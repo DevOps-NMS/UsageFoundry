@@ -41,6 +41,7 @@ const {
   conflictKey,
   overlaps,
   isUsageLimit,
+  nextPrompt,
   refusalResumeAt,
   selectPromotable,
   MAX_PAUSES_PER_RUN,
@@ -154,6 +155,73 @@ describe("promotion", () => {
     const first = row("running", `${ws}/.uf-worktrees/repoone-1`);
     const second = row("queued", `${ws}/.uf-worktrees/repoone-2`);
     assert.deepEqual(selectPromotable([first, second], null), [second.id]);
+  });
+});
+
+/**
+ * Covers which prompt a cycle spawns with. Pure, and it earns a test because
+ * every wrong branch is billed: the continuation prompt asks for DONE if the
+ * work is finished, so sending it into a session that has just said DONE buys
+ * an immediate second DONE, and sending the original task into a session that
+ * is part-way through it repeats work already done.
+ */
+describe("prompt for the next work cycle", () => {
+  const base = {
+    sessionId: "sess-1" as string | null,
+    followUp: null as string | null,
+    justRetriggered: false,
+    task: "TASK",
+    isolationPreamble: null as string | null,
+    continuation: "CONTINUE",
+    donePushback: "PUSHBACK",
+  };
+
+  it("opens with the task when there is no session to resume", () => {
+    assert.equal(nextPrompt({ ...base, sessionId: null }), "TASK");
+  });
+
+  it("prepends the isolation preamble only on that opening turn", () => {
+    assert.equal(
+      nextPrompt({ ...base, sessionId: null, isolationPreamble: "PRE" }),
+      "PRE\n\nTASK",
+    );
+    // Mid-conversation the agent is already in its worktree and has been told.
+    assert.equal(
+      nextPrompt({ ...base, isolationPreamble: "PRE" }),
+      "CONTINUE",
+    );
+  });
+
+  it("continues an existing session rather than restating the task", () => {
+    assert.equal(nextPrompt(base), "CONTINUE");
+  });
+
+  it("pushes back instead of continuing after a DONE", () => {
+    // The continuation prompt asks for DONE when the work is complete, so
+    // replying to a DONE with it is a billed cycle that only says DONE again.
+    assert.equal(nextPrompt({ ...base, justRetriggered: true }), "PUSHBACK");
+  });
+
+  it("sends the operator's note as the whole turn", () => {
+    assert.equal(nextPrompt({ ...base, followUp: "NOTE" }), "NOTE");
+  });
+
+  it("appends the note instead when the task has to start over", () => {
+    // Without a session there is no conversation for a reply to land in, and a
+    // note that only makes sense as one would read as the entire job.
+    assert.equal(
+      nextPrompt({ ...base, sessionId: null, followUp: "NOTE" }),
+      "TASK\n\nNOTE",
+    );
+    assert.equal(
+      nextPrompt({
+        ...base,
+        sessionId: null,
+        isolationPreamble: "PRE",
+        followUp: "NOTE",
+      }),
+      "PRE\n\nTASK\n\nNOTE",
+    );
   });
 });
 

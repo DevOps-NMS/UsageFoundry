@@ -125,6 +125,12 @@ function migrate(db: Database.Database) {
   addColumn(db, "runs", "pause_count", "INTEGER NOT NULL DEFAULT 0");
   addColumn(db, "runs", "done_retriggers", "INTEGER NOT NULL DEFAULT 0");
 
+  // What the next work cycle says, when an operator has picked a finished run
+  // up by hand. Consumed rather than kept: the loop clears it the moment it
+  // hands it to a spawn, so a run that parks or is picked up again later does
+  // not deliver the same message twice.
+  addColumn(db, "runs", "follow_up", "TEXT");
+
   // Spend reconciled from transcripts for work cycles that were killed before
   // Claude Code reported their cost. Held apart from spent_usd rather than
   // added to it: spent_usd stays a floor of what the CLI itself measured, and

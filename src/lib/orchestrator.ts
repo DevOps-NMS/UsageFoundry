@@ -92,6 +92,11 @@ export interface RunRow {
   pause_count: number;
   done_retriggers: number;
   /**
+   * The operator's next message, waiting for the next spawn. Set by
+   * `reopenRun`, cleared by the loop as soon as it is delivered.
+   */
+  follow_up: string | null;
+  /**
    * Spend recovered from transcripts for cycles killed before Claude Code
    * reported theirs. Never added into `spent_usd`; the two are shown side by
    * side and summed only where a total is wanted.
@@ -1454,6 +1459,47 @@ interface IterationResult {
 /** Cap on `IterationResult.stderrTail`. An agent can log for hours. */
 const STDERR_TAIL_LIMIT = 4_096;
 
+/**
+ * What the cycle about to spawn actually says.
+ *
+ * Pure, and separated from the loop because every branch is a billing decision
+ * whose failure mode is silent. Sending `continuation` — "if it is fully
+ * complete, reply with exactly DONE" — into a session that has just reported
+ * DONE produces an immediate second DONE and a billed cycle that did nothing,
+ * which is precisely why the pushback and the follow-up exist.
+ *
+ * Keyed on the session, not on the cycle counter: a cycle the live guard cut
+ * short is refunded, so `iterations === 1` can name a conversation that is
+ * already part-way through the task. "There is a session to resume into" is
+ * what a continuation actually means, and the two agree for any run that is
+ * never interrupted.
+ *
+ * `followUp` is the operator's own message, carried by a run they picked up by
+ * hand. With no session to resume it cannot stand alone — the run is starting
+ * the original task over, and a note that only makes sense as a reply would
+ * read as the whole job — so it is appended rather than substituted.
+ */
+export function nextPrompt(o: {
+  sessionId: string | null;
+  followUp: string | null;
+  /** The previous cycle said DONE and this run is set to carry on anyway. */
+  justRetriggered: boolean;
+  task: string;
+  /** Prepended on the first cycle of an isolated run only. */
+  isolationPreamble: string | null;
+  continuation: string;
+  donePushback: string;
+}): string {
+  if (o.sessionId === null) {
+    const opening = o.isolationPreamble
+      ? `${o.isolationPreamble}\n\n${o.task}`
+      : o.task;
+    return o.followUp ? `${opening}\n\n${o.followUp}` : opening;
+  }
+  if (o.followUp) return o.followUp;
+  return o.justRetriggered ? o.donePushback : o.continuation;
+}
+
 function buildArgs(opts: {
   prompt: string;
   model: string | null;
@@ -1848,6 +1894,8 @@ export async function startRun(id: string): Promise<void> {
   let iterations = run.iterations;
   let doneRetriggers = run.done_retriggers;
   let sessionId: string | null = run.session_id;
+  /** The operator's message for the first cycle of this segment, if any. */
+  let followUp: string | null = run.follow_up ?? null;
   let stopReason = "";
   let finalStatus: RunStatus = "completed";
   let lastExit = 0;
@@ -1950,20 +1998,27 @@ export async function startRun(id: string): Promise<void> {
       }
 
       iterations += 1;
-      // Keyed on the session, not the counter. A cycle the live guard cut short
-      // is refunded below, so `iterations === 1` would send the original prompt
-      // into a conversation that has already been part-way through the task —
-      // and "there is a session to resume into" is what a continuation actually
-      // means. The two agree for every run that is never interrupted.
-      const prompt =
-        sessionId === null
-          ? run.isolation === "worktree"
-            ? `${settings.isolationPreamble}\n\n${run.prompt}`
-            : run.prompt
-          : justRetriggered
-            ? settings.donePushbackPrompt
-            : settings.continuationPrompt;
+      const prompt = nextPrompt({
+        sessionId,
+        followUp,
+        justRetriggered,
+        task: run.prompt,
+        isolationPreamble:
+          run.isolation === "worktree" ? settings.isolationPreamble : null,
+        continuation: settings.continuationPrompt,
+        donePushback: settings.donePushbackPrompt,
+      });
       justRetriggered = false;
+
+      // Cleared here rather than after the cycle returns, because this is the
+      // point of no return for the message: a run that parks, crashes or is
+      // killed from here on has already had it delivered, and replaying it on
+      // the next pick-up would say the same thing twice into a conversation
+      // that has already acted on it.
+      if (followUp !== null) {
+        followUp = null;
+        db().prepare("UPDATE runs SET follow_up = NULL WHERE id = ?").run(id);
+      }
 
       emit({
         runId: id,
@@ -2626,15 +2681,19 @@ export function resumeRun(id: string): ResumeOutcome {
 
 export type ReopenOutcome = { ok: true } | { ok: false; reason: string };
 
+/** Statuses a run can be picked up from. Terminal, and holding nothing. */
+const REOPENABLE: readonly RunStatus[] = ["failed", "stopped", "completed"];
+
 /**
- * Put a finished run back to work, continuing its Claude Code session.
+ * Put a finished run back to work, continuing its Claude Code session, and
+ * optionally say something to it.
  *
  * Distinct from `resumeRun`, which un-parks a run that was always going to
  * carry on by itself. This one reopens a row that had reached a terminal state:
- * a crash, a non-zero exit, a restart, an operator stop, or a guard. Nothing
- * about the run is rebuilt — it keeps its folder, its checkout, its branch, its
- * session id and its spend, so `startRun` resumes the same conversation rather
- * than starting a new one.
+ * a crash, a non-zero exit, a restart, an operator stop, a guard, or the agent
+ * reporting the task done. Nothing about the run is rebuilt — it keeps its
+ * folder, its checkout, its branch, its session id and its spend, so `startRun`
+ * resumes the same conversation rather than starting a new one.
  *
  * It takes a budget because the usual reason a run needs picking up is that its
  * own limits ended it, and re-queueing it under the limits that stopped it just
@@ -2643,16 +2702,30 @@ export type ReopenOutcome = { ok: true } | { ok: false; reason: string };
  * the run already flickering queued → stopped and no indication of what to
  * change.
  *
+ * `completed` is included because the agent's judgement that a task is finished
+ * is not the operator's. What it costs is one branch: the continuation prompt
+ * asks for DONE if the work is complete, so sending it back into a session that
+ * has just said DONE buys an immediate second DONE and nothing else. A reopened
+ * `completed` run therefore always carries a first-cycle prompt — the
+ * operator's own note if they wrote one, and `donePushbackPrompt` if they did
+ * not, which is the prompt `continueAfterDone` already uses for this exact
+ * situation. `failed` and `stopped` runs were interrupted mid-task and need no
+ * such substitution.
+ *
  * `started_at` is cleared, and that is the one deliberate difference from a
  * pause. A parked run keeps its original start so wall clock stays a terminus
  * it cannot wait out; a finished run picked up by hand is a fresh attempt the
  * operator decided on, and charging it for the hours or days it spent dead
  * would refuse every run older than its own time limit.
  */
-export function reopenRun(id: string, budget: unknown): ReopenOutcome {
+export function reopenRun(
+  id: string,
+  budget: unknown,
+  followUp?: string,
+): ReopenOutcome {
   const run = getRun(id);
   if (!run) return { ok: false, reason: "No such run." };
-  if (run.status !== "failed" && run.status !== "stopped") {
+  if (!REOPENABLE.includes(run.status)) {
     return {
       ok: false,
       reason: `This run is ${run.status}, so there is nothing here to pick up.`,
@@ -2708,13 +2781,26 @@ export function reopenRun(id: string, budget: unknown): ReopenOutcome {
   const stored = JSON.parse(run.budget) as Record<string, unknown>;
   const blob = JSON.stringify({ ...policy, permissionMode: stored.permissionMode });
 
+  // Resolved to the literal text the next cycle will send, rather than to a
+  // flag the loop re-interprets later: the substitution below depends on the
+  // status this run is being picked up *from*, which the queued row no longer
+  // records. Without a session there is nothing to push back against, so the
+  // default is dropped and only a real note survives — `nextPrompt` appends it
+  // to the original task.
+  const note = String(followUp ?? "").trim();
+  const firstPrompt =
+    note ||
+    (run.status === "completed" && run.session_id
+      ? getSettings().donePushbackPrompt
+      : "");
+
   const flip = db()
     .prepare(
-      "UPDATE runs SET status='queued', budget=?, max_iterations=?," +
+      "UPDATE runs SET status='queued', budget=?, max_iterations=?, follow_up=?," +
         " started_at=NULL, finished_at=NULL, exit_code=NULL, stop_reason=NULL," +
-        " resume_at=NULL WHERE id=? AND status IN ('failed','stopped')",
+        " resume_at=NULL WHERE id=? AND status IN ('failed','stopped','completed')",
     )
-    .run(blob, policy.maxIterations ?? 0, id);
+    .run(blob, policy.maxIterations ?? 0, firstPrompt || null, id);
   if (flip.changes !== 1) {
     return { ok: false, reason: "This run changed state before it could be picked up." };
   }
@@ -2725,9 +2811,13 @@ export function reopenRun(id: string, budget: unknown): ReopenOutcome {
     kind: "status",
     payload: {
       status: "queued",
-      message: run.session_id
-        ? "Picked up again — it continues the session it left off in."
-        : "Picked up again. It never reported a session to resume, so it starts from the original task.",
+      message: !run.session_id
+        ? note
+          ? "Picked up again. It never reported a session to resume, so it starts from the original task with your note added to it."
+          : "Picked up again. It never reported a session to resume, so it starts from the original task."
+        : note
+          ? "Picked up again — your note goes to the session it left off in."
+          : "Picked up again — it continues the session it left off in.",
     },
   });
 
