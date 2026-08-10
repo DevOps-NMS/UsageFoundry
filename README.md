@@ -219,16 +219,66 @@ it stays `iteration`.
 
 ### The guarantee, stated honestly
 
-Guards are checked **between** iterations, not during one. A Claude Code turn
-cannot be interrupted mid-flight without losing its work, so what this gives you
+**No mode here is a hard cap.** Each run picks one of three, under *When a limit
+is reached*:
+
+**Let the cycle finish, then stop** — the default, and the original behaviour.
+Guards are checked **between** iterations, not during one, so what this gives you
 is *"no new work starts past the threshold"* — **not** *"spend never exceeds the
 threshold"*. Overshoot is bounded by one iteration **per run that was active at
-the time**. Size the cap accordingly.
+the time**. Size the cap accordingly. It is also the only mode whose accounting
+is exact: every cycle runs to completion and reports what it cost.
 
-That last clause is the part concurrency changes. `maxRunCostUSD` applies to each
-run separately, so three runs with a $5 limit each is a $15 worst case, not $5.
-Set **Runs allowed at the same time** in Settings if you want that bounded; it is
-unlimited by default, and a run over the limit waits rather than being refused.
+**Stop the cycle in flight** — guards are re-read about once a minute while
+Claude is working, and it is killed as soon as one trips. The bound becomes *one
+model turn plus one check interval plus the kill*, which on a long cycle is a
+large improvement. It is still not instant, and the reason is structural: usage
+is read from the transcript files Claude Code writes as each turn *completes*, so
+a turn that is still thinking or still running a tool has contributed nothing to
+read yet. The work in the interrupted cycle is lost. Its cost is recovered from
+your transcripts afterwards and shown separately from the figure Claude Code
+reported — close, but reconstructed rather than measured.
+
+**Stop the cycle, carry on next window** — as above, except that filling your
+5-hour window parks the run instead of ending it. It resumes where it left off,
+same conversation and same checkout, when the next 5-hour window opens, so one
+task can stretch across several of them until the weekly percentage (or the time
+limit, or the cycle cap) ends it for good.
+
+Only the 5-hour window is ever waited out, because it is the only limit here that
+refills on its own, on a schedule, without being told anything. A weekly window
+takes days to refill — and unless you have set your reset day in Settings it has
+no reset instant at all, only a trailing total that decays. Your spend, your
+cycles and the clock only move one way. So those all end a run; the 5-hour
+window is the one that can pause it.
+
+A parked run keeps hold of its folder the whole time it waits, and survives a
+restart of UsageFoundry for 24 hours by default. Its budget is re-checked from
+scratch before it starts spending again, so it can also come back only to step
+aside once more.
+
+Concurrency multiplies the overshoot in every mode. `maxRunCostUSD` applies to
+each run separately, so three runs with a $5 limit each is a $15 worst case, not
+$5. Set **Runs allowed at the same time** in Settings if you want that bounded;
+it is unlimited by default, and a run over the limit waits rather than being
+refused. A parked run does not count against it — it is spending nothing — but it
+does still hold its folder.
+
+### Running until the limit rather than until the agent says stop
+
+*When Claude says the task is done* can be switched from ending the run to
+sending it back in. `DONE` then stops meaning anything, and the run ends only
+when a limit is reached. It is worth being clear about what that is: an agent
+told to carry on past a task it believes finished will find work, and not all of
+that work is good. The prompt it gets (Settings → **Carry-on prompt**) points it
+at verification, tests and edge cases rather than at new features, and an
+isolated checkout is strongly advised so the output arrives as a branch you can
+throw away.
+
+Because `DONE` no longer ends the run, something else has to. A run with no cycle
+limit is refused unless it has a time limit — the clock is the only limit that
+keeps advancing whether or not a cycle survived long enough to report what it
+spent.
 
 Stopping a run signals the current work cycle and prevents any further one. If
 the stop lands between cycles there is no process to signal, but the run still
@@ -294,14 +344,23 @@ started later, so nothing spawns unattended from a prompt you have forgotten abo
 
 | Rule | Behaviour |
 |---|---|
-| `maxIterations` | Hard cap on iterations. Always set — the loop has no other natural end. |
+| `maxIterations` | Cap on iterations. `null` disables it, but only alongside `maxDurationMinutes`. |
 | `maxRunCostUSD` | Stop when this run's own spend reaches it. `null` disables it. |
-| `maxDurationMinutes` | Wall-clock cap. `null` disables it — the run then ends only on `DONE`, the iteration cap, or another guard. |
-| `maxWeeklyFraction` | Stop at N% of the weekly window (cost-denominated). **Requires a configured ceiling.** |
-| `maxSessionFraction` | Stop at N% of the 5-hour window (cost-denominated). **Requires a configured ceiling.** |
+| `maxDurationMinutes` | Wall-clock cap, **including time spent parked**. `null` disables it. |
+| `maxWeeklyFraction` | Stop at N% of the weekly window (cost-denominated). **Requires a configured ceiling.** Always ends the run. |
+| `maxSessionFraction` | Stop at N% of the 5-hour window (cost-denominated). **Requires a configured ceiling.** Parks the run instead under `live-resume`. |
+| `enforcement` | `between-cycles` \| `live` \| `live-resume` — when a tripped rule is acted on. |
+| `continueAfterDone` | Ignore the agent's `DONE` and send it back to the same task. |
 
 `maxRunCostUSD` is the one guard that needs **no ceiling** — it is absolute. Use
 it on day one, before you have enough history to calibrate.
+
+The loop always needs a **monotone terminus**: at least one of `maxIterations` or
+`maxDurationMinutes`. Those two are the only quantities that move one way and
+keep moving — this run's own spend stops accruing the moment a cycle is killed
+before it could report, and both window fractions can fall. A policy with
+neither is refused at creation, and refused again as `no_terminus` if it reaches
+the guard by some other route.
 
 ---
 
@@ -518,11 +577,41 @@ Built and exercised against real transcripts:
 - Reserved headroom: 50% reserve halves the effective ceiling ($200 → $100),
   doubling the reading (13.8% → 27.5%) and converting a 20% guard from allow to
   refuse. Out-of-range input (400%) clamps to 95%.
+- Budget policy and guard ordering (`npm test`, 11 cases): `normalizePolicy` is
+  idempotent across a JSON round trip for every field, an explicit `null` cycle
+  cap survives while blank / zero / negative / missing all still mean one cycle,
+  a string `"false"` for `continueAfterDone` reads as off, and an unknown
+  enforcement mode degrades to `between-cycles`. `evaluateBudget` refuses
+  `no_terminus` ahead of every other check, parks on the 5-hour window only
+  under `live-resume` and never on the weekly one, **ends** rather than parks a
+  run that is also out of time, still refuses a fraction guard with no ceiling,
+  and blocks on reconciled spend that `spent_usd` alone would have missed.
 
-There is no linter run in this repo, and `npm test` covers exactly one thing:
-the folder-collision predicate above. `npm run typecheck` plus a
-`docker compose up --build` smoke test is still the real verification loop, and
-the list above records what was checked by hand.
+### Not yet verified by hand
+
+The live-enforcement and pause/resume paths typecheck, build (including the
+standalone bundle), and are covered by the unit tests above, but the following
+have **not** been exercised against a real CLI. They are the list to work
+through before trusting this unattended:
+
+- Whether `claude -p` flushes its `result` event on `SIGINT`. If it does, an
+  interrupted cycle keeps its measured cost and the transcript reconciliation
+  becomes a fallback rather than the norm.
+- Whether `claude --resume` accepts a session whose transcript was truncated by
+  a mid-turn kill. The recovery ladder retries once and then stops, naming the
+  command — it deliberately does not start a fresh session.
+- A run parking and resuming across a real 5-hour boundary, in the same
+  worktree, on the same branch, with its commits intact.
+- A paused run surviving `docker compose restart`, and a stale one being closed
+  out once past `resumeGraceHours`.
+- `detached: true`: that Ctrl-C during `npm run dev` still kills the agent (via
+  the new `instrumentation.ts` handler) and that a long command the agent
+  started dies with it.
+
+There is no linter run in this repo, and `npm test` covers two things: the
+folder-collision predicate and the budget policy above. `npm run typecheck` plus
+a `docker compose up --build` smoke test is still the real verification loop,
+and the list above records what was checked by hand.
 
 ---
 

@@ -158,13 +158,23 @@ export interface FoldersResponse {
   folders: WorkspaceFolderDTO[];
 }
 
+/**
+ * Duplicated from `budget.ts` rather than imported, exactly as
+ * `RunDTO["status"]` duplicates `RunStatus`: this file is the client-safe
+ * mirror and must not pull a server module into the browser bundle.
+ */
+export type EnforcementModeDTO = "between-cycles" | "live" | "live-resume";
+
 export interface BudgetPolicyDTO {
   maxWeeklyFraction: number | null;
   maxSessionFraction: number | null;
   maxRunCostUSD: number | null;
   maxRunTokens: number | null;
-  maxIterations: number;
+  /** null = no cap on work cycles. Legal only alongside maxDurationMinutes. */
+  maxIterations: number | null;
   maxDurationMinutes: number | null;
+  enforcement: EnforcementModeDTO;
+  continueAfterDone: boolean;
   permissionMode?: string;
 }
 
@@ -179,8 +189,16 @@ export interface RunDTO {
   relPath?: string;
   prompt: string;
   model: string | null;
-  status: "queued" | "running" | "completed" | "stopped" | "failed" | "blocked";
+  status:
+    | "queued"
+    | "running"
+    | "paused"
+    | "completed"
+    | "stopped"
+    | "failed"
+    | "blocked";
   budget: BudgetPolicyDTO;
+  /** Cap on work cycles. **0 means no cap** — see the note in db.ts. */
   max_iterations: number;
   iterations: number;
   created_at: number;
@@ -196,6 +214,18 @@ export interface RunDTO {
   isolation?: "none" | "worktree" | null;
   worktree_branch?: string | null;
   worktree_base?: string | null;
+  /** Paused runs only: epoch ms at which the run next tries again. */
+  resume_at?: number | null;
+  paused_at?: number | null;
+  pause_count?: number;
+  /** How many times the agent said DONE and was sent back in anyway. */
+  done_retriggers?: number;
+  /**
+   * Spend reconciled from transcripts for work cycles killed before Claude Code
+   * reported theirs. Shown beside `spent_usd`, never folded into it.
+   */
+  spent_usd_est?: number;
+  spent_tokens_est?: number;
   /** Queued runs only: how many are ahead of it. 0 means next up. */
   queuePosition?: number;
 }
@@ -252,4 +282,8 @@ export interface SettingsDTO {
   isolationCopyGlobs: string[];
   isolationPreamble: string;
   telemetryForRuns: boolean;
+  donePushbackPrompt: string;
+  liveGuardIntervalSeconds: number;
+  resumeGraceHours: number;
+  killProcessGroup: boolean;
 }

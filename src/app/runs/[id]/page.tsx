@@ -7,6 +7,7 @@ import {
   STATUS_TONE,
   fmtClock,
   fmtDateTime,
+  fmtRelative,
   fmtTokens,
   fmtUSD,
   shortPath,
@@ -33,7 +34,9 @@ function lineFor(e: RunEventDTO): string | null {
               ? "n/a"
               : `${((p.weeklyFraction as number) * 100).toFixed(1)}%`
           }`
-        : `budget stop — ${p.reason}`;
+        : `${p.disposition === "pause" ? "budget pause" : "budget stop"}${
+            p.live ? " (mid-cycle)" : ""
+          } — ${p.reason}`;
     case "result":
       return `✓ turn complete — ${fmtUSD(Number(p.costUSD ?? 0))}, ${
         p.numTurns ?? "?"
@@ -117,6 +120,15 @@ export default function RunDetail({
       el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   }
 
+  // Only ticks while parked, so a finished run's page does no work. Must sit
+  // above the `if (!run)` early return — hooks cannot live behind one.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (run?.status !== "paused") return;
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [run?.status]);
+
   async function stop() {
     const res = await fetch(`/api/runs/${id}`, { method: "DELETE" });
     const json = (await res.json().catch(() => ({}))) as { outcome?: string };
@@ -126,14 +138,35 @@ export default function RunDetail({
       json.outcome === "signalled"
         ? "Stopping the current work cycle…"
         : json.outcome === "cancelled"
-          ? "Stopping — it will not start another work cycle."
+          ? run?.status === "paused"
+            ? "Stopped — it will not resume."
+            : "Stopping — it will not start another work cycle."
           : "This run is not active.",
+    );
+  }
+
+  async function tryNow() {
+    const res = await fetch(`/api/runs/${id}/resume`, { method: "POST" });
+    const json = (await res.json().catch(() => ({}))) as { outcome?: string };
+    // Deliberately does not bypass the guard — it rejoins the queue and the
+    // ordinary pre-cycle check decides. Asking early while the window is still
+    // full parks it again, which is the honest outcome; a button that spends
+    // past a limit the operator set would be worse than no button.
+    setStopNote(
+      json.outcome === "requeued"
+        ? "Trying now — if the 5-hour window is still too full it steps aside again."
+        : "This run is not waiting.",
     );
   }
 
   if (!run) return <div className="empty">Loading run…</div>;
 
-  const active = run.status === "running" || run.status === "queued";
+  // Paused counts as active: the run still holds its folder, will spend money
+  // again on its own, and must keep offering the control that ends it.
+  const active =
+    run.status === "running" ||
+    run.status === "queued" ||
+    run.status === "paused";
   const handoff = [...events].reverse().find((e) => e.kind === "handoff");
   const costPct = run.budget.maxRunCostUSD
     ? Math.min(run.spent_usd / run.budget.maxRunCostUSD, 1)
@@ -167,6 +200,26 @@ export default function RunDetail({
         </div>
       )}
 
+      {run.status === "paused" && (
+        <div className="notice" data-tone="warn">
+          <strong>Waiting for the next 5-hour window.</strong> Your 5-hour window
+          reached the percentage this run was told to step aside at.{" "}
+          {run.resume_at ? (
+            <>
+              It tries again at {fmtDateTime(run.resume_at)} —{" "}
+              <strong>{fmtRelative(run.resume_at, nowTick)}</strong>.
+            </>
+          ) : (
+            "It tries again when the window rolls over."
+          )}{" "}
+          It is still holding{" "}
+          <span className="mono" title={run.work_dir ?? run.folder}>
+            {run.relPath || run.mountLabel || shortPath(run.folder, 2)}
+          </span>
+          , so nothing else can run there until it finishes or you stop it.
+        </div>
+      )}
+
       {run.isolation === "worktree" && run.worktree_branch && (
         <div className="notice" data-tone="info">
           <strong>Isolated checkout.</strong> This run works on branch{" "}
@@ -188,7 +241,11 @@ export default function RunDetail({
           data-tone={run.status === "failed" ? "danger" : "info"}
         >
           <strong>
-            {run.status === "blocked" ? "Refused to start:" : "Stopped:"}
+            {run.status === "blocked"
+              ? "Refused to start:"
+              : run.status === "paused"
+                ? "Waiting:"
+                : "Stopped:"}
           </strong>{" "}
           {run.stop_reason}
         </div>
@@ -253,6 +310,16 @@ export default function RunDetail({
                 }`
               : "no spending limit set"}
           </div>
+          {/* Held apart from the measured figure above, not added to it: this
+              is what work cycles that were cut short before Claude Code could
+              report their cost are estimated to have spent, worked out from
+              your transcripts. */}
+          {(run.spent_usd_est ?? 0) > 0 && (
+            <div className="stat-sub" style={{ color: "var(--warn)" }}>
+              + {fmtUSD(run.spent_usd_est ?? 0)} estimated from transcripts for
+              cycles that were cut short
+            </div>
+          )}
         </div>
         <div className="card">
           <h2 className="card-title">Tokens</h2>
@@ -282,17 +349,26 @@ export default function RunDetail({
           <div className="stat">
             {run.iterations}
             <span style={{ color: "var(--fg-faint)", fontSize: 18 }}>
-              /{run.max_iterations}
+              {/* 0 is the stored sentinel for "no cap" — see db.ts. */}
+              {run.max_iterations > 0 ? `/${run.max_iterations}` : " · no cap"}
             </span>
           </div>
           <div className="stat-sub">
-            {active ? (
+            {/* A spinner on a run that is deliberately idle for hours is a lie,
+                so the paused branch comes first. */}
+            {run.status === "paused" ? (
+              "paused — waiting for the next 5-hour window"
+            ) : active ? (
               <>
                 <span className="spinner" /> working
               </>
-            ) : (
+            ) : run.max_iterations > 0 ? (
               `${run.max_iterations === 1 ? "cycle" : "cycles"} used of the limit · exit ${run.exit_code ?? "—"}`
+            ) : (
+              `cycles used · exit ${run.exit_code ?? "—"}`
             )}
+            {(run.done_retriggers ?? 0) > 0 &&
+              ` · ${run.done_retriggers} after it reported done`}
           </div>
         </div>
       </section>
@@ -307,13 +383,18 @@ export default function RunDetail({
           ) : (
             <span className="badge">disconnected</span>
           )}
+          {run.status === "paused" && (
+            <button style={{ marginLeft: "auto" }} onClick={tryNow}>
+              Try now
+            </button>
+          )}
           {active && (
             <button
               className="danger"
-              style={{ marginLeft: "auto" }}
+              style={run.status === "paused" ? undefined : { marginLeft: "auto" }}
               onClick={stop}
             >
-              Stop run
+              {run.status === "paused" ? "Give up" : "Stop run"}
             </button>
           )}
         </h2>

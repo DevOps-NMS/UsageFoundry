@@ -141,5 +141,32 @@ export async function PUT(req: Request) {
     if (v) patch.isolationPreamble = v;
   }
 
+  if ("donePushbackPrompt" in body) {
+    // Blank keeps whatever is stored, matching continuationPrompt: emptying it
+    // would silently turn "carry on past DONE" into a wasted, contentless turn.
+    const v = String(body.donePushbackPrompt ?? "").trim();
+    if (v) patch.donePushbackPrompt = v;
+  }
+
+  if ("liveGuardIntervalSeconds" in body) {
+    const n = optionalNumber(body.liveGuardIntervalSeconds);
+    // Blank restores the default rather than meaning "no limit", unlike
+    // maxConcurrentRuns above. There is no such thing as "no interval": a live
+    // run is either checked on some cadence or it is not a live run. Floored at
+    // 15s because below that the server re-walks ~/.claude faster than Claude
+    // Code writes to it. Not a breach of "blank disables a guard" — that rule
+    // is about budget rules, and this is a cadence.
+    patch.liveGuardIntervalSeconds = n === null ? 60 : Math.max(15, Math.floor(n));
+  }
+
+  if ("resumeGraceHours" in body) {
+    const n = optionalNumber(body.resumeGraceHours);
+    patch.resumeGraceHours = n === null ? 24 : Math.max(1, Math.floor(n));
+  }
+
+  if ("killProcessGroup" in body) {
+    patch.killProcessGroup = Boolean(body.killProcessGroup);
+  }
+
   return NextResponse.json({ settings: saveSettings(patch) });
 }
