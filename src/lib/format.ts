@@ -6,11 +6,20 @@ import type { RunDTO } from "./apiTypes";
 export const STATUS_TONE: Record<RunDTO["status"], string> = {
   queued: "",
   running: "accent",
+  // Alive *and* needing attention: it will spend money again, unattended, and
+  // it is holding a folder meanwhile. "accent" would imply progress and "" would
+  // let it disappear into the history table.
+  paused: "warn",
   completed: "ok",
   stopped: "warn",
   blocked: "warn",
   failed: "danger",
 };
+
+/** "3/5", or "3 · no cap" when the run has no work-cycle limit (stored as 0). */
+export function fmtCycles(used: number, cap: number): string {
+  return cap > 0 ? `${used}/${cap}` : `${used} · no cap`;
+}
 
 export function fmtTokens(n: number): string {
   if (!Number.isFinite(n)) return "—";

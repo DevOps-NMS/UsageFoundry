@@ -40,6 +40,12 @@ function migrate(db: Database.Database) {
       status         TEXT NOT NULL,
       budget         TEXT NOT NULL,
       baseline       TEXT,
+      -- 0 means "no cap". SQLite cannot drop NOT NULL without rebuilding the
+      -- table and there is no migration framework here, so the sentinel is the
+      -- cheaper of the two evils. 0 was previously unreachable — normalizePolicy
+      -- floored at 1 — and this column is only a denormalised copy for the list
+      -- view; the budget blob stays the source of truth. Every reader goes
+      -- through fmtCycles() in format.ts rather than open-coding the check.
       max_iterations INTEGER NOT NULL DEFAULT 1,
       iterations     INTEGER NOT NULL DEFAULT 0,
       created_at     INTEGER NOT NULL,
@@ -110,6 +116,22 @@ function migrate(db: Database.Database) {
   addColumn(db, "runs", "worktree_path", "TEXT");
   addColumn(db, "runs", "worktree_branch", "TEXT");
   addColumn(db, "runs", "worktree_base", "TEXT");
+
+  // Pause/resume state. `resume_at` is an advisory wake hint only — the sweeper
+  // re-evaluates the budget on waking rather than trusting it, because the
+  // verdict depends on things that move while a run is parked.
+  addColumn(db, "runs", "resume_at", "INTEGER");
+  addColumn(db, "runs", "paused_at", "INTEGER");
+  addColumn(db, "runs", "pause_count", "INTEGER NOT NULL DEFAULT 0");
+  addColumn(db, "runs", "done_retriggers", "INTEGER NOT NULL DEFAULT 0");
+
+  // Spend reconciled from transcripts for work cycles that were killed before
+  // Claude Code reported their cost. Held apart from spent_usd rather than
+  // added to it: spent_usd stays a floor of what the CLI itself measured, and
+  // the sum of the two is the best available total. Only the unaccounted
+  // portion lands here, so adding them never double-counts.
+  addColumn(db, "runs", "spent_usd_est", "REAL NOT NULL DEFAULT 0");
+  addColumn(db, "runs", "spent_tokens_est", "INTEGER NOT NULL DEFAULT 0");
 }
 
 function addColumn(

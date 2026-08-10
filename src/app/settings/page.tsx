@@ -539,6 +539,82 @@ export default function SettingsPage() {
             </div>
           </div>
 
+          <div className="field">
+            <label htmlFor="pushback">Carry-on prompt</label>
+            <textarea
+              id="pushback"
+              value={s.donePushbackPrompt}
+              onChange={(e) => patch({ donePushbackPrompt: e.target.value })}
+              style={{ minHeight: 150 }}
+            />
+            <div className="hint">
+              What Claude is told when it reports <span className="mono">DONE</span>{" "}
+              on a run set to keep going anyway. Point it at verification rather
+              than new work — an agent told to carry on past a finished task will
+              otherwise invent features.
+            </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor="livechk">Live limit check</label>
+            <div className="input-row">
+              <input
+                id="livechk"
+                type="number"
+                min={15}
+                value={s.liveGuardIntervalSeconds}
+                onChange={(e) =>
+                  patch({ liveGuardIntervalSeconds: Number(e.target.value) })
+                }
+              />
+              <span className="unit">seconds</span>
+            </div>
+            <div className="hint">
+              How often a run set to stop mid-cycle re-reads your usage. It does
+              not make the guard exact: usage comes from transcript files Claude
+              Code writes as each turn completes, so the real resolution is one
+              turn however low this goes.
+            </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor="grace">Keep waiting runs after a restart for</label>
+            <div className="input-row">
+              <input
+                id="grace"
+                type="number"
+                min={1}
+                value={s.resumeGraceHours}
+                onChange={(e) =>
+                  patch({ resumeGraceHours: Number(e.target.value) })
+                }
+              />
+              <span className="unit">hours</span>
+            </div>
+            <div className="hint">
+              A run parked waiting for the next 5-hour window survives a restart
+              and resumes on its own. Past this age it is closed out instead, so
+              a forgotten run cannot wake up days later and start spending.
+            </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor="killgroup">Stopping a run also stops</label>
+            <select
+              id="killgroup"
+              value={s.killProcessGroup ? "1" : "0"}
+              onChange={(e) => patch({ killProcessGroup: e.target.value === "1" })}
+            >
+              <option value="1">Claude and everything it started</option>
+              <option value="0">Claude only</option>
+            </select>
+            <div className="hint">
+              Builds, test runners and servers the agent launched hold the working
+              directory open. Leaving them alive means they keep writing to a
+              folder the next run is about to use.
+            </div>
+          </div>
+
           <div className="subsection">
             <div className="subsection-title">Running several at once</div>
 

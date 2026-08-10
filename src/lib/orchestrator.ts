@@ -16,11 +16,15 @@ import { db } from "./db";
 import { getSettings, limitConfig, type PermissionMode } from "./settings";
 import {
   type BudgetPolicy,
+  type BudgetStopCode,
   type BudgetVerdict,
+  type RunProgress,
+  LIVE_ENFORCEABLE_CODES,
   evaluateBudget,
   normalizePolicy,
 } from "./budget";
-import { scanUsage } from "./transcripts";
+import { scanUsage, type UsageEntry } from "./transcripts";
+import { totalTokens } from "./pricing";
 import { buildSnapshot } from "./windows";
 
 /**
@@ -34,11 +38,20 @@ import { buildSnapshot } from "./windows";
  * Cost is read from the `result` event Claude Code emits, which is the same
  * figure the CLI reports — we do not re-derive it from token counts, because
  * the CLI already accounts for cache TTLs and any plan-specific rates.
+ *
+ * A run whose policy asks for live enforcement gets a second check on a timer
+ * while a cycle is in flight, and is killed when one trips. That does not
+ * change the shape above — the between-cycles check is still the only exact
+ * one, and it is what a `live` run falls back to when nothing trips mid-cycle.
+ * What it costs is the in-flight cycle's work and its self-reported cost;
+ * `reconcileKilledCycle` recovers an estimate of the latter from transcripts.
  */
 
 export type RunStatus =
   | "queued"
   | "running"
+  /** Stepped aside for a full 5-hour window; the sweeper will re-queue it. */
+  | "paused"
   | "completed"
   | "stopped"
   | "failed"
@@ -72,6 +85,18 @@ export interface RunRow {
   worktree_branch: string | null;
   /** Commit the worktree branched from, for the handoff diff range. */
   worktree_base: string | null;
+  /** Paused runs: when to look again. A hint, not a promise — see sweepPaused. */
+  resume_at: number | null;
+  paused_at: number | null;
+  pause_count: number;
+  done_retriggers: number;
+  /**
+   * Spend recovered from transcripts for cycles killed before Claude Code
+   * reported theirs. Never added into `spent_usd`; the two are shown side by
+   * side and summed only where a total is wanted.
+   */
+  spent_usd_est: number;
+  spent_tokens_est: number;
 }
 
 /** Where the agent runs. Older rows predate `work_dir` and never isolated. */
@@ -106,8 +131,64 @@ const procs = ((globalThis as unknown as {
   __ufProcs?: Map<string, AgentProcess>;
 }).__ufProcs ??= new Map<string, AgentProcess>());
 
-const cancelled = ((globalThis as unknown as { __ufCancelled?: Set<string> })
-  .__ufCancelled ??= new Set<string>());
+/**
+ * Why a run is being stopped, and whether it may come back.
+ *
+ * Replaces a reason-less `Set` of cancelled ids: with live guards there are now
+ * two distinct callers, and filing a guard-driven kill as "Stopped by operator"
+ * would be a lie in the one place the operator most needs the truth.
+ */
+interface Interrupt {
+  kind: "operator" | "guard";
+  reason: string;
+  code?: BudgetStopCode;
+  /** True only for a live-resume step-aside; the run parks rather than ends. */
+  pause: boolean;
+  resumeAt?: number;
+  at: number;
+}
+
+// A new globalThis key rather than reusing `__ufCancelled`. `??=` only
+// initialises when absent, so on a dev hot reload a pre-upgrade Set sitting at
+// the old key would survive and every `.get()` on it would throw.
+const interrupts = ((globalThis as unknown as {
+  __ufInterrupts?: Map<string, Interrupt>;
+}).__ufInterrupts ??= new Map<string, Interrupt>());
+
+/**
+ * Runs with a child in flight that asked for live enforcement.
+ *
+ * The value closes over `startRun`'s locals. That function is suspended on the
+ * `await runIteration(...)` for the whole time an entry is registered, so its
+ * `iterations` / `spentUSD` are current and the ticker needs no database read
+ * and no second copy of the run's progress.
+ */
+interface LiveGuard {
+  policy: BudgetPolicy;
+  progress: () => RunProgress;
+}
+
+const liveGuards = ((globalThis as unknown as {
+  __ufLiveGuards?: Map<string, LiveGuard>;
+}).__ufLiveGuards ??= new Map<string, LiveGuard>());
+
+/**
+ * The two background timers, and their reentrancy flags.
+ *
+ * Both are lazily started and stopped when there is nothing left to watch, so
+ * an idle server holds no interval at all.
+ */
+const timers = ((globalThis as unknown as {
+  __ufTimers?: {
+    live: NodeJS.Timeout | null;
+    sweep: NodeJS.Timeout | null;
+    ticking: boolean;
+    sweeping: boolean;
+  };
+}).__ufTimers ??= { live: null, sweep: null, ticking: false, sweeping: false });
+
+/** How often a paused run is reconsidered. */
+const SWEEP_MS = 60_000;
 
 /* ------------------------------------------------------------------ */
 /* Persistence helpers                                                 */
@@ -137,25 +218,64 @@ export function listRuns(limit = 50): RunRow[] {
     .all(limit) as RunRow[];
 }
 
-export function runEvents(runId: string, afterId = 0): Array<RunEvent & { id: number }> {
-  const rows = db()
-    .prepare(
-      "SELECT id, run_id, ts, kind, payload FROM run_events WHERE run_id = ? AND id > ? ORDER BY id",
-    )
-    .all(runId, afterId) as Array<{
+/**
+ * Events for a run, oldest first.
+ *
+ * `limit` keeps the *newest* rows and reports how many were dropped. A run that
+ * works for days across hundreds of cycles accumulates tens of thousands of
+ * events, and both the detail route and the SSE replay would otherwise serialise
+ * every one of them on every request. Callers that pass a limit must surface
+ * `dropped` — a truncated log that does not say it is truncated is worse than a
+ * slow one.
+ */
+export function runEvents(
+  runId: string,
+  afterId = 0,
+  limit?: number,
+): { events: Array<RunEvent & { id: number }>; dropped: number } {
+  const total = limit
+    ? (
+        db()
+          .prepare(
+            "SELECT COUNT(*) AS n FROM run_events WHERE run_id = ? AND id > ?",
+          )
+          .get(runId, afterId) as { n: number }
+      ).n
+    : 0;
+
+  // Newest N, then flipped back into chronological order — SQLite has no
+  // "last N rows ascending" without the subquery, and the log reads forwards.
+  const rows = (
+    limit
+      ? db()
+          .prepare(
+            "SELECT * FROM (SELECT id, run_id, ts, kind, payload FROM run_events" +
+              " WHERE run_id = ? AND id > ? ORDER BY id DESC LIMIT ?) ORDER BY id",
+          )
+          .all(runId, afterId, limit)
+      : db()
+          .prepare(
+            "SELECT id, run_id, ts, kind, payload FROM run_events WHERE run_id = ? AND id > ? ORDER BY id",
+          )
+          .all(runId, afterId)
+  ) as Array<{
     id: number;
     run_id: string;
     ts: number;
     kind: RunEvent["kind"];
     payload: string;
   }>;
-  return rows.map((r) => ({
-    id: r.id,
-    runId: r.run_id,
-    ts: r.ts,
-    kind: r.kind,
-    payload: JSON.parse(r.payload) as Record<string, unknown>,
-  }));
+
+  return {
+    events: rows.map((r) => ({
+      id: r.id,
+      runId: r.run_id,
+      ts: r.ts,
+      kind: r.kind,
+      payload: JSON.parse(r.payload) as Record<string, unknown>,
+    })),
+    dropped: limit ? Math.max(0, total - rows.length) : 0,
+  };
 }
 
 export function subscribe(runId: string, fn: (e: RunEvent) => void): () => void {
@@ -725,6 +845,19 @@ async function ensureWorktree(run: RunRow): Promise<string> {
     .map((l) => l.slice("worktree ".length));
 
   if (registered.includes(slotPath)) {
+    const head = await git(slotPath, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    // Already this run's own checkout, on its own branch, holding its commits —
+    // it is coming back from a pause. Adopt it exactly as it stands: `checkout
+    // -b` would fail on an existing branch, the dirty check below would reject
+    // work in progress the agent legitimately left, and re-seeding would
+    // overwrite files it has since edited.
+    if (head.ok && head.stdout === branch) {
+      log(run.id, `Resuming in the existing checkout on branch ${branch}.`, {
+        worktree: slotPath,
+        branch,
+      });
+      return slotPath;
+    }
     const status = await git(slotPath, ["status", "--porcelain"]);
     if (!status.ok || status.stdout !== "") {
       throw new Error(
@@ -733,6 +866,14 @@ async function ensureWorktree(run: RunRow): Promise<string> {
     }
     const co = await git(slotPath, ["checkout", "-b", branch, base]);
     if (!co.ok) throw new Error(`Could not start branch ${branch}: ${co.stderr}`);
+  } else if (run.iterations > 0) {
+    // A resuming run whose checkout has been removed from under it. Creating a
+    // fresh one would silently orphan every commit it already made, so name the
+    // branch and stop — the work is still in the repository.
+    throw new Error(
+      `The isolated checkout for this run is gone, but its work is still on branch ${branch}. ` +
+        `Inspect it with: git log ${branch}`,
+    );
   } else {
     // No timeout worth enforcing: this is a full checkout, and a big repository
     // legitimately takes minutes.
@@ -859,11 +1000,19 @@ export interface CreateRunInput {
   budget: unknown;
 }
 
-/** Runs holding, or waiting to hold, a place on disk. */
+/**
+ * Runs holding, or waiting to hold, a place on disk.
+ *
+ * `paused` belongs here: a parked run resumes into the same worktree, on the
+ * same branch, carrying its own commits, so it keeps its claim for as long as
+ * it waits. Letting a second agent into that directory in the meantime is
+ * exactly the collision the claim exists to prevent — even though the parked
+ * run has no process and is spending nothing.
+ */
 export function activeRuns(): RunRow[] {
   return db()
     .prepare(
-      "SELECT * FROM runs WHERE status IN ('queued','running') ORDER BY created_at",
+      "SELECT * FROM runs WHERE status IN ('queued','running','paused') ORDER BY created_at",
     )
     .all() as RunRow[];
 }
@@ -989,7 +1138,10 @@ export function createRun(input: CreateRunInput): RunRow {
         prompt,
         input.model ?? settings.defaultModel,
         budgetBlob,
-        policy.maxIterations,
+        // 0 is the stored sentinel for "no cap" — see the schema comment in
+        // db.ts. The blob above is the source of truth; this column exists so
+        // the list view does not have to parse it.
+        policy.maxIterations ?? 0,
         now,
         workDir,
         plan.mode,
@@ -1042,7 +1194,14 @@ export function createRun(input: CreateRunInput): RunRow {
 export function promoteQueued(): void {
   const runs = activeRuns();
   const running = runs.filter((r) => r.status === "running");
-  const reserved: ConflictKey[] = running.map((r) => conflictKey(workDirOf(r)));
+  // Paused runs reserve their folder but are not counted as live below. The
+  // asymmetry is deliberate and is the same one `queued` already has: the claim
+  // is about what is on disk, the cap is about what is spending money. Counting
+  // a parked run against a cap of 1 would starve every other run for hours.
+  const holding = runs.filter(
+    (r) => r.status === "running" || r.status === "paused",
+  );
+  const reserved: ConflictKey[] = holding.map((r) => conflictKey(workDirOf(r)));
 
   // The cap is enforced here rather than at admission, because here is the only
   // place a run actually starts costing anything. Over the cap a run waits its
@@ -1195,6 +1354,28 @@ function telemetryEnv(runId: string): Record<string, string> {
   };
 }
 
+/**
+ * Signal the agent and everything it started.
+ *
+ * Falls back to signalling the process alone when the group is unavailable —
+ * `detached` turned off, Windows, or a group that has already gone (ESRCH).
+ */
+function signalTree(child: AgentProcess, sig: NodeJS.Signals): void {
+  if (child.pid !== undefined && process.platform !== "win32") {
+    try {
+      process.kill(-child.pid, sig);
+      return;
+    } catch {
+      /* not a group leader, or already reaped — fall through */
+    }
+  }
+  try {
+    child.kill(sig);
+  } catch {
+    /* already gone */
+  }
+}
+
 function runIteration(
   runId: string,
   cwd: string,
@@ -1207,6 +1388,12 @@ function runIteration(
       cwd,
       env: childEnv(telemetryEnv(runId)),
       stdio: ["ignore", "pipe", "pipe"],
+      // Its own process group, so a kill reaches the builds, test runners and
+      // servers the agent started. Those are what actually hold the working
+      // tree; a signal aimed at the CLI alone leaves them running and writing
+      // into a directory this run is about to resume into or hand off. Windows
+      // has no process groups to signal, and `process.kill(-pid)` throws there.
+      detached: getSettings().killProcessGroup && process.platform !== "win32",
     });
 
     procs.set(runId, child);
@@ -1372,6 +1559,47 @@ async function currentSnapshot() {
   );
 }
 
+/**
+ * Recover an estimate of what a killed work cycle spent.
+ *
+ * Cost is normally read from the CLI's own `result` event, which a cycle killed
+ * mid-flight never emits — so without this it contributes $0 to a run that very
+ * much burned tokens. The estimate comes from the same transcript pipeline the
+ * dashboard uses: same dedupe key, same price table, same cache-TTL weighting.
+ * It is kept in its own column rather than added to `spent_usd`, which stays a
+ * floor of what the CLI itself measured.
+ *
+ * Bounded by session *and* by the cycle's own time range, because a resumed
+ * session copies earlier turns forward into the same file carrying their
+ * original timestamps.
+ *
+ * Understates by at most the final turn: a record Claude Code had not finished
+ * flushing when it died is left unconsumed by the incremental reader, and if the
+ * process never writes again it stays that way.
+ */
+async function reconcileKilledCycle(
+  sessionId: string | null,
+  from: number,
+): Promise<{ costUSD: number; tokens: number } | null> {
+  if (!sessionId) return null;
+  try {
+    const { entries } = await scanUsage();
+    const to = Date.now();
+    let costUSD = 0;
+    let tokens = 0;
+    for (const e of entries as UsageEntry[]) {
+      if (e.sessionId !== sessionId || e.ts < from || e.ts > to) continue;
+      costUSD += e.costUSD;
+      tokens += totalTokens(e.tokens);
+    }
+    return costUSD > 0 || tokens > 0 ? { costUSD, tokens } : null;
+  } catch {
+    // An unreadable transcript directory is not a reason to fail a run that has
+    // already stopped. The figure stays understated and the run says so.
+    return null;
+  }
+}
+
 export async function startRun(id: string): Promise<void> {
   const run = getRun(id);
   if (!run) throw new Error(`No such run: ${id}`);
@@ -1379,30 +1607,54 @@ export async function startRun(id: string): Promise<void> {
   // Claim the run itself before anything else can. The conditional UPDATE is
   // the whole guard: two callers racing to promote the same queued run both
   // reach here, and exactly one sees a row change.
+  //
+  // COALESCE rather than an unconditional write: a run coming back from a pause
+  // keeps its original start instant, so the duration guard measures the whole
+  // run including the hours it spent parked. That is what makes wall clock the
+  // terminus of a resuming run rather than a limit it can wait out.
   const claim = db()
     .prepare(
-      "UPDATE runs SET status = 'running', started_at = ? WHERE id = ? AND status = 'queued'",
+      "UPDATE runs SET status = 'running', started_at = COALESCE(started_at, ?), resume_at = NULL WHERE id = ? AND status = 'queued'",
     )
     .run(Date.now(), id);
   if (claim.changes !== 1) return;
 
-  const startedAt = Date.now();
+  const startedAt = run.started_at ?? Date.now();
   emit({
     runId: id,
-    ts: startedAt,
+    ts: Date.now(),
     kind: "status",
     payload: { status: "running", started_at: startedAt },
   });
 
-  let spentUSD = 0;
-  let spentTokens = 0;
-  let iterations = 0;
-  let sessionId: string | null = null;
+  // Hydrated from the row, not zeroed: this call may be a resume, and the
+  // continuation path it then takes (`continuationPrompt` plus `--resume`) is
+  // selected purely by `iterations > 0` and a non-null session id.
+  let spentUSD = run.spent_usd;
+  let spentTokens = run.spent_tokens;
+  let spentEstUSD = run.spent_usd_est;
+  let spentEstTokens = run.spent_tokens_est;
+  let iterations = run.iterations;
+  let doneRetriggers = run.done_retriggers;
+  let sessionId: string | null = run.session_id;
   let stopReason = "";
   let finalStatus: RunStatus = "completed";
   let lastExit = 0;
   let workDir = workDirOf(run);
   let incompleteIteration = false;
+  /** Set when the run is stepping aside rather than ending. */
+  let pausedUntil: number | null = null;
+  /** The next prompt should be the DONE pushback rather than the continuation. */
+  let justRetriggered = false;
+  const resumedFromPause = iterations > 0;
+  let cyclesThisSegment = 0;
+  let resumeRetried = false;
+
+  const applyInterrupt = (it: Interrupt) => {
+    stopReason = it.reason;
+    finalStatus = it.pause ? "paused" : "stopped";
+    pausedUntil = it.pause ? (it.resumeAt ?? null) : null;
+  };
 
   // Everything that can throw belongs inside the try. Parsing the budget blob
   // outside it used to leave the row stuck at 'running' with the finally never
@@ -1420,9 +1672,9 @@ export async function startRun(id: string): Promise<void> {
     }
 
     for (;;) {
-      if (cancelled.has(id)) {
-        stopReason = "Stopped by operator.";
-        finalStatus = "stopped";
+      const preScan = interrupts.get(id);
+      if (preScan) {
+        applyInterrupt(preScan);
         break;
       }
 
@@ -1430,7 +1682,14 @@ export async function startRun(id: string): Promise<void> {
       const verdict: BudgetVerdict = evaluateBudget(
         policy,
         snapshot,
-        { iterations, spentUSD, spentTokens, startedAt },
+        {
+          iterations,
+          spentUSD,
+          spentTokens,
+          spentGuardUSD: spentUSD + spentEstUSD,
+          spentGuardTokens: spentTokens + spentEstTokens,
+          startedAt,
+        },
         Date.now(),
       );
 
@@ -1440,8 +1699,9 @@ export async function startRun(id: string): Promise<void> {
         kind: "budget",
         payload: {
           allowed: verdict.allowed,
-          reason: verdict.reason ?? null,
-          code: verdict.code ?? null,
+          reason: verdict.allowed ? null : verdict.reason,
+          code: verdict.allowed ? null : verdict.code,
+          disposition: verdict.allowed ? null : verdict.disposition,
           meters: verdict.meters,
           weeklyFraction: snapshot.weekly.fraction,
           sessionFraction: snapshot.session.fraction,
@@ -1449,11 +1709,19 @@ export async function startRun(id: string): Promise<void> {
       });
 
       if (!verdict.allowed) {
-        stopReason = verdict.reason ?? "Budget guard stopped the run.";
-        // Hitting a guard before any work happened is a different outcome from
-        // running out mid-task; surface it distinctly so it is not mistaken
-        // for a completed run.
-        finalStatus = iterations === 0 ? "blocked" : "stopped";
+        stopReason = verdict.reason;
+        if (verdict.disposition === "pause") {
+          // The ordinary path for a well-behaved live-resume run: the cycle
+          // finished on its own and the *next* one is what gets refused, so
+          // nothing is thrown away.
+          finalStatus = "paused";
+          pausedUntil = verdict.resumeAt;
+        } else {
+          // Hitting a guard before any work happened is a different outcome
+          // from running out mid-task; surface it distinctly so it is not
+          // mistaken for a completed run.
+          finalStatus = iterations === 0 ? "blocked" : "stopped";
+        }
         break;
       }
 
@@ -1462,9 +1730,9 @@ export async function startRun(id: string): Promise<void> {
       // `stopRun` promises "it will not start another work cycle" for a stop
       // landing in exactly that window — without this the operator is told
       // spending stopped and is then billed for a whole further cycle.
-      if (cancelled.has(id)) {
-        stopReason = "Stopped by operator.";
-        finalStatus = "stopped";
+      const preSpawn = interrupts.get(id);
+      if (preSpawn) {
+        applyInterrupt(preSpawn);
         break;
       }
 
@@ -1474,7 +1742,10 @@ export async function startRun(id: string): Promise<void> {
           ? run.isolation === "worktree"
             ? `${settings.isolationPreamble}\n\n${run.prompt}`
             : run.prompt
-          : settings.continuationPrompt;
+          : justRetriggered
+            ? settings.donePushbackPrompt
+            : settings.continuationPrompt;
+      justRetriggered = false;
 
       emit({
         runId: id,
@@ -1502,42 +1773,136 @@ export async function startRun(id: string): Promise<void> {
         throw new Error(`Working directory changed underneath the run: ${workDir}`);
       }
 
-      const res = await runIteration(id, workDir, args);
+      const cycleStartedAt = Date.now();
+      const usedResume = sessionId !== null;
+
+      // Registered for exactly as long as a child exists. The closure reads
+      // this function's own locals, which stay alive because it is suspended on
+      // the await below — no database round trip, no second copy of progress.
+      if (policy.enforcement !== "between-cycles") {
+        liveGuards.set(id, {
+          policy,
+          progress: () => ({
+            // The loop increments before it spawns, so the cycle in flight is
+            // the one the pre-cycle guard has just authorised. Reporting it as
+            // already used would make the first live tick kill it immediately.
+            iterations: iterations - 1,
+            spentUSD,
+            spentTokens,
+            spentGuardUSD: spentUSD + spentEstUSD,
+            spentGuardTokens: spentTokens + spentEstTokens,
+            startedAt,
+          }),
+        });
+        startLiveTicker();
+      }
+
+      let res: IterationResult;
+      try {
+        res = await runIteration(id, workDir, args);
+      } finally {
+        liveGuards.delete(id);
+      }
+
+      cyclesThisSegment += 1;
       lastExit = res.exitCode;
       spentUSD += res.costUSD;
       spentTokens += res.tokens;
       incompleteIteration = !res.sawResult;
       if (res.sessionId) sessionId = res.sessionId;
 
+      // The cycle died before Claude Code reported what it cost, so the two
+      // lines above added nothing. Recover an estimate from the transcripts;
+      // it is held apart from `spent_usd` and reported as an estimate.
+      if (!res.sawResult) {
+        const recovered = await reconcileKilledCycle(sessionId, cycleStartedAt);
+        if (recovered) {
+          spentEstUSD += recovered.costUSD;
+          spentEstTokens += recovered.tokens;
+        }
+      }
+
       db()
         .prepare(
-          "UPDATE runs SET iterations = ?, spent_usd = ?, spent_tokens = ?, session_id = ? WHERE id = ?",
+          "UPDATE runs SET iterations = ?, spent_usd = ?, spent_tokens = ?," +
+            " spent_usd_est = ?, spent_tokens_est = ?, session_id = ?," +
+            " done_retriggers = ? WHERE id = ?",
         )
-        .run(iterations, spentUSD, spentTokens, sessionId, id);
+        .run(
+          iterations,
+          spentUSD,
+          spentTokens,
+          spentEstUSD,
+          spentEstTokens,
+          sessionId,
+          doneRetriggers,
+          id,
+        );
 
-      // Before the exit-code test, because a SIGTERM'd child closes with a null
-      // code that reads as -1. Judging that as a crash would file every stop the
-      // operator asks for while a cycle is in flight as a red `failed` run.
-      if (cancelled.has(id)) {
-        stopReason = "Stopped by operator.";
-        finalStatus = "stopped";
+      // Before the exit-code test, because a killed child closes with a null
+      // code that reads as -1. Judging that as a crash would file every stop —
+      // operator or guard — as a red `failed` run.
+      const postCycle = interrupts.get(id);
+      if (postCycle) {
+        applyInterrupt(postCycle);
         break;
       }
 
       if (res.exitCode !== 0 || res.isError) {
-        stopReason = `Claude Code exited with code ${res.exitCode}.`;
+        // A cycle resuming a session that a kill truncated mid-turn can be
+        // rejected before it does any work — an assistant turn holding a
+        // `tool_use` with no matching result is not a message list the API will
+        // accept. One retry covers a transient failure. A second identical one
+        // is the session itself, and the honest move is to stop and name the
+        // command rather than quietly start a fresh session and lose the
+        // conversation the resume existed to keep.
+        const looksLikeResumeFailure =
+          usedResume &&
+          resumedFromPause &&
+          cyclesThisSegment === 1 &&
+          !res.sawResult &&
+          res.finalText === "";
+        if (looksLikeResumeFailure && !resumeRetried) {
+          resumeRetried = true;
+          iterations -= 1;
+          cyclesThisSegment = 0;
+          log(
+            id,
+            "Resuming the previous session failed before it did any work. Trying once more.",
+          );
+          continue;
+        }
+        stopReason = looksLikeResumeFailure
+          ? `Could not resume this run's Claude Code session (exit ${res.exitCode}). Its work is still on disk; pick it up by hand with: claude --resume ${sessionId}`
+          : `Claude Code exited with code ${res.exitCode}.`;
         finalStatus = "failed";
         break;
       }
 
       // Completion signal from the continuation protocol.
       if (/^\s*DONE\s*$/m.test(res.finalText)) {
-        stopReason = "Agent reported the task complete.";
-        finalStatus = "completed";
-        break;
+        if (!policy.continueAfterDone) {
+          stopReason =
+            doneRetriggers > 0
+              ? `Agent reported the task complete after ${doneRetriggers} further work ${
+                  doneRetriggers === 1 ? "cycle" : "cycles"
+                }.`
+              : "Agent reported the task complete.";
+          finalStatus = "completed";
+          break;
+        }
+        // The operator asked for the budget to be spent rather than for the
+        // agent's own judgement to end the run. Fall through to the cap check
+        // below, so "keep going" still cannot mean "keep going forever".
+        doneRetriggers += 1;
+        justRetriggered = true;
+        log(
+          id,
+          `Agent reported the task complete, but this run is set to carry on until a limit stops it (${doneRetriggers} so far).`,
+        );
       }
 
-      if (iterations >= policy.maxIterations) {
+      if (policy.maxIterations !== null && iterations >= policy.maxIterations) {
         stopReason = `Used all ${policy.maxIterations} work ${
           policy.maxIterations === 1 ? "cycle" : "cycles"
         } allowed for this run.`;
@@ -1556,12 +1921,20 @@ export async function startRun(id: string): Promise<void> {
     });
   } finally {
     procs.delete(id);
-    cancelled.delete(id);
-    // Spend is only ever read from the CLI's `result` event, so an iteration
-    // killed before that event lands contributes $0. Say so rather than let
-    // the total read as measured fact. The dashboard's transcript-derived
-    // figures are unaffected and remain the more complete number.
-    if (incompleteIteration) {
+    interrupts.delete(id);
+    liveGuards.delete(id);
+
+    // Spend is only ever read from the CLI's `result` event, so a cycle killed
+    // before that event lands contributes $0 to `spent_usd`. Say what was
+    // recovered instead of letting the total read as measured fact.
+    if (spentEstUSD > 0) {
+      stopReason = [
+        stopReason,
+        `A work cycle ended before Claude Code reported its cost; $${spentEstUSD.toFixed(2)} of this run's spend is reconciled from transcripts rather than measured.`,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    } else if (incompleteIteration) {
       stopReason = [
         stopReason,
         "The final work cycle ended before Claude Code reported its cost, so this run's spend is understated.",
@@ -1569,22 +1942,51 @@ export async function startRun(id: string): Promise<void> {
         .filter(Boolean)
         .join(" ");
     }
-    setStatus(id, finalStatus, {
-      finished_at: Date.now(),
+
+    const carried: Partial<RunRow> = {
       stop_reason: stopReason,
-      exit_code: lastExit,
       iterations,
       spent_usd: spentUSD,
       spent_tokens: spentTokens,
+      spent_usd_est: spentEstUSD,
+      spent_tokens_est: spentEstTokens,
+      done_retriggers: doneRetriggers,
       work_dir: workDir,
       session_id: sessionId,
-    });
+    };
 
-    // Only once there is something to hand off. A run that never got past the
-    // budget guard, or died setting its checkout up, has no branch to describe.
-    // Not awaited: the run is already in its terminal state, and the card is an
-    // extra event on a stream that replays from storage.
-    if (run.isolation === "worktree" && run.worktree_path && iterations > 0) {
+    if (finalStatus === "paused") {
+      // A parked run is not finished. `finished_at` and `exit_code` stay unset
+      // so nothing reports a run that is about to spend more money as over, and
+      // it keeps its folder, branch and session for the resume.
+      setStatus(id, "paused", {
+        ...carried,
+        resume_at: pausedUntil,
+        paused_at: Date.now(),
+        pause_count: (run.pause_count ?? 0) + 1,
+      });
+      startSweeper();
+    } else {
+      setStatus(id, finalStatus, {
+        ...carried,
+        finished_at: Date.now(),
+        exit_code: lastExit,
+        resume_at: null,
+      });
+    }
+
+    // Only once there is something to hand off, and only when the run is really
+    // over. A run that never got past the budget guard, or died setting its
+    // checkout up, has no branch to describe — and a parked one is not done
+    // with its branch yet. Not awaited: the run is already in its terminal
+    // state, and the card is an extra event on a stream that replays from
+    // storage.
+    if (
+      finalStatus !== "paused" &&
+      run.isolation === "worktree" &&
+      run.worktree_path &&
+      iterations > 0
+    ) {
       void emitHandoff(id, run, workDir).catch(() => {
         /* a handoff we cannot describe is not worth failing a finished run */
       });
@@ -1597,15 +1999,76 @@ export async function startRun(id: string): Promise<void> {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Interrupting a run in flight                                        */
+/* ------------------------------------------------------------------ */
+
 export type StopOutcome = "signalled" | "cancelled" | "not-active";
+
+/**
+ * Record why a run is stopping and signal its child, if it has one.
+ *
+ * The single kill path for both callers. `stopRun` and the live guard reach the
+ * same code because the mechanics are identical — only the recorded reason and
+ * whether the run may come back differ, and both of those travel in the
+ * `Interrupt`.
+ */
+function interruptRun(id: string, it: Interrupt): "signalled" | "cancelled" {
+  // First interrupt wins. An operator stop landing just after a guard kill must
+  // not rewrite why the run ended, and re-signalling a dying child does nothing.
+  if (!interrupts.has(id)) {
+    interrupts.set(id, it);
+    // Announced before the signal, so the log explains the kill even when the
+    // child dies instantly and the loop's own checkpoint is the next thing to
+    // run.
+    if (it.kind === "guard") {
+      emit({
+        runId: id,
+        ts: it.at,
+        kind: "budget",
+        payload: {
+          allowed: false,
+          live: true,
+          code: it.code ?? null,
+          reason: it.reason,
+          disposition: it.pause ? "pause" : "stop",
+          resumeAt: it.resumeAt ?? null,
+        },
+      });
+    } else {
+      log(id, it.reason);
+    }
+  }
+
+  const child = procs.get(id);
+  if (!child) return "cancelled";
+
+  // SIGINT first: it is the signal a CLI is most likely to handle deliberately,
+  // and one that handles it may still print its `result` event — the difference
+  // between this cycle's spend being measured and being reconciled. An
+  // unhandled SIGINT terminates by default, so trying it costs only the three
+  // seconds before the ladder escalates.
+  //
+  // Each step tests whether the child is still registered — `finish` removes it
+  // — and deliberately not `child.killed`, which only records that a signal was
+  // *sent* and is already true, so including it meant SIGKILL was never reached.
+  signalTree(child, "SIGINT");
+  setTimeout(() => {
+    if (procs.get(id) === child) signalTree(child, "SIGTERM");
+  }, 3_000).unref?.();
+  setTimeout(() => {
+    if (procs.get(id) === child) signalTree(child, "SIGKILL");
+  }, 8_000).unref?.();
+  return "signalled";
+}
 
 /**
  * Ask a run to stop.
  *
  * The distinction matters to the caller: between work cycles there is no child
- * to signal, but the run is still stopped — the loop checks `cancelled` before
- * starting the next one. Reporting that as a failure (which a bare boolean did)
- * makes a working Stop button look broken.
+ * to signal, but the run is still stopped — the loop checks for an interrupt
+ * before starting the next one. Reporting that as a failure (which a bare
+ * boolean did) makes a working Stop button look broken.
  */
 export function stopRun(id: string): StopOutcome {
   const run = getRun(id);
@@ -1621,21 +2084,258 @@ export function stopRun(id: string): StopOutcome {
     return "cancelled";
   }
 
+  // A parked run has no loop and no child either, and it is the one state where
+  // a kill switch matters most — without this branch, Stop does nothing to the
+  // runs most likely to be left unattended.
+  if (run.status === "paused") {
+    setStatus(id, "stopped", {
+      finished_at: Date.now(),
+      stop_reason:
+        "Stopped by operator while it was waiting for the next 5-hour window.",
+      resume_at: null,
+    });
+    promoteQueued();
+    return "cancelled";
+  }
+
   if (run.status !== "running") return "not-active";
 
-  cancelled.add(id);
-  const child = procs.get(id);
-  if (!child) return "cancelled";
+  return interruptRun(id, {
+    kind: "operator",
+    reason: "Stopped by operator.",
+    pause: false,
+    at: Date.now(),
+  });
+}
 
-  child.kill("SIGTERM");
-  // Escalate if the process ignores the polite request. The test is whether the
-  // child is still registered — `close` removes it — and deliberately not
-  // `child.killed`, which only records that a signal was *sent* and is already
-  // true from the line above, so including it meant SIGKILL was never reached.
-  setTimeout(() => {
-    if (procs.get(id) === child) child.kill("SIGKILL");
-  }, 5_000).unref?.();
-  return "signalled";
+/* ------------------------------------------------------------------ */
+/* Live guards and the paused-run sweeper                              */
+/* ------------------------------------------------------------------ */
+
+function startLiveTicker(): void {
+  if (timers.live) return;
+  // Read once at start. A change to the setting takes effect the next time the
+  // ticker stops and starts, which is at the end of the last live cycle.
+  const seconds = Math.max(15, getSettings().liveGuardIntervalSeconds);
+  timers.live = setInterval(() => void liveGuardTick(), seconds * 1000);
+  timers.live.unref?.();
+}
+
+function stopLiveTicker(): void {
+  if (!timers.live) return;
+  clearInterval(timers.live);
+  timers.live = null;
+}
+
+/**
+ * Re-read the budget for every run with a child in flight.
+ *
+ * One timer and one snapshot for all of them: `scanUsage` already coalesces
+ * concurrent callers, but `buildSnapshot` does not, and it is the expensive half
+ * on a large history.
+ *
+ * Deliberately emits nothing per tick. `emit()` writes a `run_events` row every
+ * call, and a row a minute for three days across several runs is tens of
+ * thousands of rows plus a proportionally larger stream replay. Only an actual
+ * interrupt is worth recording.
+ */
+async function liveGuardTick(): Promise<void> {
+  // A scan slower than the interval must not stack ticks on top of each other.
+  if (timers.ticking) return;
+  timers.ticking = true;
+  try {
+    if (liveGuards.size === 0) {
+      stopLiveTicker();
+      return;
+    }
+    const pending = [...liveGuards].filter(([id]) => !interrupts.has(id));
+    if (pending.length === 0) return;
+
+    const snapshot = await currentSnapshot();
+    const now = Date.now();
+
+    for (const [id, guard] of pending) {
+      // An operator stop may have landed while the scan was running.
+      if (interrupts.has(id)) continue;
+
+      const verdict = evaluateBudget(guard.policy, snapshot, guard.progress(), now);
+      if (verdict.allowed) continue;
+      if (!LIVE_ENFORCEABLE_CODES.includes(verdict.code)) continue;
+
+      interruptRun(id, {
+        kind: "guard",
+        reason: verdict.reason,
+        code: verdict.code,
+        pause: verdict.disposition === "pause",
+        resumeAt: verdict.disposition === "pause" ? verdict.resumeAt : undefined,
+        at: now,
+      });
+    }
+  } catch {
+    /* a failed scan must not kill the ticker; the next tick retries */
+  } finally {
+    timers.ticking = false;
+  }
+}
+
+function startSweeper(): void {
+  if (timers.sweep) return;
+  timers.sweep = setInterval(() => void sweepPaused(), SWEEP_MS);
+  timers.sweep.unref?.();
+}
+
+function stopSweeper(): void {
+  if (!timers.sweep) return;
+  clearInterval(timers.sweep);
+  timers.sweep = null;
+}
+
+/**
+ * Reconsider every parked run.
+ *
+ * `resume_at` decides *when to look*; `evaluateBudget` decides *whether to
+ * run*. Trusting the stored timestamp would be wrong in both directions: the
+ * weekly window in its default rolling mode has no reset instant at all, only a
+ * total that decays, and even an anchored one moves with usage from surfaces
+ * this app cannot see, with a change to the reserved headroom, and with the
+ * operator's own terminal work opening a fresh 5-hour block. The guard that
+ * parked a run is the guard that clears it.
+ */
+async function sweepPaused(): Promise<void> {
+  if (timers.sweeping) return;
+  timers.sweeping = true;
+  try {
+    const paused = db()
+      .prepare("SELECT * FROM runs WHERE status = 'paused' ORDER BY created_at")
+      .all() as RunRow[];
+    if (paused.length === 0) {
+      stopSweeper();
+      return;
+    }
+
+    const due = paused.filter(
+      (r) => r.resume_at === null || Date.now() >= r.resume_at,
+    );
+    if (due.length === 0) return; // nothing to decide, so no scan
+
+    const snapshot = await currentSnapshot();
+    const now = Date.now();
+    let freed = false;
+
+    for (const run of due) {
+      const policy = normalizePolicy(JSON.parse(run.budget));
+      const verdict = evaluateBudget(
+        policy,
+        snapshot,
+        {
+          iterations: run.iterations,
+          spentUSD: run.spent_usd,
+          spentTokens: run.spent_tokens,
+          spentGuardUSD: run.spent_usd + run.spent_usd_est,
+          spentGuardTokens: run.spent_tokens + run.spent_tokens_est,
+          startedAt: run.started_at,
+        },
+        now,
+      );
+
+      if (verdict.allowed) {
+        // Re-queue rather than start directly: `promoteQueued` owns FIFO order,
+        // folder reservation and the concurrency cap, and re-implementing any
+        // of that here is how a folder claim gets broken. Ordering by
+        // `created_at` means a resumed run keeps its original place in line.
+        const flip = db()
+          .prepare(
+            "UPDATE runs SET status='queued', resume_at=NULL WHERE id=? AND status='paused'",
+          )
+          .run(run.id);
+        if (flip.changes === 1) {
+          freed = true;
+          emit({
+            runId: run.id,
+            ts: now,
+            kind: "status",
+            payload: {
+              status: "queued",
+              message: "The 5-hour window cleared; rejoining the queue.",
+            },
+          });
+        }
+        continue;
+      }
+
+      if (verdict.disposition === "pause") {
+        // Re-derived from the current snapshot, not carried over: the window
+        // that will clear this run is not necessarily the one that closed it.
+        db()
+          .prepare(
+            "UPDATE runs SET resume_at = ? WHERE id = ? AND status='paused'",
+          )
+          .run(verdict.resumeAt, run.id);
+        continue;
+      }
+
+      // A guard that never clears — the clock, this run's own spend, the weekly
+      // window — has caught up with a parked run. End it rather than leave it
+      // holding a folder indefinitely for a resume that can never happen.
+      setStatus(run.id, "stopped", {
+        finished_at: now,
+        stop_reason: verdict.reason,
+        resume_at: null,
+      });
+      freed = true;
+    }
+
+    if (freed) promoteQueued();
+  } catch {
+    /* a failed sweep must not kill the timer; the next one retries */
+  } finally {
+    timers.sweeping = false;
+  }
+}
+
+export type ResumeOutcome = "requeued" | "not-paused";
+
+/**
+ * Put a parked run back in the queue now, rather than at its next wake.
+ *
+ * Deliberately does not bypass the guard: the ordinary pre-cycle check runs as
+ * usual, so asking early while the 5-hour window is still full simply parks it
+ * again. A button that spends past a limit the operator set would be worse than
+ * no button.
+ */
+export function resumeRun(id: string): ResumeOutcome {
+  const flip = db()
+    .prepare(
+      "UPDATE runs SET status='queued', resume_at=NULL WHERE id=? AND status='paused'",
+    )
+    .run(id);
+  if (flip.changes !== 1) return "not-paused";
+
+  emit({
+    runId: id,
+    ts: Date.now(),
+    kind: "status",
+    payload: { status: "queued", message: "Asked to try again now." },
+  });
+  promoteQueued();
+  return "requeued";
+}
+
+/**
+ * Signal every live agent, for a server that is shutting down.
+ *
+ * Only needed because agents are spawned `detached`: that takes them out of the
+ * terminal's foreground process group, so Ctrl-C during `npm run dev` no longer
+ * reaches them and would otherwise leave a real, billed agent running. Under
+ * Docker the container cgroup handles it and this is redundant.
+ */
+export function killAllAgents(sig: NodeJS.Signals = "SIGTERM"): number {
+  let n = 0;
+  for (const child of procs.values()) {
+    signalTree(child, sig);
+    n += 1;
+  }
+  return n;
 }
 
 /**
@@ -1670,20 +2370,53 @@ export function isRunning(id: string): boolean {
  * Queued rows are stopped, not restarted. Promoting a prompt written days ago
  * into an unattended agent that accepts edits is the one thing a queue must
  * never do on its own.
+ *
+ * A recently *paused* row is the one exception, and a deliberate one. It is not
+ * an unreviewed prompt: it is a run the operator started, in a mode they chose
+ * precisely so that it would carry on across 5-hour windows, and the sweeper
+ * re-evaluates its budget from scratch before anything spawns. The grace period
+ * (`settings.resumeGraceHours`) is what keeps it from becoming the very thing
+ * the rule above forbids — past it, a stale pause is closed out like any other
+ * stale row.
  */
 export function reconcileOnBoot(): void {
   const stale = activeRuns();
   if (stale.length === 0) return;
 
+  let closed = 0;
+  let kept = 0;
+  const graceMs = getSettings().resumeGraceHours * 3_600_000;
+
   for (const run of stale) {
+    if (run.status === "paused") {
+      const fresh = run.paused_at !== null && Date.now() - run.paused_at < graceMs;
+      if (fresh) {
+        kept += 1;
+        continue;
+      }
+      setStatus(run.id, "stopped", {
+        finished_at: Date.now(),
+        stop_reason:
+          "This run was waiting for the next 5-hour window when the server " +
+          "restarted, and has been waiting too long to pick up on its own. " +
+          "Start it again if it is still wanted.",
+        resume_at: null,
+      });
+      closed += 1;
+      continue;
+    }
+
     if (run.status === "queued") {
       setStatus(run.id, "stopped", {
         finished_at: Date.now(),
         stop_reason: "The server restarted before this run started. Start it again.",
       });
+      closed += 1;
       continue;
     }
 
+    // Deliberately `failed` even for a run that was set to resume: the child is
+    // gone with unknown state, and mapping that to `paused` would be guessing.
     const resume = run.session_id
       ? ` To pick up where it left off: claude --resume ${run.session_id}`
       : "";
@@ -1691,9 +2424,18 @@ export function reconcileOnBoot(): void {
       finished_at: Date.now(),
       stop_reason: `The server restarted while this run was in progress.${resume}`,
     });
+    closed += 1;
   }
 
-  console.warn(
-    `[usagefoundry] Closed out ${stale.length} run(s) interrupted by a restart.`,
-  );
+  if (closed > 0) {
+    console.warn(
+      `[usagefoundry] Closed out ${closed} run(s) interrupted by a restart.`,
+    );
+  }
+  if (kept > 0) {
+    console.warn(
+      `[usagefoundry] Kept ${kept} paused run(s); they resume when their 5-hour window clears.`,
+    );
+    startSweeper();
+  }
 }

@@ -17,7 +17,23 @@ export async function register() {
     if (g.__ufReconciled) return;
     g.__ufReconciled = true;
 
-    const { reconcileOnBoot } = await import("./lib/orchestrator");
+    const { reconcileOnBoot, killAllAgents } = await import("./lib/orchestrator");
     reconcileOnBoot();
+
+    // Agents are spawned into their own process group so a kill reaches the
+    // commands they started. That also takes them out of the terminal's
+    // foreground group, so Ctrl-C during `npm run dev` no longer reaches them
+    // on its own — without this, quitting the dev server would leave a real,
+    // billed agent running. Under Docker the container cgroup already handles
+    // it and this is redundant.
+    for (const sig of ["SIGINT", "SIGTERM"] as const) {
+      process.once(sig, () => {
+        const n = killAllAgents(sig);
+        if (n > 0) {
+          console.warn(`[usagefoundry] Signalled ${n} running agent(s) on ${sig}.`);
+        }
+        process.exit(0);
+      });
+    }
   }
 }

@@ -100,6 +100,44 @@ export interface Settings {
    * otherwise recover.
    */
   telemetryForRuns: boolean;
+  /**
+   * Sent when an agent reports DONE and the run is set to carry on regardless.
+   *
+   * Cannot be `continuationPrompt`: that one says "if it is fully complete,
+   * reply with exactly DONE", so feeding it back after a DONE produces an
+   * immediate second DONE and a tight, billed spin loop.
+   */
+  donePushbackPrompt: string;
+  /**
+   * How often a live-enforced run re-reads usage during a work cycle.
+   *
+   * A cadence, not a ceiling, so the no-default-numbers rule above does not
+   * apply. 60s because each check is a transcript scan, and because the
+   * underlying data only moves when Claude Code flushes a completed turn — a
+   * 5-second interval would re-walk ~/.claude twelve times a minute to learn
+   * nothing new. It does not make enforcement precise: the real resolution is
+   * one model turn, and the UI says so.
+   */
+  liveGuardIntervalSeconds: number;
+  /**
+   * How stale a parked run's pause may be and still survive a restart.
+   *
+   * A run waiting on the 5-hour window is preserved across a restart, unlike a
+   * queued one, because the operator explicitly chose "carry on into the next
+   * window" — that is informed consent a bare queued row does not carry. The
+   * grace period is what keeps it from becoming "auto-start a days-old prompt".
+   */
+  resumeGraceHours: number;
+  /**
+   * Spawn each agent in its own process group, so a kill also reaps the builds,
+   * test runners and servers it started.
+   *
+   * On by default: those grandchildren hold the working tree, and a signal
+   * aimed at the CLI alone leaves them running and writing into a directory the
+   * orchestrator is about to resume into or hand off. Off restores the older
+   * behaviour of signalling only the `claude` process.
+   */
+  killProcessGroup: boolean;
 }
 
 export type PermissionMode =
@@ -117,6 +155,25 @@ export const DEFAULT_CONTINUATION_PROMPT =
  * a hidden directory the folder picker deliberately skips — the operator looks
  * at their repository, sees nothing changed, and concludes the run did nothing.
  */
+/**
+ * Biased hard toward verification rather than new work, and explicit that
+ * saying DONE again will not end the run.
+ *
+ * An agent told only "carry on" against a task it believes finished will invent
+ * features, refactor working code and churn dependencies — and on a run that is
+ * not isolated, that lands in the operator's own checkout. An instruction it
+ * cannot satisfy produces the same churn, hence the last sentence.
+ */
+export const DEFAULT_DONE_PUSHBACK_PROMPT =
+  "You reported the task complete, but this run still has budget left and is " +
+  "set to spend it on the same task. Do not start new features and do not " +
+  "refactor working code for its own sake. Instead: re-read the original task " +
+  "and check every part of it is met; run the tests and fix what fails; look " +
+  "for edge cases, error handling and missing tests; and correct any " +
+  "documentation your changes made wrong. This run ends when it reaches a " +
+  "limit, not when you report it done, so if you truly find nothing worth " +
+  "doing, say so and make no changes.";
+
 export const DEFAULT_ISOLATION_PREAMBLE =
   "You are working in a dedicated git worktree on your own branch, not in the " +
   "user's checkout. Commit your work as you go, with clear messages; anything " +
@@ -138,6 +195,10 @@ const DEFAULTS: Settings = {
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,
   telemetryForRuns: false,
+  donePushbackPrompt: DEFAULT_DONE_PUSHBACK_PROMPT,
+  liveGuardIntervalSeconds: 60,
+  resumeGraceHours: 24,
+  killProcessGroup: true,
 };
 
 const KEY = "settings";

@@ -1,71 +1,179 @@
 import type { UsageSnapshot } from "./windows";
 
 /**
- * Budget policy: the rules that decide whether a run may start another
- * iteration.
+ * Budget policy: the rules that decide whether a run may keep working.
  *
- * Checked *before* each iteration rather than during one. A Claude Code turn
- * cannot be interrupted mid-flight without losing its work, so the guarantee
- * this offers is "no new work starts past the threshold", not "spend never
- * exceeds the threshold". The overshoot is bounded by one iteration, and the
- * UI states this rather than implying a hard cap.
+ * How a tripped rule is acted on is the operator's choice, expressed as
+ * `enforcement`:
+ *
+ * - `between-cycles` reads the rules only before each iteration. A Claude Code
+ *   turn cannot be interrupted without losing its work, so the guarantee is "no
+ *   new work starts past the threshold", not "spend never exceeds the
+ *   threshold". Overshoot is bounded by one iteration.
+ * - `live` also reads them on a timer while an iteration is in flight and kills
+ *   the agent when one trips. That trades the in-flight cycle's work — and its
+ *   self-reported cost — for a tighter bound: one model turn plus one check
+ *   interval plus the kill, rather than a whole cycle. It is still not a hard
+ *   cap, because usage is read from transcripts Claude Code flushes as each
+ *   turn completes.
+ * - `live-resume` is `live`, except that the one rule which comes back on its
+ *   own — the 5-hour window — parks the run instead of ending it.
+ *
+ * This module stays pure and synchronous. *When* a verdict is evaluated and
+ * *what is done* with a blocked one both live in the orchestrator; deciding
+ * either here would mean teaching the budget rules about processes and timers.
  */
+
+export const ENFORCEMENT_MODES = [
+  /** Guards are read before each work cycle, only. */
+  "between-cycles",
+  /** Also read on a timer during a cycle; a trip kills the agent mid-flight. */
+  "live",
+  /** As "live", but a 5-hour-window trip parks the run instead of ending it. */
+  "live-resume",
+] as const;
+
+export type EnforcementMode = (typeof ENFORCEMENT_MODES)[number];
 
 export interface BudgetPolicy {
   /** Stop when the weekly window reaches this fraction of its ceiling (0–1). */
   maxWeeklyFraction: number | null;
-  /** Stop when the 5-hour window reaches this fraction of its ceiling (0–1). */
+  /**
+   * Threshold on the 5-hour window (0–1).
+   *
+   * Under `live-resume` this is where the run *steps aside* rather than where
+   * it stops — the number means the same thing either way ("this run must not
+   * push the 5-hour window past here"); only the response differs, and
+   * `enforcement` is what selects the response.
+   */
   maxSessionFraction: number | null;
   /** Stop when this run alone has spent this many USD. null = no limit. */
   maxRunCostUSD: number | null;
   /** Stop when this run alone has consumed this many tokens. null = no limit. */
   maxRunTokens: number | null;
   /**
-   * Cap on iterations ("work cycles" in the UI). Always set — an unbounded
-   * loop is the one failure mode with no natural stopping point.
+   * Cap on iterations ("work cycles" in the UI). `null` means no cap.
+   *
+   * The loop must always have a *monotone terminus* — a quantity that only ever
+   * moves one way — or nothing would end it. `maxIterations` and
+   * `maxDurationMinutes` are the only two that qualify: this run's own spend
+   * stops accruing the moment a cycle is killed before it reports, and both
+   * window fractions can fall as usage ages out. So `null` here is legal only
+   * alongside a `maxDurationMinutes`.
+   *
+   * That rule is enforced in `POST /api/runs`, which can tell the user, and
+   * refused again here as `no_terminus`. It is deliberately *not* enforced in
+   * `normalizePolicy`, which has no error channel and must stay total.
    */
-  maxIterations: number;
-  /** Wall-clock cap for the whole run. null = run for as long as it takes. */
+  maxIterations: number | null;
+  /**
+   * Wall-clock cap for the whole run, measured from when it first started and
+   * **including any time spent parked**. That is what makes it the terminus of
+   * a resuming run. null = run for as long as it takes.
+   */
   maxDurationMinutes: number | null;
+  /** When a tripped guard is acted on. */
+  enforcement: EnforcementMode;
+  /**
+   * Ignore the agent's DONE and send it back to the same task, so the run ends
+   * on a limit rather than on the agent's own judgement. The wording it is sent
+   * back with is `settings.donePushbackPrompt`.
+   */
+  continueAfterDone: boolean;
 }
-
-export const DEFAULT_POLICY: BudgetPolicy = {
-  maxWeeklyFraction: 0.8,
-  maxSessionFraction: null,
-  maxRunCostUSD: 5,
-  maxRunTokens: null,
-  maxIterations: 5,
-  maxDurationMinutes: 60,
-};
 
 export interface RunProgress {
   iterations: number;
   spentUSD: number;
   spentTokens: number;
+  /**
+   * Spend the guard acts on: `spentUSD` plus spend reconciled from cycles that
+   * were killed before Claude Code reported theirs. Equal to `spentUSD` in the
+   * ordinary case, and never displayed as the run's cost — the same split
+   * `costUSD`/`costGuardUSD` already makes for windows, and for the same
+   * reason: what is shown stays a floor of measured fact, what is guarded on
+   * includes what could have been spent.
+   */
+  spentGuardUSD?: number;
+  spentGuardTokens?: number;
   startedAt: number | null;
 }
 
-export interface BudgetVerdict {
-  allowed: boolean;
-  /** Human-readable reason the run was stopped. Present only when blocked. */
-  reason?: string;
-  /** Machine-readable stop code. */
-  code?:
-    | "weekly_fraction"
-    | "session_fraction"
-    | "run_cost"
-    | "run_tokens"
-    | "iterations"
-    | "duration"
-    | "no_ceiling";
-  /** Per-constraint utilisation, for rendering meters. */
-  meters: Array<{
-    label: string;
-    value: number;
-    limit: number;
-    unit: "fraction" | "usd" | "tokens" | "count" | "minutes";
-  }>;
-}
+export type BudgetMeter = {
+  label: string;
+  value: number;
+  limit: number;
+  unit: "fraction" | "usd" | "tokens" | "count" | "minutes";
+};
+
+export type BudgetStopCode =
+  | "weekly_fraction"
+  | "session_fraction"
+  | "run_cost"
+  | "run_tokens"
+  | "iterations"
+  | "duration"
+  | "no_ceiling"
+  | "no_terminus";
+
+/**
+ * A union rather than one object with optional fields, so that `resumeAt` is
+ * unreachable without first narrowing to the paused case. The alternative — an
+ * optional `disposition` — lets a caller read a pause as a stop and still
+ * compile, which is the one mistake this type exists to prevent.
+ */
+export type BudgetVerdict =
+  | { allowed: true; meters: BudgetMeter[] }
+  | {
+      allowed: false;
+      code: BudgetStopCode;
+      reason: string;
+      disposition: "stop";
+      meters: BudgetMeter[];
+    }
+  | {
+      allowed: false;
+      /**
+       * Only one cause can be waited out, and this is it: the 5-hour window is
+       * the sole quantity here that refills on its own, on a schedule, with no
+       * configuration. The weekly window does not qualify — in its default
+       * rolling mode it has no reset instant at all, only a total that decays
+       * over days.
+       */
+      code: "session_fraction";
+      reason: string;
+      disposition: "pause";
+      /** Epoch ms at which the run should try again. */
+      resumeAt: number;
+      meters: BudgetMeter[];
+    };
+
+/**
+ * Codes a mid-cycle check may act on.
+ *
+ * `iterations` is excluded because the loop increments before it spawns, so a
+ * live check would read the run as over its cap and kill the very cycle the
+ * guard just authorised. `no_ceiling` and `no_terminus` are excluded because
+ * they describe configuration that was checked before the cycle started —
+ * re-reading them mid-flight means a Settings edit in another browser tab kills
+ * a running agent.
+ */
+export const LIVE_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
+  "duration",
+  "run_cost",
+  "run_tokens",
+  "weekly_fraction",
+  "session_fraction",
+];
+
+/**
+ * Slack past the window boundary before a parked run tries again.
+ *
+ * The boundary comes from transcripts, which are flushed as turns complete, so
+ * waking exactly at `endsAt` risks reading the closing window one last time and
+ * parking again in a tight loop.
+ */
+export const RESUME_MARGIN_MS = 60_000;
 
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
 
@@ -75,22 +183,30 @@ export function evaluateBudget(
   progress: RunProgress,
   now = Date.now(),
 ): BudgetVerdict {
-  const meters: BudgetVerdict["meters"] = [];
+  const meters: BudgetMeter[] = [];
 
   const elapsedMinutes = progress.startedAt
     ? (now - progress.startedAt) / 60_000
     : 0;
 
-  meters.push({
-    label: "Work cycles used",
-    value: progress.iterations,
-    limit: policy.maxIterations,
-    unit: "count",
-  });
+  // Both read the guard figure rather than the reported one, for the same
+  // reason the window meters below do: what the run page shows should be what
+  // the guard decided on.
+  const spentUSD = progress.spentGuardUSD ?? progress.spentUSD;
+  const spentTokens = progress.spentGuardTokens ?? progress.spentTokens;
+
+  if (policy.maxIterations !== null) {
+    meters.push({
+      label: "Work cycles used",
+      value: progress.iterations,
+      limit: policy.maxIterations,
+      unit: "count",
+    });
+  }
   if (policy.maxRunCostUSD !== null) {
     meters.push({
       label: "Spent on this run",
-      value: progress.spentUSD,
+      value: spentUSD,
       limit: policy.maxRunCostUSD,
       unit: "usd",
     });
@@ -98,7 +214,7 @@ export function evaluateBudget(
   if (policy.maxRunTokens !== null) {
     meters.push({
       label: "Tokens used by this run",
-      value: progress.spentTokens,
+      value: spentTokens,
       limit: policy.maxRunTokens,
       unit: "tokens",
     });
@@ -134,14 +250,39 @@ export function evaluateBudget(
     });
   }
 
-  const block = (code: BudgetVerdict["code"], reason: string): BudgetVerdict => ({
+  const block = (code: BudgetStopCode, reason: string): BudgetVerdict => ({
     allowed: false,
     code,
     reason,
+    disposition: "stop",
     meters,
   });
 
-  if (progress.iterations >= policy.maxIterations) {
+  const park = (reason: string, resumeAt: number): BudgetVerdict => ({
+    allowed: false,
+    code: "session_fraction",
+    reason,
+    disposition: "pause",
+    resumeAt,
+    meters,
+  });
+
+  // Same reasoning as the "no ceiling" refusal below: a rule that cannot bind
+  // is refused, not ignored. POST /api/runs rejects this combination outright,
+  // so reaching it here means the policy came from somewhere other than this
+  // app's form — refuse rather than spawn an agent nothing would ever stop.
+  if (policy.maxIterations === null && policy.maxDurationMinutes === null) {
+    return block(
+      "no_terminus",
+      "This run has no work-cycle limit and no time limit, so nothing would " +
+        "ever end it.",
+    );
+  }
+
+  if (
+    policy.maxIterations !== null &&
+    progress.iterations >= policy.maxIterations
+  ) {
     return block(
       "iterations",
       `Used all ${policy.maxIterations} work ${
@@ -160,17 +301,17 @@ export function evaluateBudget(
     );
   }
 
-  if (policy.maxRunCostUSD !== null && progress.spentUSD >= policy.maxRunCostUSD) {
+  if (policy.maxRunCostUSD !== null && spentUSD >= policy.maxRunCostUSD) {
     return block(
       "run_cost",
-      `This run has spent $${progress.spentUSD.toFixed(2)}, reaching its $${policy.maxRunCostUSD.toFixed(2)} spending limit.`,
+      `This run has spent $${spentUSD.toFixed(2)}, reaching its $${policy.maxRunCostUSD.toFixed(2)} spending limit.`,
     );
   }
 
-  if (policy.maxRunTokens !== null && progress.spentTokens >= policy.maxRunTokens) {
+  if (policy.maxRunTokens !== null && spentTokens >= policy.maxRunTokens) {
     return block(
       "run_tokens",
-      `This run has used ${progress.spentTokens.toLocaleString()} tokens, reaching its token limit.`,
+      `This run has used ${spentTokens.toLocaleString()} tokens, reaching its token limit.`,
     );
   }
 
@@ -184,8 +325,9 @@ export function evaluateBudget(
   // window unpriced the displayed fraction is exactly 0, which no threshold
   // can ever exceed. Guarding on the reported floor would mean the guard
   // quietly ceases to exist the week a new model ships. The "no ceiling"
-  // refusal below still reads `fraction` — the two are null together, and a
-  // missing ceiling is a configuration fact, not a pricing one.
+  // refusal below still reads `fraction` — the two are null together (both come
+  // from `fractionOf(x, limit)` against the same ceiling, windows.ts), and a
+  // missing ceiling is a configuration fact, not a pricing one. Not a bug.
   if (policy.maxWeeklyFraction !== null) {
     if (snapshot.weekly.fraction === null) {
       return block(
@@ -211,9 +353,24 @@ export function evaluateBudget(
       );
     }
     if ((snapshot.session.guardFraction ?? 0) >= policy.maxSessionFraction) {
+      const at = pct(snapshot.session.guardFraction ?? 0);
+      const guard = pct(policy.maxSessionFraction);
+      // A full 5-hour window is the one tripped guard that comes back on its
+      // own, so it is the one a run can wait out. Every check above measures
+      // something that only moves one way — cycles used, wall clock, this run's
+      // own spend, the weekly window — and they are ordered ahead of it
+      // deliberately: a run that is out of time *and* out of window must end,
+      // not park, or the clock stops being a terminus. Keep that order.
+      if (policy.enforcement === "live-resume") {
+        return park(
+          `5-hour window is at ${at}, at or past the ${guard} guard. ` +
+            "Waiting for the next 5-hour window.",
+          snapshot.session.endsAt + RESUME_MARGIN_MS,
+        );
+      }
       return block(
         "session_fraction",
-        `5-hour window is at ${pct(snapshot.session.guardFraction ?? 0)}, at or past the ${pct(policy.maxSessionFraction)} guard.`,
+        `5-hour window is at ${at}, at or past the ${guard} guard.`,
       );
     }
   }
@@ -235,12 +392,41 @@ export function normalizePolicy(raw: unknown): BudgetPolicy {
     return n > 1 ? Math.min(n / 100, 1) : n;
   };
 
+  // The one rule that may not be switched off by accident, so the only way to
+  // ask for an uncapped loop is an explicit `null`. A blank field, a zero, a
+  // negative and a missing key all still mean one cycle — the same coercion
+  // this has always done. Whether that null is *legal* is decided in
+  // POST /api/runs, which can tell the user; this function has no error channel
+  // and must stay total, because it runs a second time over an already-stored
+  // policy in startRun and a run that was legal when it was created must not
+  // become fatal at restart.
+  const maxIterations: number | null = !("maxIterations" in o)
+    ? 1
+    : o.maxIterations === null
+      ? null
+      : Math.max(1, Math.floor(num(o.maxIterations, 1) ?? 1));
+
+  // Degrades rather than throws, for the same reason. POST /api/runs rejects an
+  // unrecognised mode outright, so this branch is only ever reached by a blob
+  // written by an older or newer build — and "behave like it always did" is the
+  // safe reading of a mode this build does not understand.
+  const enforcement: EnforcementMode = (
+    ENFORCEMENT_MODES as readonly string[]
+  ).includes(String(o.enforcement))
+    ? (o.enforcement as EnforcementMode)
+    : "between-cycles";
+
   return {
     maxWeeklyFraction: frac(o.maxWeeklyFraction),
     maxSessionFraction: frac(o.maxSessionFraction),
     maxRunCostUSD: num(o.maxRunCostUSD, null),
     maxRunTokens: num(o.maxRunTokens, null),
-    maxIterations: Math.max(1, Math.floor(num(o.maxIterations, 1) ?? 1)),
+    maxIterations,
     maxDurationMinutes: num(o.maxDurationMinutes, null),
+    enforcement,
+    // `=== true`, not `Boolean(...)`: this flag makes a run refuse to stop when
+    // the agent says it is finished, so a string "false" off the wire must read
+    // as off, not as on. Fail safe beats fail consistent.
+    continueAfterDone: o.continueAfterDone === true,
   };
 }

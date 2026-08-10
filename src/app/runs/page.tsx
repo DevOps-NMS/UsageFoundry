@@ -12,8 +12,10 @@ import type {
 } from "@/lib/apiTypes";
 import {
   STATUS_TONE,
+  fmtCycles,
   fmtDateTime,
   fmtPct,
+  fmtRelative,
   fmtTokens,
   fmtUSD,
   shortPath,
@@ -35,11 +37,22 @@ export default function RunsPage() {
   const [prompt, setPrompt] = useState("");
   const [isolate, setIsolate] = useState(true);
   const [permissionMode, setPermissionMode] = useState("acceptEdits");
+  // Defaults reproduce today's behaviour exactly. There is deliberately no
+  // `settings.defaultEnforcement`: a settable default is a way to turn every run
+  // into a live-killing run by accident, and between-cycles is the only mode
+  // that never throws work away.
+  const [iterationsCapped, setIterationsCapped] = useState(true);
   const [maxIterations, setMaxIterations] = useState("5");
+  const [costLimited, setCostLimited] = useState(true);
   const [maxRunCostUSD, setMaxRunCostUSD] = useState("5");
+  const [maxSessionFraction, setMaxSessionFraction] = useState("");
   const [maxWeeklyFraction, setMaxWeeklyFraction] = useState("");
   const [timeLimited, setTimeLimited] = useState(true);
   const [maxDurationMinutes, setMaxDurationMinutes] = useState("60");
+  const [enforcement, setEnforcement] = useState<
+    "between-cycles" | "live" | "live-resume"
+  >("between-cycles");
+  const [continueAfterDone, setContinueAfterDone] = useState(false);
 
   const loadRuns = useCallback(async () => {
     const res = await fetch("/api/runs", { cache: "no-store" });
@@ -117,7 +130,15 @@ export default function RunsPage() {
   const canIsolate = folder !== "" && selectedFolder?.isGitRepo === true;
 
   const activeRuns = useMemo(
-    () => runs.filter((r) => r.status === "running" || r.status === "queued"),
+    () =>
+      runs.filter(
+        (r) =>
+          r.status === "running" ||
+          r.status === "queued" ||
+          // A parked run is still active: it holds its folder and will spend
+          // again on its own.
+          r.status === "paused",
+      ),
     [runs],
   );
 
@@ -133,6 +154,12 @@ export default function RunsPage() {
 
   const weeklyCeilingSet =
     settings?.weeklyTokenLimit != null || settings?.weeklyCostLimit != null;
+  const sessionCeilingSet =
+    settings?.sessionTokenLimit != null || settings?.sessionCostLimit != null;
+  const weeklyRolling = settings != null && settings.weeklyAnchor == null;
+  const live = enforcement !== "between-cycles";
+  const resuming = enforcement === "live-resume";
+  const isolated = canIsolate && isolate;
 
   const noMountsUsable =
     foldersLoaded && !mounts.some((m) => m.available);
@@ -153,12 +180,22 @@ export default function RunsPage() {
           permissionMode,
           isolate: canIsolate ? isolate : false,
           budget: {
-            maxIterations,
-            maxRunCostUSD,
-            maxWeeklyFraction: maxWeeklyFraction || null,
-            // null is the wire form of "no time limit" — normalizePolicy maps
-            // it back to an unset cap rather than to a default.
+            // null is the wire form of "no limit" for all four of these —
+            // normalizePolicy maps it to an unset cap rather than to a default.
+            maxIterations: iterationsCapped ? maxIterations : null,
+            maxRunCostUSD: costLimited ? maxRunCostUSD : null,
             maxDurationMinutes: timeLimited ? maxDurationMinutes : null,
+            // Sent as a 0–1 fraction rather than the 0–100 the field shows.
+            // normalizePolicy's frac() reads a bare 1 as 100%, so a user typing
+            // "1" into a field labelled (%) would otherwise get no guard at all.
+            maxWeeklyFraction: maxWeeklyFraction
+              ? Number(maxWeeklyFraction) / 100
+              : null,
+            maxSessionFraction: maxSessionFraction
+              ? Number(maxSessionFraction) / 100
+              : null,
+            enforcement,
+            continueAfterDone,
           },
         }),
       });
@@ -382,37 +419,92 @@ export default function RunsPage() {
 
               <div className="field">
                 <label htmlFor="iters">Work cycles before stopping</label>
-                <input
-                  id="iters"
-                  type="number"
-                  min={1}
-                  value={maxIterations}
-                  onChange={(e) => setMaxIterations(e.target.value)}
-                />
-                <div className="hint">
-                  How many times Claude may be told to carry on. Each cycle picks
-                  up where the last one left off.{" "}
-                  <strong>1</strong> means one pass and then stop, no matter what
-                  state the work is in.
+                <div className="input-row">
+                  <select
+                    value={iterationsCapped ? "on" : "off"}
+                    onChange={(e) => setIterationsCapped(e.target.value === "on")}
+                    aria-label="Work cycle limit mode"
+                  >
+                    <option value="on">Stop after…</option>
+                    <option value="off">No cycle limit</option>
+                  </select>
+                  {iterationsCapped && (
+                    <>
+                      <input
+                        id="iters"
+                        type="number"
+                        min={1}
+                        value={maxIterations}
+                        onChange={(e) => setMaxIterations(e.target.value)}
+                      />
+                      <span className="unit">cycles</span>
+                    </>
+                  )}
                 </div>
+                <div className="hint">
+                  {iterationsCapped ? (
+                    <>
+                      How many times Claude may be told to carry on. Each cycle
+                      picks up where the last one left off. <strong>1</strong>{" "}
+                      means one pass and then stop, no matter what state the work
+                      is in.
+                    </>
+                  ) : (
+                    <>
+                      Claude keeps being told to carry on until something else
+                      stops it. This needs a time limit below: the clock is the
+                      only limit that keeps advancing whether or not Claude
+                      reports what it spent.
+                    </>
+                  )}
+                </div>
+                {!iterationsCapped && !timeLimited && (
+                  <div className="hint" style={{ color: "var(--danger)" }}>
+                    With no cycle limit and no time limit, nothing would ever end
+                    this run. Set a time limit below.
+                  </div>
+                )}
               </div>
 
               <div className="field">
-                <label htmlFor="cost">Spending limit for this run (USD)</label>
-                <input
-                  id="cost"
-                  type="number"
-                  min={0}
-                  step="0.5"
-                  placeholder="leave blank for no limit"
-                  value={maxRunCostUSD}
-                  onChange={(e) => setMaxRunCostUSD(e.target.value)}
-                />
-                <div className="hint">
-                  Roughly what this one run may cost. No new cycle starts once
-                  this much has been spent, so the final figure can exceed it by
-                  up to one cycle. Leave blank for no limit.
+                <label htmlFor="cost">Spending limit for this run</label>
+                <div className="input-row">
+                  <select
+                    value={costLimited ? "on" : "off"}
+                    onChange={(e) => setCostLimited(e.target.value === "on")}
+                    aria-label="Spending limit mode"
+                  >
+                    <option value="on">Stop after…</option>
+                    <option value="off">No spending limit</option>
+                  </select>
+                  {costLimited && (
+                    <>
+                      <input
+                        id="cost"
+                        type="number"
+                        min={0}
+                        step="0.5"
+                        value={maxRunCostUSD}
+                        onChange={(e) => setMaxRunCostUSD(e.target.value)}
+                      />
+                      <span className="unit">USD</span>
+                    </>
+                  )}
                 </div>
+                <div className="hint">
+                  {costLimited
+                    ? "Roughly what this one run may cost. No new cycle starts once this much has been spent, so the final figure can exceed it by up to one cycle."
+                    : "This run is not capped in dollars. The two window percentages below cap it against your subscription instead, which is what you want when you care about the allowance rather than the invoice."}
+                </div>
+                {costLimited && live && (
+                  <div className="hint" style={{ color: "var(--warn)" }}>
+                    Claude Code only reports a cycle&rsquo;s cost when the cycle
+                    finishes, and the mode you have chosen cuts cycles short. What
+                    an interrupted cycle spent is worked out from your transcripts
+                    afterwards, which is close but not exact — treat the cycle and
+                    time limits as the ones that really bound this run.
+                  </div>
+                )}
               </div>
 
               <div className="field">
@@ -440,10 +532,59 @@ export default function RunsPage() {
                   )}
                 </div>
                 <div className="hint">
-                  {timeLimited
-                    ? "Measured from when the run starts. A cycle already underway is never cut off mid-edit — the clock is only checked before the next one begins."
-                    : "The run keeps going until Claude reports the task complete, or another limit stops it."}
+                  {!timeLimited ? (
+                    "The run keeps going until Claude reports the task complete, or another limit stops it."
+                  ) : (
+                    <>
+                      Measured from when the run starts.{" "}
+                      {live
+                        ? "The clock is checked during a cycle too, so a cycle can be cut off part-way."
+                        : "A cycle already underway is never cut off mid-edit — the clock is only checked before the next one begins."}
+                      {resuming &&
+                        " Time spent waiting for a window to reset counts as well, so this is what finally ends a run that would otherwise keep resuming."}
+                    </>
+                  )}
                 </div>
+                {timeLimited && resuming && Number(maxDurationMinutes) > 720 && (
+                  <div className="hint" style={{ color: "var(--warn)" }}>
+                    That is about {(Number(maxDurationMinutes) / 60).toFixed(0)}{" "}
+                    hours of unattended agent, most of it likely spent waiting.
+                  </div>
+                )}
+              </div>
+
+              <div className="field">
+                <label htmlFor="sess">
+                  {resuming
+                    ? "Step aside at 5-hour usage (%)"
+                    : "Stop at 5-hour usage (%)"}
+                </label>
+                <input
+                  id="sess"
+                  type="number"
+                  min={1}
+                  max={100}
+                  placeholder="e.g. 85 — leave blank to disable"
+                  value={maxSessionFraction}
+                  onChange={(e) => setMaxSessionFraction(e.target.value)}
+                />
+                {maxSessionFraction && !sessionCeilingSet ? (
+                  <div className="hint" style={{ color: "var(--warn)" }}>
+                    No 5-hour ceiling is configured, so this guard has nothing to
+                    measure against and the run will be refused. Set one in{" "}
+                    <Link href="/settings">Settings</Link>, or run Calibrate
+                    there.
+                  </div>
+                ) : (
+                  <div className="hint">
+                    {resuming
+                      ? "How full your 5-hour window may get before this run steps aside. It picks up where it left off when the next 5-hour window opens, so one task can stretch across several of them."
+                      : "How full your 5-hour window may get before this run stops. It measures your whole subscription, not just this run — anything else you do in Claude Code counts against it too."}{" "}
+                    {usage?.snapshot.session.fraction != null
+                      ? `Your 5-hour window is at ${fmtPct(usage.snapshot.session.fraction)} right now.`
+                      : "Requires a 5-hour ceiling in Settings."}
+                  </div>
+                )}
               </div>
 
               <div className="field">
@@ -465,7 +606,9 @@ export default function RunsPage() {
                   </div>
                 ) : (
                   <div className="hint">
-                    Protects your subscription allowance, not just this run.{" "}
+                    Protects your subscription allowance, not just this run. This
+                    one always ends the run — a weekly window takes days to
+                    refill, so there is nothing useful to wait for.{" "}
                     {usage?.snapshot.weekly.fraction != null
                       ? `Your weekly window is currently at ${fmtPct(usage.snapshot.weekly.fraction)}.`
                       : "Requires a weekly ceiling in Settings."}
@@ -473,6 +616,148 @@ export default function RunsPage() {
                 )}
               </div>
             </div>
+
+            <div className="subsection">
+              <div className="subsection-title">How limits are enforced</div>
+
+              <div className="field">
+                <label htmlFor="enf">When a limit is reached</label>
+                <select
+                  id="enf"
+                  value={enforcement}
+                  onChange={(e) =>
+                    setEnforcement(e.target.value as typeof enforcement)
+                  }
+                >
+                  <option value="between-cycles">
+                    Let the cycle finish, then stop
+                  </option>
+                  <option value="live">Stop the cycle in flight</option>
+                  <option value="live-resume">
+                    Stop the cycle, carry on next window
+                  </option>
+                </select>
+                <div className="hint">
+                  {enforcement === "between-cycles" ? (
+                    <>
+                      Limits are read between cycles. Claude always finishes what
+                      it started, so the run can overshoot a limit by up to one
+                      cycle — but no work is thrown away and every cycle reports
+                      what it cost.
+                    </>
+                  ) : (
+                    <>
+                      Limits are read while a cycle is running too, about every{" "}
+                      {settings?.liveGuardIntervalSeconds ?? 60} seconds, and
+                      Claude is stopped as soon as one is reached.{" "}
+                      <strong>The work in that cycle is lost.</strong> It is not
+                      instantaneous either: usage is read from the transcript
+                      files Claude Code writes as each turn completes, so a limit
+                      is noticed at most one turn plus one check after it was
+                      crossed.
+                    </>
+                  )}
+                </div>
+                {live && settings?.telemetryForRuns === false && (
+                  <div className="hint" style={{ color: "var(--warn)" }}>
+                    Consider turning on{" "}
+                    <Link href="/settings">agent self-reporting</Link> — it is the
+                    only independent record of what the cycles this mode cuts
+                    short actually cost.
+                  </div>
+                )}
+                {resuming && (
+                  <div className="hint">
+                    Only the 5-hour percentage is waited out — it refills on its
+                    own within five hours. Everything else ends the run, because
+                    nothing else comes back: your spend, your cycles, the clock
+                    and the weekly window all move one way.
+                  </div>
+                )}
+              </div>
+
+              {resuming && !maxSessionFraction && (
+                <div className="notice" data-tone="warn">
+                  Carrying on into the next window needs a{" "}
+                  <strong>5-hour usage</strong> percentage to step aside at. Set
+                  one above, or choose one of the other two modes.
+                </div>
+              )}
+
+              {resuming && weeklyRolling && (
+                <div className="notice" data-tone="warn">
+                  Your weekly window is set to <strong>rolling 7 days</strong>, so
+                  it has no reset instant. That does not stop this mode — the run
+                  waits on the 5-hour window, which always rolls over — but a
+                  weekly percentage will only fall again as old usage ages out,
+                  over days. Set your reset day in{" "}
+                  <Link href="/settings">Settings</Link> if you know it.
+                </div>
+              )}
+
+              {resuming && !isolated && (
+                <div className="notice" data-tone="warn">
+                  A waiting run keeps hold of its folder. Nothing else can run in{" "}
+                  <span className="mono">
+                    {folder || activeMount?.label || "this workspace"}
+                  </span>{" "}
+                  while it waits, which can be up to five hours at a stretch.
+                </div>
+              )}
+
+              <div className="field">
+                <label htmlFor="done">When Claude says the task is done</label>
+                <select
+                  id="done"
+                  value={continueAfterDone ? "1" : "0"}
+                  onChange={(e) => setContinueAfterDone(e.target.value === "1")}
+                >
+                  <option value="0">End the run — it is finished</option>
+                  <option value="1">Send it back in until a limit stops it</option>
+                </select>
+                <div className="hint">
+                  {continueAfterDone ? (
+                    <>
+                      <span className="mono">DONE</span> no longer ends this run.
+                      Claude is told the budget is not spent yet and sent back to
+                      the same task — to verify, test and tighten rather than to
+                      invent new work. There is then no way for it to finish
+                      early: the run ends when a limit above is reached. The exact
+                      wording it gets is in{" "}
+                      <Link href="/settings">Settings</Link>.
+                    </>
+                  ) : (
+                    <>
+                      The run ends as soon as Claude replies{" "}
+                      <span className="mono">DONE</span>, leaving whatever budget
+                      is left unspent.
+                    </>
+                  )}
+                </div>
+                {continueAfterDone && !isolated && (
+                  <div className="hint" style={{ color: "var(--warn)" }}>
+                    This run edits your folder directly, and will keep editing it
+                    after it believes the task is finished. Isolation would put
+                    that on its own branch instead.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {permissionMode === "bypassPermissions" &&
+              (resuming || continueAfterDone) && (
+                <div className="notice" data-tone="danger">
+                  <strong>Read this before starting.</strong> This run can run any
+                  command without asking
+                  {resuming && ", will keep going across several 5-hour windows"}
+                  {continueAfterDone &&
+                    ", will not stop when it believes the work is finished"}
+                  , and nobody will be watching it.{" "}
+                  {timeLimited
+                    ? `It ends by itself after ${maxDurationMinutes} minutes.`
+                    : "Nothing here bounds it in wall-clock time."}
+                </div>
+              )}
 
             {formError && (
               <div className="notice" data-tone="danger">
@@ -500,7 +785,19 @@ export default function RunsPage() {
             )}
 
             <div className="btn-row">
-              <button type="submit" disabled={submitting || !mountId || !prompt}>
+              {/* Mirrors the two rejections POST /api/runs makes, so the user is
+                  not round-tripping to learn them. The server stays the
+                  authority. */}
+              <button
+                type="submit"
+                disabled={
+                  submitting ||
+                  !mountId ||
+                  !prompt ||
+                  (!iterationsCapped && !timeLimited) ||
+                  (resuming && !maxSessionFraction)
+                }
+              >
                 {submitting ? "Starting…" : "Start run"}
               </button>
             </div>
@@ -522,7 +819,13 @@ export default function RunsPage() {
                           <span className="badge" data-tone={STATUS_TONE[r.status]}>
                             {r.status === "queued"
                               ? `waiting · ${r.queuePosition ?? 0} ahead`
-                              : r.status}
+                              : r.status === "paused"
+                                ? `paused · ${
+                                    r.resume_at
+                                      ? fmtRelative(r.resume_at, Date.now())
+                                      : "waiting"
+                                  }`
+                                : r.status}
                           </span>
                         </td>
                         <td className="mono" title={r.work_dir ?? r.folder}>
@@ -537,7 +840,7 @@ export default function RunsPage() {
                           )}
                         </td>
                         <td className="num">
-                          {r.iterations}/{r.max_iterations}
+                          {fmtCycles(r.iterations, r.max_iterations)}
                         </td>
                         <td className="num">{fmtUSD(r.spent_usd)}</td>
                       </tr>
@@ -587,7 +890,7 @@ export default function RunsPage() {
                         </span>
                       </td>
                       <td className="num">
-                        {r.iterations}/{r.max_iterations}
+                        {fmtCycles(r.iterations, r.max_iterations)}
                       </td>
                       <td className="num">
                         {fmtUSD(r.spent_usd)}

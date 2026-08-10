@@ -41,9 +41,15 @@ export async function GET() {
   function occupancy(abs: string) {
     const key = conflictKey(abs);
     const hits = activeKeys.filter((a) => overlaps(key, a.key));
-    const running = hits.find((h) => h.run.status === "running");
+    // A parked run counts as busy. It has no process, but it holds the folder
+    // for its resume, and `createRun` queues behind it — reporting the folder
+    // as free would mean offering a run that then sits in the queue for hours
+    // with no explanation.
+    const holder = hits.find(
+      (h) => h.run.status === "running" || h.run.status === "paused",
+    );
     return {
-      busyRunId: running?.run.id ?? null,
+      busyRunId: holder?.run.id ?? null,
       queuedCount: hits.filter((h) => h.run.status === "queued").length,
     };
   }
