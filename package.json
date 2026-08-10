@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Usage-aware orchestration for Claude Code: tracks subscription limits from local transcripts and runs the agent headlessly under a budget guard.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "engines": {
     "node": ">=22"
   },

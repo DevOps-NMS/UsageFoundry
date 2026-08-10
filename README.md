@@ -617,4 +617,11 @@ and the list above records what was checked by hand.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Source-available, not open source — see [LICENSE](LICENSE).
+
+You may use, self-host, modify and study it for your own personal,
+non-commercial purposes. **Distributing it, and using it commercially or inside
+an organisation, both need written permission** — ask, and it may well be given.
+
+Releases before this change were MIT, and this does not withdraw rights anyone
+already has in a copy they received under those terms.
