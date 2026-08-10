@@ -1,3 +1,22 @@
+/* Layer precedence is declared, never inferred. Without this statement the
+   order is decided by which block the bundler emits first, and that differs
+   between `next dev` and `next build` — measured: dev emits utilities before
+   the legacy block, the production build emits it after. The legacy sheet
+   would then beat utilities in the browser and lose to them in the shipped
+   image, or the reverse.
+   `legacy` sits above `base` so the old stylesheet still wins over Preflight,
+   and below `utilities` so a utility always wins over it. */
+@layer theme, base, legacy, components, utilities;
+
+/* Content detection is pinned rather than automatic. Tailwind's automatic
+   scan respects .gitignore, and .dockerignore excludes .gitignore from the
+   build context — so inside the image the scan would additionally cover
+   tsconfig.tsbuildinfo and CLAUDE.md and emit a *different* stylesheet than
+   the one built on the host. A class would work in `next dev` and be missing
+   from the shipped container, with nothing to indicate why. */
+@import "tailwindcss" source(none);
+@source "../**/*.{ts,tsx}";
+
 /* ------------------------------------------------------------------ */
 /* Tokens                                                              */
 /* ------------------------------------------------------------------ */
@@ -44,6 +63,20 @@
     --danger: #cf222e;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Legacy stylesheet — being migrated to Tailwind, one component at a   */
+/* time. Everything below is deleted as its component lands, so an      */
+/* empty block here means the migration is finished.                    */
+/*                                                                      */
+/* The layer is load-bearing, not tidiness: unlayered declarations       */
+/* outrank *every* layered one regardless of specificity, so unwrapped   */
+/* `.card` would beat `p-6` and the utility would silently do nothing.   */
+/* The `legacy` name and its position come from the @layer statement at  */
+/* the top of this file — see the note there.                            */
+/* ------------------------------------------------------------------ */
+
+@layer legacy {
 
 * { box-sizing: border-box; }
 
@@ -305,3 +338,5 @@ button.danger { background: var(--danger); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .center-card { max-width: 380px; margin: 12vh auto 0; }
+
+} /* end legacy layer */
