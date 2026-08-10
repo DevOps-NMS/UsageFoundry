@@ -24,6 +24,58 @@ function ceilingDetail(w: WindowStateDTO): string {
   return "Set a ceiling in Settings to see a percentage.";
 }
 
+/**
+ * One cost-attribution table. Share is against the window total, and every
+ * turn lands in some bucket — including explicit "(main thread)" / "(no skill)"
+ * rows — so the column adds to 100% instead of quietly omitting the remainder.
+ */
+function Breakdown({
+  title,
+  heading,
+  rows,
+  total,
+  hint,
+}: {
+  title: string;
+  heading: string;
+  rows: Array<{ label: string; cost: number }>;
+  total: number;
+  hint?: string;
+}) {
+  return (
+    <div className="card">
+      <h2 className="card-title">{title}</h2>
+      {rows.length === 0 ? (
+        <div className="empty">No usage in this window.</div>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>{heading}</th>
+                <th className="num">Cost</th>
+                <th className="num">Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.slice(0, 12).map((r) => (
+                <tr key={r.label}>
+                  <td className="mono">{r.label}</td>
+                  <td className="num">{fmtUSD(r.cost)}</td>
+                  <td className="num">
+                    {total > 0 ? fmtPct(r.cost / total) : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {hint && <div className="hint">{hint}</div>}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [data, setData] = useState<UsageResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -311,6 +363,35 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+      </section>
+
+      {/* Attribution Claude Code already records on each turn, so these cover
+          the full history rather than starting from the day they were added. */}
+      <section className="grid grid-3">
+        <Breakdown
+          title="By effort"
+          heading="Effort"
+          rows={s.byEffort.map((r) => ({ label: r.effort, cost: r.agg.costUSD }))}
+          total={s.weekly.costUSD}
+          hint="Reasoning effort is usually the largest single cost lever."
+        />
+        <Breakdown
+          title="By sub-agent"
+          heading="Agent"
+          rows={s.byAgent.map((r) => ({ label: r.agent, cost: r.agg.costUSD }))}
+          total={s.weekly.costUSD}
+          hint={
+            meta.includeSidechains
+              ? "Sub-agent turns bill separately from the main thread."
+              : "Sub-agent turns are currently excluded from totals in Settings, so only main-thread work appears here."
+          }
+        />
+        <Breakdown
+          title="By skill"
+          heading="Skill"
+          rows={s.bySkill.map((r) => ({ label: r.skill, cost: r.agg.costUSD }))}
+          total={s.weekly.costUSD}
+        />
       </section>
 
       <section className="card">

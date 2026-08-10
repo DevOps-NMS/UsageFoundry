@@ -63,6 +63,9 @@ export interface SnapshotDTO {
   projectedExhaustionAt: number | null;
   byModel: Array<{ model: string; agg: AggregateDTO }>;
   byProject: Array<{ project: string; agg: AggregateDTO }>;
+  byAgent: Array<{ agent: string; agg: AggregateDTO }>;
+  bySkill: Array<{ skill: string; agg: AggregateDTO }>;
+  byEffort: Array<{ effort: string; agg: AggregateDTO }>;
   totalCostUSD: number;
 }
 
@@ -80,6 +83,8 @@ export interface UsageResponse {
     reservedHeadroomFraction: number;
     /** Which Claude Code entrypoints the parsed transcripts came from. */
     entrypoints: string[];
+    /** Whether sub-agent turns are in these totals — the by-agent table depends on it. */
+    includeSidechains: boolean;
     /**
      * The subscription the scanned transcripts belong to, when Claude Code's
      * own state files can be read. All fields null means "plan unknown", which

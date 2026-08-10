@@ -49,6 +49,20 @@ export interface UsageEntry {
   speed?: string;
   serviceTier?: string;
   /**
+   * Reasoning effort the turn ran at (`low` … `max`). Present on essentially
+   * every turn, and a large cost lever — the same task at `xhigh` and at `low`
+   * are different amounts of money.
+   */
+  effort?: string;
+  /**
+   * Sub-agent that produced the turn (`Explore`, `workflow-subagent`, …), or
+   * undefined for main-thread work. Claude Code records this itself; it is a
+   * finer split than `isSidechain`, which only says "not the main thread".
+   */
+  agent?: string;
+  /** Skill in play when the turn ran (`claude-api`, `init`, …), if any. */
+  skill?: string;
+  /**
    * Which Claude Code surface produced the turn (`cli`, `sdk-cli`, …).
    *
    * Reported so the UI can state exactly what is covered. Only Claude Code
@@ -168,6 +182,11 @@ function parseLine(line: string, cwdRef: { value: string }): UsageEntry | null {
     speed,
     serviceTier:
       typeof usage.service_tier === "string" ? usage.service_tier : undefined,
+    effort: typeof rec.effort === "string" ? rec.effort : undefined,
+    agent:
+      typeof rec.attributionAgent === "string" ? rec.attributionAgent : undefined,
+    skill:
+      typeof rec.attributionSkill === "string" ? rec.attributionSkill : undefined,
     entrypoint: typeof rec.entrypoint === "string" ? rec.entrypoint : undefined,
     // A record that consumed no tokens cannot have cost anything, so it is not
     // evidence that the price table is missing a model. Claude Code writes at

@@ -78,6 +78,8 @@ Events flow: `emit()` writes to `run_events` **and** publishes on a `globalThis`
 
 **Per-iteration spend comes from the CLI's own `result` event** (`total_cost_usd`), not re-derived from tokens. The transcript-derived cost math in `pricing.ts` serves the dashboard; the two are independent on purpose.
 
+**Attribution comes from the transcript, not from telemetry.** `effort`, `attributionAgent`, and `attributionSkill` are on the assistant record already, so `byEffort`/`byAgent`/`bySkill` cover full history with no collector, no config, and no second source to reconcile. Before adding a breakdown, check whether the field is already on the record — `agentId`, `gitBranch`, `usage.server_tool_use`, and `message.stop_reason` are all still unread. All five rollups go through one `groupBy()` in `windows.ts`, and every turn must land in a bucket (`(main thread)`, `(no skill)`, `(unspecified)`) so each column reconciles to the window total rather than silently omitting a remainder.
+
 **Transcript parsing details that materially change the numbers:**
 - Dedupe key is `${message.id}:${requestId}`, applied across files (a resumed session copies earlier turns forward). Naive summing over-reports by ~3×.
 - Files are read from a cached byte offset; the bytes after the final `\n` are left unconsumed so a partially-flushed line is re-read next pass. A shrinking file means rotation → re-parse from 0.

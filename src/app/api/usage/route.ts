@@ -32,6 +32,7 @@ export async function GET() {
         hasWeeklyCeiling:
           settings.weeklyCostLimit !== null || settings.weeklyTokenLimit !== null,
         reservedHeadroomFraction: settings.reservedHeadroomFraction ?? 0,
+        includeSidechains: settings.includeSidechains,
         account,
         entrypoints: [
           ...new Set(entries.map((e) => e.entrypoint).filter(Boolean)),

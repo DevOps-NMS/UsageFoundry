@@ -241,6 +241,15 @@ something known. The meters draw that as a hatched band past the solid fill, so
 a run stopped before the visible bar looks full is explained rather than
 mysterious. Nothing shown as a dollar amount is ever the fallback rate.
 
+**Cost attribution.** Beyond model and project, each turn is broken down by
+**reasoning effort**, **sub-agent**, and **skill** — all three recorded by Claude
+Code on the transcript record itself, so the tables cover full history rather
+than starting from the day they were added. Turns with no sub-agent or skill get
+explicit `(main thread)` / `(no skill)` buckets, so every column reconciles to
+the window total instead of quietly omitting a remainder. Effort is typically
+the largest single lever; excluding sub-agent turns in Settings empties the
+by-agent table, which the card says outright.
+
 **Agent self-reporting (optional, off by default).** Claude Code computes a cost
 for every API request and will push it to any OTLP endpoint. Turning on *Agent
 self-reporting* in Settings points agents this app spawns back at this server,
@@ -334,6 +343,10 @@ Built and exercised against real transcripts:
   `claude-nextgen-9` stays unknown; `claude-opus-4-1` keeps its own $15/$75.
 - A zero-token turn (`<synthetic>`) no longer counts as an unpriced model, and
   incurs no fallback charge.
+- Attribution tables against real transcripts: effort, sub-agent, and skill each
+  reconcile to the window total to within a rounding error ($138.3639 over 998
+  turns), every turn lands in exactly one bucket per breakdown (998 = 998), and
+  the `groupBy` refactor left `byModel` / `byProject` reconciling as before.
 - Stop path, end to end against a stub CLI that ignores SIGTERM: the run now
   reaches `stopped` about 8s after the stop (5s escalation + 2s drain grace),
   where it previously stayed `running` indefinitely. Two independent causes
