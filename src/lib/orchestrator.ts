@@ -1129,11 +1129,12 @@ export interface CreateRunInput {
 /**
  * Runs holding, or waiting to hold, a place on disk.
  *
- * `paused` belongs here: a parked run resumes into the same worktree, on the
- * same branch, carrying its own commits, so it keeps its claim for as long as
- * it waits. Letting a second agent into that directory in the meantime is
- * exactly the collision the claim exists to prevent — even though the parked
- * run has no process and is spending nothing.
+ * `paused` belongs here, but what a parked run holds is narrower than what a
+ * live one holds. Its **worktree slot** is reserved outright — it resumes onto
+ * the same branch carrying its own commits, and `allocateSlotPath` must never
+ * hand that checkout to anyone else. Its **folder** is not: a parked run has no
+ * process, so it steps aside for a run that is ready to work now and takes the
+ * folder back when that one finishes. See `selectPromotable`.
  */
 export function activeRuns(): RunRow[] {
   return db()
@@ -1150,11 +1151,21 @@ export function activeRuns(): RunRow[] {
  * every work cycle and only refilled when the next one spawns, so a run sitting
  * in its pre-cycle budget scan looks idle there while very much holding its
  * folder.
+ *
+ * `paused` is absent from the default set on purpose — a parked run yields its
+ * folder, so naming it as the thing a new run is waiting for would describe a
+ * wait that does not happen. `sweepPaused` narrows this further to `running`,
+ * which is the only status that can actually be in the folder right now.
  */
-function occupantOf(dir: string, exclude?: string): RunRow | null {
+function occupantOf(
+  dir: string,
+  exclude?: string,
+  statuses: readonly RunStatus[] = ["running", "queued"],
+): RunRow | null {
   const key = conflictKey(dir);
   for (const run of activeRuns()) {
     if (run.id === exclude) continue;
+    if (!statuses.includes(run.status)) continue;
     if (overlaps(key, conflictKey(workDirOf(run)))) return run;
   }
   return null;
@@ -1310,44 +1321,65 @@ export function createRun(input: CreateRunInput): RunRow {
 }
 
 /**
- * Start every queued run whose folder is free, oldest first.
+ * Which queued runs may start right now, oldest first. `runs` must be ordered
+ * by `created_at`, as `activeRuns()` returns it.
  *
- * Strictly FIFO, and a run that cannot start still reserves its folder against
- * everything younger. Without that reservation a run on the workspace root —
- * which overlaps every folder under it — would be jumped by every small run
- * submitted after it and never start at all.
+ * Pure, and separated from the spawning below so it can be tested: the failure
+ * mode is two agents writing in one directory, which stays silent until it has
+ * already cost something.
+ *
+ * Only `running` rows reserve a folder. A parked run does not — it has no
+ * process, and holding a folder for hours against work that is ready now is a
+ * wait with nothing at the end of it. It takes the folder back through
+ * `sweepPaused`, which will not un-park it while a run is in there. Its
+ * worktree slot is a separate claim and is *not* yielded; see `activeRuns`.
+ *
+ * A queued run that cannot start still reserves its folder against everything
+ * younger. Without that, a run on the workspace root — which overlaps every
+ * folder under it — is overtaken by every small run submitted after it and
+ * never starts at all.
+ *
+ * The cap counts `running` only, and for the same reason the reservation set
+ * does: the claim is about what is on disk, the cap is about what is spending
+ * money. Counting parked runs against a cap of 1 would starve everything else
+ * for hours.
  */
-export function promoteQueued(): void {
-  const runs = activeRuns();
-  const running = runs.filter((r) => r.status === "running");
-  // Paused runs reserve their folder but are not counted as live below. The
-  // asymmetry is deliberate and is the same one `queued` already has: the claim
-  // is about what is on disk, the cap is about what is spending money. Counting
-  // a parked run against a cap of 1 would starve every other run for hours.
-  const holding = runs.filter(
-    (r) => r.status === "running" || r.status === "paused",
-  );
-  const reserved: ConflictKey[] = holding.map((r) => conflictKey(workDirOf(r)));
+export function selectPromotable(
+  runs: readonly RunRow[],
+  cap: number | null,
+): string[] {
+  const reserved: ConflictKey[] = runs
+    .filter((r) => r.status === "running")
+    .map((r) => conflictKey(workDirOf(r)));
 
-  // The cap is enforced here rather than at admission, because here is the only
-  // place a run actually starts costing anything. Over the cap a run waits its
-  // turn instead of being refused — the queue already exists for exactly that.
-  const cap = getSettings().maxConcurrentRuns;
-  let live = running.length;
+  const promote: string[] = [];
+  let live = reserved.length;
 
   for (const run of runs) {
     if (run.status !== "queued") continue;
-    if (cap !== null && live >= cap) return;
+    if (cap !== null && live >= cap) break;
 
     const key = conflictKey(workDirOf(run));
-    // A run that cannot start still reserves its folder against everything
-    // younger. Without that, a run on the whole workspace — which overlaps
-    // every folder in it — is overtaken forever by smaller runs behind it.
     reserved.push(key);
     if (reserved.some((r) => r !== key && overlaps(key, r))) continue;
 
     live += 1;
-    void startRun(run.id).catch(() => {
+    promote.push(run.id);
+  }
+  return promote;
+}
+
+/**
+ * Start every queued run whose folder is free, oldest first.
+ *
+ * The cap is enforced here rather than at admission, because here is the only
+ * place a run actually starts costing anything. Over the cap a run waits its
+ * turn instead of being refused — the queue already exists for exactly that.
+ */
+export function promoteQueued(): void {
+  const cap = getSettings().maxConcurrentRuns;
+  for (const id of selectPromotable(activeRuns(), cap)) {
+    void startRun(id).catch(() => {
       /* terminal state is recorded by startRun's own finally block */
     });
   }
@@ -2467,6 +2499,26 @@ async function sweepPaused(): Promise<void> {
       );
 
       if (verdict.allowed) {
+        // Its window cleared, but a run admitted while it waited is in the
+        // folder now. Stay `paused` rather than joining the queue: `paused` is
+        // what the restart grace keys on, and `resume_at` is already in the
+        // past, so the next sweep re-checks and flips the moment it is free.
+        const holder = occupantOf(workDirOf(run), run.id, ["running"]);
+        if (holder) {
+          const waiting =
+            "Its 5-hour window has cleared. Waiting for the folder, which a " +
+            "run started while it waited now holds.";
+          // Idempotent so the reason is corrected once rather than rewritten,
+          // and logged once rather than every 60 seconds.
+          const noted = db()
+            .prepare(
+              "UPDATE runs SET stop_reason=? WHERE id=? AND status='paused' AND stop_reason IS NOT ?",
+            )
+            .run(waiting, run.id, waiting);
+          if (noted.changes === 1) log(run.id, waiting, { waitingFor: holder.id });
+          continue;
+        }
+
         // Re-queue rather than start directly: `promoteQueued` owns FIFO order,
         // folder reservation and the concurrency cap, and re-implementing any
         // of that here is how a folder claim gets broken. Ordering by

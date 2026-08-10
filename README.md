@@ -252,17 +252,23 @@ no reset instant at all, only a trailing total that decays. Your spend, your
 cycles and the clock only move one way. So those all end a run; the 5-hour
 window is the one that can pause it.
 
-A parked run keeps hold of its folder the whole time it waits, and survives a
-restart of UsageFoundry for 24 hours by default. Its budget is re-checked from
-scratch before it starts spending again, so it can also come back only to step
-aside once more.
+A parked run steps out of the way. It has no agent running and is spending
+nothing, so a run you start afterwards on the same folder goes straight to work
+rather than queuing behind it for hours; the parked one takes the folder back
+once that run finishes. Only its own isolated checkout stays reserved, since its
+commits live there. It survives a restart of UsageFoundry for 24 hours by
+default, and its budget is re-checked from scratch before it starts spending
+again, so it can also come back only to step aside once more.
+
+The trade is worth knowing: if the parked run was working in the folder directly
+rather than in its own checkout, it resumes into a tree the other run may have
+changed. Its own conversation is intact; the files may not be what it left.
 
 Concurrency multiplies the overshoot in every mode. `maxRunCostUSD` applies to
 each run separately, so three runs with a $5 limit each is a $15 worst case, not
 $5. Set **Runs allowed at the same time** in Settings if you want that bounded;
 it is unlimited by default, and a run over the limit waits rather than being
-refused. A parked run does not count against it — it is spending nothing — but it
-does still hold its folder.
+refused. A parked run does not count against it — it is spending nothing.
 
 ### Running until the limit rather than until the agent says stop
 
@@ -624,13 +630,17 @@ through before trusting this unattended:
   worktree, on the same branch, with its commits intact.
 - A paused run surviving `docker compose restart`, and a stale one being closed
   out once past `resumeGraceHours`.
+- A parked run taking its folder back: that it stays parked while the run that
+  took the folder is still working, and starts within a sweep of that one
+  finishing. The hand-over in the other direction — a new run starting straight
+  away instead of queuing — was reproduced against the live container.
 - `detached: true`: that Ctrl-C during `npm run dev` still kills the agent (via
   the new `instrumentation.ts` handler) and that a long command the agent
   started dies with it.
 
-There is no linter run in this repo, and `npm test` covers three things: the
-folder-collision predicate, the budget policy, and how a provider refusal is
-classified and backed off from. `npm run typecheck` plus
+There is no linter run in this repo, and `npm test` covers four things: the
+folder-collision predicate, which queued runs may start, the budget policy, and
+how a provider refusal is classified and backed off from. `npm run typecheck` plus
 a `docker compose up --build` smoke test is still the real verification loop,
 and the list above records what was checked by hand.
 

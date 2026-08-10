@@ -144,6 +144,10 @@ export default function RunsPage() {
 
   const occupant = canIsolate && isolate ? null : selectedFolder?.busyRunId ?? null;
   const rootOccupant = folder === "" ? activeMount?.busyRunId ?? null : null;
+  // A parked run has yielded the folder, so this is worth saying but is not a
+  // wait — hence separate from the two above, which are.
+  const parked = canIsolate && isolate ? null : selectedFolder?.parkedRunId ?? null;
+  const rootParked = folder === "" ? activeMount?.parkedRunId ?? null : null;
 
   // Switching mounts invalidates the selected subfolder — fall back to the
   // mount's own root rather than carrying a path that lives somewhere else.
@@ -295,7 +299,7 @@ export default function RunsPage() {
                   <option key={f.path} value={f.path}>
                     {f.path}
                     {f.isGitRepo ? "  (git)" : ""}
-                    {f.busyRunId ? "  · busy" : ""}
+                    {f.busyRunId ? "  · busy" : f.parkedRunId ? "  · parked" : ""}
                     {f.queuedCount ? `  · ${f.queuedCount} waiting` : ""}
                   </option>
                 ))}
@@ -321,6 +325,12 @@ export default function RunsPage() {
                 <div className="hint" style={{ color: "var(--warn)" }}>
                   A run is already working somewhere in this workspace, so this
                   one will wait for it.
+                </div>
+              )}
+              {!rootOccupant && rootParked && (
+                <div className="hint">
+                  A parked run is waiting somewhere in this workspace. Yours
+                  starts now; it takes its folder back when yours finishes.
                 </div>
               )}
             </div>
@@ -365,6 +375,13 @@ export default function RunsPage() {
                   This folder is in use.{" "}
                   <Link href={`/runs/${occupant}`}>See the run holding it</Link>{" "}
                   — yours will start when it finishes.
+                </div>
+              )}
+              {!occupant && parked && (
+                <div className="hint">
+                  A <Link href={`/runs/${parked}`}>parked run</Link> is waiting
+                  for this folder. Yours starts now; it takes the folder back
+                  when yours finishes.
                 </div>
               )}
             </div>

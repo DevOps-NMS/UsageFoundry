@@ -136,6 +136,8 @@ export interface WorkspaceMountDTO {
   truncated: boolean;
   /** Run currently working here or in anything under it. */
   busyRunId?: string | null;
+  /** Parked run that will want this folder back. Does not block a new run. */
+  parkedRunId?: string | null;
   /** Runs waiting on this folder. */
   queuedCount?: number;
 }
@@ -148,6 +150,8 @@ export interface WorkspaceFolderDTO {
   isGitRepo: boolean;
   /** Run currently working here, in a parent of it, or in a child of it. */
   busyRunId?: string | null;
+  /** Parked run that will want this folder back. Does not block a new run. */
+  parkedRunId?: string | null;
   queuedCount?: number;
 }
 

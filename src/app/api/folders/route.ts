@@ -41,15 +41,16 @@ export async function GET() {
   function occupancy(abs: string) {
     const key = conflictKey(abs);
     const hits = activeKeys.filter((a) => overlaps(key, a.key));
-    // A parked run counts as busy. It has no process, but it holds the folder
-    // for its resume, and `createRun` queues behind it — reporting the folder
-    // as free would mean offering a run that then sits in the queue for hours
-    // with no explanation.
-    const holder = hits.find(
-      (h) => h.run.status === "running" || h.run.status === "paused",
-    );
+    // Reported apart, because they mean different things to someone about to
+    // start a run here. A running holder blocks: the new run queues behind it.
+    // A parked one does not — it has yielded the folder and takes it back when
+    // whatever runs next is finished — but it is still worth naming, since the
+    // new run will find the tree changed under it when it resumes.
+    const running = hits.find((h) => h.run.status === "running");
+    const parked = hits.find((h) => h.run.status === "paused");
     return {
-      busyRunId: holder?.run.id ?? null,
+      busyRunId: running?.run.id ?? null,
+      parkedRunId: parked?.run.id ?? null,
       queuedCount: hits.filter((h) => h.run.status === "queued").length,
     };
   }
@@ -128,7 +129,7 @@ export async function GET() {
       // the root carries its own occupancy rather than inheriting a child's.
       ...(available
         ? occupancy(mount.path)
-        : { busyRunId: null, queuedCount: 0 }),
+        : { busyRunId: null, parkedRunId: null, queuedCount: 0 }),
     });
   }
 

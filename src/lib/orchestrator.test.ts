@@ -37,8 +37,14 @@ process.env.DATA_DIR = path.join(tmp, "data");
 
 // `require`, not `import`: imports are hoisted above the environment setup
 // above, and the module reads WORKSPACE_ROOTS once at load.
-const { conflictKey, overlaps, isUsageLimit, refusalResumeAt, MAX_PAUSES_PER_RUN } =
-  require("./orchestrator") as typeof import("./orchestrator");
+const {
+  conflictKey,
+  overlaps,
+  isUsageLimit,
+  refusalResumeAt,
+  selectPromotable,
+  MAX_PAUSES_PER_RUN,
+} = require("./orchestrator") as typeof import("./orchestrator");
 
 const clash = (a: string, b: string) => overlaps(conflictKey(a), conflictKey(b));
 
@@ -91,6 +97,63 @@ describe("folder collision", () => {
     assert.equal(clash(`${nestedAlias}/Deep`, `${ws}/RepoOne`), false);
     // And the parent mount still contains the aliased nested path.
     assert.equal(clash(ws, `${nestedAlias}/Deep`), true);
+  });
+});
+
+/**
+ * Covers which queued runs are allowed to start. Pure, and it earns a test on
+ * the same grounds as the predicate above: one wrong status in the reservation
+ * set is either two agents in one working tree, or a run queued behind
+ * something that will never move.
+ *
+ * Array order is the contract — `activeRuns()` sorts by `created_at`, and these
+ * fixtures stand in for that.
+ */
+describe("promotion", () => {
+  type Row = import("./orchestrator").RunRow;
+  let seq = 0;
+  // Only three fields are read. A complete row would be thirty nulls per case
+  // and would need editing every time a column is added.
+  const row = (status: Row["status"], dir: string): Row =>
+    ({ id: `r${++seq}`, status, folder: dir, work_dir: dir }) as Row;
+
+  it("starts a queued run in a folder only a parked run holds", () => {
+    const parked = row("paused", `${ws}/RepoOne`);
+    const waiting = row("queued", `${ws}/RepoOne`);
+    assert.deepEqual(selectPromotable([parked, waiting], null), [waiting.id]);
+  });
+
+  it("holds it behind a running one", () => {
+    const live = row("running", `${ws}/RepoOne`);
+    const waiting = row("queued", `${ws}/RepoOne/sub`);
+    assert.deepEqual(selectPromotable([live, waiting], null), []);
+  });
+
+  it("does not spend a concurrency slot on a parked run", () => {
+    const parked = row("paused", `${ws}/Other`);
+    const waiting = row("queued", `${ws}/RepoOne`);
+    assert.deepEqual(selectPromotable([parked, waiting], 1), [waiting.id]);
+  });
+
+  it("does spend one on a running run", () => {
+    const live = row("running", `${ws}/Other`);
+    const waiting = row("queued", `${ws}/RepoOne`);
+    assert.deepEqual(selectPromotable([live, waiting], 1), []);
+  });
+
+  it("does not let a younger run overtake one waiting on the workspace root", () => {
+    // The root overlaps everything beneath it, so without the queued run's own
+    // reservation it is jumped forever by the smaller runs behind it.
+    const live = row("running", `${ws}/RepoOne`);
+    const root = row("queued", ws);
+    const small = row("queued", `${ws}/Other`);
+    assert.deepEqual(selectPromotable([live, root, small], null), []);
+  });
+
+  it("starts isolated runs on one repo side by side", () => {
+    const first = row("running", `${ws}/.uf-worktrees/repoone-1`);
+    const second = row("queued", `${ws}/.uf-worktrees/repoone-2`);
+    assert.deepEqual(selectPromotable([first, second], null), [second.id]);
   });
 });
 
