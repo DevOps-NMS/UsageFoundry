@@ -28,6 +28,19 @@ export const PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
  */
 export const CLAUDE_CONFIG_DIR = env("CLAUDE_CONFIG_DIR", CLAUDE_HOME);
 
+/**
+ * Base URL a spawned agent should push its OTLP telemetry to.
+ *
+ * Loopback by default because the agent runs in this same container — the
+ * Dockerfile installs the CLI into the image — so nothing has to be published
+ * for this to work. Claude Code appends `/v1/logs` to whatever base it is
+ * given, which is why this stops at `/api/otlp`.
+ */
+export const OTLP_SELF_URL = env(
+  "OTLP_SELF_URL",
+  `http://127.0.0.1:${env("PORT", "3000")}/api/otlp`,
+);
+
 /** One directory tree the UI may browse and run agents against. */
 export interface WorkspaceMount {
   /** Stable slug used on the wire and as a form value. */

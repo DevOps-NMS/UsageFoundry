@@ -6,6 +6,7 @@ import {
   runEvents,
   stopRun,
 } from "@/lib/orchestrator";
+import { telemetryForRun } from "@/lib/otlp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,6 +25,11 @@ export async function GET(req: Request, ctx: Ctx) {
   return NextResponse.json({
     run: { ...run, budget: JSON.parse(run.budget), mountLabel, relPath },
     running: isRunning(id),
+    // Reported alongside spent_usd, never merged into it. The two are
+    // independent measurements of the same run and disagreeing is
+    // informative — telemetry counts requests the CLI's `result` event
+    // never got to report.
+    telemetry: telemetryForRun(id),
     events: runEvents(id, Number.isFinite(after) ? after : 0),
   });
 }

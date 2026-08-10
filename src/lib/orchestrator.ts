@@ -6,6 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import {
   CLAUDE_BIN,
+  OTLP_SELF_URL,
   WORKSPACE_MOUNTS,
   mountById,
   type WorkspaceMount,
@@ -404,6 +405,40 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return { ...env, ...extra };
 }
 
+/**
+ * Telemetry variables for a run, or nothing when the setting is off.
+ *
+ * `childEnv` strips inherited `OTEL_*`, so these are the only ones that reach
+ * the agent — telemetry routing is decided here or not at all. The base URL
+ * carries no signal suffix because the CLI appends `/v1/logs` itself.
+ *
+ * When `UF_AUTH_TOKEN` is set the exporter authenticates like any other
+ * client, which is why `middleware.ts` needs no exemption for the ingest path.
+ */
+function telemetryEnv(runId: string): Record<string, string> {
+  if (!getSettings().telemetryForRuns) return {};
+
+  const headers: Record<string, string> = process.env.UF_AUTH_TOKEN
+    ? {
+        OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${process.env.UF_AUTH_TOKEN}`,
+      }
+    : {};
+
+  return {
+    CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+    OTEL_LOGS_EXPORTER: "otlp",
+    OTEL_EXPORTER_OTLP_PROTOCOL: "http/json",
+    OTEL_EXPORTER_OTLP_ENDPOINT: OTLP_SELF_URL,
+    // Well under the default 5s, so a killed iteration loses less of its
+    // final batch. It cannot be eliminated: a SIGKILL flushes nothing.
+    OTEL_LOGS_EXPORT_INTERVAL: "1000",
+    // Stamped onto every record so a request can be attributed to this run.
+    // Interactive sessions carry no such attribute and stay unattributed.
+    OTEL_RESOURCE_ATTRIBUTES: `uf.run_id=${runId}`,
+    ...headers,
+  };
+}
+
 function runIteration(
   runId: string,
   cwd: string,
@@ -414,7 +449,7 @@ function runIteration(
     // quotes, backticks, or semicolons is inert rather than interpreted.
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {
       cwd,
-      env: childEnv(),
+      env: childEnv(telemetryEnv(runId)),
       stdio: ["ignore", "pipe", "pipe"],
     });
 

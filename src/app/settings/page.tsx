@@ -436,6 +436,28 @@ export default function SettingsPage() {
                 the accurate default. Exclude only to compare main-thread cost.
               </div>
             </div>
+
+            <div className="field">
+              <label htmlFor="telemetry">Agent self-reporting</label>
+              <select
+                id="telemetry"
+                value={s.telemetryForRuns ? "1" : "0"}
+                onChange={(e) => patch({ telemetryForRuns: e.target.value === "1" })}
+              >
+                <option value="0">Off</option>
+                <option value="1">Report per-request cost over OpenTelemetry</option>
+              </select>
+              <div className="hint">
+                Turns on Claude Code&rsquo;s own telemetry inside agents this app
+                spawns, pointed back at this server. Each API request then
+                reports the cost Claude Code computed for it, shown as a
+                separate figure on the run page — including requests from a work
+                cycle that was interrupted before the CLI could report anything.
+                Off by default because it changes the child process&rsquo;s
+                behaviour. It never affects the dashboard or the budget guard,
+                which read transcripts only.
+              </div>
+            </div>
           </div>
 
           <div className="field">

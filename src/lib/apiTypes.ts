@@ -89,6 +89,19 @@ export interface UsageResponse {
   };
 }
 
+/**
+ * First-party per-request totals for one run, from Claude Code's own OTLP
+ * export. Shown beside `spent_usd`, never merged into it: the two are
+ * independent measurements and their disagreement is the useful part.
+ */
+export interface RunTelemetryDTO {
+  requests: number;
+  costUSD: number;
+  tokens: number;
+  firstAt: number | null;
+  lastAt: number | null;
+}
+
 /** Names a plan. Carries no ceiling, no email, no account UUID. */
 export interface AccountProfileDTO {
   subscriptionType: string | null;
@@ -203,4 +216,5 @@ export interface SettingsDTO {
   defaultModel: string | null;
   continuationPrompt: string;
   includeSidechains: boolean;
+  telemetryForRuns: boolean;
 }

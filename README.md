@@ -241,6 +241,25 @@ something known. The meters draw that as a hatched band past the solid fill, so
 a run stopped before the visible bar looks full is explained rather than
 mysterious. Nothing shown as a dollar amount is ever the fallback rate.
 
+**Agent self-reporting (optional, off by default).** Claude Code computes a cost
+for every API request and will push it to any OTLP endpoint. Turning on *Agent
+self-reporting* in Settings points agents this app spawns back at this server,
+which records one row per request — a first-party number that needs no price
+table, no dedupe key, and no file polling. It is shown as its own card on the
+run page and is **never** merged into `spent_usd`, the dashboard, or the budget
+guard, all of which stay transcript-derived.
+
+Its one real advantage: per-iteration spend normally comes from the CLI's
+terminal `result` event, so a work cycle killed before that event reports $0.
+Telemetry arrives per request as the run proceeds, so it captures that work. A
+telemetry figure *higher* than the run's own total is the expected outcome of an
+interrupted run, not a discrepancy.
+
+It cannot replace the transcript scan: there is no historical backfill, no `cwd`
+so no per-project attribution, and `cache_creation_tokens` is a single number
+with the 5m/1h split collapsed. The payload also carries `user.email` and
+account UUIDs — none of which are stored.
+
 Provider-decorated model IDs are canonicalised before lookup — Bedrock's
 `us.anthropic.claude-…-v1:0` and Agent Platform's `claude-…@20250929` resolve to
 the same rates as the first-party IDs. No short catch-all keys are used: a
@@ -315,6 +334,21 @@ Built and exercised against real transcripts:
   `claude-nextgen-9` stays unknown; `claude-opus-4-1` keeps its own $15/$75.
 - A zero-token turn (`<synthetic>`) no longer counts as an unpriced model, and
   incurs no fallback charge.
+- OTLP transport captured from a real headless `claude -p` run on CLI v2.1.226,
+  not taken from the docs. Telemetry *does* initialise under `-p`; a base
+  endpoint of `/api/otlp` receives `POST /api/otlp/v1/logs` and
+  `/api/otlp/v1/metrics`, so the CLI appends the signal suffix itself; the body
+  is uncompressed `application/json`. The docs name the event
+  `claude_code.api_request`, but on the wire that string is the record *body*
+  and the `event.name` attribute is the bare `api_request` — the parser accepts
+  both. `OTEL_RESOURCE_ATTRIBUTES` lands on the resource *and* on each record,
+  and the parser merges both so run attribution does not depend on which.
+- OTLP parser run against those captured payloads, 13 assertions: extracts the
+  priced request with its `req_…` id, first-party cost, tokens and run id;
+  drops `user.email` / `user.account_uuid` at the parser; a redelivered batch
+  inserts 0 rows (delivery is at-least-once); an unknown run returns null
+  rather than a zero row; and malformed or null payloads return empty instead
+  of throwing, since a rejected batch would be retried forever.
 - Plan detection reads `Claude Max 20x` from `.credentials.json` with no email,
   name, or account UUID crossing the wire; caches for 60s including misses (the
   CLI writes these files lazily); and degrades to "plan unknown" with no error

@@ -31,7 +31,9 @@ Note that `npm run dev` on the host reads the host's **real** `~/.claude` transc
 
 ## Architecture
 
-Two data sources that are **never summed or mixed in the UI**:
+**Three** data sources now, still **never summed or mixed in the UI**. The third is Claude Code's own OTLP export (`otlp.ts` → `otlp_requests`), opt-in via `settings.telemetryForRuns`, covering only runs this app spawns. It is first-party per-request cost — no price table, no dedupe key, no file polling — and it is the only way to account for a work cycle killed before the CLI's `result` event. It renders as its own card on the run page and must never reach `buildSnapshot()`, `evaluateBudget()`, or `runs.spent_usd`. It cannot replace transcripts: no backfill, no `cwd`, and `cache_creation_tokens` collapses the 5m/1h split. Wire details were captured from a live CLI, not read from the docs — the docs' `claude_code.api_request` is the record *body*, while `event.name` is the bare `api_request`, and `OTEL_RESOURCE_ATTRIBUTES` lands on both the resource and each record. The payload carries `user.email` and account UUIDs; the parser drops them and the schema has no column for them. `request_id` is the primary key because OTLP delivery is at-least-once, and the ingest route always answers 200 — a batch exporter retries failures, so rejecting a malformed record would cost that batch on a loop.
+
+The two original sources:
 
 | | Subscription view | API-account view |
 |---|---|---|

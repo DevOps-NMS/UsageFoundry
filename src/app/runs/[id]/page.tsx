@@ -2,7 +2,7 @@
 
 import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import type { RunDTO, RunEventDTO } from "@/lib/apiTypes";
+import type { RunDTO, RunEventDTO, RunTelemetryDTO } from "@/lib/apiTypes";
 import { fmtClock, fmtDateTime, fmtTokens, fmtUSD, shortPath } from "@/lib/format";
 
 const STATUS_TONE: Record<string, string> = {
@@ -61,6 +61,7 @@ export default function RunDetail({
 }) {
   const { id } = use(params);
   const [run, setRun] = useState<RunDTO | null>(null);
+  const [telemetry, setTelemetry] = useState<RunTelemetryDTO | null>(null);
   const [events, setEvents] = useState<RunEventDTO[]>([]);
   const [connected, setConnected] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
@@ -74,6 +75,7 @@ export default function RunDetail({
       if (!res.ok || !alive) return;
       const json = await res.json();
       setRun(json.run);
+      setTelemetry(json.telemetry ?? null);
     };
     load();
     const t = setInterval(load, 3000);
@@ -169,6 +171,24 @@ export default function RunDetail({
           <div className="stat">{fmtTokens(run.spent_tokens)}</div>
           <div className="stat-sub">reported by Claude Code</div>
         </div>
+        {/* A separate measurement, deliberately not folded into the two cards
+            above. It counts every API request the agent made, including any
+            belonging to a work cycle that ended before the CLI reported its
+            cost — so a higher number here is the expected outcome of an
+            interrupted run, not a discrepancy to reconcile away. */}
+        {telemetry && (
+          <div className="card">
+            <h2 className="card-title">Telemetry (first-party)</h2>
+            <div className="stat">{fmtUSD(telemetry.costUSD)}</div>
+            <div className="stat-sub">
+              {telemetry.requests} API{" "}
+              {telemetry.requests === 1 ? "request" : "requests"} ·{" "}
+              {fmtTokens(telemetry.tokens)} tokens
+              {telemetry.costUSD > run.spent_usd &&
+                " · includes work the run row could not account for"}
+            </div>
+          </div>
+        )}
         <div className="card">
           <h2 className="card-title">Work cycles</h2>
           <div className="stat">
