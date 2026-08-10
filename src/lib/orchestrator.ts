@@ -492,8 +492,23 @@ function gitEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-/** `core.fsmonitor` is a command git runs, so it is cleared on every call. */
-const gitArgs = (args: string[]) => ["-c", "core.fsmonitor=", ...args];
+/**
+ * `core.fsmonitor` is a command git runs, so it is cleared on every call.
+ *
+ * `safe.directory` is waived for the same reason the image waives it: a
+ * bind-mounted repository carries the host's uid, which need not be this
+ * process's, and git's refusal is indistinguishable from "not a repository" by
+ * the time `probeIsolation` sees it. The check it disables guards against
+ * repositories reached by surprise on a shared host; every path that gets here
+ * has already been proved to sit inside a configured mount by `resolveInMount`.
+ */
+const gitArgs = (args: string[]) => [
+  "-c",
+  "core.fsmonitor=",
+  "-c",
+  "safe.directory=*",
+  ...args,
+];
 
 function gitSync(cwd: string, args: string[]): GitResult {
   const res = spawnSync(GIT_BIN, gitArgs(args), {
@@ -575,7 +590,18 @@ function slugify(s: string): string {
 export function probeIsolation(folder: string): IsolationPlan {
   const top = gitSync(folder, ["rev-parse", "--show-toplevel"]);
   if (!top.ok || !top.stdout) {
-    return { mode: "none", reason: "Not a git repository — runs here are serialised." };
+    // git's own words when it has any, because "not a git repository" is a
+    // conclusion this call cannot actually reach. A checkout made on the host
+    // records an absolute host gitdir that does not exist under the mount, and
+    // git reports exactly that — while the directory is plainly a repository
+    // to the operator looking at it.
+    const detail = top.stderr.split("\n")[0]?.replace(/^fatal:\s*/, "") ?? "";
+    return {
+      mode: "none",
+      reason: detail
+        ? `git cannot use this folder (${detail}) — runs here are serialised.`
+        : "Not a git repository — runs here are serialised.",
+    };
   }
 
   let repoRoot: string;

@@ -3,8 +3,10 @@ node_modules
 .git
 .gitignore
 .env
-.env.local
+.env.*
+!.env.example
 .data
+.test-build
 npm-debug.log*
 README.md
 docker-compose.yml

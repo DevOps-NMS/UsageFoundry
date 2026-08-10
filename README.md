@@ -143,12 +143,30 @@ the containerised agent.
 
 | Variable | Purpose |
 |---|---|
-| `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. |
+| `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. Absolute path; compose refuses to start without it. |
 | `UF_AUTH_TOKEN` | Shared secret for the UI. Blank disables auth — only acceptable on loopback. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
+| `UF_UID` / `UF_GID` | **Linux only.** The uid the container runs as; must own the mounts. Default 1000. |
 
 Compose also mounts `~/.claude` **read-write** — Claude Code writes new session
 transcripts there as runs execute, so a read-only mount breaks runs.
+
+### On Linux, set `UF_UID` and `UF_GID`
+
+The container writes to both bind mounts: your `~/.claude`, and your workspaces.
+macOS Docker Desktop remaps bind-mount ownership onto the container user, so the
+default uid 1000 is correct there no matter what your host uid is. Linux
+preserves the host uid, and a mismatch is silent in a way that wastes an evening
+— git refuses every repository, `/login` never persists, and the first write of a
+run fails. So on Linux:
+
+```bash
+echo "UF_UID=$(id -u)" >> .env
+echo "UF_GID=$(id -g)" >> .env
+```
+
+Run compose as yourself, not under `sudo`: `$HOME` comes from your shell, and
+`sudo` would point the credential mount at root's home.
 
 ### Multiple workspaces
 
@@ -240,6 +258,18 @@ Two consequences worth knowing before you rely on it:
 - Work the agent leaves **uncommitted** stays in the worktree and never reaches
   your branch. That is why the isolated-run preamble tells it to commit as it
   goes — keep that instruction if you edit the wording.
+
+A checkout under `.uf-worktrees/` is usable **from inside the container only**.
+`git worktree` records an absolute path to its gitdir, and the container knows
+your repository as `/workspace/…` while you know it as whatever you mounted — so
+`cd`-ing into one of those directories on the host gives you `fatal: not a git
+repository`. Nothing is lost: the *branch* lives in the real repository, which is
+what the handoff card hands you. The same asymmetry runs the other way, so a
+worktree **you** created on the host is not usable by a run either, and the
+folder picker will say so rather than offering isolation. Two habits follow from
+it: review the branch from your own checkout, not by opening the worktree, and do
+not run `git worktree prune` on the host while a run is in flight — from there
+those registrations point at paths that do not exist.
 
 You can turn this off per run with **Isolation → work in the folder itself**, in
 which case it behaves like the case below.
