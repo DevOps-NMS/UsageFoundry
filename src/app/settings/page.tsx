@@ -739,7 +739,9 @@ export default function SettingsPage() {
       {/* Sticky, because one Save commits every field on a page that is now
           five sections long — the button must not be somewhere you have to
           hunt for after editing something at the top. */}
-      <div className="sticky bottom-0 -mx-5 border-t border-line bg-canvas/95 px-5 py-3 backdrop-blur">
+      {/* The negative margin must match the shell's gutter at each breakpoint,
+          or the bar is wider than the page and scrolls it sideways. */}
+      <div className="sticky bottom-0 -mx-4 border-t border-line bg-canvas/95 px-4 py-3 backdrop-blur sm:-mx-5 sm:px-5">
         <ButtonRow>
           <Button onClick={save} disabled={busy || !dirty}>
             {busy ? "Saving…" : "Save settings"}

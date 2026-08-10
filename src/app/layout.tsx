@@ -34,7 +34,9 @@ export default function RootLayout({
         />
       </head>
       <body>
-        <div className="shell">
+        {/* Narrower gutter on phones — the old shell kept a flat 20px at every
+            width, which is most of a small screen spent on margin. */}
+        <div className="mx-auto max-w-shell px-4 pb-16 sm:px-5">
           <Nav />
           {children}
         </div>
