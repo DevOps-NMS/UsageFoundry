@@ -992,10 +992,14 @@ async function ensureWorktree(run: RunRow): Promise<string> {
     }
     const co = await git(slotPath, ["checkout", "-b", branch, base]);
     if (!co.ok) throw new Error(`Could not start branch ${branch}: ${co.stderr}`);
-  } else if (run.iterations > 0) {
+  } else if (run.iterations > 0 || (run.pause_count ?? 0) > 0) {
     // A resuming run whose checkout has been removed from under it. Creating a
     // fresh one would silently orphan every commit it already made, so name the
     // branch and stop — the work is still in the repository.
+    //
+    // `pause_count` and not `iterations` alone: a cycle the live guard cut
+    // short is refunded to the counter below, so a run parked during its first
+    // cycle is back at zero while its branch very much exists.
     throw new Error(
       `The isolated checkout for this run is gone, but its work is still on branch ${branch}. ` +
         `Inspect it with: git log ${branch}`,
@@ -1129,11 +1133,12 @@ export interface CreateRunInput {
 /**
  * Runs holding, or waiting to hold, a place on disk.
  *
- * `paused` belongs here: a parked run resumes into the same worktree, on the
- * same branch, carrying its own commits, so it keeps its claim for as long as
- * it waits. Letting a second agent into that directory in the meantime is
- * exactly the collision the claim exists to prevent — even though the parked
- * run has no process and is spending nothing.
+ * `paused` belongs here, but what a parked run holds is narrower than what a
+ * live one holds. Its **worktree slot** is reserved outright — it resumes onto
+ * the same branch carrying its own commits, and `allocateSlotPath` must never
+ * hand that checkout to anyone else. Its **folder** is not: a parked run has no
+ * process, so it steps aside for a run that is ready to work now and takes the
+ * folder back when that one finishes. See `selectPromotable`.
  */
 export function activeRuns(): RunRow[] {
   return db()
@@ -1150,11 +1155,21 @@ export function activeRuns(): RunRow[] {
  * every work cycle and only refilled when the next one spawns, so a run sitting
  * in its pre-cycle budget scan looks idle there while very much holding its
  * folder.
+ *
+ * `paused` is absent from the default set on purpose — a parked run yields its
+ * folder, so naming it as the thing a new run is waiting for would describe a
+ * wait that does not happen. `sweepPaused` narrows this further to `running`,
+ * which is the only status that can actually be in the folder right now.
  */
-function occupantOf(dir: string, exclude?: string): RunRow | null {
+function occupantOf(
+  dir: string,
+  exclude?: string,
+  statuses: readonly RunStatus[] = ["running", "queued"],
+): RunRow | null {
   const key = conflictKey(dir);
   for (const run of activeRuns()) {
     if (run.id === exclude) continue;
+    if (!statuses.includes(run.status)) continue;
     if (overlaps(key, conflictKey(workDirOf(run)))) return run;
   }
   return null;
@@ -1310,44 +1325,65 @@ export function createRun(input: CreateRunInput): RunRow {
 }
 
 /**
- * Start every queued run whose folder is free, oldest first.
+ * Which queued runs may start right now, oldest first. `runs` must be ordered
+ * by `created_at`, as `activeRuns()` returns it.
  *
- * Strictly FIFO, and a run that cannot start still reserves its folder against
- * everything younger. Without that reservation a run on the workspace root —
- * which overlaps every folder under it — would be jumped by every small run
- * submitted after it and never start at all.
+ * Pure, and separated from the spawning below so it can be tested: the failure
+ * mode is two agents writing in one directory, which stays silent until it has
+ * already cost something.
+ *
+ * Only `running` rows reserve a folder. A parked run does not — it has no
+ * process, and holding a folder for hours against work that is ready now is a
+ * wait with nothing at the end of it. It takes the folder back through
+ * `sweepPaused`, which will not un-park it while a run is in there. Its
+ * worktree slot is a separate claim and is *not* yielded; see `activeRuns`.
+ *
+ * A queued run that cannot start still reserves its folder against everything
+ * younger. Without that, a run on the workspace root — which overlaps every
+ * folder under it — is overtaken by every small run submitted after it and
+ * never starts at all.
+ *
+ * The cap counts `running` only, and for the same reason the reservation set
+ * does: the claim is about what is on disk, the cap is about what is spending
+ * money. Counting parked runs against a cap of 1 would starve everything else
+ * for hours.
  */
-export function promoteQueued(): void {
-  const runs = activeRuns();
-  const running = runs.filter((r) => r.status === "running");
-  // Paused runs reserve their folder but are not counted as live below. The
-  // asymmetry is deliberate and is the same one `queued` already has: the claim
-  // is about what is on disk, the cap is about what is spending money. Counting
-  // a parked run against a cap of 1 would starve every other run for hours.
-  const holding = runs.filter(
-    (r) => r.status === "running" || r.status === "paused",
-  );
-  const reserved: ConflictKey[] = holding.map((r) => conflictKey(workDirOf(r)));
+export function selectPromotable(
+  runs: readonly RunRow[],
+  cap: number | null,
+): string[] {
+  const reserved: ConflictKey[] = runs
+    .filter((r) => r.status === "running")
+    .map((r) => conflictKey(workDirOf(r)));
 
-  // The cap is enforced here rather than at admission, because here is the only
-  // place a run actually starts costing anything. Over the cap a run waits its
-  // turn instead of being refused — the queue already exists for exactly that.
-  const cap = getSettings().maxConcurrentRuns;
-  let live = running.length;
+  const promote: string[] = [];
+  let live = reserved.length;
 
   for (const run of runs) {
     if (run.status !== "queued") continue;
-    if (cap !== null && live >= cap) return;
+    if (cap !== null && live >= cap) break;
 
     const key = conflictKey(workDirOf(run));
-    // A run that cannot start still reserves its folder against everything
-    // younger. Without that, a run on the whole workspace — which overlaps
-    // every folder in it — is overtaken forever by smaller runs behind it.
     reserved.push(key);
     if (reserved.some((r) => r !== key && overlaps(key, r))) continue;
 
     live += 1;
-    void startRun(run.id).catch(() => {
+    promote.push(run.id);
+  }
+  return promote;
+}
+
+/**
+ * Start every queued run whose folder is free, oldest first.
+ *
+ * The cap is enforced here rather than at admission, because here is the only
+ * place a run actually starts costing anything. Over the cap a run waits its
+ * turn instead of being refused — the queue already exists for exactly that.
+ */
+export function promoteQueued(): void {
+  const cap = getSettings().maxConcurrentRuns;
+  for (const id of selectPromotable(activeRuns(), cap)) {
+    void startRun(id).catch(() => {
       /* terminal state is recorded by startRun's own finally block */
     });
   }
@@ -1804,7 +1840,7 @@ export async function startRun(id: string): Promise<void> {
 
   // Hydrated from the row, not zeroed: this call may be a resume, and the
   // continuation path it then takes (`continuationPrompt` plus `--resume`) is
-  // selected purely by `iterations > 0` and a non-null session id.
+  // selected purely by whether there is a session id to resume into.
   let spentUSD = run.spent_usd;
   let spentTokens = run.spent_tokens;
   let spentEstUSD = run.spent_usd_est;
@@ -1821,7 +1857,9 @@ export async function startRun(id: string): Promise<void> {
   let pausedUntil: number | null = null;
   /** The next prompt should be the DONE pushback rather than the continuation. */
   let justRetriggered = false;
-  const resumedFromPause = iterations > 0;
+  // Not `iterations > 0`: a run parked during its first cycle has that cycle
+  // refunded, so the counter cannot say whether this call is a resume.
+  const resumedFromPause = (run.pause_count ?? 0) > 0;
   let cyclesThisSegment = 0;
   let resumeRetried = false;
 
@@ -1912,8 +1950,13 @@ export async function startRun(id: string): Promise<void> {
       }
 
       iterations += 1;
+      // Keyed on the session, not the counter. A cycle the live guard cut short
+      // is refunded below, so `iterations === 1` would send the original prompt
+      // into a conversation that has already been part-way through the task —
+      // and "there is a session to resume into" is what a continuation actually
+      // means. The two agree for every run that is never interrupted.
       const prompt =
-        iterations === 1
+        sessionId === null
           ? run.isolation === "worktree"
             ? `${settings.isolationPreamble}\n\n${run.prompt}`
             : run.prompt
@@ -2023,6 +2066,15 @@ export async function startRun(id: string): Promise<void> {
       const postCycle = interrupts.get(id);
       if (postCycle) {
         applyInterrupt(postCycle);
+        // A cycle the live guard cut short is refunded to the counter: the
+        // resume continues this same conversation rather than starting fresh
+        // work, and charging it would mean `live-resume` with a single work
+        // cycle could only park and then stop at `cycles` without ever
+        // finishing. `MAX_PAUSES_PER_RUN` bounds the refund, so one cycle is at
+        // most four billed invocations. Only here — `applyInterrupt`'s other
+        // two call sites run *before* the increment above, and refunding there
+        // would discount a cycle that completed.
+        if (postCycle.pause) iterations -= 1;
         break;
       }
 
@@ -2066,6 +2118,9 @@ export async function startRun(id: string): Promise<void> {
             "Claude refused the work cycle: the subscription allowance is used up. " +
             "Waiting for it to refill.";
           finalStatus = "paused";
+          // Refunded for the same reason a guard-interrupted cycle is, and with
+          // more force: the provider refused before any work happened at all.
+          iterations -= 1;
           break;
         }
 
@@ -2467,6 +2522,26 @@ async function sweepPaused(): Promise<void> {
       );
 
       if (verdict.allowed) {
+        // Its window cleared, but a run admitted while it waited is in the
+        // folder now. Stay `paused` rather than joining the queue: `paused` is
+        // what the restart grace keys on, and `resume_at` is already in the
+        // past, so the next sweep re-checks and flips the moment it is free.
+        const holder = occupantOf(workDirOf(run), run.id, ["running"]);
+        if (holder) {
+          const waiting =
+            "Its 5-hour window has cleared. Waiting for the folder, which a " +
+            "run started while it waited now holds.";
+          // Idempotent so the reason is corrected once rather than rewritten,
+          // and logged once rather than every 60 seconds.
+          const noted = db()
+            .prepare(
+              "UPDATE runs SET stop_reason=? WHERE id=? AND status='paused' AND stop_reason IS NOT ?",
+            )
+            .run(waiting, run.id, waiting);
+          if (noted.changes === 1) log(run.id, waiting, { waitingFor: holder.id });
+          continue;
+        }
+
         // Re-queue rather than start directly: `promoteQueued` owns FIFO order,
         // folder reservation and the concurrency cap, and re-implementing any
         // of that here is how a folder claim gets broken. Ordering by
@@ -2547,6 +2622,119 @@ export function resumeRun(id: string): ResumeOutcome {
   });
   promoteQueued();
   return "requeued";
+}
+
+export type ReopenOutcome = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Put a finished run back to work, continuing its Claude Code session.
+ *
+ * Distinct from `resumeRun`, which un-parks a run that was always going to
+ * carry on by itself. This one reopens a row that had reached a terminal state:
+ * a crash, a non-zero exit, a restart, an operator stop, or a guard. Nothing
+ * about the run is rebuilt — it keeps its folder, its checkout, its branch, its
+ * session id and its spend, so `startRun` resumes the same conversation rather
+ * than starting a new one.
+ *
+ * It takes a budget because the usual reason a run needs picking up is that its
+ * own limits ended it, and re-queueing it under the limits that stopped it just
+ * reproduces the stop. The three carried-forward guards are checked here rather
+ * than left to the pre-cycle check, which would refuse a few seconds later with
+ * the run already flickering queued → stopped and no indication of what to
+ * change.
+ *
+ * `started_at` is cleared, and that is the one deliberate difference from a
+ * pause. A parked run keeps its original start so wall clock stays a terminus
+ * it cannot wait out; a finished run picked up by hand is a fresh attempt the
+ * operator decided on, and charging it for the hours or days it spent dead
+ * would refuse every run older than its own time limit.
+ */
+export function reopenRun(id: string, budget: unknown): ReopenOutcome {
+  const run = getRun(id);
+  if (!run) return { ok: false, reason: "No such run." };
+  if (run.status !== "failed" && run.status !== "stopped") {
+    return {
+      ok: false,
+      reason: `This run is ${run.status}, so there is nothing here to pick up.`,
+    };
+  }
+
+  // Its checkout may have been handed to a newer run while it was dead:
+  // `allocateSlotPath` only avoids slots that an *active* run holds, and a
+  // terminal row is not active. `ensureWorktree` would refuse the branch rather
+  // than corrupt anything, but only after this run had been queued and had
+  // taken its turn — saying so now is the difference between an explanation and
+  // a second failure.
+  if (run.worktree_path) {
+    const holder = activeRuns().find(
+      (r) => r.worktree_path === run.worktree_path,
+    );
+    if (holder) {
+      return {
+        ok: false,
+        reason: `Its isolated checkout is in use by run ${holder.id.slice(0, 8)}. Its own work is still on branch ${run.worktree_branch}; wait for that run to finish.`,
+      };
+    }
+  }
+
+  const policy = normalizePolicy(budget);
+  const spentUSD = run.spent_usd + run.spent_usd_est;
+  const spentTokens = run.spent_tokens + run.spent_tokens_est;
+
+  if (policy.maxIterations !== null && run.iterations >= policy.maxIterations) {
+    return {
+      ok: false,
+      reason: `This run has already used ${run.iterations} work ${
+        run.iterations === 1 ? "cycle" : "cycles"
+      }. Raise the cycle limit above that to carry on.`,
+    };
+  }
+  if (policy.maxRunCostUSD !== null && spentUSD >= policy.maxRunCostUSD) {
+    return {
+      ok: false,
+      reason: `This run has already spent $${spentUSD.toFixed(2)}. Raise the spending limit above that to carry on.`,
+    };
+  }
+  if (policy.maxRunTokens !== null && spentTokens >= policy.maxRunTokens) {
+    return {
+      ok: false,
+      reason: `This run has already used ${spentTokens.toLocaleString()} tokens. Raise the token limit above that to carry on.`,
+    };
+  }
+
+  // Carried from the stored blob rather than accepted from the caller: this
+  // value reaches `--permission-mode` on a process that edits files, and
+  // reopening a run is not a reason to open a second path to it.
+  const stored = JSON.parse(run.budget) as Record<string, unknown>;
+  const blob = JSON.stringify({ ...policy, permissionMode: stored.permissionMode });
+
+  const flip = db()
+    .prepare(
+      "UPDATE runs SET status='queued', budget=?, max_iterations=?," +
+        " started_at=NULL, finished_at=NULL, exit_code=NULL, stop_reason=NULL," +
+        " resume_at=NULL WHERE id=? AND status IN ('failed','stopped')",
+    )
+    .run(blob, policy.maxIterations ?? 0, id);
+  if (flip.changes !== 1) {
+    return { ok: false, reason: "This run changed state before it could be picked up." };
+  }
+
+  emit({
+    runId: id,
+    ts: Date.now(),
+    kind: "status",
+    payload: {
+      status: "queued",
+      message: run.session_id
+        ? "Picked up again — it continues the session it left off in."
+        : "Picked up again. It never reported a session to resume, so it starts from the original task.",
+    },
+  });
+
+  // Outside any claim of its own: a queued row holds nothing, and
+  // `promoteQueued` is what decides whether its folder is free.
+  promoteQueued();
+  return { ok: true };
 }
 
 /**

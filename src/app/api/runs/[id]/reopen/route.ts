@@ -1,0 +1,63 @@
+import { NextResponse } from "next/server";
+import { getRun, reopenRun } from "@/lib/orchestrator";
+import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type Ctx = { params: Promise<{ id: string }> };
+
+/**
+ * Put a failed or stopped run back in the queue, under a budget the operator
+ * has had a chance to raise.
+ *
+ * Sibling of `POST /api/runs`, and the budget rules are deliberately the same
+ * ones: a reopened run spawns the same agent under the same loop, so anything
+ * that would refuse it as a new run has to refuse it here. `permissionMode` is
+ * the one field not accepted from the wire — `reopenRun` carries the stored
+ * value forward, because reopening is not a reason to open a second route to
+ * `--permission-mode`.
+ *
+ * Refusals are 400 with a message rather than the 200-plus-outcome shape the
+ * sibling stop/resume routes use: every one of them names something the
+ * operator can change, and the form has to show it.
+ */
+export async function POST(req: Request, ctx: Ctx) {
+  const { id } = await ctx.params;
+  if (!getRun(id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
+  const rawBudget = (body.budget ?? {}) as Record<string, unknown>;
+
+  // Narrowed rather than trusted, for the reason given in `POST /api/runs`:
+  // this decides whether a running agent is killed part-way through a cycle.
+  if (rawBudget.enforcement !== undefined && rawBudget.enforcement !== null) {
+    const candidate = String(rawBudget.enforcement);
+    if (!(ENFORCEMENT_MODES as readonly string[]).includes(candidate)) {
+      return NextResponse.json(
+        { error: `Unknown enforcement mode: ${candidate}` },
+        { status: 400 },
+      );
+    }
+  }
+
+  const policy = normalizePolicy(rawBudget);
+
+  if (policy.maxIterations === null && policy.maxDurationMinutes === null) {
+    return NextResponse.json(
+      {
+        error:
+          "A run with no work-cycle limit needs a time limit. Wall-clock time " +
+          "is the only limit that keeps advancing whether or not the agent " +
+          "reports what it spent, so it is the only thing that would end this run.",
+      },
+      { status: 400 },
+    );
+  }
+
+  const outcome = reopenRun(id, policy);
+  if (!outcome.ok) {
+    return NextResponse.json({ error: outcome.reason }, { status: 400 });
+  }
+  return NextResponse.json({ ok: true });
+}

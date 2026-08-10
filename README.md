@@ -252,17 +252,23 @@ no reset instant at all, only a trailing total that decays. Your spend, your
 cycles and the clock only move one way. So those all end a run; the 5-hour
 window is the one that can pause it.
 
-A parked run keeps hold of its folder the whole time it waits, and survives a
-restart of UsageFoundry for 24 hours by default. Its budget is re-checked from
-scratch before it starts spending again, so it can also come back only to step
-aside once more.
+A parked run steps out of the way. It has no agent running and is spending
+nothing, so a run you start afterwards on the same folder goes straight to work
+rather than queuing behind it for hours; the parked one takes the folder back
+once that run finishes. Only its own isolated checkout stays reserved, since its
+commits live there. It survives a restart of UsageFoundry for 24 hours by
+default, and its budget is re-checked from scratch before it starts spending
+again, so it can also come back only to step aside once more.
+
+The trade is worth knowing: if the parked run was working in the folder directly
+rather than in its own checkout, it resumes into a tree the other run may have
+changed. Its own conversation is intact; the files may not be what it left.
 
 Concurrency multiplies the overshoot in every mode. `maxRunCostUSD` applies to
 each run separately, so three runs with a $5 limit each is a $15 worst case, not
 $5. Set **Runs allowed at the same time** in Settings if you want that bounded;
 it is unlimited by default, and a run over the limit waits rather than being
-refused. A parked run does not count against it — it is spending nothing — but it
-does still hold its folder.
+refused. A parked run does not count against it — it is spending nothing.
 
 ### Running until the limit rather than until the agent says stop
 
@@ -283,6 +289,28 @@ spent.
 Stopping a run signals the current work cycle and prevents any further one. If
 the stop lands between cycles there is no process to signal, but the run still
 ends — it is recorded as `stopped`, not as a failure.
+
+### Picking a run back up
+
+A run that ended — because it crashed, because Claude Code exited non-zero,
+because UsageFoundry restarted under it, because you stopped it, or because it
+hit one of its own limits — has a **Resume** button on its page. It keeps its
+folder, its isolated checkout and branch, its spend so far, and its Claude Code
+session, so it continues the conversation rather than starting a new one. A run
+that died before it had a session to continue starts again from the original
+task instead, and says so.
+
+Resuming asks for the limits again, pre-filled from the run, because the usual
+reason a run needs picking up is that its own limits ended it. They are totals,
+not top-ups: a run that used 1 of 1 cycles needs the cycle limit raised above 1,
+and the button refuses and says so rather than queueing a run that would stop
+again on its first check. The time limit is the exception — it runs from the
+moment it starts again, since counting the hours it spent dead would refuse
+every run older than its own limit. Everything else carries over untouched.
+
+A run that reported `DONE` has no Resume button. Sending an agent back into work
+it believes finished needs a different prompt, which is what *When Claude says
+the task is done* above is for.
 
 ---
 
@@ -624,13 +652,22 @@ through before trusting this unattended:
   worktree, on the same branch, with its commits intact.
 - A paused run surviving `docker compose restart`, and a stale one being closed
   out once past `resumeGraceHours`.
+- A parked run taking its folder back: that it stays parked while the run that
+  took the folder is still working, and starts within a sweep of that one
+  finishing. The hand-over in the other direction — a new run starting straight
+  away instead of queuing — was reproduced against the live container.
+- Resuming a finished run into a real agent: that `--resume` picks the session
+  back up, and that an isolated one lands in its own checkout still on its own
+  branch. The refusals around it — an exhausted cycle or spend limit, a checkout
+  another run has taken, a `completed` run offering no button — were checked
+  against the live container.
 - `detached: true`: that Ctrl-C during `npm run dev` still kills the agent (via
   the new `instrumentation.ts` handler) and that a long command the agent
   started dies with it.
 
-There is no linter run in this repo, and `npm test` covers three things: the
-folder-collision predicate, the budget policy, and how a provider refusal is
-classified and backed off from. `npm run typecheck` plus
+There is no linter run in this repo, and `npm test` covers four things: the
+folder-collision predicate, which queued runs may start, the budget policy, and
+how a provider refusal is classified and backed off from. `npm run typecheck` plus
 a `docker compose up --build` smoke test is still the real verification loop,
 and the list above records what was checked by hand.
 
