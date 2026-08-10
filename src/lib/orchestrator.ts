@@ -346,6 +346,14 @@ interface IterationResult {
   sessionId: string | null;
   finalText: string;
   isError: boolean;
+  /**
+   * Whether the CLI's terminal `result` event arrived. Cost and tokens come
+   * only from that event, so when it is missing — operator stop, crash, OOM —
+   * this iteration contributes $0 to the run's totals despite having burned
+   * real tokens. The run reports that rather than presenting the understated
+   * figure as fact.
+   */
+  sawResult: boolean;
 }
 
 function buildArgs(opts: {
@@ -361,6 +369,41 @@ function buildArgs(opts: {
   return args;
 }
 
+/**
+ * Environment for the spawned agent.
+ *
+ * The child is a full Claude Code session with tool access, so it can read its
+ * own environment and so can anything it runs. Two classes are withheld:
+ *
+ *   `UF_*`, `ANTHROPIC_ADMIN_KEY` — UsageFoundry's own configuration. The
+ *   Admin API key is an organisation-wide credential with no bearing on the
+ *   task the agent was given, and `UF_AUTH_TOKEN` is the shared secret
+ *   guarding this app. Excluding the whole `UF_` namespace means a future
+ *   setting is withheld by default rather than by remembering to add it here.
+ *
+ *   `OTEL_*`, `CLAUDE_CODE_ENABLE_TELEMETRY` — telemetry routing is this
+ *   app's decision, not an inheritance from whoever started the server.
+ *   Otherwise an operator's ambient collector silently receives every run.
+ *
+ * Everything else passes through. The CLI needs PATH, HOME, CLAUDE_CONFIG_DIR,
+ * proxy and CA settings, and locale to function at all, so an allowlist would
+ * fail in ways that are tedious to diagnose from inside a container.
+ */
+function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: "0" };
+  for (const key of Object.keys(env)) {
+    if (
+      key.startsWith("UF_") ||
+      key.startsWith("OTEL_") ||
+      key === "ANTHROPIC_ADMIN_KEY" ||
+      key === "CLAUDE_CODE_ENABLE_TELEMETRY"
+    ) {
+      delete env[key];
+    }
+  }
+  return { ...env, ...extra };
+}
+
 function runIteration(
   runId: string,
   cwd: string,
@@ -371,7 +414,7 @@ function runIteration(
     // quotes, backticks, or semicolons is inert rather than interpreted.
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {
       cwd,
-      env: { ...process.env, FORCE_COLOR: "0" },
+      env: childEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -384,6 +427,7 @@ function runIteration(
       sessionId: null,
       finalText: "",
       isError: false,
+      sawResult: false,
     };
 
     let stdoutBuf = "";
@@ -466,6 +510,7 @@ function handleStreamLine(runId: string, line: string, acc: IterationResult) {
 
   if (type === "result") {
     // Authoritative per-iteration accounting from the CLI itself.
+    acc.sawResult = true;
     const cost = Number(ev.total_cost_usd ?? 0);
     if (Number.isFinite(cost)) acc.costUSD += cost;
 
@@ -539,6 +584,7 @@ export async function startRun(id: string): Promise<void> {
   let stopReason = "";
   let finalStatus: RunStatus = "completed";
   let lastExit = 0;
+  let incompleteIteration = false;
 
   try {
     for (;;) {
@@ -601,6 +647,7 @@ export async function startRun(id: string): Promise<void> {
       lastExit = res.exitCode;
       spentUSD += res.costUSD;
       spentTokens += res.tokens;
+      incompleteIteration = !res.sawResult;
       if (res.sessionId) sessionId = res.sessionId;
 
       db()
@@ -608,6 +655,16 @@ export async function startRun(id: string): Promise<void> {
           "UPDATE runs SET iterations = ?, spent_usd = ?, spent_tokens = ? WHERE id = ?",
         )
         .run(iterations, spentUSD, spentTokens, id);
+
+      // An operator stop kills the child, which arrives here as a non-zero
+      // exit. Checking the cancel flag first keeps a deliberate stop from
+      // being filed as a failure; the loop-top check only catches a stop that
+      // lands between iterations.
+      if (cancelled.has(id)) {
+        stopReason = "Stopped by operator.";
+        finalStatus = "stopped";
+        break;
+      }
 
       if (res.exitCode !== 0 || res.isError) {
         stopReason = `Claude Code exited with code ${res.exitCode}.`;
@@ -642,6 +699,18 @@ export async function startRun(id: string): Promise<void> {
   } finally {
     procs.delete(id);
     cancelled.delete(id);
+    // Spend is only ever read from the CLI's `result` event, so an iteration
+    // killed before that event lands contributes $0. Say so rather than let
+    // the total read as measured fact. The dashboard's transcript-derived
+    // figures are unaffected and remain the more complete number.
+    if (incompleteIteration) {
+      stopReason = [
+        stopReason,
+        "The final work cycle ended before Claude Code reported its cost, so this run's spend is understated.",
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
     setStatus(id, finalStatus, {
       finished_at: Date.now(),
       stop_reason: stopReason,
@@ -659,8 +728,16 @@ export function stopRun(id: string): boolean {
   if (!child) return false;
   child.kill("SIGTERM");
   // Escalate if the process ignores the polite request.
+  //
+  // Liveness is `procs.get(id) === child`, not `child.killed`. Node sets
+  // `killed` the moment a signal is *sent*, not when the process dies, so
+  // testing it here would make this escalation dead code and leave a child
+  // that ignores SIGTERM running forever — and because `runIteration` only
+  // resolves from the `close` handler, the run would hang in "running" with
+  // no timeout anywhere to rescue it. `procs.delete` happens in `close`, the
+  // very event that never fires for such a child.
   setTimeout(() => {
-    if (procs.get(id) === child && !child.killed) child.kill("SIGKILL");
+    if (procs.get(id) === child) child.kill("SIGKILL");
   }, 5_000).unref?.();
   return true;
 }

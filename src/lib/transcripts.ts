@@ -3,9 +3,9 @@ import path from "node:path";
 import { PROJECTS_DIR } from "./config";
 import {
   type TokenCounts,
-  ZERO_TOKENS,
   costOf,
   resolvePrice,
+  totalTokens,
 } from "./pricing";
 
 /**
@@ -161,7 +161,13 @@ function parseLine(line: string, cwdRef: { value: string }): UsageEntry | null {
     serviceTier:
       typeof usage.service_tier === "string" ? usage.service_tier : undefined,
     entrypoint: typeof rec.entrypoint === "string" ? rec.entrypoint : undefined,
-    unpriced: price === null,
+    // A record that consumed no tokens cannot have cost anything, so it is not
+    // evidence that the price table is missing a model. Claude Code writes at
+    // least one such record per machine — `<synthetic>`, with an all-zero usage
+    // block — and counting it would leave the "unpriced models" warning
+    // permanently lit for a model that never spent a cent, blunting the signal
+    // exactly where the budget guard now relies on it.
+    unpriced: price === null && totalTokens(tokens) > 0,
   };
 }
 
