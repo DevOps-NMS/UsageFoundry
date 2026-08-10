@@ -4,6 +4,7 @@ import { PROJECTS_DIR } from "./config";
 import {
   type TokenCounts,
   costOf,
+  guardCostOf,
   resolvePrice,
   totalTokens,
 } from "./pricing";
@@ -34,6 +35,12 @@ export interface UsageEntry {
   model: string;
   tokens: TokenCounts;
   costUSD: number;
+  /**
+   * Same cost, but an unpriced model is charged the fallback rate instead of
+   * $0. Read only by the budget guard — never displayed. Identical to
+   * `costUSD` whenever the model is priced, which is the normal case.
+   */
+  costGuardUSD: number;
   /** Absolute path of the project the session ran in. */
   project: string;
   sessionId: string;
@@ -154,6 +161,7 @@ function parseLine(line: string, cwdRef: { value: string }): UsageEntry | null {
     model: model || "unknown",
     tokens,
     costUSD: costOf(tokens, price),
+    costGuardUSD: guardCostOf(tokens, price),
     project: cwdRef.value,
     sessionId: typeof rec.sessionId === "string" ? rec.sessionId : "",
     isSidechain: rec.isSidechain === true,

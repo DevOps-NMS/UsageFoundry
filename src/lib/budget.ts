@@ -103,18 +103,24 @@ export function evaluateBudget(
       unit: "tokens",
     });
   }
-  if (policy.maxWeeklyFraction !== null && snapshot.weekly.fraction !== null) {
+  // These meters report `guardFraction`, the figure actually compared below,
+  // so what the run page shows is what the guard decided on. It matches the
+  // dashboard's meter unless the window contains a model with no known price.
+  if (policy.maxWeeklyFraction !== null && snapshot.weekly.guardFraction !== null) {
     meters.push({
       label: "Weekly window",
-      value: snapshot.weekly.fraction,
+      value: snapshot.weekly.guardFraction,
       limit: policy.maxWeeklyFraction,
       unit: "fraction",
     });
   }
-  if (policy.maxSessionFraction !== null && snapshot.session.fraction !== null) {
+  if (
+    policy.maxSessionFraction !== null &&
+    snapshot.session.guardFraction !== null
+  ) {
     meters.push({
       label: "5-hour window",
-      value: snapshot.session.fraction,
+      value: snapshot.session.guardFraction,
       limit: policy.maxSessionFraction,
       unit: "fraction",
     });
@@ -172,6 +178,14 @@ export function evaluateBudget(
   // Refusing to start is the safe reading of "stop at 80% of my weekly limit"
   // when we have no idea what 100% is — silently ignoring the rule would let a
   // run proceed under a guard the user believes is active.
+  //
+  // The threshold is compared against `guardFraction`, not `fraction`: a model
+  // with no known price contributes $0 to the displayed cost, and with a whole
+  // window unpriced the displayed fraction is exactly 0, which no threshold
+  // can ever exceed. Guarding on the reported floor would mean the guard
+  // quietly ceases to exist the week a new model ships. The "no ceiling"
+  // refusal below still reads `fraction` — the two are null together, and a
+  // missing ceiling is a configuration fact, not a pricing one.
   if (policy.maxWeeklyFraction !== null) {
     if (snapshot.weekly.fraction === null) {
       return block(
@@ -180,10 +194,10 @@ export function evaluateBudget(
           "Set one in Settings (or run Calibrate) before using this guard.",
       );
     }
-    if (snapshot.weekly.fraction >= policy.maxWeeklyFraction) {
+    if ((snapshot.weekly.guardFraction ?? 0) >= policy.maxWeeklyFraction) {
       return block(
         "weekly_fraction",
-        `Weekly window is at ${pct(snapshot.weekly.fraction)}, at or past the ${pct(policy.maxWeeklyFraction)} guard.`,
+        `Weekly window is at ${pct(snapshot.weekly.guardFraction ?? 0)}, at or past the ${pct(policy.maxWeeklyFraction)} guard.`,
       );
     }
   }
@@ -196,10 +210,10 @@ export function evaluateBudget(
           "Set one in Settings (or run Calibrate) before using this guard.",
       );
     }
-    if (snapshot.session.fraction >= policy.maxSessionFraction) {
+    if ((snapshot.session.guardFraction ?? 0) >= policy.maxSessionFraction) {
       return block(
         "session_fraction",
-        `5-hour window is at ${pct(snapshot.session.fraction)}, at or past the ${pct(policy.maxSessionFraction)} guard.`,
+        `5-hour window is at ${pct(snapshot.session.guardFraction ?? 0)}, at or past the ${pct(policy.maxSessionFraction)} guard.`,
       );
     }
   }

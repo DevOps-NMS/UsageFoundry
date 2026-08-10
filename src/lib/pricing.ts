@@ -68,7 +68,42 @@ const FAST_MODE_PRICES: Record<string, ModelPrice> = {
 const SONNET_5_INTRO_PRICE: ModelPrice = { input: 2, output: 10 };
 const SONNET_5_INTRO_ENDS = Date.parse("2026-09-01T00:00:00Z");
 
+/**
+ * Rate charged to a model this table cannot place — for the budget guard only.
+ *
+ * $10/$50 is the most expensive *current-generation* entry above (Fable /
+ * Mythos), deliberately not the $5/$25 Opus tier: an unrecognised ID must not
+ * be able to look cheaper than a model that is actually in the table. The
+ * $15/$75 entries are deprecated snapshots rather than a plausible shape for a
+ * future launch, so they are not the benchmark.
+ *
+ * This is the same trade the Claude apps gateway's spend meter makes, and for
+ * the same reason — an ID nothing can price must not go unmetered, or a cap
+ * stops being a cap.
+ */
+export const UNKNOWN_MODEL_PRICE: ModelPrice = { input: 10, output: 50 };
+
 const PREFIXES = Object.keys(PRICES).sort((a, b) => b.length - a.length);
+
+/**
+ * Reduce a provider-decorated model string to the first-party form the table
+ * is keyed on.
+ *
+ * Bedrock serves `us.anthropic.claude-…-v1:0` and Google's Agent Platform
+ * serves `claude-…@20250929` — both name a model this table knows perfectly
+ * well, but either would miss the prefix match and be charged the unknown
+ * rate. Only decoration is stripped; nothing here maps one model onto another.
+ * Note what is deliberately absent: no short catch-all keys like
+ * `claude-opus-4`, because those would price an unreleased `claude-opus-4-9`
+ * at a confident wrong number instead of surfacing it as unknown.
+ */
+function canonicalModelId(model: string): string {
+  return model
+    .toLowerCase()
+    .replace(/^(us|us-gov|eu|apac|global)\./, "")
+    .replace(/^anthropic\./, "")
+    .replace("@", "-");
+}
 
 /**
  * Resolve pricing for a model string at a point in time.
@@ -82,7 +117,7 @@ export function resolvePrice(
   opts: { at?: number; speed?: string } = {},
 ): ModelPrice | null {
   if (!model) return null;
-  const id = model.toLowerCase().replace(/^anthropic\./, "");
+  const id = canonicalModelId(model);
 
   const key = PREFIXES.find((p) => id.startsWith(p));
   if (!key) return null;
@@ -140,6 +175,27 @@ export function totalTokens(t: TokenCounts): number {
 /** Tokens excluding cache reads — a closer proxy for "real" work done. */
 export function billableWeightedTokens(t: TokenCounts): number {
   return t.input + t.output + t.cacheWrite5m + t.cacheWrite1h;
+}
+
+/**
+ * Cost for budget-guard purposes, charging an unknown model the fallback rate
+ * rather than nothing.
+ *
+ * `costOf` returns 0 for an unpriced model, which is the honest number to
+ * *display* — but it also means a model this table cannot place contributes
+ * nothing to a cost-denominated guard. With a whole window unpriced the
+ * fraction is exactly 0 and the guard can never fire, so the one setting a
+ * user reaches for to bound spend silently stops existing at exactly the
+ * moment a new model ships.
+ *
+ * Only `evaluateBudget` reads this. The dashboard keeps reporting the $0 floor
+ * and naming the model, so no figure shown to a user is ever a guess.
+ */
+export function guardCostOf(
+  tokens: TokenCounts,
+  price: ModelPrice | null,
+): number {
+  return costOf(tokens, price ?? UNKNOWN_MODEL_PRICE);
 }
 
 export function costOf(tokens: TokenCounts, price: ModelPrice | null): number {

@@ -129,7 +129,10 @@ export default function Dashboard() {
           <strong>Unpriced models seen:</strong>{" "}
           <span className="mono">{meta.unpricedModels.join(", ")}</span>. Their
           tokens count toward volume but contribute $0 to cost, so the dollar
-          figures below are a floor.
+          figures below are a floor. The budget guard does not use that floor —
+          it charges these models a conservative rate instead, which is the
+          hatched span on the meters below. A run can therefore be stopped
+          before the solid bar looks full.
         </div>
       )}
 
@@ -151,6 +154,7 @@ export default function Dashboard() {
           <Meter
             label="Session consumed"
             fraction={s.session.fraction}
+            upperFraction={s.session.guardFraction}
             detail={ceilingDetail(s.session)}
           />
           {s.session.tokenFraction !== null &&
@@ -170,6 +174,7 @@ export default function Dashboard() {
           <Meter
             label="Weekly consumed"
             fraction={s.weekly.fraction}
+            upperFraction={s.weekly.guardFraction}
             detail={ceilingDetail(s.weekly)}
           />
           {s.weekly.tokenFraction !== null &&

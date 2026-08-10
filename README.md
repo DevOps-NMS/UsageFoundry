@@ -228,8 +228,24 @@ exactly this workload. Cache reads are billed at 0.1×. Older records with no TT
 split are attributed to the cheaper 5m bucket, so an unsplit record understates
 rather than overstates.
 
-Models with no known price contribute **$0 and are listed in a banner** — dollar
-totals are a floor, never a silent guess.
+Models with no known price contribute **$0 to every reported figure and are
+listed in a banner** — dollar totals are a floor, never a silent guess.
+
+**The budget guard is the one exception, deliberately.** A displayed $0 means a
+window consisting entirely of an unpriced model reads as 0% used, and no
+threshold can ever be crossed — so the guard would quietly cease to exist the
+week a new model ships. For guard purposes only, an unrecognised model is
+charged a conservative **$10/$50 per Mtok**: the most expensive
+current-generation rate in the table, so an unknown can never look cheaper than
+something known. The meters draw that as a hatched band past the solid fill, so
+a run stopped before the visible bar looks full is explained rather than
+mysterious. Nothing shown as a dollar amount is ever the fallback rate.
+
+Provider-decorated model IDs are canonicalised before lookup — Bedrock's
+`us.anthropic.claude-…-v1:0` and Agent Platform's `claude-…@20250929` resolve to
+the same rates as the first-party IDs. No short catch-all keys are used: a
+hypothetical `claude-opus-4` key would price an unreleased `claude-opus-4-9` at
+a confident wrong number instead of surfacing it as unknown.
 
 ---
 
@@ -287,6 +303,18 @@ Built and exercised against real transcripts:
   when cost is cleared; null when neither is set.
 - Budget guard evaluated against the cost fraction — allowed at an 80% guard,
   refused at 5% with the window at 11.2%.
+- Unpriced-model guard fallback, 17 assertions against the compiled modules: a
+  window of 90M output tokens from an unknown model still reports `$0` and
+  `fraction = 0` (so the pre-fix guard could never fire) while `guardFraction`
+  reads 45× a $100 ceiling and the guard blocks with `weekly_fraction`. A fully
+  priced window keeps `guardFraction === fraction` exactly, an under-threshold
+  window is still allowed, and a fraction guard with no ceiling still refuses
+  with `no_ceiling` rather than being satisfied by the fallback.
+- Model-ID canonicalisation: `us.anthropic.claude-opus-5-20260101-v1:0`,
+  `anthropic.claude-sonnet-4-5`, and `claude-sonnet-4-5@20250929` all resolve;
+  `claude-nextgen-9` stays unknown; `claude-opus-4-1` keeps its own $15/$75.
+- A zero-token turn (`<synthetic>`) no longer counts as an unpriced model, and
+  incurs no fallback charge.
 - Path traversal rejected in every form tested: `../` escape, absolute path
   outside all mounts, a symlink pointing out of the tree, a folder belonging to a
   *different* mount, an unknown mount id, an unmounted workspace, and a path

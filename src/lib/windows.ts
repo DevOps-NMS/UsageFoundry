@@ -22,23 +22,33 @@ export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 export interface Aggregate {
   tokens: TokenCounts;
   costUSD: number;
+  /**
+   * Cost with unpriced models charged the fallback rate rather than $0.
+   * Consumed only by the budget guard; equal to `costUSD` when every model in
+   * the window is priced. Never render this — `costUSD` is the reported
+   * figure, and it stays a floor rather than a guess.
+   */
+  costGuardUSD: number;
   entryCount: number;
 }
 
 export const ZERO_AGGREGATE: Aggregate = {
   tokens: ZERO_TOKENS,
   costUSD: 0,
+  costGuardUSD: 0,
   entryCount: 0,
 };
 
 export function aggregate(entries: UsageEntry[]): Aggregate {
   let tokens = ZERO_TOKENS;
   let costUSD = 0;
+  let costGuardUSD = 0;
   for (const e of entries) {
     tokens = addTokens(tokens, e.tokens);
     costUSD += e.costUSD;
+    costGuardUSD += e.costGuardUSD;
   }
-  return { tokens, costUSD, entryCount: entries.length };
+  return { tokens, costUSD, costGuardUSD, entryCount: entries.length };
 }
 
 export interface SessionBlock {
@@ -138,6 +148,17 @@ export interface WindowState {
   costFraction: number | null;
   /** Utilisation against the token ceiling, when one is configured. */
   tokenFraction: number | null;
+  /**
+   * What the budget guard compares against its threshold: the same preference
+   * order as `fraction`, but with unpriced models charged the fallback rate.
+   *
+   * Equal to `fraction` whenever every model in the window is priced. When it
+   * is higher, the guard will stop a run before the displayed meter looks
+   * full — the meter shows what is known to have been spent, the guard acts on
+   * what could have been. The dashboard renders the gap rather than letting
+   * the two silently disagree.
+   */
+  guardFraction: number | null;
   /** The ceiling backing `fraction`. */
   limit: number | null;
   limitMetric: "tokens" | "cost" | null;
@@ -232,6 +253,10 @@ export function buildSnapshot(
     const costFraction = fractionOf(agg.costUSD, costLimit);
     const tokenFraction = fractionOf(tokens, tokenLimit);
     const useCost = costFraction !== null;
+    // Same ceiling, same preference order — only the numerator differs, so
+    // guardFraction is null exactly when fraction is, and the "no ceiling
+    // configured" refusal keeps working off either.
+    const guardCostFraction = fractionOf(agg.costGuardUSD, costLimit);
 
     return {
       label,
@@ -244,6 +269,7 @@ export function buildSnapshot(
       fractionMetric: useCost ? "cost" : tokenFraction !== null ? "tokens" : null,
       costFraction,
       tokenFraction,
+      guardFraction: guardCostFraction ?? tokenFraction,
       limit: useCost ? costLimit : tokenLimit,
       limitMetric: useCost ? "cost" : tokenFraction !== null ? "tokens" : null,
     };

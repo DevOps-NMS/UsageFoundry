@@ -16,6 +16,8 @@ export interface TokenCountsDTO {
 export interface AggregateDTO {
   tokens: TokenCountsDTO;
   costUSD: number;
+  /** Guard-only cost: unpriced models charged a fallback rate. Never rendered. */
+  costGuardUSD: number;
   entryCount: number;
 }
 
@@ -30,6 +32,13 @@ export interface WindowStateDTO {
   fractionMetric: "cost" | "tokens" | null;
   costFraction: number | null;
   tokenFraction: number | null;
+  /**
+   * What the budget guard compares. Equals `fraction` unless the window holds
+   * a model with no known price, in which case it is higher — the dashboard
+   * draws the gap so the guard's stricter view is visible rather than
+   * surprising.
+   */
+  guardFraction: number | null;
   limit: number | null;
   limitMetric: "tokens" | "cost" | null;
 }
