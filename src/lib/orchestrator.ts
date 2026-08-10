@@ -496,11 +496,28 @@ function runIteration(
       });
     });
 
-    child.on("close", (code) => {
+    // `close` is the preferred signal because it guarantees stdout has been
+    // fully drained. It is not guaranteed to arrive: it waits for every handle
+    // on the pipe to close, and a tool subprocess that outlives the agent
+    // still holds one. A killed agent can therefore be gone while `close`
+    // never fires — which left the run stuck in "running" with no timeout
+    // anywhere to rescue it. `exit` is the authoritative "the process is
+    // dead", so it settles the iteration after a short grace period for
+    // buffered output. In the normal case `close` arrives first and this
+    // timer never gets the chance to fire.
+    let settled = false;
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
       procs.delete(runId);
       if (stdoutBuf.trim()) handleStreamLine(runId, stdoutBuf.trim(), result);
       result.exitCode = code ?? -1;
       resolve(result);
+    };
+
+    child.on("close", (code) => finish(code));
+    child.on("exit", (code) => {
+      setTimeout(() => finish(code), 2_000).unref?.();
     });
   });
 }

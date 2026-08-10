@@ -334,6 +334,24 @@ Built and exercised against real transcripts:
   `claude-nextgen-9` stays unknown; `claude-opus-4-1` keeps its own $15/$75.
 - A zero-token turn (`<synthetic>`) no longer counts as an unpriced model, and
   incurs no fallback charge.
+- Stop path, end to end against a stub CLI that ignores SIGTERM: the run now
+  reaches `stopped` about 8s after the stop (5s escalation + 2s drain grace),
+  where it previously stayed `running` indefinitely. Two independent causes
+  were needed — the `!child.killed` test made the SIGKILL escalation dead code,
+  and even once SIGKILL was delivered, an orphaned grandchild still holding the
+  inherited stdout pipe kept `close` from ever firing, so the iteration is now
+  settled from `exit` as well.
+- Operator stop records `stopped` with the interrupted-cost note in
+  `stop_reason`, not `failed`.
+- Child environment, dumped from a real spawned process: 97 variables reach the
+  agent with `PATH` and `HOME` intact, while a sentinel `ANTHROPIC_ADMIN_KEY`,
+  `UF_AUTH_TOKEN`, and every `OTEL_*` are absent.
+- Normal accounting path unaffected: a stub emitting a `result` event records
+  $0.42 / 35 tokens, completes on `DONE`, and adds no interrupted-cost note.
+- OTLP ingest over HTTP: a captured batch inserts 1 row, replaying it inserts
+  0, a garbage body yields `seen: 0`, and a non-JSON body still returns 200 so
+  the exporter does not retry it forever. The stored row has no column for
+  `user.email` or any account UUID.
 - OTLP transport captured from a real headless `claude -p` run on CLI v2.1.226,
   not taken from the docs. Telemetry *does* initialise under `-p`; a base
   endpoint of `/api/otlp` receives `POST /api/otlp/v1/logs` and
