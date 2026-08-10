@@ -27,6 +27,8 @@ export default function SettingsPage() {
   const [busy, setBusy] = useState(false);
   const [cal, setCal] = useState<CalibrateResponse | null>(null);
   const [calBusy, setCalBusy] = useState(false);
+  /** Non-null only while the globs field is being edited. */
+  const [copyGlobsText, setCopyGlobsText] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/settings")
@@ -451,6 +453,80 @@ export default function SettingsPage() {
               first, to carry on where it left off. The run ends when the reply
               contains <span className="mono">DONE</span> on its own line, so
               keep that instruction if you change the wording.
+            </div>
+          </div>
+
+          <div className="subsection">
+            <div className="subsection-title">Running several at once</div>
+
+            <div className="field">
+              <label htmlFor="conc">Runs allowed at the same time</label>
+              <input
+                id="conc"
+                type="number"
+                min={1}
+                placeholder="blank = no limit"
+                value={s.maxConcurrentRuns ?? ""}
+                onChange={(e) =>
+                  patch({
+                    maxConcurrentRuns: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+              />
+              <div className="hint">
+                Each run carries its own spending limit, so this multiplies the
+                worst case: three runs with a $5 limit each can spend $15. Guards
+                are still checked between work cycles, so the overrun is bounded
+                by one cycle per run that was active at the time. Runs over the
+                limit wait their turn rather than being refused.
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="copyglobs">Files copied into a new checkout</label>
+              {/* Held as raw text while editing. Splitting on every keystroke
+                  drops the separator the moment it is typed, which makes a
+                  second pattern impossible to enter. */}
+              <input
+                id="copyglobs"
+                value={copyGlobsText ?? s.isolationCopyGlobs.join(", ")}
+                onChange={(e) => setCopyGlobsText(e.target.value)}
+                onBlur={() => {
+                  if (copyGlobsText === null) return;
+                  patch({
+                    isolationCopyGlobs: copyGlobsText
+                      .split(",")
+                      .map((g) => g.trim())
+                      .filter(Boolean),
+                  });
+                  setCopyGlobsText(null);
+                }}
+              />
+              <div className="hint">
+                A fresh checkout holds committed work only, so an agent would
+                start with no environment file. These top-level patterns are
+                copied across; prefix one with{" "}
+                <span className="mono">!</span> to exclude it. Dependencies are
+                not copied — the agent installs them, and they survive into the
+                next run that reuses the same checkout.
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="isopre">Isolated-run preamble</label>
+              <textarea
+                id="isopre"
+                value={s.isolationPreamble}
+                onChange={(e) => patch({ isolationPreamble: e.target.value })}
+                style={{ minHeight: 110 }}
+              />
+              <div className="hint">
+                Prepended to the first prompt of an isolated run. Keep the
+                instruction to commit: work left uncommitted stays in a hidden
+                checkout and never reaches your branch.
+              </div>
             </div>
           </div>
         </div>

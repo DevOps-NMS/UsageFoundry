@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { WORKSPACE_MOUNTS, WORKSPACE_ROOT, type WorkspaceMount } from "@/lib/config";
+import {
+  activeRuns,
+  conflictKey,
+  overlaps,
+  workDirOf,
+} from "@/lib/orchestrator";
 import type { WorkspaceFolderDTO, WorkspaceMountDTO } from "@/lib/apiTypes";
 
 export const runtime = "nodejs";
@@ -24,6 +30,24 @@ export async function GET() {
   const mounts: WorkspaceMountDTO[] = [];
   const folders: WorkspaceFolderDTO[] = [];
 
+  // Occupancy is a pure string comparison against the live rows, so annotating
+  // every folder costs one query rather than a syscall per candidate.
+  const active = activeRuns();
+  const activeKeys = active.map((r) => ({
+    run: r,
+    key: conflictKey(workDirOf(r)),
+  }));
+
+  function occupancy(abs: string) {
+    const key = conflictKey(abs);
+    const hits = activeKeys.filter((a) => overlaps(key, a.key));
+    const running = hits.find((h) => h.run.status === "running");
+    return {
+      busyRunId: running?.run.id ?? null,
+      queuedCount: hits.filter((h) => h.run.status === "queued").length,
+    };
+  }
+
   async function scan(mount: WorkspaceMount, dir: string, depth: number, count: { n: number }) {
     if (count.n >= MAX_FOLDERS_PER_MOUNT) return;
     let entries;
@@ -42,16 +66,29 @@ export async function GET() {
         .then(() => true)
         .catch(() => false);
 
+      // A bare repository has no `.git` entry, so the test above misses it and
+      // the walk below would offer `objects/`, `refs/`, and `hooks/` as run
+      // targets. Detect it and stop, without claiming it is a working tree.
+      const isBareRepo =
+        !isGitRepo &&
+        (await Promise.all([
+          fs.stat(path.join(full, "HEAD")).then(() => true).catch(() => false),
+          fs.stat(path.join(full, "objects")).then(() => true).catch(() => false),
+        ]).then(([head, objects]) => head && objects));
+
       folders.push({
         mountId: mount.id,
         path: path.relative(mount.path, full),
         name: e.name,
         isGitRepo,
+        ...occupancy(full),
       });
       count.n += 1;
 
       // A repo is a leaf for our purposes — don't enumerate its subdirectories.
-      if (!isGitRepo && depth < 2) await scan(mount, full, depth + 1, count);
+      if (!isGitRepo && !isBareRepo && depth < 2) {
+        await scan(mount, full, depth + 1, count);
+      }
     }
   }
 
@@ -81,6 +118,11 @@ export async function GET() {
       error,
       folderCount: count.n,
       truncated: count.n >= MAX_FOLDERS_PER_MOUNT,
+      // A run started on the mount root overlaps every folder beneath it, so
+      // the root carries its own occupancy rather than inheriting a child's.
+      ...(available
+        ? occupancy(mount.path)
+        : { busyRunId: null, queuedCount: 0 }),
     });
   }
 

@@ -85,6 +85,10 @@ export interface WorkspaceMountDTO {
   folderCount: number;
   /** True when the listing hit its per-mount cap and is incomplete. */
   truncated: boolean;
+  /** Run currently working here or in anything under it. */
+  busyRunId?: string | null;
+  /** Runs waiting on this folder. */
+  queuedCount?: number;
 }
 
 export interface WorkspaceFolderDTO {
@@ -93,6 +97,9 @@ export interface WorkspaceFolderDTO {
   path: string;
   name: string;
   isGitRepo: boolean;
+  /** Run currently working here, in a parent of it, or in a child of it. */
+  busyRunId?: string | null;
+  queuedCount?: number;
 }
 
 export interface FoldersResponse {
@@ -114,9 +121,10 @@ export interface BudgetPolicyDTO {
 
 export interface RunDTO {
   id: string;
-  /** Absolute, canonicalised folder the run executed in. */
+  /** Absolute, canonicalised folder the operator picked. */
   folder: string;
   /** Mount the folder belongs to, or null if that mount is gone. */
+  mountId?: string | null;
   mountLabel?: string | null;
   /** `folder` relative to its mount; "" means the mount root itself. */
   relPath?: string;
@@ -133,6 +141,14 @@ export interface RunDTO {
   exit_code: number | null;
   spent_usd: number;
   spent_tokens: number;
+  session_id?: string | null;
+  /** Where the agent ran. Differs from `folder` only for an isolated run. */
+  work_dir?: string | null;
+  isolation?: "none" | "worktree" | null;
+  worktree_branch?: string | null;
+  worktree_base?: string | null;
+  /** Queued runs only: how many are ahead of it. 0 means next up. */
+  queuePosition?: number;
 }
 
 export interface RunEventDTO {
@@ -147,6 +163,7 @@ export interface RunEventDTO {
     | "iteration"
     | "budget"
     | "result"
+    | "handoff"
     | "error"
     | "replay-complete";
   payload: Record<string, unknown>;
@@ -179,4 +196,8 @@ export interface SettingsDTO {
   defaultModel: string | null;
   continuationPrompt: string;
   includeSidechains: boolean;
+  /** Null means no limit. */
+  maxConcurrentRuns: number | null;
+  isolationCopyGlobs: string[];
+  isolationPreamble: string;
 }

@@ -70,6 +70,31 @@ const globalCache = globalThis as unknown as {
 const cache: Map<string, FileCacheEntry> =
   globalCache.__ufTranscriptCache ?? (globalCache.__ufTranscriptCache = new Map());
 
+/**
+ * In-flight refreshes, keyed by file, so overlapping scans never parse the same
+ * appended bytes twice.
+ *
+ * `readAppended` reads a file's byte offset and writes it back with four awaits
+ * in between, pushing parsed records into the shared `entries` array. Two scans
+ * that overlap — and they routinely do, since the run loop scans before every
+ * work cycle while the dashboard polls every 10s — both read the same stale
+ * offset, read the same bytes, and append the same records. Cross-file dedupe in
+ * `scanUsage` hides that from the totals, so it is invisible in the UI, but the
+ * cached array grows without bound and every later scan gets slower, which
+ * widens the window that caused it.
+ *
+ * Sharing one promise makes the second caller reuse the first one's parse. Its
+ * view is at most one refresh stale, which is well inside the lag transcripts
+ * already have against a live session.
+ */
+const globalInflight = globalThis as unknown as {
+  __ufTranscriptInflight?: Map<string, Promise<FileCacheEntry>>;
+  __ufScanInflight?: Promise<ScanResult> | null;
+};
+const inflight: Map<string, Promise<FileCacheEntry>> =
+  globalInflight.__ufTranscriptInflight ??
+  (globalInflight.__ufTranscriptInflight = new Map());
+
 /** Recursively collect *.jsonl paths under the projects directory. */
 async function listTranscriptFiles(root: string): Promise<string[]> {
   const out: string[] = [];
@@ -165,8 +190,13 @@ function parseLine(line: string, cwdRef: { value: string }): UsageEntry | null {
   };
 }
 
-/** Parse only the bytes appended since the last scan of this file. */
-async function refreshFile(file: string): Promise<FileCacheEntry> {
+/**
+ * Parse only the bytes appended since the last scan of this file.
+ *
+ * Never call this directly — go through `refreshFile`, which serialises
+ * concurrent callers. Running two of these against one file double-appends.
+ */
+async function readAppended(file: string): Promise<FileCacheEntry> {
   const stat = await fs.stat(file);
   const prev = cache.get(file);
 
@@ -225,6 +255,22 @@ async function refreshFile(file: string): Promise<FileCacheEntry> {
   return base;
 }
 
+/** Refresh one file, joining an already-running refresh of the same file. */
+function refreshFile(file: string): Promise<FileCacheEntry> {
+  const running = inflight.get(file);
+  if (running) return running;
+
+  const started = readAppended(file).finally(() => {
+    // Guard the identity check: a refresh queued after this one settled owns
+    // the slot now, and clearing it blindly would let a third caller start a
+    // parallel parse of the same file.
+    if (inflight.get(file) === started) inflight.delete(file);
+  });
+
+  inflight.set(file, started);
+  return started;
+}
+
 export interface ScanResult {
   entries: UsageEntry[];
   fileCount: number;
@@ -235,8 +281,27 @@ export interface ScanResult {
 
 /**
  * Scan all transcripts and return deduplicated usage entries, sorted by time.
+ *
+ * Concurrent callers share one scan. Per-file locking already makes overlapping
+ * scans correct; coalescing here also makes them cheap, which matters because
+ * every concurrent run evaluates its budget against a fresh scan and they tend
+ * to arrive together.
  */
-export async function scanUsage(): Promise<ScanResult> {
+export function scanUsage(): Promise<ScanResult> {
+  const running = globalInflight.__ufScanInflight;
+  if (running) return running;
+
+  const started = runScan().finally(() => {
+    if (globalInflight.__ufScanInflight === started) {
+      globalInflight.__ufScanInflight = null;
+    }
+  });
+
+  globalInflight.__ufScanInflight = started;
+  return started;
+}
+
+async function runScan(): Promise<ScanResult> {
   const files = await listTranscriptFiles(PROJECTS_DIR);
 
   const results = await Promise.all(
@@ -272,4 +337,8 @@ export async function scanUsage(): Promise<ScanResult> {
 /** Drop cached offsets so the next scan re-reads every file from byte 0. */
 export function invalidateTranscriptCache(): void {
   cache.clear();
+  // In-flight refreshes still hold the offsets they read before the clear, so
+  // drop them too rather than letting one write a pre-invalidation offset back.
+  inflight.clear();
+  globalInflight.__ufScanInflight = null;
 }

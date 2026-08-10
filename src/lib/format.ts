@@ -1,5 +1,17 @@
 /** Presentation helpers. Client-safe — no node builtins in here. */
 
+import type { RunDTO } from "./apiTypes";
+
+/** Badge tone per run status. Shared so the list and detail pages cannot drift. */
+export const STATUS_TONE: Record<RunDTO["status"], string> = {
+  queued: "",
+  running: "accent",
+  completed: "ok",
+  stopped: "warn",
+  blocked: "warn",
+  failed: "danger",
+};
+
 export function fmtTokens(n: number): string {
   if (!Number.isFinite(n)) return "—";
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
