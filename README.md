@@ -349,7 +349,7 @@ started later, so nothing spawns unattended from a prompt you have forgotten abo
 | `maxDurationMinutes` | Wall-clock cap, **including time spent parked**. `null` disables it. |
 | `maxWeeklyFraction` | Stop at N% of the weekly window (cost-denominated). **Requires a configured ceiling.** Always ends the run. |
 | `maxSessionFraction` | Stop at N% of the 5-hour window (cost-denominated). **Requires a configured ceiling.** Parks the run instead under `live-resume`. |
-| `enforcement` | `between-cycles` \| `live` \| `live-resume` — when a tripped rule is acted on. |
+| `enforcement` | `between-cycles` \| `live` \| `live-resume` — when a tripped rule is acted on. Under `live-resume` a run also parks when **Claude itself** refuses a cycle for want of allowance, which needs no fraction and no ceiling. |
 | `continueAfterDone` | Ignore the agent's `DONE` and send it back to the same task. |
 
 `maxRunCostUSD` is the one guard that needs **no ceiling** — it is absolute. Use
@@ -586,6 +586,15 @@ Built and exercised against real transcripts:
   under `live-resume` and never on the weekly one, **ends** rather than parks a
   run that is also out of time, still refuses a fraction guard with no ceiling,
   and blocks on reconciled spend that `spent_usd` alone would have missed.
+- Provider refusals (`npm test`, 11 cases): `isUsageLimit` matches both the
+  wording the CLI renders and the wording in its own error taxonomy, including a
+  model label it has never seen; leaves `Not logged in`, a spend cap and a
+  credit balance to fail as themselves; and treats a 429, an overloaded upstream
+  and a plain rate limit as transient rather than as an exhausted allowance —
+  money and blips are the two things that must not be waited out.
+  `refusalResumeAt` waits for a window still open, backs
+  off 20/40/60 minutes for one already passed or invisible, never re-spawns
+  inside five minutes, and never holds a folder past six hours.
 
 ### Not yet verified by hand
 
@@ -597,6 +606,17 @@ through before trusting this unattended:
 - Whether `claude -p` flushes its `result` event on `SIGINT`. If it does, an
   interrupted cycle keeps its measured cost and the transcript reconciliation
   becomes a fallback rather than the norm.
+- **What a subscription-limit refusal actually says.** The `<synthetic>` marker
+  is confirmed from a real record on this machine, but the only refusal ever
+  seen here is `Not logged in · Please run /login`. The wording `isUsageLimit()`
+  matches was read out of the shipped binary's own strings, not observed on the
+  wire, and the `usage limit reached|<epoch>` form the ecosystem keys on is not
+  in that binary at all. A refusal it fails to classify still reports honestly —
+  it just fails instead of waiting. The `error` run event records the text, the
+  exit code and whether the pattern matched, so the first real occurrence is
+  enough to correct it.
+- Whether a refusal ever arrives on stderr alone rather than as a `<synthetic>`
+  assistant turn. `refusalInStderr` covers that case but has never fired.
 - Whether `claude --resume` accepts a session whose transcript was truncated by
   a mid-turn kill. The recovery ladder retries once and then stops, naming the
   command — it deliberately does not start a fresh session.
@@ -608,8 +628,9 @@ through before trusting this unattended:
   the new `instrumentation.ts` handler) and that a long command the agent
   started dies with it.
 
-There is no linter run in this repo, and `npm test` covers two things: the
-folder-collision predicate and the budget policy above. `npm run typecheck` plus
+There is no linter run in this repo, and `npm test` covers three things: the
+folder-collision predicate, the budget policy, and how a provider refusal is
+classified and backed off from. `npm run typecheck` plus
 a `docker compose up --build` smoke test is still the real verification loop,
 and the list above records what was checked by hand.
 
