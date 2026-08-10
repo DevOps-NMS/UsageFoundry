@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { scanUsage } from "@/lib/transcripts";
 import { buildSnapshot } from "@/lib/windows";
 import { getSettings, limitConfig } from "@/lib/settings";
+import { readAccountProfile } from "@/lib/account";
 import { PROJECTS_DIR } from "@/lib/config";
 
 export const runtime = "nodejs";
@@ -10,6 +11,7 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const scan = await scanUsage();
+    const account = await readAccountProfile();
     const settings = getSettings();
     const entries = settings.includeSidechains
       ? scan.entries
@@ -30,6 +32,7 @@ export async function GET() {
         hasWeeklyCeiling:
           settings.weeklyCostLimit !== null || settings.weeklyTokenLimit !== null,
         reservedHeadroomFraction: settings.reservedHeadroomFraction ?? 0,
+        account,
         entrypoints: [
           ...new Set(entries.map((e) => e.entrypoint).filter(Boolean)),
         ] as string[],

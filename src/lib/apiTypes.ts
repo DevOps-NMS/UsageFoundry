@@ -80,7 +80,22 @@ export interface UsageResponse {
     reservedHeadroomFraction: number;
     /** Which Claude Code entrypoints the parsed transcripts came from. */
     entrypoints: string[];
+    /**
+     * The subscription the scanned transcripts belong to, when Claude Code's
+     * own state files can be read. All fields null means "plan unknown", which
+     * is a normal state — never an error, and never a ceiling.
+     */
+    account: AccountProfileDTO;
   };
+}
+
+/** Names a plan. Carries no ceiling, no email, no account UUID. */
+export interface AccountProfileDTO {
+  subscriptionType: string | null;
+  rateLimitTier: string | null;
+  label: string | null;
+  fingerprint: string | null;
+  source: "credentials" | "profile" | null;
 }
 
 /** One top-level directory tree the agent may be pointed at. */

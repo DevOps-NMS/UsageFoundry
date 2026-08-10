@@ -315,6 +315,12 @@ Built and exercised against real transcripts:
   `claude-nextgen-9` stays unknown; `claude-opus-4-1` keeps its own $15/$75.
 - A zero-token turn (`<synthetic>`) no longer counts as an unpriced model, and
   incurs no fallback charge.
+- Plan detection reads `Claude Max 20x` from `.credentials.json` with no email,
+  name, or account UUID crossing the wire; caches for 60s including misses (the
+  CLI writes these files lazily); and degrades to "plan unknown" with no error
+  when the config directory holds neither file. The legacy `~/.claude.json` is
+  consulted only while the config directory is still the default — a redirected
+  `CLAUDE_HOME` reports no plan rather than the wrong one.
 - Path traversal rejected in every form tested: `../` escape, absolute path
   outside all mounts, a symlink pointing out of the tree, a folder belonging to a
   *different* mount, an unknown mount id, an unmounted workspace, and a path

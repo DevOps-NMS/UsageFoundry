@@ -85,6 +85,14 @@ export default function Dashboard() {
             (<span className="mono">{meta.entrypoints.join(", ")}</span>)
           </>
         )}
+        {/* Names the plan only. Anthropic publishes no number for a tier, so
+            this never implies a ceiling — the meters stay indeterminate until
+            one is configured. */}
+        {meta.account.label && (
+          <>
+            , on <strong>{meta.account.label}</strong>
+          </>
+        )}
         .
       </p>
 
@@ -117,7 +125,14 @@ export default function Dashboard() {
         <div className="notice" data-tone="warn">
           <strong>No limit ceilings configured.</strong> Anthropic publishes no
           numeric value for a Pro/Max limit and offers no endpoint to read one,
-          so percentages cannot be shown until you set a ceiling.{" "}
+          so percentages cannot be shown until you set a ceiling
+          {meta.account.label && (
+            <>
+              {" "}
+              — knowing you are on {meta.account.label} does not supply one
+            </>
+          )}
+          .{" "}
           <Link href="/settings">Run Calibrate</Link> to derive one from your own
           peak usage, or enter a value manually. Volumes and costs below are
           exact regardless.

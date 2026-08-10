@@ -17,6 +17,17 @@ export const CLAUDE_HOME = env("CLAUDE_HOME", path.join(os.homedir(), ".claude")
 /** Where transcripts live: one subdirectory per project, *.jsonl inside. */
 export const PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
 
+/**
+ * Where the Claude CLI keeps its own config and credential files.
+ *
+ * `CLAUDE_CONFIG_DIR` is the CLI's variable, not ours, and the container sets
+ * it. Falling back to `CLAUDE_HOME` rather than to `~/.claude` directly keeps
+ * the account we report tied to the same tree whose transcripts we parse — a
+ * `CLAUDE_HOME` pointed elsewhere should yield "plan unknown", not the plan of
+ * whoever happens to be logged in on this host.
+ */
+export const CLAUDE_CONFIG_DIR = env("CLAUDE_CONFIG_DIR", CLAUDE_HOME);
+
 /** One directory tree the UI may browse and run agents against. */
 export interface WorkspaceMount {
   /** Stable slug used on the wire and as a form value. */
