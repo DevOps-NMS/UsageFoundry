@@ -20,12 +20,13 @@ import {
   type BudgetVerdict,
   type RunProgress,
   LIVE_ENFORCEABLE_CODES,
+  RESUME_MARGIN_MS,
   evaluateBudget,
   normalizePolicy,
 } from "./budget";
 import { scanUsage, type UsageEntry } from "./transcripts";
 import { totalTokens } from "./pricing";
-import { buildSnapshot } from "./windows";
+import { buildSnapshot, type UsageSnapshot } from "./windows";
 
 /**
  * Runs Claude Code headlessly against a folder, iteration by iteration, and
@@ -578,6 +579,131 @@ export function overlaps(a: ConflictKey, b: ConflictKey): boolean {
     }
   }
   return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Provider refusals                                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Whether a refusal is the 5-hour or weekly allowance running out.
+ *
+ * Text matching, because the CLI exposes no machine-readable marker for it:
+ * `result.subtype` has no limit member (`success`, `error_during_execution`,
+ * `error_max_turns`, `error_max_structured_output_retries`,
+ * `error_max_budget_usd`), and the refusal arrives as an ordinary sentence in
+ * a `<synthetic>` assistant turn.
+ *
+ * Both shapes are matched on purpose. `usage limit reached` is the wording in
+ * the CLI's own error taxonomy; `You've hit your <label> limit` is what it
+ * renders, where <label> comes from its own table. The label is matched
+ * loosely rather than enumerated, because that table is per-window *and* per
+ * model — "session limit", "weekly limit", "Opus limit" — so a model shipped
+ * next year would fall out of any list written today, and falling out means
+ * the wall stops being recognised.
+ *
+ * Money is the exception, and it is excluded by name. A spend cap or a credit
+ * balance is not an allowance that refills on a schedule; waiting for one
+ * holds a folder for hours to arrive at the same answer. Those must end the
+ * run, which is the same reasoning that keeps the weekly window terminal.
+ *
+ * The widely-copied `Claude AI usage limit reached|<epoch>` form appears
+ * nowhere in the shipped binary, so nothing here parses a reset instant out of
+ * the message: the reset time comes from the window model, which the operator
+ * can correct with `sessionResetOverrideAt`.
+ *
+ * Transient failures are excluded too. A 429 burst, an overloaded upstream and
+ * a dropped connection all clear in seconds; waiting hours for one turns a
+ * retryable blip into a stalled run.
+ */
+export function isUsageLimit(text: string): boolean {
+  if (/\b(spend|credit|credits|balance)\b/i.test(text)) return false;
+  return (
+    /usage limit reached/i.test(text) ||
+    /\b(?:hit|reached) your\s+(?:[\w-]+\s+){0,2}limit/i.test(text)
+  );
+}
+
+/**
+ * An allowance refusal that only ever reached stderr.
+ *
+ * Deliberately narrower than the `<synthetic>` path: stderr carries build
+ * noise, deprecation warnings and whatever the agent's own tooling printed, so
+ * only a line that classifies as an allowance refusal is promoted to one.
+ * Anything else stays an ordinary log line and the exit code decides, exactly
+ * as it does today.
+ */
+function refusalInStderr(tail: string): string | null {
+  if (!tail) return null;
+  return (
+    tail
+      .split("\n")
+      .filter(Boolean)
+      .reverse()
+      .find((line) => isUsageLimit(line)) ?? null
+  );
+}
+
+/** How long a refused run waits when the boundary it can see has already passed. */
+const REFUSAL_BACKOFF_MS = [20 * 60_000, 40 * 60_000, 60 * 60_000];
+/** Never re-spawn into the same wall immediately, whatever the arithmetic says. */
+const MIN_REFUSAL_WAIT_MS = 5 * 60_000;
+/** Never hold a folder longer than one window plus slack on a refusal. */
+const MAX_REFUSAL_WAIT_MS = 6 * 3_600_000;
+/**
+ * How many times one run may wait out a refusal.
+ *
+ * The guard path needs no such cap — wall clock is checked ahead of the window
+ * and terminates the run — but a refusal is someone else's claim about someone
+ * else's counter, and a misread one must not re-park forever.
+ */
+export const MAX_PAUSES_PER_RUN = 3;
+
+/**
+ * When a run refused for want of allowance should try again.
+ *
+ * `boundary` is the end of the window the refusal belongs to, as far as this
+ * app can tell, or null when it cannot tell. Two things make it unreliable,
+ * and both are why this is a backoff rather than a single computed instant:
+ *
+ * A derived boundary is early. `buildSessionBlocks` floors a block's start to
+ * the hour, so a window opened at 14:47 is reported as ending at 19:00 rather
+ * than 19:47 — up to an hour before the provider actually resets. Only an
+ * operator-supplied `sessionResetOverrideAt` is exact.
+ *
+ * And once that early boundary passes, the derived one becomes actively
+ * misleading: a refusal writes a zero-token `<synthetic>` record into the
+ * transcript, which opens a *fresh* block, so `session.endsAt` jumps five
+ * hours into the future for a window that reopens in minutes. Hence the
+ * caller's boundary is drawn from the last block with real spend in it, and a
+ * boundary in the past falls through to the backoff instead of being trusted.
+ */
+export function refusalResumeAt(o: {
+  boundary: number | null;
+  pauseCount: number;
+  now: number;
+}): number {
+  const backoff =
+    REFUSAL_BACKOFF_MS[Math.min(o.pauseCount, REFUSAL_BACKOFF_MS.length - 1)];
+  const target =
+    o.boundary !== null && o.boundary > o.now
+      ? o.boundary + RESUME_MARGIN_MS
+      : o.now + backoff;
+  return Math.min(
+    Math.max(target, o.now + MIN_REFUSAL_WAIT_MS),
+    o.now + MAX_REFUSAL_WAIT_MS,
+  );
+}
+
+/**
+ * End of the newest window that actually holds spend, or null if none does.
+ *
+ * `snapshot.session.endsAt` is the wrong input for a refusal: the refusal's own
+ * zero-token record opens a block of its own, and an empty block's boundary
+ * describes nothing. Blocks arrive newest first.
+ */
+export function lastSpendingWindowEnd(snapshot: UsageSnapshot): number | null {
+  return snapshot.blocks.find((b) => b.agg.costGuardUSD > 0)?.endsAt ?? null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1270,7 +1396,27 @@ interface IterationResult {
    * figure as fact.
    */
   sawResult: boolean;
+  /**
+   * What the provider refused with, when it refused rather than the agent
+   * failing. Claude Code reports API-level errors as an assistant message
+   * whose `message.model` is the literal `<synthetic>` — the same marker
+   * `transcripts.ts` keys on to keep an all-zero record out of the unpriced
+   * warning — so this is the only signal separating "Claude would not do it"
+   * from "the agent crashed". Without it every refusal reads as
+   * `Claude Code exited with code 1`, which blames the agent for a decision
+   * it did not make.
+   */
+  apiError: string | null;
+  /**
+   * Tail of the child's stderr. Forwarded to `run_events` line by line as it
+   * arrives, and kept here too so a refusal that only ever reaches stderr is
+   * still visible to the branch that has to classify it.
+   */
+  stderrTail: string;
 }
+
+/** Cap on `IterationResult.stderrTail`. An agent can log for hours. */
+const STDERR_TAIL_LIMIT = 4_096;
 
 function buildArgs(opts: {
   prompt: string;
@@ -1406,6 +1552,8 @@ function runIteration(
       finalText: "",
       isError: false,
       sawResult: false,
+      apiError: null,
+      stderrTail: "",
     };
 
     let stdoutBuf = "";
@@ -1424,7 +1572,12 @@ function runIteration(
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
       const text = chunk.trim();
-      if (text) log(runId, text, { stream: "stderr" });
+      if (!text) return;
+      log(runId, text, { stream: "stderr" });
+      // Keep the tail as well as logging it: a refusal the CLI writes only to
+      // stderr is otherwise unavailable to the branch that decides whether the
+      // run failed or the window is simply full.
+      result.stderrTail = `${result.stderrTail}${text}\n`.slice(-STDERR_TAIL_LIMIT);
     });
 
     child.on("error", (err) => {
@@ -1477,11 +1630,20 @@ function handleStreamLine(runId: string, line: string, acc: IterationResult) {
   if (typeof ev.session_id === "string") acc.sessionId = ev.session_id;
 
   if (type === "assistant") {
-    const message = ev.message as { content?: unknown[] } | undefined;
+    const message = ev.message as
+      | { content?: unknown[]; model?: unknown }
+      | undefined;
     const blocks = Array.isArray(message?.content) ? message.content : [];
+    // Claude Code writes provider refusals — not logged in, credit exhausted,
+    // usage limit reached — as an assistant turn attributed to `<synthetic>`
+    // rather than to a model. Recorded on first sight only: `finalText` is
+    // last-write-wins by design, so any later text would otherwise erase the
+    // one message that says why the cycle ended.
+    const synthetic = message?.model === "<synthetic>";
     for (const b of blocks as Array<Record<string, unknown>>) {
       if (b.type === "text" && typeof b.text === "string") {
         acc.finalText = b.text;
+        if (synthetic && acc.apiError === null) acc.apiError = b.text;
         emit({
           runId,
           ts: Date.now(),
@@ -1516,6 +1678,19 @@ function handleStreamLine(runId: string, line: string, acc: IterationResult) {
 
     if (ev.subtype && ev.subtype !== "success") acc.isError = true;
     if (typeof ev.result === "string" && ev.result) acc.finalText = ev.result;
+
+    // Second-best source for a refusal, behind the `<synthetic>` message: the
+    // CLI summarises the failure here too. `??=` because the summary can be
+    // empty or generic where the assistant turn carried the real sentence.
+    if (
+      ev.subtype &&
+      ev.subtype !== "success" &&
+      typeof ev.result === "string" &&
+      ev.result &&
+      acc.apiError === null
+    ) {
+      acc.apiError = ev.result;
+    }
 
     emit({
       runId,
@@ -1808,7 +1983,10 @@ export async function startRun(id: string): Promise<void> {
       lastExit = res.exitCode;
       spentUSD += res.costUSD;
       spentTokens += res.tokens;
-      incompleteIteration = !res.sawResult;
+      // Latched, not assigned: a cycle that died before reporting its cost
+      // leaves the run's total understated for the rest of the run, and a
+      // later cycle that reports normally does not undo that.
+      incompleteIteration ||= !res.sawResult;
       if (res.sessionId) sessionId = res.sessionId;
 
       // The cycle died before Claude Code reported what it cost, so the two
@@ -1845,6 +2023,56 @@ export async function startRun(id: string): Promise<void> {
       const postCycle = interrupts.get(id);
       if (postCycle) {
         applyInterrupt(postCycle);
+        break;
+      }
+
+      // Before the exit-code test for the same reason the interrupt check is:
+      // a refusal kills the cycle non-zero, and testing the code first files
+      // the provider's decision as the agent crashing. It also has to come
+      // before the DONE test below, because a refusal that exits 0 would
+      // otherwise match nothing and re-spawn straight back into the wall.
+      const refusal = res.apiError ?? refusalInStderr(res.stderrTail);
+      if (refusal) {
+        const limited = isUsageLimit(refusal);
+        const canWait =
+          limited &&
+          policy.enforcement === "live-resume" &&
+          (run.pause_count ?? 0) < MAX_PAUSES_PER_RUN;
+
+        emit({
+          runId: id,
+          ts: Date.now(),
+          kind: "error",
+          payload: {
+            apiError: refusal,
+            exitCode: res.exitCode,
+            usageLimit: limited,
+            waiting: canWait,
+          },
+        });
+
+        if (canWait) {
+          // Not `snapshot.session.endsAt`. This snapshot predates the cycle, so
+          // it is clean of *this* refusal — but a run that woke at an early
+          // boundary and was refused again scans a tree that already holds the
+          // previous refusal's zero-token record, and that record opens a block
+          // of its own reading as a window five hours out.
+          pausedUntil = refusalResumeAt({
+            boundary: lastSpendingWindowEnd(snapshot),
+            pauseCount: run.pause_count ?? 0,
+            now: Date.now(),
+          });
+          stopReason =
+            "Claude refused the work cycle: the subscription allowance is used up. " +
+            "Waiting for it to refill.";
+          finalStatus = "paused";
+          break;
+        }
+
+        stopReason = limited
+          ? `Claude refused the work cycle: ${refusal}`
+          : `Claude Code refused the request: ${refusal}`;
+        finalStatus = "failed";
         break;
       }
 
@@ -1937,7 +2165,7 @@ export async function startRun(id: string): Promise<void> {
     } else if (incompleteIteration) {
       stopReason = [
         stopReason,
-        "The final work cycle ended before Claude Code reported its cost, so this run's spend is understated.",
+        "A work cycle ended before Claude Code reported its cost, so this run's spend is understated.",
       ]
         .filter(Boolean)
         .join(" ");

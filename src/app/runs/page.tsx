@@ -668,19 +668,20 @@ export default function RunsPage() {
                 )}
                 {resuming && (
                   <div className="hint">
-                    Only the 5-hour percentage is waited out — it refills on its
-                    own within five hours. Everything else ends the run, because
-                    nothing else comes back: your spend, your cycles, the clock
-                    and the weekly window all move one way.
+                    The run steps aside for two things: your own 5-hour
+                    percentage, and Claude refusing a cycle because the
+                    subscription allowance is used up. Everything else ends the
+                    run, because nothing else comes back: your spend, your
+                    cycles, the clock and the weekly window all move one way.
                   </div>
                 )}
               </div>
 
               {resuming && !maxSessionFraction && (
-                <div className="notice" data-tone="warn">
-                  Carrying on into the next window needs a{" "}
-                  <strong>5-hour usage</strong> percentage to step aside at. Set
-                  one above, or choose one of the other two modes.
+                <div className="hint">
+                  Without a 5-hour percentage the run carries on until Claude
+                  itself refuses a cycle, then waits for the allowance to refill.
+                  Set one above to step aside before the wall rather than at it.
                 </div>
               )}
 
@@ -794,8 +795,7 @@ export default function RunsPage() {
                   submitting ||
                   !mountId ||
                   !prompt ||
-                  (!iterationsCapped && !timeLimited) ||
-                  (resuming && !maxSessionFraction)
+                  (!iterationsCapped && !timeLimited)
                 }
               >
                 {submitting ? "Starting…" : "Start run"}

@@ -84,16 +84,12 @@ export async function POST(req: Request) {
     );
   }
 
-  if (policy.enforcement === "live-resume" && policy.maxSessionFraction === null) {
-    return NextResponse.json(
-      {
-        error:
-          "Carrying on into the next window needs a 5-hour usage percentage to " +
-          "step aside at. Without one there is nothing for the run to wait for.",
-      },
-      { status: 400 },
-    );
-  }
+  // A 5-hour percentage used to be required here, on the reasoning that without
+  // one nothing could ever ask the run to step aside. That is no longer true:
+  // the run also steps aside when Claude itself refuses a cycle for want of
+  // allowance, which needs no percentage and no configured ceiling. Requiring
+  // one now would reject exactly the setup that needs this mode most — the
+  // default one, where no ceiling is known and the wall arrives unannounced.
 
   try {
     // createRun admits or queues the run and starts whatever is now startable.
