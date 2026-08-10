@@ -2,9 +2,22 @@
 
 import type { RunDTO } from "./apiTypes";
 
+/**
+ * Badges and notices carry *different* vocabularies — a badge can be `accent`
+ * and a notice cannot, a notice can be `info` and a badge cannot. As untyped
+ * `data-tone` strings a wrong pairing rendered as the default with nothing to
+ * say so; as separate unions it is a compile error.
+ *
+ * These live here rather than beside the components because `src/lib` is what
+ * `tsconfig.test.json` compiles, and a `.tsx` import would drag JSX into the
+ * test build.
+ */
+export type BadgeTone = "neutral" | "ok" | "warn" | "danger" | "accent";
+export type NoticeTone = "neutral" | "info" | "warn" | "danger";
+
 /** Badge tone per run status. Shared so the list and detail pages cannot drift. */
-export const STATUS_TONE: Record<RunDTO["status"], string> = {
-  queued: "",
+export const STATUS_TONE: Record<RunDTO["status"], BadgeTone> = {
+  queued: "neutral",
   running: "accent",
   // Alive *and* needing attention: it will spend money again, unattended, and
   // it is holding a folder meanwhile. "accent" would imply progress and "" would
