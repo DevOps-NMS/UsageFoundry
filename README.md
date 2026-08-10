@@ -448,10 +448,12 @@ Built and exercised against real transcripts:
   is skipped, a missing one is reported as unavailable rather than empty, and a
   run's folder maps back to its workspace even when the mount is reached through
   a symlink.
-- Folder collision (`npm test`, 7 cases): a folder collides with itself, not with
+- Folder collision (`npm test`, 8 cases): a folder collides with itself, not with
   a sibling, with its own parent and child in both directions, with the same
   directory reached through a second workspace, and with a name differing only in
-  case; two isolated checkouts do not collide with each other or with the
+  case; a nested mount reached through an alias keeps its parent-relative prefix,
+  so the one directory named two ways still collides and the parent mount still
+  contains it; two isolated checkouts do not collide with each other or with the
   repository, but all of them collide with a run on the whole workspace.
 - Concurrency, against a real database with a stub agent: two runs on one plain
   folder → the second queues and is promoted automatically when the first ends;
@@ -477,9 +479,10 @@ Built and exercised against real transcripts:
   doubling the reading (13.8% → 27.5%) and converting a 20% guard from allow to
   refuse. Out-of-range input (400%) clamps to 95%.
 
-There is no test framework and no linter in this repo. `npm run typecheck` plus
-a `docker compose up --build` smoke test is the whole verification loop, and the
-list above records what was checked by hand.
+There is no linter run in this repo, and `npm test` covers exactly one thing:
+the folder-collision predicate above. `npm run typecheck` plus a
+`docker compose up --build` smoke test is still the real verification loop, and
+the list above records what was checked by hand.
 
 ---
 
