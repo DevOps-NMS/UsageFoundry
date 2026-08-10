@@ -992,10 +992,14 @@ async function ensureWorktree(run: RunRow): Promise<string> {
     }
     const co = await git(slotPath, ["checkout", "-b", branch, base]);
     if (!co.ok) throw new Error(`Could not start branch ${branch}: ${co.stderr}`);
-  } else if (run.iterations > 0) {
+  } else if (run.iterations > 0 || (run.pause_count ?? 0) > 0) {
     // A resuming run whose checkout has been removed from under it. Creating a
     // fresh one would silently orphan every commit it already made, so name the
     // branch and stop — the work is still in the repository.
+    //
+    // `pause_count` and not `iterations` alone: a cycle the live guard cut
+    // short is refunded to the counter below, so a run parked during its first
+    // cycle is back at zero while its branch very much exists.
     throw new Error(
       `The isolated checkout for this run is gone, but its work is still on branch ${branch}. ` +
         `Inspect it with: git log ${branch}`,
@@ -1836,7 +1840,7 @@ export async function startRun(id: string): Promise<void> {
 
   // Hydrated from the row, not zeroed: this call may be a resume, and the
   // continuation path it then takes (`continuationPrompt` plus `--resume`) is
-  // selected purely by `iterations > 0` and a non-null session id.
+  // selected purely by whether there is a session id to resume into.
   let spentUSD = run.spent_usd;
   let spentTokens = run.spent_tokens;
   let spentEstUSD = run.spent_usd_est;
@@ -1853,7 +1857,9 @@ export async function startRun(id: string): Promise<void> {
   let pausedUntil: number | null = null;
   /** The next prompt should be the DONE pushback rather than the continuation. */
   let justRetriggered = false;
-  const resumedFromPause = iterations > 0;
+  // Not `iterations > 0`: a run parked during its first cycle has that cycle
+  // refunded, so the counter cannot say whether this call is a resume.
+  const resumedFromPause = (run.pause_count ?? 0) > 0;
   let cyclesThisSegment = 0;
   let resumeRetried = false;
 
@@ -1944,8 +1950,13 @@ export async function startRun(id: string): Promise<void> {
       }
 
       iterations += 1;
+      // Keyed on the session, not the counter. A cycle the live guard cut short
+      // is refunded below, so `iterations === 1` would send the original prompt
+      // into a conversation that has already been part-way through the task —
+      // and "there is a session to resume into" is what a continuation actually
+      // means. The two agree for every run that is never interrupted.
       const prompt =
-        iterations === 1
+        sessionId === null
           ? run.isolation === "worktree"
             ? `${settings.isolationPreamble}\n\n${run.prompt}`
             : run.prompt
@@ -2055,6 +2066,15 @@ export async function startRun(id: string): Promise<void> {
       const postCycle = interrupts.get(id);
       if (postCycle) {
         applyInterrupt(postCycle);
+        // A cycle the live guard cut short is refunded to the counter: the
+        // resume continues this same conversation rather than starting fresh
+        // work, and charging it would mean `live-resume` with a single work
+        // cycle could only park and then stop at `cycles` without ever
+        // finishing. `MAX_PAUSES_PER_RUN` bounds the refund, so one cycle is at
+        // most four billed invocations. Only here — `applyInterrupt`'s other
+        // two call sites run *before* the increment above, and refunding there
+        // would discount a cycle that completed.
+        if (postCycle.pause) iterations -= 1;
         break;
       }
 
@@ -2098,6 +2118,9 @@ export async function startRun(id: string): Promise<void> {
             "Claude refused the work cycle: the subscription allowance is used up. " +
             "Waiting for it to refill.";
           finalStatus = "paused";
+          // Refunded for the same reason a guard-interrupted cycle is, and with
+          // more force: the provider refused before any work happened at all.
+          iterations -= 1;
           break;
         }
 
