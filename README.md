@@ -293,12 +293,26 @@ ends — it is recorded as `stopped`, not as a failure.
 ### Picking a run back up
 
 A run that ended — because it crashed, because Claude Code exited non-zero,
-because UsageFoundry restarted under it, because you stopped it, or because it
-hit one of its own limits — has a **Resume** button on its page. It keeps its
-folder, its isolated checkout and branch, its spend so far, and its Claude Code
-session, so it continues the conversation rather than starting a new one. A run
-that died before it had a session to continue starts again from the original
+because UsageFoundry restarted under it, because you stopped it, because it hit
+one of its own limits, or because the agent reported the task done — has a
+button on its page: **Resume**, or **Ask for more** when it completed. It keeps
+its folder, its isolated checkout and branch, its spend so far, and its Claude
+Code session, so it continues the conversation rather than starting a new one. A
+run that died before it had a session to continue starts again from the original
 task instead, and says so.
+
+The form takes a message as well as the limits. Whatever you write is sent
+verbatim as the next turn of the same conversation — that is how you keep
+talking to a run after it has finished, when looking at what it built shows up
+the next thing to ask for. Leave it blank and a run that was cut off mid-task is
+simply told to continue.
+
+A run that reported `DONE` is the one case where blank is not "continue": the
+continuation prompt asks for `DONE` when the work is complete, so replying to a
+`DONE` with it buys an immediate second `DONE` and a billed cycle that did
+nothing. Blank there sends the same pushback prompt as *When Claude says the
+task is done* above — re-read the task, run the tests, fix what fails — which
+you can edit in Settings.
 
 Resuming asks for the limits again, pre-filled from the run, because the usual
 reason a run needs picking up is that its own limits ended it. They are totals,
@@ -307,10 +321,6 @@ and the button refuses and says so rather than queueing a run that would stop
 again on its first check. The time limit is the exception — it runs from the
 moment it starts again, since counting the hours it spent dead would refuse
 every run older than its own limit. Everything else carries over untouched.
-
-A run that reported `DONE` has no Resume button. Sending an agent back into work
-it believes finished needs a different prompt, which is what *When Claude says
-the task is done* above is for.
 
 ---
 
@@ -659,15 +669,20 @@ through before trusting this unattended:
 - Resuming a finished run into a real agent: that `--resume` picks the session
   back up, and that an isolated one lands in its own checkout still on its own
   branch. The refusals around it — an exhausted cycle or spend limit, a checkout
-  another run has taken, a `completed` run offering no button — were checked
-  against the live container.
+  another run has taken — were checked against the live container.
+- Picking a `completed` run back up with a follow-up message: that the note
+  arrives as the next turn of the same conversation rather than as a new task,
+  and that leaving it blank sends the DONE pushback instead of the continuation
+  prompt. The branch that decides this is unit-tested; the delivery to a real
+  CLI is not.
 - `detached: true`: that Ctrl-C during `npm run dev` still kills the agent (via
   the new `instrumentation.ts` handler) and that a long command the agent
   started dies with it.
 
-There is no linter run in this repo, and `npm test` covers four things: the
-folder-collision predicate, which queued runs may start, the budget policy, and
-how a provider refusal is classified and backed off from. `npm run typecheck` plus
+There is no linter run in this repo, and `npm test` covers five things: the
+folder-collision predicate, which queued runs may start, the budget policy, how
+a provider refusal is classified and backed off from, and which prompt a work
+cycle spawns with. `npm run typecheck` plus
 a `docker compose up --build` smoke test is still the real verification loop,
 and the list above records what was checked by hand.
 

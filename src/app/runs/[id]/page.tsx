@@ -47,8 +47,13 @@ function lineFor(e: RunEventDTO): string | null {
       const commits = Array.isArray(p.commits) ? p.commits.length : 0;
       return `⇢ ${commits} commit${commits === 1 ? "" : "s"} on ${p.branch}`;
     }
-    case "status":
-      return `status → ${p.status}${p.stop_reason ? `: ${p.stop_reason}` : ""}`;
+    case "status": {
+      // `message` is what a hand-driven transition says about itself — a
+      // pick-up, a park, a resume. Without it the log shows the status flipping
+      // and nothing about why.
+      const why = p.stop_reason ?? p.message;
+      return `status → ${p.status}${why ? `: ${why}` : ""}`;
+    }
     case "log": {
       const msg = String(p.message ?? "");
       // system:init and friends are noise once the run is underway.
@@ -77,6 +82,7 @@ export default function RunDetail({
   const [reopenCycles, setReopenCycles] = useState("");
   const [reopenCost, setReopenCost] = useState("");
   const [reopenMinutes, setReopenMinutes] = useState("");
+  const [reopenNote, setReopenNote] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
 
@@ -172,6 +178,7 @@ export default function RunDetail({
     setReopenCycles(blankIfNull(run.budget.maxIterations));
     setReopenCost(blankIfNull(run.budget.maxRunCostUSD));
     setReopenMinutes(blankIfNull(run.budget.maxDurationMinutes));
+    setReopenNote("");
     setReopenError(null);
     setStopNote(null);
     setReopenOpen(true);
@@ -193,6 +200,7 @@ export default function RunDetail({
           maxRunCostUSD: asLimit(reopenCost),
           maxDurationMinutes: asLimit(reopenMinutes),
         },
+        followUp: reopenNote,
       }),
     });
     const json = (await res.json().catch(() => ({}))) as { error?: string };
@@ -201,7 +209,11 @@ export default function RunDetail({
       return;
     }
     setReopenOpen(false);
-    setStopNote("Back in the queue — it carries on from where it stopped.");
+    setStopNote(
+      reopenNote.trim()
+        ? "Back in the queue — your note is the first thing it reads."
+        : "Back in the queue — it carries on from where it stopped.",
+    );
   }
 
   if (!run) return <div className="empty">Loading run…</div>;
@@ -212,10 +224,13 @@ export default function RunDetail({
     run.status === "running" ||
     run.status === "queued" ||
     run.status === "paused";
-  // Finished, but with somewhere to carry on from. `completed` is excluded on
-  // purpose: the agent reported the task done, and sending it back in after
-  // that is what `continueAfterDone` is for, with a prompt written for it.
-  const resumable = run.status === "failed" || run.status === "stopped";
+  // Finished, but with somewhere to carry on from — including `completed`: the
+  // agent's judgement that a task is done is not the operator's, and seeing
+  // what it built is usually what shows up the next thing to ask for.
+  const resumable =
+    run.status === "failed" ||
+    run.status === "stopped" ||
+    run.status === "completed";
   const handoff = [...events].reverse().find((e) => e.kind === "handoff");
   const costPct = run.budget.maxRunCostUSD
     ? Math.min(run.spent_usd / run.budget.maxRunCostUSD, 1)
@@ -434,7 +449,7 @@ export default function RunDetail({
           )}
           {resumable && !reopenOpen && (
             <button style={{ marginLeft: "auto" }} onClick={openReopen}>
-              Resume
+              {run.status === "completed" ? "Ask for more" : "Resume"}
             </button>
           )}
           {run.status === "paused" && (
@@ -456,9 +471,28 @@ export default function RunDetail({
         {reopenOpen && (
           <div className="subsection">
             <div className="subsection-title">
-              {run.session_id
-                ? "Carry on from where this run stopped"
-                : "Start this run again from its original task"}
+              {!run.session_id
+                ? "Start this run again from its original task"
+                : run.status === "completed"
+                  ? "Send this run back into the same session"
+                  : "Carry on from where this run stopped"}
+            </div>
+
+            <div className="field">
+              <label htmlFor="re-note">What else needs doing?</label>
+              <textarea
+                id="re-note"
+                value={reopenNote}
+                onChange={(e) => setReopenNote(e.target.value)}
+                placeholder="The retry logic is missing a test for the timeout path."
+              />
+              <div className="hint">
+                {!run.session_id
+                  ? "This run never reported a session to resume, so it starts the original task again with this added to the end."
+                  : run.status === "completed"
+                    ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails."
+                    : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue."}
+              </div>
             </div>
 
             <div className="field">

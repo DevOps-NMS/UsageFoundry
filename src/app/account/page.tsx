@@ -3,6 +3,10 @@
 import { useEffect, useState } from "react";
 import type { AccountResponse } from "@/lib/apiTypes";
 import { fmtTokens, fmtUSD } from "@/lib/format";
+import { Badge } from "@/components/ui/Badge";
+import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
+import { Notice } from "@/components/ui/Notice";
+import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 
 const LIMIT_LABELS: Record<string, string> = {
   requests_per_minute: "Requests / min",
@@ -29,102 +33,102 @@ export default function AccountPage() {
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <div className="empty">Querying the Admin API…</div>;
+  if (loading) return <Empty>Querying the Admin API…</Empty>;
 
   return (
     <>
-      <h1>API account</h1>
-      <p className="lede">
+      <h1 className="mb-1 text-xl font-semibold tracking-tight">API account</h1>
+      <p className="mb-4 max-w-[68ch] text-ink-muted">
         Read straight from Anthropic&apos;s Admin API. Unlike the subscription
         figures on the dashboard, these numbers are authoritative — configured
         rate limits and billed cost, not local estimates.
       </p>
 
       {!data?.configured && (
-        <div className="notice" data-tone="info">
+        <Notice tone="info">
           <strong>Not configured.</strong> {data?.reason}
-        </div>
+        </Notice>
       )}
 
       {data?.configured && data.error && (
-        <div className="notice" data-tone="danger">
+        <Notice tone="danger">
           <strong>Admin API error.</strong> {data.error}
-          <div style={{ marginTop: 6 }}>
-            The Admin API requires an organization Admin key
-            (<span className="mono">sk-ant-admin01-…</span>) and is unavailable to
+          <div className="mt-1.5">
+            The Admin API requires an organization Admin key (
+            <span className="mono">sk-ant-admin01-…</span>) and is unavailable to
             individual accounts. If you only use a Pro/Max subscription, this
             panel will never populate — the dashboard is your view.
           </div>
-        </div>
+        </Notice>
       )}
 
       {data?.configured && !data.error && (
         <>
-          <section className="grid grid-2">
-            <div className="card">
-              <h2 className="card-title">Billed cost — last 30 days</h2>
-              <div className="stat">{fmtUSD(data.cost?.last30dUSD ?? 0)}</div>
-              <div className="stat-sub">
+          <section className="mb-4 grid gap-4 md:grid-cols-2">
+            <Card emphasis="primary">
+              <CardTitle>Billed cost — last 30 days</CardTitle>
+              <Stat size="large">{fmtUSD(data.cost?.last30dUSD ?? 0)}</Stat>
+              <StatSub>
                 from <span className="mono">/v1/organizations/cost_report</span>
-              </div>
-              <div className="hint">
+              </StatSub>
+              <div className="mt-2 text-xs text-ink-faint">
                 Priority Tier spend is billed differently and is not included in
                 this endpoint.
               </div>
-            </div>
+            </Card>
 
-            <div className="card">
-              <h2 className="card-title">Daily cost</h2>
+            <Card>
+              <CardTitle>Daily cost</CardTitle>
               {!data.cost?.daily?.length ? (
-                <div className="empty">No cost data in range.</div>
+                <Empty>No cost data in range.</Empty>
               ) : (
-                <div className="table-wrap" style={{ maxHeight: 200, overflowY: "auto" }}>
-                  <table>
+                <div className="max-h-[200px] overflow-y-auto">
+                  <Table>
                     <tbody>
                       {data.cost.daily
                         .slice()
                         .reverse()
                         .slice(0, 14)
                         .map((d) => (
-                          <tr key={d.date}>
-                            <td className="mono">{d.date.slice(0, 10)}</td>
-                            <td className="num">{fmtUSD(d.usd)}</td>
-                          </tr>
+                          <Tr key={d.date}>
+                            <Td className="mono">{d.date.slice(0, 10)}</Td>
+                            <Td num>{fmtUSD(d.usd)}</Td>
+                          </Tr>
                         ))}
                     </tbody>
-                  </table>
+                  </Table>
                 </div>
               )}
-            </div>
+            </Card>
           </section>
 
-          <section className="card">
-            <h2 className="card-title">Configured rate limits</h2>
+          <Card>
+            <CardTitle>Configured rate limits</CardTitle>
             {!data.rateLimits?.length ? (
-              <div className="empty">No rate limit groups returned.</div>
+              <Empty>No rate limit groups returned.</Empty>
             ) : (
-              <div className="table-wrap">
-                <table>
+              <TableWrap>
+                <Table>
                   <thead>
                     <tr>
-                      <th>Group</th>
-                      <th>Models</th>
-                      <th>Limits</th>
+                      <Th>Group</Th>
+                      <Th>Models</Th>
+                      <Th>Limits</Th>
                     </tr>
                   </thead>
                   <tbody>
                     {data.rateLimits.map((g, i) => (
-                      <tr key={i}>
-                        <td>
-                          <span className="badge">{g.group_type}</span>
-                        </td>
-                        <td className="mono" style={{ maxWidth: 320 }}>
+                      <Tr key={i}>
+                        <Td>
+                          <Badge>{g.group_type}</Badge>
+                        </Td>
+                        <Td className="mono max-w-[320px]">
                           {g.models?.join(", ") ?? "—"}
-                        </td>
-                        <td>
+                        </Td>
+                        <Td>
                           {g.limits.map((l) => (
                             <div key={l.type}>
-                              <span style={{ color: "var(--fg-muted)" }}>
+                              <span className="text-ink-muted">
                                 {LIMIT_LABELS[l.type] ?? l.type}:
                               </span>{" "}
                               <span className="mono">
@@ -132,14 +136,14 @@ export default function AccountPage() {
                               </span>
                             </div>
                           ))}
-                        </td>
-                      </tr>
+                        </Td>
+                      </Tr>
                     ))}
                   </tbody>
-                </table>
-              </div>
+                </Table>
+              </TableWrap>
             )}
-          </section>
+          </Card>
         </>
       )}
     </>

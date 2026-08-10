@@ -13,6 +13,14 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json* ./
+# No --omit=dev: Tailwind's PostCSS plugin is a devDependency and has to be
+# present when the builder stage runs `next build`.
+#
+# No --omit=optional either, ever. Tailwind's oxide engine ships as twelve
+# platform-specific optional packages, and `npm ci` picks the one matching
+# *this* container rather than the host that wrote the lockfile. Regenerating
+# the lockfile without optional deps drops linux-*-gnu and the image build
+# fails on a missing native module.
 RUN npm ci --no-audit --no-fund
 
 # ---------------------------------------------------------------------------

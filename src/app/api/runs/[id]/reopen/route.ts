@@ -8,8 +8,8 @@ export const dynamic = "force-dynamic";
 type Ctx = { params: Promise<{ id: string }> };
 
 /**
- * Put a failed or stopped run back in the queue, under a budget the operator
- * has had a chance to raise.
+ * Put a finished run back in the queue, under a budget the operator has had a
+ * chance to raise, and optionally with something further to say to it.
  *
  * Sibling of `POST /api/runs`, and the budget rules are deliberately the same
  * ones: a reopened run spawns the same agent under the same loop, so anything
@@ -17,6 +17,10 @@ type Ctx = { params: Promise<{ id: string }> };
  * the one field not accepted from the wire — `reopenRun` carries the stored
  * value forward, because reopening is not a reason to open a second route to
  * `--permission-mode`.
+ *
+ * `followUp` is optional and blank is a legitimate answer, not an error: a run
+ * stopped mid-task usually needs nothing said to it, and one that reported
+ * itself complete gets the DONE pushback instead. `reopenRun` decides which.
  *
  * Refusals are 400 with a message rather than the 200-plus-outcome shape the
  * sibling stop/resume routes use: every one of them names something the
@@ -55,7 +59,7 @@ export async function POST(req: Request, ctx: Ctx) {
     );
   }
 
-  const outcome = reopenRun(id, policy);
+  const outcome = reopenRun(id, policy, String(body.followUp ?? ""));
   if (!outcome.ok) {
     return NextResponse.json({ error: outcome.reason }, { status: 400 });
   }

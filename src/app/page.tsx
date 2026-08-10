@@ -1,8 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { Meter } from "@/components/Meter";
+import { Badge } from "@/components/ui/Badge";
+import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
+import { Notice } from "@/components/ui/Notice";
+import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 import type { UsageResponse, WindowStateDTO } from "@/lib/apiTypes";
 import {
   fmtDuration,
@@ -24,61 +28,12 @@ function ceilingDetail(w: WindowStateDTO): string {
   return "Set a ceiling in Settings to see a percentage.";
 }
 
-/**
- * One cost-attribution table. Share is against the window total, and every
- * turn lands in some bucket — including explicit "(main thread)" / "(no skill)"
- * rows — so the column adds to 100% instead of quietly omitting the remainder.
- */
-function Breakdown({
-  title,
-  heading,
-  rows,
-  total,
-  hint,
-}: {
-  title: string;
-  heading: string;
-  rows: Array<{ label: string; cost: number }>;
-  total: number;
-  hint?: string;
-}) {
-  return (
-    <div className="card">
-      <h2 className="card-title">{title}</h2>
-      {rows.length === 0 ? (
-        <div className="empty">No usage in this window.</div>
-      ) : (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>{heading}</th>
-                <th className="num">Cost</th>
-                <th className="num">Share</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.slice(0, 12).map((r) => (
-                <tr key={r.label}>
-                  <td className="mono">{r.label}</td>
-                  <td className="num">{fmtUSD(r.cost)}</td>
-                  <td className="num">
-                    {total > 0 ? fmtPct(r.cost / total) : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-      {hint && <div className="hint">{hint}</div>}
-    </div>
-  );
-}
+type Dimension = "model" | "project" | "effort" | "agent" | "skill";
 
 export default function Dashboard() {
   const [data, setData] = useState<UsageResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [dimension, setDimension] = useState<Dimension>("model");
 
   useEffect(() => {
     let alive = true;
@@ -104,29 +59,76 @@ export default function Dashboard() {
     };
   }, []);
 
+  /**
+   * Five separate cards became one switchable table. They were identical in
+   * shape — a label, a cost, a share of the window — so five of them side by
+   * side spent a screen of vertical space saying "there are five ways to slice
+   * this" rather than showing any one slice well.
+   */
+  const breakdowns = useMemo(() => {
+    if (!data) return null;
+    const s = data.snapshot;
+    return {
+      model: {
+        label: "Model",
+        rows: s.byModel.map((m) => ({ label: m.model, cost: m.agg.costUSD })),
+        hint: undefined as string | undefined,
+      },
+      project: {
+        label: "Project",
+        rows: s.byProject.map((p) => ({
+          label: shortPath(p.project),
+          cost: p.agg.costUSD,
+        })),
+        hint: undefined,
+      },
+      effort: {
+        label: "Effort",
+        rows: s.byEffort.map((r) => ({ label: r.effort, cost: r.agg.costUSD })),
+        hint: "Reasoning effort is usually the largest single cost lever.",
+      },
+      agent: {
+        label: "Sub-agent",
+        rows: s.byAgent.map((r) => ({ label: r.agent, cost: r.agg.costUSD })),
+        hint: data.meta.includeSidechains
+          ? "Sub-agent turns bill separately from the main thread."
+          : "Sub-agent turns are excluded from totals in Settings, so only main-thread work appears here.",
+      },
+      skill: {
+        label: "Skill",
+        rows: s.bySkill.map((r) => ({ label: r.skill, cost: r.agg.costUSD })),
+        hint: undefined,
+      },
+    } satisfies Record<
+      Dimension,
+      { label: string; rows: Array<{ label: string; cost: number }>; hint?: string }
+    >;
+  }, [data]);
+
   if (error) {
     return (
-      <div className="notice" data-tone="danger">
+      <Notice tone="danger">
         <strong>Could not read usage.</strong> {error}
-      </div>
+      </Notice>
     );
   }
 
-  if (!data) {
-    return <div className="empty">Reading transcripts…</div>;
+  if (!data || !breakdowns) {
+    return <Empty>Reading transcripts…</Empty>;
   }
 
   const { snapshot: s, meta } = data;
   const noCeilings = !meta.hasSessionCeiling && !meta.hasWeeklyCeiling;
-
-  const wkTokens = s.weekly.agg.tokens;
   const cacheShare =
-    s.weekly.tokens > 0 ? wkTokens.cacheRead / s.weekly.tokens : null;
+    s.weekly.tokens > 0 ? s.weekly.agg.tokens.cacheRead / s.weekly.tokens : null;
+  const current = breakdowns[dimension];
 
   return (
     <>
-      <h1>Claude Code usage</h1>
-      <p className="lede">
+      <h1 className="mb-1 text-xl font-semibold tracking-tight">
+        Claude Code usage
+      </h1>
+      <p className="mb-4 max-w-[68ch] text-ink-muted">
         Computed from local transcripts in{" "}
         <span className="mono">{shortPath(meta.transcriptDir, 2)}</span> —{" "}
         {meta.entryCount.toLocaleString()} deduplicated turns across{" "}
@@ -142,57 +144,56 @@ export default function Dashboard() {
             one is configured. */}
         {meta.account.label && (
           <>
-            , on <strong>{meta.account.label}</strong>
+            , on{" "}
+            <strong className="font-semibold text-ink">
+              {meta.account.label}
+            </strong>
           </>
         )}
         .
       </p>
 
-      {/* Always shown. The blind spot is structural, not a transient state. */}
-      <div className="notice" data-tone="warn">
+      {/* Always shown — the blind spot is structural, not a transient state.
+          Rendered quiet so the conditional warnings below can outrank it;
+          three equally loud warn blocks trained the eye to skip all three. */}
+      <Notice quiet>
         <strong>This covers Claude Code only.</strong> Your 5-hour and weekly
-        limits are shared with <strong>Cowork</strong>, Claude Desktop, web, and
-        mobile — none of which write anything locally, so none of it appears
-        below. Treat these figures as a <em>floor</em> on your real consumption.
+        limits are shared with <strong>Cowork</strong>, Claude Desktop, web and
+        mobile, none of which write anything locally — so treat these figures as
+        a <em>floor</em> on your real consumption.
         {meta.reservedHeadroomFraction > 0 ? (
           <>
             {" "}
-            You have reserved <strong>
-              {fmtPct(meta.reservedHeadroomFraction)}
-            </strong>{" "}
-            of each window for that invisible usage, so the ceilings below are
-            reduced accordingly.
+            You have reserved{" "}
+            <strong>{fmtPct(meta.reservedHeadroomFraction)}</strong> of each
+            window for it, so the ceilings below are reduced accordingly.
           </>
         ) : (
           <>
             {" "}
-            If you also use those surfaces, set a{" "}
-            <Link href="/settings">reserved headroom</Link> — otherwise a guard
-            can permit a run while your real window is already close to full.
+            <Link href="/settings">Reserve headroom</Link> if you use those too —
+            otherwise a guard can permit a run while your real window is already
+            close to full.
           </>
         )}
-      </div>
+      </Notice>
 
       {noCeilings && (
-        <div className="notice" data-tone="warn">
+        <Notice tone="warn">
           <strong>No limit ceilings configured.</strong> Anthropic publishes no
           numeric value for a Pro/Max limit and offers no endpoint to read one,
           so percentages cannot be shown until you set a ceiling
           {meta.account.label && (
-            <>
-              {" "}
-              — knowing you are on {meta.account.label} does not supply one
-            </>
+            <> — knowing you are on {meta.account.label} does not supply one</>
           )}
-          .{" "}
-          <Link href="/settings">Run Calibrate</Link> to derive one from your own
-          peak usage, or enter a value manually. Volumes and costs below are
+          . <Link href="/settings">Run Calibrate</Link> to derive one from your
+          own peak usage, or enter a value manually. Volumes and costs below are
           exact regardless.
-        </div>
+        </Notice>
       )}
 
       {meta.unpricedModels.length > 0 && (
-        <div className="notice" data-tone="warn">
+        <Notice tone="warn">
           <strong>Unpriced models seen:</strong>{" "}
           <span className="mono">{meta.unpricedModels.join(", ")}</span>. Their
           tokens count toward volume but contribute $0 to cost, so the dollar
@@ -200,24 +201,21 @@ export default function Dashboard() {
           it charges these models a conservative rate instead, which is the
           hatched span on the meters below. A run can therefore be stopped
           before the solid bar looks full.
-        </div>
+        </Notice>
       )}
 
-      <section className="grid grid-2">
-        <div className="card">
-          <h2 className="card-title">
+      {/* The two windows are the page's subject. Everything below is support. */}
+      <section className="mb-4 grid gap-4 md:grid-cols-2">
+        <Card emphasis="primary">
+          <CardTitle>
             5-hour session window
-            {s.session.agg.entryCount > 0 && (
-              <span className="badge" data-tone="accent">
-                active
-              </span>
-            )}
-          </h2>
-          <div className="stat">{fmtUSD(s.session.costUSD)}</div>
-          <div className="stat-sub">
-            {fmtTokens(s.session.tokens)} tokens · {s.session.agg.entryCount} turns
-            · resets {fmtRelative(s.session.endsAt, s.now)}
-          </div>
+            {s.session.agg.entryCount > 0 && <Badge tone="accent">active</Badge>}
+          </CardTitle>
+          <Stat size="large">{fmtUSD(s.session.costUSD)}</Stat>
+          <StatSub>
+            {fmtTokens(s.session.tokens)} tokens · {s.session.agg.entryCount}{" "}
+            turns · resets {fmtRelative(s.session.endsAt, s.now)}
+          </StatSub>
           <Meter
             label="Session consumed"
             fraction={s.session.fraction}
@@ -226,13 +224,13 @@ export default function Dashboard() {
           />
           {s.session.tokenFraction !== null &&
             s.session.fractionMetric === "cost" && (
-              <div className="hint">
+              <div className="mt-1.5 text-xs text-ink-faint">
                 Against the raw-token ceiling: {fmtPct(s.session.tokenFraction)}
               </div>
             )}
           {meta.sessionResetOverrideAt !== null &&
             meta.sessionResetOverrideAt > s.now && (
-              <div className="hint">
+              <div className="mt-1.5 text-xs text-ink-faint">
                 Window start taken from a{" "}
                 <Link href="/settings">manual reset</Link>, not from the
                 transcripts — usage before{" "}
@@ -240,14 +238,14 @@ export default function Dashboard() {
                 this card and from the budget guard.
               </div>
             )}
-        </div>
+        </Card>
 
-        <div className="card">
-          <h2 className="card-title">{s.weekly.label}</h2>
-          <div className="stat">{fmtUSD(s.weekly.costUSD)}</div>
-          <div className="stat-sub">
+        <Card emphasis="primary">
+          <CardTitle>{s.weekly.label}</CardTitle>
+          <Stat size="large">{fmtUSD(s.weekly.costUSD)}</Stat>
+          <StatSub>
             {fmtTokens(s.weekly.tokens)} tokens · {s.weekly.agg.entryCount} turns
-          </div>
+          </StatSub>
           <Meter
             label="Weekly consumed"
             fraction={s.weekly.fraction}
@@ -256,171 +254,136 @@ export default function Dashboard() {
           />
           {s.weekly.tokenFraction !== null &&
             s.weekly.fractionMetric === "cost" && (
-              <div className="hint">
+              <div className="mt-1.5 text-xs text-ink-faint">
                 Against the raw-token ceiling: {fmtPct(s.weekly.tokenFraction)}
               </div>
             )}
-        </div>
+        </Card>
       </section>
 
-      <section className="grid grid-3">
-        <div className="card">
-          <h2 className="card-title">Burn rate</h2>
-          <div className="stat">{fmtUSD(s.burnCostPerHour)}</div>
-          <div className="stat-sub">
-            per hour · {fmtTokens(s.burnTokensPerHour)} tokens/hour
-          </div>
-          <div className="hint">Measured over the trailing 60 minutes.</div>
-        </div>
+      <section className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Card emphasis="quiet">
+          <CardTitle>Burn rate</CardTitle>
+          <Stat>{fmtUSD(s.burnCostPerHour)}</Stat>
+          <StatSub>
+            per hour · trailing 60 minutes
+          </StatSub>
+        </Card>
 
-        <div className="card">
-          <h2 className="card-title">Composition</h2>
-          <div className="stat">{fmtPct(cacheShare)}</div>
-          <div className="stat-sub">of tokens are cache reads</div>
-          <div className="hint">
-            Cache reads bill at 0.1×, so they inflate raw token counts far more
-            than they consume your plan. That is why the meters above are
-            cost-denominated.
-          </div>
-        </div>
-
-        <div className="card">
-          <h2 className="card-title">Projected exhaustion</h2>
-          <div className="stat">
+        <Card emphasis="quiet">
+          <CardTitle>Projected exhaustion</CardTitle>
+          <Stat>
             {s.projectedExhaustionAt
               ? fmtDuration(Math.max(0, s.projectedExhaustionAt - s.now))
               : "—"}
-          </div>
-          <div className="stat-sub">
+          </Stat>
+          <StatSub>
             {s.projectedExhaustionAt
               ? `at the current rate, ${fmtRelative(s.projectedExhaustionAt, s.now)}`
               : noCeilings
                 ? "needs a configured ceiling"
                 : "not projected to run out"}
+          </StatSub>
+        </Card>
+
+        <Card emphasis="quiet">
+          <CardTitle>Cache reads</CardTitle>
+          <Stat>{fmtPct(cacheShare)}</Stat>
+          <StatSub>
+            of tokens · they bill at 0.1×, which is why the meters are
+            cost-denominated
+          </StatSub>
+        </Card>
+
+        <Card emphasis="quiet">
+          <CardTitle>Lifetime recorded</CardTitle>
+          <Stat>{fmtUSD(s.totalCostUSD)}</Stat>
+          <StatSub>equivalent API cost, all local transcripts</StatSub>
+        </Card>
+      </section>
+
+      <Card className="mb-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <CardTitle className="mb-0">
+            Where it went — {s.weekly.label.toLowerCase()}
+          </CardTitle>
+          <div
+            className="flex flex-wrap gap-1"
+            role="tablist"
+            aria-label="Breakdown dimension"
+          >
+            {(Object.keys(breakdowns) as Dimension[]).map((d) => (
+              <button
+                key={d}
+                type="button"
+                role="tab"
+                aria-selected={dimension === d}
+                onClick={() => setDimension(d)}
+                className={`cursor-pointer rounded-full border px-3 py-1 text-xs font-medium ${
+                  dimension === d
+                    ? "border-accent bg-accent-dim text-ink"
+                    : "border-line bg-inset text-ink-muted hover:text-ink"
+                }`}
+              >
+                {breakdowns[d].label}
+              </button>
+            ))}
           </div>
         </div>
 
-        <div className="card">
-          <h2 className="card-title">Lifetime recorded</h2>
-          <div className="stat">{fmtUSD(s.totalCostUSD)}</div>
-          <div className="stat-sub">
-            equivalent API cost across all local transcripts
-          </div>
-        </div>
-      </section>
+        {current.rows.length === 0 ? (
+          <Empty>No usage in this window.</Empty>
+        ) : (
+          <TableWrap>
+            <Table>
+              <thead>
+                <tr>
+                  <Th>{current.label}</Th>
+                  <Th num>Cost</Th>
+                  <Th num>Share</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {/* Every turn lands in some bucket — including explicit
+                    "(main thread)" / "(no skill)" rows — so the column adds to
+                    100% instead of quietly omitting a remainder. */}
+                {current.rows.slice(0, 12).map((r) => (
+                  <Tr key={r.label}>
+                    <Td className="mono">{r.label}</Td>
+                    <Td num>{fmtUSD(r.cost)}</Td>
+                    <Td num>
+                      {s.weekly.costUSD > 0
+                        ? fmtPct(r.cost / s.weekly.costUSD)
+                        : "—"}
+                    </Td>
+                  </Tr>
+                ))}
+              </tbody>
+            </Table>
+          </TableWrap>
+        )}
+        {current.hint && (
+          <div className="mt-2.5 text-xs text-ink-faint">{current.hint}</div>
+        )}
+      </Card>
 
-      <section className="grid grid-2">
-        <div className="card">
-          <h2 className="card-title">By model — {s.weekly.label.toLowerCase()}</h2>
-          {s.byModel.length === 0 ? (
-            <div className="empty">No usage in this window.</div>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Model</th>
-                    <th className="num">Tokens</th>
-                    <th className="num">Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {s.byModel.map((m) => (
-                    <tr key={m.model}>
-                      <td className="mono">{m.model}</td>
-                      <td className="num">
-                        {fmtTokens(
-                          m.agg.tokens.input +
-                            m.agg.tokens.output +
-                            m.agg.tokens.cacheRead +
-                            m.agg.tokens.cacheWrite5m +
-                            m.agg.tokens.cacheWrite1h,
-                        )}
-                      </td>
-                      <td className="num">{fmtUSD(m.agg.costUSD)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div className="card">
-          <h2 className="card-title">By project — {s.weekly.label.toLowerCase()}</h2>
-          {s.byProject.length === 0 ? (
-            <div className="empty">No usage in this window.</div>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Project</th>
-                    <th className="num">Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {s.byProject.slice(0, 12).map((p) => (
-                    <tr key={p.project}>
-                      <td className="mono" title={p.project}>
-                        {shortPath(p.project)}
-                      </td>
-                      <td className="num">{fmtUSD(p.agg.costUSD)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* Attribution Claude Code already records on each turn, so these cover
-          the full history rather than starting from the day they were added. */}
-      <section className="grid grid-3">
-        <Breakdown
-          title="By effort"
-          heading="Effort"
-          rows={s.byEffort.map((r) => ({ label: r.effort, cost: r.agg.costUSD }))}
-          total={s.weekly.costUSD}
-          hint="Reasoning effort is usually the largest single cost lever."
-        />
-        <Breakdown
-          title="By sub-agent"
-          heading="Agent"
-          rows={s.byAgent.map((r) => ({ label: r.agent, cost: r.agg.costUSD }))}
-          total={s.weekly.costUSD}
-          hint={
-            meta.includeSidechains
-              ? "Sub-agent turns bill separately from the main thread."
-              : "Sub-agent turns are currently excluded from totals in Settings, so only main-thread work appears here."
-          }
-        />
-        <Breakdown
-          title="By skill"
-          heading="Skill"
-          rows={s.bySkill.map((r) => ({ label: r.skill, cost: r.agg.costUSD }))}
-          total={s.weekly.costUSD}
-        />
-      </section>
-
-      <section className="card">
-        <h2 className="card-title">Recent 5-hour blocks</h2>
-        <div className="table-wrap">
-          <table>
+      <Card emphasis="quiet">
+        <CardTitle>Recent 5-hour blocks</CardTitle>
+        <TableWrap>
+          <Table>
             <thead>
               <tr>
-                <th>Started</th>
-                <th className="num">Tokens</th>
-                <th className="num">Cost</th>
-                <th className="num">Turns</th>
-                <th>Models</th>
+                <Th>Started</Th>
+                <Th num>Tokens</Th>
+                <Th num>Cost</Th>
+                <Th num>Turns</Th>
+                <Th>Models</Th>
               </tr>
             </thead>
             <tbody>
               {s.blocks.slice(0, 15).map((b) => (
-                <tr key={b.startsAt}>
-                  <td>
+                <Tr key={b.startsAt}>
+                  <Td className="whitespace-nowrap">
                     {new Date(b.startsAt).toLocaleString([], {
                       month: "short",
                       day: "numeric",
@@ -430,13 +393,11 @@ export default function Dashboard() {
                     {b.isActive && (
                       <>
                         {" "}
-                        <span className="badge" data-tone="ok">
-                          live
-                        </span>
+                        <Badge tone="ok">live</Badge>
                       </>
                     )}
-                  </td>
-                  <td className="num">
+                  </Td>
+                  <Td num>
                     {fmtTokens(
                       b.agg.tokens.input +
                         b.agg.tokens.output +
@@ -444,18 +405,18 @@ export default function Dashboard() {
                         b.agg.tokens.cacheWrite5m +
                         b.agg.tokens.cacheWrite1h,
                     )}
-                  </td>
-                  <td className="num">{fmtUSD(b.agg.costUSD)}</td>
-                  <td className="num">{b.agg.entryCount}</td>
-                  <td className="mono">
+                  </Td>
+                  <Td num>{fmtUSD(b.agg.costUSD)}</Td>
+                  <Td num>{b.agg.entryCount}</Td>
+                  <Td className="mono">
                     {b.models.map((m) => m.replace("claude-", "")).join(", ")}
-                  </td>
-                </tr>
+                  </Td>
+                </Tr>
               ))}
             </tbody>
-          </table>
-        </div>
-      </section>
+          </Table>
+        </TableWrap>
+      </Card>
     </>
   );
 }
