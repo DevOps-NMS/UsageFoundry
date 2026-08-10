@@ -72,6 +72,17 @@ export interface Settings {
   isolationCopyGlobs: string[];
   /** Prepended to the first prompt of an isolated run. */
   isolationPreamble: string;
+  /**
+   * Ask agents this app spawns to report their own per-request cost over OTLP.
+   *
+   * Off by default. It turns on telemetry inside a child process and points it
+   * at this server, which is a side effect a user should opt into rather than
+   * discover. When on, a run gets a first-party cost figure per API request
+   * — including requests belonging to an iteration that died before the CLI
+   * emitted its `result` event, which is the one number the run row cannot
+   * otherwise recover.
+   */
+  telemetryForRuns: boolean;
 }
 
 export type PermissionMode =
@@ -108,6 +119,7 @@ const DEFAULTS: Settings = {
   maxConcurrentRuns: null,
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,
+  telemetryForRuns: false,
 };
 
 const KEY = "settings";

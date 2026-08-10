@@ -3,9 +3,10 @@ import path from "node:path";
 import { PROJECTS_DIR } from "./config";
 import {
   type TokenCounts,
-  ZERO_TOKENS,
   costOf,
+  guardCostOf,
   resolvePrice,
+  totalTokens,
 } from "./pricing";
 
 /**
@@ -34,6 +35,12 @@ export interface UsageEntry {
   model: string;
   tokens: TokenCounts;
   costUSD: number;
+  /**
+   * Same cost, but an unpriced model is charged the fallback rate instead of
+   * $0. Read only by the budget guard — never displayed. Identical to
+   * `costUSD` whenever the model is priced, which is the normal case.
+   */
+  costGuardUSD: number;
   /** Absolute path of the project the session ran in. */
   project: string;
   sessionId: string;
@@ -41,6 +48,20 @@ export interface UsageEntry {
   isSidechain: boolean;
   speed?: string;
   serviceTier?: string;
+  /**
+   * Reasoning effort the turn ran at (`low` … `max`). Present on essentially
+   * every turn, and a large cost lever — the same task at `xhigh` and at `low`
+   * are different amounts of money.
+   */
+  effort?: string;
+  /**
+   * Sub-agent that produced the turn (`Explore`, `workflow-subagent`, …), or
+   * undefined for main-thread work. Claude Code records this itself; it is a
+   * finer split than `isSidechain`, which only says "not the main thread".
+   */
+  agent?: string;
+  /** Skill in play when the turn ran (`claude-api`, `init`, …), if any. */
+  skill?: string;
   /**
    * Which Claude Code surface produced the turn (`cli`, `sdk-cli`, …).
    *
@@ -179,14 +200,26 @@ function parseLine(line: string, cwdRef: { value: string }): UsageEntry | null {
     model: model || "unknown",
     tokens,
     costUSD: costOf(tokens, price),
+    costGuardUSD: guardCostOf(tokens, price),
     project: cwdRef.value,
     sessionId: typeof rec.sessionId === "string" ? rec.sessionId : "",
     isSidechain: rec.isSidechain === true,
     speed,
     serviceTier:
       typeof usage.service_tier === "string" ? usage.service_tier : undefined,
+    effort: typeof rec.effort === "string" ? rec.effort : undefined,
+    agent:
+      typeof rec.attributionAgent === "string" ? rec.attributionAgent : undefined,
+    skill:
+      typeof rec.attributionSkill === "string" ? rec.attributionSkill : undefined,
     entrypoint: typeof rec.entrypoint === "string" ? rec.entrypoint : undefined,
-    unpriced: price === null,
+    // A record that consumed no tokens cannot have cost anything, so it is not
+    // evidence that the price table is missing a model. Claude Code writes at
+    // least one such record per machine — `<synthetic>`, with an all-zero usage
+    // block — and counting it would leave the "unpriced models" warning
+    // permanently lit for a model that never spent a cent, blunting the signal
+    // exactly where the budget guard now relies on it.
+    unpriced: price === null && totalTokens(tokens) > 0,
   };
 }
 

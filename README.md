@@ -282,8 +282,52 @@ exactly this workload. Cache reads are billed at 0.1×. Older records with no TT
 split are attributed to the cheaper 5m bucket, so an unsplit record understates
 rather than overstates.
 
-Models with no known price contribute **$0 and are listed in a banner** — dollar
-totals are a floor, never a silent guess.
+Models with no known price contribute **$0 to every reported figure and are
+listed in a banner** — dollar totals are a floor, never a silent guess.
+
+**The budget guard is the one exception, deliberately.** A displayed $0 means a
+window consisting entirely of an unpriced model reads as 0% used, and no
+threshold can ever be crossed — so the guard would quietly cease to exist the
+week a new model ships. For guard purposes only, an unrecognised model is
+charged a conservative **$10/$50 per Mtok**: the most expensive
+current-generation rate in the table, so an unknown can never look cheaper than
+something known. The meters draw that as a hatched band past the solid fill, so
+a run stopped before the visible bar looks full is explained rather than
+mysterious. Nothing shown as a dollar amount is ever the fallback rate.
+
+**Cost attribution.** Beyond model and project, each turn is broken down by
+**reasoning effort**, **sub-agent**, and **skill** — all three recorded by Claude
+Code on the transcript record itself, so the tables cover full history rather
+than starting from the day they were added. Turns with no sub-agent or skill get
+explicit `(main thread)` / `(no skill)` buckets, so every column reconciles to
+the window total instead of quietly omitting a remainder. Effort is typically
+the largest single lever; excluding sub-agent turns in Settings empties the
+by-agent table, which the card says outright.
+
+**Agent self-reporting (optional, off by default).** Claude Code computes a cost
+for every API request and will push it to any OTLP endpoint. Turning on *Agent
+self-reporting* in Settings points agents this app spawns back at this server,
+which records one row per request — a first-party number that needs no price
+table, no dedupe key, and no file polling. It is shown as its own card on the
+run page and is **never** merged into `spent_usd`, the dashboard, or the budget
+guard, all of which stay transcript-derived.
+
+Its one real advantage: per-iteration spend normally comes from the CLI's
+terminal `result` event, so a work cycle killed before that event reports $0.
+Telemetry arrives per request as the run proceeds, so it captures that work. A
+telemetry figure *higher* than the run's own total is the expected outcome of an
+interrupted run, not a discrepancy.
+
+It cannot replace the transcript scan: there is no historical backfill, no `cwd`
+so no per-project attribution, and `cache_creation_tokens` is a single number
+with the 5m/1h split collapsed. The payload also carries `user.email` and
+account UUIDs — none of which are stored.
+
+Provider-decorated model IDs are canonicalised before lookup — Bedrock's
+`us.anthropic.claude-…-v1:0` and Agent Platform's `claude-…@20250929` resolve to
+the same rates as the first-party IDs. No short catch-all keys are used: a
+hypothetical `claude-opus-4` key would price an unreleased `claude-opus-4-9` at
+a confident wrong number instead of surfacing it as unknown.
 
 ---
 
@@ -341,6 +385,61 @@ Built and exercised against real transcripts:
   when cost is cleared; null when neither is set.
 - Budget guard evaluated against the cost fraction — allowed at an 80% guard,
   refused at 5% with the window at 11.2%.
+- Unpriced-model guard fallback, 17 assertions against the compiled modules: a
+  window of 90M output tokens from an unknown model still reports `$0` and
+  `fraction = 0` (so the pre-fix guard could never fire) while `guardFraction`
+  reads 45× a $100 ceiling and the guard blocks with `weekly_fraction`. A fully
+  priced window keeps `guardFraction === fraction` exactly, an under-threshold
+  window is still allowed, and a fraction guard with no ceiling still refuses
+  with `no_ceiling` rather than being satisfied by the fallback.
+- Model-ID canonicalisation: `us.anthropic.claude-opus-5-20260101-v1:0`,
+  `anthropic.claude-sonnet-4-5`, and `claude-sonnet-4-5@20250929` all resolve;
+  `claude-nextgen-9` stays unknown; `claude-opus-4-1` keeps its own $15/$75.
+- A zero-token turn (`<synthetic>`) no longer counts as an unpriced model, and
+  incurs no fallback charge.
+- Attribution tables against real transcripts: effort, sub-agent, and skill each
+  reconcile to the window total to within a rounding error ($138.3639 over 998
+  turns), every turn lands in exactly one bucket per breakdown (998 = 998), and
+  the `groupBy` refactor left `byModel` / `byProject` reconciling as before.
+- Stop path, end to end against a stub CLI that ignores SIGTERM: the run now
+  reaches `stopped` about 8s after the stop (5s escalation + 2s drain grace),
+  where it previously stayed `running` indefinitely. Two independent causes
+  were needed — the `!child.killed` test made the SIGKILL escalation dead code,
+  and even once SIGKILL was delivered, an orphaned grandchild still holding the
+  inherited stdout pipe kept `close` from ever firing, so the iteration is now
+  settled from `exit` as well.
+- Operator stop records `stopped` with the interrupted-cost note in
+  `stop_reason`, not `failed`.
+- Child environment, dumped from a real spawned process: 97 variables reach the
+  agent with `PATH` and `HOME` intact, while a sentinel `ANTHROPIC_ADMIN_KEY`,
+  `UF_AUTH_TOKEN`, and every `OTEL_*` are absent.
+- Normal accounting path unaffected: a stub emitting a `result` event records
+  $0.42 / 35 tokens, completes on `DONE`, and adds no interrupted-cost note.
+- OTLP ingest over HTTP: a captured batch inserts 1 row, replaying it inserts
+  0, a garbage body yields `seen: 0`, and a non-JSON body still returns 200 so
+  the exporter does not retry it forever. The stored row has no column for
+  `user.email` or any account UUID.
+- OTLP transport captured from a real headless `claude -p` run on CLI v2.1.226,
+  not taken from the docs. Telemetry *does* initialise under `-p`; a base
+  endpoint of `/api/otlp` receives `POST /api/otlp/v1/logs` and
+  `/api/otlp/v1/metrics`, so the CLI appends the signal suffix itself; the body
+  is uncompressed `application/json`. The docs name the event
+  `claude_code.api_request`, but on the wire that string is the record *body*
+  and the `event.name` attribute is the bare `api_request` — the parser accepts
+  both. `OTEL_RESOURCE_ATTRIBUTES` lands on the resource *and* on each record,
+  and the parser merges both so run attribution does not depend on which.
+- OTLP parser run against those captured payloads, 13 assertions: extracts the
+  priced request with its `req_…` id, first-party cost, tokens and run id;
+  drops `user.email` / `user.account_uuid` at the parser; a redelivered batch
+  inserts 0 rows (delivery is at-least-once); an unknown run returns null
+  rather than a zero row; and malformed or null payloads return empty instead
+  of throwing, since a rejected batch would be retried forever.
+- Plan detection reads `Claude Max 20x` from `.credentials.json` with no email,
+  name, or account UUID crossing the wire; caches for 60s including misses (the
+  CLI writes these files lazily); and degrades to "plan unknown" with no error
+  when the config directory holds neither file. The legacy `~/.claude.json` is
+  consulted only while the config directory is still the default — a redirected
+  `CLAUDE_HOME` reports no plan rather than the wrong one.
 - Path traversal rejected in every form tested: `../` escape, absolute path
   outside all mounts, a symlink pointing out of the tree, a folder belonging to a
   *different* mount, an unknown mount id, an unmounted workspace, and a path

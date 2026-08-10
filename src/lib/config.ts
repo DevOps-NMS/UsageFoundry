@@ -17,6 +17,30 @@ export const CLAUDE_HOME = env("CLAUDE_HOME", path.join(os.homedir(), ".claude")
 /** Where transcripts live: one subdirectory per project, *.jsonl inside. */
 export const PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
 
+/**
+ * Where the Claude CLI keeps its own config and credential files.
+ *
+ * `CLAUDE_CONFIG_DIR` is the CLI's variable, not ours, and the container sets
+ * it. Falling back to `CLAUDE_HOME` rather than to `~/.claude` directly keeps
+ * the account we report tied to the same tree whose transcripts we parse — a
+ * `CLAUDE_HOME` pointed elsewhere should yield "plan unknown", not the plan of
+ * whoever happens to be logged in on this host.
+ */
+export const CLAUDE_CONFIG_DIR = env("CLAUDE_CONFIG_DIR", CLAUDE_HOME);
+
+/**
+ * Base URL a spawned agent should push its OTLP telemetry to.
+ *
+ * Loopback by default because the agent runs in this same container — the
+ * Dockerfile installs the CLI into the image — so nothing has to be published
+ * for this to work. Claude Code appends `/v1/logs` to whatever base it is
+ * given, which is why this stops at `/api/otlp`.
+ */
+export const OTLP_SELF_URL = env(
+  "OTLP_SELF_URL",
+  `http://127.0.0.1:${env("PORT", "3000")}/api/otlp`,
+);
+
 /** One directory tree the UI may browse and run agents against. */
 export interface WorkspaceMount {
   /** Stable slug used on the wire and as a form value. */

@@ -16,6 +16,8 @@ export interface TokenCountsDTO {
 export interface AggregateDTO {
   tokens: TokenCountsDTO;
   costUSD: number;
+  /** Guard-only cost: unpriced models charged a fallback rate. Never rendered. */
+  costGuardUSD: number;
   entryCount: number;
 }
 
@@ -30,6 +32,13 @@ export interface WindowStateDTO {
   fractionMetric: "cost" | "tokens" | null;
   costFraction: number | null;
   tokenFraction: number | null;
+  /**
+   * What the budget guard compares. Equals `fraction` unless the window holds
+   * a model with no known price, in which case it is higher — the dashboard
+   * draws the gap so the guard's stricter view is visible rather than
+   * surprising.
+   */
+  guardFraction: number | null;
   limit: number | null;
   limitMetric: "tokens" | "cost" | null;
 }
@@ -54,6 +63,9 @@ export interface SnapshotDTO {
   projectedExhaustionAt: number | null;
   byModel: Array<{ model: string; agg: AggregateDTO }>;
   byProject: Array<{ project: string; agg: AggregateDTO }>;
+  byAgent: Array<{ agent: string; agg: AggregateDTO }>;
+  bySkill: Array<{ skill: string; agg: AggregateDTO }>;
+  byEffort: Array<{ effort: string; agg: AggregateDTO }>;
   totalCostUSD: number;
 }
 
@@ -71,7 +83,37 @@ export interface UsageResponse {
     reservedHeadroomFraction: number;
     /** Which Claude Code entrypoints the parsed transcripts came from. */
     entrypoints: string[];
+    /** Whether sub-agent turns are in these totals — the by-agent table depends on it. */
+    includeSidechains: boolean;
+    /**
+     * The subscription the scanned transcripts belong to, when Claude Code's
+     * own state files can be read. All fields null means "plan unknown", which
+     * is a normal state — never an error, and never a ceiling.
+     */
+    account: AccountProfileDTO;
   };
+}
+
+/**
+ * First-party per-request totals for one run, from Claude Code's own OTLP
+ * export. Shown beside `spent_usd`, never merged into it: the two are
+ * independent measurements and their disagreement is the useful part.
+ */
+export interface RunTelemetryDTO {
+  requests: number;
+  costUSD: number;
+  tokens: number;
+  firstAt: number | null;
+  lastAt: number | null;
+}
+
+/** Names a plan. Carries no ceiling, no email, no account UUID. */
+export interface AccountProfileDTO {
+  subscriptionType: string | null;
+  rateLimitTier: string | null;
+  label: string | null;
+  fingerprint: string | null;
+  source: "credentials" | "profile" | null;
 }
 
 /** One top-level directory tree the agent may be pointed at. */
@@ -200,4 +242,5 @@ export interface SettingsDTO {
   maxConcurrentRuns: number | null;
   isolationCopyGlobs: string[];
   isolationPreamble: string;
+  telemetryForRuns: boolean;
 }

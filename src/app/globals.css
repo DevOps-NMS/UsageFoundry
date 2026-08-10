@@ -149,13 +149,21 @@ h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; }
   font-size: 12px; color: var(--fg-muted); margin-bottom: 6px;
 }
 .meter-value { font-variant-numeric: tabular-nums; color: var(--fg); font-weight: 600; }
+.meter-upper { color: var(--fg-muted); font-weight: 500; }
 .meter-track {
   height: 7px; border-radius: 99px;
   background: var(--bg-inset);
   overflow: hidden;
   border: 1px solid var(--border);
+  /* Fills are absolutely positioned so the hatched upper band can sit *behind*
+     the solid known-spend bar. As block siblings the second one would be laid
+     out below the first and clipped away by overflow:hidden. */
+  position: relative;
 }
-.meter-fill { height: 100%; border-radius: 99px; transition: width .4s ease; }
+.meter-fill {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  border-radius: 99px; transition: width .4s ease;
+}
 .meter-fill[data-sev="ok"] { background: var(--ok); }
 .meter-fill[data-sev="warn"] { background: var(--warn); }
 .meter-fill[data-sev="danger"] { background: var(--danger); }

@@ -59,6 +59,35 @@ function migrate(db: Database.Database) {
       payload TEXT NOT NULL
     );
 
+    -- First-party per-request telemetry, pushed by Claude Code over OTLP.
+    --
+    -- A third source, kept apart from the other two exactly as they are kept
+    -- apart from each other: it never feeds buildSnapshot() or evaluateBudget()
+    -- and is never summed with transcript-derived figures. request_id is the
+    -- Anthropic request id and the natural primary key — OTLP delivery is
+    -- at-least-once, so a retried batch must land as a no-op rather than
+    -- double-count.
+    --
+    -- Note what is absent: the payload also carries user.email,
+    -- user.account_uuid and organization.id. None of it is stored. This table
+    -- holds cost and token facts about runs, not an identity record.
+    CREATE TABLE IF NOT EXISTS otlp_requests (
+      request_id            TEXT PRIMARY KEY,
+      ts                    INTEGER NOT NULL,
+      run_id                TEXT,
+      session_id            TEXT,
+      model                 TEXT,
+      cost_usd              REAL NOT NULL DEFAULT 0,
+      input_tokens          INTEGER NOT NULL DEFAULT 0,
+      output_tokens         INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      duration_ms           INTEGER,
+      query_source          TEXT,
+      speed                 TEXT,
+      effort                TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_run_events_run
       ON run_events(run_id, id);
     CREATE INDEX IF NOT EXISTS idx_runs_created
@@ -66,6 +95,8 @@ function migrate(db: Database.Database) {
     -- Every admission decision and every promotion pass reads the active rows.
     CREATE INDEX IF NOT EXISTS idx_runs_status
       ON runs(status);
+    CREATE INDEX IF NOT EXISTS idx_otlp_run
+      ON otlp_requests(run_id, ts);
   `);
 
   // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already

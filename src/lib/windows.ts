@@ -22,23 +22,33 @@ export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 export interface Aggregate {
   tokens: TokenCounts;
   costUSD: number;
+  /**
+   * Cost with unpriced models charged the fallback rate rather than $0.
+   * Consumed only by the budget guard; equal to `costUSD` when every model in
+   * the window is priced. Never render this — `costUSD` is the reported
+   * figure, and it stays a floor rather than a guess.
+   */
+  costGuardUSD: number;
   entryCount: number;
 }
 
 export const ZERO_AGGREGATE: Aggregate = {
   tokens: ZERO_TOKENS,
   costUSD: 0,
+  costGuardUSD: 0,
   entryCount: 0,
 };
 
 export function aggregate(entries: UsageEntry[]): Aggregate {
   let tokens = ZERO_TOKENS;
   let costUSD = 0;
+  let costGuardUSD = 0;
   for (const e of entries) {
     tokens = addTokens(tokens, e.tokens);
     costUSD += e.costUSD;
+    costGuardUSD += e.costGuardUSD;
   }
-  return { tokens, costUSD, entryCount: entries.length };
+  return { tokens, costUSD, costGuardUSD, entryCount: entries.length };
 }
 
 export interface SessionBlock {
@@ -138,6 +148,17 @@ export interface WindowState {
   costFraction: number | null;
   /** Utilisation against the token ceiling, when one is configured. */
   tokenFraction: number | null;
+  /**
+   * What the budget guard compares against its threshold: the same preference
+   * order as `fraction`, but with unpriced models charged the fallback rate.
+   *
+   * Equal to `fraction` whenever every model in the window is priced. When it
+   * is higher, the guard will stop a run before the displayed meter looks
+   * full — the meter shows what is known to have been spent, the guard acts on
+   * what could have been. The dashboard renders the gap rather than letting
+   * the two silently disagree.
+   */
+  guardFraction: number | null;
   /** The ceiling backing `fraction`. */
   limit: number | null;
   limitMetric: "tokens" | "cost" | null;
@@ -189,6 +210,23 @@ function fractionOf(value: number, limit: number | null): number | null {
   return value / limit;
 }
 
+/** Roll entries up under an arbitrary label, most expensive first. */
+function groupBy(
+  entries: UsageEntry[],
+  key: (e: UsageEntry) => string,
+): Array<{ key: string; agg: Aggregate }> {
+  const map = new Map<string, UsageEntry[]>();
+  for (const e of entries) {
+    const k = key(e);
+    const bucket = map.get(k);
+    if (bucket) bucket.push(e);
+    else map.set(k, [e]);
+  }
+  return [...map.entries()]
+    .map(([k, es]) => ({ key: k, agg: aggregate(es) }))
+    .sort((a, b) => b.agg.costUSD - a.agg.costUSD);
+}
+
 export interface UsageSnapshot {
   now: number;
   session: WindowState;
@@ -205,6 +243,12 @@ export interface UsageSnapshot {
   projectedExhaustionAt: number | null;
   byModel: Array<{ model: string; agg: Aggregate }>;
   byProject: Array<{ project: string; agg: Aggregate }>;
+  /** Cost by sub-agent, with main-thread work in its own bucket. */
+  byAgent: Array<{ agent: string; agg: Aggregate }>;
+  /** Cost by skill, with un-skilled turns in their own bucket. */
+  bySkill: Array<{ skill: string; agg: Aggregate }>;
+  /** Cost by reasoning effort — usually the largest single lever. */
+  byEffort: Array<{ effort: string; agg: Aggregate }>;
   totalCostUSD: number;
 }
 
@@ -232,6 +276,10 @@ export function buildSnapshot(
     const costFraction = fractionOf(agg.costUSD, costLimit);
     const tokenFraction = fractionOf(tokens, tokenLimit);
     const useCost = costFraction !== null;
+    // Same ceiling, same preference order — only the numerator differs, so
+    // guardFraction is null exactly when fraction is, and the "no ceiling
+    // configured" refusal keeps working off either.
+    const guardCostFraction = fractionOf(agg.costGuardUSD, costLimit);
 
     return {
       label,
@@ -244,6 +292,7 @@ export function buildSnapshot(
       fractionMetric: useCost ? "cost" : tokenFraction !== null ? "tokens" : null,
       costFraction,
       tokenFraction,
+      guardFraction: guardCostFraction ?? tokenFraction,
       limit: useCost ? costLimit : tokenLimit,
       limitMetric: useCost ? "cost" : tokenFraction !== null ? "tokens" : null,
     };
@@ -306,21 +355,27 @@ export function buildSnapshot(
 
   const projectedExhaustionAt = candidates.length ? Math.min(...candidates) : null;
 
-  const modelMap = new Map<string, UsageEntry[]>();
-  const projectMap = new Map<string, UsageEntry[]>();
-  for (const e of weekEntries) {
-    (modelMap.get(e.model) ?? modelMap.set(e.model, []).get(e.model)!).push(e);
-    const p = e.project || "(unknown)";
-    (projectMap.get(p) ?? projectMap.set(p, []).get(p)!).push(e);
-  }
+  const byModel = groupBy(weekEntries, (e) => e.model).map(({ key, agg }) => ({
+    model: key,
+    agg,
+  }));
+  const byProject = groupBy(weekEntries, (e) => e.project || "(unknown)").map(
+    ({ key, agg }) => ({ project: key, agg }),
+  );
 
-  const byModel = [...modelMap.entries()]
-    .map(([model, es]) => ({ model, agg: aggregate(es) }))
-    .sort((a, b) => b.agg.costUSD - a.agg.costUSD);
-
-  const byProject = [...projectMap.entries()]
-    .map(([project, es]) => ({ project, agg: aggregate(es) }))
-    .sort((a, b) => b.agg.costUSD - a.agg.costUSD);
+  // Attribution Claude Code already records on every turn. Turns with no
+  // sub-agent or skill get an explicit bucket rather than being dropped, so
+  // the rows still add up to the window total and a large "(main thread)"
+  // share reads as the fact it is instead of a gap in the data.
+  const byAgent = groupBy(weekEntries, (e) => e.agent ?? "(main thread)").map(
+    ({ key, agg }) => ({ agent: key, agg }),
+  );
+  const bySkill = groupBy(weekEntries, (e) => e.skill ?? "(no skill)").map(
+    ({ key, agg }) => ({ skill: key, agg }),
+  );
+  const byEffort = groupBy(weekEntries, (e) => e.effort ?? "(unspecified)").map(
+    ({ key, agg }) => ({ effort: key, agg }),
+  );
 
   return {
     now,
@@ -332,6 +387,9 @@ export function buildSnapshot(
     projectedExhaustionAt,
     byModel,
     byProject,
+    byAgent,
+    bySkill,
+    byEffort,
     totalCostUSD: entries.reduce((s, e) => s + e.costUSD, 0),
   };
 }

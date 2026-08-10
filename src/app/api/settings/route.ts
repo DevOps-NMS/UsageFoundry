@@ -85,6 +85,10 @@ export async function PUT(req: Request) {
     if (v) patch.continuationPrompt = v;
   }
 
+  if ("telemetryForRuns" in body) {
+    patch.telemetryForRuns = Boolean(body.telemetryForRuns);
+  }
+
   if ("includeSidechains" in body) {
     patch.includeSidechains = Boolean(body.includeSidechains);
   }

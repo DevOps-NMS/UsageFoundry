@@ -1,15 +1,26 @@
 services:
   usagefoundry:
     build: .
-    image: usagefoundry:latest
-    container_name: usagefoundry
+    # All three default to today's values, so `docker compose up` is unchanged.
+    # Overriding them lets a second instance run alongside the first — to
+    # compare two branches against the same transcripts, for example. Pair them
+    # with `docker compose -p <project>`, which namespaces the data volume so
+    # the two instances do not share a SQLite database:
+    #
+    #   UF_PORT=3100 UF_CONTAINER_NAME=usagefoundry-x UF_IMAGE_TAG=x \
+    #     docker compose -p usagefoundry-x up -d --build
+    #
+    # A distinct UF_IMAGE_TAG matters: sharing one tag means each build moves it
+    # under the other instance's feet.
+    image: usagefoundry:${UF_IMAGE_TAG:-latest}
+    container_name: ${UF_CONTAINER_NAME:-usagefoundry}
 
     # Bound to loopback on purpose. This container holds Claude credentials and
     # can run an agent with write access to mounted code — publishing it on
     # 0.0.0.0 hands both to anyone who can reach the port. Change only if you
     # have set UF_AUTH_TOKEN and put TLS in front.
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${UF_PORT:-3000}:3000"
 
     environment:
       # Set to a long random string to require a token in the UI.

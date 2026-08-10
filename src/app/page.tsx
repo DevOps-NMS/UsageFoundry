@@ -24,6 +24,58 @@ function ceilingDetail(w: WindowStateDTO): string {
   return "Set a ceiling in Settings to see a percentage.";
 }
 
+/**
+ * One cost-attribution table. Share is against the window total, and every
+ * turn lands in some bucket — including explicit "(main thread)" / "(no skill)"
+ * rows — so the column adds to 100% instead of quietly omitting the remainder.
+ */
+function Breakdown({
+  title,
+  heading,
+  rows,
+  total,
+  hint,
+}: {
+  title: string;
+  heading: string;
+  rows: Array<{ label: string; cost: number }>;
+  total: number;
+  hint?: string;
+}) {
+  return (
+    <div className="card">
+      <h2 className="card-title">{title}</h2>
+      {rows.length === 0 ? (
+        <div className="empty">No usage in this window.</div>
+      ) : (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>{heading}</th>
+                <th className="num">Cost</th>
+                <th className="num">Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.slice(0, 12).map((r) => (
+                <tr key={r.label}>
+                  <td className="mono">{r.label}</td>
+                  <td className="num">{fmtUSD(r.cost)}</td>
+                  <td className="num">
+                    {total > 0 ? fmtPct(r.cost / total) : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {hint && <div className="hint">{hint}</div>}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [data, setData] = useState<UsageResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +137,14 @@ export default function Dashboard() {
             (<span className="mono">{meta.entrypoints.join(", ")}</span>)
           </>
         )}
+        {/* Names the plan only. Anthropic publishes no number for a tier, so
+            this never implies a ceiling — the meters stay indeterminate until
+            one is configured. */}
+        {meta.account.label && (
+          <>
+            , on <strong>{meta.account.label}</strong>
+          </>
+        )}
         .
       </p>
 
@@ -117,7 +177,14 @@ export default function Dashboard() {
         <div className="notice" data-tone="warn">
           <strong>No limit ceilings configured.</strong> Anthropic publishes no
           numeric value for a Pro/Max limit and offers no endpoint to read one,
-          so percentages cannot be shown until you set a ceiling.{" "}
+          so percentages cannot be shown until you set a ceiling
+          {meta.account.label && (
+            <>
+              {" "}
+              — knowing you are on {meta.account.label} does not supply one
+            </>
+          )}
+          .{" "}
           <Link href="/settings">Run Calibrate</Link> to derive one from your own
           peak usage, or enter a value manually. Volumes and costs below are
           exact regardless.
@@ -129,7 +196,10 @@ export default function Dashboard() {
           <strong>Unpriced models seen:</strong>{" "}
           <span className="mono">{meta.unpricedModels.join(", ")}</span>. Their
           tokens count toward volume but contribute $0 to cost, so the dollar
-          figures below are a floor.
+          figures below are a floor. The budget guard does not use that floor —
+          it charges these models a conservative rate instead, which is the
+          hatched span on the meters below. A run can therefore be stopped
+          before the solid bar looks full.
         </div>
       )}
 
@@ -151,6 +221,7 @@ export default function Dashboard() {
           <Meter
             label="Session consumed"
             fraction={s.session.fraction}
+            upperFraction={s.session.guardFraction}
             detail={ceilingDetail(s.session)}
           />
           {s.session.tokenFraction !== null &&
@@ -170,6 +241,7 @@ export default function Dashboard() {
           <Meter
             label="Weekly consumed"
             fraction={s.weekly.fraction}
+            upperFraction={s.weekly.guardFraction}
             detail={ceilingDetail(s.weekly)}
           />
           {s.weekly.tokenFraction !== null &&
@@ -291,6 +363,35 @@ export default function Dashboard() {
             </div>
           )}
         </div>
+      </section>
+
+      {/* Attribution Claude Code already records on each turn, so these cover
+          the full history rather than starting from the day they were added. */}
+      <section className="grid grid-3">
+        <Breakdown
+          title="By effort"
+          heading="Effort"
+          rows={s.byEffort.map((r) => ({ label: r.effort, cost: r.agg.costUSD }))}
+          total={s.weekly.costUSD}
+          hint="Reasoning effort is usually the largest single cost lever."
+        />
+        <Breakdown
+          title="By sub-agent"
+          heading="Agent"
+          rows={s.byAgent.map((r) => ({ label: r.agent, cost: r.agg.costUSD }))}
+          total={s.weekly.costUSD}
+          hint={
+            meta.includeSidechains
+              ? "Sub-agent turns bill separately from the main thread."
+              : "Sub-agent turns are currently excluded from totals in Settings, so only main-thread work appears here."
+          }
+        />
+        <Breakdown
+          title="By skill"
+          heading="Skill"
+          rows={s.bySkill.map((r) => ({ label: r.skill, cost: r.agg.costUSD }))}
+          total={s.weekly.costUSD}
+        />
       </section>
 
       <section className="card">

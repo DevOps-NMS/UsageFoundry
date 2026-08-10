@@ -32,7 +32,9 @@ Note that `npm run dev` on the host reads the host's **real** `~/.claude` transc
 
 ## Architecture
 
-Two data sources that are **never summed or mixed in the UI**:
+**Three** data sources now, still **never summed or mixed in the UI**. The third is Claude Code's own OTLP export (`otlp.ts` → `otlp_requests`), opt-in via `settings.telemetryForRuns`, covering only runs this app spawns. It is first-party per-request cost — no price table, no dedupe key, no file polling — and it is the only way to account for a work cycle killed before the CLI's `result` event. It renders as its own card on the run page and must never reach `buildSnapshot()`, `evaluateBudget()`, or `runs.spent_usd`. It cannot replace transcripts: no backfill, no `cwd`, and `cache_creation_tokens` collapses the 5m/1h split. Wire details were captured from a live CLI, not read from the docs — the docs' `claude_code.api_request` is the record *body*, while `event.name` is the bare `api_request`, and `OTEL_RESOURCE_ATTRIBUTES` lands on both the resource and each record. The payload carries `user.email` and account UUIDs; the parser drops them and the schema has no column for them. `request_id` is the primary key because OTLP delivery is at-least-once, and the ingest route always answers 200 — a batch exporter retries failures, so rejecting a malformed record would cost that batch on a loop.
+
+The two original sources:
 
 | | Subscription view | API-account view |
 |---|---|---|
@@ -67,11 +69,19 @@ Events flow: `emit()` writes to `run_events` **and** publishes on a `globalThis`
 
 **Cost is the primary metric; raw tokens are the fallback.** A Claude Code workload is ~98% cache reads at 0.1×, so a token-denominated ceiling tracks conversation length rather than work. `WindowState` exposes both `costFraction` and `tokenFraction`, but `fraction`/`limitMetric` prefer cost whenever a cost ceiling exists.
 
-**Unpriced models contribute $0 and are named.** `resolvePrice` returns `null` for unknown models rather than guessing; `scanUsage` collects `unpricedModels` and the dashboard banners them. Dollar totals are a documented floor.
+**Unpriced models contribute $0 to everything displayed, and are named.** `resolvePrice` returns `null` for unknown models rather than guessing; `costOf(t, null)` is `0`; `scanUsage` collects `unpricedModels` and the dashboard banners them. Dollar totals are a documented floor.
+
+**…but the guard charges them a fallback rate, because a floor is not a guard.** A window made entirely of an unpriced model has `costUSD === 0`, so `costFraction` is exactly `0` and no threshold can ever be crossed — the guard would silently stop existing the week a new model ships. `guardCostOf()` charges `UNKNOWN_MODEL_PRICE` ($10/$50, the priciest *current-generation* rate, so an unknown can never look cheaper than a known model), which flows through `Aggregate.costGuardUSD` → `WindowState.guardFraction` → the threshold comparisons in `evaluateBudget`. Keep the split absolute: `costUSD`/`fraction` are what the user is shown, `costGuardUSD`/`guardFraction` are what the guard acts on, and the two are identical whenever every model is priced. `Meter`'s `upperFraction` renders the gap as a hatched band — do not drop it, or a run gets refused at a threshold the visible bar has not reached. The `no_ceiling` refusal still reads `fraction`: a missing ceiling is a configuration fact, not a pricing one.
+
+**Canonicalise model IDs, never truncate them.** `canonicalModelId()` strips region and vendor prefixes (`us.anthropic.`) and normalises `@date` to `-date`, so Bedrock and Agent Platform IDs resolve to the same rates as first-party ones. Do **not** add short catch-all keys like `claude-opus-4` — a future `claude-opus-4-9` would then be priced at a confident wrong number instead of surfacing as unknown, turning a loud failure into a quiet one.
+
+**Naming the plan is not setting a ceiling.** `account.ts` reads Claude Code's own `.credentials.json` / `.claude.json` to *name* the subscription ("Claude Max 20x"). A tier maps to no published number, so this must never become a ceiling, never populate `DEFAULTS`, and never suppress the indeterminate meter. Both files are undocumented internals of another program — written lazily, mode 0600, possibly replaced by the macOS Keychain — so every read is try/catch to `null`, misses are cached only briefly, and the profile is projected to plan strings before it reaches `apiTypes.ts` (the source objects carry email, display name, and UUIDs). The legacy `~/.claude.json` is consulted only while `CLAUDE_CONFIG_DIR` is still the default: once it is redirected, that file describes whoever is logged in on the host rather than the account whose transcripts are being scanned, and a confident wrong plan name is worse than none.
 
 **Reserved headroom is applied in exactly one place.** `limitConfig()` subtracts it so meters, guards, and the exhaustion projection all agree. Raw configured values stay on `Settings` for display. Capped at 0.95.
 
 **Per-iteration spend comes from the CLI's own `result` event** (`total_cost_usd`), not re-derived from tokens. The transcript-derived cost math in `pricing.ts` serves the dashboard; the two are independent on purpose.
+
+**Attribution comes from the transcript, not from telemetry.** `effort`, `attributionAgent`, and `attributionSkill` are on the assistant record already, so `byEffort`/`byAgent`/`bySkill` cover full history with no collector, no config, and no second source to reconcile. Before adding a breakdown, check whether the field is already on the record — `agentId`, `gitBranch`, `usage.server_tool_use`, and `message.stop_reason` are all still unread. All five rollups go through one `groupBy()` in `windows.ts`, and every turn must land in a bucket (`(main thread)`, `(no skill)`, `(unspecified)`) so each column reconciles to the window total rather than silently omitting a remainder.
 
 **Transcript parsing details that materially change the numbers:**
 - Dedupe key is `${message.id}:${requestId}`, applied across files (a resumed session copies earlier turns forward). Naive summing over-reports by ~3×.

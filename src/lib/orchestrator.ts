@@ -7,6 +7,7 @@ import fs from "node:fs";
 import {
   CLAUDE_BIN,
   GIT_BIN,
+  OTLP_SELF_URL,
   WORKSPACE_MOUNTS,
   mountById,
   type WorkspaceMount,
@@ -1076,6 +1077,14 @@ interface IterationResult {
   sessionId: string | null;
   finalText: string;
   isError: boolean;
+  /**
+   * Whether the CLI's terminal `result` event arrived. Cost and tokens come
+   * only from that event, so when it is missing — operator stop, crash, OOM —
+   * this iteration contributes $0 to the run's totals despite having burned
+   * real tokens. The run reports that rather than presenting the understated
+   * figure as fact.
+   */
+  sawResult: boolean;
 }
 
 function buildArgs(opts: {
@@ -1091,6 +1100,75 @@ function buildArgs(opts: {
   return args;
 }
 
+/**
+ * Environment for the spawned agent.
+ *
+ * The child is a full Claude Code session with tool access, so it can read its
+ * own environment and so can anything it runs. Two classes are withheld:
+ *
+ *   `UF_*`, `ANTHROPIC_ADMIN_KEY` — UsageFoundry's own configuration. The
+ *   Admin API key is an organisation-wide credential with no bearing on the
+ *   task the agent was given, and `UF_AUTH_TOKEN` is the shared secret
+ *   guarding this app. Excluding the whole `UF_` namespace means a future
+ *   setting is withheld by default rather than by remembering to add it here.
+ *
+ *   `OTEL_*`, `CLAUDE_CODE_ENABLE_TELEMETRY` — telemetry routing is this
+ *   app's decision, not an inheritance from whoever started the server.
+ *   Otherwise an operator's ambient collector silently receives every run.
+ *
+ * Everything else passes through. The CLI needs PATH, HOME, CLAUDE_CONFIG_DIR,
+ * proxy and CA settings, and locale to function at all, so an allowlist would
+ * fail in ways that are tedious to diagnose from inside a container.
+ */
+function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: "0" };
+  for (const key of Object.keys(env)) {
+    if (
+      key.startsWith("UF_") ||
+      key.startsWith("OTEL_") ||
+      key === "ANTHROPIC_ADMIN_KEY" ||
+      key === "CLAUDE_CODE_ENABLE_TELEMETRY"
+    ) {
+      delete env[key];
+    }
+  }
+  return { ...env, ...extra };
+}
+
+/**
+ * Telemetry variables for a run, or nothing when the setting is off.
+ *
+ * `childEnv` strips inherited `OTEL_*`, so these are the only ones that reach
+ * the agent — telemetry routing is decided here or not at all. The base URL
+ * carries no signal suffix because the CLI appends `/v1/logs` itself.
+ *
+ * When `UF_AUTH_TOKEN` is set the exporter authenticates like any other
+ * client, which is why `middleware.ts` needs no exemption for the ingest path.
+ */
+function telemetryEnv(runId: string): Record<string, string> {
+  if (!getSettings().telemetryForRuns) return {};
+
+  const headers: Record<string, string> = process.env.UF_AUTH_TOKEN
+    ? {
+        OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${process.env.UF_AUTH_TOKEN}`,
+      }
+    : {};
+
+  return {
+    CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+    OTEL_LOGS_EXPORTER: "otlp",
+    OTEL_EXPORTER_OTLP_PROTOCOL: "http/json",
+    OTEL_EXPORTER_OTLP_ENDPOINT: OTLP_SELF_URL,
+    // Well under the default 5s, so a killed iteration loses less of its
+    // final batch. It cannot be eliminated: a SIGKILL flushes nothing.
+    OTEL_LOGS_EXPORT_INTERVAL: "1000",
+    // Stamped onto every record so a request can be attributed to this run.
+    // Interactive sessions carry no such attribute and stay unattributed.
+    OTEL_RESOURCE_ATTRIBUTES: `uf.run_id=${runId}`,
+    ...headers,
+  };
+}
+
 function runIteration(
   runId: string,
   cwd: string,
@@ -1101,7 +1179,7 @@ function runIteration(
     // quotes, backticks, or semicolons is inert rather than interpreted.
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {
       cwd,
-      env: { ...process.env, FORCE_COLOR: "0" },
+      env: childEnv(telemetryEnv(runId)),
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -1114,6 +1192,7 @@ function runIteration(
       sessionId: null,
       finalText: "",
       isError: false,
+      sawResult: false,
     };
 
     let stdoutBuf = "";
@@ -1210,6 +1289,7 @@ function handleStreamLine(runId: string, line: string, acc: IterationResult) {
 
   if (type === "result") {
     // Authoritative per-iteration accounting from the CLI itself.
+    acc.sawResult = true;
     const cost = Number(ev.total_cost_usd ?? 0);
     if (Number.isFinite(cost)) acc.costUSD += cost;
 
@@ -1291,6 +1371,7 @@ export async function startRun(id: string): Promise<void> {
   let finalStatus: RunStatus = "completed";
   let lastExit = 0;
   let workDir = workDirOf(run);
+  let incompleteIteration = false;
 
   // Everything that can throw belongs inside the try. Parsing the budget blob
   // outside it used to leave the row stuck at 'running' with the finally never
@@ -1394,6 +1475,7 @@ export async function startRun(id: string): Promise<void> {
       lastExit = res.exitCode;
       spentUSD += res.costUSD;
       spentTokens += res.tokens;
+      incompleteIteration = !res.sawResult;
       if (res.sessionId) sessionId = res.sessionId;
 
       db()
@@ -1444,6 +1526,18 @@ export async function startRun(id: string): Promise<void> {
   } finally {
     procs.delete(id);
     cancelled.delete(id);
+    // Spend is only ever read from the CLI's `result` event, so an iteration
+    // killed before that event lands contributes $0. Say so rather than let
+    // the total read as measured fact. The dashboard's transcript-derived
+    // figures are unaffected and remain the more complete number.
+    if (incompleteIteration) {
+      stopReason = [
+        stopReason,
+        "The final work cycle ended before Claude Code reported its cost, so this run's spend is understated.",
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
     setStatus(id, finalStatus, {
       finished_at: Date.now(),
       stop_reason: stopReason,
