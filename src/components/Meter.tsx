@@ -43,6 +43,7 @@ export function Meter({
   fraction,
   upperFraction,
   detail,
+  value,
   unknownHint = "no ceiling set",
   compact = false,
 }: {
@@ -50,6 +51,12 @@ export function Meter({
   fraction: number | null;
   upperFraction?: number | null;
   detail?: string;
+  /**
+   * Replaces the percentage in the head, for readings where the raw pair says
+   * more than the ratio does ("2/5" over "40.0%"). Ignored when the fraction is
+   * unknown — that state must keep saying so rather than showing any number.
+   */
+  value?: string;
   unknownHint?: string;
   compact?: boolean;
 }) {
@@ -69,11 +76,11 @@ export function Meter({
     : clamped;
 
   return (
-    <div className={compact ? "mt-1.5" : "mt-2.5"}>
+    <div className={compact ? "mt-2.5 first:mt-0" : "mt-2.5"}>
       <div className="mb-1.5 flex items-baseline justify-between text-xs text-ink-muted">
         <span>{label}</span>
         <span className="font-semibold tabular-nums text-ink">
-          {known ? fmtPct(fraction) : unknownHint}
+          {known ? (value ?? fmtPct(fraction)) : unknownHint}
           {hasUpper && (
             <span className="font-medium text-ink-muted">
               {" "}

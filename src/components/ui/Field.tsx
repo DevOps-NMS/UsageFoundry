@@ -7,9 +7,18 @@ import type {
   TextareaHTMLAttributes,
 } from "react";
 
-const CONTROL =
-  "w-full rounded-sm border border-line bg-inset px-2.5 py-2 text-sm text-ink " +
+/**
+ * Width is deliberately not in here. Two width utilities on one element do not
+ * resolve by their order in the class attribute — they resolve by their order
+ * in the generated stylesheet — so composing `CONTROL w-auto` silently kept
+ * `w-full` and collapsed the sibling input to nothing. Each caller states its
+ * own width exactly once.
+ */
+const CONTROL_BASE =
+  "rounded-sm border border-line bg-inset px-2.5 py-2 text-sm text-ink " +
   "focus:border-accent focus:outline-none focus:ring-[3px] focus:ring-accent-dim";
+
+const CONTROL = `w-full ${CONTROL_BASE}`;
 
 export function Field({
   label,
@@ -123,7 +132,7 @@ export function LimitField({
   return (
     <div className="flex items-center gap-2">
       <select
-        className={`${CONTROL} w-auto shrink-0`}
+        className={`${CONTROL_BASE} w-auto shrink-0`}
         value={enabled ? "on" : "off"}
         onChange={(e) => onEnabledChange(e.target.value === "on")}
         aria-label={modeLabel}
@@ -138,7 +147,7 @@ export function LimitField({
             type="number"
             min={min}
             step={step}
-            className={`${CONTROL} min-w-0 flex-1`}
+            className={`${CONTROL_BASE} w-full min-w-0 flex-1`}
             value={value}
             onChange={(e) => onValueChange(e.target.value)}
           />
