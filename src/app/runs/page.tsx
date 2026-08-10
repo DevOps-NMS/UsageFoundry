@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import type {
   FoldersResponse,
   RunDTO,
@@ -11,19 +10,16 @@ import type {
   WorkspaceFolderDTO,
   WorkspaceMountDTO,
 } from "@/lib/apiTypes";
-import { fmtDateTime, fmtPct, fmtTokens, fmtUSD, shortPath } from "@/lib/format";
-
-const STATUS_TONE: Record<RunDTO["status"], string> = {
-  queued: "",
-  running: "accent",
-  completed: "ok",
-  stopped: "warn",
-  blocked: "warn",
-  failed: "danger",
-};
+import {
+  STATUS_TONE,
+  fmtDateTime,
+  fmtPct,
+  fmtTokens,
+  fmtUSD,
+  shortPath,
+} from "@/lib/format";
 
 export default function RunsPage() {
-  const router = useRouter();
   const [runs, setRuns] = useState<RunDTO[]>([]);
   const [mounts, setMounts] = useState<WorkspaceMountDTO[]>([]);
   const [allFolders, setAllFolders] = useState<WorkspaceFolderDTO[]>([]);
@@ -32,10 +28,12 @@ export default function RunsPage() {
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [started, setStarted] = useState<RunDTO | null>(null);
 
   const [mountId, setMountId] = useState("");
   const [folder, setFolder] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [isolate, setIsolate] = useState(true);
   const [permissionMode, setPermissionMode] = useState("acceptEdits");
   const [maxIterations, setMaxIterations] = useState("5");
   const [maxRunCostUSD, setMaxRunCostUSD] = useState("5");
@@ -48,28 +46,41 @@ export default function RunsPage() {
     if (res.ok) setRuns((await res.json()).runs);
   }, []);
 
-  useEffect(() => {
-    loadRuns();
-    const t = setInterval(loadRuns, 4000);
-    return () => clearInterval(t);
-  }, [loadRuns]);
+  // Folders carry occupancy, so this is refetched alongside the run list rather
+  // than only at mount — otherwise the "busy" markers freeze at page load.
+  const refreshFolders = useCallback(async () => {
+    try {
+      const res = await fetch("/api/folders", { cache: "no-store" });
+      const d = (await res.json()) as FoldersResponse;
+      setMounts(d.mounts ?? []);
+      setAllFolders(d.folders ?? []);
+      setFoldersLoaded(true);
+      return d;
+    } catch {
+      setFoldersLoaded(true);
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
-    fetch("/api/folders")
-      .then((r) => r.json())
-      .then((d: FoldersResponse) => {
-        setMounts(d.mounts ?? []);
-        setAllFolders(d.folders ?? []);
-        setFoldersLoaded(true);
-        // Prefer the first mount that actually has something in it, so a
-        // configured-but-empty mount does not look like the whole UI is broken.
-        const first =
-          d.mounts?.find((m) => m.available && m.folderCount > 0) ??
-          d.mounts?.find((m) => m.available) ??
-          d.mounts?.[0];
-        if (first) setMountId(first.id);
-      })
-      .catch(() => setFoldersLoaded(true));
+    loadRuns();
+    const t = setInterval(() => {
+      loadRuns();
+      refreshFolders();
+    }, 4000);
+    return () => clearInterval(t);
+  }, [loadRuns, refreshFolders]);
+
+  useEffect(() => {
+    refreshFolders().then((d) => {
+      // Prefer the first mount that actually has something in it, so a
+      // configured-but-empty mount does not look like the whole UI is broken.
+      const first =
+        d?.mounts?.find((m) => m.available && m.folderCount > 0) ??
+        d?.mounts?.find((m) => m.available) ??
+        d?.mounts?.[0];
+      if (first) setMountId(first.id);
+    });
 
     fetch("/api/settings")
       .then((r) => r.json())
@@ -96,6 +107,23 @@ export default function RunsPage() {
     [allFolders, mountId],
   );
 
+  const selectedFolder = useMemo(
+    () => folders.find((f) => f.path === folder) ?? null,
+    [folders, folder],
+  );
+
+  // Isolation needs a repository to branch from. Offering the choice on a plain
+  // folder would promise parallelism the folder cannot give.
+  const canIsolate = folder !== "" && selectedFolder?.isGitRepo === true;
+
+  const activeRuns = useMemo(
+    () => runs.filter((r) => r.status === "running" || r.status === "queued"),
+    [runs],
+  );
+
+  const occupant = canIsolate && isolate ? null : selectedFolder?.busyRunId ?? null;
+  const rootOccupant = folder === "" ? activeMount?.busyRunId ?? null : null;
+
   // Switching mounts invalidates the selected subfolder — fall back to the
   // mount's own root rather than carrying a path that lives somewhere else.
   function selectMount(id: string) {
@@ -113,6 +141,7 @@ export default function RunsPage() {
     e.preventDefault();
     setSubmitting(true);
     setFormError(null);
+    setStarted(null);
     try {
       const res = await fetch("/api/runs", {
         method: "POST",
@@ -122,6 +151,7 @@ export default function RunsPage() {
           folder,
           prompt,
           permissionMode,
+          isolate: canIsolate ? isolate : false,
           budget: {
             maxIterations,
             maxRunCostUSD,
@@ -134,7 +164,14 @@ export default function RunsPage() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error ?? "Failed to start run");
-      router.push(`/runs/${json.run.id}`);
+
+      // Stay put rather than following the new run. Several runs at once is the
+      // normal case now, and navigating away after each one makes starting the
+      // next a round trip back.
+      setStarted(json.run as RunDTO);
+      setPrompt("");
+      await loadRuns();
+      await refreshFolders();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -221,6 +258,8 @@ export default function RunsPage() {
                   <option key={f.path} value={f.path}>
                     {f.path}
                     {f.isGitRepo ? "  (git)" : ""}
+                    {f.busyRunId ? "  · busy" : ""}
+                    {f.queuedCount ? `  · ${f.queuedCount} waiting` : ""}
                   </option>
                 ))}
               </select>
@@ -235,6 +274,62 @@ export default function RunsPage() {
                         folders.length === 1 ? "" : "s"
                       } found${activeMount?.truncated ? " (list truncated)" : ""}.`}
               </div>
+              {folder === "" && (
+                <div className="hint">
+                  Starting at the top of the workspace takes the whole tree: no
+                  run in any folder inside it can start until this one finishes.
+                </div>
+              )}
+              {rootOccupant && (
+                <div className="hint" style={{ color: "var(--warn)" }}>
+                  A run is already working somewhere in this workspace, so this
+                  one will wait for it.
+                </div>
+              )}
+            </div>
+
+            <div className="field">
+              <label htmlFor="isolate">Isolation</label>
+              <select
+                id="isolate"
+                value={canIsolate && isolate ? "worktree" : "direct"}
+                onChange={(e) => setIsolate(e.target.value === "worktree")}
+                disabled={!canIsolate}
+              >
+                <option value="worktree">
+                  Own checkout — run alongside other runs
+                </option>
+                <option value="direct">
+                  Work in the folder itself — one run at a time
+                </option>
+              </select>
+              <div className="hint">
+                {!canIsolate ? (
+                  folder === "" ? (
+                    "The whole workspace is not a repository, so runs here take turns."
+                  ) : selectedFolder ? (
+                    "Not a git repository, so runs here take turns — a second run waits for the first."
+                  ) : (
+                    "Pick a folder to choose how it runs."
+                  )
+                ) : isolate ? (
+                  <>
+                    Claude gets its own git worktree on a new branch, so several
+                    runs can work on this project at once. It starts from the
+                    last commit — uncommitted work stays in your checkout, and
+                    dependencies are installed fresh the first time.
+                  </>
+                ) : (
+                  "Claude edits this folder directly, so only one run at a time can use it."
+                )}
+              </div>
+              {occupant && (
+                <div className="hint" style={{ color: "var(--warn)" }}>
+                  This folder is in use.{" "}
+                  <Link href={`/runs/${occupant}`}>See the run holding it</Link>{" "}
+                  — yours will start when it finishes.
+                </div>
+              )}
             </div>
 
             <div className="field">
@@ -385,6 +480,25 @@ export default function RunsPage() {
               </div>
             )}
 
+            {started && (
+              <div
+                className="notice"
+                data-tone={started.status === "queued" ? "warn" : "info"}
+              >
+                {started.status === "queued" ? (
+                  <>
+                    Queued behind {started.queuePosition ?? 0} other run
+                    {(started.queuePosition ?? 0) === 1 ? "" : "s"} for that
+                    folder — it starts on its own.{" "}
+                  </>
+                ) : (
+                  <>Started. </>
+                )}
+                <Link href={`/runs/${started.id}`}>Open it</Link>, or start
+                another.
+              </div>
+            )}
+
             <div className="btn-row">
               <button type="submit" disabled={submitting || !mountId || !prompt}>
                 {submitting ? "Starting…" : "Start run"}
@@ -395,6 +509,44 @@ export default function RunsPage() {
 
         <div className="card">
           <h2 className="card-title">History</h2>
+
+          {activeRuns.length > 0 && (
+            <div className="subsection">
+              <div className="subsection-title">Running now</div>
+              <div className="table-wrap">
+                <table>
+                  <tbody>
+                    {activeRuns.map((r) => (
+                      <tr key={r.id}>
+                        <td>
+                          <span className="badge" data-tone={STATUS_TONE[r.status]}>
+                            {r.status === "queued"
+                              ? `waiting · ${r.queuePosition ?? 0} ahead`
+                              : r.status}
+                          </span>
+                        </td>
+                        <td className="mono" title={r.work_dir ?? r.folder}>
+                          <Link href={`/runs/${r.id}`}>
+                            {r.relPath || r.mountLabel || shortPath(r.folder, 2)}
+                          </Link>
+                          {r.isolation === "worktree" && (
+                            <span style={{ color: "var(--fg-faint)" }}>
+                              {" "}
+                              · own checkout
+                            </span>
+                          )}
+                        </td>
+                        <td className="num">
+                          {r.iterations}/{r.max_iterations}
+                        </td>
+                        <td className="num">{fmtUSD(r.spent_usd)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
           {runs.length === 0 ? (
             <div className="empty">No runs yet.</div>
           ) : (

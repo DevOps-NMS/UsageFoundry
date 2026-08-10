@@ -3,16 +3,14 @@
 import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { RunDTO, RunEventDTO } from "@/lib/apiTypes";
-import { fmtClock, fmtDateTime, fmtTokens, fmtUSD, shortPath } from "@/lib/format";
-
-const STATUS_TONE: Record<string, string> = {
-  queued: "",
-  running: "accent",
-  completed: "ok",
-  stopped: "warn",
-  blocked: "warn",
-  failed: "danger",
-};
+import {
+  STATUS_TONE,
+  fmtClock,
+  fmtDateTime,
+  fmtTokens,
+  fmtUSD,
+  shortPath,
+} from "@/lib/format";
 
 /** Render one event as a single log line. */
 function lineFor(e: RunEventDTO): string | null {
@@ -42,6 +40,10 @@ function lineFor(e: RunEventDTO): string | null {
       } turns`;
     case "error":
       return `✗ ${p.message}`;
+    case "handoff": {
+      const commits = Array.isArray(p.commits) ? p.commits.length : 0;
+      return `⇢ ${commits} commit${commits === 1 ? "" : "s"} on ${p.branch}`;
+    }
     case "status":
       return `status → ${p.status}${p.stop_reason ? `: ${p.stop_reason}` : ""}`;
     case "log": {
@@ -63,6 +65,7 @@ export default function RunDetail({
   const [run, setRun] = useState<RunDTO | null>(null);
   const [events, setEvents] = useState<RunEventDTO[]>([]);
   const [connected, setConnected] = useState(false);
+  const [stopNote, setStopNote] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
 
@@ -113,12 +116,23 @@ export default function RunDetail({
   }
 
   async function stop() {
-    await fetch(`/api/runs/${id}`, { method: "DELETE" });
+    const res = await fetch(`/api/runs/${id}`, { method: "DELETE" });
+    const json = (await res.json().catch(() => ({}))) as { outcome?: string };
+    // Between work cycles there is no child to signal, but the run still stops
+    // at the next check — say so rather than leaving the button looking inert.
+    setStopNote(
+      json.outcome === "signalled"
+        ? "Stopping the current work cycle…"
+        : json.outcome === "cancelled"
+          ? "Stopping — it will not start another work cycle."
+          : "This run is not active.",
+    );
   }
 
   if (!run) return <div className="empty">Loading run…</div>;
 
   const active = run.status === "running" || run.status === "queued";
+  const handoff = [...events].reverse().find((e) => e.kind === "handoff");
   const costPct = run.budget.maxRunCostUSD
     ? Math.min(run.spent_usd / run.budget.maxRunCostUSD, 1)
     : null;
@@ -140,6 +154,32 @@ export default function RunDetail({
         <Link href="/runs">back to runs</Link>
       </p>
 
+      {run.status === "queued" && (
+        <div className="notice" data-tone="warn">
+          <strong>Waiting for its folder.</strong>{" "}
+          {(run.queuePosition ?? 0) === 0
+            ? "It is next in line and starts as soon as the run ahead of it finishes."
+            : `${run.queuePosition} other run${
+                run.queuePosition === 1 ? "" : "s"
+              } are ahead of it.`}
+        </div>
+      )}
+
+      {run.isolation === "worktree" && run.worktree_branch && (
+        <div className="notice" data-tone="info">
+          <strong>Isolated checkout.</strong> This run works on branch{" "}
+          <span className="mono">{run.worktree_branch}</span>, not in your copy
+          of the folder — so other runs can use the same project at the same
+          time. Nothing lands in your checkout until you merge it.
+        </div>
+      )}
+
+      {stopNote && (
+        <div className="notice" data-tone="info">
+          {stopNote}
+        </div>
+      )}
+
       {run.stop_reason && (
         <div
           className="notice"
@@ -149,6 +189,54 @@ export default function RunDetail({
             {run.status === "blocked" ? "Refused to start:" : "Stopped:"}
           </strong>{" "}
           {run.stop_reason}
+        </div>
+      )}
+
+      {handoff && (
+        <div className="card">
+          <h2 className="card-title">Where the work landed</h2>
+          {Array.isArray(handoff.payload.commits) &&
+          handoff.payload.commits.length > 0 ? (
+            <div className="log" style={{ maxHeight: 160 }}>
+              {(handoff.payload.commits as string[]).map((c) => (
+                <div className="log-line" key={c}>
+                  <span className="log-body">{c}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty">
+              The agent made no commits on this branch.
+            </div>
+          )}
+
+          {Array.isArray(handoff.payload.uncommitted) &&
+            handoff.payload.uncommitted.length > 0 && (
+              <div className="notice" data-tone="warn">
+                <strong>Uncommitted changes left in the checkout.</strong> They
+                are not on the branch, so a merge will not bring them over.
+              </div>
+            )}
+
+          <div className="subsection">
+            <div className="subsection-title">Review it</div>
+            {(handoff.payload.review as string[]).map((c) => (
+              <div className="mono" key={c}>
+                {c}
+              </div>
+            ))}
+          </div>
+
+          <div className="subsection">
+            <div className="subsection-title">Bring it in</div>
+            {handoff.payload.merge ? (
+              <div className="mono">{String(handoff.payload.merge)}</div>
+            ) : (
+              <div className="hint" style={{ color: "var(--warn)" }}>
+                {String(handoff.payload.mergeBlocked)}
+              </div>
+            )}
+          </div>
         </div>
       )}
 

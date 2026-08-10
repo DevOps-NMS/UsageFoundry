@@ -51,6 +51,27 @@ export interface Settings {
   continuationPrompt: string;
   /** Whether to include sub-agent (sidechain) turns in usage totals. */
   includeSidechains: boolean;
+  /**
+   * How many runs may be active at once. Null means no limit.
+   *
+   * A concurrency knob, not a usage ceiling — the no-default-ceilings rule
+   * above does not apply, because unlike a limit this number is not a guess at
+   * something Anthropic knows and we do not. It does move the spend bound
+   * though: each run carries its own `maxRunCostUSD`, so N runs can overshoot
+   * by N work cycles rather than one.
+   */
+  maxConcurrentRuns: number | null;
+  /**
+   * Gitignored files copied into a fresh checkout, newest-wins glob order.
+   *
+   * A worktree contains committed work only, so an isolated agent would
+   * otherwise start with no environment file and fail its first command. Kept
+   * narrow on purpose: build output and dependency trees are rebuilt by the
+   * agent, and copying them would be slow and stale.
+   */
+  isolationCopyGlobs: string[];
+  /** Prepended to the first prompt of an isolated run. */
+  isolationPreamble: string;
 }
 
 export type PermissionMode =
@@ -63,6 +84,16 @@ export const DEFAULT_CONTINUATION_PROMPT =
   "Continue working on the task. If it is fully complete and verified, reply " +
   "with exactly DONE on its own line and make no further changes.";
 
+/**
+ * Without this, the expected outcome of an isolated run is uncommitted edits in
+ * a hidden directory the folder picker deliberately skips — the operator looks
+ * at their repository, sees nothing changed, and concludes the run did nothing.
+ */
+export const DEFAULT_ISOLATION_PREAMBLE =
+  "You are working in a dedicated git worktree on your own branch, not in the " +
+  "user's checkout. Commit your work as you go, with clear messages; anything " +
+  "left uncommitted will not be visible to the user.";
+
 const DEFAULTS: Settings = {
   sessionCostLimit: null,
   weeklyCostLimit: null,
@@ -74,6 +105,9 @@ const DEFAULTS: Settings = {
   defaultModel: null,
   continuationPrompt: DEFAULT_CONTINUATION_PROMPT,
   includeSidechains: true,
+  maxConcurrentRuns: null,
+  isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
+  isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,
 };
 
 const KEY = "settings";

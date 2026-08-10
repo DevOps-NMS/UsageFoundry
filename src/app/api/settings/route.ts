@@ -89,5 +89,28 @@ export async function PUT(req: Request) {
     patch.includeSidechains = Boolean(body.includeSidechains);
   }
 
+  if ("maxConcurrentRuns" in body) {
+    const n = optionalNumber(body.maxConcurrentRuns);
+    // Blank means no limit, matching every other switchable rule. Floor at 1 so
+    // a typed 0 cannot wedge every run behind a cap nothing can satisfy.
+    patch.maxConcurrentRuns = n === null ? null : Math.max(1, Math.floor(n));
+  }
+
+  if ("isolationCopyGlobs" in body) {
+    const raw = body.isolationCopyGlobs;
+    const list = Array.isArray(raw)
+      ? raw.map((g) => String(g).trim()).filter(Boolean)
+      : String(raw ?? "")
+          .split(/[\n,]/)
+          .map((g) => g.trim())
+          .filter(Boolean);
+    patch.isolationCopyGlobs = list;
+  }
+
+  if ("isolationPreamble" in body) {
+    const v = String(body.isolationPreamble ?? "").trim();
+    if (v) patch.isolationPreamble = v;
+  }
+
   return NextResponse.json({ settings: saveSettings(patch) });
 }

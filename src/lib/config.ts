@@ -128,6 +128,9 @@ export const ADMIN_API_KEY = env("ANTHROPIC_ADMIN_KEY", "");
 /** Path to the Claude Code executable inside the container. */
 export const CLAUDE_BIN = env("CLAUDE_BIN", "claude");
 
+/** Path to git, used to give concurrent runs their own checkout. */
+export const GIT_BIN = env("GIT_BIN", "git");
+
 export const ANTHROPIC_API_BASE = env("ANTHROPIC_API_BASE", "https://api.anthropic.com");
 
 export const USER_AGENT = "UsageFoundry/0.1.0";

@@ -5,6 +5,12 @@ import { DATA_DIR, DB_PATH } from "./config";
 /**
  * SQLite persistence. Single-writer, single-process — matching the fact that
  * this ships as one container serving one operator.
+ *
+ * The single-process part is now load-bearing rather than incidental: the
+ * folder claim that keeps two agents out of one directory is a synchronous
+ * check-then-insert in `createRun`, which is only atomic because one Node
+ * event-loop turn runs to completion. Running two app processes against this
+ * file would silently allow the collision the claim exists to prevent.
  */
 
 const globalDb = globalThis as unknown as { __ufDb?: Database.Database };
@@ -57,7 +63,36 @@ function migrate(db: Database.Database) {
       ON run_events(run_id, id);
     CREATE INDEX IF NOT EXISTS idx_runs_created
       ON runs(created_at DESC);
+    -- Every admission decision and every promotion pass reads the active rows.
+    CREATE INDEX IF NOT EXISTS idx_runs_status
+      ON runs(status);
   `);
+
+  // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already
+  // exists, and `ALTER TABLE ADD COLUMN` throws "duplicate column name" on the
+  // second boot. With no version table, checking the live schema is the only
+  // idempotent option.
+  addColumn(db, "runs", "session_id", "TEXT");
+  addColumn(db, "runs", "work_dir", "TEXT");
+  addColumn(db, "runs", "isolation", "TEXT");
+  addColumn(db, "runs", "repo_root", "TEXT");
+  addColumn(db, "runs", "worktree_path", "TEXT");
+  addColumn(db, "runs", "worktree_branch", "TEXT");
+  addColumn(db, "runs", "worktree_base", "TEXT");
+}
+
+function addColumn(
+  db: Database.Database,
+  table: string,
+  col: string,
+  decl: string,
+) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as {
+    name: string;
+  }[];
+  if (!cols.some((c) => c.name === col)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+  }
 }
 
 export function db(): Database.Database {

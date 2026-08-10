@@ -194,7 +194,61 @@ it stays `iteration`.
 Guards are checked **between** iterations, not during one. A Claude Code turn
 cannot be interrupted mid-flight without losing its work, so what this gives you
 is *"no new work starts past the threshold"* — **not** *"spend never exceeds the
-threshold"*. Overshoot is bounded by one iteration. Size the cap accordingly.
+threshold"*. Overshoot is bounded by one iteration **per run that was active at
+the time**. Size the cap accordingly.
+
+That last clause is the part concurrency changes. `maxRunCostUSD` applies to each
+run separately, so three runs with a $5 limit each is a $15 worst case, not $5.
+Set **Runs allowed at the same time** in Settings if you want that bounded; it is
+unlimited by default, and a run over the limit waits rather than being refused.
+
+Stopping a run signals the current work cycle and prevents any further one. If
+the stop lands between cycles there is no process to signal, but the run still
+ends — it is recorded as `stopped`, not as a failure.
+
+---
+
+## Two runs, one project
+
+Several runs can be in flight at once. What happens when two of them want the
+same folder depends on whether that folder is a git repository.
+
+**A git repository — they run in parallel.** Each run gets its own `git worktree`
+on its own branch, under `.uf-worktrees/` beside the repository, and works there.
+Your own checkout is never touched: your uncommitted changes stay yours, and you
+stay on your branch. When the run ends you get a handoff card with the commands
+to review the branch and, if your checkout is clean, to merge it. **UsageFoundry
+never merges anything itself.**
+
+Two consequences worth knowing before you rely on it:
+
+- A worktree starts from your **last commit**. Uncommitted work is not carried
+  over, and neither is anything gitignored — no `node_modules`, no build output.
+  Your `.env` files are copied across (configurable in Settings) so the first
+  command does not fail on a missing variable; everything else the agent installs
+  itself. Checkouts are reused between runs, so that cost is paid once per slot.
+- Work the agent leaves **uncommitted** stays in the worktree and never reaches
+  your branch. That is why the isolated-run preamble tells it to commit as it
+  goes — keep that instruction if you edit the wording.
+
+You can turn this off per run with **Isolation → work in the folder itself**, in
+which case it behaves like the case below.
+
+**Anything else — they take turns.** A plain folder has no repository to branch
+from, so a second run on it is **queued**, not refused, and starts on its own when
+the folder frees up. The folder picker marks what is busy and what is waiting, and
+the run page shows a queued run's position in line.
+
+"The same folder" is more inclusive than string equality, deliberately: a run
+started on the **whole workspace** holds every folder inside it, two workspaces
+pointing at one directory count as one, and on macOS a name differing only in case
+is the same folder. Queueing is strictly first-come — a run waiting on the whole
+workspace is not overtaken by smaller runs submitted after it.
+
+If the server restarts mid-run, the run is closed out as failed rather than left
+holding its folder forever, and the stop reason carries the `claude --resume`
+command to pick the session up by hand. Queued runs are cancelled rather than
+started later, so nothing spawns unattended from a prompt you have forgotten about.
 
 ### Budget policy
 
@@ -295,6 +349,27 @@ Built and exercised against real transcripts:
   is skipped, a missing one is reported as unavailable rather than empty, and a
   run's folder maps back to its workspace even when the mount is reached through
   a symlink.
+- Folder collision (`npm test`, 7 cases): a folder collides with itself, not with
+  a sibling, with its own parent and child in both directions, with the same
+  directory reached through a second workspace, and with a name differing only in
+  case; two isolated checkouts do not collide with each other or with the
+  repository, but all of them collide with a run on the whole workspace.
+- Concurrency, against a real database with a stub agent: two runs on one plain
+  folder → the second queues and is promoted automatically when the first ends;
+  a run on a different folder starts immediately; a run on the workspace root
+  queues behind both and still runs rather than being starved; `session_id` is
+  persisted.
+- Isolation, against a real repository with uncommitted work and a gitignored
+  `.env`: two runs on one repo both start, in different slots, each on its own
+  `uf/…` branch; the seeded `.env` is present in the checkout; the operator's
+  modified file and current branch are untouched; `.uf-worktrees/` does not
+  appear in `git status`.
+- Restart recovery: a row left `running` is closed out as `failed` with the
+  `claude --resume <id>` command in its stop reason, freeing the folder.
+- Concurrency limit and stopping: with the limit at 1, runs on two further idle
+  folders queue rather than being refused, and exactly one is promoted when a
+  slot frees; stopping a live run records `stopped` rather than `failed`, and a
+  run whose agent leaves a grandchild holding its output still terminates.
 - The **standalone** build (what the container runs) boots and serves, native
   SQLite binding included.
 - **One real billed run**, end to end: 1 iteration, exit 0, stopped at the

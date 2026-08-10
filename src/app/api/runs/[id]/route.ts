@@ -3,6 +3,7 @@ import {
   describeFolder,
   getRun,
   isRunning,
+  queuePosition,
   runEvents,
   stopRun,
 } from "@/lib/orchestrator";
@@ -19,10 +20,17 @@ export async function GET(req: Request, ctx: Ctx) {
 
   const after = Number(new URL(req.url).searchParams.get("after") ?? 0);
 
-  const { mountLabel, relPath } = describeFolder(run.folder);
+  const { mountId, mountLabel, relPath } = describeFolder(run.folder);
 
   return NextResponse.json({
-    run: { ...run, budget: JSON.parse(run.budget), mountLabel, relPath },
+    run: {
+      ...run,
+      budget: JSON.parse(run.budget),
+      mountId,
+      mountLabel,
+      relPath,
+      queuePosition: run.status === "queued" ? queuePosition(id) : undefined,
+    },
     running: isRunning(id),
     events: runEvents(id, Number.isFinite(after) ? after : 0),
   });
@@ -33,6 +41,8 @@ export async function DELETE(_req: Request, ctx: Ctx) {
   const run = getRun(id);
   if (!run) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const killed = stopRun(id);
-  return NextResponse.json({ ok: true, signalled: killed });
+  // "cancelled" is a success, not a fallback: between work cycles there is no
+  // child to signal and the loop stops on its own at the next check.
+  const outcome = stopRun(id);
+  return NextResponse.json({ ok: outcome !== "not-active", outcome });
 }
