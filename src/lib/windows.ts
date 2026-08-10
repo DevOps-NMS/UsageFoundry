@@ -67,25 +67,59 @@ function floorToHour(ts: number): number {
 }
 
 /**
+ * Turn an operator-supplied reset instant into the block boundary it implies.
+ *
+ * Anthropic restarts the 5-hour window on events that leave no trace in a
+ * transcript — changing subscription tier is the known one — and from then on
+ * the boundary derived from the entries is measuring against a window that no
+ * longer exists. The transcripts cannot be corrected, so the reset instant the
+ * user reads out of `/usage` is carried as configuration instead, and the
+ * window it opened started five hours before it.
+ */
+function anchorOf(sessionResetAt: number | null): number | null {
+  return sessionResetAt === null ? null : sessionResetAt - FIVE_HOURS_MS;
+}
+
+/**
  * Group entries into 5-hour session blocks.
  *
  * A block opens at the first entry (floored to the hour) and runs for five
  * hours. It also closes early if more than five hours pass with no activity,
  * which is what Claude Code does — an idle gap ends the session rather than
  * carrying the window forward.
+ *
+ * `sessionResetAt` forces a boundary: a block open at that moment is closed
+ * there, and the block that follows starts at the reset rather than at its own
+ * first entry floored to the hour. Splitting rather than filtering keeps the
+ * pre-reset work in history, where it did happen and did count.
  */
 export function buildSessionBlocks(
   entries: UsageEntry[],
   now = Date.now(),
+  sessionResetAt: number | null = null,
 ): SessionBlock[] {
+  const anchor = anchorOf(sessionResetAt);
   const blocks: SessionBlock[] = [];
   let current: UsageEntry[] = [];
   let blockStart = 0;
   let lastTs = 0;
 
+  const startFor = (ts: number) =>
+    anchor !== null && ts >= anchor && ts < anchor + FIVE_HOURS_MS
+      ? anchor
+      : floorToHour(ts);
+
   const flush = () => {
     if (current.length === 0) return;
-    const endsAt = blockStart + FIVE_HOURS_MS;
+    // A block that was still open when the provider reset the window ended
+    // there, not five hours after its own first entry — so it also stops being
+    // the active block, which is the whole point of the override.
+    const endsAt =
+      anchor !== null &&
+      blockStart < anchor &&
+      anchor < blockStart + FIVE_HOURS_MS
+        ? anchor
+        : blockStart + FIVE_HOURS_MS;
     blocks.push({
       startsAt: blockStart,
       endsAt,
@@ -100,16 +134,17 @@ export function buildSessionBlocks(
 
   for (const e of entries) {
     if (current.length === 0) {
-      blockStart = floorToHour(e.ts);
+      blockStart = startFor(e.ts);
       current = [e];
       lastTs = e.ts;
       continue;
     }
     const pastWindow = e.ts >= blockStart + FIVE_HOURS_MS;
     const idleGap = e.ts - lastTs >= FIVE_HOURS_MS;
-    if (pastWindow || idleGap) {
+    const crossedReset = anchor !== null && blockStart < anchor && e.ts >= anchor;
+    if (pastWindow || idleGap || crossedReset) {
       flush();
-      blockStart = floorToHour(e.ts);
+      blockStart = startFor(e.ts);
       current = [e];
     } else {
       current.push(e);
@@ -256,9 +291,15 @@ export function buildSnapshot(
   entries: UsageEntry[],
   limits: LimitConfig,
   now = Date.now(),
+  sessionResetAt: number | null = null,
 ): UsageSnapshot {
-  const blocks = buildSessionBlocks(entries, now);
+  const blocks = buildSessionBlocks(entries, now, sessionResetAt);
   const activeBlock = blocks.find((b) => b.isActive) ?? null;
+  const anchor = anchorOf(sessionResetAt);
+  // Live only until the reset it names; a stale value keeps splitting history
+  // but must never re-open a window that has already rolled over.
+  const anchorIsCurrent =
+    anchor !== null && anchor <= now && now < anchor + FIVE_HOURS_MS;
 
   /**
    * Build a window, preferring the cost ceiling. Both fractions are exposed so
@@ -298,7 +339,11 @@ export function buildSnapshot(
     };
   };
 
-  const sessionStart = activeBlock ? activeBlock.startsAt : floorToHour(now);
+  const sessionStart = activeBlock
+    ? activeBlock.startsAt
+    : anchorIsCurrent
+      ? anchor
+      : floorToHour(now);
   const sessionAgg = activeBlock ? activeBlock.agg : ZERO_AGGREGATE;
 
   const wkStart = weekStart(now, limits.weeklyAnchor);

@@ -6,6 +6,7 @@ import {
   WORKSPACE_ROOT,
   CLAUDE_HOME,
 } from "@/lib/config";
+import { FIVE_HOURS_MS } from "@/lib/windows";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -66,6 +67,30 @@ export async function PUT(req: Request) {
         hourUTC <= 23
           ? { weekday, hourUTC }
           : null;
+    }
+  }
+
+  if ("sessionResetOverrideAt" in body) {
+    const raw = body.sessionResetOverrideAt;
+    if (raw === null || raw === undefined || raw === "") {
+      patch.sessionResetOverrideAt = null;
+    } else {
+      const at = Number(raw);
+      // A window resets five hours after it opens and it cannot have opened in
+      // the future, so anything past now+5h describes no window at all — almost
+      // always a date typo. Refusing beats storing it: it would silently blank
+      // the session meter the moment its anchor arrived.
+      if (!Number.isFinite(at) || at <= 0 || at > Date.now() + FIVE_HOURS_MS) {
+        return NextResponse.json(
+          {
+            error:
+              "sessionResetOverrideAt must be a past or near-future epoch " +
+              `(no more than 5 hours ahead); got ${String(raw)}.`,
+          },
+          { status: 400 },
+        );
+      }
+      patch.sessionResetOverrideAt = at;
     }
   }
 

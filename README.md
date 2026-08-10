@@ -53,6 +53,16 @@ happens outside the terminal. Capped at 95%.
 
 Numbers below are always a **floor** on real consumption.
 
+**It also cannot see a window that was reset for you.** The 5-hour block is
+derived from your own turns: it opens at the first one after a gap and runs five
+hours. Changing subscription tier restarts that window on Anthropic's side, and
+nothing about it is written to a transcript — the entries still describe one
+continuous block while the limit is being enforced against a window that started
+later. Settings → *5-hour window reset (override)* takes the reset time
+`/usage` prints and splits the block there: earlier work stays in history but
+leaves the current window and the budget guard. It is inert once that reset has
+passed, and the weekly quota is not touched.
+
 ### Ceilings are denominated in cost, not tokens
 
 A Claude Code workload is **~98% cache reads**, which bill at 0.1×. A raw-token

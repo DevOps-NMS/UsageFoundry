@@ -17,7 +17,12 @@ export async function GET() {
       ? scan.entries
       : scan.entries.filter((e) => !e.isSidechain);
 
-    const snapshot = buildSnapshot(entries, limitConfig(settings), Date.now());
+    const snapshot = buildSnapshot(
+      entries,
+      limitConfig(settings),
+      Date.now(),
+      settings.sessionResetOverrideAt,
+    );
 
     return NextResponse.json({
       snapshot,
@@ -32,6 +37,7 @@ export async function GET() {
         hasWeeklyCeiling:
           settings.weeklyCostLimit !== null || settings.weeklyTokenLimit !== null,
         reservedHeadroomFraction: settings.reservedHeadroomFraction ?? 0,
+        sessionResetOverrideAt: settings.sessionResetOverrideAt,
         includeSidechains: settings.includeSidechains,
         account,
         entrypoints: [

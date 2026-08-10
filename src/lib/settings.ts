@@ -29,6 +29,23 @@ export interface Settings {
   weeklyTokenLimit: number | null;
   weeklyAnchor: WeeklyAnchor | null;
   /**
+   * Epoch ms at which the provider's current 5-hour window resets, when the
+   * transcripts cannot show it.
+   *
+   * The window normally opens at the first turn after a gap, which is why it is
+   * derived rather than configured. But Anthropic restarts it on a subscription
+   * change, and that event appears nowhere in a transcript: the entries still
+   * describe one continuous block while the limit is being enforced against a
+   * window that started later. Setting the reset instant printed by `/usage`
+   * splits the block there, so the meter and the guard measure the window that
+   * is actually in force.
+   *
+   * Not a ceiling and not an estimate — it is an observed fact the local data
+   * happens not to contain, so it is exempt from the no-default-numbers rule
+   * above. It still defaults to null: a wrong value here is worse than none.
+   */
+  sessionResetOverrideAt: number | null;
+  /**
    * Fraction of each window (0–1) held back for usage this tool cannot see.
    *
    * The 5-hour and weekly limits are shared across Claude Code, Cowork, Claude
@@ -111,6 +128,7 @@ const DEFAULTS: Settings = {
   sessionTokenLimit: null,
   weeklyTokenLimit: null,
   weeklyAnchor: null,
+  sessionResetOverrideAt: null,
   reservedHeadroomFraction: null,
   defaultPermissionMode: "acceptEdits",
   defaultModel: null,

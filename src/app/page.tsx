@@ -230,6 +230,16 @@ export default function Dashboard() {
                 Against the raw-token ceiling: {fmtPct(s.session.tokenFraction)}
               </div>
             )}
+          {meta.sessionResetOverrideAt !== null &&
+            meta.sessionResetOverrideAt > s.now && (
+              <div className="hint">
+                Window start taken from a{" "}
+                <Link href="/settings">manual reset</Link>, not from the
+                transcripts — usage before{" "}
+                {new Date(s.session.startsAt).toLocaleString()} is excluded from
+                this card and from the budget guard.
+              </div>
+            )}
         </div>
 
         <div className="card">

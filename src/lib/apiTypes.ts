@@ -81,6 +81,13 @@ export interface UsageResponse {
     hasWeeklyCeiling: boolean;
     /** Headroom reserved for surfaces this tool cannot observe (0–1). */
     reservedHeadroomFraction: number;
+    /**
+     * Manual 5-hour reset instant, when one is configured. Present so the
+     * session card can say the window was anchored by hand rather than derived
+     * — a meter that silently disagrees with the transcripts is worse than no
+     * override at all.
+     */
+    sessionResetOverrideAt: number | null;
     /** Which Claude Code entrypoints the parsed transcripts came from. */
     entrypoints: string[];
     /** Whether sub-agent turns are in these totals — the by-agent table depends on it. */
@@ -233,6 +240,8 @@ export interface SettingsDTO {
   sessionTokenLimit: number | null;
   weeklyTokenLimit: number | null;
   weeklyAnchor: { weekday: number; hourUTC: number } | null;
+  /** Epoch ms of a provider-side 5-hour reset the transcripts cannot show. */
+  sessionResetOverrideAt: number | null;
   reservedHeadroomFraction: number | null;
   defaultPermissionMode: string;
   defaultModel: string | null;

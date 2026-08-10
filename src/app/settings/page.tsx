@@ -20,10 +20,21 @@ interface CalibrateResponse {
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
+const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
+
+/** Epoch ms → the `YYYY-MM-DDTHH:mm` a datetime-local input wants, in local time. */
+function toLocalInput(ms: number | null): string {
+  if (ms === null) return "";
+  const d = new Date(ms);
+  const local = new Date(ms - d.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 export default function SettingsPage() {
   const [s, setS] = useState<SettingsDTO | null>(null);
   const [env, setEnv] = useState<Record<string, unknown>>({});
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [cal, setCal] = useState<CalibrateResponse | null>(null);
   const [calBusy, setCalBusy] = useState(false);
@@ -42,6 +53,7 @@ export default function SettingsPage() {
   function patch(p: Partial<SettingsDTO>) {
     setS((prev) => (prev ? { ...prev, ...p } : prev));
     setSaved(false);
+    setSaveError(null);
   }
 
   async function save() {
@@ -54,8 +66,15 @@ export default function SettingsPage() {
         body: JSON.stringify(s),
       });
       const json = await res.json();
+      // A rejected field means nothing was saved — keep the edited form on
+      // screen rather than replacing it with an undefined settings object.
+      if (!res.ok) {
+        setSaveError(String(json.error ?? `Save failed (${res.status}).`));
+        return;
+      }
       setS(json.settings);
       setSaved(true);
+      setSaveError(null);
     } finally {
       setBusy(false);
     }
@@ -287,6 +306,48 @@ export default function SettingsPage() {
             <div className="hint">
               Hour is UTC. Leave on rolling if you do not know your reset day —
               the trailing-7-day figure is still meaningful.
+            </div>
+          </div>
+
+          <div className="field">
+            <label htmlFor="sessreset">5-hour window reset (override)</label>
+            <input
+              id="sessreset"
+              type="datetime-local"
+              value={toLocalInput(s.sessionResetOverrideAt)}
+              onChange={(e) => {
+                const at = e.target.value
+                  ? new Date(e.target.value).getTime()
+                  : null;
+                patch({
+                  sessionResetOverrideAt:
+                    at !== null && Number.isFinite(at) ? at : null,
+                });
+              }}
+            />
+            <div className="hint">
+              Normally the 5-hour window is derived from your transcripts and
+              needs no input. Changing subscription tier restarts it on
+              Anthropic&apos;s side, and that leaves no trace in a transcript —
+              so the block here keeps running against a window that no longer
+              exists. Enter the reset time <code>/usage</code> shows and the
+              block is split there: work before it stays in history but drops
+              out of the current window and out of the budget guard. The weekly
+              quota is untouched.{" "}
+              {s.sessionResetOverrideAt === null ? (
+                "Blank is the normal state."
+              ) : Date.now() < s.sessionResetOverrideAt ? (
+                <strong>
+                  In force until{" "}
+                  {new Date(s.sessionResetOverrideAt).toLocaleString()}.
+                </strong>
+              ) : (
+                <>
+                  Expired — that window ended{" "}
+                  {new Date(s.sessionResetOverrideAt).toLocaleString()}. The
+                  split stays in history; clear the field to drop it.
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -563,6 +624,11 @@ export default function SettingsPage() {
             </span>
           )}
         </div>
+        {saveError && (
+          <div className="notice" data-tone="danger">
+            Nothing was saved: {saveError}
+          </div>
+        )}
       </section>
     </>
   );

@@ -48,7 +48,7 @@ export async function GET() {
   }
 
   const now = Date.now();
-  const blocks = buildSessionBlocks(filtered, now);
+  const blocks = buildSessionBlocks(filtered, now, settings.sessionResetOverrideAt);
 
   // Only fully-elapsed blocks represent a complete window; an active block is
   // still filling and would drag the estimate down.

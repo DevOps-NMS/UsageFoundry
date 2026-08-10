@@ -1338,7 +1338,12 @@ async function currentSnapshot() {
   const filtered = settings.includeSidechains
     ? entries
     : entries.filter((e) => !e.isSidechain);
-  return buildSnapshot(filtered, limitConfig(settings), Date.now());
+  return buildSnapshot(
+    filtered,
+    limitConfig(settings),
+    Date.now(),
+    settings.sessionResetOverrideAt,
+  );
 }
 
 export async function startRun(id: string): Promise<void> {
