@@ -1,0 +1,52 @@
+services:
+  usagefoundry:
+    build: .
+    image: usagefoundry:latest
+    container_name: usagefoundry
+
+    # Bound to loopback on purpose. This container holds Claude credentials and
+    # can run an agent with write access to mounted code — publishing it on
+    # 0.0.0.0 hands both to anyone who can reach the port. Change only if you
+    # have set UF_AUTH_TOKEN and put TLS in front.
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    environment:
+      # Set to a long random string to require a token in the UI.
+      UF_AUTH_TOKEN: "${UF_AUTH_TOKEN:-}"
+      # Optional: enables the API-account panel. Needs an org Admin key.
+      ANTHROPIC_ADMIN_KEY: "${ANTHROPIC_ADMIN_KEY:-}"
+      # One entry per selectable workspace, "Label=/container/path", separated
+      # by "|". An entry whose label is empty — i.e. UF_WORKSPACE_N_NAME is not
+      # set in .env — is skipped, so extra workspaces are switched on from .env
+      # without editing this file.
+      WORKSPACE_ROOTS: "${UF_WORKSPACE_NAME:-Workspace}=/workspace|${UF_WORKSPACE_2_NAME:-}=/workspace2|${UF_WORKSPACE_3_NAME:-}=/workspace3|${UF_WORKSPACE_4_NAME:-}=/workspace4"
+      WORKSPACE_ROOT: /workspace
+      CLAUDE_HOME: /home/node/.claude
+      CLAUDE_CONFIG_DIR: /home/node/.claude
+      DATA_DIR: /data
+
+    volumes:
+      # Credentials + transcripts. Read-write because Claude Code writes new
+      # session transcripts here as runs execute — mounting :ro breaks runs.
+      - ${HOME}/.claude:/home/node/.claude
+
+      # The code the agent is allowed to touch. Point these at parent
+      # directories of the projects you want to work on.
+      #
+      # Compose cannot leave a volume out conditionally, so slots 2-4 fall back
+      # to slot 1's directory. That is harmless: a slot is only offered in the
+      # UI when WORKSPACE_ROOTS above lists it, which needs its NAME set in
+      # .env. An unnamed slot is mounted but unreachable.
+      - ${UF_WORKSPACE:-${HOME}/Documents/GIT}:/workspace
+      - ${UF_WORKSPACE_2:-${UF_WORKSPACE:-${HOME}/Documents/GIT}}:/workspace2
+      - ${UF_WORKSPACE_3:-${UF_WORKSPACE:-${HOME}/Documents/GIT}}:/workspace3
+      - ${UF_WORKSPACE_4:-${UF_WORKSPACE:-${HOME}/Documents/GIT}}:/workspace4
+
+      # SQLite database (runs, events, settings).
+      - usagefoundry-data:/data
+
+    restart: unless-stopped
+
+volumes:
+  usagefoundry-data:

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4b9fff"/>
+      <stop offset="1" stop-color="#7a5cff"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#g)"/>
+  <!-- three bars rising: the usage meter the app is built around -->
+  <rect x="8"  y="18" width="4" height="7"  rx="1.5" fill="#fff" opacity=".95"/>
+  <rect x="14" y="13" width="4" height="12" rx="1.5" fill="#fff" opacity=".95"/>
+  <rect x="20" y="7"  width="4" height="18" rx="1.5" fill="#fff" opacity=".95"/>
+</svg>

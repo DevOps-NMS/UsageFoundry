@@ -1,0 +1,13 @@
+node_modules/
+.next/
+.data/
+
+# Every .env variant is ignored, so a later .env.production or .env.local
+# cannot be committed by accident. The example file is the one exception.
+.env
+.env.*
+!.env.example
+
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store

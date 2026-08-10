@@ -1,0 +1,89 @@
+import { getRun, runEvents, subscribe, type RunEvent } from "@/lib/orchestrator";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+type Ctx = { params: Promise<{ id: string }> };
+
+/**
+ * Server-sent events for one run.
+ *
+ * Replays persisted history first, then tails live events. The replay matters:
+ * without it, a page opened after a run started would show an empty log even
+ * though the work is well underway, and a reconnect after a dropped connection
+ * would silently lose everything emitted during the gap.
+ */
+export async function GET(req: Request, ctx: Ctx) {
+  const { id } = await ctx.params;
+  if (!getRun(id)) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const url = new URL(req.url);
+  const lastEventId = Number(
+    req.headers.get("last-event-id") ?? url.searchParams.get("after") ?? 0,
+  );
+
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let closed = false;
+      const send = (data: unknown, eventId?: number) => {
+        if (closed) return;
+        try {
+          const idLine = eventId !== undefined ? `id: ${eventId}\n` : "";
+          controller.enqueue(
+            encoder.encode(`${idLine}data: ${JSON.stringify(data)}\n\n`),
+          );
+        } catch {
+          closed = true;
+        }
+      };
+
+      // 1. Replay everything the client has not seen.
+      const history = runEvents(id, Number.isFinite(lastEventId) ? lastEventId : 0);
+      for (const e of history) send(e, e.id);
+      send({ kind: "replay-complete", runId: id, ts: Date.now(), payload: {} });
+
+      // 2. Tail live events. Events are also persisted, so a client that
+      //    reconnects with Last-Event-ID picks up exactly where it left off.
+      const unsubscribe = subscribe(id, (e: RunEvent) => send(e));
+
+      // Proxies drop idle connections; a periodic comment keeps it warm
+      // without appearing as an event to the client.
+      const heartbeat = setInterval(() => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(": ping\n\n"));
+        } catch {
+          closed = true;
+        }
+      }, 15_000);
+
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(heartbeat);
+        unsubscribe();
+        try {
+          controller.close();
+        } catch {
+          /* already closed by the runtime */
+        }
+      };
+
+      req.signal.addEventListener("abort", cleanup);
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      // Nginx buffers SSE by default, which defeats the point.
+      "x-accel-buffering": "no",
+    },
+  });
+}
