@@ -26,11 +26,15 @@ export function Card({
   className?: string;
 }) {
   return (
-    <section
+    // A div, not a <section>. The legacy stylesheet still carries
+    // `section + section { margin-top: 24px }`, which fired between sibling
+    // cards inside a grid and pushed every card but the first down 24px.
+    // A card is a surface anyway, not a document section.
+    <div
       className={`rounded-lg border border-line bg-surface ${EMPHASIS[emphasis]} ${className}`}
     >
       {children}
-    </section>
+    </div>
   );
 }
 
