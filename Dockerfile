@@ -48,8 +48,33 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends git ripgrep ca-certificates tini \
  && rm -rf /var/lib/apt/lists/*
 
+# Two things git cannot work out for itself inside a container, both of which
+# fail in ways that read as something else entirely. `--system` so a mounted
+# ~/.gitconfig or a repo-local setting still wins.
+#
+#   identity — an isolated run is told to commit its work (isolationPreamble),
+#   but a container hostname carries no domain, so git rejects its own
+#   auto-detected `node@<id>.(none)` under the strict ident every commit uses.
+#   The run then ends with an empty branch and a handoff card listing nothing.
+#
+#   safe.directory — a bind-mounted repository carries the *host* uid, which
+#   need not be this container's. git then refuses the repo outright, and
+#   `probeIsolation`'s first call cannot tell that apart from "not a repo", so
+#   the operator is told their repository is not one and isolation goes quiet.
+#   Ownership adds nothing here that `resolveInMount` does not already enforce.
+RUN git config --system user.name "UsageFoundry Agent" \
+ && git config --system user.email "agent@usagefoundry.local" \
+ && git config --system --add safe.directory '*'
+
 # The agent runs inside this container, so Claude Code has to be in the image.
-RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
+#
+# Pinned because the run loop parses this CLI's `stream-json` output and its
+# OTLP records, and both were captured from a specific build rather than read
+# from a specification. An unpinned rebuild would move that contract silently:
+# an unparsed line degrades to a log entry and a missing `result` event
+# understates spend, so the failure would not announce itself.
+ARG CLAUDE_CLI_VERSION=2.1.226
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" && npm cache clean --force
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./

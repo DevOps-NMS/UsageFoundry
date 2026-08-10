@@ -15,6 +15,17 @@ services:
     image: usagefoundry:${UF_IMAGE_TAG:-latest}
     container_name: ${UF_CONTAINER_NAME:-usagefoundry}
 
+    # The container writes to two bind mounts — your ~/.claude (credentials and
+    # new transcripts) and your workspaces (the agent's edits, plus the
+    # .uf-worktrees checkouts) — so it has to run as a uid that owns them.
+    #
+    # macOS Docker Desktop remaps bind-mount ownership onto the container user,
+    # so 1000 is right there whatever your host uid is. Linux preserves the host
+    # uid, and a mismatch is silent in the worst way: git refuses every
+    # repository, `claude /login` cannot persist its credentials, and runs fail
+    # on the first write. Set UF_UID=$(id -u) / UF_GID=$(id -g) in .env there.
+    user: "${UF_UID:-1000}:${UF_GID:-1000}"
+
     # Bound to loopback on purpose. This container holds Claude credentials and
     # can run an agent with write access to mounted code — publishing it on
     # 0.0.0.0 hands both to anyone who can reach the port. Change only if you
@@ -40,7 +51,14 @@ services:
     volumes:
       # Credentials + transcripts. Read-write because Claude Code writes new
       # session transcripts here as runs execute — mounting :ro breaks runs.
-      - ${HOME}/.claude:/home/node/.claude
+      #
+      # HOME comes from the invoking shell, not from .env. `:?` rather than a
+      # default because every way it can be wrong is silent: unset (a systemd
+      # unit, some CI runners) interpolates to empty and mounts /.claude, and
+      # `sudo docker compose up` mounts root's. Docker creates a missing bind
+      # source rather than refusing, so the symptom would be a dashboard
+      # reporting zero usage — which is also what a quiet week looks like.
+      - ${HOME:?HOME is unset — run compose as your own user, not under sudo}/.claude:/home/node/.claude
 
       # The code the agent is allowed to touch. Point these at parent
       # directories of the projects you want to work on.
@@ -49,10 +67,15 @@ services:
       # to slot 1's directory. That is harmless: a slot is only offered in the
       # UI when WORKSPACE_ROOTS above lists it, which needs its NAME set in
       # .env. An unnamed slot is mounted but unreachable.
-      - ${UF_WORKSPACE:-${HOME}/Documents/GIT}:/workspace
-      - ${UF_WORKSPACE_2:-${UF_WORKSPACE:-${HOME}/Documents/GIT}}:/workspace2
-      - ${UF_WORKSPACE_3:-${UF_WORKSPACE:-${HOME}/Documents/GIT}}:/workspace3
-      - ${UF_WORKSPACE_4:-${UF_WORKSPACE:-${HOME}/Documents/GIT}}:/workspace4
+      #
+      # Slot 1 has no default. It used to fall back to ~/Documents/GIT, which
+      # made the one genuinely required setting optional — and getting it wrong
+      # produces an empty folder picker, not an error, because Docker creates
+      # whatever path it is handed.
+      - ${UF_WORKSPACE:?set UF_WORKSPACE in .env to the directory holding your projects — see .env.example}:/workspace
+      - ${UF_WORKSPACE_2:-${UF_WORKSPACE}}:/workspace2
+      - ${UF_WORKSPACE_3:-${UF_WORKSPACE}}:/workspace3
+      - ${UF_WORKSPACE_4:-${UF_WORKSPACE}}:/workspace4
 
       # SQLite database (runs, events, settings).
       - usagefoundry-data:/data
