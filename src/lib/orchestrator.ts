@@ -2624,6 +2624,119 @@ export function resumeRun(id: string): ResumeOutcome {
   return "requeued";
 }
 
+export type ReopenOutcome = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Put a finished run back to work, continuing its Claude Code session.
+ *
+ * Distinct from `resumeRun`, which un-parks a run that was always going to
+ * carry on by itself. This one reopens a row that had reached a terminal state:
+ * a crash, a non-zero exit, a restart, an operator stop, or a guard. Nothing
+ * about the run is rebuilt — it keeps its folder, its checkout, its branch, its
+ * session id and its spend, so `startRun` resumes the same conversation rather
+ * than starting a new one.
+ *
+ * It takes a budget because the usual reason a run needs picking up is that its
+ * own limits ended it, and re-queueing it under the limits that stopped it just
+ * reproduces the stop. The three carried-forward guards are checked here rather
+ * than left to the pre-cycle check, which would refuse a few seconds later with
+ * the run already flickering queued → stopped and no indication of what to
+ * change.
+ *
+ * `started_at` is cleared, and that is the one deliberate difference from a
+ * pause. A parked run keeps its original start so wall clock stays a terminus
+ * it cannot wait out; a finished run picked up by hand is a fresh attempt the
+ * operator decided on, and charging it for the hours or days it spent dead
+ * would refuse every run older than its own time limit.
+ */
+export function reopenRun(id: string, budget: unknown): ReopenOutcome {
+  const run = getRun(id);
+  if (!run) return { ok: false, reason: "No such run." };
+  if (run.status !== "failed" && run.status !== "stopped") {
+    return {
+      ok: false,
+      reason: `This run is ${run.status}, so there is nothing here to pick up.`,
+    };
+  }
+
+  // Its checkout may have been handed to a newer run while it was dead:
+  // `allocateSlotPath` only avoids slots that an *active* run holds, and a
+  // terminal row is not active. `ensureWorktree` would refuse the branch rather
+  // than corrupt anything, but only after this run had been queued and had
+  // taken its turn — saying so now is the difference between an explanation and
+  // a second failure.
+  if (run.worktree_path) {
+    const holder = activeRuns().find(
+      (r) => r.worktree_path === run.worktree_path,
+    );
+    if (holder) {
+      return {
+        ok: false,
+        reason: `Its isolated checkout is in use by run ${holder.id.slice(0, 8)}. Its own work is still on branch ${run.worktree_branch}; wait for that run to finish.`,
+      };
+    }
+  }
+
+  const policy = normalizePolicy(budget);
+  const spentUSD = run.spent_usd + run.spent_usd_est;
+  const spentTokens = run.spent_tokens + run.spent_tokens_est;
+
+  if (policy.maxIterations !== null && run.iterations >= policy.maxIterations) {
+    return {
+      ok: false,
+      reason: `This run has already used ${run.iterations} work ${
+        run.iterations === 1 ? "cycle" : "cycles"
+      }. Raise the cycle limit above that to carry on.`,
+    };
+  }
+  if (policy.maxRunCostUSD !== null && spentUSD >= policy.maxRunCostUSD) {
+    return {
+      ok: false,
+      reason: `This run has already spent $${spentUSD.toFixed(2)}. Raise the spending limit above that to carry on.`,
+    };
+  }
+  if (policy.maxRunTokens !== null && spentTokens >= policy.maxRunTokens) {
+    return {
+      ok: false,
+      reason: `This run has already used ${spentTokens.toLocaleString()} tokens. Raise the token limit above that to carry on.`,
+    };
+  }
+
+  // Carried from the stored blob rather than accepted from the caller: this
+  // value reaches `--permission-mode` on a process that edits files, and
+  // reopening a run is not a reason to open a second path to it.
+  const stored = JSON.parse(run.budget) as Record<string, unknown>;
+  const blob = JSON.stringify({ ...policy, permissionMode: stored.permissionMode });
+
+  const flip = db()
+    .prepare(
+      "UPDATE runs SET status='queued', budget=?, max_iterations=?," +
+        " started_at=NULL, finished_at=NULL, exit_code=NULL, stop_reason=NULL," +
+        " resume_at=NULL WHERE id=? AND status IN ('failed','stopped')",
+    )
+    .run(blob, policy.maxIterations ?? 0, id);
+  if (flip.changes !== 1) {
+    return { ok: false, reason: "This run changed state before it could be picked up." };
+  }
+
+  emit({
+    runId: id,
+    ts: Date.now(),
+    kind: "status",
+    payload: {
+      status: "queued",
+      message: run.session_id
+        ? "Picked up again — it continues the session it left off in."
+        : "Picked up again. It never reported a session to resume, so it starts from the original task.",
+    },
+  });
+
+  // Outside any claim of its own: a queued row holds nothing, and
+  // `promoteQueued` is what decides whether its folder is free.
+  promoteQueued();
+  return { ok: true };
+}
+
 /**
  * Signal every live agent, for a server that is shutting down.
  *

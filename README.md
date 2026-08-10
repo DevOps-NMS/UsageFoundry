@@ -290,6 +290,28 @@ Stopping a run signals the current work cycle and prevents any further one. If
 the stop lands between cycles there is no process to signal, but the run still
 ends — it is recorded as `stopped`, not as a failure.
 
+### Picking a run back up
+
+A run that ended — because it crashed, because Claude Code exited non-zero,
+because UsageFoundry restarted under it, because you stopped it, or because it
+hit one of its own limits — has a **Resume** button on its page. It keeps its
+folder, its isolated checkout and branch, its spend so far, and its Claude Code
+session, so it continues the conversation rather than starting a new one. A run
+that died before it had a session to continue starts again from the original
+task instead, and says so.
+
+Resuming asks for the limits again, pre-filled from the run, because the usual
+reason a run needs picking up is that its own limits ended it. They are totals,
+not top-ups: a run that used 1 of 1 cycles needs the cycle limit raised above 1,
+and the button refuses and says so rather than queueing a run that would stop
+again on its first check. The time limit is the exception — it runs from the
+moment it starts again, since counting the hours it spent dead would refuse
+every run older than its own limit. Everything else carries over untouched.
+
+A run that reported `DONE` has no Resume button. Sending an agent back into work
+it believes finished needs a different prompt, which is what *When Claude says
+the task is done* above is for.
+
 ---
 
 ## Two runs, one project
@@ -634,6 +656,11 @@ through before trusting this unattended:
   took the folder is still working, and starts within a sweep of that one
   finishing. The hand-over in the other direction — a new run starting straight
   away instead of queuing — was reproduced against the live container.
+- Resuming a finished run into a real agent: that `--resume` picks the session
+  back up, and that an isolated one lands in its own checkout still on its own
+  branch. The refusals around it — an exhausted cycle or spend limit, a checkout
+  another run has taken, a `completed` run offering no button — were checked
+  against the live container.
 - `detached: true`: that Ctrl-C during `npm run dev` still kills the agent (via
   the new `instrumentation.ts` handler) and that a long command the agent
   started dies with it.

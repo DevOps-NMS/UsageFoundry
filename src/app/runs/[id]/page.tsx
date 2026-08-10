@@ -70,6 +70,13 @@ export default function RunDetail({
   const [events, setEvents] = useState<RunEventDTO[]>([]);
   const [connected, setConnected] = useState(false);
   const [stopNote, setStopNote] = useState<string | null>(null);
+  // The reopen form. Held as strings because blank is meaningful — it is what
+  // `normalizePolicy` reads as "no limit" — and a number input cannot hold it.
+  const [reopenOpen, setReopenOpen] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
+  const [reopenCycles, setReopenCycles] = useState("");
+  const [reopenCost, setReopenCost] = useState("");
+  const [reopenMinutes, setReopenMinutes] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
 
@@ -159,6 +166,44 @@ export default function RunDetail({
     );
   }
 
+  function openReopen() {
+    if (!run) return;
+    const blankIfNull = (v: number | null) => (v === null ? "" : String(v));
+    setReopenCycles(blankIfNull(run.budget.maxIterations));
+    setReopenCost(blankIfNull(run.budget.maxRunCostUSD));
+    setReopenMinutes(blankIfNull(run.budget.maxDurationMinutes));
+    setReopenError(null);
+    setStopNote(null);
+    setReopenOpen(true);
+  }
+
+  async function submitReopen() {
+    if (!run) return;
+    setReopenError(null);
+    const asLimit = (v: string) => (v.trim() === "" ? null : Number(v));
+    const res = await fetch(`/api/runs/${id}/reopen`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        // Everything not on this form carries over untouched — the window
+        // percentages, the enforcement mode, and what happens after DONE.
+        budget: {
+          ...run.budget,
+          maxIterations: asLimit(reopenCycles),
+          maxRunCostUSD: asLimit(reopenCost),
+          maxDurationMinutes: asLimit(reopenMinutes),
+        },
+      }),
+    });
+    const json = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) {
+      setReopenError(json.error ?? "Could not pick this run up.");
+      return;
+    }
+    setReopenOpen(false);
+    setStopNote("Back in the queue — it carries on from where it stopped.");
+  }
+
   if (!run) return <div className="empty">Loading run…</div>;
 
   // Paused counts as active: the run still holds its folder, will spend money
@@ -167,6 +212,10 @@ export default function RunDetail({
     run.status === "running" ||
     run.status === "queued" ||
     run.status === "paused";
+  // Finished, but with somewhere to carry on from. `completed` is excluded on
+  // purpose: the agent reported the task done, and sending it back in after
+  // that is what `continueAfterDone` is for, with a prompt written for it.
+  const resumable = run.status === "failed" || run.status === "stopped";
   const handoff = [...events].reverse().find((e) => e.kind === "handoff");
   const costPct = run.budget.maxRunCostUSD
     ? Math.min(run.spent_usd / run.budget.maxRunCostUSD, 1)
@@ -383,6 +432,11 @@ export default function RunDetail({
           ) : (
             <span className="badge">disconnected</span>
           )}
+          {resumable && !reopenOpen && (
+            <button style={{ marginLeft: "auto" }} onClick={openReopen}>
+              Resume
+            </button>
+          )}
           {run.status === "paused" && (
             <button style={{ marginLeft: "auto" }} onClick={tryNow}>
               Try now
@@ -398,6 +452,93 @@ export default function RunDetail({
             </button>
           )}
         </h2>
+
+        {reopenOpen && (
+          <div className="subsection">
+            <div className="subsection-title">
+              {run.session_id
+                ? "Carry on from where this run stopped"
+                : "Start this run again from its original task"}
+            </div>
+
+            <div className="field">
+              <label htmlFor="re-cycles">Work cycles before stopping</label>
+              <div className="input-row">
+                <input
+                  id="re-cycles"
+                  type="number"
+                  min={1}
+                  value={reopenCycles}
+                  onChange={(e) => setReopenCycles(e.target.value)}
+                />
+                <span className="unit">cycles in total</span>
+              </div>
+              <div className="hint">
+                Counts the {run.iterations} this run has already had, so it needs
+                to be higher than that. Blank means no cycle limit, which needs a
+                time limit below.
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="re-cost">Spending limit for this run</label>
+              <div className="input-row">
+                <span className="unit">$</span>
+                <input
+                  id="re-cost"
+                  type="number"
+                  min={0}
+                  step="0.5"
+                  value={reopenCost}
+                  onChange={(e) => setReopenCost(e.target.value)}
+                />
+              </div>
+              <div className="hint">
+                Counts the {fmtUSD(run.spent_usd + (run.spent_usd_est ?? 0))} it
+                has already spent. Blank means no limit.
+              </div>
+            </div>
+
+            <div className="field">
+              <label htmlFor="re-minutes">Time limit</label>
+              <div className="input-row">
+                <input
+                  id="re-minutes"
+                  type="number"
+                  min={1}
+                  value={reopenMinutes}
+                  onChange={(e) => setReopenMinutes(e.target.value)}
+                />
+                <span className="unit">minutes</span>
+              </div>
+              <div className="hint">
+                Runs from when it starts again, not from when it first ran.
+                Blank means no limit.
+              </div>
+            </div>
+
+            <div className="hint">
+              Everything else carries over: the window percentages, how the
+              limits are enforced, what happens after DONE, and the permission
+              mode. It keeps its folder
+              {run.isolation === "worktree" && run.worktree_branch
+                ? ` and its checkout on ${run.worktree_branch}`
+                : ""}
+              .
+            </div>
+
+            {reopenError && (
+              <div className="hint" style={{ color: "var(--danger)" }}>
+                {reopenError}
+              </div>
+            )}
+
+            <div className="input-row">
+              <button onClick={submitReopen}>Resume run</button>
+              <button onClick={() => setReopenOpen(false)}>Cancel</button>
+            </div>
+          </div>
+        )}
 
         <div className="log" ref={logRef} onScroll={onScroll}>
           {events.length === 0 && (
