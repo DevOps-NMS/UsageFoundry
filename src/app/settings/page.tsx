@@ -51,6 +51,30 @@ const SECTIONS = [
   { id: "advanced", label: "Advanced" },
 ];
 
+/**
+ * The cost ceilings as the meters and guards actually see them, once reserved
+ * headroom is off.
+ *
+ * Both windows, not just the weekly one. The 5-hour meter is what an operator
+ * watches while a run is going, and with only the weekly figure named here
+ * nothing anywhere stated the effective session ceiling — so a session bar
+ * sitting at 25% of $552.50 reads as a miscalculation of the $650 typed above
+ * it, which is the one reading on this page a person acts on.
+ */
+function effectiveCeilings(
+  reserve: number | null,
+  sessionCost: number | null,
+  weeklyCost: number | null,
+): Array<{ label: string; raw: number; effective: number }> {
+  if (!reserve) return [];
+  return [
+    { label: "5-hour", raw: sessionCost },
+    { label: "weekly", raw: weeklyCost },
+  ]
+    .filter((c): c is { label: string; raw: number } => !!c.raw && c.raw > 0)
+    .map((c) => ({ ...c, effective: c.raw * (1 - reserve) }));
+}
+
 /** Epoch ms → the `YYYY-MM-DDTHH:mm` a datetime-local input wants, in local time. */
 function toLocalInput(ms: number | null): string {
   if (ms === null) return "";
@@ -283,17 +307,18 @@ export default function SettingsPage() {
             Those surfaces share your limits and write no local transcripts, so
             this tool cannot see them — reserving headroom shrinks every ceiling
             so guards trip early
-            {s.reservedHeadroomFraction && s.weeklyCostLimit ? (
-              <>
-                {" · effective weekly ceiling "}
-                <strong className="text-ink">
-                  {fmtUSD(
-                    s.weeklyCostLimit * (1 - s.reservedHeadroomFraction),
-                  )}
-                </strong>{" "}
-                of {fmtUSD(s.weeklyCostLimit)}
-              </>
-            ) : null}
+            {effectiveCeilings(
+              s.reservedHeadroomFraction,
+              s.sessionCostLimit,
+              s.weeklyCostLimit,
+            ).map((c, i) => (
+              <span key={c.label}>
+                {i === 0 ? " · effective " : ", "}
+                {c.label} ceiling{" "}
+                <strong className="text-ink">{fmtUSD(c.effective)}</strong> of{" "}
+                {fmtUSD(c.raw)}
+              </span>
+            ))}
           </Hint>
         </Field>
 

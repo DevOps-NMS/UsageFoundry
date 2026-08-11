@@ -82,6 +82,22 @@ export interface UsageResponse {
     /** Headroom reserved for surfaces this tool cannot observe (0–1). */
     reservedHeadroomFraction: number;
     /**
+     * The ceilings as *typed in Settings*, before reserved headroom.
+     *
+     * `WindowState.limit` is the effective ceiling — `limitConfig()` has already
+     * taken the reserve off it — so it is the wrong number to describe as the
+     * one the user set. Carried separately rather than reconstructed by
+     * dividing `limit` by `1 - reserve`: that reproduces $650 as
+     * $650.0000000001, and it silently invents a ceiling whenever the reserve
+     * is later applied somewhere else too.
+     */
+    configuredCeilings: {
+      sessionCost: number | null;
+      weeklyCost: number | null;
+      sessionTokens: number | null;
+      weeklyTokens: number | null;
+    };
+    /**
      * Manual 5-hour reset instant, when one is configured. Present so the
      * session card can say the window was anchored by hand rather than derived
      * — a meter that silently disagrees with the transcripts is worse than no

@@ -19,13 +19,34 @@ import {
   shortPath,
 } from "@/lib/format";
 
-/** Describe the ceiling a window's percentage is measured against. */
-function ceilingDetail(w: WindowStateDTO): string {
+/**
+ * Describe the ceiling a window's percentage is measured against.
+ *
+ * `w.limit` is the *effective* ceiling: `limitConfig()` has already subtracted
+ * reserved headroom. Calling that "your configured estimate" named the wrong
+ * number — at a 15% reserve a typed $650 is measured against $552.50, so the
+ * bar climbs ~18% faster than the figure in Settings implies and the gap widens
+ * with usage. The arithmetic was never wrong; the label was, and a meter that
+ * disagrees with the value you set reads as a broken calculation. So say both
+ * numbers whenever a reserve is in force.
+ */
+function ceilingDetail(
+  w: WindowStateDTO,
+  configured: number | null,
+  reserve: number,
+): string {
+  const reduced = reserve > 0 && configured !== null;
+
   if (w.fractionMetric === "cost") {
-    return `Ceiling: ${fmtUSD(w.limit ?? 0)} equivalent API cost — your configured estimate.`;
+    return reduced
+      ? `Ceiling: ${fmtUSD(w.limit ?? 0)} equivalent API cost — your ${fmtUSD(configured)} estimate less ${fmtPct(reserve)} reserved headroom.`
+      : `Ceiling: ${fmtUSD(w.limit ?? 0)} equivalent API cost — your configured estimate.`;
   }
   if (w.fractionMetric === "tokens") {
-    return `Ceiling: ${fmtTokens(w.limit ?? 0)} raw tokens. A cost ceiling is steadier for this workload — see Settings.`;
+    const head = reduced
+      ? `Ceiling: ${fmtTokens(w.limit ?? 0)} raw tokens — your ${fmtTokens(configured)} estimate less ${fmtPct(reserve)} reserved headroom.`
+      : `Ceiling: ${fmtTokens(w.limit ?? 0)} raw tokens.`;
+    return `${head} A cost ceiling is steadier for this workload — see Settings.`;
   }
   return "Set a ceiling in Settings to see a percentage.";
 }
@@ -236,7 +257,13 @@ export default function Dashboard() {
             label="Session consumed"
             fraction={s.session.fraction}
             upperFraction={s.session.guardFraction}
-            detail={ceilingDetail(s.session)}
+            detail={ceilingDetail(
+              s.session,
+              s.session.fractionMetric === "tokens"
+                ? meta.configuredCeilings.sessionTokens
+                : meta.configuredCeilings.sessionCost,
+              meta.reservedHeadroomFraction,
+            )}
           />
           {s.session.tokenFraction !== null &&
             s.session.fractionMetric === "cost" && (
@@ -276,7 +303,13 @@ export default function Dashboard() {
             label="Weekly consumed"
             fraction={s.weekly.fraction}
             upperFraction={s.weekly.guardFraction}
-            detail={ceilingDetail(s.weekly)}
+            detail={ceilingDetail(
+              s.weekly,
+              s.weekly.fractionMetric === "tokens"
+                ? meta.configuredCeilings.weeklyTokens
+                : meta.configuredCeilings.weeklyCost,
+              meta.reservedHeadroomFraction,
+            )}
           />
           {s.weekly.tokenFraction !== null &&
             s.weekly.fractionMetric === "cost" && (

@@ -47,6 +47,14 @@ export async function GET() {
         hasWeeklyCeiling:
           settings.weeklyCostLimit !== null || settings.weeklyTokenLimit !== null,
         reservedHeadroomFraction: settings.reservedHeadroomFraction ?? 0,
+        // What the user typed, so the meters can name it alongside the reduced
+        // ceiling they are actually measured against.
+        configuredCeilings: {
+          sessionCost: settings.sessionCostLimit,
+          weeklyCost: settings.weeklyCostLimit,
+          sessionTokens: settings.sessionTokenLimit,
+          weeklyTokens: settings.weeklyTokenLimit,
+        },
         sessionResetOverrideAt: settings.sessionResetOverrideAt,
         includeSidechains: settings.includeSidechains,
         account,
