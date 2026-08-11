@@ -554,6 +554,34 @@ describe("buildArgs", () => {
     assert.equal(buildArgs({ ...base, isolated: false }).includes("--allowedTools"), false);
   });
 
+  /**
+   * The other direction, and the more expensive one. `next-server` is the
+   * process title of both this server and any dev server an agent starts to
+   * check its work, so a name-matched kill aimed at one reaches the other: one
+   * `pkill -f "next-server|next dev"` restarted the container and took fourteen
+   * runs with it. The argv is the whole mechanism — there is no ownership
+   * boundary between an agent and the process supervising it — so it is pinned
+   * for every mode, including the one whose entire purpose is skipping checks.
+   */
+  for (const permissionMode of ["acceptEdits", "bypassPermissions"] as const) {
+    for (const isolated of [true, false]) {
+      it(`withholds name-matched kills from a ${permissionMode} run (isolated: ${isolated})`, () => {
+        const args = buildArgs({ ...base, permissionMode, isolated });
+        const at = args.indexOf("--disallowedTools");
+        assert.notEqual(at, -1, "no run may select processes to kill by name");
+        assert.deepEqual(args.slice(at + 1, at + 3), [
+          "Bash(pkill:*)",
+          "Bash(killall:*)",
+        ]);
+        // Denying the command without saying why buys one turn, not a fix:
+        // `kill $(pgrep -f next-server)` is not `pkill` and is just as fatal.
+        const said = args[args.indexOf("--append-system-prompt") + 1] ?? "";
+        assert.match(said, /pgrep/);
+        assert.match(said, /next-server/);
+      });
+    }
+  }
+
   it("still passes the mode, the model and the session to resume", () => {
     const args = buildArgs({
       ...base,
