@@ -490,6 +490,58 @@ export function rejectProposal(id: string): boolean {
   return res.changes > 0;
 }
 
+/** What one click on Approve or Reject did, in the terms the thread records it. */
+export interface DecisionTally {
+  action: "approve" | "reject";
+  started: number;
+  rejected: number;
+  failed: Array<{ title: string; reason: string }>;
+  /** Proposals of this chat that are no longer pending. */
+  decided: number;
+  /** Ids naming no proposal of this chat — another thread's, or gone. */
+  foreign: number;
+}
+
+/**
+ * The sentence a decision is recorded by — a note in the thread when something
+ * happened, and the refusal when nothing did.
+ *
+ * Pure and unit-tested because it is the *only* account the operator gets of a
+ * click that acted on nothing. The route's scoping to `pendingProposals(id)`
+ * already stops a stale id being approved, so what is left to get wrong is a
+ * true 200 carrying a false explanation: `decided` and `foreign` are two
+ * different facts, and reporting the second as the first tells one thread that
+ * proposals still waiting in another were "already decided". Nothing throws on
+ * that and nothing typechecks it away — it is a permanent, wrong line in a
+ * conversation the operator later reads back as a record of what they did.
+ */
+export function decisionNote(t: DecisionTally): string {
+  const parts = [
+    t.started > 0 ? `Approved and queued ${t.started} run(s).` : "",
+    t.rejected > 0 ? `Rejected ${t.rejected} proposal(s).` : "",
+    ...t.failed.map((f) => `Could not start “${f.title}”: ${f.reason}`),
+    t.decided > 0
+      ? `${t.decided} proposal(s) had already been decided and were left alone.`
+      : "",
+    t.foreign > 0
+      ? `${t.foreign} selected proposal(s) are not in this chat and were left alone.`
+      : "",
+  ].filter(Boolean);
+
+  // Nothing moved, so the first thing said has to be that nothing moved. Left
+  // to the clauses above, a batch that did nothing reads as a report of two
+  // proposals it declined to touch, which is what "the button appears to have
+  // done nothing" looks like from the thread.
+  const acted = t.started > 0 || t.rejected > 0 || t.failed.length > 0;
+  if (!acted && parts.length > 0) {
+    parts.unshift(
+      t.action === "approve" ? "Nothing was approved." : "Nothing was rejected.",
+    );
+  }
+
+  return parts.join(" ");
+}
+
 function markProposal(
   id: string,
   status: ProposalStatus,

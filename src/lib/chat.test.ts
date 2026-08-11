@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { chatPrompt, composeTask, planProposal, type ChatProposalRow } from "./chat";
+import {
+  chatPrompt,
+  composeTask,
+  decisionNote,
+  planProposal,
+  type ChatProposalRow,
+  type DecisionTally,
+} from "./chat";
 import { githubSlug } from "./workspace";
 import type { RunTemplate } from "./templates";
 import type { RunGuards } from "./settings";
 
 /**
- * Covers `planProposal`, `chatPrompt` and `githubSlug`, and only those.
+ * Covers `planProposal`, `chatPrompt`, `decisionNote` and `githubSlug`, and
+ * only those.
  *
  * Each is the same class of failure the rest of this suite is reserved for —
  * pure, silent, and expensive:
@@ -23,6 +31,13 @@ import type { RunGuards } from "./settings";
  *    of a run the chat may write, and getting the two halves the wrong way
  *    round — or dropping one — is a run that does something adjacent to the
  *    task, expensively, without failing.
+ *  - `decisionNote` is the only account the operator gets of what a click on
+ *    Approve did. The route refuses to act on an id that is not pending in
+ *    this chat, which is the right defence and also the reason the failure is
+ *    silent: the request succeeds, nothing runs, and the thread keeps whatever
+ *    sentence this function wrote. Reporting another thread's proposals as
+ *    "already decided" is a permanent, wrong record in a conversation the
+ *    operator reads back as what they authorised.
  *  - `chatPrompt` decides whether a turn is billed with the thread or without
  *    it. Getting it wrong is invisible: a model that silently lost the
  *    conversation still answers confidently, and the reply reads as a
@@ -258,6 +273,61 @@ describe("composeTask", () => {
   it("is the task alone when there are no standing instructions", () => {
     assert.equal(composeTask(null, "This one thing."), "This one thing.");
     assert.equal(composeTask("  ", "This one thing."), "This one thing.");
+  });
+});
+
+describe("decisionNote", () => {
+  const nothing: DecisionTally = {
+    action: "approve",
+    started: 0,
+    rejected: 0,
+    failed: [],
+    decided: 0,
+    foreign: 0,
+  };
+
+  it("reports an id from another thread as such, never as already decided", () => {
+    // The selection carried across a chat switch: two proposals still pending
+    // in the thread they were ticked in, sent to one that has never held them.
+    const note = decisionNote({ ...nothing, foreign: 2 });
+    assert.doesNotMatch(note, /already been decided/);
+    assert.match(note, /2 selected proposal\(s\) are not in this chat/);
+  });
+
+  it("says nothing happened when nothing did, for either action", () => {
+    assert.match(decisionNote({ ...nothing, foreign: 2 }), /^Nothing was approved\./);
+    assert.match(
+      decisionNote({ ...nothing, action: "reject", decided: 1 }),
+      /^Nothing was rejected\./,
+    );
+  });
+
+  it("keeps the two reasons apart in one batch", () => {
+    const note = decisionNote({ ...nothing, started: 1, decided: 1, foreign: 3 });
+    assert.match(note, /Approved and queued 1 run\(s\)\./);
+    assert.match(note, /1 proposal\(s\) had already been decided/);
+    assert.match(note, /3 selected proposal\(s\) are not in this chat/);
+    assert.doesNotMatch(note, /Nothing was/);
+  });
+
+  it("says only what happened when every id was actionable", () => {
+    assert.equal(
+      decisionNote({ ...nothing, started: 2 }),
+      "Approved and queued 2 run(s).",
+    );
+    assert.equal(
+      decisionNote({ ...nothing, action: "reject", rejected: 2 }),
+      "Rejected 2 proposal(s).",
+    );
+  });
+
+  it("names a run that could not start, and does not call that nothing", () => {
+    const note = decisionNote({
+      ...nothing,
+      failed: [{ title: "Fix a bug", reason: "That folder is not in any mount." }],
+    });
+    assert.match(note, /Could not start .Fix a bug.: That folder is not in any mount\./);
+    assert.doesNotMatch(note, /Nothing was/);
   });
 });
 

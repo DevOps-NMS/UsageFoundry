@@ -303,7 +303,14 @@ export default function ChatPage() {
                   .map((c) => (
                     <button
                       key={c.id}
-                      onClick={() => void load(c.id)}
+                      onClick={() => {
+                        // Ticked ids belong to the thread they were ticked in.
+                        // `newChat` clears them for the same reason; carried
+                        // over, they describe proposals not on screen and are
+                        // sent to a chat that has never held them.
+                        setSelected(new Set());
+                        void load(c.id);
+                      }}
                       className="cursor-pointer truncate text-left text-xs text-ink-muted hover:text-ink"
                     >
                       {c.title ?? "Untitled"}{" "}

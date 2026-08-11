@@ -1304,6 +1304,12 @@ through before trusting this unattended:
   which makes this the failure an operator is most likely to meet: a run that
   cannot be resumed cannot be reopened into either, and the manual command is
   the only way out of it.
+- **Switching threads in the Orchestrator, in a browser.** The proposal
+  selection is now cleared where the "Earlier chats" button switches thread, and
+  a batch whose ids are none of the target chat's is a 400 naming which of them
+  belong to another thread rather than a 200 claiming they were already decided.
+  The sentence that refusal is written with is unit-tested; the click that
+  produces it, and the red banner the page then shows, have not been watched.
 - **Which session id `claude -p --resume <id>` reports back.** Every cycle's
   stream is read for one and the run adopts it; a value differing from the one
   passed to `--resume` is written to the run log and otherwise treated as

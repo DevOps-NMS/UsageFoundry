@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   appendMessage,
   approveProposal,
+  decisionNote,
   getChat,
   getProposal,
   pendingProposals,
@@ -56,6 +57,40 @@ export async function POST(req: Request, ctx: Ctx) {
   const eligible = new Set(pendingProposals(id).map((p) => p.id));
   const targets = wanted.filter((pid) => eligible.has(pid));
 
+  // Why an id is not actionable is two facts, not one. A proposal of this chat
+  // that has since been decided is the ordinary stale-page case; an id naming
+  // no proposal of this chat came from somewhere else entirely — a selection
+  // carried across a chat switch — and those proposals are still waiting where
+  // they were made. Calling that "already decided" is a claim about another
+  // thread's proposals, written into this one.
+  let decided = 0;
+  let foreign = 0;
+  for (const pid of wanted) {
+    if (eligible.has(pid)) continue;
+    if (getProposal(pid)?.chat_id === id) decided += 1;
+    else foreign += 1;
+  }
+
+  // Nothing here to act on — the same refusal an empty `ids` gets above, and
+  // for the same reason. A 200 with an empty `started` is indistinguishable
+  // from a batch that worked: the page clears the selection on `res.ok` and
+  // shows no error, so the click reads as having succeeded silently.
+  if (targets.length === 0) {
+    return NextResponse.json(
+      {
+        error: decisionNote({
+          action,
+          started: 0,
+          rejected: 0,
+          failed: [],
+          decided,
+          foreign,
+        }),
+      },
+      { status: 400 },
+    );
+  }
+
   const started: string[] = [];
   const failed: Array<{ title: string; reason: string }> = [];
   let rejected = 0;
@@ -78,16 +113,14 @@ export async function POST(req: Request, ctx: Ctx) {
   // Recorded in the thread rather than only in the proposal rows, so the
   // conversation reads as what happened: the model proposed, a person decided,
   // and the decision is in the same place as the request.
-  const note = [
-    started.length > 0 ? `Approved and queued ${started.length} run(s).` : "",
-    rejected > 0 ? `Rejected ${rejected} proposal(s).` : "",
-    ...failed.map((f) => `Could not start “${f.title}”: ${f.reason}`),
-    targets.length < wanted.length
-      ? `${wanted.length - targets.length} proposal(s) were already decided and were left alone.`
-      : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const note = decisionNote({
+    action,
+    started: started.length,
+    rejected,
+    failed,
+    decided,
+    foreign,
+  });
   if (note) appendMessage(id, "system", note);
 
   return NextResponse.json({
