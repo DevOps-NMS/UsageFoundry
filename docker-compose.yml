@@ -38,6 +38,13 @@ services:
       UF_AUTH_TOKEN: "${UF_AUTH_TOKEN:-}"
       # Optional: enables the API-account panel. Needs an org Admin key.
       ANTHROPIC_ADMIN_KEY: "${ANTHROPIC_ADMIN_KEY:-}"
+      # Optional: what a run uses to push, open a PR, or read an issue. The
+      # mounted ~/.claude carries Claude's login and nothing else — no
+      # ~/.gitconfig, no ~/.ssh, no ~/.config/gh — so without this every
+      # GitHub command a run tries fails, and fails inside a tool call.
+      # Scope it to the repositories you actually run agents against: an
+      # unattended agent can use everything this token can.
+      UF_GITHUB_TOKEN: "${UF_GITHUB_TOKEN:-}"
       # One entry per selectable workspace, "Label=/container/path", separated
       # by "|". An entry whose label is empty — i.e. UF_WORKSPACE_N_NAME is not
       # set in .env — is skipped, so extra workspaces are switched on from .env

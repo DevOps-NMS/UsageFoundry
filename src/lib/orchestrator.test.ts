@@ -40,11 +40,14 @@ process.env.DATA_DIR = path.join(tmp, "data");
 const {
   conflictKey,
   overlaps,
+  githubEnv,
+  isTransientApiError,
   isUsageLimit,
   nextPrompt,
   refusalResumeAt,
   selectPromotable,
   MAX_PAUSES_PER_RUN,
+  MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
 
 const clash = (a: string, b: string) => overlaps(conflictKey(a), conflictKey(b));
@@ -306,6 +309,81 @@ describe("usage-limit classification", () => {
   });
 });
 
+/**
+ * Covers which refusals are retried in place. It earns a test on the same
+ * grounds as `isUsageLimit`, and the two failure modes point opposite ways: a
+ * shape that stops being recognised ends a run — with a live session, a held
+ * folder and an agent part-way through — for a fault that fixes itself, while
+ * one recognised too broadly re-spawns three times into a wall that will refuse
+ * every one of them.
+ *
+ * The five stream sentences are quoted from the shipped CLI, not invented.
+ */
+describe("transient API failure classification", () => {
+  it("matches the CLI's own stream-truncation messages", () => {
+    // The one from the issue, plus its four siblings in the same table.
+    for (const text of [
+      "API Error: Connection closed mid-response. The response above may be incomplete.",
+      "API Error: Server error mid-response. The response above may be incomplete.",
+      "API Error: Response stalled mid-stream. The response above may be incomplete.",
+      "API Error: Response stalled while thinking, before producing a response. Try again.",
+      "API Error: Connection closed while thinking, before producing a response. Try again.",
+    ]) {
+      assert.equal(isTransientApiError(text), true, text);
+    }
+  });
+
+  it("matches the statuses and error types the provider documents as retryable", () => {
+    assert.equal(isTransientApiError("API Error: 529 overloaded_error"), true);
+    assert.equal(isTransientApiError("API Error: 500 Internal Server Error"), true);
+    assert.equal(isTransientApiError("API Error: 503 Service Unavailable"), true);
+    assert.equal(
+      isTransientApiError('{"type":"error","error":{"type":"rate_limit_error"}}'),
+      true,
+    );
+  });
+
+  it("matches a connection that never reached a status", () => {
+    assert.equal(isTransientApiError("Connection error."), true);
+    assert.equal(isTransientApiError("Unable to connect to API"), true);
+    assert.equal(isTransientApiError("read ECONNRESET"), true);
+    assert.equal(isTransientApiError("TypeError: fetch failed"), true);
+  });
+
+  it("leaves permanent failures to end the run", () => {
+    // Retrying any of these buys three more of the same answer.
+    assert.equal(isTransientApiError("API Error: 401 Invalid API key · Please run /login"), false);
+    assert.equal(isTransientApiError("Not logged in · Please run /login"), false);
+    assert.equal(
+      isTransientApiError("API Error: 400 duplicate tool_use ID in conversation history."),
+      false,
+    );
+    assert.equal(isTransientApiError("Your credit balance is too low"), false);
+    assert.equal(isTransientApiError(""), false);
+  });
+
+  it("does not read a bare number in ordinary text as a status", () => {
+    // `apiError` can carry whatever the CLI summarised the cycle with.
+    assert.equal(isTransientApiError("Wrote 500 lines to server.ts"), false);
+    assert.equal(isTransientApiError("429 tests passed"), false);
+  });
+
+  it("is the second question asked, never the first", () => {
+    // A wall can arrive as a 429, and backing off five seconds does not refill
+    // an allowance — so the loop tests `isUsageLimit` first and this only ever
+    // sees what that rejected. Both being true here is the reason for the order.
+    const wall = "API Error: 429 You've hit your weekly limit";
+    assert.equal(isUsageLimit(wall), true);
+    assert.equal(isTransientApiError(wall), true);
+  });
+
+  it("retries a bounded number of times", () => {
+    // The cap is what keeps a broken upstream from holding a folder forever;
+    // `startRun` indexes a backoff entry per retry, so it must not be zero.
+    assert.equal(MAX_TRANSIENT_RETRIES >= 1, true);
+  });
+});
+
 describe("refusal wake-up time", () => {
   const now = 1_700_000_000_000;
   const min = 5 * 60_000;
@@ -362,5 +440,74 @@ describe("refusal wake-up time", () => {
     });
     assert.equal(Number.isFinite(atCap), true);
     assert.equal(atCap <= now + 6 * hour, true);
+  });
+});
+
+/**
+ * The credential block handed to a work cycle.
+ *
+ * It earns a test on the same grounds as the rest of this file: it is pure, and
+ * every way it can be wrong is silent. Git ignores a `GIT_CONFIG_*` block whose
+ * count and pairs disagree — no warning, no non-zero exit — so a mistake here
+ * looks exactly like the unauthenticated container it exists to fix, and only
+ * shows up as an agent that could not push, inside a tool call nothing here
+ * reads. The empty case matters just as much: injecting a helper that answers
+ * with an empty password turns "no credentials configured" into a rejected
+ * login against whatever the agent was doing.
+ */
+describe("github credentials for a work cycle", () => {
+  const token = "ghp_example";
+  const env = githubEnv(token);
+
+  it("hands nothing to the child when no token is configured", () => {
+    assert.deepEqual(githubEnv(""), {});
+  });
+
+  it("sets both names the gh CLI and its ecosystem read", () => {
+    assert.equal(env.GH_TOKEN, token);
+    assert.equal(env.GITHUB_TOKEN, token);
+  });
+
+  it("numbers the git config block so git does not discard all of it", () => {
+    const count = Number(env.GIT_CONFIG_COUNT);
+    assert.equal(Number.isInteger(count) && count > 0, true);
+    for (let i = 0; i < count; i += 1) {
+      assert.equal(typeof env[`GIT_CONFIG_KEY_${i}`], "string");
+      assert.equal(typeof env[`GIT_CONFIG_VALUE_${i}`], "string");
+    }
+    // A pair past the count is a pair git never reads.
+    assert.equal(env[`GIT_CONFIG_KEY_${count}`], undefined);
+  });
+
+  it("resets the credential helper list before adding its own", () => {
+    // A repository cloned on the host can name a helper this image does not
+    // have; git consults them in order, so ours has to be the only one.
+    const keys: string[] = [];
+    const values: string[] = [];
+    for (let i = 0; i < Number(env.GIT_CONFIG_COUNT); i += 1) {
+      keys.push(env[`GIT_CONFIG_KEY_${i}`]);
+      values.push(env[`GIT_CONFIG_VALUE_${i}`]);
+    }
+    const first = keys.indexOf("credential.https://github.com.helper");
+    assert.notEqual(first, -1);
+    assert.equal(values[first], "");
+    assert.equal(values[first + 1]?.startsWith("!"), true);
+    assert.equal(keys[first + 1], "credential.https://github.com.helper");
+  });
+
+  it("rewrites an ssh remote, which is the case that cannot be authenticated", () => {
+    const rewrites = Object.entries(env)
+      .filter(([k]) => k.startsWith("GIT_CONFIG_KEY_"))
+      .filter(([, v]) => v === "url.https://github.com/.insteadOf")
+      .map(([k]) => env[k.replace("KEY", "VALUE")]);
+    assert.deepEqual(rewrites.sort(), ["git@github.com:", "ssh://git@github.com/"]);
+  });
+
+  it("keeps the token out of the git config it writes", () => {
+    // `git config --list` is something an agent prints; the helper reads the
+    // environment at call time so the value there is `$GH_TOKEN`, not the token.
+    for (const [key, value] of Object.entries(env)) {
+      if (key.startsWith("GIT_CONFIG_")) assert.equal(value.includes(token), false);
+    }
   });
 });

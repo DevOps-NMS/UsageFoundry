@@ -139,6 +139,34 @@ One thing the mount also cannot carry is `~/.claude.json` — it sits *next to*
 the directory, not inside it — so user-scoped MCP servers are not available to
 the containerised agent.
 
+### Giving a run access to GitHub
+
+The same gap applies to git hosting, and it bites later in a run rather than at
+the start of one. `~/.claude` carries your Claude login; it does not carry
+`~/.gitconfig`, `~/.ssh` or `~/.config/gh`. So an agent that tries to push a
+branch, open a pull request or read an issue gets an authentication failure
+*inside a tool call* — which nothing in the run loop reads. From the outside the
+cycle simply ends without the PR you asked for.
+
+Set one token in `.env`:
+
+```bash
+UF_GITHUB_TOKEN=github_pat_…
+```
+
+Scope it to the repositories you run agents against — Contents: read and write,
+plus Pull requests and Issues if the agent should open them (a classic token
+needs `repo`). An unattended agent can use everything the token can.
+
+With it set, each work cycle is spawned with `GH_TOKEN`/`GITHUB_TOKEN` for the
+`gh` CLI, a git credential helper for `github.com`, and a rewrite of
+`git@github.com:` remotes to HTTPS — the container holds no SSH key, so a
+repository cloned over SSH could otherwise never authenticate while one cloned
+over HTTPS could, which is what makes this fail on some runs and not others.
+Those variables reach the agent and nothing else: not the reviewer, and not the
+git this app itself runs, whose children execute repository-controlled hooks.
+Settings shows whether a token is configured.
+
 ### Required environment
 
 | Variable | Purpose |
@@ -146,6 +174,7 @@ the containerised agent.
 | `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. Absolute path; compose refuses to start without it. |
 | `UF_AUTH_TOKEN` | Shared secret for the UI. Blank disables auth — only acceptable on loopback. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
+| `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid the container runs as; must own the mounts. Default 1000. |
 
 Compose also mounts `~/.claude` **read-write** — Claude Code writes new session
@@ -244,6 +273,29 @@ reported — close, but reconstructed rather than measured.
 same conversation and same checkout, when the next 5-hour window opens, so one
 task can stretch across several of them until the weekly percentage (or the time
 limit, or the cycle cap) ends it for good.
+
+A dropped connection is a third thing again, and it is handled in every mode.
+`API Error: Connection closed mid-response`, an overloaded upstream, a burst of
+429s — none of these say anything about your allowance or about the task, and
+all of them clear in seconds.
+
+Often Claude Code has already dealt with it before UsageFoundry sees it: when a
+stream drops part-way, the CLI finalises what it had and carries the work cycle
+on, leaving the error behind as a note. A cycle that ends that way — its own
+`result`, a clean exit — is a cycle that **worked**, and the run simply carries
+on with a line in its log saying what happened. (Runs used to die there, on the
+note rather than on the fault.)
+
+When the cycle really was cut short, the run waits 5, then 20, then 60 seconds
+and spawns again into the same conversation, rather than ending. It
+never parks for one (there is no window to wait out, and parking would hand its
+folder to whatever is queued behind it), and it never retries more than three
+times **in a row** — a cycle that gets through resets the count, so a long run
+that meets a blip an hour is unaffected, while an upstream that is genuinely
+down ends the run inside a minute and a half and says how many attempts it made.
+Each attempt is one line in the run log. A bad key, a malformed request or an
+exhausted credit balance is not in this category and still fails immediately:
+retrying those buys three more copies of the same answer.
 
 Only the 5-hour window is ever waited out, because it is the only limit here that
 refills on its own, on a schedule, without being told anything. A weekly window
@@ -669,6 +721,12 @@ mounted code. Treat it as privileged.
   containing shell metacharacters is inert.
 - `bypassPermissions` lets the agent run any command in the mounted folder
   without asking. The UI warns; the default is `acceptEdits`.
+- `UF_GITHUB_TOKEN` is handed to the agent's work cycles and to nothing else.
+  The reviewer does not get it (it cannot write), and neither does the git this
+  app runs itself — `worktree add` and `merge` execute hooks the repository
+  controls, and this app's own git never touches the network. The credential
+  helper is scoped to `https://github.com`, so another host asking for
+  credentials gets none.
 
 ---
 
@@ -828,13 +886,18 @@ Built and exercised against real transcripts:
   under `live-resume` and never on the weekly one, **ends** rather than parks a
   run that is also out of time, still refuses a fraction guard with no ceiling,
   and blocks on reconciled spend that `spent_usd` alone would have missed.
-- Provider refusals (`npm test`, 11 cases): `isUsageLimit` matches both the
+- Provider refusals (`npm test`, 18 cases): `isUsageLimit` matches both the
   wording the CLI renders and the wording in its own error taxonomy, including a
   model label it has never seen; leaves `Not logged in`, a spend cap and a
   credit balance to fail as themselves; and treats a 429, an overloaded upstream
   and a plain rate limit as transient rather than as an exhausted allowance —
   money and blips are the two things that must not be waited out.
-  `refusalResumeAt` waits for a window still open, backs
+  `isTransientApiError` picks those blips back up: all five stream-truncation
+  sentences the CLI can render, the statuses and `error.type` names the provider
+  documents as retryable, and a connection that never reached a status — while
+  leaving a bad key, a malformed request and an empty credit balance to fail as
+  themselves, and reading neither `Wrote 500 lines` nor `429 tests passed` as a
+  status. `refusalResumeAt` waits for a window still open, backs
   off 20/40/60 minutes for one already passed or invisible, never re-spawns
   inside five minutes, and never holds a folder past six hours.
 - Reviewing and landing, exercised end to end against real scratch repositories
@@ -913,6 +976,16 @@ Built and exercised against real transcripts:
   budget blob: it comes back as `plan` (the only mode that cannot write) and one
   work cycle, rather than as a wider permission or a throw. `normalizeTemplateInput`
   and `rowToTemplate` also have 20 assertions under `npm test`.
+- The GitHub credential block, driven into a real `git` (2.39.5) in a scratch
+  repository rather than only asserted in a test: `git credential fill` for
+  `github.com` returns the token even when the repository's own config names a
+  helper the image does not have (`osxkeychain`), which is the reset entry
+  earning its place; `store`/`erase` are accepted as no-ops; both
+  `git@github.com:owner/repo` and `ssh://git@github.com/owner/repo` rewrite to
+  HTTPS under `ls-remote --get-url`; and a request for `gitlab.com` gets no
+  credential at all and fails immediately instead of prompting. Plus six
+  assertions in `npm test` on the block itself — the count matching its pairs is
+  the silent one, since git discards the whole block if it does not.
 - Layout, measured rather than eyeballed: every page of the production build
   rendered in a headless browser against fabricated API responses (each status a
   run can hold, a conflicting land preview, a working merge queue) at twelve
@@ -953,6 +1026,18 @@ through before trusting this unattended:
   enough to correct it.
 - Whether a refusal ever arrives on stderr alone rather than as a `<synthetic>`
   assistant turn. `refusalInStderr` covers that case but has never fired.
+- **What a dropped stream does to the cycle around it.** The five sentences
+  `isTransientApiError` matches were read out of the shipped binary's own
+  strings, and one of them (`Connection closed mid-response`) is confirmed from
+  a real run — which this app then filed as `failed`. The binary also shows the
+  CLI finalising a partial response and carrying on rather than aborting, which
+  is why a cycle that still reports success is now treated as having recovered.
+  What has not been watched end to end is which of the two paths that real run
+  actually took, or whether `--resume` accepts a session a drop truncated
+  mid-turn — and so whether a retry carries on or lands in the resume-failure
+  ladder above. Every outcome is recorded either way: a recovery is a log line
+  naming the error, each retry is an `error` event carrying its backoff, and the
+  stop reason names the attempt count if all of them fail.
 - Whether `claude --resume` accepts a session whose transcript was truncated by
   a mid-turn kill. The recovery ladder retries once and then stops, naming the
   command — it deliberately does not start a fresh session. That ladder now also
@@ -1022,18 +1107,25 @@ through before trusting this unattended:
   banners — a carried live-enforcement mode, a carried `bypassPermissions` —
   appear on load and clear when the control is touched. The routes underneath
   were exercised directly; only the client wiring is unconfirmed.
+- **The image with `gh` in it.** The install layer, the checksum check and the
+  arch mapping have not been built — no Docker on the machine this was written
+  on — so `docker compose up --build` is the first thing to run against this.
+- A real agent using the token: a `git push` of a run's branch, and a `gh` call
+  that needs authentication. The credential block itself was driven into a real
+  git (above); what has not been watched is the CLI's own git picking it up out
+  of the environment mid-run.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
-work cycle spawns with, how a run's diff is parsed and budgeted, when a branch
-may be landed, what a queued merge does with the branch it reaches, what counts
-as a conflict marker — both for deciding whether one
-was really resolved and for deciding what to show — and the two renderings that
-would lie quietly about a number: an unconfigured ceiling, and a first-party
-figure shown beside the meters. `npm run typecheck` plus
-a `docker compose up --build` smoke test is still the real verification loop,
-and the list above records what was checked by hand.
+work cycle spawns with, the GitHub credentials handed to a work cycle, how a
+run's diff is parsed and budgeted, when a branch may be landed, what a queued
+merge does with the branch it reaches, what counts as a conflict marker — both
+for deciding whether one was really resolved and for deciding what to show — and
+the two renderings that would lie quietly about a number: an unconfigured
+ceiling, and a first-party figure shown beside the meters. `npm run typecheck`
+plus a `docker compose up --build` smoke test is still the real verification
+loop, and the list above records what was checked by hand.
 
 ---
 
