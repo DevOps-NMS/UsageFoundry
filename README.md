@@ -1153,6 +1153,13 @@ through before trusting this unattended:
   have been better, since it is the branch with no form behind it and its guard
   set is the one thing on a proposal card an operator has to *read* rather than
   recognise.
+- **That `cd <folder> && git log` survives the allowlist.** `Bash(cd:*)` sits
+  beside the three `git` entries because the child's cwd is the first mount and
+  `git -C <path> log` matches none of them — which assumes the CLI matches each
+  half of a compound command separately rather than the whole string. That is
+  how it is documented to work and it has not been watched here. If it turns out
+  otherwise the failure is loud and harmless: a refused call, named in the
+  thread, and a chat that can still read every folder through `Read` and `Grep`.
 - **The `chat_proposals` rebuild on a database that predates it.** Dropping the
   NOT NULL from `template_id` needs a table rebuild, which was exercised against
   SQLite directly — rows preserved, index recreated, foreign key and its cascade

@@ -952,8 +952,10 @@ const ALLOWED_TOOLS = [
   "Bash(git branch:*)",
   // Not decoration: the child's cwd is the first mount, and a `git` subcommand
   // is only allowed by the entries above under its own name — `git -C <path>
-  // log` matches none of them. `cd <folder> && git log` is what is left, and
-  // each half of that is matched separately.
+  // log` matches none of them. `cd <folder> && git log` is what is left, which
+  // rests on the CLI matching each half of a compound command separately. That
+  // is how it is documented and it has not been watched here; if it is wrong
+  // the call is refused and named in the thread, which is the loud direction.
   "Bash(cd:*)",
 ];
 
