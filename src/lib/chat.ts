@@ -618,12 +618,27 @@ export async function sendChatMessage(
   const prompt = chatPrompt({ sessionId: chat.session_id, history }, text);
 
   // Not awaited: it runs for minutes and the row is what reports on it.
-  void runTurn(chat, prompt).catch((err) => {
-    finishTurn(chatId, {
-      status: "failed",
-      error: err instanceof Error ? err.message : String(err),
+  //
+  // Wrapped as well as `.catch`ed, because `runTurn` is not `async`: it mints
+  // the capability and writes the MCP config *while this call expression is
+  // being evaluated*, so a throw from either happens before `.catch` is
+  // attached to anything. Unhandled, it propagates out of this function with
+  // the row already set to `thinking` — a state nothing but a restart clears,
+  // and one this function refuses to send into.
+  try {
+    void runTurn(chat, prompt).catch((err) => {
+      finishTurn(chatId, {
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
-  });
+  } catch (err) {
+    const reason = `Could not start the turn: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+    finishTurn(chatId, { status: "failed", error: reason });
+    return { ok: false, reason };
+  }
 
   return { ok: true };
 }
@@ -640,7 +655,17 @@ interface TurnResult {
 
 function runTurn(chat: ChatRow, prompt: string): Promise<void> {
   const token = mintCapability(chat.id);
-  const configPath = writeMcpConfig(token);
+  let configPath: string;
+  try {
+    configPath = writeMcpConfig(token);
+  } catch (err) {
+    // `land` is the only thing that revokes, and it is inside the promise this
+    // never reaches — so a token minted for a turn that cannot start would
+    // stay live in memory until it expired, an hour later. The caller records
+    // the failure on the row; this releases what the failed setup took.
+    revokeCapability(token);
+    throw err;
+  }
 
   return new Promise((resolve) => {
     const settings = getSettings();
@@ -1087,18 +1112,32 @@ function writeMcpConfig(token: string): string {
     os.tmpdir(),
     `uf-mcp-${randomBytes(9).toString("hex")}.json`,
   );
-  fs.writeFileSync(
-    file,
-    JSON.stringify({
-      mcpServers: {
-        uf: {
-          type: "http",
-          url: MCP_SELF_URL,
-          headers: { Authorization: `Bearer ${token}` },
+  try {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        mcpServers: {
+          uf: {
+            type: "http",
+            url: MCP_SELF_URL,
+            headers: { Authorization: `Bearer ${token}` },
+          },
         },
-      },
-    }),
-    { mode: 0o600 },
-  );
+      }),
+      { mode: 0o600 },
+    );
+  } catch (err) {
+    // A write that fails part-way — ENOSPC, the likeliest of these — leaves the
+    // file behind with whatever reached the disk, and what it carries is the
+    // capability token. Nothing else would ever remove it: the unlink in `land`
+    // is inside a promise this failure never reaches.
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      // Never created, or the same condition that failed the write. The
+      // original error is the one worth reporting.
+    }
+    throw err;
+  }
   return file;
 }
