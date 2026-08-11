@@ -16,6 +16,16 @@ import { DiffFileRow } from "@/components/ui/Patch";
  * than reading the diff. This is the outcome.
  */
 
+/**
+ * Above this many files the list gets its own scroll box.
+ *
+ * Every row is a collapsed `<details>`, so a 300-file change is 300 rows of
+ * chrome between the operator and the land decision below it. The cap bounds
+ * the card rather than the list: nothing is dropped, and the count above it
+ * already says how many there are.
+ */
+const SCROLL_FILE_LIST_ABOVE = 24;
+
 export function RunDiff({ run }: { run: RunDTO }) {
   const [diff, setDiff] = useState<RunDiffDTO | null>(null);
   const [loading, setLoading] = useState(false);
@@ -49,12 +59,14 @@ export function RunDiff({ run }: { run: RunDTO }) {
   }, [settled, load]);
 
   return (
-    <Card className="mt-6">
+    // The outcome once a run is over, and a one-line stub while it is still
+    // writing — so it leads only when there is something settled to read.
+    <Card emphasis={settled ? "primary" : "default"} className="mt-6">
       <CardTitle>
         What changed
         <Button
           variant="secondary"
-          className="ml-auto"
+          className="ml-auto transition-colors duration-150"
           onClick={load}
           disabled={loading}
         >
@@ -64,8 +76,26 @@ export function RunDiff({ run }: { run: RunDTO }) {
 
       {error && <Notice tone="danger">{error}</Notice>}
 
-      {!diff && !error && (
-        <Empty>{loading ? "Reading the repository…" : "Not loaded yet."}</Empty>
+      {/* Shaped like the file list it is standing in for, so the card does not
+          resize under the reader when the answer arrives. */}
+      {loading && !diff && (
+        <div aria-busy="true" aria-live="polite">
+          <span className="sr-only">Reading the repository…</span>
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="flex items-center gap-2 border-b border-line py-2.5 last:border-b-0">
+              <div className="h-3.5 flex-1 rounded-sm bg-inset" />
+              <div className="h-3.5 w-12 rounded-sm bg-inset" />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!diff && !error && !loading && (
+        <Empty>
+          {settled
+            ? "Nothing loaded — read it with the button above."
+            : "This run is still working, so its changes are read on request."}
+        </Empty>
       )}
 
       {diff && (
@@ -75,14 +105,19 @@ export function RunDiff({ run }: { run: RunDTO }) {
           {diff.kind === "none" && <Empty>{diff.reason ?? "Nothing to show."}</Empty>}
 
           {diff.kind === "range" && (
-            <div className="mb-2 text-sm text-ink-muted">
+            <div className="mb-2 text-sm tabular-nums text-ink-muted">
               {diff.filesChanged === 0 ? (
                 (diff.reason ?? "No files changed.")
               ) : (
                 <>
-                  <strong className="text-ink">{diff.filesChanged}</strong> file
-                  {diff.filesChanged === 1 ? "" : "s"} on{" "}
+                  <strong className="font-semibold text-ink">
+                    {diff.filesChanged}
+                  </strong>{" "}
+                  file{diff.filesChanged === 1 ? "" : "s"} on{" "}
                   <span className="mono">{diff.branch}</span> ·{" "}
+                  {/* The sign is in the text, not only in the colour: these read
+                      the same way in a screenshot, in high contrast, and to a
+                      reader who cannot tell green from red. */}
                   <span className="text-ok">+{diff.added}</span>{" "}
                   <span className="text-danger">−{diff.deleted}</span>
                 </>
@@ -101,7 +136,13 @@ export function RunDiff({ run }: { run: RunDTO }) {
             </Notice>
           )}
 
-          <div>
+          <div
+            className={
+              diff.files.length > SCROLL_FILE_LIST_ABOVE
+                ? "max-h-[26rem] overflow-y-auto rounded-sm border border-line px-2.5"
+                : ""
+            }
+          >
             {diff.files.map((f) => (
               <DiffFileRow key={`${f.oldPath ?? ""}:${f.path}`} file={f} />
             ))}

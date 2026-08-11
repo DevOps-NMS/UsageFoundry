@@ -46,7 +46,10 @@ export function LiveTelemetry({
 
       <div className="mb-3 flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <Stat>{fmtUSD(telemetry.costUSD)}</Stat>
-        <div className="text-xs text-ink-muted">
+        {/* Tabular: every figure on this line moves as the card polls, and a
+            proportional digit set shifts the whole sentence sideways when a 1
+            becomes an 8. */}
+        <div className="text-xs tabular-nums text-ink-muted">
           {telemetry.requests} API{" "}
           {telemetry.requests === 1 ? "request" : "requests"} ·{" "}
           {fmtTokens(telemetry.tokens)} tokens · {telemetry.runCount}{" "}

@@ -3,7 +3,7 @@
 import type { RunEventDTO } from "@/lib/apiTypes";
 import { cycleOutputs, type CycleOutput } from "@/lib/cycles";
 import { fmtClock } from "@/lib/format";
-import { Card, CardTitle } from "@/components/ui/Card";
+import { Card, CardTitle, type CardEmphasis } from "@/components/ui/Card";
 import { Markdown } from "@/components/Markdown";
 
 /**
@@ -33,7 +33,16 @@ function CycleBody({ cycle }: { cycle: CycleOutput }) {
   );
 }
 
-export function RunOutput({ events }: { events: RunEventDTO[] }) {
+export function RunOutput({
+  events,
+  // Raised to the page's lead once the run is over: while it works, the log is
+  // what the operator is watching and this is a partial account of it; once it
+  // has stopped, this is the answer to "what happened".
+  emphasis = "default",
+}: {
+  events: RunEventDTO[];
+  emphasis?: CardEmphasis;
+}) {
   const cycles = cycleOutputs(events);
   // Nothing to show rather than an empty card: a run that has not spoken yet is
   // already visibly working in the log, and a "waiting…" card beside it says
@@ -44,7 +53,7 @@ export function RunOutput({ events }: { events: RunEventDTO[] }) {
   const earlier = cycles.slice(0, -1);
 
   return (
-    <Card className="mt-6">
+    <Card emphasis={emphasis} className="mt-6">
       <CardTitle>What the agent reported</CardTitle>
 
       <CycleBody cycle={latest} />

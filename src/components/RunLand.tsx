@@ -257,13 +257,16 @@ export function RunLand({ run }: { run: RunDTO }) {
   const canPurge = state.branchExists && settled && !canDelete;
 
   return (
-    <Card className="mt-6">
+    // Raised only while there is a decision to take. A branch that is already
+    // in, or that nothing can be done with yet, is a record rather than a
+    // choice, and should not be the loudest thing on the page.
+    <Card emphasis={canLand || canResolve ? "primary" : "default"} className="mt-6">
       <CardTitle>
         Land this work
         {state.landedAt && <Badge tone="ok">landed</Badge>}
       </CardTitle>
 
-      <div className="text-sm text-ink-muted">
+      <div className="text-sm tabular-nums text-ink-muted">
         <span className="mono text-ink">{state.branch}</span>
         {state.target ? (
           <>
@@ -299,7 +302,10 @@ export function RunLand({ run }: { run: RunDTO }) {
 
       {/* One line about the state, not three. "Already in main", "landed on
           Tuesday" and "merged just now" are the same fact told three ways, and
-          a card that stacks them reads as three separate things happening. */}
+          a card that stacks them reads as three separate things happening.
+          Announced, because a merge into the operator's own checkout is the one
+          thing on this page that changes a directory they are working in. */}
+      <div aria-live="polite">
       {error ? (
         <Notice tone="danger" className="mt-3">
           {error}
@@ -338,6 +344,7 @@ export function RunLand({ run }: { run: RunDTO }) {
           </Notice>
         )
       )}
+      </div>
 
       {state.pending && (
         <PendingWork
@@ -421,76 +428,128 @@ export function RunLand({ run }: { run: RunDTO }) {
       )}
 
       {(canLand || canDelete || canResolve || canPurge) && (
-        <ButtonRow className="mt-3.5">
+        <div className="mt-4 border-t border-line pt-3.5">
+          {/* What the button does, stated above it rather than under it. This
+              one writes into a directory the operator is working in, and the
+              only version of that sentence worth anything is the one they read
+              before they press it. */}
           {canLand && (
-            <>
-              <select
-                className="w-auto rounded-sm border border-line bg-inset px-2.5 py-2 text-sm text-ink"
-                value={strategy}
-                onChange={(e) => setStrategy(e.target.value as "merge" | "squash")}
-                aria-label="How to land it"
+            <p className="mb-2.5 max-w-[70ch] text-xs leading-snug text-ink-muted">
+              Merges into <span className="mono">{state.target}</span> in your own
+              checkout, which has to be clean and standing on it. A conflict is
+              rolled back.
+              {strategy === "squash" && (
+                <>
+                  {" "}
+                  A squash rewrites the commits, so git can never afterwards see
+                  this branch as merged.
+                </>
+              )}
+            </p>
+          )}
+          {canResolve && !resolving && (
+            <p className="mb-2.5 max-w-[70ch] text-xs leading-snug text-ink-muted">
+              Merges {state.target} into the branch in a throwaway checkout and has
+              Claude reconcile the markers. Billed, and your own checkout is not
+              involved.
+            </p>
+          )}
+
+          <ButtonRow>
+            {canLand && (
+              <>
+                <select
+                  className="w-auto rounded-sm border border-line bg-inset px-2.5 py-2 text-sm text-ink transition-colors duration-150"
+                  value={strategy}
+                  onChange={(e) => setStrategy(e.target.value as "merge" | "squash")}
+                  aria-label="How to land it"
+                >
+                  <option value="merge">Merge, keeping its commits</option>
+                  <option value="squash">Squash into one commit</option>
+                </select>
+                <Button
+                  className="transition-colors duration-150"
+                  onClick={() => act("land")}
+                  disabled={busy}
+                >
+                  {busy ? "Landing…" : `Land into ${state.target}`}
+                </Button>
+              </>
+            )}
+            {canResolve && (
+              <Button
+                className="transition-colors duration-150"
+                onClick={() => act("resolve")}
+                disabled={busy || resolving}
               >
-                <option value="merge">Merge, keeping its commits</option>
-                <option value="squash">Squash into one commit</option>
-              </select>
-              <Button onClick={() => act("land")} disabled={busy}>
-                {busy ? "Landing…" : `Land into ${state.target}`}
+                {resolving ? "Resolving…" : "Resolve with Claude"}
               </Button>
-            </>
-          )}
-          {canResolve && (
-            <Button onClick={() => act("resolve")} disabled={busy || resolving}>
-              {resolving ? "Resolving…" : "Resolve with Claude"}
-            </Button>
-          )}
-          {canDelete && (
-            <Button variant="danger" onClick={() => act("delete")} disabled={busy}>
-              Delete branch
-            </Button>
-          )}
-          {/* Two presses, and the second one names what goes. Nothing here can
-              put back a commit that was never landed. */}
-          {canPurge &&
-            (confirmPurge ? (
-              <Button variant="danger" onClick={() => act("purge")} disabled={busy}>
-                {busy
-                  ? "Purging…"
-                  : `Purge ${state.branch} and its ${state.ahead} commit${
-                      state.ahead === 1 ? "" : "s"
-                    }`}
+            )}
+            {/* The safe door: git can see this work is in the target, so it is
+                deliberately *not* dressed as the destructive one below. */}
+            {canDelete && (
+              <Button
+                variant="secondary"
+                className="transition-colors duration-150"
+                onClick={() => act("delete")}
+                disabled={busy}
+              >
+                Delete branch
               </Button>
-            ) : (
+            )}
+            {canPurge && !confirmPurge && (
               <Button
                 variant="ghost"
+                className="transition-colors duration-150"
                 onClick={() => setConfirmPurge(true)}
                 disabled={busy}
               >
                 Purge branch
               </Button>
-            ))}
-        </ButtonRow>
+            )}
+          </ButtonRow>
+        </div>
       )}
 
+      {/* Two presses, and the second one names what goes — with a way back out,
+          which the armed single button did not have. Nothing here can put back a
+          commit that was never landed. */}
       {confirmPurge && (
-        <Hint tone="danger">
-          Deletes the branch, its {state.ahead} commit
-          {state.ahead === 1 ? "" : "s"}
-          {state.pending ? ` and ${state.pending.count} uncommitted path(s)` : ""}, and
-          its checkout — none of it recoverable from here
-        </Hint>
-      )}
-
-      {canLand && (
-        <Hint>
-          Runs in your own checkout, which has to be clean and on {state.target}. A
-          conflict is rolled back
-        </Hint>
-      )}
-      {canResolve && !resolving && (
-        <Hint>
-          Merges {state.target} into the branch in a throwaway checkout and has
-          Claude reconcile the markers. Billed, and your checkout is untouched
-        </Hint>
+        <div className="mt-3 rounded-sm border border-line border-l-[3px] border-l-danger bg-inset p-3">
+          <p className="text-sm font-semibold text-ink">
+            Purge <span className="mono">{state.branch}</span>?
+          </p>
+          <p className="mt-1 max-w-[70ch] text-xs leading-snug text-ink-muted">
+            This deletes the branch, its {state.ahead} commit
+            {state.ahead === 1 ? "" : "s"}
+            {state.pending
+              ? ` and ${state.pending.count} uncommitted path${
+                  state.pending.count === 1 ? "" : "s"
+                }`
+              : ""}
+            , and its checkout. None of it is recoverable from here.
+          </p>
+          <ButtonRow className="mt-2.5">
+            <Button
+              variant="danger"
+              className="transition-colors duration-150"
+              onClick={() => act("purge")}
+              disabled={busy}
+            >
+              {busy
+                ? "Purging…"
+                : `Purge ${state.ahead} commit${state.ahead === 1 ? "" : "s"}`}
+            </Button>
+            <Button
+              variant="ghost"
+              className="transition-colors duration-150"
+              onClick={() => setConfirmPurge(false)}
+              disabled={busy}
+            >
+              Keep it
+            </Button>
+          </ButtonRow>
+        </div>
       )}
     </Card>
   );

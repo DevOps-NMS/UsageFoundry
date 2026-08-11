@@ -1,6 +1,7 @@
 "use client";
 
-import { use, useEffect, useRef, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import Link from "next/link";
 import type { RunDTO, RunEventDTO, RunTelemetryDTO } from "@/lib/apiTypes";
 import {
@@ -11,8 +12,16 @@ import {
   fmtRelative,
   fmtTokens,
   fmtUSD,
+  pollFailureMessage,
   shortPath,
 } from "@/lib/format";
+import { Badge } from "@/components/ui/Badge";
+import { Button, ButtonRow } from "@/components/ui/Button";
+import { Card, CardTitle, Empty, Stat } from "@/components/ui/Card";
+import { Field, Input, Textarea } from "@/components/ui/Field";
+import { Hint } from "@/components/ui/Hint";
+import { Log, LogLine, Spinner } from "@/components/ui/Log";
+import { Notice } from "@/components/ui/Notice";
 import { RunDiff } from "@/components/RunDiff";
 import { RunLand } from "@/components/RunLand";
 import { RunOutput } from "@/components/RunOutput";
@@ -98,6 +107,193 @@ function lineFor(e: RunEventDTO): string | null {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* What state the run is in, said once                                 */
+/* ------------------------------------------------------------------ */
+
+/** Runs the orchestrator still owns: they hold a folder and can spend again. */
+const ACTIVE_STATUSES: ReadonlySet<RunDTO["status"]> = new Set([
+  "running",
+  "queued",
+  "paused",
+]);
+
+/**
+ * The line under a headline figure.
+ *
+ * `StatSub` is the kit's version and takes no `className`, so it cannot be made
+ * tabular at a call site — and every one of these carries a figure that moves
+ * as the page polls. Stated once here rather than repeated inline.
+ */
+const SUB = "mt-0.5 text-xs tabular-nums text-ink-muted";
+
+type StateTone = "neutral" | "info" | "ok" | "warn" | "danger";
+
+/**
+ * The lead card's left edge, tinted by how much attention the state wants.
+ *
+ * A complete class string per tone, never `border-l-${tone}`: Tailwind scans
+ * source as plain text, so an interpolated name emits no rule at all and the
+ * edge silently disappears in the shipped container. Same rule as `Badge`.
+ */
+const STATE_ACCENT: Record<StateTone, string> = {
+  neutral: "border-l-line-strong",
+  info: "border-l-accent",
+  ok: "border-l-ok",
+  warn: "border-l-warn",
+  danger: "border-l-danger",
+};
+
+interface RunState {
+  tone: StateTone;
+  /** What happened, in a phrase. */
+  headline: string;
+  /** What it means, in a sentence. Never repeats `run.stop_reason`, which is
+   *  rendered underneath it verbatim. */
+  detail: ReactNode;
+}
+
+function describeRun(
+  run: RunDTO,
+  ctx: { now: number; cycleInFlight: string | null; stoppedByGuard: boolean },
+): RunState {
+  switch (run.status) {
+    case "queued": {
+      const ahead = run.queuePosition ?? 0;
+      return {
+        tone: "info",
+        headline: "Waiting for its folder",
+        detail:
+          ahead === 0
+            ? "Next in line — it starts as soon as the run ahead of it finishes."
+            : `${ahead} other run${ahead === 1 ? " is" : "s are"} ahead of it.`,
+      };
+    }
+
+    case "running":
+      return {
+        tone: "info",
+        headline: "Working",
+        detail: ctx.cycleInFlight
+          ? `On ${ctx.cycleInFlight}.`
+          : "Starting its first work cycle.",
+      };
+
+    case "paused":
+      return {
+        tone: "warn",
+        headline: "Waiting for the next 5-hour window",
+        detail: (
+          <>
+            Your 5-hour window reached the percentage this run was told to step
+            aside at.{" "}
+            {run.resume_at ? (
+              <>
+                It tries again at {fmtDateTime(run.resume_at)},{" "}
+                <strong className="font-semibold text-ink">
+                  {fmtRelative(run.resume_at, ctx.now)}
+                </strong>
+                .
+              </>
+            ) : (
+              "It tries again when the window rolls over."
+            )}{" "}
+            It is still holding{" "}
+            <span className="mono" title={run.work_dir ?? run.folder}>
+              {run.relPath || run.mountLabel || shortPath(run.folder, 2)}
+            </span>
+            , so nothing else can run there until it finishes or you stop it.
+          </>
+        ),
+      };
+
+    case "blocked":
+      return {
+        tone: "warn",
+        headline: "Refused to start",
+        detail: "It never started a work cycle, so it has spent nothing.",
+      };
+
+    case "failed":
+      return {
+        tone: "danger",
+        headline: "It failed",
+        detail:
+          run.exit_code === null || run.exit_code === undefined
+            ? "A work cycle ended without finishing."
+            : `A work cycle exited ${run.exit_code}.`,
+      };
+
+    case "stopped":
+      // A guard is not a fault, and must not be dressed as one. The signal is
+      // the budget event's own payload, never the wording of `stop_reason`.
+      return ctx.stoppedByGuard
+        ? {
+            tone: "neutral",
+            headline: "Stopped by one of your limits",
+            detail:
+              "Nothing went wrong — a limit you set was reached. Resume it with more room to carry on.",
+          }
+        : {
+            tone: "neutral",
+            headline: "Stopped",
+            detail: "It will not start another work cycle on its own.",
+          };
+
+    case "completed":
+      if (run.reported_done) {
+        return {
+          tone: "ok",
+          headline: "Reported the task complete",
+          detail:
+            "The agent judged the task done. Read what changed before you land it.",
+        };
+      }
+      // `completed` is also what a run that used up its cycle cap is written
+      // as, and the cap defaults to 1 — so this is the ordinary case, not the
+      // rare one, and calling it "complete" would be a lie.
+      return run.max_iterations > 0
+        ? {
+            tone: "neutral",
+            headline: `Used all ${run.max_iterations} work cycle${
+              run.max_iterations === 1 ? "" : "s"
+            }`,
+            detail:
+              "It never reported the task complete, so there is probably more to do.",
+          }
+        : {
+            tone: "neutral",
+            headline: "Finished",
+            detail: "It stopped without reporting the task complete.",
+          };
+  }
+}
+
+/* ------------------------------------------------------------------ */
+
+/** Shaped like the page it is standing in for, so nothing jumps on arrival. */
+function RunSkeleton() {
+  return (
+    <div aria-busy="true" aria-live="polite">
+      <span className="sr-only">Loading this run…</span>
+      <div className="mb-1 h-7 w-52 rounded-sm bg-inset" />
+      <div className="mb-4 h-4 w-80 rounded-sm bg-inset" />
+      <Card emphasis="primary" className="border-l-[3px] border-l-line-strong">
+        <div className="mb-2 h-5 w-44 rounded-sm bg-inset" />
+        <div className="h-4 w-full max-w-[46ch] rounded-sm bg-inset" />
+        <div className="mt-4 grid grid-cols-2 gap-4 border-t border-line pt-4">
+          <div className="h-8 w-24 rounded-sm bg-inset" />
+          <div className="h-8 w-24 rounded-sm bg-inset" />
+        </div>
+      </Card>
+      <Card className="mt-6">
+        <div className="mb-3 h-4 w-24 rounded-sm bg-inset" />
+        <div className="h-40 w-full rounded-sm bg-inset" />
+      </Card>
+    </div>
+  );
+}
+
 export default function RunDetail({
   params,
 }: {
@@ -108,6 +304,7 @@ export default function RunDetail({
   const [telemetry, setTelemetry] = useState<RunTelemetryDTO | null>(null);
   const [events, setEvents] = useState<RunEventDTO[]>([]);
   const [connected, setConnected] = useState(false);
+  const [pollError, setPollError] = useState<string | null>(null);
   const [stopNote, setStopNote] = useState<string | null>(null);
   // The reopen form. Held as strings because blank is meaningful — it is what
   // `normalizePolicy` reads as "no limit" — and a number input cannot hold it.
@@ -119,19 +316,48 @@ export default function RunDetail({
   const [reopenNote, setReopenNote] = useState("");
   const logRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
+  // Mirrors `pinnedToBottom` into render, because the way back to the live edge
+  // has to be a control the reader can see. The ref stays the source of truth
+  // for the autoscroll effect: it is read during an effect that must not wait
+  // for a re-render.
+  const [atLiveEdge, setAtLiveEdge] = useState(true);
+  const [missed, setMissed] = useState(0);
+  const seenLines = useRef(0);
+  // null until the run's first status is known — see the effect below.
+  const [logOpen, setLogOpen] = useState<boolean | null>(null);
 
   // Poll the run row for status/spend; the SSE stream carries the log.
   useEffect(() => {
     let alive = true;
     const load = async () => {
-      const res = await fetch(`/api/runs/${id}`, { cache: "no-store" });
-      if (!res.ok || !alive) return;
-      const json = await res.json();
-      setRun(json.run);
-      setTelemetry(json.telemetry ?? null);
+      try {
+        const res = await fetch(`/api/runs/${id}`, { cache: "no-store" });
+        const json = (await res.json().catch(() => ({}))) as {
+          run?: RunDTO;
+          telemetry?: RunTelemetryDTO | null;
+          error?: string;
+        };
+        if (!alive) return;
+        if (!res.ok || !json.run) {
+          // A 404 or a lapsed session used to leave the loading state on screen
+          // for ever, which is indistinguishable from a slow request.
+          setPollError(
+            pollFailureMessage(res.status, json.error ?? (res.ok ? "no run in the response" : null)),
+          );
+          return;
+        }
+        setRun(json.run);
+        setTelemetry(json.telemetry ?? null);
+        setPollError(null);
+      } catch (err) {
+        if (!alive) return;
+        setPollError(
+          pollFailureMessage(null, err instanceof Error ? err.message : String(err)),
+        );
+      }
     };
-    load();
-    const t = setInterval(load, 3000);
+    void load();
+    const t = setInterval(() => void load(), 3000);
     return () => {
       alive = false;
       clearInterval(t);
@@ -154,18 +380,80 @@ export default function RunDetail({
     return () => es.close();
   }, [id]);
 
+  // Rendered once rather than per paint: `lineFor` runs over the whole stream,
+  // and the log's header counts the lines it will draw.
+  const lines = useMemo(
+    () =>
+      events.flatMap((e, i) => {
+        const text = lineFor(e);
+        return text === null
+          ? []
+          : [{ key: e.id ?? `${e.ts}-${i}`, kind: e.kind, ts: e.ts, text }];
+      }),
+    [events],
+  );
+
+  const status = run?.status;
+  const active = status !== undefined && ACTIVE_STATUSES.has(status);
+
+  // The log is the page while a run works and history once it has finished, so
+  // it starts open on an active run and folded on a settled one. Frozen at the
+  // first status that arrives: a run that finishes while you are reading it
+  // must not pull the log shut under you.
+  useEffect(() => {
+    if (!status) return;
+    setLogOpen((prev) => prev ?? ACTIVE_STATUSES.has(status));
+  }, [status]);
+  const showLog = logOpen ?? active;
+
   // Follow the tail, but stop fighting the user if they scroll up to read.
   useEffect(() => {
     const el = logRef.current;
-    if (el && pinnedToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [events]);
+    if (!el) return;
+    if (pinnedToBottom.current) {
+      el.scrollTop = el.scrollHeight;
+      seenLines.current = lines.length;
+      setMissed(0);
+    } else {
+      setMissed(Math.max(0, lines.length - seenLines.current));
+    }
+  }, [lines.length, showLog]);
+
+  // `Log` takes no attribute passthrough and is a shared primitive this run does
+  // not own, so the two things a scrolling region needs — a name, and a way for
+  // a keyboard to reach it — are set here. `role="log"` is what tells a screen
+  // reader the additions are appended output rather than a changed document.
+  useEffect(() => {
+    const el = logRef.current;
+    if (!el) return;
+    el.tabIndex = 0;
+    el.setAttribute("role", "log");
+    el.setAttribute("aria-label", "Run event log");
+  }, [showLog]);
 
   function onScroll() {
     const el = logRef.current;
     if (!el) return;
-    pinnedToBottom.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    pinnedToBottom.current = pinned;
+    // Bails out of the re-render when the answer has not changed, so dragging
+    // the scrollbar does not re-render the page on every frame.
+    setAtLiveEdge((prev) => (prev === pinned ? prev : pinned));
+    if (pinned) {
+      seenLines.current = lines.length;
+      setMissed(0);
+    }
   }
+
+  const jumpToLive = useCallback(() => {
+    const el = logRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    pinnedToBottom.current = true;
+    setAtLiveEdge(true);
+    seenLines.current = lines.length;
+    setMissed(0);
+  }, [lines.length]);
 
   // Only ticks while parked, so a finished run's page does no work. Must sit
   // above the `if (!run)` early return — hooks cannot live behind one.
@@ -175,6 +463,20 @@ export default function RunDetail({
     const t = setInterval(() => setNowTick(Date.now()), 1000);
     return () => clearInterval(t);
   }, [run?.status]);
+
+  // Whether a guard ended this run, read off the budget event's own payload
+  // rather than off the wording of `stop_reason` — that is user-facing prose
+  // and parsing it would break the first time it is reworded.
+  const stoppedByGuard = useMemo(
+    () =>
+      events.some(
+        (e) =>
+          e.kind === "budget" &&
+          e.payload?.allowed === false &&
+          e.payload?.disposition !== "pause",
+      ),
+    [events],
+  );
 
   async function stop() {
     const res = await fetch(`/api/runs/${id}`, { method: "DELETE" });
@@ -250,14 +552,15 @@ export default function RunDetail({
     );
   }
 
-  if (!run) return <div className="empty">Loading run…</div>;
+  if (!run) {
+    return (
+      <>
+        {pollError && <Notice tone="warn">{pollError}</Notice>}
+        {!pollError && <RunSkeleton />}
+      </>
+    );
+  }
 
-  // Paused counts as active: the run still holds its folder, will spend money
-  // again on its own, and must keep offering the control that ends it.
-  const active =
-    run.status === "running" ||
-    run.status === "queued" ||
-    run.status === "paused";
   // Finished, but with somewhere to carry on from — including `completed`: the
   // agent's judgement that a task is done is not the operator's, and seeing
   // what it built is usually what shows up the next thing to ask for.
@@ -270,413 +573,453 @@ export default function RunDetail({
   // is continued rather than pushed back on — same branch as `reopenPrompt`.
   const saidDone = run.status === "completed" && Boolean(run.reported_done);
   const handoff = [...events].reverse().find((e) => e.kind === "handoff");
+  const cycleInFlight = fmtCycleInFlight(run);
   const costPct = run.budget.maxRunCostUSD
     ? Math.min(run.spent_usd / run.budget.maxRunCostUSD, 1)
     : null;
-  const cycleInFlight = fmtCycleInFlight(run);
+  const state = describeRun(run, {
+    now: nowTick,
+    cycleInFlight,
+    stoppedByGuard,
+  });
+  const isolated = run.isolation === "worktree" && Boolean(run.worktree_branch);
 
   return (
     <>
-      <h1>
-        Run <span className="mono">{run.id.slice(0, 8)}</span>{" "}
-        <span className="badge" data-tone={STATUS_TONE[run.status]}>
-          {run.status}
-        </span>
+      <h1 className="mb-1 flex flex-wrap items-center gap-2 text-xl font-semibold tracking-tight">
+        Run <span className="mono text-lg">{run.id.slice(0, 8)}</span>
+        <Badge tone={STATUS_TONE[run.status]}>{run.status}</Badge>
       </h1>
-      <p className="lede">
+      <p className="mb-4 max-w-[80ch] text-sm text-ink-muted">
         {run.mountLabel && <>{run.mountLabel} · </>}
         <span className="mono" title={run.folder}>
           {run.mountLabel ? run.relPath || "." : shortPath(run.folder, 3)}
         </span>{" "}
-        · started {fmtDateTime(run.started_at ?? run.created_at)} ·{" "}
+        ·{" "}
+        {run.started_at
+          ? `started ${fmtDateTime(run.started_at)}`
+          : `created ${fmtDateTime(run.created_at)}`}{" "}
+        ·{" "}
         {/* Not a resume: this opens the new-run form pre-filled from this
             run's stored config — same task, same folder, same guards, same
             permission mode — and changes nothing until it is submitted. It is
             also how a template gets seeded from something already known to
             work, since the form can save whatever it is holding. */}
-        <Link href={`/runs/new?from=${run.id}`}>start another like this</Link> ·{" "}
-        <Link href="/runs">back to runs</Link>
+        <Link href={`/runs/new?from=${run.id}`}>Start another like this</Link> ·{" "}
+        <Link href="/runs">Back to runs</Link>
       </p>
 
-      {run.status === "queued" && (
-        <div className="notice" data-tone="warn">
-          <strong>Waiting for its folder.</strong>{" "}
-          {(run.queuePosition ?? 0) === 0
-            ? "It is next in line and starts as soon as the run ahead of it finishes."
-            : `${run.queuePosition} other run${
-                run.queuePosition === 1 ? "" : "s"
-              } are ahead of it.`}
-        </div>
-      )}
+      {pollError && <Notice tone="warn">{pollError}</Notice>}
 
-      {run.status === "paused" && (
-        <div className="notice" data-tone="warn">
-          <strong>Waiting for the next 5-hour window.</strong> Your 5-hour window
-          reached the percentage this run was told to step aside at.{" "}
-          {run.resume_at ? (
-            <>
-              It tries again at {fmtDateTime(run.resume_at)} —{" "}
-              <strong>{fmtRelative(run.resume_at, nowTick)}</strong>.
-            </>
-          ) : (
-            "It tries again when the window rolls over."
-          )}{" "}
-          It is still holding{" "}
-          <span className="mono" title={run.work_dir ?? run.folder}>
-            {run.relPath || run.mountLabel || shortPath(run.folder, 2)}
-          </span>
-          , so nothing else can run there until it finishes or you stop it.
-        </div>
-      )}
+      {/* The lead card: what is happening, what it has cost, and the one thing
+          to do about it. Everything below recedes from here. */}
+      <Card
+        emphasis="primary"
+        className={`border-l-[3px] ${STATE_ACCENT[state.tone]}`}
+      >
+        <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
+          <div className="min-w-0 flex-1">
+            {/* Announced, because it is the one thing on the page that changes
+                on its own and matters. The detail below it is not: while the
+                run is parked it carries a countdown that reticks every second,
+                and a live region there would read it out every second. */}
+            <h2
+              aria-live="polite"
+              className="flex items-center gap-2 text-md font-semibold text-ink"
+            >
+              {run.status === "running" && <Spinner />}
+              {state.headline}
+            </h2>
+            <p className="mt-1 max-w-[70ch] text-sm text-ink-muted">
+              {state.detail}
+            </p>
+            {run.stop_reason && (
+              <p className="mt-1 max-w-[70ch] text-xs text-ink-faint">
+                {run.stop_reason}
+              </p>
+            )}
+          </div>
 
-      {run.isolation === "worktree" && run.worktree_branch && (
-        <div className="notice" data-tone="info">
-          <strong>Isolated checkout.</strong> This run works on branch{" "}
-          <span className="mono">{run.worktree_branch}</span>, not in your copy
-          of the folder — so other runs can use the same project at the same
-          time. Nothing lands in your checkout until you merge it.
+          <ButtonRow>
+            {run.status === "paused" && (
+              <Button className="transition-colors duration-150" onClick={tryNow}>
+                Try now
+              </Button>
+            )}
+            {resumable && !reopenOpen && (
+              <Button
+                className="transition-colors duration-150"
+                onClick={openReopen}
+              >
+                {saidDone ? "Ask for more" : "Resume"}
+              </Button>
+            )}
+            {active && (
+              <Button
+                variant="danger"
+                className="transition-colors duration-150"
+                onClick={stop}
+              >
+                {run.status === "paused" ? "Give up" : "Stop run"}
+              </Button>
+            )}
+          </ButtonRow>
         </div>
-      )}
 
-      {stopNote && (
-        <div className="notice" data-tone="info">
-          {stopNote}
+        {/* Transient feedback for a button that was just pressed. The region is
+            always in the DOM so a screen reader announces what arrives in it. */}
+        <div aria-live="polite">
+          {stopNote && <p className="mt-3 text-sm text-accent">{stopNote}</p>}
         </div>
-      )}
 
-      {run.stop_reason && (
-        <div
-          className="notice"
-          data-tone={run.status === "failed" ? "danger" : "info"}
-        >
-          <strong>
-            {run.status === "blocked"
-              ? "Refused to start:"
-              : run.status === "paused"
-                ? "Waiting:"
-                : "Stopped:"}
-          </strong>{" "}
-          {run.stop_reason}
+        {/* The two figures that belong to the run itself: both come from what
+            Claude Code reported for a finished work cycle. Telemetry is a
+            different measurement and stays in a card of its own. */}
+        <div className="mt-4 grid grid-cols-1 gap-4 border-t border-line pt-4 sm:grid-cols-2">
+          <div>
+            <div className="text-2xs font-semibold uppercase tracking-wider text-ink-muted">
+              Spent
+            </div>
+            <Stat>{fmtUSD(run.spent_usd)}</Stat>
+            <div className={SUB}>
+              {run.budget.maxRunCostUSD
+                ? `of a ${fmtUSD(run.budget.maxRunCostUSD)} limit${
+                    costPct !== null ? ` · ${(costPct * 100).toFixed(0)}%` : ""
+                  }`
+                : "no spending limit set"}
+            </div>
+            <div className={SUB}>
+              {fmtTokens(run.spent_tokens)} tokens, as Claude Code reported them
+            </div>
+            {/* $0.00 on a run eight minutes into its first cycle is documented
+                behaviour rather than a broken counter — Claude Code reports what
+                a cycle cost in its terminal `result` event and nowhere earlier. */}
+            {cycleInFlight && (
+              <div className={SUB}>
+                excludes the cycle in flight, which is reported when it ends
+              </div>
+            )}
+            {/* Held apart from the measured figure above, not added to it. */}
+            {(run.spent_usd_est ?? 0) > 0 && (
+              <Hint tone="warn">
+                {fmtUSD(run.spent_usd_est ?? 0)} more is estimated from your
+                transcripts for cycles that were cut short
+              </Hint>
+            )}
+          </div>
+
+          <div>
+            <div className="text-2xs font-semibold uppercase tracking-wider text-ink-muted">
+              Work cycles
+            </div>
+            <Stat>
+              {run.iterations}
+              {/* 0 is the stored sentinel for "no cap" — see db.ts. */}
+              <span className="text-lg font-medium text-ink-faint">
+                {run.max_iterations > 0 ? `/${run.max_iterations}` : " · no cap"}
+              </span>
+            </Stat>
+            <div className={SUB}>
+              {run.status === "paused"
+                ? "parked between cycles"
+                : (cycleInFlight ?? (active ? "starting" : "finished"))}
+            </div>
+            {!active && (
+              <div className={SUB}>exit {run.exit_code ?? "—"}</div>
+            )}
+            {(run.done_retriggers ?? 0) > 0 && (
+              <div className={SUB}>
+                {run.done_retriggers} sent back after it reported done
+              </div>
+            )}
+          </div>
         </div>
-      )}
 
-      {handoff && (
-        <div className="card">
-          <h2 className="card-title">Where the work landed</h2>
-          {Array.isArray(handoff.payload.commits) &&
-          handoff.payload.commits.length > 0 ? (
-            <div className="log" style={{ maxHeight: 160 }}>
-              {(handoff.payload.commits as string[]).map((c) => (
-                <div className="log-line" key={c}>
-                  <span className="log-body">{c}</span>
+        {reopenOpen && (
+          <div className="mt-4 border-t border-line pt-4">
+            <h3 className="mb-2.5 text-xs font-semibold text-ink">
+              {!run.session_id
+                ? "Start this run again from its original task"
+                : saidDone
+                  ? "Send this run back into the same session"
+                  : "Carry on from where this run stopped"}
+            </h3>
+
+            <Field label="What else needs doing?" htmlFor="re-note">
+              <Textarea
+                id="re-note"
+                value={reopenNote}
+                onChange={(e) => setReopenNote(e.target.value)}
+                placeholder="The retry logic is missing a test for the timeout path."
+              />
+              <Hint>
+                {!run.session_id
+                  ? "This run never reported a session to resume, so it starts the original task again with this added to the end"
+                  : saidDone
+                    ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails"
+                    : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue"}
+              </Hint>
+            </Field>
+
+            <div className="grid gap-x-4 sm:grid-cols-3">
+              <Field label="Work cycles" htmlFor="re-cycles">
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="re-cycles"
+                    type="number"
+                    min={1}
+                    className="w-full min-w-0 flex-1"
+                    value={reopenCycles}
+                    onChange={(e) => setReopenCycles(e.target.value)}
+                  />
+                  <span className="whitespace-nowrap text-xs text-ink-muted">
+                    in total
+                  </span>
                 </div>
-              ))}
+                <Hint>
+                  Counts the {run.iterations} it has already had. Blank means no
+                  cycle limit, which needs a time limit
+                </Hint>
+              </Field>
+
+              <Field label="Spending limit" htmlFor="re-cost">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-ink-muted">$</span>
+                  <Input
+                    id="re-cost"
+                    type="number"
+                    min={0}
+                    step="0.5"
+                    className="w-full min-w-0 flex-1"
+                    value={reopenCost}
+                    onChange={(e) => setReopenCost(e.target.value)}
+                  />
+                </div>
+                <Hint>
+                  Counts the {fmtUSD(run.spent_usd + (run.spent_usd_est ?? 0))}{" "}
+                  already spent. Blank means no limit
+                </Hint>
+              </Field>
+
+              <Field label="Time limit" htmlFor="re-minutes">
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="re-minutes"
+                    type="number"
+                    min={1}
+                    className="w-full min-w-0 flex-1"
+                    value={reopenMinutes}
+                    onChange={(e) => setReopenMinutes(e.target.value)}
+                  />
+                  <span className="whitespace-nowrap text-xs text-ink-muted">
+                    minutes
+                  </span>
+                </div>
+                <Hint>Runs from when it starts again. Blank means no limit</Hint>
+              </Field>
             </div>
-          ) : (
-            <div className="empty">
-              The agent made no commits on this branch.
-            </div>
-          )}
 
-          {Array.isArray(handoff.payload.uncommitted) &&
-            handoff.payload.uncommitted.length > 0 && (
-              <div className="notice" data-tone="warn">
-                <strong>Uncommitted changes left in the checkout.</strong> They
-                are not on the branch, so a merge will not bring them over.
-              </div>
-            )}
+            <Hint>
+              Everything else carries over: the window percentages, how the
+              limits are enforced, what happens after DONE, and the permission
+              mode. It keeps its folder
+              {isolated ? ` and its checkout on ${run.worktree_branch}` : ""}
+            </Hint>
 
-          <div className="subsection">
-            <div className="subsection-title">Review it</div>
-            {(handoff.payload.review as string[]).map((c) => (
-              <div className="mono" key={c}>
-                {c}
-              </div>
-            ))}
+            {reopenError && <Hint tone="danger">{reopenError}</Hint>}
+
+            <ButtonRow className="mt-3">
+              <Button
+                className="transition-colors duration-150"
+                onClick={submitReopen}
+              >
+                Resume run
+              </Button>
+              <Button
+                variant="secondary"
+                className="transition-colors duration-150"
+                onClick={() => setReopenOpen(false)}
+              >
+                Cancel
+              </Button>
+            </ButtonRow>
           </div>
+        )}
+      </Card>
 
-          <div className="subsection">
-            <div className="subsection-title">Bring it in</div>
-            {handoff.payload.merge ? (
-              <div className="mono">{String(handoff.payload.merge)}</div>
-            ) : (
-              <div className="hint" style={{ color: "var(--warn)" }}>
-                {String(handoff.payload.mergeBlocked)}
-              </div>
-            )}
-          </div>
-        </div>
+      {isolated && (
+        <Notice tone="info" quiet className="mt-4">
+          <strong>Isolated checkout.</strong> This run works on branch{" "}
+          <span className="mono">{run.worktree_branch}</span>, not in your copy of
+          the folder — so other runs can use the same project at the same time.
+          Nothing lands in your checkout until you merge it.
+        </Notice>
       )}
 
-      {/* The outcome, then what it means, then what to do with it — above the
-          accounting, because "was any of this worth keeping?" is the question
-          a finished run actually raises. The agent's own account comes first
-          within that: it is the only one of these that says why. */}
-      <RunOutput events={events} />
+      {/* A separate measurement, deliberately not folded into the card above.
+          It counts every API request the agent made, including any belonging to
+          a work cycle that ended before the CLI reported its cost — so a higher
+          number here is the expected outcome of an interrupted run, not a
+          discrepancy to reconcile away. */}
+      {telemetry && (
+        <Card emphasis="quiet" className="mt-4">
+          <CardTitle>Telemetry — first-party</CardTitle>
+          <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+            <Stat>{fmtUSD(telemetry.costUSD)}</Stat>
+            <div className="text-xs tabular-nums text-ink-muted">
+              {telemetry.requests} API{" "}
+              {telemetry.requests === 1 ? "request" : "requests"} ·{" "}
+              {fmtTokens(telemetry.tokens)} tokens
+            </div>
+          </div>
+          <div className="mt-2 max-w-[80ch] text-xs text-ink-faint">
+            Claude Code&rsquo;s own per-request cost for this run. Kept apart from
+            the figure above rather than added to it: that one counts only work
+            cycles the CLI got to report, so the two disagree by design
+            {telemetry.costUSD > run.spent_usd
+              ? " — and this one is the larger, which is what an interrupted cycle looks like."
+              : "."}
+          </div>
+        </Card>
+      )}
+
+      {/* The outcome, then what it means, then what to do with it. The agent's
+          own account comes first within that: it is the only one of these that
+          says why. */}
+      <RunOutput events={events} emphasis={active ? "default" : "primary"} />
+
+      <Card emphasis={showLog && active ? "default" : "quiet"} className="mt-6">
+        <CardTitle>
+          Live log
+          <span className="font-normal normal-case tracking-normal tabular-nums text-ink-faint">
+            {lines.length} line{lines.length === 1 ? "" : "s"}
+          </span>
+          {/* Only while the run can still produce output: a finished run whose
+              stream has closed is not "disconnected", it is over. */}
+          {active &&
+            (connected ? (
+              <Badge tone="ok">live</Badge>
+            ) : (
+              <Badge tone="warn">reconnecting</Badge>
+            ))}
+          <Button
+            variant="ghost"
+            className="ml-auto transition-colors duration-150"
+            aria-expanded={showLog}
+            aria-controls="run-log"
+            onClick={() => setLogOpen(!showLog)}
+          >
+            {showLog ? "Hide" : "Show"}
+          </Button>
+        </CardTitle>
+
+        {showLog && (
+          <div className="relative" id="run-log">
+            <Log ref={logRef} onScroll={onScroll}>
+              {lines.length === 0 && (
+                <Empty>
+                  {active
+                    ? "Waiting for the first turn…"
+                    : "This run produced no output."}
+                </Empty>
+              )}
+              {lines.map((l) => (
+                <LogLine key={l.key} kind={l.kind} timestamp={fmtClock(l.ts)}>
+                  {l.text}
+                </LogLine>
+              ))}
+            </Log>
+
+            {/* The way back. Autoscroll stops the moment the reader scrolls up,
+                which is right — but without this the only way to rejoin the tail
+                of a long log is to drag to the bottom by hand. */}
+            {!atLiveEdge && lines.length > 0 && (
+              <Button
+                variant="secondary"
+                className="absolute bottom-3 right-4 shadow-e2 transition-colors duration-150"
+                onClick={jumpToLive}
+              >
+                Jump to live
+                {missed > 0 && (
+                  <span className="ml-1.5 tabular-nums text-ink-muted">
+                    {missed} new
+                  </span>
+                )}
+              </Button>
+            )}
+          </div>
+        )}
+      </Card>
+
       <RunDiff run={run} />
-      {run.isolation === "worktree" && run.worktree_branch && (
+
+      {isolated && (
         <>
           <RunReview run={run} />
           <RunLand run={run} />
         </>
       )}
 
-      {/* The spacing between the blocks on this page came from the legacy
-          `section + section` rule, which only fires between two <section>
-          siblings. RunDiff/RunReview/RunLand are component-kit cards — plain
-          divs — so the rule stopped matching the moment they were inserted
-          above, and this section welded itself to the card above it. Stated
-          here rather than restored there: every other page already carries its
-          own margin, and adjacency is the wrong thing to depend on. */}
-      <section className="mt-6 grid grid-3">
-        <div className="card">
-          <h2 className="card-title">Spent on this run</h2>
-          <div className="stat">{fmtUSD(run.spent_usd)}</div>
-          <div className="stat-sub">
-            {run.budget.maxRunCostUSD
-              ? `of a ${fmtUSD(run.budget.maxRunCostUSD)} limit${
-                  costPct !== null ? ` — ${(costPct * 100).toFixed(0)}%` : ""
-                }`
-              : "no spending limit set"}
-          </div>
-          {/* $0.00 on a run eight minutes into its first cycle is the
-              documented behaviour rather than a broken counter — Claude Code
-              reports what a cycle cost in its terminal `result` event and
-              nowhere earlier. Say which of the two it is while a cycle is
-              open; the telemetry card beside this one is the figure that moves
-              meanwhile. */}
-          {cycleInFlight && (
-            <div className="stat-sub">
-              excludes the cycle in flight — Claude Code reports a cycle&rsquo;s
-              cost when it ends
-            </div>
-          )}
-          {/* Held apart from the measured figure above, not added to it: this
-              is what work cycles that were cut short before Claude Code could
-              report their cost are estimated to have spent, worked out from
-              your transcripts. */}
-          {(run.spent_usd_est ?? 0) > 0 && (
-            <div className="stat-sub" style={{ color: "var(--warn)" }}>
-              + {fmtUSD(run.spent_usd_est ?? 0)} estimated from transcripts for
-              cycles that were cut short
-            </div>
-          )}
-        </div>
-        <div className="card">
-          <h2 className="card-title">Tokens</h2>
-          <div className="stat">{fmtTokens(run.spent_tokens)}</div>
-          <div className="stat-sub">reported by Claude Code</div>
-        </div>
-        {/* A separate measurement, deliberately not folded into the two cards
-            above. It counts every API request the agent made, including any
-            belonging to a work cycle that ended before the CLI reported its
-            cost — so a higher number here is the expected outcome of an
-            interrupted run, not a discrepancy to reconcile away. */}
-        {telemetry && (
-          <div className="card">
-            <h2 className="card-title">Telemetry (first-party)</h2>
-            <div className="stat">{fmtUSD(telemetry.costUSD)}</div>
-            <div className="stat-sub">
-              {telemetry.requests} API{" "}
-              {telemetry.requests === 1 ? "request" : "requests"} ·{" "}
-              {fmtTokens(telemetry.tokens)} tokens
-              {telemetry.costUSD > run.spent_usd &&
-                " · includes work the run row could not account for"}
-            </div>
-          </div>
-        )}
-        <div className="card">
-          <h2 className="card-title">Work cycles</h2>
-          <div className="stat">
-            {run.iterations}
-            <span style={{ color: "var(--fg-faint)", fontSize: 18 }}>
-              {/* 0 is the stored sentinel for "no cap" — see db.ts. */}
-              {run.max_iterations > 0 ? `/${run.max_iterations}` : " · no cap"}
-            </span>
-          </div>
-          <div className="stat-sub">
-            {/* A spinner on a run that is deliberately idle for hours is a lie,
-                so the paused branch comes first. */}
-            {run.status === "paused" ? (
-              "paused — waiting for the next 5-hour window"
-            ) : active ? (
-              <>
-                {/* The number above counts cycles that finished, so on a run in
-                    its first one it is 0 and the spinner is the only thing
-                    saying otherwise. Name the cycle instead. */}
-                <span className="spinner" /> {cycleInFlight ?? "working"}
-              </>
-            ) : run.max_iterations > 0 ? (
-              `${run.max_iterations === 1 ? "cycle" : "cycles"} used of the limit · exit ${run.exit_code ?? "—"}`
-            ) : (
-              `cycles used · exit ${run.exit_code ?? "—"}`
-            )}
-            {(run.done_retriggers ?? 0) > 0 &&
-              ` · ${run.done_retriggers} after it reported done`}
-          </div>
-        </div>
-      </section>
+      {handoff && (
+        <Card emphasis="quiet" className="mt-6">
+          <CardTitle>In your own terminal</CardTitle>
 
-      <section className="mt-6 card">
-        <h2 className="card-title">
-          Live log
-          {connected ? (
-            <span className="badge" data-tone="ok">
-              connected
-            </span>
+          {Array.isArray(handoff.payload.commits) &&
+          handoff.payload.commits.length > 0 ? (
+            <div className="mono max-h-40 overflow-auto rounded-sm border border-line bg-inset p-2.5">
+              {(handoff.payload.commits as string[]).map((c) => (
+                <div key={c} className="whitespace-pre-wrap text-ink-muted">
+                  {c}
+                </div>
+              ))}
+            </div>
           ) : (
-            <span className="badge">disconnected</span>
+            <Empty>The agent made no commits on this branch.</Empty>
           )}
-          {resumable && !reopenOpen && (
-            <button style={{ marginLeft: "auto" }} onClick={openReopen}>
-              {run.status === "completed" ? "Ask for more" : "Resume"}
-            </button>
-          )}
-          {run.status === "paused" && (
-            <button style={{ marginLeft: "auto" }} onClick={tryNow}>
-              Try now
-            </button>
-          )}
-          {active && (
-            <button
-              className="danger"
-              style={run.status === "paused" ? undefined : { marginLeft: "auto" }}
-              onClick={stop}
-            >
-              {run.status === "paused" ? "Give up" : "Stop run"}
-            </button>
-          )}
-        </h2>
 
-        {reopenOpen && (
-          <div className="subsection">
-            <div className="subsection-title">
-              {!run.session_id
-                ? "Start this run again from its original task"
-                : saidDone
-                  ? "Send this run back into the same session"
-                  : "Carry on from where this run stopped"}
-            </div>
-
-            <div className="field">
-              <label htmlFor="re-note">What else needs doing?</label>
-              <textarea
-                id="re-note"
-                value={reopenNote}
-                onChange={(e) => setReopenNote(e.target.value)}
-                placeholder="The retry logic is missing a test for the timeout path."
-              />
-              <div className="hint">
-                {!run.session_id
-                  ? "This run never reported a session to resume, so it starts the original task again with this added to the end."
-                  : saidDone
-                    ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails."
-                    : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue."}
-              </div>
-            </div>
-
-            <div className="field">
-              <label htmlFor="re-cycles">Work cycles before stopping</label>
-              <div className="input-row">
-                <input
-                  id="re-cycles"
-                  type="number"
-                  min={1}
-                  value={reopenCycles}
-                  onChange={(e) => setReopenCycles(e.target.value)}
-                />
-                <span className="unit">cycles in total</span>
-              </div>
-              <div className="hint">
-                Counts the {run.iterations} this run has already had, so it needs
-                to be higher than that. Blank means no cycle limit, which needs a
-                time limit below.
-              </div>
-            </div>
-
-            <div className="field">
-              <label htmlFor="re-cost">Spending limit for this run</label>
-              <div className="input-row">
-                <span className="unit">$</span>
-                <input
-                  id="re-cost"
-                  type="number"
-                  min={0}
-                  step="0.5"
-                  value={reopenCost}
-                  onChange={(e) => setReopenCost(e.target.value)}
-                />
-              </div>
-              <div className="hint">
-                Counts the {fmtUSD(run.spent_usd + (run.spent_usd_est ?? 0))} it
-                has already spent. Blank means no limit.
-              </div>
-            </div>
-
-            <div className="field">
-              <label htmlFor="re-minutes">Time limit</label>
-              <div className="input-row">
-                <input
-                  id="re-minutes"
-                  type="number"
-                  min={1}
-                  value={reopenMinutes}
-                  onChange={(e) => setReopenMinutes(e.target.value)}
-                />
-                <span className="unit">minutes</span>
-              </div>
-              <div className="hint">
-                Runs from when it starts again, not from when it first ran.
-                Blank means no limit.
-              </div>
-            </div>
-
-            <div className="hint">
-              Everything else carries over: the window percentages, how the
-              limits are enforced, what happens after DONE, and the permission
-              mode. It keeps its folder
-              {run.isolation === "worktree" && run.worktree_branch
-                ? ` and its checkout on ${run.worktree_branch}`
-                : ""}
-              .
-            </div>
-
-            {reopenError && (
-              <div className="hint" style={{ color: "var(--danger)" }}>
-                {reopenError}
-              </div>
+          {Array.isArray(handoff.payload.uncommitted) &&
+            handoff.payload.uncommitted.length > 0 && (
+              <Notice tone="warn" quiet className="mt-3">
+                <strong>Uncommitted changes left in the checkout.</strong> They
+                are not on the branch, so a merge will not bring them over.
+              </Notice>
             )}
 
-            <div className="input-row">
-              <button onClick={submitReopen}>Resume run</button>
-              <button onClick={() => setReopenOpen(false)}>Cancel</button>
-            </div>
-          </div>
-        )}
-
-        <div className="log" ref={logRef} onScroll={onScroll}>
-          {events.length === 0 && (
-            <div className="empty">Waiting for output…</div>
-          )}
-          {events.map((e, i) => {
-            const text = lineFor(e);
-            if (text === null) return null;
-            return (
-              <div className="log-line" data-kind={e.kind} key={e.id ?? `${e.ts}-${i}`}>
-                <span className="log-ts">{fmtClock(e.ts)}</span>
-                <span className="log-body">{text}</span>
+          <div className="mt-4 border-t border-line pt-3.5">
+            <div className="mb-2 text-xs font-semibold text-ink">Review it</div>
+            {(Array.isArray(handoff.payload.review)
+              ? (handoff.payload.review as string[])
+              : []
+            ).map((c) => (
+              <div key={c} className="mono break-all text-ink-muted">
+                {c}
               </div>
-            );
-          })}
-        </div>
-      </section>
+            ))}
+          </div>
 
-      <section className="mt-6 card">
-        <h2 className="card-title">Task</h2>
-        <div className="log" style={{ maxHeight: 200 }}>
+          <div className="mt-4 border-t border-line pt-3.5">
+            <div className="mb-2 text-xs font-semibold text-ink">
+              Bring it in
+            </div>
+            {handoff.payload.merge ? (
+              <div className="mono break-all text-ink-muted">
+                {String(handoff.payload.merge)}
+              </div>
+            ) : (
+              // Withheld rather than shown with a caveat: a copyable command
+              // gets copied.
+              <Hint tone="warn">{String(handoff.payload.mergeBlocked)}</Hint>
+            )}
+          </div>
+        </Card>
+      )}
+
+      <Card emphasis="quiet" className="mt-6">
+        <CardTitle>Task</CardTitle>
+        <div className="mono max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-sm border border-line bg-inset p-2.5 text-ink-muted">
           {run.prompt}
         </div>
-      </section>
+      </Card>
     </>
   );
 }

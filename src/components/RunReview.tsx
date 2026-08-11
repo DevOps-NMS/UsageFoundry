@@ -55,7 +55,9 @@ function ReviewBody({ review }: { review: RunReviewDTO }) {
 
       {review.status === "failed" && <Notice tone="danger">{review.error}</Notice>}
       {review.status === "running" && (
-        <Empty>Reading the diff — this takes a minute or two.</Empty>
+        <div aria-live="polite">
+          <Empty>Reading the diff — this takes a minute or two.</Empty>
+        </div>
       )}
       {review.text && <Markdown text={review.text} />}
     </div>
@@ -103,11 +105,13 @@ export function RunReview({ run }: { run: RunDTO }) {
   const earlier = reviews?.slice(1) ?? [];
 
   return (
-    <Card className="mt-6">
+    // Never the lead: a review is optional, billed, and only exists because
+    // somebody pressed the button.
+    <Card emphasis="quiet" className="mt-6">
       <CardTitle>
         Review
         <Button
-          className="ml-auto"
+          className="ml-auto transition-colors duration-150"
           onClick={start}
           disabled={starting || running}
           variant="secondary"
@@ -118,15 +122,14 @@ export function RunReview({ run }: { run: RunDTO }) {
 
       {error && <Notice tone="danger">{error}</Notice>}
 
-      {!latest && (
-        <>
-          <Empty>No review yet.</Empty>
-          <Hint>
-            Runs Claude once against this run&rsquo;s diff. It is billed and spends
-            against the same 5-hour window your runs do
-          </Hint>
-        </>
-      )}
+      {/* Beside the button whether or not a review already exists: "Review
+          again" spends exactly as much as the first one did. */}
+      <Hint>
+        Runs Claude once against this run&rsquo;s diff. It is billed and spends
+        against the same 5-hour window your runs do
+      </Hint>
+
+      {!latest && <Empty>No review yet.</Empty>}
 
       {latest && <ReviewBody review={latest} />}
 
