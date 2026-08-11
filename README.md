@@ -216,6 +216,31 @@ echo "UF_GID=$(id -g)" >> .env
 Run compose as yourself, not under `sudo`: `$HOME` comes from your shell, and
 `sudo` would point the credential mount at root's home.
 
+**The database volume is handled in the image, not here.** `/data` is a named
+volume rather than a bind mount, so it does not carry your host's ownership the
+way the other two mounts do: Docker copies the ownership and mode of `/data`
+*in the image* onto the volume root the first time it creates it. That used to
+be uid 1000, mode 0755 — unwritable by the uid you have just set, which meant
+the app could not create its SQLite file and every data route failed. The image
+now marks that one directory world-writable, so a fresh volume works under any
+`UF_UID`. Nothing to configure.
+
+**Changing `UF_UID` on an install that already has data** is the one case that
+still needs a hand. Docker only initialises a volume once, so an existing
+`usagefoundry-data` keeps the files uid 1000 wrote, and the new uid cannot write
+them. Hand the volume over once:
+
+```bash
+docker compose down
+docker compose run --rm --user 0:0 --entrypoint sh usagefoundry \
+  -c "chown -R $(id -u):$(id -g) /data"
+docker compose up -d
+```
+
+Double quotes, so `$(id -u)` is expanded by your shell rather than inside the
+container. If you do not mind losing run history and settings, `docker compose
+down -v` and starting again does the same thing by destroying the volume.
+
 ### Multiple workspaces
 
 Up to four host directories can be mounted, and the New run form picks one
@@ -400,6 +425,12 @@ continuation prompt asks for `DONE` when the work is complete, so replying to a
 nothing. Blank there sends the same pushback prompt as *When Claude says the
 task is done* above — re-read the task, run the tests, fix what fails — which
 you can edit in Settings.
+
+That is what the agent said, not how the run ended. A run that stopped because
+it used up its work cycles is *finished* in the same green sense and said
+nothing of the kind, so blank tells it to continue like any other run cut off
+mid-task — the pushback would open by telling it that it had reported the task
+complete, and then forbid it from starting the work it was reopened to do.
 
 Resuming asks for the limits again, pre-filled from the run, because the usual
 reason a run needs picking up is that its own limits ended it. They are totals,
@@ -595,6 +626,22 @@ windows, so it can tell you that approving ten runs into a nearly-spent window
 means ten runs that stop on their first guard check. `get_run` and `get_run_diff`
 give it a finished run's log, spend and patch, so "why did that one fail, and
 what should we do about it" is a question it can actually answer.
+
+**A turn that is not going to finish can be stopped.** While the chat is
+working, **Stop** appears beside Send. It signals the process answering — and
+everything that process started, the same ladder a run's Stop button uses — and
+fails the turn out with "you stopped this message", so the thread is usable
+again immediately. It is a way to *end* a turn, never a way to send around one:
+the chat still refuses a second message while a turn is in flight, which is what
+stops two billed children on one conversation.
+
+There is a deadline under it as well. A turn that has been in flight for more
+than ten minutes is failed out by a sweeper that reads the row rather than
+waiting on the child, so the bound holds even when the child dies in a way that
+never reports back — the case where the only recovery used to be restarting the
+server, which stops every run in flight to clear one thread. Nothing is resumed
+or re-asked either way: a chat turn is a question you put minutes ago, and
+re-asking it unattended is spend nobody is present to want.
 
 **It costs money, and the cost is shown apart.** A chat turn spends against the
 same 5-hour window as everything else. It is refused outright when that window is
@@ -1156,6 +1203,19 @@ Built and exercised against real transcripts:
   handlers answer the pinned CLI 2.1.226 correctly), `list_folders` identified
   the repository's GitHub remote, and the proposal recorded the right template
   and folder.
+- **The order a chat thread renders in** (`npm test`, 3 cases, against a real
+  database under a temporary `DATA_DIR`): a reply and the denial note that
+  annotates it, appended under a frozen clock, come back in that order rather
+  than by the coin toss the random `id` was; ten messages written in one
+  millisecond come back in insert order, and still do after the connection is
+  closed and reopened; and rows carrying a null `seq` — the state a deployed
+  database is in between the `ALTER TABLE` and the backfill — come back in the
+  order they were written, with a message appended afterwards landing below them
+  rather than among them. The migration itself was driven separately against a
+  hand-built database file predating the column, using the three rows read out
+  of the live deployment: it gains `seq`, they backfill to 1/2/3 in insert
+  order, and the assistant reply that used to render *below* the denial note now
+  renders above it.
 - **That the chat could not write, under the configuration it had then.** Asked
   directly, in the same turn, to create a file inside the workspace, it reported
   `No such tool available: Write. Write is disabled for this session, in
@@ -1259,6 +1319,20 @@ through before trusting this unattended:
   smaller than the proposal describing it, and whether it runs `git` writes
   while investigating (it has the credentials to push, since `githubEnv()`
   reaches this child).
+- **Stopping a chat turn, in either of its two forms.** `staleTurn` is unit
+  tested and the rest typechecks, but no real CLI child has been signalled by
+  `cancelChatTurn` and no sweep has fired against a live row. Two things to
+  watch. Whether the SIGINT/SIGTERM/SIGKILL ladder actually reaches a chat
+  child's whole process group the way it does an agent's — the chat spawns
+  `detached` under the same `killProcessGroup` setting, so it should, but the
+  agent path is the one that has been watched. And whether the sweeper ever
+  fires on a turn that was merely slow: it waits a minute past the ten-minute
+  bound, and the in-closure timer should have settled the row long before, so an
+  entry saying the chat "did not answer within 10 minutes" that arrives with no
+  preceding kill means the two paths disagree about when a turn began. Putting a
+  row into `thinking` by hand (`sqlite3 $DATA_DIR/usagefoundry.db "update
+  chat_sessions set status='thinking', turn_started_at=… where id=…"`) and
+  loading `/chat` exercises the no-child half of both without spending anything.
 - **The `chat_proposals` rebuild on a database that predates it.** Dropping the
   NOT NULL from `template_id` needs a table rebuild, which was exercised against
   SQLite directly — rows preserved, index recreated, foreign key and its cascade
@@ -1335,9 +1409,12 @@ through before trusting this unattended:
   another run has taken — were checked against the live container.
 - Picking a `completed` run back up with a follow-up message: that the note
   arrives as the next turn of the same conversation rather than as a new task,
-  and that leaving it blank sends the DONE pushback instead of the continuation
-  prompt. The branch that decides this is unit-tested; the delivery to a real
-  CLI is not.
+  and that leaving it blank sends the DONE pushback only to a run whose agent
+  really replied `DONE` — a run that merely used up its work cycles gets the
+  continuation. The branch that decides this is unit-tested, and the column it
+  reads was watched being written end to end against a *stub* CLI printing the
+  two `stream-json` events the loop reads. Neither the recording nor the
+  delivery has been through a real `claude`.
 - `detached: true`: that Ctrl-C during `npm run dev` still kills the agent (via
   the new `instrumentation.ts` handler) and that a long command the agent
   started dies with it.
@@ -1377,6 +1454,15 @@ through before trusting this unattended:
   next to the meters — whether the separation is as plain on screen as it is in
   the copy — and whether the figure visibly moves during a single work cycle at
   the 5s poll.
+- **The in-flight cycle line on a real run.** `runs.active_iteration` is written
+  at the spawn and cleared when the cycle returns, and `fmtCycleInFlight` is
+  unit-tested for every branch including the stale-row one — but no agent has
+  been started through a running server to watch the card go from nothing to
+  "cycle 1 of 2 in flight" and back to a plain count between cycles. Two things
+  to watch: that the line disappears during the pre-cycle transcript scan rather
+  than lingering over finished work, and that a run killed with the container
+  down comes back reading `failed` with no cycle claimed. Start a run and open
+  `/runs` during cycle 1.
 - The new-run form's template UI driven through a browser: that loading a
   template fills every field, that *Start another like this* pre-fills from a
   run without the folder and settings loaders racing it, and that the two
@@ -1390,6 +1476,40 @@ through before trusting this unattended:
   that needs authentication. The credential block itself was driven into a real
   git (above); what has not been watched is the CLI's own git picking it up out
   of the environment mid-run.
+- The chat page recovering from a dropped request, in a browser. That a rejected
+  `fetch` comes back as a result rather than a rejection is unit-tested, and the
+  `finally` that clears `busy` is plain control flow — but nobody has stopped the
+  server, pressed Send, and watched the composer, Approve, Reject and Select-all
+  stay usable with the reason on screen.
+- **The chat page's failed-poll notice in a browser.** A poll that fails now
+  puts a sentence on the page and stops the thread claiming to be thinking, and
+  the sentence itself is unit-tested — but no browser has been pointed at a
+  stopped server or at a `UF_AUTH_TOKEN` deployment with the `uf_session` cookie
+  deleted, which are the two reproductions. What that leaves unconfirmed is the
+  client wiring rather than the copy: that the notice appears within one poll,
+  that it clears on the next successful one, and that a page opened while the
+  server is down recovers by itself once the server is back.
+- **That a fresh `usagefoundry-data` volume is writable under a non-1000
+  `UF_UID`.** The image marks `/data` mode 0777 so that Docker copies a
+  world-writable root onto the volume when it first creates it; that Docker does
+  copy the mount point's mode and not only its ownership is the step this rests
+  on, and no `docker build` has been run since the change — Docker was not
+  available on the machine it was made on. `src/lib/deployment.test.ts` pins the
+  image and compose halves against each other, which is a different claim. The
+  check is four commands, on a Linux host where `id -u` is not 1000:
+
+  ```bash
+  UF_UID=1001 UF_GID=1001 UF_PORT=3100 UF_CONTAINER_NAME=usagefoundry-uidtest \
+    docker compose -p uf-uidtest up --build -d
+  docker compose -p uf-uidtest exec usagefoundry ls -ld /data   # expect drwxrwxrwx
+  curl -fsS localhost:3100/api/usage >/dev/null && echo OK      # with UF_AUTH_TOKEN blank
+  docker compose -p uf-uidtest down -v
+  ```
+
+  `UF_PORT`/`UF_CONTAINER_NAME` are there because `container_name` is *not*
+  namespaced by the compose project, so without them this collides with an
+  instance already running. Run it a second time with the two uid variables
+  unset to confirm the 1000 default is unchanged.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
@@ -1399,7 +1519,13 @@ run's diff is parsed and budgeted, when a branch may be landed, what a queued
 merge does with the branch it reaches, what counts as a conflict marker — both
 for deciding whether one was really resolved and for deciding what to show — and
 the two renderings that would lie quietly about a number: an unconfigured
-ceiling, and a first-party figure shown beside the meters. `npm run typecheck`
+ceiling, and a first-party figure shown beside the meters. Two entries are
+neither a function nor a rendering: the order a chat's thread renders in, driven
+against a real database because what it pins is in the SQL rather than in any
+function; and that the image leaves the data volume writable by whatever uid
+compose runs the container as, which is otherwise checked by nothing here and
+fails only on Linux, only under a non-1000 `UF_UID`, and only by refusing every
+data route. `npm run typecheck`
 plus a `docker compose up --build` smoke test is still the real verification
 loop, and the list above records what was checked by hand.
 
