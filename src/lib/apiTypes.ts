@@ -252,7 +252,14 @@ export interface RunDTO {
   budget: BudgetPolicyDTO;
   /** Cap on work cycles. **0 means no cap** — see the note in db.ts. */
   max_iterations: number;
+  /** Work cycles that have *finished*. A cycle in flight is not counted here. */
   iterations: number;
+  /**
+   * The work cycle open right now, or null when no child is running. Read
+   * through `fmtCycleInFlight`, which also refuses to trust it on a row that is
+   * no longer running.
+   */
+  active_iteration?: number | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -278,6 +285,12 @@ export interface RunDTO {
   pause_count?: number;
   /** How many times the agent said DONE and was sent back in anyway. */
   done_retriggers?: number;
+  /**
+   * Whether the last work cycle replied DONE. Separates a run that finished
+   * from one that used up its cycle cap — both are `completed`, and they are
+   * picked up with different prompts.
+   */
+  reported_done?: number;
   /**
    * Spend reconciled from transcripts for work cycles killed before Claude Code
    * reported theirs. Shown beside `spent_usd`, never folded into it.
