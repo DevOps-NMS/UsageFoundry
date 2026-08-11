@@ -152,6 +152,9 @@ export default function Branches() {
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // The one row a purge is armed for. Destroying committed work takes two
+  // presses, and arming a second row disarms the first.
+  const [armedPurge, setArmedPurge] = useState<string | null>(null);
   // Selection order is the merge order, so this is a list and not a Set.
   const [selected, setSelected] = useState<string[]>([]);
   const [strategy, setStrategy] = useState<"merge" | "squash">("merge");
@@ -199,22 +202,31 @@ export default function Branches() {
     wasActive.current = queueActive;
   }, [queueActive, load]);
 
-  async function remove(runId: string) {
-    setBusy(runId);
+  /**
+   * One row, one action.
+   *
+   * `commit` sends no message: the run's own task becomes the subject, which is
+   * what the run page's field defaults to as well. `purge` echoes the branch
+   * name back, which is what the API compares against the row before it deletes
+   * anything.
+   */
+  async function act(b: BranchSummaryDTO, action: "delete" | "commit" | "purge") {
+    setBusy(b.runId);
     setNote(null);
     setError(null);
     try {
-      const res = await fetch(`/api/runs/${runId}/land`, {
+      const res = await fetch(`/api/runs/${b.runId}/land`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "delete" }),
+        body: JSON.stringify({ action, confirmBranch: b.branch }),
       });
       const json = (await res.json().catch(() => ({}))) as {
         message?: string;
         error?: string;
       };
-      if (res.ok) setNote(json.message ?? "Deleted.");
-      else setError(json.error ?? "Could not delete that branch.");
+      if (res.ok) setNote(json.message ?? "Done.");
+      else setError(json.error ?? "That did not work.");
+      setArmedPurge(null);
       await load();
     } finally {
       setBusy(null);
@@ -403,26 +415,69 @@ export default function Branches() {
                     <Td className="mono">{b.target ?? "—"}</Td>
                     <Td num>{b.exists ? b.ahead : "—"}</Td>
                     <Td>
-                      <StateBadge b={b} />
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <StateBadge b={b} />
+                        {/* Work in the checkout, not on the branch. A run that
+                            could not commit reads as "unmerged, 0 ahead", which
+                            looks like a run that did nothing. */}
+                        {!!b.uncommitted && (
+                          <Badge tone="warn">{b.uncommitted} uncommitted</Badge>
+                        )}
+                      </div>
                     </Td>
                     <Td>{fmtDateTime(b.createdAt)}</Td>
                     <Td>
-                      {/* Merged branches only. Deleting one with commits of its
-                          own is the single action here with no undo, so it is
-                          not offered at all rather than offered with a warning. */}
-                      {b.exists && (b.merged || b.landedUnchanged) && !b.active ? (
-                        <Button
-                          variant="ghost"
-                          onClick={() => remove(b.runId)}
-                          disabled={busy === b.runId}
-                        >
-                          {busy === b.runId ? "Deleting…" : "Delete"}
-                        </Button>
-                      ) : (
-                        <Link href={`/runs/${b.runId}`} className="text-xs">
-                          open run
-                        </Link>
-                      )}
+                      <ButtonRow>
+                        {/* Puts what the agent wrote onto the branch, under the
+                            run's own task as the subject. Also what frees the
+                            checkout slot: one with work in it is not reusable. */}
+                        {b.exists && !b.active && !!b.uncommitted && (
+                          <Button
+                            variant="secondary"
+                            onClick={() => act(b, "commit")}
+                            disabled={busy === b.runId}
+                          >
+                            {busy === b.runId ? "Working…" : "Commit"}
+                          </Button>
+                        )}
+
+                        {/* Delete is the safe door — git can see the work is in
+                            the target. Purge is the other one, and it takes a
+                            second press that names what goes with it. */}
+                        {b.exists && (b.merged || b.landedUnchanged) && !b.active ? (
+                          <Button
+                            variant="ghost"
+                            onClick={() => act(b, "delete")}
+                            disabled={busy === b.runId}
+                          >
+                            {busy === b.runId ? "Deleting…" : "Delete"}
+                          </Button>
+                        ) : b.exists && !b.active ? (
+                          armedPurge === b.runId ? (
+                            <Button
+                              variant="danger"
+                              onClick={() => act(b, "purge")}
+                              disabled={busy === b.runId}
+                            >
+                              {busy === b.runId
+                                ? "Purging…"
+                                : `Purge ${b.ahead} commit${b.ahead === 1 ? "" : "s"}`}
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              onClick={() => setArmedPurge(b.runId)}
+                              disabled={busy === b.runId}
+                            >
+                              Purge
+                            </Button>
+                          )
+                        ) : (
+                          <Link href={`/runs/${b.runId}`} className="text-xs">
+                            open run
+                          </Link>
+                        )}
+                      </ButtonRow>
                     </Td>
                   </Tr>
                 ))}

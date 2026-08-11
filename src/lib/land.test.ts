@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  commitRefusal,
   conflictRegions,
   hasConflictMarkers,
   landRefusal,
   parseMergeTree,
+  parseStatusZ,
+  purgeRefusal,
   unresolvedFiles,
   type CheckoutState,
   type ConflictFile,
@@ -22,6 +25,14 @@ import {
  * `hasConflictMarkers` does: it decides what counts as a conflict marker in
  * arbitrary file content, and a parser that fires on a markdown heading
  * underline renders half a document as a conflict.
+ *
+ * `commitRefusal` and `purgeRefusal` clear the same bar from the other end.
+ * One decides whether to make a commit in a checkout — where the expensive
+ * mistake is committing a slot's contents onto the branch of whichever run took
+ * that slot over next — and the other decides whether to destroy a branch
+ * nothing has landed, which is the only action here git cannot undo.
+ * `parseStatusZ` is what both of them count, and it is a parser over arbitrary
+ * filenames whose first character is significant.
  */
 
 /* ------------------------------------------------------------------ */
@@ -140,6 +151,7 @@ describe("landRefusal", () => {
     merged: false,
     landedUnchanged: false,
     ahead: 3,
+    pendingCount: 0,
     preview: { outcome: "clean" as const },
     checkout: clean,
   };
@@ -238,12 +250,198 @@ describe("landRefusal", () => {
     assert.match(landRefusal({ ...landable, ahead: 0 }) ?? "", /no commits/);
   });
 
+  it("names the uncommitted work when that is why the branch is empty", () => {
+    // The failure this exists for: an agent that wrote everything and could not
+    // commit any of it. "No commits of its own" alone reads as a run that did
+    // nothing, and sends the operator looking for work that is sitting in the
+    // checkout.
+    const refusal = landRefusal({ ...landable, ahead: 0, pendingCount: 7 });
+    assert.match(refusal ?? "", /7 path/);
+    assert.match(refusal ?? "", /Commit them first/);
+  });
+
   it("refuses when no target was ever recorded", () => {
     assert.match(landRefusal({ ...landable, target: null }) ?? "", /no recorded branch/);
   });
 
   it("refuses a branch that is gone", () => {
     assert.match(landRefusal({ ...landable, branchExists: false }) ?? "", /no longer exists/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Reading `git status --porcelain -z`                                 */
+/* ------------------------------------------------------------------ */
+
+describe("parseStatusZ", () => {
+  it("keeps the leading space that means unstaged", () => {
+    // ` M` and `M ` are different facts about the same file, and the space is
+    // the whole difference — which is why `git()` is told not to trim this.
+    const [unstaged, staged] = parseStatusZ(z(" M src/a.ts", "M  src/b.ts", ""));
+    assert.deepEqual(
+      [unstaged, staged].map((f) => [f.code, f.path]),
+      [
+        [" M", "src/a.ts"],
+        ["M ", "src/b.ts"],
+      ],
+    );
+  });
+
+  it("pairs a rename with its source instead of listing it as a change", () => {
+    // With -z git drops the arrow and reverses the order, so the *current* path
+    // is in the record and the original follows as its own field. Left in the
+    // stream that field becomes a file whose first two characters are read as
+    // status letters.
+    const files = parseStatusZ(z("R  new.ts", "old.ts", "?? untracked.ts", ""));
+    assert.deepEqual(
+      files.map((f) => [f.code, f.path, f.origPath]),
+      [
+        ["R ", "new.ts", "old.ts"],
+        ["??", "untracked.ts", null],
+      ],
+    );
+  });
+
+  it("keeps a path containing a space", () => {
+    const [file] = parseStatusZ(z("?? docs/some file.md", ""));
+    assert.equal(file.path, "docs/some file.md");
+  });
+
+  it("stops rather than pairing a rename with a field that is not there", () => {
+    // A killed git leaves a record cut short. Pairing it with whatever follows
+    // would report a rename from a file that was never involved.
+    assert.deepEqual(parseStatusZ(z(" M a.ts", "R  new.ts")), [
+      { path: "a.ts", origPath: null, code: " M" },
+    ]);
+  });
+
+  it("reads an empty status as nothing pending", () => {
+    assert.deepEqual(parseStatusZ(""), []);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Deciding whether to commit into a run's own checkout                */
+/* ------------------------------------------------------------------ */
+
+describe("commitRefusal", () => {
+  const committable = {
+    runStatus: "completed" as const,
+    isolated: true,
+    branch: "uf/repo-1234abcd",
+    checkedOutBranch: "uf/repo-1234abcd",
+    readable: true,
+    pendingCount: 4,
+    message: "Add the parser",
+  };
+
+  it("allows the case everything is in order", () => {
+    assert.equal(commitRefusal(committable), null);
+  });
+
+  it("refuses to commit in the operator's own checkout", () => {
+    assert.match(commitRefusal({ ...committable, isolated: false }) ?? "", /yours to do/);
+  });
+
+  it("refuses while the run can still write", () => {
+    for (const runStatus of ["running", "queued", "paused"] as const) {
+      assert.match(
+        commitRefusal({ ...committable, runStatus }) ?? "",
+        /still active/,
+        `${runStatus} should not be committable`,
+      );
+    }
+  });
+
+  it("refuses when a later run has taken the slot over", () => {
+    // The expensive one. A slot is reused, so what is uncommitted in it after
+    // that belongs to somebody else — committing it here would put one run's
+    // work on another run's branch, as a commit nobody made.
+    const refusal = commitRefusal({
+      ...committable,
+      checkedOutBranch: "uf/repo-99887766",
+    });
+    assert.match(refusal ?? "", /uf\/repo-99887766/);
+    assert.match(refusal ?? "", /another run/);
+  });
+
+  it("refuses when the checkout is gone", () => {
+    assert.match(
+      commitRefusal({ ...committable, checkedOutBranch: null }) ?? "",
+      /checkout this run worked in is gone/,
+    );
+  });
+
+  it("refuses an unreadable status rather than committing blind", () => {
+    assert.match(commitRefusal({ ...committable, readable: false }) ?? "", /Could not read/);
+  });
+
+  it("refuses when there is nothing to commit", () => {
+    assert.match(
+      commitRefusal({ ...committable, pendingCount: 0 }) ?? "",
+      /nothing uncommitted/,
+    );
+  });
+
+  it("refuses a message that was given and then emptied", () => {
+    // Absent means "use the task". Blank means the operator cleared it, and a
+    // subject they did not write is not a repair for that.
+    assert.match(commitRefusal({ ...committable, message: "   " }) ?? "", /required/);
+  });
+
+  it("refuses a message that is a file rather than a subject", () => {
+    assert.match(
+      commitRefusal({ ...committable, message: "x".repeat(1_001) }) ?? "",
+      /1001 characters/,
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Deciding whether to destroy a branch                                */
+/* ------------------------------------------------------------------ */
+
+describe("purgeRefusal", () => {
+  const purgeable = {
+    runStatus: "failed" as const,
+    branch: "uf/repo-1234abcd",
+    branchExists: true,
+    confirmBranch: "uf/repo-1234abcd",
+  };
+
+  it("allows an unmerged branch, which is the whole point of it", () => {
+    // `deleteBranch` refuses this case by design. Purge is the other door, and
+    // if it refused the same things it would not exist.
+    assert.equal(purgeRefusal(purgeable), null);
+  });
+
+  it("refuses unless the branch is named back", () => {
+    // Not authentication — the row still decides what gets deleted. It is what
+    // stops a request aimed at one branch from landing on another.
+    for (const confirmBranch of ["", "uf/repo-99887766", "UF/REPO-1234ABCD"]) {
+      assert.match(
+        purgeRefusal({ ...purgeable, confirmBranch }) ?? "",
+        /has to name it/,
+        `${confirmBranch || "(empty)"} should not confirm`,
+      );
+    }
+  });
+
+  it("refuses while the run is still working on it", () => {
+    for (const runStatus of ["running", "queued", "paused"] as const) {
+      assert.match(
+        purgeRefusal({ ...purgeable, runStatus }) ?? "",
+        /still active/,
+        `${runStatus} should not be purgeable`,
+      );
+    }
+  });
+
+  it("says so when the branch is already gone", () => {
+    assert.match(
+      purgeRefusal({ ...purgeable, branchExists: false }) ?? "",
+      /already gone/,
+    );
   });
 });
 

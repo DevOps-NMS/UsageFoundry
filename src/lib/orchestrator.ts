@@ -1070,9 +1070,18 @@ async function ensureWorktree(run: RunRow): Promise<string> {
     // `pause_count` and not `iterations` alone: a cycle the live guard cut
     // short is refunded to the counter below, so a run parked during its first
     // cycle is back at zero while its branch very much exists.
+    //
+    // Unless it does not: `purgeBranch` deletes the branch and the checkout
+    // together, and a reopen after that would otherwise be sent to `git log` on
+    // a ref that is gone. Both sentences refuse; only one of them is true at a
+    // time, and being sure which is the whole reason to look.
+    const onDisk = await git(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
     throw new Error(
-      `The isolated checkout for this run is gone, but its work is still on branch ${branch}. ` +
-        `Inspect it with: git log ${branch}`,
+      onDisk.ok
+        ? `The isolated checkout for this run is gone, but its work is still on branch ${branch}. ` +
+          `Inspect it with: git log ${branch}`
+        : `Branch ${branch} and its checkout have both been deleted, so there is nothing for ` +
+          "this run to carry on from. Start it again as a new run.",
     );
   } else {
     // No timeout worth enforcing: this is a full checkout, and a big repository

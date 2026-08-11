@@ -687,12 +687,30 @@ and the diff of the merge commit it made, against the branch as it stood before
 the merge. The first is an account of the work; the second is the work, and it
 is what landing will bring across.
 
+**Work an agent never committed can be committed for it.** An isolated run is
+now granted `git add` and `git commit`, but a run from before that — or one whose
+agent simply never got round to it — finishes with a full checkout and an empty
+branch, which reads as a run that did nothing. Both the run page and the
+Branches page show what is sitting there, uncommitted, and commit it onto the
+run's own branch under the run's task as the subject (the run page lets you write
+your own). Nothing is written to your checkout. It is also how you get the
+checkout slot back: one with work left in it cannot be reused by the next run.
+
+The commit is refused if the slot has since been taken over by another run —
+what is uncommitted in it is then that run's, and committing it here would put
+one run's work on another's branch.
+
 **The Branches page** lists every `uf/*` branch across runs: which run made it,
-what it lands into, how far ahead it is, and whether it is merged. It is also
-where the merge queue lives. Merged
-branches can be deleted there, and its checkout slot is freed at the same time.
-Branches with commits of their own are not deletable from the UI at all — that is
-the one action here with no undo.
+what it lands into, how far ahead it is, whether it is merged, and how much is
+uncommitted in its checkout. It is also where the merge queue lives.
+
+Two ways out of a branch, and they are not the same button. **Delete** appears
+once git can see the work is in the target — it removes the branch and frees its
+checkout slot, and it is refused the moment the branch gains a commit that has
+not landed. **Purge** is the other door, for the attempt that went nowhere: it
+deletes the branch, its commits and its checkout whatever state they are in. It
+takes two presses, the second one saying how many commits go with it, and it is
+not offered for a run that is still going. Nothing here can put any of it back.
 
 A squashed branch is a special case worth knowing: git cannot see a squash as a
 merge, so the tool records the branch tip it took instead. That is what lets a
@@ -1141,6 +1159,19 @@ Built and exercised against real transcripts:
   `permission_denials`, with `tool_name: "Bash"` and the command under
   `tool_input.command` — which is why the log line names the command.
 
+- **The two git formats behind committing and purging, read off git 2.39.5
+  rather than the manual.** `git status --porcelain -z` was captured from a
+  scratch repository holding an unstaged edit, a rename and an untracked file
+  with a space in its name: the record is `XY <space> path NUL`, a rename's
+  source follows as its **own** field with the current path first, and the
+  leading space of `" M path"` is load-bearing. Passing that same output through
+  `.trim()` — which every other caller of `git()` gets — silently drops the
+  unstaged file from the list entirely, which is what `trim: false` exists for.
+  Separately: `git worktree remove` refuses a checkout with modified *or*
+  untracked files and a single `--force` removes it, and `git branch -d` refuses
+  an unmerged branch where `-D` deletes it. Those four exit codes are the
+  difference between Delete and Purge.
+
 ### Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
@@ -1274,6 +1305,17 @@ through before trusting this unattended:
   every conflicting file, because that list comes from the stage records — but
   which of those two happens on 2.39 is unconfirmed.
 - A repository large enough to hit the diff's size budget in the wild.
+- **Committing and purging through the app itself.** The two git formats they
+  turn on are confirmed against 2.39.5 above, and the three decisions
+  (`parseStatusZ`, `commitRefusal`, `purgeRefusal`) are unit-tested — but no
+  branch has been committed to or purged through a running server, so the
+  wiring in between is unconfirmed: whether the leftovers a real agent leaves
+  come back as the list the card renders, whether the commit satisfies
+  `ensureWorktree`'s reuse check on the next run into that slot, and whether a
+  purged slot is re-created cleanly rather than tripping the "checkout is gone"
+  guard for a run that had already worked in it. `next build` could not be run
+  here at all — it fails with `TypeError: generate is not a function` on the
+  unmodified tree too, so it says nothing either way about these changes.
 - **The Live from runs card in a browser, fed by a real telemetry-enabled run.**
   Its query was driven against a real database through the real ingest route and
   its markup was rendered and read, but the batches were synthesised from the
