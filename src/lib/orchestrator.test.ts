@@ -575,9 +575,13 @@ describe("buildArgs", () => {
         ]);
         // Denying the command without saying why buys one turn, not a fix:
         // `kill $(pgrep -f next-server)` is not `pkill` and is just as fatal.
+        // And a bare prohibition trades this failure for the other one — a dev
+        // server nobody can stop, holding its port for the life of the
+        // container — so the safe form has to be in there too.
         const said = args[args.indexOf("--append-system-prompt") + 1] ?? "";
-        assert.match(said, /pgrep/);
-        assert.match(said, /next-server/);
+        assert.match(said, /next-server/, "must name the collision");
+        assert.match(said, /pgrep -P/, "must give the child-process form");
+        assert.match(said, /pid=\$!/, "must give the recipe, not just the ban");
       });
     }
   }
