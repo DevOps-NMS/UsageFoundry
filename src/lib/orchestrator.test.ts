@@ -172,6 +172,8 @@ describe("prompt for the next work cycle", () => {
     justRetriggered: false,
     task: "TASK",
     isolationPreamble: null as string | null,
+    priorCycles: 0,
+    worktreeBranch: null as string | null,
     continuation: "CONTINUE",
     donePushback: "PUSHBACK",
   };
@@ -221,6 +223,38 @@ describe("prompt for the next work cycle", () => {
         followUp: "NOTE",
       }),
       "PRE\n\nTASK\n\nNOTE",
+    );
+  });
+
+  it("says so when the task is being reopened on top of earlier work", () => {
+    // The one case the run page reports as a restart. There is no conversation
+    // to carry what the previous attempt did, and a bare task tells the agent
+    // to do the work it is standing on — so the prompt has to name the state on
+    // disk itself.
+    const restarted = nextPrompt({ ...base, sessionId: null, priorCycles: 3 });
+    assert.match(restarted, /^A previous attempt at this task already ran 3 work cycles/);
+    assert.match(restarted, /\n\nTASK$/);
+
+    // An isolated run's earlier work is committed, and the branch is the only
+    // place a fresh session can still read it.
+    const isolated = nextPrompt({
+      ...base,
+      sessionId: null,
+      isolationPreamble: "PRE",
+      priorCycles: 1,
+      worktreeBranch: "uf/thing",
+    });
+    assert.match(isolated, /^PRE\n\nA previous attempt at this task already ran 1 work cycle and committed its work to this branch \(uf\/thing\)/);
+    assert.match(isolated, /\n\nTASK$/);
+  });
+
+  it("stays silent about earlier work when there is none, or a session holds it", () => {
+    // A first cycle is not a restart …
+    assert.equal(nextPrompt({ ...base, sessionId: null, priorCycles: 0 }), "TASK");
+    // … and a run that can resume already has the whole conversation.
+    assert.equal(
+      nextPrompt({ ...base, priorCycles: 3, worktreeBranch: "uf/thing" }),
+      "CONTINUE",
     );
   });
 });

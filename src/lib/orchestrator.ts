@@ -1447,6 +1447,11 @@ const STDERR_TAIL_LIMIT = 4_096;
  * hand. With no session to resume it cannot stand alone — the run is starting
  * the original task over, and a note that only makes sense as a reply would
  * read as the whole job — so it is appended rather than substituted.
+ *
+ * A run that opens with the task again *after* having already worked is told so.
+ * That combination is a restart, not a first attempt, and the difference is
+ * invisible from inside the prompt: the conversation that held what the previous
+ * attempt did is gone, while its work is still on disk.
  */
 export function nextPrompt(o: {
   sessionId: string | null;
@@ -1456,17 +1461,52 @@ export function nextPrompt(o: {
   task: string;
   /** Prepended on the first cycle of an isolated run only. */
   isolationPreamble: string | null;
+  /** Work cycles this run was charged for before the one about to spawn. */
+  priorCycles: number;
+  /** The run's own branch, for an isolated run: where that work is. */
+  worktreeBranch: string | null;
   continuation: string;
   donePushback: string;
 }): string {
   if (o.sessionId === null) {
-    const opening = o.isolationPreamble
-      ? `${o.isolationPreamble}\n\n${o.task}`
-      : o.task;
-    return o.followUp ? `${opening}\n\n${o.followUp}` : opening;
+    return [
+      o.isolationPreamble,
+      o.priorCycles > 0 ? priorWorkNotice(o.priorCycles, o.worktreeBranch) : null,
+      o.task,
+      o.followUp,
+    ]
+      .filter((part): part is string => Boolean(part))
+      .join("\n\n");
   }
   if (o.followUp) return o.followUp;
   return o.justRetriggered ? o.donePushback : o.continuation;
+}
+
+/**
+ * What an agent is told when it is handed the original task on a run that has
+ * already done work.
+ *
+ * Everything the previous attempt left behind is on disk and nowhere else — the
+ * conversation is gone, so nothing else in the prompt refers to it — and an
+ * agent given a bare task does the first thing that task says, which is the work
+ * it is standing on top of. Pointing it at the branch is the whole point for an
+ * isolated run: its predecessor's output is committed there, which is the one
+ * place a fresh session can still read it.
+ */
+function priorWorkNotice(cycles: number, branch: string | null): string {
+  const spent = `${cycles} work ${cycles === 1 ? "cycle" : "cycles"}`;
+  const where = branch
+    ? `committed its work to this branch (${branch})`
+    : `worked in this folder`;
+  const look = branch
+    ? "read the recent commits on this branch and the current state of the files"
+    : "check the current state of the files";
+  return (
+    `A previous attempt at this task already ran ${spent} and ${where}. There is ` +
+    `no conversation left to resume, so the task is repeated in full below. ` +
+    `Before doing anything, ${look}, and carry on from where that attempt ` +
+    `stopped rather than starting it again.`
+  );
 }
 
 function buildArgs(opts: {
@@ -1580,10 +1620,20 @@ export function signalTree(
   }
 }
 
+/**
+ * Spawn one work cycle.
+ *
+ * `onSession` fires the moment the stream first names a session, and again if it
+ * ever names a different one. The caller needs it before the promise settles:
+ * the id is what makes the run resumable, and the events that lose it — a crash,
+ * a restart, a kill — are exactly the ones that stop this promise settling at
+ * all.
+ */
 function runIteration(
   runId: string,
   cwd: string,
   args: string[],
+  onSession: (sessionId: string) => void,
 ): Promise<IterationResult> {
   return new Promise((resolve) => {
     // No shell: arguments are passed as an array, so a prompt containing
@@ -1623,7 +1673,7 @@ function runIteration(
       while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
         const line = stdoutBuf.slice(0, nl).trim();
         stdoutBuf = stdoutBuf.slice(nl + 1);
-        if (line) handleStreamLine(runId, line, result);
+        if (line) handleStreamLine(runId, line, result, onSession);
       }
     });
 
@@ -1655,7 +1705,8 @@ function runIteration(
       if (settled) return;
       settled = true;
       procs.delete(runId);
-      if (stdoutBuf.trim()) handleStreamLine(runId, stdoutBuf.trim(), result);
+      if (stdoutBuf.trim())
+        handleStreamLine(runId, stdoutBuf.trim(), result, onSession);
       result.exitCode = code ?? -1;
       resolve(result);
     };
@@ -1674,7 +1725,12 @@ function runIteration(
 }
 
 /** Interpret one line of Claude Code's `stream-json` output. */
-function handleStreamLine(runId: string, line: string, acc: IterationResult) {
+function handleStreamLine(
+  runId: string,
+  line: string,
+  acc: IterationResult,
+  onSession: (sessionId: string) => void,
+) {
   let ev: Record<string, unknown>;
   try {
     ev = JSON.parse(line);
@@ -1685,7 +1741,20 @@ function handleStreamLine(runId: string, line: string, acc: IterationResult) {
 
   const type = String(ev.type ?? "");
 
-  if (typeof ev.session_id === "string") acc.sessionId = ev.session_id;
+  // Announced on change rather than only latched, so the run's row learns its
+  // session id while the cycle is still running. Every event carries the id, so
+  // the change guard is what keeps this from being one callback per line; the
+  // emptiness guard is load-bearing too, because `nextPrompt` and `--resume`
+  // key on *having* a session and an empty string would claim one that is not
+  // there.
+  if (
+    typeof ev.session_id === "string" &&
+    ev.session_id &&
+    ev.session_id !== acc.sessionId
+  ) {
+    acc.sessionId = ev.session_id;
+    onSession(ev.session_id);
+  }
 
   if (type === "assistant") {
     const message = ev.message as
@@ -1889,11 +1958,24 @@ export async function startRun(id: string): Promise<void> {
   let pausedUntil: number | null = null;
   /** The next prompt should be the DONE pushback rather than the continuation. */
   let justRetriggered = false;
-  // Not `iterations > 0`: a run parked during its first cycle has that cycle
-  // refunded, so the counter cannot say whether this call is a resume.
-  const resumedFromPause = (run.pause_count ?? 0) > 0;
   let cyclesThisSegment = 0;
   let resumeRetried = false;
+
+  /**
+   * Take a session id as the run's own, and record it immediately.
+   *
+   * `session_id` used to be written only in the post-cycle UPDATE, so anything
+   * that stopped a first cycle from *returning* — a spawn failure, a container
+   * restart mid-cycle — left the column null however far the cycle had actually
+   * got. Picking that run back up then had no session to resume and re-sent the
+   * original task: a literal restart, with the previous attempt's work still on
+   * the branch and nothing telling the new agent it was there.
+   */
+  const adoptSession = (sid: string | null) => {
+    if (sid === sessionId) return;
+    sessionId = sid;
+    db().prepare("UPDATE runs SET session_id = ? WHERE id = ?").run(sid, id);
+  };
 
   const applyInterrupt = (it: Interrupt) => {
     stopReason = it.reason;
@@ -1981,6 +2063,11 @@ export async function startRun(id: string): Promise<void> {
         break;
       }
 
+      // Read before the increment below: what the next prompt needs to know is
+      // how much this run had already been charged for *before* the cycle it is
+      // about to open, which is what says whether opening with the task again
+      // is a first attempt or a restart on top of existing work.
+      const priorCycles = iterations;
       iterations += 1;
       const prompt = nextPrompt({
         sessionId,
@@ -1989,6 +2076,9 @@ export async function startRun(id: string): Promise<void> {
         task: run.prompt,
         isolationPreamble:
           run.isolation === "worktree" ? settings.isolationPreamble : null,
+        priorCycles,
+        worktreeBranch:
+          run.isolation === "worktree" ? run.worktree_branch : null,
         continuation: settings.continuationPrompt,
         donePushback: settings.donePushbackPrompt,
       });
@@ -2031,7 +2121,10 @@ export async function startRun(id: string): Promise<void> {
       }
 
       const cycleStartedAt = Date.now();
-      const usedResume = sessionId !== null;
+      // Captured before the spawn, because `adoptSession` may move `sessionId`
+      // while the child is still running.
+      const resumeTarget = sessionId;
+      const usedResume = resumeTarget !== null;
 
       // Registered for exactly as long as a child exists. The closure reads
       // this function's own locals, which stay alive because it is suspended on
@@ -2056,7 +2149,22 @@ export async function startRun(id: string): Promise<void> {
 
       let res: IterationResult;
       try {
-        res = await runIteration(id, workDir, args);
+        res = await runIteration(id, workDir, args, (sid) => {
+          // A resume that comes back under a different id is recorded rather
+          // than treated as a failure: which of the two Claude Code reports for
+          // a `--resume` is its business, and this app has never observed it
+          // against a real CLI. What is not acceptable is adopting it silently
+          // — every later cycle resumes whatever landed here, and a run that
+          // quietly changed conversation looks, from outside, exactly like one
+          // that restarted.
+          if (resumeTarget && sid !== resumeTarget && sessionId === resumeTarget) {
+            log(
+              id,
+              `This work cycle asked to resume session ${resumeTarget}, and Claude Code reported session ${sid}. Later cycles will continue ${sid}.`,
+            );
+          }
+          adoptSession(sid);
+        });
       } finally {
         liveGuards.delete(id);
       }
@@ -2069,10 +2177,13 @@ export async function startRun(id: string): Promise<void> {
       // leaves the run's total understated for the rest of the run, and a
       // later cycle that reports normally does not undo that.
       incompleteIteration ||= !res.sawResult;
-      if (res.sessionId) sessionId = res.sessionId;
+      // No `sessionId = res.sessionId` here: the stream callback above already
+      // adopted it, the moment it was reported rather than once the cycle
+      // returned. Re-reading it from the result would be a second write path
+      // saying the same thing later.
 
       // The cycle died before Claude Code reported what it cost, so the two
-      // lines above added nothing. Recover an estimate from the transcripts;
+      // `+=` lines above added nothing. Recover an estimate from the transcripts;
       // it is held apart from `spent_usd` and reported as an estimate.
       if (!res.sawResult) {
         const recovered = await reconcileKilledCycle(sessionId, cycleStartedAt);
@@ -2178,9 +2289,17 @@ export async function startRun(id: string): Promise<void> {
         // is the session itself, and the honest move is to stop and name the
         // command rather than quietly start a fresh session and lose the
         // conversation the resume existed to keep.
+        //
+        // `usedResume && cyclesThisSegment === 1` is exactly "this segment
+        // opened by resuming a session an earlier one left behind": no cycle in
+        // this segment has completed yet, so the id can only have come off the
+        // row. It deliberately no longer also requires the earlier segment to
+        // have ended in a *pause* — a truncated session is a truncated session
+        // whether a guard parked the run or a crash ended it, and a run picked
+        // up by hand has `pause_count === 0`, so that condition excluded the
+        // one case an operator is watching.
         const looksLikeResumeFailure =
           usedResume &&
-          resumedFromPause &&
           cyclesThisSegment === 1 &&
           !res.sawResult &&
           res.finalText === "";
@@ -2188,6 +2307,11 @@ export async function startRun(id: string): Promise<void> {
           resumeRetried = true;
           iterations -= 1;
           cyclesThisSegment = 0;
+          // Back to the id this cycle was asked to resume. A cycle that failed
+          // this test did no work at all, so anything the stream named — an
+          // empty session the CLI opened before giving up — is worth less than
+          // the conversation the retry exists to get back into.
+          adoptSession(resumeTarget);
           log(
             id,
             "Resuming the previous session failed before it did any work. Trying once more.",
@@ -2195,7 +2319,7 @@ export async function startRun(id: string): Promise<void> {
           continue;
         }
         stopReason = looksLikeResumeFailure
-          ? `Could not resume this run's Claude Code session (exit ${res.exitCode}). Its work is still on disk; pick it up by hand with: claude --resume ${sessionId}`
+          ? `Could not resume this run's Claude Code session (exit ${res.exitCode}). Its work is still on disk; pick it up by hand with: claude --resume ${resumeTarget}`
           : `Claude Code exited with code ${res.exitCode}.`;
         finalStatus = "failed";
         break;

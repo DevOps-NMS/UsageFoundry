@@ -297,9 +297,25 @@ because UsageFoundry restarted under it, because you stopped it, because it hit
 one of its own limits, or because the agent reported the task done — has a
 button on its page: **Resume**, or **Ask for more** when it completed. It keeps
 its folder, its isolated checkout and branch, its spend so far, and its Claude
-Code session, so it continues the conversation rather than starting a new one. A
-run that died before it had a session to continue starts again from the original
-task instead, and says so.
+Code session, so it continues the conversation rather than starting a new one.
+The session is recorded as soon as Claude Code names it, not when the work cycle
+finishes, so a run that crashed — or that UsageFoundry restarted underneath —
+still has one to continue.
+
+A run that genuinely never got that far starts again from the original task
+instead, and says so on its page. When it had already worked, the agent is told:
+the prompt opens by naming how many cycles the previous attempt ran and where its
+output is — the run's own branch when it is isolated, the folder otherwise — and
+tells it to read that before doing anything. There is no conversation left to
+carry any of it, and an agent handed a bare task does the first thing the task
+says, which is the work it is standing on.
+
+If the session exists but Claude Code will not resume it — a transcript truncated
+by a mid-turn kill is the known way that happens — the run tries once more and
+then stops, saying so and naming the `claude --resume <id>` command to pick it up
+by hand. It does not quietly start a fresh session: that would lose the
+conversation the resume existed to keep, and it is what "picking a run back up"
+means here.
 
 The form takes a message as well as the limits. Whatever you write is sent
 verbatim as the next turn of the same conversation — that is how you keep
@@ -778,7 +794,22 @@ through before trusting this unattended:
   assistant turn. `refusalInStderr` covers that case but has never fired.
 - Whether `claude --resume` accepts a session whose transcript was truncated by
   a mid-turn kill. The recovery ladder retries once and then stops, naming the
-  command — it deliberately does not start a fresh session.
+  command — it deliberately does not start a fresh session. That ladder now also
+  covers a run picked up by hand rather than only one coming back from a pause,
+  which makes this the failure an operator is most likely to meet: a run that
+  cannot be resumed cannot be reopened into either, and the manual command is
+  the only way out of it.
+- **Which session id `claude -p --resume <id>` reports back.** Every cycle's
+  stream is read for one and the run adopts it; a value differing from the one
+  passed to `--resume` is written to the run log and otherwise treated as
+  normal, because nothing here has watched a real resume on the wire. If it
+  turns out the CLI always mints a fresh id, that line is noise and should
+  become a debug-level detail rather than a log entry per resumed cycle.
+- Whether a session id reported by an `init` event that is then killed seconds
+  later is resumable at all. It is now persisted, so such a run is reopened as a
+  continuation rather than a restart — which is the point — but the conversation
+  it attaches to holds only the original task, and a continuation prompt that
+  restates nothing is relying on that first user turn having been flushed.
 - A run parking and resuming across a real 5-hour boundary, in the same
   worktree, on the same branch, with its commits intact.
 - A paused run surviving `docker compose restart`, and a stale one being closed
