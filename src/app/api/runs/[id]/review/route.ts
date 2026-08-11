@@ -27,6 +27,10 @@ export async function GET(_req: Request, ctx: Ctx) {
       diffFiles: r.diff_files,
       diffShown: r.diff_shown,
       truncated: r.truncated === 1,
+      // Both belong to a conflict resolution. This route serves reviews only,
+      // and a review changes nothing by construction.
+      paths: [],
+      changed: null,
     })),
   });
 }

@@ -224,6 +224,14 @@ function migrate(db: Database.Database) {
   // fail out on restart — and because both are the same accounting fact:
   // money spent on a run *outside* its work cycles.
   addColumn(db, "run_reviews", "kind", "TEXT NOT NULL DEFAULT 'review'");
+
+  // What a conflict resolution produced. The merge commit is the only handle on
+  // it: the checkout it was made in is removed as soon as the row is written,
+  // and the row's text is the agent's account of the work rather than the work.
+  // The paths are the files it was handed, kept so that what is shown afterwards
+  // is the resolution rather than everything the merge brought across.
+  addColumn(db, "run_reviews", "resolved_commit", "TEXT");
+  addColumn(db, "run_reviews", "resolved_paths", "TEXT");
 }
 
 function addColumn(

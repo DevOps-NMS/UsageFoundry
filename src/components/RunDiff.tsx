@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { DiffFileDTO, RunDTO, RunDiffDTO } from "@/lib/apiTypes";
+import type { RunDTO, RunDiffDTO } from "@/lib/apiTypes";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
+import { DiffFileRow } from "@/components/ui/Patch";
 
 /**
  * What the run actually changed.
@@ -14,76 +15,6 @@ import { Notice } from "@/components/ui/Notice";
  * every assistant turn — and reading it to find out what a run *did* is slower
  * than reading the diff. This is the outcome.
  */
-
-const STATUS_LABEL: Record<DiffFileDTO["status"], string> = {
-  added: "added",
-  modified: "modified",
-  deleted: "deleted",
-  renamed: "renamed",
-  copied: "copied",
-  changed: "type changed",
-};
-
-/** Colour by line prefix. A unified diff has exactly five kinds of line. */
-function classFor(line: string): string {
-  if (line.startsWith("+++") || line.startsWith("---")) return "text-ink-faint";
-  if (line.startsWith("@@")) return "text-accent";
-  if (line.startsWith("+")) return "text-ok";
-  if (line.startsWith("-")) return "text-danger";
-  if (line.startsWith("diff --git") || line.startsWith("index ")) return "text-ink-faint";
-  return "text-ink-muted";
-}
-
-function Patch({ text }: { text: string }) {
-  return (
-    <div className="max-h-[420px] overflow-auto rounded-sm border border-line bg-inset p-2.5 font-mono text-xs leading-relaxed">
-      {text.split("\n").map((line, i) => (
-        <div key={i} className={`whitespace-pre ${classFor(line)}`}>
-          {line || " "}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function FileRow({ file }: { file: DiffFileDTO }) {
-  return (
-    <details className="border-b border-line py-1.5 last:border-b-0">
-      <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
-        <span className="mono min-w-0 flex-1 break-all text-ink">
-          {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
-        </span>
-        <span className="text-2xs uppercase tracking-wide text-ink-faint">
-          {STATUS_LABEL[file.status]}
-        </span>
-        {file.binary ? (
-          <span className="text-2xs text-ink-faint">binary</span>
-        ) : (
-          <span className="whitespace-nowrap tabular-nums text-xs">
-            <span className="text-ok">+{file.added ?? 0}</span>{" "}
-            <span className="text-danger">−{file.deleted ?? 0}</span>
-          </span>
-        )}
-      </summary>
-      <div className="mt-2">
-        {file.patch === null ? (
-          <Hint tone="warn">
-            This file&rsquo;s contents were left out — the change is too large to
-            render here. See it with{" "}
-            <span className="mono">git diff</span> in the repository
-          </Hint>
-        ) : (
-          <>
-            <Patch text={file.patch} />
-            {file.patchTruncated && (
-              <Hint tone="warn">Only the first part of this file&rsquo;s change is shown</Hint>
-            )}
-          </>
-        )}
-      </div>
-    </details>
-  );
-}
 
 export function RunDiff({ run }: { run: RunDTO }) {
   const [diff, setDiff] = useState<RunDiffDTO | null>(null);
@@ -172,7 +103,7 @@ export function RunDiff({ run }: { run: RunDTO }) {
 
           <div>
             {diff.files.map((f) => (
-              <FileRow key={`${f.oldPath ?? ""}:${f.path}`} file={f} />
+              <DiffFileRow key={`${f.oldPath ?? ""}:${f.path}`} file={f} />
             ))}
           </div>
 
