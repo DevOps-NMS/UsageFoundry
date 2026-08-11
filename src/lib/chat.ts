@@ -1,4 +1,8 @@
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import {
+  spawn,
+  type ChildProcess,
+  type ChildProcessByStdio,
+} from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -140,6 +144,9 @@ export const STALE_TURN_MARGIN_MS = 60_000;
 
 /** How often a `thinking` row is checked against that deadline. */
 const CHAT_SWEEP_MS = 30_000;
+
+/** How long `close` is given to deliver the last of stdout after the exit. */
+const EXIT_DRAIN_MS = 2_000;
 
 /* ------------------------------------------------------------------ */
 /* Storage                                                             */
@@ -810,12 +817,27 @@ export async function sendChatMessage(
   const prompt = chatPrompt({ sessionId: chat.session_id, history }, text);
 
   // Not awaited: it runs for minutes and the row is what reports on it.
-  void runTurn(chat, prompt).catch((err) => {
-    finishTurn(chatId, {
-      status: "failed",
-      error: err instanceof Error ? err.message : String(err),
+  //
+  // Wrapped as well as `.catch`ed, because `runTurn` is not `async`: it mints
+  // the capability and writes the MCP config *while this call expression is
+  // being evaluated*, so a throw from either happens before `.catch` is
+  // attached to anything. Unhandled, it propagates out of this function with
+  // the row already set to `thinking` — a state nothing but a restart clears,
+  // and one this function refuses to send into.
+  try {
+    void runTurn(chat, prompt).catch((err) => {
+      finishTurn(chatId, {
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
-  });
+  } catch (err) {
+    const reason = `Could not start the turn: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+    finishTurn(chatId, { status: "failed", error: reason });
+    return { ok: false, reason };
+  }
 
   return { ok: true };
 }
@@ -832,7 +854,17 @@ interface TurnResult {
 
 function runTurn(chat: ChatRow, prompt: string): Promise<void> {
   const token = mintCapability(chat.id);
-  const configPath = writeMcpConfig(token);
+  let configPath: string;
+  try {
+    configPath = writeMcpConfig(token);
+  } catch (err) {
+    // `land` is the only thing that revokes, and it is inside the promise this
+    // never reaches — so a token minted for a turn that cannot start would
+    // stay live in memory until it expired, an hour later. The caller records
+    // the failure on the row; this releases what the failed setup took.
+    revokeCapability(token);
+    throw err;
+  }
 
   return new Promise((resolve) => {
     const settings = getSettings();
@@ -949,7 +981,7 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       land({ status: "failed", error: `Could not launch ${CLAUDE_BIN}: ${err.message}` });
     });
 
-    child.on("close", (code) => {
+    settleOnExit(child, (code) => {
       if (timedOut) {
         land({ status: "failed", error: TIMED_OUT_REASON });
         return;
@@ -957,6 +989,43 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       land(parseTurnOutput(stdout, stderr, code));
     });
   });
+}
+
+/**
+ * Settle a turn on the child's `exit`, giving `close` a grace period first.
+ *
+ * `close` is the better signal — it means stdout has been fully drained — but
+ * it fires only once every inherited pipe has shut, and the CLI's own children
+ * hold those. A `claude` that leaves a grandchild behind has *exited* and will
+ * never *close*, so a turn wired to `close` alone sits at "Thinking…" until the
+ * ten-minute timeout kills the group and throws the answer away — and for ever
+ * when `killProcessGroup` is off, because then there is no group to kill and
+ * nothing else reaps the grandchild.
+ *
+ * `runIteration` settles the identical hazard the identical way, and for the
+ * same reason: `exit` is the guarantee, `close` is the fast path, and the grace
+ * period exists only so a normal exit flushes its last chunk through `close`
+ * before anything is parsed.
+ *
+ * Exported because the shape it exists for — a child that exits while a
+ * grandchild holds its stdout — is only reachable from a test through this
+ * seam; `runTurn` itself needs a database, a settings row and a spend gate.
+ */
+export function settleOnExit(
+  child: ChildProcess,
+  settle: (code: number | null) => void,
+): void {
+  let done = false;
+  const once = (code: number | null) => {
+    if (done) return;
+    done = true;
+    settle(code);
+  };
+
+  child.on("exit", (code) => {
+    setTimeout(() => once(code), EXIT_DRAIN_MS).unref?.();
+  });
+  child.on("close", (code) => once(code));
 }
 
 /**
@@ -1261,18 +1330,32 @@ function writeMcpConfig(token: string): string {
     os.tmpdir(),
     `uf-mcp-${randomBytes(9).toString("hex")}.json`,
   );
-  fs.writeFileSync(
-    file,
-    JSON.stringify({
-      mcpServers: {
-        uf: {
-          type: "http",
-          url: MCP_SELF_URL,
-          headers: { Authorization: `Bearer ${token}` },
+  try {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        mcpServers: {
+          uf: {
+            type: "http",
+            url: MCP_SELF_URL,
+            headers: { Authorization: `Bearer ${token}` },
+          },
         },
-      },
-    }),
-    { mode: 0o600 },
-  );
+      }),
+      { mode: 0o600 },
+    );
+  } catch (err) {
+    // A write that fails part-way — ENOSPC, the likeliest of these — leaves the
+    // file behind with whatever reached the disk, and what it carries is the
+    // capability token. Nothing else would ever remove it: the unlink in `land`
+    // is inside a promise this failure never reaches.
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      // Never created, or the same condition that failed the write. The
+      // original error is the one worth reporting.
+    }
+    throw err;
+  }
   return file;
 }
