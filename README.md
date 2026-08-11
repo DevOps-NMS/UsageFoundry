@@ -1120,6 +1120,27 @@ Built and exercised against real transcripts:
   have left the chat able to read GitHub and not this app. `manual` plus the
   allowlist is what shipped, and the allowlist is therefore the guarantee.
 
+- **That an isolated run under `acceptEdits` could not commit, and now can.**
+  Found in the wild rather than reasoned about: four runs finished `completed`
+  on their own branches with nothing on them and their whole change sitting
+  uncommitted in the worktree. The transcripts say why — seven `git add` / `git
+  commit` attempts across five phrasings, every one answered `This command
+  requires approval`, which in a `-p` child nobody can give. `acceptEdits`
+  auto-approves edits and read-only shell and holds mutating git for a human, so
+  the isolation preamble was ordering work the permission mode forbade.
+  Confirmed in the same transcripts that the other 59 Bash calls *did* run, so
+  this is specifically mutating git and not "acceptEdits blocks the shell".
+
+  The fix was then verified against the real CLI for $0.02, in a throwaway
+  repository: `--permission-mode acceptEdits --allowedTools "Bash(git add:*)"
+  "Bash(git commit:*)"` wrote the file, committed it, and had its `git push`
+  refused — which establishes all three things it needed to. The grant works,
+  it grants only what it names, and `--allowedTools` is *additive* rather than
+  exhaustive when the mode is not `manual` (`Write` still ran, having never been
+  named). The same run confirmed the `stream-json` `result` event carries
+  `permission_denials`, with `tool_name: "Bash"` and the command under
+  `tool_input.command` — which is why the log line names the command.
+
 ### Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the

@@ -38,12 +38,14 @@ process.env.DATA_DIR = path.join(tmp, "data");
 // `require`, not `import`: imports are hoisted above the environment setup
 // above, and the module reads WORKSPACE_ROOTS once at load.
 const {
+  buildArgs,
   conflictKey,
   overlaps,
   githubEnv,
   isTransientApiError,
   isUsageLimit,
   nextPrompt,
+  permissionDenials,
   refusalResumeAt,
   selectPromotable,
   MAX_PAUSES_PER_RUN,
@@ -508,6 +510,90 @@ describe("github credentials for a work cycle", () => {
     // environment at call time so the value there is `$GH_TOKEN`, not the token.
     for (const [key, value] of Object.entries(env)) {
       if (key.startsWith("GIT_CONFIG_")) assert.equal(value.includes(token), false);
+    }
+  });
+});
+
+/**
+ * Covers the argv an isolated run is spawned with, and the refusals it reports.
+ *
+ * Both earn a test on the same grounds as everything else here — pure, silent,
+ * expensive — and both were written *after* the failure they describe. Four
+ * runs finished `completed`, on their own branches, having been told to commit
+ * as they went, with every `git add` and `git commit` refused by the permission
+ * mode and the whole change left uncommitted in a worktree. Nothing failed;
+ * `landState` simply read four branches with no commits on them. The argv is
+ * what makes the preamble's instruction possible to obey, and the denial line
+ * is what makes it visible when it is not.
+ */
+describe("buildArgs", () => {
+  const base = {
+    prompt: "do the thing",
+    model: null,
+    permissionMode: "acceptEdits" as const,
+    resumeSessionId: null,
+  };
+
+  it("grants an isolated run the two git commands it is told to use", () => {
+    const args = buildArgs({ ...base, isolated: true });
+    const at = args.indexOf("--allowedTools");
+    assert.notEqual(at, -1, "an isolated run must be able to commit");
+    assert.deepEqual(args.slice(at + 1, at + 3), [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+    ]);
+  });
+
+  it("grants nothing to a run working in the operator's own checkout", () => {
+    // It is never told to commit, and auto-approving commits into the tree
+    // somebody is working in is a decision nobody asked for.
+    assert.equal(buildArgs({ ...base, isolated: false }).includes("--allowedTools"), false);
+  });
+
+  it("still passes the mode, the model and the session to resume", () => {
+    const args = buildArgs({
+      ...base,
+      model: "claude-opus-5",
+      resumeSessionId: "sess-1",
+      isolated: true,
+    });
+    assert.deepEqual(args.slice(0, 2), ["-p", "do the thing"]);
+    assert.equal(args[args.indexOf("--model") + 1], "claude-opus-5");
+    assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
+    assert.equal(args[args.indexOf("--resume") + 1], "sess-1");
+  });
+});
+
+describe("permissionDenials", () => {
+  it("names the command, because every denial's tool_name is Bash", () => {
+    // The shape is copied from a real `result` event: tool_name is the tool,
+    // and what was actually refused is in tool_input.command.
+    assert.deepEqual(
+      permissionDenials([
+        {
+          tool_name: "Bash",
+          tool_use_id: "toolu_01",
+          tool_input: { command: "git push", description: "Run git push" },
+        },
+      ]),
+      ["Bash (git push)"],
+    );
+  });
+
+  it("groups a refusal the agent retried, which is how they arrive", () => {
+    const denials = permissionDenials([
+      { tool_name: "Bash", tool_input: { command: "git commit -am 'x'" } },
+      { tool_name: "Bash", tool_input: { command: "git commit -am 'x'" } },
+      { tool_name: "WebFetch" },
+    ]);
+    assert.deepEqual(denials, ["Bash (git commit -am 'x') ×2", "WebFetch"]);
+  });
+
+  it("is empty for a build that stops sending the field", () => {
+    // Read defensively on purpose: this shape was captured from one CLI build,
+    // and a cycle must not fail to finish because its result event changed.
+    for (const raw of [undefined, null, "nope", [], [{}], [{ tool_name: "" }]]) {
+      assert.deepEqual(permissionDenials(raw), []);
     }
   });
 });

@@ -1606,15 +1606,48 @@ function priorWorkNotice(cycles: number, branch: string | null): string {
   );
 }
 
-function buildArgs(opts: {
+/**
+ * The two commands an isolated run is *ordered* to use, granted to it.
+ *
+ * `acceptEdits` auto-approves file edits and read-only shell, and holds
+ * mutating git for a human — `git add` and `git commit` both come back "This
+ * command requires approval", and a `-p` child has nobody to give it. So the
+ * isolation preamble tells the agent to commit as it goes, and the permission
+ * mode the run form defaults to makes that impossible. Measured, not reasoned:
+ * one run tried seven times, in five phrasings, and was refused every time,
+ * finished as `completed`, and left its whole change sitting uncommitted in a
+ * worktree that `landState` then read as a branch with nothing on it.
+ *
+ * Granted by name rather than by moving the run to `bypassPermissions`, which
+ * would also hand it the network, `rm`, and everything else the run form warns
+ * about. The narrow grant is exactly the promise the preamble already makes.
+ *
+ * Isolated runs only. A run working in the operator's own checkout is told
+ * nothing about committing, and auto-approving commits into the tree someone
+ * is working in is a decision nobody asked for.
+ *
+ * Prefix-matched, so `git commit -am …` is covered and `git -c user.name=…
+ * commit` is not — the agent above tried that form too, once, before falling
+ * back to the plain one. Not worth a second entry: `gitEnv` and the image's
+ * system-wide identity are why it reached for `-c` at all.
+ */
+const ISOLATED_GIT_TOOLS = ["Bash(git add:*)", "Bash(git commit:*)"];
+
+export function buildArgs(opts: {
   prompt: string;
   model: string | null;
   permissionMode: PermissionMode;
   resumeSessionId: string | null;
+  /** A run with its own checkout and branch, which is told to commit to it. */
+  isolated: boolean;
 }): string[] {
   const args = ["-p", opts.prompt, "--output-format", "stream-json", "--verbose"];
   if (opts.model) args.push("--model", opts.model);
   if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
+  // Additive: `--allowedTools` names what skips the prompt, and everything else
+  // still follows the mode. It is not the allowlist `chat.ts` runs under, where
+  // `manual` mode is what makes the same flag exhaustive.
+  if (opts.isolated) args.push("--allowedTools", ...ISOLATED_GIT_TOOLS);
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   return args;
 }
@@ -1903,6 +1936,48 @@ function runIteration(
   });
 }
 
+/** How much of a refused command is kept. Long enough to name it, not to log it. */
+const DENIAL_COMMAND_CHARS = 60;
+
+/**
+ * Refused tool calls off a `result` event, as `Tool (what) ×N`, commonest
+ * first.
+ *
+ * The command is part of the label because `tool_name` alone is `Bash` —
+ * confirmed on the wire — and "Bash ×7" is the difference between a line an
+ * operator acts on and one they scroll past. Grouped, because a refusal
+ * repeats: the agent retries and rephrases, and seven near-identical entries
+ * are one fact.
+ *
+ * Pure and tested, because it reads a shape captured from one CLI build and
+ * every field of it is optional here: a build that stops sending it, or renames
+ * it, must yield an empty list rather than break the cycle that carried it.
+ */
+export function permissionDenials(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+
+  const counts = new Map<string, number>();
+  for (const entry of raw) {
+    const e = entry as { tool_name?: unknown; tool_input?: unknown } | null;
+    const name = String(e?.tool_name ?? "").trim();
+    if (!name) continue;
+
+    const command = String(
+      (e?.tool_input as { command?: unknown } | null)?.command ?? "",
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    const label = command
+      ? `${name} (${command.slice(0, DENIAL_COMMAND_CHARS)}${command.length > DENIAL_COMMAND_CHARS ? "…" : ""})`
+      : name;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([label, n]) => (n > 1 ? `${label} ×${n}` : label));
+}
+
 /** Interpret one line of Claude Code's `stream-json` output. */
 function handleStreamLine(
   runId: string,
@@ -1996,6 +2071,25 @@ function handleStreamLine(
       acc.apiError === null
     ) {
       acc.apiError = ev.result;
+    }
+
+    // A tool call the agent made and nothing could answer.
+    //
+    // `chat.ts` has read this since it shipped, on the grounds that a chat
+    // which quietly could not run `gh` reads as a chat that found no issues.
+    // The same argument is stronger here and was learned the expensive way: a
+    // run whose every `git commit` was refused reads as a run that decided not
+    // to commit, and it takes reading a transcript by hand to tell the two
+    // apart. Counted by tool rather than listed, because a refusal repeats —
+    // the agent retries, rephrases, and retries again.
+    const denials = permissionDenials(ev.permission_denials);
+    if (denials.length > 0) {
+      log(
+        runId,
+        `Refused tool calls this cycle: ${denials.join(", ")}. The agent asked ` +
+          "and nothing was there to approve, so those calls did not run.",
+        { denials },
+      );
     }
 
     emit({
@@ -2287,6 +2381,7 @@ export async function startRun(id: string): Promise<void> {
         model: run.model,
         permissionMode: budget.permissionMode ?? "acceptEdits",
         resumeSessionId: sessionId,
+        isolated: run.isolation === "worktree",
       });
 
       // A run can last hours, and the working directory was validated once when
