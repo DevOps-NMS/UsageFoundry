@@ -141,8 +141,29 @@ COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
+# /data is the one path here whose permissions are the *image's* problem rather
+# than the host's, because it is a named volume. Docker initialises a fresh
+# volume from the directory sitting at its mount point and copies that
+# directory's ownership and mode onto the volume root — so the chown below,
+# plus the default 0755, hands the volume to uid 1000 and to nobody else.
+# Compose then runs the container as `${UF_UID}`, which Linux operators are told
+# to set to their own uid, and the first thing the app does is create
+# /data/usagefoundry.db. That is EACCES on every data route, for an operator who
+# has just followed the instruction meant to prevent permission problems.
+#
+# 0777 on this one directory is the fix that needs nothing from the operator.
+# The two alternatives do not work here: a chown to a build-arg uid makes the
+# image uid-specific (and stale the moment the uid changes), and an entrypoint
+# chown has no root process to run as, because compose's `user:` applies before
+# the entrypoint. The bind mounts need none of this — they carry the host's
+# ownership, which is the uid `UF_UID` names.
+#
+# Only a *fresh* volume takes this mode; one created under the old arrangement
+# keeps uid 1000's files, and README's "On Linux, set UF_UID and UF_GID" states
+# the one-off chown for that case.
 RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.claude \
- && chown -R node:node /data /workspace /workspace2 /workspace3 /workspace4 /home/node /app
+ && chown -R node:node /data /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
+ && chmod 0777 /data
 
 USER node
 EXPOSE 3000

@@ -6,6 +6,7 @@ import type { RunDTO, RunEventDTO, RunTelemetryDTO } from "@/lib/apiTypes";
 import {
   STATUS_TONE,
   fmtClock,
+  fmtCycleInFlight,
   fmtDateTime,
   fmtRelative,
   fmtTokens,
@@ -264,10 +265,15 @@ export default function RunDetail({
     run.status === "failed" ||
     run.status === "stopped" ||
     run.status === "completed";
+  // What blank sends, which is the one thing this form's copy has to get right.
+  // A `completed` run that used up its cycle cap never reported anything, and
+  // is continued rather than pushed back on — same branch as `reopenPrompt`.
+  const saidDone = run.status === "completed" && Boolean(run.reported_done);
   const handoff = [...events].reverse().find((e) => e.kind === "handoff");
   const costPct = run.budget.maxRunCostUSD
     ? Math.min(run.spent_usd / run.budget.maxRunCostUSD, 1)
     : null;
+  const cycleInFlight = fmtCycleInFlight(run);
 
   return (
     <>
@@ -433,6 +439,18 @@ export default function RunDetail({
                 }`
               : "no spending limit set"}
           </div>
+          {/* $0.00 on a run eight minutes into its first cycle is the
+              documented behaviour rather than a broken counter — Claude Code
+              reports what a cycle cost in its terminal `result` event and
+              nowhere earlier. Say which of the two it is while a cycle is
+              open; the telemetry card beside this one is the figure that moves
+              meanwhile. */}
+          {cycleInFlight && (
+            <div className="stat-sub">
+              excludes the cycle in flight — Claude Code reports a cycle&rsquo;s
+              cost when it ends
+            </div>
+          )}
           {/* Held apart from the measured figure above, not added to it: this
               is what work cycles that were cut short before Claude Code could
               report their cost are estimated to have spent, worked out from
@@ -483,7 +501,10 @@ export default function RunDetail({
               "paused — waiting for the next 5-hour window"
             ) : active ? (
               <>
-                <span className="spinner" /> working
+                {/* The number above counts cycles that finished, so on a run in
+                    its first one it is 0 and the spinner is the only thing
+                    saying otherwise. Name the cycle instead. */}
+                <span className="spinner" /> {cycleInFlight ?? "working"}
               </>
             ) : run.max_iterations > 0 ? (
               `${run.max_iterations === 1 ? "cycle" : "cycles"} used of the limit · exit ${run.exit_code ?? "—"}`
@@ -532,7 +553,7 @@ export default function RunDetail({
             <div className="subsection-title">
               {!run.session_id
                 ? "Start this run again from its original task"
-                : run.status === "completed"
+                : saidDone
                   ? "Send this run back into the same session"
                   : "Carry on from where this run stopped"}
             </div>
@@ -548,7 +569,7 @@ export default function RunDetail({
               <div className="hint">
                 {!run.session_id
                   ? "This run never reported a session to resume, so it starts the original task again with this added to the end."
-                  : run.status === "completed"
+                  : saidDone
                     ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails."
                     : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue."}
               </div>

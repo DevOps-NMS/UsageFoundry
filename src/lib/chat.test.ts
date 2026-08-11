@@ -1,16 +1,24 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { PassThrough } from "node:stream";
+import { after, describe, it } from "node:test";
 
-import { chatPrompt, composeTask, planProposal, type ChatProposalRow } from "./chat";
-import { githubSlug } from "./workspace";
+// Types only: an `import` of a *value* from `./chat` is hoisted above the
+// environment set below, which is what the `require` further down exists to
+// avoid. `import type` is erased and loads nothing.
+import type { ChatProposalRow, ChatRow } from "./chat";
 import type { RunTemplate } from "./templates";
 import type { RunGuards } from "./settings";
 
 /**
- * Covers `planProposal`, `chatPrompt` and `githubSlug`, and only those.
+ * Covers `planProposal`, `chatPrompt`, `githubSlug`, `settleOnExit`,
+ * `staleTurn` and the turn claim in `sendChatMessage`, and only those.
  *
  * Each is the same class of failure the rest of this suite is reserved for —
- * pure, silent, and expensive:
+ * silent, and expensive:
  *
  *  - `planProposal` is where text a model wrote becomes a process with write
  *    access to a directory. The branch that matters most is the one that is not
@@ -30,7 +38,96 @@ import type { RunGuards } from "./settings";
  *  - `githubSlug` names the repository the chat then reads issues out of. A
  *    wrong answer is not an error — it is proposals for somebody else's
  *    project, described convincingly.
+ *  - `sendChatMessage` is the only check-then-act in this file, and the one
+ *    thing it decides is whether a second billed child joins a conversation
+ *    that already has one. It is not pure, so it is driven against a temporary
+ *    database with `spawn` replaced — the assertion is the number of children,
+ *    which is what the failure costs.
+ *  - `settleOnExit` decides whether a turn ever ends. It is the other impure
+ *    one, and the only one that earns a *real* subprocess: the fault it guards
+ *    against cannot be reproduced without one, because pipes a grandchild
+ *    holds open are the whole mechanism — which is also why it takes `spawn`
+ *    from the handle saved before the counter above replaced it. Wired to
+ *    `close` alone, a chat whose
+ *    answer is already sitting in the buffer reads as "Thinking…" for ten
+ *    minutes and then as a timeout — or for ever, with no error recorded.
+ *  - `staleTurn` is what is left when even that does not fire: the only thing
+ *    enforcing the ten-minute bound on a turn whose child this process can no
+ *    longer hear from at all. Wrong in one direction it kills a live turn
+ *    mid-answer; wrong in the other it never fires, and the bound quietly stops
+ *    existing — a thread that says "Thinking…" for ever, refusing every
+ *    message, with nothing short of a server restart able to clear it.
  */
+
+/* ------------------------------------------------------------------ */
+/* Harness for the impure one                                          */
+/* ------------------------------------------------------------------ */
+
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf-chat-")));
+fs.mkdirSync(path.join(tmp, "claude", "projects"), { recursive: true });
+
+process.env.DATA_DIR = path.join(tmp, "data");
+process.env.CLAUDE_HOME = path.join(tmp, "claude");
+// Belt to the fake `spawn` below: if the replacement ever stopped taking
+// effect, this is a path that cannot be executed rather than a real, billed CLI.
+process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
+
+// `require`, not `import`: imports are hoisted above the environment above, and
+// `config.ts` fixes `DATA_DIR` and `CLAUDE_HOME` at load. Same reason
+// `orchestrator.test.ts` does it.
+const {
+  CHAT_TIMEOUT_MS,
+  STALE_TURN_MARGIN_MS,
+  chatPrompt,
+  composeTask,
+  createChat,
+  getChat,
+  listMessages,
+  parseTurnOutput,
+  planProposal,
+  sendChatMessage,
+  settleOnExit,
+  staleTurn,
+} = require("./chat") as typeof import("./chat");
+const { githubSlug } = require("./workspace") as typeof import("./workspace");
+
+/**
+ * Count the children a turn would start, without starting one.
+ *
+ * `chat.ts` calls `spawn` through the module object under the test build's
+ * CommonJS emit, so replacing it here is what every turn below gets. The fake
+ * closes with no output, which lands the turn exactly as a CLI that printed
+ * nothing would — the MCP config file is unlinked and the capability revoked,
+ * rather than left behind by a turn that never finished.
+ *
+ * `realSpawn` is kept rather than only restored: the `settleOnExit` case below
+ * needs a genuine subprocess, and reading `spawn` off the module there would
+ * get this counter instead — a test of the grandchild fault that never starts
+ * a grandchild, passing whatever the wiring does.
+ */
+const childProcess = require("node:child_process") as Record<string, unknown>;
+const realSpawn = childProcess.spawn as typeof import("node:child_process").spawn;
+let spawnCount = 0;
+
+childProcess.spawn = () => {
+  spawnCount++;
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  setImmediate(() => child.emit("close", 0));
+  return child;
+};
+
+after(() => {
+  childProcess.spawn = realSpawn;
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+/** Let a landed turn finish writing before the next assertion reads the row. */
+const settle = async () => {
+  for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+};
 
 const template: RunTemplate = {
   id: "tpl1",
@@ -301,6 +398,76 @@ describe("chatPrompt", () => {
   });
 });
 
+describe("staleTurn", () => {
+  const NOW = 1_700_000_000_000;
+  const deadline = CHAT_TIMEOUT_MS + STALE_TURN_MARGIN_MS;
+
+  const row = (over: Partial<ChatRow> = {}) =>
+    ({
+      status: "thinking",
+      turn_started_at: NOW - 60_000,
+      updated_at: NOW - 60_000,
+      ...over,
+    }) as Pick<ChatRow, "status" | "turn_started_at" | "updated_at">;
+
+  it("leaves a turn inside the bound alone", () => {
+    // Turns legitimately run for minutes: the sweeper must not be a shorter
+    // auto-cancel wearing a timeout's name.
+    assert.equal(staleTurn(row(), NOW), false);
+    assert.equal(
+      staleTurn(row({ turn_started_at: NOW - deadline + 1 }), NOW),
+      false,
+    );
+  });
+
+  it("fails out a turn that has run past it", () => {
+    assert.equal(staleTurn(row({ turn_started_at: NOW - deadline }), NOW), true);
+    assert.equal(
+      staleTurn(row({ turn_started_at: NOW - deadline * 4 }), NOW),
+      true,
+    );
+  });
+
+  it("never touches a chat that is not working on anything", () => {
+    // The row is the only input, and an old idle thread is old by definition —
+    // reading the age without the status would fail out every chat on the page.
+    for (const status of ["idle", "failed"] as const) {
+      assert.equal(
+        staleTurn(row({ status, turn_started_at: NOW - deadline * 10 }), NOW),
+        false,
+        status,
+      );
+    }
+  });
+
+  it("falls back to updated_at for a row written before the column existed", () => {
+    // Not "never stale": a null start instant read as no deadline is exactly
+    // the stuck thread this exists to clear, and it would be silent.
+    assert.equal(
+      staleTurn(row({ turn_started_at: null, updated_at: NOW - deadline }), NOW),
+      true,
+    );
+    assert.equal(
+      staleTurn(row({ turn_started_at: null, updated_at: NOW - 60_000 }), NOW),
+      false,
+    );
+  });
+
+  it("prefers the turn's own start over updated_at", () => {
+    // `save_template` appends a system message mid-turn, which moves
+    // `updated_at`. Reading that as the turn's start would push the deadline
+    // out every time the chat used the tool — the bound would come off exactly
+    // on the longest turns.
+    assert.equal(
+      staleTurn(
+        row({ turn_started_at: NOW - deadline, updated_at: NOW - 1_000 }),
+        NOW,
+      ),
+      true,
+    );
+  });
+});
+
 describe("githubSlug", () => {
   it("reads both forms the same repository is cloned with", () => {
     for (const url of [
@@ -328,4 +495,146 @@ describe("githubSlug", () => {
       assert.equal(githubSlug(url), null, url);
     }
   });
+});
+
+describe("sendChatMessage", () => {
+  it("starts one child when two messages race into one chat", async () => {
+    const chat = createChat();
+    const before = spawnCount;
+
+    // Both callers read the row before either writes it: the first suspends on
+    // `assistRefusal()`, which rescans every transcript under `CLAUDE_HOME`,
+    // and the second runs its whole synchronous prefix while it is suspended.
+    // Two tabs produce this, and so does one tab reloaded mid-turn — the page's
+    // own `busy` flag is per-tab React state and guards nothing here.
+    const outcomes = await Promise.all([
+      sendChatMessage(chat.id, "first"),
+      sendChatMessage(chat.id, "second"),
+    ]);
+
+    // The assertion that survives a change of interleaving: however the two
+    // callers resume, one billed child joins the conversation and not two.
+    assert.equal(spawnCount - before, 1, "a second child must not be spawned");
+
+    assert.equal(outcomes.filter((o) => o.ok).length, 1);
+    const loser = outcomes.find((o) => !o.ok);
+    assert.ok(loser, "one of the two must be refused");
+    if (loser.ok) return;
+    assert.match(loser.reason, /still working on the last message/);
+
+    const users = listMessages(chat.id).filter((m) => m.role === "user");
+    assert.equal(users.length, 1, "the losing request must add nothing to the thread");
+    assert.equal(getChat(chat.id)?.status, "thinking");
+
+    await settle();
+  });
+
+  it("still takes a message after a turn that failed", async () => {
+    // The claim is `status <> 'thinking'`, not `= 'idle'`: a failed turn is
+    // exactly when an operator retries, and a claim that matched only 'idle'
+    // would leave the chat permanently unusable with nothing said about why.
+    const chat = createChat();
+
+    const first = await sendChatMessage(chat.id, "hello");
+    assert.equal(first.ok, true);
+    await settle();
+    assert.equal(getChat(chat.id)?.status, "failed");
+
+    const before = spawnCount;
+    const second = await sendChatMessage(chat.id, "again");
+    assert.equal(second.ok, true);
+    assert.equal(spawnCount - before, 1);
+    await settle();
+  });
+
+  it("refuses a message sent while a turn is in flight", async () => {
+    const chat = createChat();
+    assert.equal((await sendChatMessage(chat.id, "hello")).ok, true);
+
+    const before = spawnCount;
+    const second = await sendChatMessage(chat.id, "and another thing");
+    assert.equal(second.ok, false);
+    if (second.ok) return;
+    assert.match(second.reason, /still working on the last message/);
+    assert.equal(spawnCount - before, 0);
+
+    await settle();
+  });
+});
+
+/**
+ * A `claude` of the shape the fault needs: it prints a complete result object,
+ * leaves a child holding the stdout it inherited, and exits straight away.
+ */
+const FAKE_CLAUDE = `#!/bin/sh
+printf '{"type":"result","subtype":"success","is_error":false,"result":"hi","session_id":"s1","total_cost_usd":0.01}\\n'
+sleep 30 &
+exit 0
+`;
+
+describe("settleOnExit", () => {
+  it(
+    "settles once the child exits, with a grandchild still holding stdout",
+    {
+      // POSIX shell and process groups; nothing here is meaningful on Windows.
+      skip: process.platform === "win32" ? "no process groups on Windows" : false,
+      // Without this the pre-fix wiring does not fail, it hangs: `node --test`
+      // waits for ever on a promise nothing is going to resolve.
+      timeout: 20_000,
+    },
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "uf-chat-settle-"));
+      const bin = path.join(dir, "fake-claude");
+      fs.writeFileSync(bin, FAKE_CLAUDE, { mode: 0o755 });
+
+      // Detached so the cleanup below can reach the grandchild through the
+      // group: a test that leaks a process holding this pipe open leaves the
+      // runner unable to exit. `realSpawn`, not the module's `spawn`, which is
+      // the counter this file installed for the turn-claim case above.
+      const child = realSpawn(bin, [], {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      });
+
+      try {
+        let stdout = "";
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (c: string) => (stdout += c));
+
+        // Recorded rather than awaited. If `close` fires, the wiring this
+        // replaces would have settled the turn too and the test proves nothing.
+        let closed = false;
+        child.on("close", () => {
+          closed = true;
+        });
+
+        const startedAt = Date.now();
+        const code = await new Promise<number | null>((resolve) =>
+          settleOnExit(child, resolve),
+        );
+        const elapsed = Date.now() - startedAt;
+
+        assert.equal(closed, false, "the grandchild should still hold stdout open");
+        assert.ok(elapsed < 10_000, `settled after ${elapsed}ms`);
+        assert.equal(code, 0);
+
+        // The answer was in the buffer the whole time: parsed as an answer,
+        // not thrown away as a timeout.
+        const result = parseTurnOutput(stdout, "", code);
+        assert.equal(result.status, "idle");
+        assert.equal(result.text, "hi");
+        assert.equal(result.sessionId, "s1");
+        assert.equal(result.costUSD, 0.01);
+      } finally {
+        try {
+          if (child.pid) process.kill(-child.pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        child.stdout.destroy();
+        child.stderr.destroy();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
