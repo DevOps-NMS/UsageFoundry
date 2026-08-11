@@ -149,6 +149,17 @@ export interface RunEvent {
   payload: Record<string, unknown>;
 }
 
+/**
+ * An event as it exists once written: the same thing plus the row id.
+ *
+ * Read history and the live tail are the same type on purpose. The SSE route
+ * puts this id on the frame's `id:` line, and a browser's `Last-Event-ID` only
+ * advances on frames that carry one — so a live event published without an id
+ * leaves the client pinned to the last *replayed* event, and the next reconnect
+ * re-sends every live event it already showed.
+ */
+export type PersistedRunEvent = RunEvent & { id: number };
+
 const bus = ((globalThis as unknown as { __ufBus?: EventEmitter }).__ufBus ??=
   new EventEmitter());
 bus.setMaxListeners(0);
@@ -229,13 +240,18 @@ const SWEEP_MS = 60_000;
 /* ------------------------------------------------------------------ */
 
 function emit(e: RunEvent) {
-  db()
+  // Persist first, then publish — that ordering is what makes a reconnect and
+  // a late page load lossless. It is also where the id comes from: the row is
+  // what orders the log, so the subscriber is handed the id the insert just
+  // assigned rather than a number invented before the write.
+  const written = db()
     .prepare(
       "INSERT INTO run_events (run_id, ts, kind, payload) VALUES (?, ?, ?, ?)",
     )
     .run(e.runId, e.ts, e.kind, JSON.stringify(e.payload));
-  bus.emit(e.runId, e);
-  bus.emit("*", e);
+  const published: PersistedRunEvent = { ...e, id: Number(written.lastInsertRowid) };
+  bus.emit(e.runId, published);
+  bus.emit("*", published);
 }
 
 function log(runId: string, message: string, extra: Record<string, unknown> = {}) {
@@ -279,7 +295,7 @@ export function runEvents(
   runId: string,
   afterId = 0,
   limit?: number,
-): { events: Array<RunEvent & { id: number }>; dropped: number } {
+): { events: PersistedRunEvent[]; dropped: number } {
   const total = limit
     ? (
         db()
@@ -325,7 +341,10 @@ export function runEvents(
   };
 }
 
-export function subscribe(runId: string, fn: (e: RunEvent) => void): () => void {
+export function subscribe(
+  runId: string,
+  fn: (e: PersistedRunEvent) => void,
+): () => void {
   bus.on(runId, fn);
   return () => void bus.off(runId, fn);
 }
