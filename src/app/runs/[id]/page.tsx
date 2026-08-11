@@ -402,7 +402,14 @@ export default function RunDetail({
         </>
       )}
 
-      <section className="grid grid-3">
+      {/* The spacing between the blocks on this page came from the legacy
+          `section + section` rule, which only fires between two <section>
+          siblings. RunDiff/RunReview/RunLand are component-kit cards — plain
+          divs — so the rule stopped matching the moment they were inserted
+          above, and this section welded itself to the card above it. Stated
+          here rather than restored there: every other page already carries its
+          own margin, and adjacency is the wrong thing to depend on. */}
+      <section className="mt-6 grid grid-3">
         <div className="card">
           <h2 className="card-title">Spent on this run</h2>
           <div className="stat">{fmtUSD(run.spent_usd)}</div>
@@ -476,7 +483,7 @@ export default function RunDetail({
         </div>
       </section>
 
-      <section className="card">
+      <section className="mt-6 card">
         <h2 className="card-title">
           Live log
           {connected ? (
@@ -630,7 +637,7 @@ export default function RunDetail({
         </div>
       </section>
 
-      <section className="card">
+      <section className="mt-6 card">
         <h2 className="card-title">Task</h2>
         <div className="log" style={{ maxHeight: 200 }}>
           {run.prompt}

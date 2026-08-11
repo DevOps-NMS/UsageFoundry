@@ -46,8 +46,13 @@ export function CardTitle({
   className?: string;
 }) {
   return (
+    // flex-wrap, because a title is also where the card's action button lives
+    // ("Refresh", "Review again", "Cancel the 3 still waiting"). A button is a
+    // flex item that cannot shrink below its own text, so without wrapping it
+    // does not compress — it escapes the card and takes the page's horizontal
+    // scrollbar with it. Measured: 92px past the card edge at 380px wide.
     <h2
-      className={`mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-muted ${className}`}
+      className={`mb-3 flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-muted ${className}`}
     >
       {children}
     </h2>

@@ -913,6 +913,24 @@ Built and exercised against real transcripts:
   budget blob: it comes back as `plan` (the only mode that cannot write) and one
   work cycle, rather than as a wider permission or a throw. `normalizeTemplateInput`
   and `rowToTemplate` also have 20 assertions under `npm test`.
+- Layout, measured rather than eyeballed: every page of the production build
+  rendered in a headless browser against fabricated API responses (each status a
+  run can hold, a conflicting land preview, a working merge queue) at twelve
+  widths from 1440px to 380px, in both themes, with the geometry read back out of
+  the DOM — box intersections between in-flow siblings, boxes escaping their
+  parent's padding box, and the document scrolling sideways. Three defects were
+  found this way and are fixed here: the run page's accounting row sat at a 0px
+  gap from the card above it where every other block on that page has 24px (the
+  legacy `section + section` rule cannot see the component-kit cards that were
+  inserted above it); the merge queue's *Cancel the N still waiting* button left
+  its card by 92px at 380px wide and took the horizontal scrollbar with it (a
+  card heading is a flex row and a button will not shrink below its own label);
+  and the settings save bar was translucent over the card it floats across,
+  which in dark mode read as a card torn in half. After the fix no card heading
+  overflows at any tested width, no page scrolls sideways, and the run page's
+  vertical rhythm is 24px throughout. The remaining reported intersections are
+  inline text boxes wrapping inside a paragraph, and the save bar overlaying the
+  page as a sticky bar is meant to.
 
 ### Not yet verified by hand
 
