@@ -53,6 +53,25 @@ happens outside the terminal. Capped at 95%.
 
 Numbers below are always a **floor** on real consumption.
 
+**The reset time is derived, and can disagree with `/usage` by minutes.**
+Anthropic sends the exact reset instant back on every API response, and Claude
+Code reads it from there — but it lands on no transcript record, in no config
+file, and in none of the telemetry the CLI exports, so there is nothing local to
+copy it from. What this app does instead is apply the published rule: the window
+opens with your first turn and runs five hours. Two things move that away from
+the figure `/usage` shows, in opposite directions. It reads **late** by the
+length of the turn that opened the window, because the transcript records the
+response rather than the request — seconds, usually. And it reads **early**
+whenever the window was really opened by a surface from the table above, which
+this app cannot see at all. If the two are far apart, Settings → *5-hour window
+reset (override)* pins the boundary to what `/usage` says.
+
+> This used to round a window's start down to the top of the hour, which put the
+> reset time up to 59 minutes early *and* rolled the window over that much too
+> soon — showing an empty session, and re-arming the budget guard, while
+> Anthropic was still counting the old one. If you recognise that, it is fixed;
+> nothing needs re-configuring.
+
 **It also cannot see a window that was reset for you.** The 5-hour block is
 derived from your own turns: it opens at the first one after a gap and runs five
 hours. Changing subscription tier restarts that window on Anthropic's side, and
@@ -721,6 +740,21 @@ Built and exercised against real transcripts:
   `claude-nextgen-9` stays unknown; `claude-opus-4-1` keeps its own $15/$75.
 - A zero-token turn (`<synthetic>`) no longer counts as an unpriced model, and
   incurs no fallback charge.
+- **5-hour boundaries no longer rounded to the hour.** That resets are not
+  hour-aligned was established from the shipped CLI itself: it reads
+  `anthropic-ratelimit-unified-reset` off each API response, and its own
+  formatter emits the minutes whenever they are non-zero — dead code if a reset
+  always landed on `:00`. That the instant is unreadable locally was established
+  the same way: no transcript record carries it (the assistant record's fields
+  were enumerated across 205 files), no file under `~/.claude` holds it, and the
+  CLI's OTLP export defines eight metrics and six event names, none of them
+  rate-limit state. The effect on 4,663 real deduped turns: the four derived
+  windows moved from a `17:00 / 22:00 / 03:00 / 08:00` grid onto the turns that
+  actually opened them (`17:17:14 / 22:17:24 / 03:29:12 / 08:31:16`), the
+  current window's reported reset moved 31 minutes later, and **86 turns moved
+  back into the window that was really open** — at 22:00 the old rule showed a
+  fresh empty session, and re-armed the session guard, 17 minutes before
+  Anthropic's window closed.
 - Attribution tables against real transcripts: effort, sub-agent, and skill each
   reconcile to the window total to within a rounding error ($138.3639 over 998
   turns), every turn lands in exactly one bucket per breakdown (998 = 998), and
@@ -924,6 +958,14 @@ through before trusting this unattended:
 - Whether `claude -p` flushes its `result` event on `SIGINT`. If it does, an
   interrupted cycle keeps its measured cost and the transcript reconciliation
   becomes a fallback rather than the norm.
+- **The derived 5-hour boundary against a live `/usage` reading.** Removing the
+  hour rounding was argued from the CLI's own header handling and rendering, not
+  from watching the two side by side, and what is left over — the opening turn's
+  latency, and any window opened by a surface with no local transcript — has
+  never been measured against the real reset time. A residual offset that is
+  *steady* is the tell that the rule is still wrong somewhere; one that varies
+  run to run is the invisible usage this app already documents. Until someone
+  compares them, the override in Settings is the answer to a disagreement.
 - **What a subscription-limit refusal actually says.** The `<synthetic>` marker
   is confirmed from a real record on this machine, but the only refusal ever
   seen here is `Not logged in · Please run /login`. The wording `isUsageLimit()`

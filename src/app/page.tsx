@@ -10,6 +10,7 @@ import { Notice } from "@/components/ui/Notice";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 import type { UsageResponse, WindowStateDTO } from "@/lib/apiTypes";
 import {
+  fmtClock,
   fmtDuration,
   fmtPct,
   fmtRelative,
@@ -228,7 +229,8 @@ export default function Dashboard() {
           <Stat size="large">{fmtUSD(s.session.costUSD)}</Stat>
           <StatSub>
             {fmtTokens(s.session.tokens)} tokens · {s.session.agg.entryCount}{" "}
-            turns · resets {fmtRelative(s.session.endsAt, s.now)}
+            turns · resets {fmtClock(s.session.endsAt)} (
+            {fmtRelative(s.session.endsAt, s.now)})
           </StatSub>
           <Meter
             label="Session consumed"
@@ -242,16 +244,26 @@ export default function Dashboard() {
                 Against the raw-token ceiling: {fmtPct(s.session.tokenFraction)}
               </div>
             )}
+          {/* Anthropic sends the real reset instant back on every API response
+              but writes it nowhere local, so this one is derived: the window
+              opens with your first turn and runs five hours. Say so next to the
+              time, or a few minutes' disagreement with `/usage` reads as a bug
+              rather than as the estimate it is. */}
           {meta.sessionResetOverrideAt !== null &&
-            meta.sessionResetOverrideAt > s.now && (
-              <div className="mt-1.5 text-xs text-ink-faint">
-                Window start taken from a{" "}
-                <Link href="/settings">manual reset</Link>, not from the
-                transcripts — usage before{" "}
-                {new Date(s.session.startsAt).toLocaleString()} is excluded from
-                this card and from the budget guard.
-              </div>
-            )}
+          meta.sessionResetOverrideAt > s.now ? (
+            <div className="mt-1.5 text-xs text-ink-faint">
+              Window start taken from a <Link href="/settings">manual reset</Link>
+              , not from the transcripts — usage before{" "}
+              {new Date(s.session.startsAt).toLocaleString()} is excluded from
+              this card and from the budget guard.
+            </div>
+          ) : (
+            <div className="mt-1.5 text-xs text-ink-faint">
+              Reset time derived from your own turns, so it can sit minutes off
+              what <span className="mono">/usage</span> reports.{" "}
+              <Link href="/settings">Pin it</Link> if they disagree.
+            </div>
+          )}
         </Card>
 
         <Card emphasis="primary">

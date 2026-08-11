@@ -62,10 +62,6 @@ export interface SessionBlock {
   projects: string[];
 }
 
-function floorToHour(ts: number): number {
-  return Math.floor(ts / 3_600_000) * 3_600_000;
-}
-
 /**
  * Turn an operator-supplied reset instant into the block boundary it implies.
  *
@@ -83,15 +79,29 @@ function anchorOf(sessionResetAt: number | null): number | null {
 /**
  * Group entries into 5-hour session blocks.
  *
- * A block opens at the first entry (floored to the hour) and runs for five
- * hours. It also closes early if more than five hours pass with no activity,
- * which is what Claude Code does — an idle gap ends the session rather than
- * carrying the window forward.
+ * A block opens at its first entry and runs for five hours; the next one opens
+ * at the first entry after that, which is the rule the provider states — the
+ * window starts with your first message and lasts five hours.
+ *
+ * It does **not** floor the start to the hour. That was a guess, and a costly
+ * one: Anthropic issues the reset instant itself, in the
+ * `anthropic-ratelimit-unified-reset` response header, and Claude Code's own
+ * renderer prints the minutes whenever they are non-zero — so resets plainly do
+ * not land on the hour. Flooring moved every boundary up to 59 minutes early
+ * and, because each block opens where the last one closed, that error carried
+ * down the whole chain. The visible damage was not the clock: a window rolled
+ * over early reads as a *fresh, empty* session while the provider is still
+ * counting the old one, which is the reading the meter and the guard both act
+ * on. Anchoring on the entry itself costs the latency of the opening turn
+ * instead — the transcript records the response, not the request that opened
+ * the window — which is seconds, and errs the other way: a boundary that is
+ * late keeps counting spend against the window still being enforced, so the
+ * guard trips early rather than late.
  *
  * `sessionResetAt` forces a boundary: a block open at that moment is closed
  * there, and the block that follows starts at the reset rather than at its own
- * first entry floored to the hour. Splitting rather than filtering keeps the
- * pre-reset work in history, where it did happen and did count.
+ * first entry. Splitting rather than filtering keeps the pre-reset work in
+ * history, where it did happen and did count.
  */
 export function buildSessionBlocks(
   entries: UsageEntry[],
@@ -105,9 +115,7 @@ export function buildSessionBlocks(
   let lastTs = 0;
 
   const startFor = (ts: number) =>
-    anchor !== null && ts >= anchor && ts < anchor + FIVE_HOURS_MS
-      ? anchor
-      : floorToHour(ts);
+    anchor !== null && ts >= anchor && ts < anchor + FIVE_HOURS_MS ? anchor : ts;
 
   const flush = () => {
     if (current.length === 0) return;
@@ -139,10 +147,13 @@ export function buildSessionBlocks(
       lastTs = e.ts;
       continue;
     }
+    // No separate idle-gap rule: `blockStart <= lastTs` always holds, so a gap
+    // of five hours has already carried `e` past the window. Reinstating one
+    // would assert that going quiet ends a window early, which the provider
+    // does not do — five hours elapse whether or not you spend them.
     const pastWindow = e.ts >= blockStart + FIVE_HOURS_MS;
-    const idleGap = e.ts - lastTs >= FIVE_HOURS_MS;
     const crossedReset = anchor !== null && blockStart < anchor && e.ts >= anchor;
-    if (pastWindow || idleGap || crossedReset) {
+    if (pastWindow || crossedReset) {
       flush();
       blockStart = startFor(e.ts);
       current = [e];
@@ -339,11 +350,15 @@ export function buildSnapshot(
     };
   };
 
+  // With no block open and no live override, no window is running: what is
+  // reported is the one the next turn would open, which starts when that turn
+  // happens. `now` is the only honest stand-in — anything earlier would claim a
+  // window is already part-spent.
   const sessionStart = activeBlock
     ? activeBlock.startsAt
     : anchorIsCurrent
       ? anchor
-      : floorToHour(now);
+      : now;
   const sessionAgg = activeBlock ? activeBlock.agg : ZERO_AGGREGATE;
 
   const wkStart = weekStart(now, limits.weeklyAnchor);

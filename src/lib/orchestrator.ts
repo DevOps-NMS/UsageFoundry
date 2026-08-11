@@ -699,10 +699,13 @@ export const MAX_PAUSES_PER_RUN = 3;
  * app can tell, or null when it cannot tell. Two things make it unreliable,
  * and both are why this is a backoff rather than a single computed instant:
  *
- * A derived boundary is early. `buildSessionBlocks` floors a block's start to
- * the hour, so a window opened at 14:47 is reported as ending at 19:00 rather
- * than 19:47 — up to an hour before the provider actually resets. Only an
- * operator-supplied `sessionResetOverrideAt` is exact.
+ * A derived boundary is approximate in both directions. It runs late by the
+ * opening turn's latency, because a block is anchored on the response we can
+ * see rather than the request that actually opened the window; and it runs
+ * early whenever the window was really opened by work this app cannot see at
+ * all — claude.ai, Desktop and Cowork spend the same allowance and write no
+ * local transcript. Only an operator-supplied `sessionResetOverrideAt` is
+ * exact.
  *
  * And once that early boundary passes, the derived one becomes actively
  * misleading: a refusal writes a zero-token `<synthetic>` record into the
