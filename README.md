@@ -322,6 +322,52 @@ again on its first check. The time limit is the exception — it runs from the
 moment it starts again, since counting the hours it spent dead would refuse
 every run older than its own limit. Everything else carries over untouched.
 
+### Running the same task again
+
+Two ways, and the cheap one is worth knowing first.
+
+**Start another like this** — a link in the header of any run page. It opens the
+new-run form pre-filled from that run: the same task, the same workspace and
+folder, the same isolation, the same limits, the same permission mode. Nothing
+happens until you press *Start run*, and nothing about the original run changes.
+This is not a resume — it is a new run that happens to be configured identically,
+which is what you want when last week's task comes round again but you would
+rather not touch the run that already finished.
+
+**Templates** — a named, saved version of the same thing. The *Templates* card at
+the top of the new-run form loads one into the form, or saves whatever the form
+is currently holding under a name. Loading a template fills in every field and
+starts nothing; you can edit anything before you run it, and editing the form
+does not write back to the template.
+
+What a template holds is the task, the limits, how it behaves, and — optionally —
+the folder. *Remember the workspace and folder* is a switch on the save row,
+because both answers are right for different tasks: "update the changelog for
+this project" wants a folder recorded, "run the test suite and fix what fails"
+wants to be asked. A template with no folder leaves the picker alone rather than
+guessing.
+
+Three things it does **not** do, each on purpose:
+
+- **It does not carry the model.** That is a single global setting
+  (Settings → *Model*), and a second place to set it is how the two drift.
+- **It does not apply a live-enforcement mode quietly.** There is deliberately no
+  global "default enforcement", because one edit that turns *every* run into a
+  cycle-killing run is a mistake with no undo. A template is a second way to
+  inherit that choice, so a template carrying *Stop the cycle in flight* (or
+  *…carry on next window*) says so in a banner above the form, with a button that
+  puts it back to the mode that loses no work. Same for `bypassPermissions`,
+  which gets the danger banner it gets everywhere else.
+- **It does not let you save something that cannot run.** A template with no
+  cycle limit and no time limit is refused when you save it, with the same
+  message `POST /api/runs` would give — the point of validating twice is that the
+  error arrives while you are still looking at the form that caused it, rather
+  than the week you finally use the template.
+
+A template is form input and nothing more. It holds no folder, blocks no run,
+occupies no concurrency slot, and deleting one cannot affect anything that has
+already started — a run copies every value it needs the moment it is created.
+
 ---
 
 ## Two runs, one project
@@ -754,6 +800,16 @@ Built and exercised against real transcripts:
   hunk; the size budget naming what it left out; `merge-tree` output read as
   clean, conflicting, or undetermined-on-an-old-git; and every `landRefusal`
   branch.
+- Run templates against a live dev server on a scratch workspace: create, list
+  (ordered by name, case-insensitively), update, and delete, with a second
+  delete answering 404. Every refusal came back as a 400 with the sentence the
+  form shows — a duplicate name differing only in case, a blank prompt, an
+  unknown permission mode, and the no-cycle-limit-and-no-time-limit pair that
+  `POST /api/runs` refuses. Read-time narrowing was checked by writing a row
+  straight into SQLite with `permission_mode = 'bypassEverything'` and a corrupt
+  budget blob: it comes back as `plan` (the only mode that cannot write) and one
+  work cycle, rather than as a wider permission or a throw. `normalizeTemplateInput`
+  and `rowToTemplate` also have 20 assertions under `npm test`.
 
 ### Not yet verified by hand
 
@@ -811,6 +867,12 @@ through before trusting this unattended:
   conflict format both date from 2.38, and an older git is reported rather than
   guessed at, but that path has not been run against 2.39 itself.
 - A repository large enough to hit the diff's size budget in the wild.
+- The new-run form's template UI driven through a browser: that loading a
+  template fills every field, that *Start another like this* pre-fills from a
+  run without the folder and settings loaders racing it, and that the two
+  banners — a carried live-enforcement mode, a carried `bypassPermissions` —
+  appear on load and clear when the control is touched. The routes underneath
+  were exercised directly; only the client wiring is unconfirmed.
 
 There is no linter run in this repo, and `npm test` covers seven things: the
 folder-collision predicate, which queued runs may start, the budget policy, how

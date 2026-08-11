@@ -54,6 +54,22 @@ export function fmtPct(f: number | null): string {
   return `${(f * 100).toFixed(1)}%`;
 }
 
+/**
+ * A stored 0–1 window fraction as the 0–100 the run form's percentage fields
+ * hold, and blank for "no guard".
+ *
+ * The exact inverse of the `Number(field) / 100` those fields submit, and it has
+ * to stay that way: a guard that loaded as a hundredth of what was saved parks a
+ * `live-resume` run on its first check and looks like a run patiently waiting
+ * for a window. Blank rather than "0", because the fields read blank as off and
+ * a literal 0 as a guard set to zero percent — which trips immediately.
+ */
+export function pctField(f: number | null | undefined): string {
+  if (f === null || f === undefined || !Number.isFinite(f)) return "";
+  // Rounded to one decimal: 0.855 is 85.5, not 85.50000000000001.
+  return String(Math.round(f * 1000) / 10);
+}
+
 export function fmtClock(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
     hour: "2-digit",

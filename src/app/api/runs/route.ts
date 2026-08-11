@@ -1,17 +1,10 @@
 import { NextResponse } from "next/server";
 import { createRun, describeFolder, listRuns, queuePosition } from "@/lib/orchestrator";
-import type { PermissionMode } from "@/lib/settings";
+import { PERMISSION_MODES, type PermissionMode } from "@/lib/settings";
 import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-const PERMISSION_MODES: PermissionMode[] = [
-  "default",
-  "acceptEdits",
-  "bypassPermissions",
-  "plan",
-];
 
 export async function GET() {
   const runs = listRuns(100).map((r) => {
