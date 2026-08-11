@@ -421,6 +421,25 @@ export type MergePreviewDTO =
   | { outcome: "conflict"; files: ConflictFileDTO[] }
   | { outcome: "unknown"; reason: string };
 
+/** One changed, uncommitted path in a run's own checkout. */
+export interface PendingChangeDTO {
+  path: string;
+  origPath: string | null;
+  /** git's two status letters — `??` untracked, `" M"` edited, `"A "` staged. */
+  code: string;
+}
+
+export interface PendingWorkDTO {
+  path: string;
+  /** Every changed path, including the ones `files` leaves out. */
+  count: number;
+  files: PendingChangeDTO[];
+  /** False when `git status` failed, so `files` says nothing about this checkout. */
+  readable: boolean;
+  /** The run's task as a commit subject, offered as the default. */
+  suggestedMessage: string;
+}
+
 export interface LandStateDTO {
   runId: string;
   runStatus: RunDTO["status"];
@@ -441,6 +460,8 @@ export interface LandStateDTO {
     dirty: boolean;
     readable: boolean;
   } | null;
+  /** Uncommitted work in the run's own checkout. Null when there is none to see. */
+  pending: PendingWorkDTO | null;
   /** Why landing is refused right now. Null means it is offered. */
   blocked: string | null;
   landedAt: number | null;
@@ -491,6 +512,12 @@ export interface BranchSummaryDTO {
   ahead: number;
   merged: boolean;
   landedUnchanged: boolean;
+  /**
+   * Uncommitted paths in the checkout holding this branch. Null when nothing
+   * holds it, its status was unreadable, or the probe cap was reached — never
+   * a claim that it is clean.
+   */
+  uncommitted: number | null;
   exists: boolean;
   /** The producing run can still commit to it. */
   active: boolean;

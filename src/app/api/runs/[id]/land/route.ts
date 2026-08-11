@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import {
+  commitPending,
   deleteBranch,
   landRun,
   landState,
+  purgeBranch,
   resolutionChange,
   resolveConflicts,
   type LandStrategy,
@@ -59,11 +61,13 @@ export async function GET(_req: Request, ctx: Ctx) {
 }
 
 /**
- * Land the branch, or delete it once it is in.
+ * Land the branch, commit what an agent left in its checkout, or get rid of it.
  *
  * The branch is never taken from the request — only the run id is, and the
  * branch is read off that row. A body that could name a branch would be a way
- * to ask this app to merge or delete something it never created.
+ * to ask this app to merge or delete something it never created. `purge` does
+ * carry a branch name, and it is a *confirmation*: it has to equal the one on
+ * the row or nothing happens, which is the opposite of naming a target.
  *
  * Refusals are 400 with a sentence naming what to change, matching `reopen`.
  * The check runs again inside `landRun` from a fresh read: the page the
@@ -78,6 +82,26 @@ export async function POST(req: Request, ctx: Ctx) {
 
   if (action === "delete") {
     const outcome = await deleteBranch(id);
+    return outcome.ok
+      ? NextResponse.json({ ok: true, message: outcome.message })
+      : NextResponse.json({ error: outcome.reason }, { status: 400 });
+  }
+
+  if (action === "purge") {
+    const outcome = await purgeBranch(id, String(body.confirmBranch ?? ""));
+    return outcome.ok
+      ? NextResponse.json({ ok: true, message: outcome.message })
+      : NextResponse.json({ error: outcome.reason }, { status: 400 });
+  }
+
+  if (action === "commit") {
+    // Absent means "use the run's task as the subject", which `commitPending`
+    // resolves. An empty string is a message the operator cleared, and it is
+    // refused there rather than quietly replaced with the default.
+    const outcome = await commitPending(
+      id,
+      body.message === undefined ? undefined : String(body.message),
+    );
     return outcome.ok
       ? NextResponse.json({ ok: true, message: outcome.message })
       : NextResponse.json({ error: outcome.reason }, { status: 400 });

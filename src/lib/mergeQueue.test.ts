@@ -29,6 +29,7 @@ const base: LandState = {
   landedUnchanged: false,
   preview: { outcome: "clean" },
   checkout: { path: "/workspace/repo", headBranch: "main", dirty: false, readable: true },
+  pending: null,
   blocked: null,
   landedAt: null,
   landedInto: null,

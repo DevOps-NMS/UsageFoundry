@@ -108,6 +108,33 @@ export interface CheckoutState {
   readable: boolean;
 }
 
+/** One path in a checkout that is changed and no commit holds. */
+export interface PendingChange {
+  /** The path as it stands now. */
+  path: string;
+  /** Where a rename or copy came from, else null. */
+  origPath: string | null;
+  /** git's two status letters — `??` untracked, `" M"` edited, `"A "` staged. */
+  code: string;
+}
+
+/**
+ * Work sitting in a run's own checkout that no commit holds.
+ *
+ * Never the operator's tree: this is read from the run's worktree slot, and
+ * only while that slot still has the run's own branch checked out.
+ */
+export interface PendingWork {
+  path: string;
+  /** Every changed path, including the ones `files` leaves out. */
+  count: number;
+  files: PendingChange[];
+  /** False when `git status` failed, so `files` says nothing about this checkout. */
+  readable: boolean;
+  /** The run's task as a commit subject, offered as the default. */
+  suggestedMessage: string;
+}
+
 export interface LandState {
   runId: string;
   runStatus: RunRow["status"];
@@ -131,6 +158,11 @@ export interface LandState {
   landedUnchanged: boolean;
   preview: MergePreview;
   checkout: CheckoutState | null;
+  /**
+   * Uncommitted work in the run's own checkout, or null when there is none to
+   * see — no slot, a slot another run has taken over, or a clean one.
+   */
+  pending: PendingWork | null;
   /** Why landing is refused right now, or null when it is offered. */
   blocked: string | null;
   landedAt: number | null;
@@ -378,6 +410,7 @@ export async function landState(runId: string): Promise<LandState | null> {
     landedUnchanged: false,
     preview: { outcome: "unknown", reason: "Not checked." },
     checkout: null,
+    pending: null,
     blocked: null,
     landedAt: run.landed_at,
     landedInto: run.landed_into,
@@ -398,6 +431,10 @@ export async function landState(runId: string): Promise<LandState | null> {
 
   const folder = repoPathFor(run.folder);
   const checkout = folder ? await checkoutStateOf(folder) : null;
+  // Read alongside the checkout rather than behind a landable branch: a run
+  // that could not commit has *nothing* on its branch, which is exactly the
+  // state this answers, and the card has to be able to say so.
+  const pending = await pendingWork(run);
   const target = await targetOf(run, repoRoot, checkout);
 
   if (!target) {
@@ -405,6 +442,7 @@ export async function landState(runId: string): Promise<LandState | null> {
       ...base,
       branchExists: true,
       checkout,
+      pending,
       blocked:
         "This run predates target-branch recording and its base commit is not " +
         `on the branch you have checked out, so there is no way to tell where ${branch} belongs. ` +
@@ -422,6 +460,7 @@ export async function landState(runId: string): Promise<LandState | null> {
       ...base,
       branchExists: true,
       checkout,
+      pending,
       target: target.branch,
       targetInferred: target.inferred,
       blocked: `The branch this run started from (${target.branch}) no longer exists.`,
@@ -468,8 +507,12 @@ export async function landState(runId: string): Promise<LandState | null> {
     landedUnchanged,
     preview,
     checkout,
+    pending,
   };
-  return { ...state, blocked: landRefusal(state) };
+  return {
+    ...state,
+    blocked: landRefusal({ ...state, pendingCount: pending?.count ?? 0 }),
+  };
 }
 
 /**
@@ -557,6 +600,8 @@ export function landRefusal(s: {
   merged: boolean;
   landedUnchanged: boolean;
   ahead: number;
+  /** Uncommitted paths in the run's own checkout. */
+  pendingCount: number;
   preview: MergePreview;
   checkout: CheckoutState | null;
 }): string | null {
@@ -577,7 +622,15 @@ export function landRefusal(s: {
   if (s.landedUnchanged) {
     return `Already squashed into ${s.target}, and nothing new has been committed to it since.`;
   }
-  if (s.ahead === 0) return "This branch has no commits of its own.";
+  // An empty branch with a full checkout behind it is not an empty run — it is
+  // an agent that wrote everything and committed none of it, which is what
+  // `commitPending` exists for. Saying only "no commits" sends the operator
+  // looking for work that is sitting right there.
+  if (s.ahead === 0) {
+    return s.pendingCount > 0
+      ? `This branch has no commits of its own, but ${s.pendingCount} path(s) are uncommitted in its checkout. Commit them first.`
+      : "This branch has no commits of its own.";
+  }
 
   if (s.preview.outcome === "conflict") {
     return `Merging into ${s.target} conflicts in ${s.preview.files.length} file(s). Resolve them on the branch first.`;
@@ -688,7 +741,7 @@ export async function landRun(
       const commit = await git(folder, [
         "commit",
         "-m",
-        squashSubject(run),
+        taskSubject(run),
         "-m",
         `Squashed from ${branch} (UsageFoundry run ${run.id}).`,
       ]);
@@ -748,7 +801,7 @@ async function unwind(folder: string, strategy: LandStrategy): Promise<void> {
 }
 
 /** First line of the task, as a commit subject. */
-function squashSubject(run: RunRow): string {
+function taskSubject(run: RunRow): string {
   const first = run.prompt.split("\n").find((l) => l.trim() !== "")?.trim() ?? "";
   const subject = first.length > 68 ? `${first.slice(0, 65)}…` : first;
   return subject || `UsageFoundry run ${run.id.slice(0, 8)}`;
@@ -1078,6 +1131,269 @@ function resolvePrompt(branch: string, target: string, files: string[]): string 
 }
 
 /* ------------------------------------------------------------------ */
+/* Committing what an agent left in its checkout                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Work an agent did and did not commit.
+ *
+ * This exists because that state is reachable and its symptoms point the wrong
+ * way. `acceptEdits` held mutating git for a human until `buildArgs` started
+ * granting `git add`/`git commit` to an isolated run, so every run from before
+ * that — and any run whose agent simply never got round to committing — ends
+ * `completed` with a full checkout and an empty branch. What the land card then
+ * said was "this branch has no commits of its own", which reads as a run that
+ * did nothing.
+ *
+ * It is also what unblocks the slot: `ensureWorktree` refuses to reuse a
+ * checkout with uncommitted work in it, so leftovers do not just sit there —
+ * they take a worktree slot out of circulation until someone deals with them.
+ */
+
+/** Paths listed per checkout. The count beside them is always the whole set. */
+const MAX_PENDING_FILES = 40;
+/** Longest commit message accepted. A subject is a sentence, not a file. */
+const MAX_COMMIT_MESSAGE = 1_000;
+
+/**
+ * Parse `git status --porcelain -z`.
+ *
+ * Records are `XY <space> <path> NUL`, and a rename or copy carries its source
+ * in the *next* field — with `-z` the arrow is dropped and the order reversed,
+ * so the current path comes first and the original follows. Consuming that
+ * second field is not optional: left in the stream it becomes a change of its
+ * own, with the first two characters of a filename read as status letters.
+ *
+ * The caller must not trim this output. `" M path"` opens with a space that
+ * means "unstaged", and losing it shifts every field in that record — which is
+ * why `git()` takes `trim: false`.
+ */
+export function parseStatusZ(raw: string): PendingChange[] {
+  const out: PendingChange[] = [];
+  const fields = raw.split("\0");
+
+  for (let i = 0; i < fields.length; i++) {
+    const record = fields[i];
+    // `XY ` and at least one character of path. The trailing field after the
+    // final NUL is empty and lands here too.
+    if (record.length < 4 || record[2] !== " ") continue;
+
+    const code = record.slice(0, 2);
+    const renamed = /[RC]/.test(code);
+    const origPath = renamed ? (fields[i + 1] ?? null) : null;
+    // A record cut short — a killed git — must not silently pair a rename with
+    // whatever field happens to follow it later.
+    if (renamed && origPath === null) break;
+    if (renamed) i++;
+
+    out.push({ path: record.slice(3), origPath, code });
+  }
+
+  return out;
+}
+
+/** A run's own checkout as it stands now, which need not still be its own. */
+interface SlotState {
+  /** The checkout recorded for this run, or null when it never had one. */
+  path: string | null;
+  /** The branch that checkout holds **now**: a slot is reused by later runs. */
+  checkedOutBranch: string | null;
+  /** False when `git status` failed — which is not the same as clean. */
+  readable: boolean;
+  files: PendingChange[];
+}
+
+async function slotState(run: RunRow): Promise<SlotState> {
+  const slot = run.worktree_path;
+  if (!slot || !fs.existsSync(slot)) {
+    return { path: slot ?? null, checkedOutBranch: null, readable: false, files: [] };
+  }
+
+  const head = await git(slot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const checkedOutBranch = head.ok && head.stdout !== "HEAD" ? head.stdout : null;
+  // Status is read only once the slot is proved to still hold this run's
+  // branch. Anything uncommitted under a different branch is a later run's, and
+  // reporting it here would offer to commit one run's work onto another's.
+  if (!checkedOutBranch || checkedOutBranch !== run.worktree_branch) {
+    return { path: slot, checkedOutBranch, readable: head.ok, files: [] };
+  }
+
+  const status = await git(slot, ["status", "--porcelain", "-z"], { trim: false });
+  return {
+    path: slot,
+    checkedOutBranch,
+    readable: status.ok,
+    files: status.ok ? parseStatusZ(status.stdout) : [],
+  };
+}
+
+/** What the land card shows about uncommitted work, or nothing to show. */
+async function pendingWork(run: RunRow): Promise<PendingWork | null> {
+  const slot = await slotState(run);
+  if (!slot.path || slot.checkedOutBranch !== run.worktree_branch) return null;
+  // An unreadable status still surfaces: "we could not tell" and "there is
+  // nothing there" are different sentences, and only the second one is silence.
+  if (slot.readable && slot.files.length === 0) return null;
+
+  return {
+    path: slot.path,
+    count: slot.files.length,
+    files: slot.files.slice(0, MAX_PENDING_FILES),
+    readable: slot.readable,
+    suggestedMessage: taskSubject(run),
+  };
+}
+
+/**
+ * Why this app will not make a commit in that checkout, or null when it will.
+ *
+ * Pure and separated for the reason `landRefusal` is: it decides whether to
+ * write, and the expensive way to be wrong is not refusing — it is committing
+ * a slot's contents onto the wrong branch after a later run took that slot
+ * over, which produces a commit nobody made against work nobody wrote.
+ */
+export function commitRefusal(s: {
+  runStatus: RunRow["status"];
+  isolated: boolean;
+  /** The branch recorded for this run. */
+  branch: string | null;
+  /** The branch its checkout holds now — not necessarily the same one. */
+  checkedOutBranch: string | null;
+  readable: boolean;
+  pendingCount: number;
+  message: string;
+}): string | null {
+  if (!s.isolated) {
+    return "This run worked directly in your own checkout, so committing there is yours to do.";
+  }
+  if (!s.branch) return "This run has no branch of its own.";
+
+  if (s.runStatus === "running" || s.runStatus === "queued" || s.runStatus === "paused") {
+    return (
+      "This run is still active. It can write to that checkout at any moment, so a " +
+      "commit now would catch a change half-written."
+    );
+  }
+
+  if (!s.checkedOutBranch) {
+    return (
+      `The checkout this run worked in is gone. Its commits are still on ${s.branch}; ` +
+      "anything it had not committed is not."
+    );
+  }
+  if (s.checkedOutBranch !== s.branch) {
+    return (
+      `That checkout slot now holds ${s.checkedOutBranch}, not ${s.branch} — whatever is ` +
+      "uncommitted in it belongs to another run."
+    );
+  }
+  if (!s.readable) {
+    return "Could not read that checkout's status, so nothing is offered. Check it by hand.";
+  }
+  if (s.pendingCount === 0) return "There is nothing uncommitted in that checkout.";
+
+  const message = s.message.trim();
+  if (message === "") return "A commit message is required.";
+  if (message.length > MAX_COMMIT_MESSAGE) {
+    return `That message is ${message.length} characters; ${MAX_COMMIT_MESSAGE} is the most this takes.`;
+  }
+  return null;
+}
+
+/**
+ * Commit everything uncommitted in the run's checkout, onto the run's branch.
+ *
+ * `add -A` rather than the listed paths: gitignored files stay ignored, so what
+ * this stages is exactly what the status above listed, and a file the agent
+ * created between the page load and the click is part of the same work rather
+ * than a leftover for the next run to trip over. Nothing is written to the
+ * operator's own tree at any point — the branch is what moves.
+ */
+export async function commitPending(
+  runId: string,
+  message?: string,
+): Promise<LandOutcome> {
+  const run = getRun(runId);
+  if (!run) return { ok: false, reason: "No such run." };
+
+  const slot = await slotState(run);
+  // Absent is "use the task", which is what the inventory's one-click commit
+  // sends. A message that *was* given and is blank is refused below rather than
+  // quietly replaced — the operator cleared it, and a commit subject they did
+  // not write is not a repair for that.
+  const resolved = message === undefined ? taskSubject(run) : message;
+
+  const refusal = commitRefusal({
+    runStatus: run.status,
+    isolated: run.isolation === "worktree",
+    branch: run.worktree_branch,
+    checkedOutBranch: slot.checkedOutBranch,
+    readable: slot.readable,
+    pendingCount: slot.files.length,
+    message: resolved,
+  });
+  if (refusal) return { ok: false, reason: refusal };
+
+  const dir = slot.path!;
+  const branch = run.worktree_branch!;
+
+  // The status proves the slot still holds this run's branch; this proves
+  // nobody is about to start writing in it. A run records its slot when it is
+  // created, so a queued one owns the path before `ensureWorktree` has switched
+  // the branch over — and the check above would not see it yet.
+  const holder = activeRuns().find((r) => r.worktree_path === dir);
+  if (holder) {
+    return {
+      ok: false,
+      reason: `Run ${holder.id.slice(0, 8)} has that checkout. Wait for it to finish.`,
+    };
+  }
+
+  const staged = await git(dir, ["add", "-A"], { timeoutMs: 120_000 });
+  if (!staged.ok) {
+    return {
+      ok: false,
+      reason: `git could not stage the changes: ${staged.stderr.split("\n")[0] || "unknown error"}`,
+    };
+  }
+
+  const commit = await git(
+    dir,
+    ["commit", "-m", resolved.trim(), "-m", `Committed from UsageFoundry run ${run.id}.`],
+    { timeoutMs: 120_000 },
+  );
+  if (!commit.ok) {
+    // Left staged rather than reset. A `pre-commit` hook is the likely refusal
+    // and re-running is the likely next move; the agent may also have staged
+    // part of this itself, and unstaging that would be this app undoing work it
+    // did not do.
+    return {
+      ok: false,
+      reason:
+        `git refused the commit: ${commit.stderr.split("\n")[0] || "unknown error"}. ` +
+        `The changes are staged in ${dir}.`,
+    };
+  }
+
+  const head = await git(dir, ["rev-parse", "--short", "HEAD"]);
+  const count = slot.files.length;
+
+  emitRunEvent({
+    runId,
+    ts: Date.now(),
+    kind: "land",
+    payload: { branch, commit: head.ok ? head.stdout : null, files: count },
+  });
+
+  return {
+    ok: true,
+    message:
+      `Committed ${count} path${count === 1 ? "" : "s"} to ${branch}` +
+      (head.ok ? ` as ${head.stdout}.` : "."),
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* Deleting a landed branch                                            */
 /* ------------------------------------------------------------------ */
 
@@ -1167,20 +1483,162 @@ export async function deleteBranch(runId: string): Promise<LandOutcome> {
   };
 }
 
+/**
+ * Which checkout holds each branch, for every worktree this repository has.
+ *
+ * One call rather than one per branch: the inventory asks this of every row it
+ * lists, and `worktree list` already answers for all of them at once.
+ */
+async function worktreeBranches(repoRoot: string): Promise<Map<string, string>> {
+  const held = new Map<string, string>();
+  const list = await git(repoRoot, ["worktree", "list", "--porcelain"]);
+  if (!list.ok) return held;
+
+  let current: string | null = null;
+  for (const line of list.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+    else if (line.startsWith("branch refs/heads/") && current) {
+      held.set(line.slice("branch refs/heads/".length), current);
+    }
+  }
+  return held;
+}
+
 /** The worktree with this branch checked out, if any is still registered. */
 async function worktreeHolding(
   repoRoot: string,
   branch: string,
 ): Promise<string | null> {
-  const list = await git(repoRoot, ["worktree", "list", "--porcelain"]);
-  if (!list.ok) return null;
+  return (await worktreeBranches(repoRoot)).get(branch) ?? null;
+}
 
-  let current: string | null = null;
-  for (const line of list.stdout.split("\n")) {
-    if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
-    else if (line === `branch refs/heads/${branch}`) return current;
+/* ------------------------------------------------------------------ */
+/* Purging a branch, landed or not                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Why a purge is refused, or null when it goes ahead.
+ *
+ * `deleteBranch` is the careful door: it refuses anything git cannot see as
+ * merged, because that refusal is all that stands between a stray click and
+ * work that exists nowhere else. This is the deliberate other one — for the
+ * attempt that went nowhere, the agent that produced a mess, the slot that is
+ * out of circulation because of it — and it destroys committed work on purpose.
+ *
+ * So the caller has to name the branch it means. That echo is not
+ * authentication, and it is not compared against anything from the wire but the
+ * row itself: it is what stops a request aimed at one branch from landing on
+ * another, and it forces the interface to spell out what is about to go.
+ */
+export function purgeRefusal(s: {
+  runStatus: RunRow["status"];
+  branch: string | null;
+  branchExists: boolean;
+  confirmBranch: string;
+}): string | null {
+  if (!s.branch) return "This run has no branch.";
+  if (!s.branchExists) return `${s.branch} is already gone.`;
+  if (["running", "queued", "paused"].includes(s.runStatus)) {
+    return "This run is still active. Stop it before purging the branch it is working on.";
+  }
+  if (s.confirmBranch !== s.branch) {
+    return `Purging ${s.branch} has to name it. Nothing was deleted.`;
   }
   return null;
+}
+
+/**
+ * Delete the branch whatever state it is in, and free the checkout holding it.
+ *
+ * The commits go, and so does anything uncommitted in its slot — both are
+ * counted *before* anything is removed, so the sentence afterwards says what
+ * was lost rather than that something was. Nothing here touches the operator's
+ * own checkout, and nothing here is recoverable through this app.
+ */
+export async function purgeBranch(
+  runId: string,
+  confirmBranch: string,
+): Promise<LandOutcome> {
+  const run = getRun(runId);
+  if (!run?.worktree_branch || !run.repo_root) {
+    return { ok: false, reason: "This run has no branch." };
+  }
+
+  const repoRoot = repoPathFor(run.repo_root);
+  if (!repoRoot) {
+    return { ok: false, reason: "This run's repository is no longer inside a workspace mount." };
+  }
+
+  const branch = run.worktree_branch;
+  const exists = await git(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+
+  const refusal = purgeRefusal({
+    runStatus: run.status,
+    branch,
+    branchExists: exists.ok,
+    confirmBranch,
+  });
+  if (refusal) return { ok: false, reason: refusal };
+
+  // A run with no recorded base has no range to count against, and a count is
+  // left out rather than guessed at.
+  const from = run.worktree_base_branch ?? run.worktree_base;
+  const ahead = from
+    ? Number((await git(repoRoot, ["rev-list", "--count", `${from}..${branch}`])).stdout) || 0
+    : 0;
+
+  const slot = await worktreeHolding(repoRoot, branch);
+  let discarded = 0;
+  if (slot) {
+    const holder = activeRuns().find((r) => r.worktree_path === slot);
+    if (holder) {
+      return {
+        ok: false,
+        reason: `Run ${holder.id.slice(0, 8)} has that checkout. Wait for it to finish.`,
+      };
+    }
+
+    const status = await git(slot, ["status", "--porcelain", "-z"], { trim: false });
+    discarded = status.ok ? parseStatusZ(status.stdout).length : 0;
+
+    // `--force` is the whole difference from `deleteBranch`, which leaves a
+    // checkout with work in it alone. Here that work is what is being purged.
+    const removed = await git(repoRoot, ["worktree", "remove", "--force", slot]);
+    if (!removed.ok) {
+      return { ok: false, reason: `Could not remove its checkout: ${removed.stderr.split("\n")[0]}` };
+    }
+  }
+
+  const del = await git(repoRoot, ["branch", "-D", branch]);
+  if (!del.ok) {
+    return { ok: false, reason: `git refused to delete the branch: ${del.stderr.split("\n")[0]}` };
+  }
+
+  emitRunEvent({
+    runId,
+    ts: Date.now(),
+    kind: "land",
+    payload: {
+      branch,
+      deleted: true,
+      purged: true,
+      commits: ahead,
+      discarded,
+      worktreeRemoved: slot ?? null,
+    },
+  });
+
+  const lost = [
+    ahead > 0 ? `${ahead} commit${ahead === 1 ? "" : "s"}` : null,
+    discarded > 0 ? `${discarded} uncommitted path${discarded === 1 ? "" : "s"}` : null,
+  ].filter(Boolean);
+
+  return {
+    ok: true,
+    message: lost.length
+      ? `Purged ${branch}. ${lost.join(" and ")} went with it.`
+      : `Purged ${branch}.`,
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1199,6 +1657,12 @@ export interface BranchSummary {
   merged: boolean;
   /** Landed by this tool and unchanged since — how a squash shows as done. */
   landedUnchanged: boolean;
+  /**
+   * Uncommitted paths in the checkout still holding this branch. Null when no
+   * checkout holds it, when its status could not be read, or when the probe cap
+   * below was reached — all of which mean "nothing to offer here", never "clean".
+   */
+  uncommitted: number | null;
   exists: boolean;
   active: boolean;
   landedAt: number | null;
@@ -1213,6 +1677,8 @@ export interface BranchInventory {
 
 /** Branches examined per request. Each costs a `rev-list --count`. */
 const MAX_INVENTORY = 60;
+/** Checkouts whose status is read per request. Each is another git process. */
+const MAX_PENDING_PROBES = 20;
 
 /**
  * Every branch this app has produced, with enough state to decide about it.
@@ -1237,10 +1703,15 @@ export async function branchInventory(): Promise<BranchInventory> {
   }
 
   const branches: BranchSummary[] = [];
+  let probes = 0;
 
   for (const [rawRoot, runs] of byRepo) {
     const repoRoot = repoPathFor(rawRoot);
     if (!repoRoot) continue;
+
+    // One call for the whole repository. Only a branch some checkout still
+    // holds can have uncommitted work of its own to report.
+    const heldBy = await worktreeBranches(repoRoot);
 
     // Name and tip together: the tip is what identifies a squash-landed branch,
     // and asking for it here costs nothing over asking for the name alone.
@@ -1288,6 +1759,14 @@ export async function branchInventory(): Promise<BranchInventory> {
             ) || 0
           : 0;
 
+      const slot = exists ? heldBy.get(branch) : undefined;
+      let uncommitted: number | null = null;
+      if (slot && probes < MAX_PENDING_PROBES) {
+        probes++;
+        const status = await git(slot, ["status", "--porcelain", "-z"], { trim: false });
+        uncommitted = status.ok ? parseStatusZ(status.stdout).length : null;
+      }
+
       branches.push({
         runId: run.id,
         runStatus: run.status,
@@ -1299,6 +1778,7 @@ export async function branchInventory(): Promise<BranchInventory> {
         ahead,
         merged,
         landedUnchanged: !!run.landed_tip && run.landed_tip === tips.get(branch),
+        uncommitted,
         exists,
         active: active.has(run.id),
         landedAt: run.landed_at,
