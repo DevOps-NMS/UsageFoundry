@@ -571,14 +571,24 @@ left switched on by default — there is no setting. The route takes the explici
 list of proposals the page was showing when you clicked, so anything the chat
 added in between is not swept into a decision you did not see.
 
-**What the chat itself may do.** It runs with an allowlist: this app's own tools,
-`Read`/`Glob`/`Grep`, read-only `gh` subcommands, and `git log`/`status`/`branch`.
-It has no `Write` and no `Edit`, `gh api` is excluded because it can POST, and
-`git diff`/`git show` are excluded because rendering a patch runs diff drivers
-the repository configures — the app's own scrubbed diff is a tool instead.
-Anything not on the list is refused and reported in the thread rather than
-swallowed: a chat that could not run `gh` should not read as a chat that found no
-issues.
+**What the chat itself may do: anything, and it is told not to.** It runs with no
+tool allowlist at all — every tool the CLI has, this app's own alongside them —
+because the job of an orchestrator is to find out enough to propose good work,
+and the allowlist this replaced (this app's tools, `Read`/`Glob`/`Grep`,
+read-only `gh`, three `git` subcommands) refused every question it had not
+anticipated: a build log, a CI run, `gh api`, `git -C <path> log`. A proposal
+written without looking is still a proposal you then approve.
+
+So the limit is the instruction rather than the mode. The system prompt says its
+job is to look and propose: read code, read issues, run whatever tells it
+whether something is broken — and not to edit a workspace, commit, push, or act
+on anything on GitHub, because a task small enough to just fix is a proposal that
+says it is small. Everything else that bounds it is unchanged and is not a matter
+of instruction: nothing it can call starts a run, its MCP surface is only this
+app's, its credential dies with the turn, and `chatTurnBudgetUSD` caps the spend.
+The cost of the trade is worth stating plainly — the chat can now write into a
+checkout you also work in, and the GitHub token in its environment authenticates
+writes as well as reads.
 
 **It can look before it proposes.** `get_usage` gives it the 5-hour and weekly
 windows, so it can tell you that approving ten runs into a nearly-spent window
@@ -1110,15 +1120,22 @@ Built and exercised against real transcripts:
   handlers answer the pinned CLI 2.1.226 correctly), `list_folders` identified
   the repository's GitHub remote, and the proposal recorded the right template
   and folder.
-- **That the chat cannot write.** Asked directly, in the same turn, to create a
-  file inside the workspace, it reported `No such tool available: Write. Write
-  is disabled for this session, in subagents as well as here.` and the file did
-  not exist afterwards.
+- **That the chat could not write, under the configuration it had then.** Asked
+  directly, in the same turn, to create a file inside the workspace, it reported
+  `No such tool available: Write. Write is disabled for this session, in
+  subagents as well as here.` and the file did not exist afterwards. That
+  measurement stands as a measurement of `manual` plus an allowlist, and **no
+  longer describes what ships**: the chat now runs `bypassPermissions` with no
+  tool list, and what keeps it out of a checkout is the system prompt. The
+  equivalent question — whether an orchestrator told to look and not build
+  actually leaves files alone when a fix is one edit away — has not been
+  measured and is in the list below.
 - **That `--permission-mode plan` cannot be used for this.** Measured, not
   assumed: the first attempt ran the chat in plan mode and every MCP call came
   back `Cannot call mcp__uf__list_templates while in plan mode`, which would
-  have left the chat able to read GitHub and not this app. `manual` plus the
-  allowlist is what shipped, and the allowlist is therefore the guarantee.
+  have left the chat able to read GitHub and not this app. That is why the
+  read-only-looking mode is not an option here, and why removing the allowlist
+  left nothing mechanical in its place.
 
 - **That an isolated run under `acceptEdits` could not commit, and now can.**
   Found in the wild rather than reasoned about: four runs finished `completed`
@@ -1174,13 +1191,16 @@ through before trusting this unattended:
   have been better, since it is the branch with no form behind it and its guard
   set is the one thing on a proposal card an operator has to *read* rather than
   recognise.
-- **That `cd <folder> && git log` survives the allowlist.** `Bash(cd:*)` sits
-  beside the three `git` entries because the child's cwd is the first mount and
-  `git -C <path> log` matches none of them — which assumes the CLI matches each
-  half of a compound command separately rather than the whole string. That is
-  how it is documented to work and it has not been watched here. If it turns out
-  otherwise the failure is loud and harmless: a refused call, named in the
-  thread, and a chat that can still read every folder through `Read` and `Grep`.
+- **That an unrestricted chat stays an orchestrator.** It now runs
+  `bypassPermissions` with no tool list, so the only thing stopping it fixing a
+  one-line bug itself — in a checkout you may also be working in — is the
+  paragraph in `systemPrompt()` telling it that its job is to look and propose.
+  That has not been tested against a real CLI, and it is the assumption this
+  whole feature now rests on. Two things to watch, both of which show up as a
+  dirty working tree rather than as an error: whether it edits when a fix is
+  smaller than the proposal describing it, and whether it runs `git` writes
+  while investigating (it has the credentials to push, since `githubEnv()`
+  reaches this child).
 - **The `chat_proposals` rebuild on a database that predates it.** Dropping the
   NOT NULL from `template_id` needs a table rebuild, which was exercised against
   SQLite directly — rows preserved, index recreated, foreign key and its cascade
