@@ -750,6 +750,36 @@ export default function SettingsPage() {
             written as each turn completes
           </Hint>
         </Field>
+
+        <Field label="Orchestrator chat limit" htmlFor="chatbudget" className="mb-0 mt-4">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-ink-muted">$</span>
+            <Input
+              id="chatbudget"
+              type="number"
+              min={0}
+              step="0.5"
+              className="flex-1"
+              placeholder="no limit"
+              value={s.chatTurnBudgetUSD ?? ""}
+              onChange={(e) =>
+                patch({
+                  chatTurnBudgetUSD:
+                    e.target.value === "" ? null : Number(e.target.value),
+                })
+              }
+            />
+            <span className="whitespace-nowrap text-xs text-ink-muted">
+              per message
+            </span>
+          </div>
+          <Hint>
+            The most one orchestrator-chat turn may spend. It is the only budget
+            rule a chat passes through — a chat is not a run and has no guards of
+            its own — so blank really does mean nothing but the ten-minute
+            timeout stops it
+          </Hint>
+        </Field>
       </SectionCard>
 
       {saveError && (

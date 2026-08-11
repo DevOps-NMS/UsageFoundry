@@ -185,8 +185,83 @@ function migrate(db: Database.Database) {
       resolve_cost REAL NOT NULL DEFAULT 0
     );
 
+    -- The orchestrator chat: a conversation that proposes runs.
+    --
+    -- Its own three tables rather than columns anywhere else, because a chat is
+    -- a fourth thing this app spends money on and the split between what it
+    -- costs and what a run costs has to survive being looked at. cost_usd here
+    -- is the chat's own spend and is never added to runs.spent_usd — the same
+    -- rule run_reviews.cost_usd follows, for the same reason: no work cycle
+    -- happened.
+    --
+    -- session_id is Claude Code's, kept so the next message continues the same
+    -- conversation via --resume rather than restating the thread. Recorded the
+    -- moment the CLI reports it, for the reason runs.session_id is.
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+      id          TEXT PRIMARY KEY,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL,
+      title       TEXT,
+      session_id  TEXT,
+      -- 'idle' | 'thinking' | 'failed'. A restart fails out 'thinking' rows for
+      -- the reason reconcileReviewsOnBoot does: the child is gone with the
+      -- process that started it.
+      status      TEXT NOT NULL DEFAULT 'idle',
+      cost_usd    REAL NOT NULL DEFAULT 0,
+      tokens      INTEGER NOT NULL DEFAULT 0,
+      error       TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id      TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      ts      INTEGER NOT NULL,
+      -- 'user' | 'assistant' | 'system'. 'system' is this app speaking about
+      -- the chat rather than the model speaking in it — a refusal, an approval
+      -- outcome — so the two are never confused for each other on re-read.
+      role    TEXT NOT NULL,
+      text    TEXT NOT NULL
+    );
+
+    -- A run the chat wants to start, which no agent has started.
+    --
+    -- The approval gate is this table. A proposal holds no folder claim,
+    -- consumes no concurrency slot and nothing derived from activeRuns() can
+    -- see it — exactly like run_templates, and for the same reason: until an
+    -- operator approves it, it is form input.
+    --
+    -- What it deliberately does *not* hold: guards, a permission mode, a model.
+    -- Those come from the template it names, at approval time. The chat picks
+    -- what work to do; the template decides what an agent may do. Storing a
+    -- budget here would make the chat the second route to --permission-mode
+    -- that reopenRun refuses to become the third.
+    CREATE TABLE IF NOT EXISTS chat_proposals (
+      id          TEXT PRIMARY KEY,
+      chat_id     TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      created_at  INTEGER NOT NULL,
+      -- The template supplying every guard. Not a foreign key: a template
+      -- deleted between proposal and approval must fail the approval with a
+      -- sentence, not vanish the row the operator is looking at.
+      template_id TEXT NOT NULL,
+      title       TEXT NOT NULL,
+      task        TEXT NOT NULL,
+      -- Null means "whatever the template says". The empty string is a real
+      -- answer here as it is on a template — the mount root.
+      mount_id    TEXT,
+      folder      TEXT,
+      -- 'pending' | 'approved' | 'rejected' | 'failed'
+      status      TEXT NOT NULL DEFAULT 'pending',
+      run_id      TEXT,
+      decided_at  INTEGER,
+      error       TEXT
+    );
+
     CREATE INDEX IF NOT EXISTS idx_run_events_run
       ON run_events(run_id, id);
+    CREATE INDEX IF NOT EXISTS idx_chat_messages_chat
+      ON chat_messages(chat_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_chat_proposals_chat
+      ON chat_proposals(chat_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_merge_queue_batch
       ON merge_queue(batch_id, position);
     -- The worker's own query: the next queued row, across every batch.

@@ -546,4 +546,55 @@ export interface SettingsDTO {
   /** How an isolated run's branch is brought into the branch it started from. */
   landStrategy: "merge" | "squash";
   killProcessGroup: boolean;
+  /** Hard ceiling on one orchestrator-chat turn. Null means no cap. */
+  chatTurnBudgetUSD: number | null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Orchestrator chat                                                   */
+/* ------------------------------------------------------------------ */
+
+export interface ChatMessageDTO {
+  id: string;
+  ts: number;
+  role: "user" | "assistant" | "system";
+  text: string;
+}
+
+export interface ChatProposalDTO {
+  id: string;
+  createdAt: number;
+  templateId: string;
+  /** Null when the template has since been deleted — approval will refuse. */
+  templateName: string | null;
+  title: string;
+  task: string;
+  /** Where it would run, as a person reads it. Null means "as the template says". */
+  folderLabel: string | null;
+  status: "pending" | "approved" | "rejected" | "failed";
+  runId: string | null;
+  error: string | null;
+}
+
+export interface ChatDTO {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  title: string | null;
+  status: "idle" | "thinking" | "failed";
+  /** This chat's own spend. Never added to any run's, or to the meters. */
+  costUSD: number;
+  tokens: number;
+  error: string | null;
+  messages: ChatMessageDTO[];
+  proposals: ChatProposalDTO[];
+}
+
+export interface ChatListEntryDTO {
+  id: string;
+  title: string | null;
+  updatedAt: number;
+  status: "idle" | "thinking" | "failed";
+  costUSD: number;
+  pendingCount: number;
 }

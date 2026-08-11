@@ -32,6 +32,20 @@ export function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
+  // The orchestrator chat's tool endpoint authenticates itself, because the
+  // credential it takes is not this one: it is a capability minted per chat
+  // turn and revoked when that turn's child exits, so a leaked copy opens
+  // nothing afterwards — where UF_AUTH_TOKEN opens every route in the app for
+  // as long as it is set. That check needs SQLite and module state, neither of
+  // which exists in the edge runtime, so it cannot happen here.
+  //
+  // This is an exemption from *this* gate, not from authentication. If the
+  // check in `/api/mcp` is ever removed, this line makes the whole tool surface
+  // public — keep the two together.
+  if (pathname === "/api/mcp") {
+    return NextResponse.next();
+  }
+
   const cookie = req.cookies.get(COOKIE)?.value ?? "";
   if (cookie && timingSafeEqual(cookie, token)) return NextResponse.next();
 

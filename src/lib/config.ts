@@ -41,6 +41,25 @@ export const OTLP_SELF_URL = env(
   `http://127.0.0.1:${env("PORT", "3000")}/api/otlp`,
 );
 
+/**
+ * Where the orchestrator chat's Claude child reaches this app's MCP tools.
+ *
+ * Loopback for the same reason `OTLP_SELF_URL` is: the child runs in this
+ * container. It points at the full endpoint rather than a base, because unlike
+ * the OTLP exporter an MCP client appends nothing.
+ *
+ * The tools have to run *in this process* rather than in a stdio MCP server of
+ * their own. `createRun`'s folder claim — the thing that keeps two agents out of
+ * one directory — is a synchronous check-then-insert that is only atomic because
+ * one Node event-loop turn runs to completion. A second process doing
+ * check-then-insert against the same SQLite file would silently permit exactly
+ * the collision it prevents. See the note at the top of `db.ts`.
+ */
+export const MCP_SELF_URL = env(
+  "MCP_SELF_URL",
+  `http://127.0.0.1:${env("PORT", "3000")}/api/mcp`,
+);
+
 /** One directory tree the UI may browse and run agents against. */
 export interface WorkspaceMount {
   /** Stable slug used on the wire and as a form value. */

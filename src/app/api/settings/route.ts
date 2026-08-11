@@ -178,5 +178,12 @@ export async function PUT(req: Request) {
     patch.killProcessGroup = Boolean(body.killProcessGroup);
   }
 
+  if ("chatTurnBudgetUSD" in body) {
+    // Blank means "no cap", the same reading every switchable budget rule here
+    // takes. It is the one guard on a chat turn other than the clock, so an
+    // operator turning it off should have to type the blank themselves.
+    patch.chatTurnBudgetUSD = optionalNumber(body.chatTurnBudgetUSD);
+  }
+
   return NextResponse.json({ settings: saveSettings(patch) });
 }

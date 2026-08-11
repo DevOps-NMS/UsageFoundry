@@ -148,6 +148,18 @@ export interface Settings {
    * behaviour of signalling only the `claude` process.
    */
   killProcessGroup: boolean;
+  /**
+   * Hard ceiling on what one orchestrator-chat turn may spend. Null removes it.
+   *
+   * Not a window ceiling, so the no-default-numbers rule above does not apply:
+   * it is not a guess at a limit Anthropic knows and we do not, it is a cap on
+   * this app's own behaviour, and unlike every other guard here it is enforced
+   * *inside* the CLI (`--max-budget-usd`) rather than between cycles. It needs a
+   * default because a chat turn passes through no `evaluateBudget` at all — the
+   * only other thing bounding it is the wall-clock timeout, and "read every
+   * issue in the repository" can spend a lot inside ten minutes.
+   */
+  chatTurnBudgetUSD: number | null;
 }
 
 export type PermissionMode =
@@ -225,6 +237,7 @@ const DEFAULTS: Settings = {
   resumeGraceHours: 24,
   landStrategy: "merge",
   killProcessGroup: true,
+  chatTurnBudgetUSD: 2,
 };
 
 const KEY = "settings";

@@ -35,6 +35,13 @@ export async function register() {
     const { reconcileMergeQueueOnBoot } = await import("./lib/mergeQueue");
     reconcileMergeQueueOnBoot();
 
+    // The fourth child process, and the same rule as the first three: the chat
+    // turn died with the process, so the row says so. Nothing is re-asked — a
+    // chat turn is a question somebody put minutes ago, and answering it
+    // unattended is spend nobody is present to want.
+    const { reconcileChatsOnBoot } = await import("./lib/chat");
+    reconcileChatsOnBoot();
+
     // Agents are spawned into their own process group so a kill reaches the
     // commands they started. That also takes them out of the terminal's
     // foreground group, so Ctrl-C during `npm run dev` no longer reaches them
