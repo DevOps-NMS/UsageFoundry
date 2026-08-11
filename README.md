@@ -1384,6 +1384,11 @@ through before trusting this unattended:
   that needs authentication. The credential block itself was driven into a real
   git (above); what has not been watched is the CLI's own git picking it up out
   of the environment mid-run.
+- The chat page recovering from a dropped request, in a browser. That a rejected
+  `fetch` comes back as a result rather than a rejection is unit-tested, and the
+  `finally` that clears `busy` is plain control flow — but nobody has stopped the
+  server, pressed Send, and watched the composer, Approve, Reject and Select-all
+  stay usable with the reason on screen.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
