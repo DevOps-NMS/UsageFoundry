@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { ChatDTO, ChatListEntryDTO, ChatProposalDTO } from "@/lib/apiTypes";
+import { chatRequest } from "@/lib/chatRequest";
 import { fmtRelative, fmtUSD } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
@@ -71,19 +72,11 @@ export default function ChatPage() {
     if (!message || !chatId || busy) return;
     setBusy(true);
     setError(null);
-    const res = await fetch(`/api/chat/${chatId}/message`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
-    });
-    const data = (await res.json().catch(() => ({}))) as {
-      chat?: ChatDTO;
-      error?: string;
-    };
-    if (!res.ok) setError(data.error ?? "The message could not be sent.");
+    const result = await chatRequest(`/api/chat/${chatId}/message`, { message });
+    if (!result.ok) setError(result.error ?? "The message could not be sent.");
     else {
       setDraft("");
-      if (data.chat) setChat(data.chat);
+      if (result.chat) setChat(result.chat);
     }
     setBusy(false);
   };
@@ -92,19 +85,11 @@ export default function ChatPage() {
     if (!chatId || ids.length === 0 || busy) return;
     setBusy(true);
     setError(null);
-    const res = await fetch(`/api/chat/${chatId}/proposals`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, ids }),
-    });
-    const data = (await res.json().catch(() => ({}))) as {
-      chat?: ChatDTO;
-      error?: string;
-    };
-    if (!res.ok) setError(data.error ?? "That could not be applied.");
+    const result = await chatRequest(`/api/chat/${chatId}/proposals`, { action, ids });
+    if (!result.ok) setError(result.error ?? "That could not be applied.");
     else {
       setSelected(new Set());
-      if (data.chat) setChat(data.chat);
+      if (result.chat) setChat(result.chat);
     }
     setBusy(false);
   };
