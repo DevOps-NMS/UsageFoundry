@@ -1,4 +1,12 @@
-import { getRun, runEvents, subscribe, type RunEvent } from "@/lib/orchestrator";
+// Relative, not "@/lib/…": tsconfig.test.json emits plain CommonJS and nothing
+// rewrites the path alias at runtime, so a file with a test beside it has to
+// import the way src/lib and the tested components already do.
+import {
+  getRun,
+  runEvents,
+  subscribe,
+  type PersistedRunEvent,
+} from "../../../../../lib/orchestrator";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -68,9 +76,13 @@ export async function GET(req: Request, ctx: Ctx) {
       for (const e of history.events) send(e, e.id);
       send({ kind: "replay-complete", runId: id, ts: Date.now(), payload: {} });
 
-      // 2. Tail live events. Events are also persisted, so a client that
-      //    reconnects with Last-Event-ID picks up exactly where it left off.
-      const unsubscribe = subscribe(id, (e: RunEvent) => send(e));
+      // 2. Tail live events, each carrying the id of the row `emit()` just
+      //    wrote — the same id the replay above sends. `EventSource` advances
+      //    its Last-Event-ID only on a frame that has an `id:` line, so a live
+      //    frame without one leaves the client pinned to the final *replayed*
+      //    event however many hours of tail follow, and the next reconnect
+      //    replays the whole live portion of the log on top of itself.
+      const unsubscribe = subscribe(id, (e: PersistedRunEvent) => send(e, e.id));
 
       // Proxies drop idle connections; a periodic comment keeps it warm
       // without appearing as an event to the client.

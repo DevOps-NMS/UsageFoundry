@@ -120,6 +120,28 @@ export default function ChatPage() {
     setBusy(false);
   };
 
+  /**
+   * Stop a turn that is not going to finish.
+   *
+   * The only way back from a thread stuck on "Thinking…" short of restarting
+   * the server — which stops every run in flight to clear one conversation. It
+   * is deliberately not a send: the guard that refuses a message while a turn
+   * is in flight is what stops two billed children on one conversation.
+   */
+  const stop = async () => {
+    if (!chatId || busy) return;
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/chat/${chatId}/cancel`, { method: "POST" });
+    const data = (await res.json().catch(() => ({}))) as {
+      chat?: ChatDTO;
+      error?: string;
+    };
+    if (!res.ok) setError(data.error ?? "The turn could not be stopped.");
+    else if (data.chat) setChat(data.chat);
+    setBusy(false);
+  };
+
   const decide = async (action: "approve" | "reject", ids: string[]) => {
     if (!chatId || ids.length === 0 || busy) return;
     setBusy(true);
@@ -249,7 +271,16 @@ export default function ChatPage() {
               <Button onClick={() => void send()} disabled={thinking || busy || !draft.trim()}>
                 {thinking ? "Working…" : "Send"}
               </Button>
-              <Hint className="mt-0">Enter sends, Shift+Enter adds a line.</Hint>
+              {thinking && (
+                <Button variant="secondary" disabled={busy} onClick={() => void stop()}>
+                  Stop
+                </Button>
+              )}
+              <Hint className="mt-0">
+                {thinking
+                  ? "Stop ends this turn and signals the process answering it."
+                  : "Enter sends, Shift+Enter adds a line."}
+              </Hint>
             </ButtonRow>
           </div>
         </Card>
