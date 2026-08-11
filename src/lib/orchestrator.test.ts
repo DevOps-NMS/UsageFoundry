@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
+import type { BudgetPolicy } from "./budget";
 
 /**
  * Covers the folder-collision predicate, and only that.
@@ -44,6 +45,7 @@ const {
   githubEnv,
   isTransientApiError,
   isUsageLimit,
+  needsLiveSpendTelemetry,
   nextPrompt,
   permissionDenials,
   refusalResumeAt,
@@ -51,6 +53,8 @@ const {
   MAX_PAUSES_PER_RUN,
   MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
+
+const { normalizePolicy } = require("./budget") as typeof import("./budget");
 
 const clash = (a: string, b: string) => overlaps(conflictKey(a), conflictKey(b));
 
@@ -561,6 +565,91 @@ describe("buildArgs", () => {
     assert.equal(args[args.indexOf("--model") + 1], "claude-opus-5");
     assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
     assert.equal(args[args.indexOf("--resume") + 1], "sess-1");
+  });
+});
+
+describe("needsLiveSpendTelemetry", () => {
+  // Every wrong answer here is silent. False when it should be true leaves the
+  // spend guard reading a number frozen for the whole cycle, so a run asked to
+  // stop mid-cycle at $5 keeps working — the exact overshoot live enforcement
+  // was chosen to avoid, and nothing in the log says the guard was inert.
+  const policy = (over: Partial<BudgetPolicy>): BudgetPolicy => ({
+    maxWeeklyFraction: null,
+    maxSessionFraction: null,
+    maxRunCostUSD: null,
+    maxRunTokens: null,
+    maxIterations: 5,
+    maxDurationMinutes: null,
+    enforcement: "between-cycles",
+    continueAfterDone: false,
+    ...over,
+  });
+
+  it("is needed by a live run with a spending limit", () => {
+    for (const enforcement of ["live", "live-resume"] as const) {
+      assert.equal(
+        needsLiveSpendTelemetry(policy({ enforcement, maxRunCostUSD: 5 })),
+        true,
+      );
+      assert.equal(
+        needsLiveSpendTelemetry(policy({ enforcement, maxRunTokens: 1_000 })),
+        true,
+      );
+    }
+  });
+
+  it("is not needed between cycles, where the result event is in time", () => {
+    // The whole point of the default mode: every cycle reports its own cost
+    // before the next guard check, so there is nothing for telemetry to add.
+    assert.equal(
+      needsLiveSpendTelemetry(
+        policy({ enforcement: "between-cycles", maxRunCostUSD: 5, maxRunTokens: 1_000 }),
+      ),
+      false,
+    );
+  });
+
+  it("is not needed by a live run guarding only on windows or the clock", () => {
+    // Those move on every tick already — the fractions off a fresh snapshot,
+    // the duration off the wall clock — so forcing an export would collect
+    // records nothing reads.
+    assert.equal(
+      needsLiveSpendTelemetry(
+        policy({
+          enforcement: "live",
+          maxSessionFraction: 0.5,
+          maxWeeklyFraction: 0.8,
+          maxDurationMinutes: 30,
+        }),
+      ),
+      false,
+    );
+  });
+
+  it("treats a zeroed limit as no limit, the way normalizePolicy does", () => {
+    // `normalizePolicy` maps 0 to null, so a policy that reaches the loop can
+    // only carry null or a real limit; going by truthiness here would then
+    // disagree with the guard about whether one exists.
+    assert.equal(
+      needsLiveSpendTelemetry(
+        normalizePolicy({
+          enforcement: "live",
+          maxRunCostUSD: 0,
+          maxIterations: 5,
+        }),
+      ),
+      false,
+    );
+    assert.equal(
+      needsLiveSpendTelemetry(
+        normalizePolicy({
+          enforcement: "live",
+          maxRunCostUSD: 5,
+          maxIterations: 5,
+        }),
+      ),
+      true,
+    );
   });
 });
 

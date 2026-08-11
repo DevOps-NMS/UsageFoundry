@@ -235,6 +235,10 @@ export default function NewRunPage() {
   const weeklyRolling = settings != null && settings.weeklyAnchor == null;
   const live = enforcement !== "between-cycles";
   const resuming = enforcement === "live-resume";
+  // A spending limit that has to be read while a cycle is still running. The
+  // run turns on Claude Code's per-request reporting for itself in that case,
+  // because nothing else knows what this run has spent before its cycle ends.
+  const liveSpendGuard = live && costLimited;
   const noTerminus = !iterationsCapped && !timeLimited;
   const noMountsUsable = foldersLoaded && !mounts.some((m) => m.available);
 
@@ -792,16 +796,18 @@ export default function NewRunPage() {
               step="0.5"
             />
             <Hint>
-              {costLimited
-                ? "No new cycle starts once this much is spent, so the final figure can exceed it by up to one cycle"
-                : "Not capped in dollars — the two window percentages below cap it against your subscription instead"}
+              {!costLimited
+                ? "Not capped in dollars — the two window percentages below cap it against your subscription instead"
+                : live
+                  ? "Read mid-cycle too, so the run stops near this figure rather than a whole cycle past it"
+                  : "No new cycle starts once this much is spent, so the final figure can exceed it by up to one cycle"}
             </Hint>
-            {costLimited && live && (
-              <Hint tone="warn">
-                Claude Code only reports a cycle&rsquo;s cost when the cycle
-                finishes, and this mode cuts cycles short. An interrupted
-                cycle&rsquo;s spend is worked out from your transcripts
-                afterwards — close, but not exact
+            {liveSpendGuard && (
+              <Hint>
+                Needs Claude Code&rsquo;s own per-request reporting, so this run
+                switches that on for itself — records land a few seconds behind
+                the spend. What the cut-short cycle cost is worked out from your
+                transcripts afterwards, close but not exact
               </Hint>
             )}
           </Field>
@@ -966,9 +972,9 @@ export default function NewRunPage() {
                 ? "Limits are read between cycles, so the run can overshoot by up to one cycle — but no work is thrown away"
                 : `Limits are also read mid-cycle, about every ${
                     settings?.liveGuardIntervalSeconds ?? 60
-                  }s, and that cycle's work is lost. Usage comes from transcripts written as each turn completes, so it is tighter, not instant`}
+                  }s, and that cycle's work is lost — tighter than waiting for the cycle to end, but not an exact cut-off`}
             </Hint>
-            {live && settings?.telemetryForRuns === false && (
+            {live && !costLimited && settings?.telemetryForRuns === false && (
               <Hint tone="warn">
                 Consider turning on{" "}
                 <Link href="/settings">agent self-reporting</Link> — it is the

@@ -812,7 +812,8 @@ export default function SettingsPage() {
           <Hint>
             The only record of what a work cycle killed mid-flight actually cost.
             Off by default because it changes the child process&rsquo;s
-            behaviour; it never affects the dashboard or the budget guard
+            behaviour, and it never feeds the meters. One exception: a run set
+            to stop mid-cycle at a spending limit switches it on for itself
           </Hint>
         </Field>
 

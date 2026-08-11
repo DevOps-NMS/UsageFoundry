@@ -28,6 +28,7 @@ import {
 import { scanUsage, type UsageEntry } from "./transcripts";
 import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
+import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
 
 /**
  * Runs Claude Code headlessly against a folder, iteration by iteration, and
@@ -182,8 +183,10 @@ const interrupts = ((globalThis as unknown as {
  *
  * The value closes over `startRun`'s locals. That function is suspended on the
  * `await runIteration(...)` for the whole time an entry is registered, so its
- * `iterations` / `spentUSD` are current and the ticker needs no database read
- * and no second copy of the run's progress.
+ * `iterations` and the completed cycles' spend are current with no database
+ * read and no second copy of the run's progress. The *in-flight* cycle's spend
+ * is the one thing those locals cannot supply — it does not exist until the
+ * cycle ends — so the closure reads it from telemetry instead.
  */
 interface LiveGuard {
   policy: BudgetPolicy;
@@ -193,6 +196,9 @@ interface LiveGuard {
 const liveGuards = ((globalThis as unknown as {
   __ufLiveGuards?: Map<string, LiveGuard>;
 }).__ufLiveGuards ??= new Map<string, LiveGuard>());
+
+/** Shared empty reading, for a policy whose guards do not need telemetry. */
+const NO_TELEMETRY_SPEND: TelemetrySpend = { requests: 0, costUSD: 0, tokens: 0 };
 
 /**
  * The two background timers, and their reentrancy flags.
@@ -1688,17 +1694,51 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 }
 
 /**
+ * Does this policy need telemetry to mean what it says?
+ *
+ * `run_cost` and `run_tokens` are on `LIVE_ENFORCEABLE_CODES`, but the figures
+ * they compare against only move when a cycle's `result` event is folded in
+ * after it ends. Under live enforcement that made them between-cycles guards
+ * wearing a live label: an operator who asked to be stopped mid-cycle at $5 was
+ * stopped at $5 plus a whole cycle, which is the bound they chose live
+ * enforcement to escape. `telemetrySpendSince` is the only source that reports a
+ * single run's spend while it is still spending, so for these policies it is not
+ * an optional enrichment — it is the guard's input.
+ *
+ * The window fractions are not here: those move on every tick already, off a
+ * fresh transcript scan, and a run's own turns land in that scan too.
+ */
+export function needsLiveSpendTelemetry(policy: BudgetPolicy): boolean {
+  return (
+    policy.enforcement !== "between-cycles" &&
+    (policy.maxRunCostUSD !== null || policy.maxRunTokens !== null)
+  );
+}
+
+/**
  * Telemetry variables for a run, or nothing when the setting is off.
  *
  * `childEnv` strips inherited `OTEL_*`, so these are the only ones that reach
  * the agent — telemetry routing is decided here or not at all. The base URL
  * carries no signal suffix because the CLI appends `/v1/logs` itself.
  *
+ * `required` is set for a policy whose spend guards cannot be enforced without
+ * it, and overrides the setting. `settings.telemetryForRuns` opts into
+ * *reporting* — the dashboard card and the run card — and a run configured to
+ * be stopped mid-cycle at a spending limit has separately asked for the one
+ * thing that can do the stopping. Refusing such a run instead would be the
+ * consistent alternative, but it would refuse a policy that works today; going
+ * silently unenforced is the one option ruled out, because a guard that stops
+ * guarding when an unrelated toggle is off is the failure `guardCostOf()`
+ * exists to prevent for unpriced models. Nothing else changes: the records go
+ * to this app's own endpoint, and `/api/usage` still gates its card on the
+ * setting.
+ *
  * When `UF_AUTH_TOKEN` is set the exporter authenticates like any other
  * client, which is why `middleware.ts` needs no exemption for the ingest path.
  */
-function telemetryEnv(runId: string): Record<string, string> {
-  if (!getSettings().telemetryForRuns) return {};
+function telemetryEnv(runId: string, required = false): Record<string, string> {
+  if (!required && !getSettings().telemetryForRuns) return {};
 
   const headers: Record<string, string> = process.env.UF_AUTH_TOKEN
     ? {
@@ -1845,6 +1885,7 @@ function runIteration(
   runId: string,
   cwd: string,
   args: string[],
+  telemetryRequired: boolean,
   onSession: (sessionId: string) => void,
 ): Promise<IterationResult> {
   return new Promise((resolve) => {
@@ -1852,7 +1893,7 @@ function runIteration(
     // quotes, backticks, or semicolons is inert rather than interpreted.
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {
       cwd,
-      env: childEnv({ ...telemetryEnv(runId), ...githubEnv() }),
+      env: childEnv({ ...telemetryEnv(runId, telemetryRequired), ...githubEnv() }),
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, so a kill reaches the builds, test runners and
       // servers the agent started. Those are what actually hold the working
@@ -2269,6 +2310,17 @@ export async function startRun(id: string): Promise<void> {
     const policy = normalizePolicy(budget);
     const settings = getSettings();
 
+    // Fixed for the run, because it decides what the child is spawned with. A
+    // Settings edit mid-run must not leave one cycle exporting and the next not,
+    // which would read as the run's spend jumping backwards.
+    const liveSpendTelemetry = needsLiveSpendTelemetry(policy);
+    if (liveSpendTelemetry) {
+      log(
+        id,
+        "Live spending limits are enforced from Claude Code's own per-request telemetry, which arrives while a cycle works. Expect a lag of a few seconds rather than an exact cut-off.",
+      );
+    }
+
     if (run.isolation === "worktree" && run.worktree_path && run.repo_root) {
       workDir = await ensureWorktree(run);
     }
@@ -2406,35 +2458,42 @@ export async function startRun(id: string): Promise<void> {
       // this function's own locals, which stay alive because it is suspended on
       // the await below — no database round trip, no second copy of progress.
       //
-      // Reading them live is not the same as their being live. `spentUSD` and
-      // `spentTokens` come from the CLI's terminal `result` event, folded in
-      // below *after* `runIteration` returns — and the `finally` has removed
-      // this entry by then. So the spend fields are frozen at what the
-      // pre-cycle guard already passed, and `run_cost`/`run_tokens` are
-      // effectively between-cycles even here, however often the ticker runs.
-      // What genuinely moves per tick is `duration` and the two window
-      // fractions, which come from the ticker's own clock and snapshot.
+      // `spentUSD` and `spentTokens` are *not* among the things that move while
+      // it is registered: both come from the CLI's terminal `result` event,
+      // folded in below after `runIteration` returns, by which point the
+      // `finally` has removed this entry. They are the completed cycles' total
+      // and nothing else. The in-flight cycle is added from telemetry, which is
+      // the only source that reports one run's spend before that run's cycle
+      // ends — bounded by `cycleStartedAt` so the cycles that already reported
+      // through `result` are not counted twice.
       if (policy.enforcement !== "between-cycles") {
         liveGuards.set(id, {
           policy,
-          progress: () => ({
-            // The loop increments before it spawns, so the cycle in flight is
-            // the one the pre-cycle guard has just authorised. Reporting it as
-            // already used would make the first live tick kill it immediately.
-            iterations: iterations - 1,
-            spentUSD,
-            spentTokens,
-            spentGuardUSD: spentUSD + spentEstUSD,
-            spentGuardTokens: spentTokens + spentEstTokens,
-            startedAt,
-          }),
+          progress: () => {
+            const inFlight = liveSpendTelemetry
+              ? telemetrySpendSince(id, cycleStartedAt)
+              : NO_TELEMETRY_SPEND;
+            return {
+              // The loop increments before it spawns, so the cycle in flight is
+              // the one the pre-cycle guard has just authorised. Reporting it as
+              // already used would make the first live tick kill it immediately.
+              iterations: iterations - 1,
+              // Reported spend stays what the CLI itself measured, so the run
+              // page never shows an estimate as the run's cost.
+              spentUSD,
+              spentTokens,
+              spentGuardUSD: spentUSD + spentEstUSD + inFlight.costUSD,
+              spentGuardTokens: spentTokens + spentEstTokens + inFlight.tokens,
+              startedAt,
+            };
+          },
         });
         startLiveTicker();
       }
 
       let res: IterationResult;
       try {
-        res = await runIteration(id, workDir, args, (sid) => {
+        res = await runIteration(id, workDir, args, liveSpendTelemetry, (sid) => {
           // A resume that comes back under a different id is recorded rather
           // than treated as a failure: which of the two Claude Code reports for
           // a `--resume` is its business, and this app has never observed it
@@ -2456,6 +2515,24 @@ export async function startRun(id: string): Promise<void> {
 
       cyclesThisSegment += 1;
       lastExit = res.exitCode;
+
+      // Say so when the live spend guard was blind. Exporting is configured by
+      // `telemetryEnv`, but nothing guarantees the records arrive — an ingest
+      // that fails leaves `telemetrySpendSince` returning zero, and a guard
+      // reading zero refuses nothing while looking exactly like a guard that
+      // was simply never reached. Checked here because this is the first point
+      // with something to compare against: the CLI's own figure for the cycle
+      // the ticker was watching.
+      if (liveSpendTelemetry && res.sawResult && res.costUSD > 0) {
+        const reported = telemetrySpendSince(id, cycleStartedAt);
+        if (reported.requests === 0) {
+          log(
+            id,
+            `This work cycle cost $${res.costUSD.toFixed(2)} and reported no telemetry, so the live spending limit had nothing to read while it ran. It was enforced between cycles only.`,
+          );
+        }
+      }
+
       spentUSD += res.costUSD;
       spentTokens += res.tokens;
       // Latched, not assigned: a cycle that died before reporting its cost

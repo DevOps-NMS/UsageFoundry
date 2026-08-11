@@ -9,7 +9,10 @@ import { db } from "./db";
  * strictly a *complement* to the transcript scan, never a replacement — it
  * cannot backfill history, carries no `cwd`, and collapses the 5m/1h cache
  * split that `pricing.ts` weights 1.25x against 2x. `scanUsage()` remains the
- * only input to the windows and the guard.
+ * only input to the windows, and to every guard except one: `telemetrySpendSince`
+ * feeds the mid-cycle half of a run's *own* spend under live enforcement, which
+ * is the single figure no other source produces before a cycle ends. See the
+ * comment on that function.
  *
  * Shapes here were taken from a captured POST from CLI v2.1.226, not from the
  * documentation, which disagrees on one detail that matters: the docs call the
@@ -234,6 +237,56 @@ export function telemetryForRun(runId: string): RunTelemetry | null {
     .get(runId) as RunTelemetry | undefined;
 
   return row && row.requests > 0 ? row : null;
+}
+
+/** What one run has reported since an instant. Zeroes when nothing has arrived. */
+export interface TelemetrySpend {
+  requests: number;
+  costUSD: number;
+  tokens: number;
+}
+
+/**
+ * One run's first-party spend since `since`, for the live guard.
+ *
+ * This is the one place telemetry informs a budget decision, and it is confined
+ * to the one quantity nothing else can report in time. A run's own spend lands
+ * on `runs.spent_usd` only when the CLI emits its terminal `result` event, so
+ * for the whole duration of a cycle `maxRunCostUSD` is compared against a
+ * number that stopped moving when the previous cycle ended — which made
+ * `run_cost` and `run_tokens` between-cycles guards wearing a live label.
+ * Telemetry arrives per request while the agent works, so bounding the *current
+ * cycle* by `since` and adding it to the completed cycles' total gives the
+ * ticker a figure that actually moves.
+ *
+ * Deliberately not a window input and not a display figure: the caller adds it
+ * to `spentGuardUSD`/`spentGuardTokens`, never to `spentUSD`, so `runs.spent_usd`
+ * stays a floor of what Claude Code itself measured. Same display-vs-guard split
+ * as `costUSD`/`costGuardUSD`, and for the same reason.
+ *
+ * `since` must be the current cycle's start. Passing the run's start would
+ * double-count every cycle that already reported its own cost.
+ *
+ * The token sum matches what `handleStreamLine` accumulates from the `result`
+ * event's `usage`, so the two halves of `spentGuardTokens` are the same unit.
+ * `cache_creation_tokens` collapses the 5m/1h split, which the transcript
+ * pipeline weights differently — irrelevant here, because this is a token count
+ * rather than a price.
+ */
+export function telemetrySpendSince(runId: string, since: number): TelemetrySpend {
+  const row = db()
+    .prepare(
+      // Covered by idx_otlp_requests_run_ts; this runs once per live run per
+      // tick, alongside a full transcript scan that costs orders more.
+      `SELECT COUNT(*) AS requests,
+              COALESCE(SUM(cost_usd), 0) AS costUSD,
+              COALESCE(SUM(input_tokens + output_tokens
+                           + cache_read_tokens + cache_creation_tokens), 0) AS tokens
+         FROM otlp_requests WHERE run_id = ? AND ts >= ?`,
+    )
+    .get(runId, since) as TelemetrySpend | undefined;
+
+  return row ?? { requests: 0, costUSD: 0, tokens: 0 };
 }
 
 /** One run's first-party total inside a window, with the run's current status. */
