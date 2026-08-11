@@ -614,7 +614,7 @@ export default function RunDetail({
       {/* The lead card: what is happening, what it has cost, and the one thing
           to do about it. Everything below recedes from here. */}
       <Card
-        emphasis="primary"
+        emphasis={active ? "primary" : "default"}
         className={`border-l-[3px] ${STATE_ACCENT[state.tone]}`}
       >
         <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
@@ -625,7 +625,7 @@ export default function RunDetail({
                 and a live region there would read it out every second. */}
             <h2
               aria-live="polite"
-              className="flex items-center gap-2 text-md font-semibold text-ink"
+              className="flex items-center gap-2 text-lg font-semibold tracking-tight text-ink"
             >
               {run.status === "running" && <Spinner />}
               {state.headline}
@@ -634,7 +634,7 @@ export default function RunDetail({
               {state.detail}
             </p>
             {run.stop_reason && (
-              <p className="mt-1 max-w-[70ch] text-xs text-ink-faint">
+              <p className="mt-1 max-w-[70ch] text-xs text-ink-muted">
                 {run.stop_reason}
               </p>
             )}
@@ -715,7 +715,7 @@ export default function RunDetail({
             <Stat>
               {run.iterations}
               {/* 0 is the stored sentinel for "no cap" — see db.ts. */}
-              <span className="text-lg font-medium text-ink-faint">
+              <span className="text-lg font-medium text-ink-muted">
                 {run.max_iterations > 0 ? `/${run.max_iterations}` : " · no cap"}
               </span>
             </Stat>
@@ -761,7 +761,10 @@ export default function RunDetail({
               </Hint>
             </Field>
 
-            <div className="grid gap-x-4 sm:grid-cols-3">
+            {/* `gap-y-0` is not redundant: the legacy sheet still carries a
+                `.grid { gap: 16px }` rule, and without an explicit row gap the
+                three fields would inherit 16px on top of their own margin. */}
+            <div className="grid gap-x-4 gap-y-0 sm:grid-cols-3">
               <Field label="Work cycles" htmlFor="re-cycles">
                 <div className="flex items-center gap-2">
                   <Input
@@ -872,7 +875,7 @@ export default function RunDetail({
               {fmtTokens(telemetry.tokens)} tokens
             </div>
           </div>
-          <div className="mt-2 max-w-[80ch] text-xs text-ink-faint">
+          <div className="mt-2 max-w-[80ch] text-xs text-ink-muted">
             Claude Code&rsquo;s own per-request cost for this run. Kept apart from
             the figure above rather than added to it: that one counts only work
             cycles the CLI got to report, so the two disagree by design
@@ -886,12 +889,12 @@ export default function RunDetail({
       {/* The outcome, then what it means, then what to do with it. The agent's
           own account comes first within that: it is the only one of these that
           says why. */}
-      <RunOutput events={events} emphasis={active ? "default" : "primary"} />
+      <RunOutput events={events} emphasis={active ? "quiet" : "default"} />
 
       <Card emphasis={showLog && active ? "default" : "quiet"} className="mt-6">
         <CardTitle>
           Live log
-          <span className="font-normal normal-case tracking-normal tabular-nums text-ink-faint">
+          <span className="font-normal normal-case tracking-normal tabular-nums text-ink-muted">
             {lines.length} line{lines.length === 1 ? "" : "s"}
           </span>
           {/* Only while the run can still produce output: a finished run whose
@@ -913,42 +916,46 @@ export default function RunDetail({
           </Button>
         </CardTitle>
 
-        {showLog && (
-          <div className="relative" id="run-log">
-            <Log ref={logRef} onScroll={onScroll}>
-              {lines.length === 0 && (
-                <Empty>
-                  {active
-                    ? "Waiting for the first turn…"
-                    : "This run produced no output."}
-                </Empty>
-              )}
-              {lines.map((l) => (
-                <LogLine key={l.key} kind={l.kind} timestamp={fmtClock(l.ts)}>
-                  {l.text}
-                </LogLine>
-              ))}
-            </Log>
-
-            {/* The way back. Autoscroll stops the moment the reader scrolls up,
-                which is right — but without this the only way to rejoin the tail
-                of a long log is to drag to the bottom by hand. */}
-            {!atLiveEdge && lines.length > 0 && (
-              <Button
-                variant="secondary"
-                className="absolute bottom-3 right-4 shadow-e2 transition-colors duration-150"
-                onClick={jumpToLive}
-              >
-                Jump to live
-                {missed > 0 && (
-                  <span className="ml-1.5 tabular-nums text-ink-muted">
-                    {missed} new
-                  </span>
+        {/* The wrapper stays mounted whether or not the log is showing, so the
+            toggle's aria-controls always names something that exists. */}
+        <div className="relative" id="run-log">
+          {showLog && (
+            <>
+              <Log ref={logRef} onScroll={onScroll}>
+                {lines.length === 0 && (
+                  <Empty>
+                    {active
+                      ? "Waiting for the first turn…"
+                      : "This run produced no output."}
+                  </Empty>
                 )}
-              </Button>
-            )}
-          </div>
-        )}
+                {lines.map((l) => (
+                  <LogLine key={l.key} kind={l.kind} timestamp={fmtClock(l.ts)}>
+                    {l.text}
+                  </LogLine>
+                ))}
+              </Log>
+
+              {/* The way back. Autoscroll stops the moment the reader scrolls
+                  up, which is right — but without this the only way to rejoin
+                  the tail of a long log is to drag to the bottom by hand. */}
+              {!atLiveEdge && lines.length > 0 && (
+                <Button
+                  variant="secondary"
+                  className="absolute bottom-3 right-4 shadow-e2 transition-colors duration-150"
+                  onClick={jumpToLive}
+                >
+                  Jump to live
+                  {missed > 0 && (
+                    <span className="ml-1.5 tabular-nums text-ink-muted">
+                      {missed} new
+                    </span>
+                  )}
+                </Button>
+              )}
+            </>
+          )}
+        </div>
       </Card>
 
       <RunDiff run={run} />

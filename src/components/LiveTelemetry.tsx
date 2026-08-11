@@ -98,13 +98,13 @@ export function LiveTelemetry({
           Same rule as a shortened diff: what was left out is counted, not
           dropped, or the list reads as the whole set. */}
       {unlisted > 0 && (
-        <div className="mt-2 text-xs text-ink-faint">
+        <div className="mt-2 text-xs text-ink-muted">
           {unlisted} cheaper {unlisted === 1 ? "run is" : "runs are"} in the
           total above but not listed.
         </div>
       )}
 
-      <div className="mt-3 max-w-[80ch] text-xs text-ink-faint">
+      <div className="mt-3 max-w-[80ch] text-xs text-ink-muted">
         Claude Code&rsquo;s own cost for every API request an agent this app
         spawned made, over the same five hours as the session card. It is the
         only figure here that moves <em>during</em> a work cycle — a run&rsquo;s
