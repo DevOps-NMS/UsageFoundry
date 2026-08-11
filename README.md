@@ -596,6 +596,22 @@ means ten runs that stop on their first guard check. `get_run` and `get_run_diff
 give it a finished run's log, spend and patch, so "why did that one fail, and
 what should we do about it" is a question it can actually answer.
 
+**A turn that is not going to finish can be stopped.** While the chat is
+working, **Stop** appears beside Send. It signals the process answering — and
+everything that process started, the same ladder a run's Stop button uses — and
+fails the turn out with "you stopped this message", so the thread is usable
+again immediately. It is a way to *end* a turn, never a way to send around one:
+the chat still refuses a second message while a turn is in flight, which is what
+stops two billed children on one conversation.
+
+There is a deadline under it as well. A turn that has been in flight for more
+than ten minutes is failed out by a sweeper that reads the row rather than
+waiting on the child, so the bound holds even when the child dies in a way that
+never reports back — the case where the only recovery used to be restarting the
+server, which stops every run in flight to clear one thread. Nothing is resumed
+or re-asked either way: a chat turn is a question you put minutes ago, and
+re-asking it unattended is spend nobody is present to want.
+
 **It costs money, and the cost is shown apart.** A chat turn spends against the
 same 5-hour window as everything else. It is refused outright when that window is
 already past the ceiling you configured, and `chatTurnBudgetUSD` (default $2,
@@ -1259,6 +1275,20 @@ through before trusting this unattended:
   smaller than the proposal describing it, and whether it runs `git` writes
   while investigating (it has the credentials to push, since `githubEnv()`
   reaches this child).
+- **Stopping a chat turn, in either of its two forms.** `staleTurn` is unit
+  tested and the rest typechecks, but no real CLI child has been signalled by
+  `cancelChatTurn` and no sweep has fired against a live row. Two things to
+  watch. Whether the SIGINT/SIGTERM/SIGKILL ladder actually reaches a chat
+  child's whole process group the way it does an agent's — the chat spawns
+  `detached` under the same `killProcessGroup` setting, so it should, but the
+  agent path is the one that has been watched. And whether the sweeper ever
+  fires on a turn that was merely slow: it waits a minute past the ten-minute
+  bound, and the in-closure timer should have settled the row long before, so an
+  entry saying the chat "did not answer within 10 minutes" that arrives with no
+  preceding kill means the two paths disagree about when a turn began. Putting a
+  row into `thinking` by hand (`sqlite3 $DATA_DIR/usagefoundry.db "update
+  chat_sessions set status='thinking', turn_started_at=… where id=…"`) and
+  loading `/chat` exercises the no-child half of both without spending anything.
 - **The `chat_proposals` rebuild on a database that predates it.** Dropping the
   NOT NULL from `template_id` needs a table rebuild, which was exercised against
   SQLite directly — rows preserved, index recreated, foreign key and its cascade

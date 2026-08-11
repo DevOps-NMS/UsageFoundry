@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import {
   CLAUDE_BIN,
   MCP_SELF_URL,
@@ -73,6 +74,13 @@ export interface ChatRow {
   cost_usd: number;
   tokens: number;
   error: string | null;
+  /**
+   * When the turn in flight began, and null when none is. Deliberately not
+   * `updated_at`: the chat's own `save_template` tool writes a system message
+   * mid-turn, which moves that column and would push the timeout out by
+   * however long the turn had already been running.
+   */
+  turn_started_at: number | null;
 }
 
 export interface ChatMessageRow {
@@ -118,7 +126,20 @@ const THREAD_REPLAY_MESSAGES = 20;
 const THREAD_REPLAY_BYTES = 20_000;
 
 /** A chat turn that has not finished in this long is not going to. */
-const CHAT_TIMEOUT_MS = 10 * 60_000;
+export const CHAT_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * How long past that bound the sweeper waits before failing a row out.
+ *
+ * The in-closure timer above fires at exactly `CHAT_TIMEOUT_MS` and then gives
+ * the child five seconds to die, so a turn that is being stopped properly
+ * settles well inside this margin. What is left over when the margin expires is
+ * a turn whose `close` is not coming — the case this whole path exists for.
+ */
+export const STALE_TURN_MARGIN_MS = 60_000;
+
+/** How often a `thinking` row is checked against that deadline. */
+const CHAT_SWEEP_MS = 30_000;
 
 /* ------------------------------------------------------------------ */
 /* Storage                                                             */
@@ -576,6 +597,172 @@ export function chatForCapability(token: string): string | null {
 
 export type ChatOutcome = { ok: true } | { ok: false; reason: string };
 
+/** stdin is "ignore", so the child has readable stdout/stderr and no stdin. */
+type ChatProcess = ChildProcessByStdio<null, Readable, Readable>;
+
+/**
+ * The chats with a child this process can still signal.
+ *
+ * The row says a turn is in flight; this says whether anything is still there
+ * to stop. The two disagree exactly when a turn is stranded — which is the
+ * state this map exists to make recoverable rather than to prevent. On
+ * `globalThis` for the reason every other long-lived singleton here is: a dev
+ * hot reload would otherwise re-evaluate the module and lose the handle on a
+ * live child, leaving the operator with an unstoppable turn and a billed agent.
+ */
+const turns = ((globalThis as unknown as {
+  __ufChatTurns?: Map<string, ChatProcess>;
+}).__ufChatTurns ??= new Map<string, ChatProcess>());
+
+const sweeper = ((globalThis as unknown as {
+  __ufChatSweep?: { timer: NodeJS.Timeout | null };
+}).__ufChatSweep ??= { timer: null });
+
+/** What the row says afterwards. The two causes must not read alike. */
+const CANCELLED_REASON =
+  "You stopped this message while it was being answered.";
+const TIMED_OUT_REASON =
+  `The chat did not answer within ${CHAT_TIMEOUT_MS / 60_000} minutes and was stopped.`;
+
+/**
+ * Whether a turn has outlived the bound on one, given the row and the clock.
+ *
+ * Pure and unit-tested, for the reason `landRefusal` and `planItem` are: every
+ * way of getting it wrong is silent. Too eager and a legitimate three-minute
+ * turn is failed out from under a live child; never true and the ten-minute
+ * bound quietly stops existing, which is the state this issue started from —
+ * a thread that says "Thinking…" for ever with nothing in the process able to
+ * move it.
+ */
+export function staleTurn(
+  chat: Pick<ChatRow, "status" | "turn_started_at" | "updated_at">,
+  now: number,
+): boolean {
+  if (chat.status !== "thinking") return false;
+  // A row that was already `thinking` when this column was added has no start
+  // instant. `updated_at` is the conservative stand-in — mid-turn writes only
+  // ever move it forward, so the fallback waits longer than the real deadline
+  // rather than ending a turn early.
+  const startedAt = chat.turn_started_at ?? chat.updated_at;
+  return now - startedAt >= CHAT_TIMEOUT_MS + STALE_TURN_MARGIN_MS;
+}
+
+/**
+ * End a turn now, and signal whatever is still running it.
+ *
+ * The row is settled *here* rather than when the child closes, which is the
+ * whole point: the turns that need ending are the ones whose `close` is not
+ * coming. `finishTurn` latches on `status='thinking'`, so a `close` that does
+ * arrive afterwards cannot move the row back or overwrite what this said.
+ *
+ * The signal ladder is `interruptRun`'s, and SIGINT leads for the same reason:
+ * it is the signal a CLI is most likely to handle deliberately, and a chat turn
+ * is spawned `detached` under the same `killProcessGroup` setting an agent is,
+ * so what has to die is the group rather than the wrapper.
+ *
+ * Each step re-checks that *this* child is still running rather than that it is
+ * still the registered one, which is where this diverges from `interruptRun`:
+ * the row is usable the instant this returns, so the operator can send a new
+ * message — and register a new child under the same id — while the old one is
+ * still working through the ladder. Not `child.killed`, which records only that
+ * a signal was sent and is already true by the second step.
+ */
+function endTurn(chatId: string, error: string): boolean {
+  const changed =
+    db()
+      .prepare(
+        "UPDATE chat_sessions SET status='failed', error=?, updated_at=?," +
+          " turn_started_at=NULL WHERE id=? AND status='thinking'",
+      )
+      .run(error, Date.now(), chatId).changes > 0;
+  // In the thread as well as on the row: the conversation should read as what
+  // happened to it, and a turn that stops without a word looks like an answer
+  // that never came.
+  if (changed) appendMessage(chatId, "system", error);
+
+  const child = turns.get(chatId);
+  if (!child) return false;
+
+  const running = () => child.exitCode === null && child.signalCode === null;
+  signalTree(child, "SIGINT");
+  setTimeout(() => {
+    if (running()) signalTree(child, "SIGTERM");
+  }, 3_000).unref?.();
+  setTimeout(() => {
+    if (running()) signalTree(child, "SIGKILL");
+  }, 8_000).unref?.();
+  return true;
+}
+
+export type CancelOutcome =
+  | { ok: true; outcome: "signalled" | "cleared" }
+  | { ok: false; reason: string };
+
+/**
+ * Stop the turn a chat is waiting on, from the page.
+ *
+ * The counterpart to `stopRun`, and it reports the same distinction for the
+ * same reason: `signalled` means a child was told to stop, `cleared` means
+ * there was nothing left to stop and only the row needed clearing. Both are
+ * successes — reporting the second as a failure (which a bare boolean would)
+ * makes a working button look broken in precisely the case it was added for.
+ *
+ * It does not send anything, and it deliberately leaves the `thinking` guard in
+ * `sendChatMessage` alone: that guard is what stops two billed children on one
+ * conversation, and the recovery is a way to *end* the turn, not around it.
+ */
+export function cancelChatTurn(chatId: string): CancelOutcome {
+  const chat = getChat(chatId);
+  if (!chat) return { ok: false, reason: "No such chat." };
+  if (chat.status !== "thinking") {
+    return { ok: false, reason: "This chat is not working on a message." };
+  }
+  return {
+    ok: true,
+    outcome: endTurn(chatId, CANCELLED_REASON) ? "signalled" : "cleared",
+  };
+}
+
+/**
+ * Fail out every turn that has outlived the bound.
+ *
+ * The backstop under the in-closure timer in `runTurn`, which cannot be one:
+ * that timer signals the child and then waits for `close`, so it rescues
+ * nothing when `close` is what went missing, and it does not exist at all for a
+ * turn whose child was never spawned. This reads the row instead, so the
+ * ten-minute bound holds however the turn was lost.
+ *
+ * Nothing is resumed or re-asked — same rule `reconcileChatsOnBoot` follows,
+ * and for the same reason: a chat turn is a question somebody put minutes ago,
+ * and re-asking it unattended is spend nobody is present to want.
+ */
+function sweepStuckChats(): void {
+  const thinking = db()
+    .prepare("SELECT * FROM chat_sessions WHERE status='thinking'")
+    .all() as ChatRow[];
+  if (thinking.length === 0) {
+    stopChatSweeper();
+    return;
+  }
+  const now = Date.now();
+  for (const chat of thinking) {
+    if (staleTurn(chat, now)) endTurn(chat.id, TIMED_OUT_REASON);
+  }
+}
+
+/** Lazily started when a turn begins, stopped when none is left to watch. */
+function startChatSweeper(): void {
+  if (sweeper.timer) return;
+  sweeper.timer = setInterval(sweepStuckChats, CHAT_SWEEP_MS);
+  sweeper.timer.unref?.();
+}
+
+function stopChatSweeper(): void {
+  if (!sweeper.timer) return;
+  clearInterval(sweeper.timer);
+  sweeper.timer = null;
+}
+
 /**
  * Send a message and return as soon as the child is on its way.
  *
@@ -608,9 +795,17 @@ export async function sendChatMessage(
     .slice(0, -1)
     .map((m) => ({ role: m.role, text: m.text }));
 
+  // `turn_started_at` is what the sweeper reads, so it is written in the same
+  // statement that makes the row `thinking` — a turn that becomes unstoppable
+  // between the two writes is exactly the turn that needs the deadline.
+  const startedAt = Date.now();
   db()
-    .prepare("UPDATE chat_sessions SET status='thinking', error=NULL, updated_at=? WHERE id=?")
-    .run(Date.now(), chatId);
+    .prepare(
+      "UPDATE chat_sessions SET status='thinking', error=NULL, updated_at=?," +
+        " turn_started_at=? WHERE id=?",
+    )
+    .run(startedAt, startedAt, chatId);
+  startChatSweeper();
 
   const prompt = chatPrompt({ sessionId: chat.session_id, history }, text);
 
@@ -710,6 +905,10 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       detached: settings.killProcessGroup && process.platform !== "win32",
     });
 
+    // Registered before anything can go wrong with it, so an operator pressing
+    // Stop reaches the child rather than orphaning it.
+    turns.set(chat.id, child);
+
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -730,6 +929,10 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Only this child's own entry: a turn cancelled and re-sent while the old
+      // child was still dying would otherwise have its live handle deleted by
+      // the corpse of the previous one.
+      if (turns.get(chat.id) === child) turns.delete(chat.id);
       // Both of these are why the token is worth having: the credential dies
       // with the turn, and the file that carried it does not outlive it either.
       revokeCapability(token);
@@ -748,10 +951,7 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
 
     child.on("close", (code) => {
       if (timedOut) {
-        land({
-          status: "failed",
-          error: `The chat did not answer within ${CHAT_TIMEOUT_MS / 60_000} minutes and was stopped.`,
-        });
+        land({ status: "failed", error: TIMED_OUT_REASON });
         return;
       }
       land(parseTurnOutput(stdout, stderr, code));
@@ -825,12 +1025,39 @@ export function parseTurnOutput(
 
 function finishTurn(chatId: string, r: TurnResult): void {
   const now = Date.now();
+  const prior = getChat(chatId)?.session_id ?? null;
+
+  // `WHERE status='thinking'` makes the row itself the settle-once latch, which
+  // is what lets `cancelChatTurn` and the sweeper end a turn without waiting
+  // for a `close` that may never come: a late one lands here and changes
+  // nothing, rather than reviving the thread or replacing "you stopped this"
+  // with whatever the killed child left on stderr. Nothing is lost by that —
+  // the CLI reports cost and session id only in the final JSON object, which a
+  // child that was signalled never prints.
+  const changed =
+    db()
+      .prepare(
+        `UPDATE chat_sessions
+            SET status=?, error=?, updated_at=?, turn_started_at=NULL,
+                cost_usd = cost_usd + ?, tokens = tokens + ?,
+                session_id = COALESCE(?, session_id)
+          WHERE id=? AND status='thinking'`,
+      )
+      .run(
+        r.status,
+        r.error ?? null,
+        now,
+        r.costUSD ?? 0,
+        r.tokens ?? 0,
+        r.sessionId,
+        chatId,
+      ).changes > 0;
+  if (!changed) return;
 
   // Session id is adopted rather than compared, and a change is recorded rather
   // than treated as a failure — same posture the run loop takes. Which id the
   // CLI reports for a resumed conversation is its business; what must not
   // happen is continuing a conversation nobody chose without saying so.
-  const prior = getChat(chatId)?.session_id ?? null;
   if (r.sessionId && prior && r.sessionId !== prior) {
     appendMessage(
       chatId,
@@ -839,24 +1066,6 @@ function finishTurn(chatId: string, r: TurnResult): void {
         `the one this chat resumed (${prior}). Continuing with the new one.`,
     );
   }
-
-  db()
-    .prepare(
-      `UPDATE chat_sessions
-          SET status=?, error=?, updated_at=?,
-              cost_usd = cost_usd + ?, tokens = tokens + ?,
-              session_id = COALESCE(?, session_id)
-        WHERE id=?`,
-    )
-    .run(
-      r.status,
-      r.error ?? null,
-      now,
-      r.costUSD ?? 0,
-      r.tokens ?? 0,
-      r.sessionId,
-      chatId,
-    );
 
   if (r.text) appendMessage(chatId, "assistant", r.text);
   if (r.error) appendMessage(chatId, "system", r.error);
@@ -897,11 +1106,16 @@ function finishTurn(chatId: string, r: TurnResult): void {
  * spins an indicator for ever. Nothing is resumed — a chat turn is a question
  * somebody asked minutes ago, and re-asking it unattended is spend nobody is
  * present to want.
+ *
+ * Still the cheapest way out of a stranded turn, and no longer the only one:
+ * `cancelChatTurn` clears one on request and the sweeper clears one that has
+ * run past its deadline, so recovering a thread no longer means restarting the
+ * server for everything else running in it.
  */
 export function reconcileChatsOnBoot(): void {
   db()
     .prepare(
-      "UPDATE chat_sessions SET status='failed'," +
+      "UPDATE chat_sessions SET status='failed', turn_started_at=NULL," +
         " error='The server restarted while this message was being answered.'" +
         " WHERE status='thinking'",
     )

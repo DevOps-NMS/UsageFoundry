@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { chatPrompt, composeTask, planProposal, type ChatProposalRow } from "./chat";
+import {
+  CHAT_TIMEOUT_MS,
+  STALE_TURN_MARGIN_MS,
+  chatPrompt,
+  composeTask,
+  planProposal,
+  staleTurn,
+  type ChatProposalRow,
+  type ChatRow,
+} from "./chat";
 import { githubSlug } from "./workspace";
 import type { RunTemplate } from "./templates";
 import type { RunGuards } from "./settings";
@@ -30,6 +39,12 @@ import type { RunGuards } from "./settings";
  *  - `githubSlug` names the repository the chat then reads issues out of. A
  *    wrong answer is not an error — it is proposals for somebody else's
  *    project, described convincingly.
+ *  - `staleTurn` is the only thing enforcing the ten-minute bound on a turn
+ *    when the child's `close` event is what went missing. Wrong in one
+ *    direction it kills a live turn mid-answer; wrong in the other it never
+ *    fires, and the bound quietly stops existing — a thread that says
+ *    "Thinking…" for ever, refusing every message, with nothing short of a
+ *    server restart able to clear it.
  */
 
 const template: RunTemplate = {
@@ -298,6 +313,76 @@ describe("chatPrompt", () => {
     const out = chatPrompt({ sessionId: null, history: long }, "and now?");
     assert.ok(out.includes("the recent bit"));
     assert.ok(!out.includes("x".repeat(25_000)));
+  });
+});
+
+describe("staleTurn", () => {
+  const NOW = 1_700_000_000_000;
+  const deadline = CHAT_TIMEOUT_MS + STALE_TURN_MARGIN_MS;
+
+  const row = (over: Partial<ChatRow> = {}) =>
+    ({
+      status: "thinking",
+      turn_started_at: NOW - 60_000,
+      updated_at: NOW - 60_000,
+      ...over,
+    }) as Pick<ChatRow, "status" | "turn_started_at" | "updated_at">;
+
+  it("leaves a turn inside the bound alone", () => {
+    // Turns legitimately run for minutes: the sweeper must not be a shorter
+    // auto-cancel wearing a timeout's name.
+    assert.equal(staleTurn(row(), NOW), false);
+    assert.equal(
+      staleTurn(row({ turn_started_at: NOW - deadline + 1 }), NOW),
+      false,
+    );
+  });
+
+  it("fails out a turn that has run past it", () => {
+    assert.equal(staleTurn(row({ turn_started_at: NOW - deadline }), NOW), true);
+    assert.equal(
+      staleTurn(row({ turn_started_at: NOW - deadline * 4 }), NOW),
+      true,
+    );
+  });
+
+  it("never touches a chat that is not working on anything", () => {
+    // The row is the only input, and an old idle thread is old by definition —
+    // reading the age without the status would fail out every chat on the page.
+    for (const status of ["idle", "failed"] as const) {
+      assert.equal(
+        staleTurn(row({ status, turn_started_at: NOW - deadline * 10 }), NOW),
+        false,
+        status,
+      );
+    }
+  });
+
+  it("falls back to updated_at for a row written before the column existed", () => {
+    // Not "never stale": a null start instant read as no deadline is exactly
+    // the stuck thread this exists to clear, and it would be silent.
+    assert.equal(
+      staleTurn(row({ turn_started_at: null, updated_at: NOW - deadline }), NOW),
+      true,
+    );
+    assert.equal(
+      staleTurn(row({ turn_started_at: null, updated_at: NOW - 60_000 }), NOW),
+      false,
+    );
+  });
+
+  it("prefers the turn's own start over updated_at", () => {
+    // `save_template` appends a system message mid-turn, which moves
+    // `updated_at`. Reading that as the turn's start would push the deadline
+    // out every time the chat used the tool — the bound would come off exactly
+    // on the longest turns.
+    assert.equal(
+      staleTurn(
+        row({ turn_started_at: NOW - deadline, updated_at: NOW - 1_000 }),
+        NOW,
+      ),
+      true,
+    );
   });
 });
 

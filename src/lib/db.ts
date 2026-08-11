@@ -372,6 +372,14 @@ function migrate(db: Database.Database) {
   // The prompt the chat wrote for one specific run. Added rather than rebuilt,
   // because a nullable column is the one change ALTER does support.
   addColumn(db, "chat_proposals", "prompt_override", "TEXT");
+
+  // When the turn now in flight began, so the ten-minute bound on a chat turn
+  // is enforceable by something outside the closure that spawned it. Not
+  // `updated_at`, which looks like the same instant and is not: the chat's own
+  // `save_template` tool appends a system message mid-turn, and every such
+  // append would push the deadline out by however long the turn has already
+  // run. Null whenever no turn is in flight.
+  addColumn(db, "chat_sessions", "turn_started_at", "INTEGER");
 }
 
 /**
