@@ -367,6 +367,52 @@ again on its first check. The time limit is the exception — it runs from the
 moment it starts again, since counting the hours it spent dead would refuse
 every run older than its own limit. Everything else carries over untouched.
 
+### Running the same task again
+
+Two ways, and the cheap one is worth knowing first.
+
+**Start another like this** — a link in the header of any run page. It opens the
+new-run form pre-filled from that run: the same task, the same workspace and
+folder, the same isolation, the same limits, the same permission mode. Nothing
+happens until you press *Start run*, and nothing about the original run changes.
+This is not a resume — it is a new run that happens to be configured identically,
+which is what you want when last week's task comes round again but you would
+rather not touch the run that already finished.
+
+**Templates** — a named, saved version of the same thing. The *Templates* card at
+the top of the new-run form loads one into the form, or saves whatever the form
+is currently holding under a name. Loading a template fills in every field and
+starts nothing; you can edit anything before you run it, and editing the form
+does not write back to the template.
+
+What a template holds is the task, the limits, how it behaves, and — optionally —
+the folder. *Remember the workspace and folder* is a switch on the save row,
+because both answers are right for different tasks: "update the changelog for
+this project" wants a folder recorded, "run the test suite and fix what fails"
+wants to be asked. A template with no folder leaves the picker alone rather than
+guessing.
+
+Three things it does **not** do, each on purpose:
+
+- **It does not carry the model.** That is a single global setting
+  (Settings → *Model*), and a second place to set it is how the two drift.
+- **It does not apply a live-enforcement mode quietly.** There is deliberately no
+  global "default enforcement", because one edit that turns *every* run into a
+  cycle-killing run is a mistake with no undo. A template is a second way to
+  inherit that choice, so a template carrying *Stop the cycle in flight* (or
+  *…carry on next window*) says so in a banner above the form, with a button that
+  puts it back to the mode that loses no work. Same for `bypassPermissions`,
+  which gets the danger banner it gets everywhere else.
+- **It does not let you save something that cannot run.** A template with no
+  cycle limit and no time limit is refused when you save it, with the same
+  message `POST /api/runs` would give — the point of validating twice is that the
+  error arrives while you are still looking at the form that caused it, rather
+  than the week you finally use the template.
+
+A template is form input and nothing more. It holds no folder, blocks no run,
+occupies no concurrency slot, and deleting one cannot affect anything that has
+already started — a run copies every value it needs the moment it is created.
+
 ---
 
 ## Two runs, one project
@@ -480,9 +526,12 @@ it spends against the same 5-hour allowance your runs do.
 and everything that principle protected is a check rather than a caveat:
 
 - The merge is previewed with `git merge-tree`, entirely in memory. You find out
-  whether it fast-forwards, merges cleanly, or conflicts — and which files — with
-  nothing written to any working tree. (Needs git 2.38+; an older one says so
-  rather than guessing.)
+  whether it fast-forwards, merges cleanly, or conflicts — and for a conflict,
+  which files, what kind of conflict each one is, and the `<<<<<<<` blocks
+  themselves — with nothing written to any working tree. That last part is free:
+  the tree `merge-tree` writes holds each file exactly as a real merge would
+  leave it, so the conflict can be read before deciding anything. (Needs git
+  2.38+; an older one says so rather than guessing.)
 - Landing needs your checkout **clean** and **on the branch the run started
   from**, which is recorded when the run is created. Anything else is refused with
   the reason, not greyed out. "Could not read your checkout" counts as dirty.
@@ -494,8 +543,26 @@ and everything that principle protected is a check rather than a caveat:
   diff above still means something afterwards; squashing gives your history one
   commit per run.
 
-Landing several branches is several merges, and each changes the base for the
-next — so it is one button per run rather than a batch operation.
+**Several branches can be queued, and a queue is not a batch.** Tick them on the
+Branches page in the order you want them landed and they go through one at a
+time, each re-previewed against git at its own turn rather than against whatever
+the page showed when you queued them — because every landing changes the base for
+the one behind it. Every check above still applies to every one of them, taken
+fresh.
+
+Two failures are told apart deliberately. A branch that cannot be landed is
+reported and the queue carries on to the next. A problem with your *checkout* —
+uncommitted changes, or standing on the wrong branch — would refuse every
+remaining branch in that repository for the same reason, so the queue stops
+there and says so once instead of ten times. Nothing is left half-merged either
+way, and the queue never resumes itself after a restart: queued merges are
+cancelled, because a server coming back up and merging four branches into the
+tree you are working in is the one thing it must not do on its own.
+
+Optionally — and it is a toggle on the form, not a setting — a conflict can be
+sent to Claude as it comes up, resolved on the run's branch exactly as below, and
+then landed. That spends money unattended, so the toggle carries the warning, the
+cost lands on each queue row, and nothing switches it on for you.
 
 **Conflicts can be resolved by Claude, and never in your checkout.** When the
 preview reports a conflict, *Resolve with Claude* merges the target branch
@@ -513,8 +580,14 @@ Your own checkout is not involved at any point, and a resolution that goes badly
 costs a branch nobody has landed. Like a review, it is billed and shown with its
 own cost — never added to the run's spend.
 
+Afterwards the card shows both halves of it: what Claude says it kept and why,
+and the diff of the merge commit it made, against the branch as it stood before
+the merge. The first is an account of the work; the second is the work, and it
+is what landing will bring across.
+
 **The Branches page** lists every `uf/*` branch across runs: which run made it,
-what it lands into, how far ahead it is, and whether it is merged. Merged
+what it lands into, how far ahead it is, and whether it is merged. It is also
+where the merge queue lives. Merged
 branches can be deleted there, and its checkout slot is freed at the same time.
 Branches with commits of their own are not deletable from the UI at all — that is
 the one action here with no undo.
@@ -571,14 +644,28 @@ for every API request and will push it to any OTLP endpoint. Turning on *Agent
 self-reporting* in Settings points agents this app spawns back at this server,
 which records one row per request — a first-party number that needs no price
 table, no dedupe key, and no file polling. It is shown as its own card on the
-run page and is **never** merged into `spent_usd`, the dashboard, or the budget
-guard, all of which stay transcript-derived.
+run page and its own card on the dashboard, and is **never** merged into
+`spent_usd`, the dashboard's meters, or the budget guard, all of which stay
+transcript-derived.
 
 Its one real advantage: per-iteration spend normally comes from the CLI's
 terminal `result` event, so a work cycle killed before that event reports $0.
 Telemetry arrives per request as the run proceeds, so it captures that work. A
 telemetry figure *higher* than the run's own total is the expected outcome of an
 interrupted run, not a discrepancy.
+
+The same property is why it is on the dashboard. Because per-cycle spend is only
+reported when a cycle *ends*, a run that has been working for twenty minutes
+reads $0 everywhere until it finishes — so nothing on the page attributed the
+week's most expensive activity to the thing currently doing it. The **Live from
+runs** card covers the same five hours as the session meter, lists the heaviest
+runs by name with their status, and says how long ago the last request landed.
+It is a third reading rather than a correction: the meters count every Claude
+Code session on this machine through our price table, the card counts one class
+of session through Anthropic's own, and the work overlaps — so the two are shown
+side by side and never added. While a run is working the dashboard polls every
+5s instead of 10s; the rest of the time it does not, because rebuilding the
+snapshot competes with the agent for the same CPU.
 
 It cannot replace the transcript scan: there is no historical backfill, no `cwd`
 so no per-project attribution, and `cache_creation_tokens` is a single number
@@ -706,6 +793,23 @@ Built and exercised against real transcripts:
   inserts 0 rows (delivery is at-least-once); an unknown run returns null
   rather than a zero row; and malformed or null payloads return empty instead
   of throwing, since a rejected batch would be retried forever.
+- The dashboard's **Live from runs** card, against a real database with batches
+  pushed through the live ingest route: the window total counts only the five
+  requests inside the 5-hour window and attributed to a run, so a record seven
+  hours old, a record carrying no `uf.run_id`, and a redelivered `request_id`
+  are each left out; per-run rows carry the run's real status from the `runs`
+  join (`running`, `completed`, and `—` when no row matches) and are ordered
+  heaviest first; eight runs in the window list six and still report `runCount`
+  8; `workingRunCount` counts the one `running` row, which is what switches the
+  poll to 5s. The transcript-derived `session.costUSD` in the same response
+  contains none of it, and the card disappears entirely when *Agent
+  self-reporting* is switched back off.
+- That card's own rendering (`npm test`, 5 cases): the first-party figure never
+  renders without all three sentences that stop it being read as an addend to
+  the meters; a list capped by `TOP_RUNS` names the number of runs it left out
+  and a complete list claims no omission; a telemetry row with no matching
+  `runs` row renders `—` rather than inventing a status; and nothing is
+  described as "working" when `workingRunCount` is 0.
 - Plan detection reads `Claude Max 20x` from `.credentials.json` with no email,
   name, or account UUID crossing the wire; caches for 60s including misses (the
   CLI writes these files lazily); and degrades to "plan unknown" with no error
@@ -805,6 +909,45 @@ Built and exercised against real transcripts:
   hunk; the size budget naming what it left out; `merge-tree` output read as
   clean, conflicting, or undetermined-on-an-old-git; and every `landRefusal`
   branch.
+- The merge queue, against a five-branch scratch repository on a live dev server,
+  with the stub CLI standing in for the resolver. Three branches queued in an
+  order that was not the list's — one clean, one conflicting, one clean — landed
+  in exactly that order: the conflict was resolved in a throwaway checkout, its
+  $0.07 recorded on the queue row and never on the run, and the two clean merges
+  went either side of it. With the resolver toggled off, the conflicting branch
+  failed with its own reason and the branch behind it still landed. With the
+  operator's checkout deliberately dirtied, both queued branches were skipped
+  with one reason between them, nothing was written, and the conflicting one was
+  **not** paid to be resolved — the checkout is tested before the conflict
+  precisely so that a merge which was going to be refused is never billed for
+  first. Driven through the browser as well as the API, including the selection
+  order badges and the inventory re-reading itself once the queue stopped.
+- The conflict display, against a scratch repository with a content conflict and
+  a modify/delete conflict in the same merge, on git 2.50. `merge-tree
+  --write-tree -z` was run for real and its output fed through
+  `parseMergeTree`: both files listed once, `contents` and `modify/delete` read
+  off the informational records, git's explanation kept only where it says
+  something the type and the path do not, and the `<<<<<<<` block read back out
+  of the merged tree. Then the same fixture through a live dev server and a
+  browser: the conflict list, the type, the clash count and the block itself all
+  render on the run page, with the modify/delete file showing git's sentence and
+  no block.
+- The resolution display, from a `run_reviews` row written straight into SQLite
+  with the merge commit of a by-hand resolution: `GET /api/runs/<id>/land`
+  returned the resolution's own diff against the branch's pre-merge tip,
+  restricted to the recorded conflicted paths, and the run page rendered it under
+  the model's prose. The row was seeded rather than produced by a real agent —
+  which the *Not yet verified* list below already covers.
+- Run templates against a live dev server on a scratch workspace: create, list
+  (ordered by name, case-insensitively), update, and delete, with a second
+  delete answering 404. Every refusal came back as a 400 with the sentence the
+  form shows — a duplicate name differing only in case, a blank prompt, an
+  unknown permission mode, and the no-cycle-limit-and-no-time-limit pair that
+  `POST /api/runs` refuses. Read-time narrowing was checked by writing a row
+  straight into SQLite with `permission_mode = 'bypassEverything'` and a corrupt
+  budget blob: it comes back as `plan` (the only mode that cannot write) and one
+  work cycle, rather than as a wider permission or a throw. `normalizeTemplateInput`
+  and `rowToTemplate` also have 20 assertions under `npm test`.
 - The GitHub credential block, driven into a real `git` (2.39.5) in a scratch
   repository rather than only asserted in a test: `git credential fill` for
   `github.com` returns the token even when the repository's own config names a
@@ -885,8 +1028,27 @@ through before trusting this unattended:
 - Landing inside the container, where git is 2.39 rather than the 2.50 the
   scratch repositories above were driven with. `merge-tree --write-tree` and its
   conflict format both date from 2.38, and an older git is reported rather than
-  guessed at, but that path has not been run against 2.39 itself.
+  guessed at, but that path has not been run against 2.39 itself. The conflict
+  *types* are the part most likely to differ: they come from the `-z`
+  informational records, whose field layout was captured from 2.50. A 2.39 that
+  writes them differently loses the type and the explanation and still lists
+  every conflicting file, because that list comes from the stage records — but
+  which of those two happens on 2.39 is unconfirmed.
 - A repository large enough to hit the diff's size budget in the wild.
+- **The Live from runs card in a browser, fed by a real telemetry-enabled run.**
+  Its query was driven against a real database through the real ingest route and
+  its markup was rendered and read, but the batches were synthesised from the
+  captured payload rather than pushed by a live `claude -p`, and the card has
+  not been *looked at* on the page. What that leaves unconfirmed is how it reads
+  next to the meters — whether the separation is as plain on screen as it is in
+  the copy — and whether the figure visibly moves during a single work cycle at
+  the 5s poll.
+- The new-run form's template UI driven through a browser: that loading a
+  template fills every field, that *Start another like this* pre-fills from a
+  run without the folder and settings loaders racing it, and that the two
+  banners — a carried live-enforcement mode, a carried `bypassPermissions` —
+  appear on load and clear when the control is touched. The routes underneath
+  were exercised directly; only the client wiring is unconfirmed.
 - **The image with `gh` in it.** The install layer, the checksum check and the
   arch mapping have not been built — no Docker on the machine this was written
   on — so `docker compose up --build` is the first thing to run against this.
@@ -895,14 +1057,17 @@ through before trusting this unattended:
   git (above); what has not been watched is the CLI's own git picking it up out
   of the environment mid-run.
 
-There is no linter run in this repo, and `npm test` covers nine things: the
-folder-collision predicate, which queued runs may start, the budget policy, how
-a provider refusal is classified and backed off from, which prompt a work cycle
-spawns with, the GitHub credentials handed to a work cycle, how a run's diff is
-parsed and budgeted, when a branch may be landed, and whether a conflict was
-really resolved. `npm run typecheck` plus
-a `docker compose up --build` smoke test is still the real verification loop,
-and the list above records what was checked by hand.
+There is no linter run in this repo, and `npm test` covers a deliberately short
+list: the folder-collision predicate, which queued runs may start, the budget
+policy, how a provider refusal is classified and backed off from, which prompt a
+work cycle spawns with, the GitHub credentials handed to a work cycle, how a
+run's diff is parsed and budgeted, when a branch may be landed, what a queued
+merge does with the branch it reaches, what counts as a conflict marker — both
+for deciding whether one was really resolved and for deciding what to show — and
+the two renderings that would lie quietly about a number: an unconfigured
+ceiling, and a first-party figure shown beside the meters. `npm run typecheck`
+plus a `docker compose up --build` smoke test is still the real verification
+loop, and the list above records what was checked by hand.
 
 ---
 

@@ -65,6 +65,29 @@ export interface ReviewRow {
   diff_files: number;
   diff_shown: number;
   truncated: number;
+  /** The merge commit a conflict resolution made. Null for a review. */
+  resolved_commit: string | null;
+  /** The files it was handed, as a JSON array. Null for a review. */
+  resolved_paths: string | null;
+}
+
+/**
+ * The paths a resolution was given, or none.
+ *
+ * A column written by this app in one place, so a value that does not parse
+ * means the row is not what it claims and the honest answer is nothing rather
+ * than a partial list.
+ */
+export function reviewPaths(row: ReviewRow): string[] {
+  if (!row.resolved_paths) return [];
+  try {
+    const parsed: unknown = JSON.parse(row.resolved_paths);
+    return Array.isArray(parsed) && parsed.every((p) => typeof p === "string")
+      ? (parsed as string[])
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 export function listReviews(runId: string, kind?: AssistKind): ReviewRow[] {
@@ -82,6 +105,20 @@ export function listReviews(runId: string, kind?: AssistKind): ReviewRow[] {
 /** The most recent one of a kind, which is what a card shows. */
 export function latestAssist(runId: string, kind: AssistKind): ReviewRow | null {
   return listReviews(runId, kind)[0] ?? null;
+}
+
+/**
+ * One by id, for a caller waiting on the invocation it started itself.
+ *
+ * `latestAssist` is the wrong tool for that: it answers "the newest one for
+ * this run", which is a different row the moment anything else starts one.
+ */
+export function getAssist(id: string): ReviewRow | null {
+  return (
+    (db().prepare("SELECT * FROM run_reviews WHERE id = ?").get(id) as
+      | ReviewRow
+      | undefined) ?? null
+  );
 }
 
 export function assistRunning(runId: string, kind: AssistKind): boolean {
@@ -174,6 +211,8 @@ export interface AssistRequest {
   permissionMode: "plan" | "acceptEdits";
   prompt: string;
   counts?: { files: number; shown: number; truncated: boolean };
+  /** The files this invocation is about, recorded on the row. Resolutions only. */
+  paths?: string[];
   /**
    * Runs after the child exits and before the row is written, so a caller can
    * check what the agent actually did and downgrade a "completed" spawn to a
@@ -198,8 +237,9 @@ export function startAssist(req: AssistRequest): ReviewOutcome {
   db()
     .prepare(
       `INSERT INTO run_reviews
-         (id, run_id, kind, created_at, status, model, diff_files, diff_shown, truncated)
-       VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
+         (id, run_id, kind, created_at, status, model, diff_files, diff_shown,
+          truncated, resolved_paths)
+       VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -210,6 +250,7 @@ export function startAssist(req: AssistRequest): ReviewOutcome {
       counts.files,
       counts.shown,
       counts.truncated ? 1 : 0,
+      req.paths ? JSON.stringify(req.paths) : null,
     );
 
   emitRunEvent({
@@ -466,6 +507,8 @@ export interface AssistResult {
   error?: string;
   costUSD?: number;
   tokens?: number;
+  /** Set by `after` on a conflict resolution: the merge commit it made. */
+  resolvedCommit?: string;
 }
 
 /**
@@ -532,7 +575,7 @@ function finish(
   db()
     .prepare(
       "UPDATE run_reviews SET status=?, finished_at=?, text=?, error=?," +
-        " cost_usd=?, tokens=? WHERE id=?",
+        " cost_usd=?, tokens=?, resolved_commit=? WHERE id=?",
     )
     .run(
       r.status,
@@ -541,6 +584,7 @@ function finish(
       r.error ?? null,
       r.costUSD ?? 0,
       r.tokens ?? 0,
+      r.resolvedCommit ?? null,
       id,
     );
 

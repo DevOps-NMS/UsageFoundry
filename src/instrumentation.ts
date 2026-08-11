@@ -27,6 +27,14 @@ export async function register() {
     const { reconcileReviewsOnBoot } = await import("./lib/review");
     reconcileReviewsOnBoot();
 
+    // And once more for the merge queue, where the rule is stricter than for
+    // either of those: a queued merge is *cancelled*, never resumed. It writes
+    // into the operator's own checkout, and a server coming back up and merging
+    // four branches into the tree someone is working in is the one thing a
+    // queue must never do by itself.
+    const { reconcileMergeQueueOnBoot } = await import("./lib/mergeQueue");
+    reconcileMergeQueueOnBoot();
+
     // Agents are spawned into their own process group so a kill reaches the
     // commands they started. That also takes them out of the terminal's
     // foreground group, so Ctrl-C during `npm run dev` no longer reaches them

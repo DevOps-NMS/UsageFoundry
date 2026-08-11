@@ -235,3 +235,104 @@ export function telemetryForRun(runId: string): RunTelemetry | null {
 
   return row && row.requests > 0 ? row : null;
 }
+
+/** One run's first-party total inside a window, with the run's current status. */
+export interface TelemetryRunTotal {
+  runId: string;
+  /** `null` only if the run row has gone; runs are not deleted, so in practice set. */
+  status: string | null;
+  requests: number;
+  costUSD: number;
+  tokens: number;
+  lastAt: number;
+}
+
+export interface TelemetryWindow {
+  requests: number;
+  costUSD: number;
+  tokens: number;
+  lastAt: number;
+  /** Distinct runs that reported inside the window, including finished ones. */
+  runCount: number;
+  /** How many of those are still `running` — i.e. the figure is still moving. */
+  workingRunCount: number;
+  /** Heaviest first, capped at `TOP_RUNS`. `runCount` is the honest total. */
+  runs: TelemetryRunTotal[];
+}
+
+/**
+ * The dashboard shows only the heaviest few runs by name. Beyond that the card
+ * is a list rather than a reading, and `runCount` still reports the whole set.
+ */
+const TOP_RUNS = 6;
+
+/**
+ * First-party totals for every run that reported inside a window.
+ *
+ * This exists because a run in flight has *nothing else* to show. Per-cycle
+ * spend lands on `runs.spent_usd` only when the CLI emits its terminal `result`
+ * event, so a work cycle that is still going contributes $0 there for its whole
+ * duration; telemetry arrives per request while it works. Reading that on the
+ * dashboard is what makes the page move during a run rather than in one jump at
+ * the end of each cycle.
+ *
+ * It stays a *separate reading*, not a correction to the meters. The window
+ * bounds are taken from the transcript-derived snapshot so the two describe the
+ * same five hours, but the numbers are never added: one is Claude Code's own
+ * per-request cost for agents this app spawned, the other is our price table
+ * applied to every transcript on the machine, and the work they cover overlaps.
+ * Nothing here reaches `buildSnapshot()`, `evaluateBudget()` or `spent_usd`.
+ *
+ * Rows with no `run_id` are excluded. The orchestrator stamps one onto every
+ * agent it spawns, so an unattributed record means something else was pointed
+ * at this endpoint by hand — and this card claims to describe runs.
+ */
+export function telemetryWindow(since: number): TelemetryWindow | null {
+  const groups = db()
+    .prepare(
+      // `r.status` is a bare column under GROUP BY, which SQLite allows and
+      // which is unambiguous here: status is functionally dependent on run_id,
+      // so every row in a group carries the same one.
+      `SELECT o.run_id AS runId,
+              r.status AS status,
+              COUNT(*) AS requests,
+              COALESCE(SUM(o.cost_usd), 0) AS costUSD,
+              COALESCE(SUM(o.input_tokens + o.output_tokens
+                           + o.cache_read_tokens + o.cache_creation_tokens), 0) AS tokens,
+              MAX(o.ts) AS lastAt
+         FROM otlp_requests o
+         LEFT JOIN runs r ON r.id = o.run_id
+        WHERE o.ts >= ? AND o.run_id IS NOT NULL
+        GROUP BY o.run_id
+        ORDER BY costUSD DESC`,
+    )
+    .all(since) as TelemetryRunTotal[];
+
+  if (groups.length === 0) return null;
+
+  // Totalled from the groups rather than by a second aggregate query: the two
+  // could then disagree about the window if a batch landed between them, and
+  // the card puts the total next to the list it is the total of.
+  let requests = 0;
+  let costUSD = 0;
+  let tokens = 0;
+  let lastAt = 0;
+  let workingRunCount = 0;
+  for (const g of groups) {
+    requests += g.requests;
+    costUSD += g.costUSD;
+    tokens += g.tokens;
+    if (g.lastAt > lastAt) lastAt = g.lastAt;
+    if (g.status === "running") workingRunCount += 1;
+  }
+
+  return {
+    requests,
+    costUSD,
+    tokens,
+    lastAt,
+    runCount: groups.length,
+    workingRunCount,
+    runs: groups.slice(0, TOP_RUNS),
+  };
+}

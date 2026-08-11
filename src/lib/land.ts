@@ -2,8 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { git } from "./git";
 import { db } from "./db";
+import { commitDiff, type DiffFile } from "./diff";
 import { getSettings } from "./settings";
-import { assistRefusal, assistRunning, startAssist } from "./review";
+import {
+  assistRefusal,
+  assistRunning,
+  reviewPaths,
+  startAssist,
+  type ReviewRow,
+} from "./review";
 import {
   activeRuns,
   auxWorktreePath,
@@ -50,11 +57,45 @@ import {
 
 export type LandStrategy = "merge" | "squash";
 
+/** One `<<<<<<< … >>>>>>>` block, exactly as the merge would leave it. */
+export interface ConflictRegion {
+  /** The block, markers included. */
+  text: string;
+  /** True when the block was cut for length, or its closing marker is missing. */
+  truncated: boolean;
+}
+
+/**
+ * A path git could not merge, with git's own account of why.
+ *
+ * The list of paths comes from `merge-tree`'s stage records, which is the
+ * authoritative statement of what conflicts. `type` and `message` come from its
+ * informational section and are decoration: a record naming a path the stage
+ * records did not is ignored rather than added, so what counts as conflicting
+ * never depends on parsing prose.
+ */
+export interface ConflictFile {
+  path: string;
+  /** git's own name for the conflict — `content`, `modify/delete`, … */
+  type: string | null;
+  /** git's one-line explanation. The whole story for a conflict with no markers. */
+  message: string | null;
+  regions: ConflictRegion[];
+  /** Regions this file has beyond the ones in `regions`. */
+  regionsOmitted: number;
+  /**
+   * False when the merged content was never read, so an empty `regions` says
+   * nothing about this file. A modify/delete leaves no markers at all and a
+   * content conflict always leaves some, and the two must not read alike.
+   */
+  regionsRead: boolean;
+}
+
 export type MergePreview =
   | { outcome: "already-merged" }
   | { outcome: "fast-forward" }
   | { outcome: "clean" }
-  | { outcome: "conflict"; files: string[] }
+  | { outcome: "conflict"; files: ConflictFile[] }
   /** Could not be determined — git too old, or the command failed. */
   | { outcome: "unknown"; reason: string };
 
@@ -122,17 +163,37 @@ function repoPathFor(dir: string): string | null {
   }
 }
 
+/** Conflicted files whose merged content is read. Each costs a `git show`. */
+const MAX_CONTENT_FILES = 10;
+/** Regions rendered per file. */
+const MAX_REGIONS_PER_FILE = 5;
+/** Lines kept per region. */
+const MAX_REGION_LINES = 80;
+/** Hard stop on how much of one conflicted file is read. */
+const MAX_CONTENT_BYTES = 1_000_000;
+
 /**
- * Parse `git merge-tree --write-tree`.
+ * Parse `git merge-tree --write-tree -z`.
  *
  * Exit 0 is a clean merge, exit 1 means conflicts, anything else is an error —
  * including "unknown option" from a git older than 2.38, which is a real
  * possibility on a host-mounted toolchain and must not read as "no conflicts".
  *
- * On conflict the output is the merged tree's oid, then one
- * `<mode> <oid> <stage>\t<path>` line per conflicted path, then a blank line
- * and human-readable messages. The same path appears once per stage, so the
- * list is de-duplicated.
+ * `-z` is what makes the conflict *types* readable. The plain output states them
+ * only in prose — "CONFLICT (content): Merge conflict in f.txt" — and finding
+ * the path in that sentence means parsing a filename out of a human message,
+ * which is the mistake `splitPatches` exists to avoid. With `-z` the record is
+ * `<path-count> NUL <path>… NUL <type> NUL <message> NUL`, so the paths arrive
+ * as fields.
+ *
+ * The whole output is one NUL-separated stream: the merged tree's oid, then one
+ * `<mode> <oid> <stage>\t<path>` record per conflicted path per stage, then an
+ * empty record, then the informational records. The same path appears once per
+ * stage, so the list is de-duplicated.
+ *
+ * Everything after the stage records is parsed defensively and contributes
+ * nothing but annotation: a git whose informational format differs loses the
+ * type and the message, and still reports exactly which files conflict.
  */
 export function parseMergeTree(
   stdout: string,
@@ -150,14 +211,100 @@ export function parseMergeTree(
     };
   }
 
-  const files = new Set<string>();
-  for (const line of stdout.split("\n").slice(1)) {
-    if (line === "") break;
-    const tab = line.indexOf("\t");
+  const fields = stdout.split("\0");
+  const byPath = new Map<string, ConflictFile>();
+
+  let i = 1; // field 0 is the merged tree's oid
+  for (; i < fields.length && fields[i] !== ""; i++) {
+    const tab = fields[i].indexOf("\t");
     if (tab === -1) continue;
-    files.add(line.slice(tab + 1));
+    const path = fields[i].slice(tab + 1);
+    if (!byPath.has(path)) {
+      byPath.set(path, {
+        path,
+        type: null,
+        message: null,
+        regions: [],
+        regionsOmitted: 0,
+        regionsRead: false,
+      });
+    }
   }
-  return { outcome: "conflict", files: [...files] };
+
+  // Informational records. `Auto-merging f.txt` is one of these too and is not
+  // a conflict, so only `CONFLICT (…)` records annotate anything.
+  for (i += 1; i < fields.length; ) {
+    const count = Number(fields[i]);
+    if (!Number.isInteger(count) || count < 1 || i + count + 2 >= fields.length) break;
+    const paths = fields.slice(i + 1, i + 1 + count);
+    const type = fields[i + count + 1];
+    const message = fields[i + count + 2];
+    i += count + 3;
+
+    const kind = /^CONFLICT \((.+)\)$/.exec(type)?.[1];
+    if (!kind) continue;
+    for (const p of paths) {
+      const file = byPath.get(p);
+      if (file) {
+        file.type = kind;
+        file.message = explanation(message, p);
+      }
+    }
+  }
+
+  return { outcome: "conflict", files: [...byPath.values()] };
+}
+
+/**
+ * What git's sentence says that the type and the path do not.
+ *
+ * Its messages open by restating the type — "CONFLICT (modify/delete): d.txt
+ * deleted in …" — and for the ordinary case the whole sentence is "Merge
+ * conflict in f.txt", which is the file's own name under its own heading. Both
+ * are dropped: what survives is the part that carries something, like which
+ * version git kept, or which paths a rename collided with.
+ */
+function explanation(message: string, path: string): string | null {
+  const rest = message.trim().replace(/^CONFLICT \([^)]*\):\s*/, "");
+  return rest === "" || rest === `Merge conflict in ${path}` ? null : rest;
+}
+
+/**
+ * The `<<<<<<<`/`>>>>>>>` blocks in a file the merge could not reconcile.
+ *
+ * Anchored on the two labelled markers only, for the reason
+ * `hasConflictMarkers` documents: a bare `=======` is a markdown heading
+ * underline, and a region parser that started on one would render half a
+ * document as a conflict. A block with no closing marker — a file cut by the
+ * read budget — is kept and flagged rather than dropped.
+ */
+export function conflictRegions(
+  text: string,
+  limits = { maxRegions: MAX_REGIONS_PER_FILE, maxLines: MAX_REGION_LINES },
+): { regions: ConflictRegion[]; omitted: number } {
+  const lines = text.split("\n");
+  const regions: ConflictRegion[] = [];
+  let found = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].startsWith("<<<<<<< ")) continue;
+    found++;
+
+    let end = i;
+    while (end < lines.length && !lines[end].startsWith(">>>>>>> ")) end++;
+    const closed = end < lines.length;
+    const block = lines.slice(i, closed ? end + 1 : lines.length);
+    i = closed ? end : lines.length;
+
+    if (regions.length >= limits.maxRegions) continue;
+    const cut = block.length > limits.maxLines;
+    regions.push({
+      text: (cut ? block.slice(0, limits.maxLines) : block).join("\n"),
+      truncated: cut || !closed,
+    });
+  }
+
+  return { regions, omitted: found - regions.length };
 }
 
 /**
@@ -329,6 +476,11 @@ export async function landState(runId: string): Promise<LandState | null> {
  * A three-way merge in memory: no checkout, no index, nothing written to any
  * working tree. It does add loose objects to the repository's object store,
  * which gc collects — that is the whole cost of finding out honestly.
+ *
+ * Those objects are the reason the conflicting *content* can be shown before
+ * anyone commits to anything: the tree merge-tree writes holds each conflicted
+ * file exactly as a real merge would leave it, markers and all, so the operator
+ * sees what they would be reconciling without a merge having happened.
  */
 async function previewMerge(
   repoRoot: string,
@@ -338,8 +490,51 @@ async function previewMerge(
   // No `--name-only`: it lands the conflict list in a simpler shape but arrived
   // two releases after `--write-tree` itself, and this has to work on whatever
   // git the host mounted.
-  const res = await git(repoRoot, ["merge-tree", "--write-tree", target, branch]);
-  return parseMergeTree(res.stdout, res.stderr, res.code);
+  const res = await git(repoRoot, ["merge-tree", "--write-tree", "-z", target, branch]);
+  const preview = parseMergeTree(res.stdout, res.stderr, res.code);
+  if (preview.outcome !== "conflict") return preview;
+
+  // Field 0 of that same output, per the format `parseMergeTree` documents.
+  const tree = res.stdout.split("\0", 1)[0] ?? "";
+  return { outcome: "conflict", files: await withRegions(repoRoot, tree, preview.files) };
+}
+
+/**
+ * Fill in each conflicted file's markers from the merged tree.
+ *
+ * Capped at `MAX_CONTENT_FILES`, because this runs on every load of the land
+ * card and each file is another git process. Files past the cap keep
+ * `regionsRead: false` rather than an empty region list — "we did not look" and
+ * "there is nothing to see" are different sentences.
+ */
+async function withRegions(
+  repoRoot: string,
+  tree: string,
+  files: ConflictFile[],
+): Promise<ConflictFile[]> {
+  if (!tree) return files;
+
+  const out: ConflictFile[] = [];
+  for (const file of files) {
+    if (out.length >= MAX_CONTENT_FILES) {
+      out.push(file);
+      continue;
+    }
+    // Not every conflict leaves markers: a modify/delete keeps one version
+    // whole, and a path that is not in the merged tree, or a file too large to
+    // read, returns nothing at all. All three mean "no regions", which the
+    // file's own message already explains.
+    const blob = await git(repoRoot, ["show", `${tree}:${file.path}`], {
+      maxBytes: MAX_CONTENT_BYTES,
+    });
+    if (!blob.ok) {
+      out.push(file);
+      continue;
+    }
+    const { regions, omitted } = conflictRegions(blob.stdout);
+    out.push({ ...file, regions, regionsOmitted: omitted, regionsRead: true });
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -385,7 +580,7 @@ export function landRefusal(s: {
   if (s.ahead === 0) return "This branch has no commits of its own.";
 
   if (s.preview.outcome === "conflict") {
-    return `Merging into ${s.target} conflicts in ${s.preview.files.length} file(s). Resolve it by hand.`;
+    return `Merging into ${s.target} conflicts in ${s.preview.files.length} file(s). Resolve them on the branch first.`;
   }
   if (s.preview.outcome === "unknown") return s.preview.reason;
 
@@ -410,7 +605,16 @@ export function landRefusal(s: {
 /* ------------------------------------------------------------------ */
 
 export type LandOutcome =
-  | { ok: true; message: string }
+  | {
+      ok: true;
+      message: string;
+      /**
+       * The `run_reviews` row a conflict resolution started, for a caller that
+       * has to wait for it. Absent when nothing was spawned — including the
+       * resolution that finds the branches agree after all.
+       */
+      assistId?: string;
+    }
   | { ok: false; reason: string; conflicts?: string[] };
 
 /**
@@ -724,6 +928,10 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
     permissionMode: "acceptEdits",
     prompt: resolvePrompt(branch, target, conflicted),
     counts: { files: conflicted.length, shown: conflicted.length, truncated: false },
+    // Recorded now rather than derived later: the throwaway checkout is gone
+    // minutes from here, and these paths are what makes the resolution's own
+    // change readable afterwards instead of the whole merge.
+    paths: conflicted,
     after: async (result) => {
       // The spawn itself failed — a crash, a timeout, a refusal. Roll back and
       // keep its own error: reporting "markers are still in f.txt" would be
@@ -771,6 +979,11 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
         };
       }
 
+      // Read before the checkout goes: this is the only handle on what the
+      // resolution decided. Its prose survives in the row either way, but prose
+      // is what the agent says it did, not what it did.
+      const head = await git(checkout.path, ["rev-parse", "HEAD"]);
+
       await discardCheckout(repoRoot, checkout);
       emitRunEvent({
         runId,
@@ -778,7 +991,10 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
         kind: "land",
         payload: { branch, target, resolved: conflicted },
       });
-      return { status: "completed" as const };
+      return {
+        status: "completed" as const,
+        resolvedCommit: head.ok ? head.stdout : undefined,
+      };
     },
   });
 
@@ -786,8 +1002,48 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
     ? {
         ok: true,
         message: `Resolving ${conflicted.length} conflicting file(s) in an isolated checkout. Your own checkout is not involved.`,
+        assistId: outcome.id,
       }
     : { ok: false, reason: outcome.reason };
+}
+
+/** What a resolution actually did, as a diff. */
+export interface ResolutionChange {
+  /** The merge commit it made on the run's branch. */
+  commit: string;
+  files: DiffFile[];
+  /** Files whose patch was withheld for size. */
+  omittedPatches: number;
+}
+
+/**
+ * The change a completed resolution made to the files it was given.
+ *
+ * The agent's answer says what it kept and why; this says what is on the
+ * branch. It is taken against the merge commit's **first** parent — the branch
+ * as it stood before the target arrived — so each file reads as "how this ended
+ * up, against what the run had committed", which is the question an operator
+ * about to land it is actually asking.
+ *
+ * Restricted to the recorded conflicted paths. The rest of the merge is
+ * whatever git reconciled by itself, and folding it in here would present it as
+ * something a model decided.
+ */
+export async function resolutionChange(
+  row: ReviewRow,
+): Promise<ResolutionChange | null> {
+  if (row.kind !== "resolve" || row.status !== "completed" || !row.resolved_commit) {
+    return null;
+  }
+  const paths = reviewPaths(row);
+  if (paths.length === 0) return null;
+
+  const run = getRun(row.run_id);
+  const repoRoot = run?.repo_root ? repoPathFor(run.repo_root) : null;
+  if (!repoRoot) return null;
+
+  const diff = await commitDiff(repoRoot, row.resolved_commit, paths);
+  return diff && { commit: row.resolved_commit, ...diff };
 }
 
 function readIfPossible(file: string): string | null {

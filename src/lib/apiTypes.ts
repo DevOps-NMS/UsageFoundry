@@ -99,6 +99,38 @@ export interface UsageResponse {
      */
     account: AccountProfileDTO;
   };
+  /**
+   * What runs have reported over their own telemetry inside the same 5-hour
+   * window as `snapshot.session`. `null` when agent self-reporting is off or
+   * nothing has reported — a normal state, not an error.
+   *
+   * A third reading on a page whose meters are transcript-derived, and kept
+   * apart from them: it moves while a work cycle is still going, which neither
+   * `runs.spent_usd` nor the guard can. Never add it to `snapshot` figures.
+   */
+  telemetry: TelemetryWindowDTO | null;
+}
+
+/** One run's first-party total inside the window. */
+export interface TelemetryRunDTO {
+  runId: string;
+  /** `null` only if the run row has gone — runs are not deleted, so in practice set. */
+  status: RunDTO["status"] | null;
+  requests: number;
+  costUSD: number;
+  tokens: number;
+  lastAt: number;
+}
+
+export interface TelemetryWindowDTO {
+  requests: number;
+  costUSD: number;
+  tokens: number;
+  lastAt: number;
+  runCount: number;
+  workingRunCount: number;
+  /** Heaviest first, and shorter than `runCount` when there were more. */
+  runs: TelemetryRunDTO[];
 }
 
 /**
@@ -240,6 +272,36 @@ export interface RunDTO {
   queuePosition?: number;
 }
 
+/**
+ * Long enough for a sentence-shaped template name, short enough that the picker
+ * stays one line. Here rather than in `templates.ts` so the form can bound the
+ * input without a client component importing a module that opens SQLite.
+ */
+export const MAX_TEMPLATE_NAME = 80;
+
+/**
+ * A saved task prompt and the guards to run it under.
+ *
+ * `permissionMode` is top-level here rather than folded into `budget` the way
+ * `RunDTO` folds it: on a run that key is a historical record of what was used,
+ * on a template it is a setting the operator is choosing again every time they
+ * apply it, and the UI has to warn about it separately.
+ */
+export interface RunTemplateDTO {
+  id: string;
+  name: string;
+  prompt: string;
+  /** Null means the template does not name a folder — the form asks for one. */
+  mountId: string | null;
+  /** Path within the mount. `""` is the mount root, and is not null. */
+  folder: string | null;
+  isolate: boolean;
+  permissionMode: string;
+  budget: BudgetPolicyDTO;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface RunEventDTO {
   id?: number;
   runId: string;
@@ -319,13 +381,44 @@ export interface RunReviewDTO {
   diffFiles: number;
   diffShown: number;
   truncated: boolean;
+  /** The files a resolution was handed. Empty for a review. */
+  paths: string[];
+  /**
+   * What a completed resolution changed on the branch, against the branch as it
+   * stood before the merge. Null while it is running, when it failed, and for a
+   * review — and for resolutions made before this was recorded.
+   */
+  changed: ResolutionChangeDTO | null;
+}
+
+export interface ResolutionChangeDTO {
+  commit: string;
+  files: DiffFileDTO[];
+  omittedPatches: number;
+}
+
+/** One `<<<<<<< … >>>>>>>` block, as the merge would leave it. */
+export interface ConflictRegionDTO {
+  text: string;
+  truncated: boolean;
+}
+
+export interface ConflictFileDTO {
+  path: string;
+  /** git's own name for the conflict — `content`, `modify/delete`, … */
+  type: string | null;
+  message: string | null;
+  regions: ConflictRegionDTO[];
+  regionsOmitted: number;
+  /** False when the merged content was not read, so `regions` says nothing. */
+  regionsRead: boolean;
 }
 
 export type MergePreviewDTO =
   | { outcome: "already-merged" }
   | { outcome: "fast-forward" }
   | { outcome: "clean" }
-  | { outcome: "conflict"; files: string[] }
+  | { outcome: "conflict"; files: ConflictFileDTO[] }
   | { outcome: "unknown"; reason: string };
 
 export interface LandStateDTO {
@@ -355,6 +448,38 @@ export interface LandStateDTO {
   landedStrategy: string | null;
 }
 
+/** One branch waiting to be landed, or already dealt with. */
+export interface MergeQueueItemDTO {
+  id: string;
+  runId: string;
+  branch: string | null;
+  target: string | null;
+  position: number;
+  status:
+    | "queued"
+    | "landing"
+    | "resolving"
+    | "landed"
+    | "failed"
+    | "skipped"
+    | "cancelled";
+  strategy: string;
+  autoResolve: boolean;
+  message: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** What its conflict resolution cost. Never added to the run's spend. */
+  resolveCostUSD: number;
+}
+
+export interface MergeQueueDTO {
+  batchId: string | null;
+  /** True while the worker is between or inside merges. */
+  working: boolean;
+  items: MergeQueueItemDTO[];
+}
+
 export interface BranchSummaryDTO {
   runId: string;
   runStatus: RunDTO["status"];
@@ -377,6 +502,8 @@ export interface BranchInventoryDTO {
   branches: BranchSummaryDTO[];
   /** Runs with a branch that the per-request cap left out. */
   notShown: number;
+  /** `settings.landStrategy`, so the queue form can default to it. */
+  defaultStrategy: "merge" | "squash";
 }
 
 export interface RateLimitEntryDTO {

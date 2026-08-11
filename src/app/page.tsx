@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { LiveTelemetry } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
@@ -30,10 +31,23 @@ function ceilingDetail(w: WindowStateDTO): string {
 
 type Dimension = "model" | "project" | "effort" | "agent" | "skill";
 
+/** Poll cadence: the second one applies while a run is still working. */
+const POLL_IDLE_MS = 10_000;
+const POLL_WORKING_MS = 5_000;
+
 export default function Dashboard() {
   const [data, setData] = useState<UsageResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dimension, setDimension] = useState<Dimension>("model");
+
+  /**
+   * A run in flight is the one time this page has something new to say every
+   * few seconds — its telemetry lands per API request, while `runs.spent_usd`
+   * waits for the end of the whole work cycle. Only 2x faster, and only while
+   * that is true: `buildSnapshot` re-aggregates the full history on every
+   * request and the agent is competing for the same CPU.
+   */
+  const working = (data?.telemetry?.workingRunCount ?? 0) > 0;
 
   useEffect(() => {
     let alive = true;
@@ -52,12 +66,12 @@ export default function Dashboard() {
       }
     };
     load();
-    const t = setInterval(load, 10_000);
+    const t = setInterval(load, working ? POLL_WORKING_MS : POLL_IDLE_MS);
     return () => {
       alive = false;
       clearInterval(t);
     };
-  }, []);
+  }, [working]);
 
   /**
    * Five separate cards became one switchable table. They were identical in
@@ -117,7 +131,7 @@ export default function Dashboard() {
     return <Empty>Reading transcripts…</Empty>;
   }
 
-  const { snapshot: s, meta } = data;
+  const { snapshot: s, meta, telemetry } = data;
   const noCeilings = !meta.hasSessionCeiling && !meta.hasWeeklyCeiling;
   const cacheShare =
     s.weekly.tokens > 0 ? s.weekly.agg.tokens.cacheRead / s.weekly.tokens : null;
@@ -260,6 +274,12 @@ export default function Dashboard() {
             )}
         </Card>
       </section>
+
+      {/* Sits under the session meter because it is a footnote to it: the same
+          five hours, read a different way. Absent entirely when agent
+          self-reporting is off or nothing has reported — the same rule the run
+          page's telemetry card follows. */}
+      {telemetry && <LiveTelemetry telemetry={telemetry} now={s.now} />}
 
       <section className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <Card emphasis="quiet">

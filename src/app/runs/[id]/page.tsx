@@ -272,6 +272,12 @@ export default function RunDetail({
           {run.mountLabel ? run.relPath || "." : shortPath(run.folder, 3)}
         </span>{" "}
         · started {fmtDateTime(run.started_at ?? run.created_at)} ·{" "}
+        {/* Not a resume: this opens the new-run form pre-filled from this
+            run's stored config — same task, same folder, same guards, same
+            permission mode — and changes nothing until it is submitted. It is
+            also how a template gets seeded from something already known to
+            work, since the form can save whatever it is holding. */}
+        <Link href={`/runs/new?from=${run.id}`}>start another like this</Link> ·{" "}
         <Link href="/runs">back to runs</Link>
       </p>
 

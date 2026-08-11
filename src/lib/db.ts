@@ -120,8 +120,78 @@ function migrate(db: Database.Database) {
       truncated   INTEGER NOT NULL DEFAULT 0
     );
 
+    -- A saved task prompt and the guards it should run under.
+    --
+    -- Its own table rather than a key in the settings blob because this is a
+    -- list with identity — rows are created, renamed and deleted individually,
+    -- and one of them is picked by id. A template is *form input*, never a run:
+    -- it holds no folder claim, consumes no concurrency slot, and nothing
+    -- derived from activeRuns() can see it. There is deliberately no foreign
+    -- key to runs either — a template outlives the run it was seeded from.
+    --
+    -- mount_id and folder are nullable together and mean "ask when this is
+    -- used". Null is not the same as "": the empty string is a real answer, the
+    -- mount root, which is why the folder column cannot use it as a sentinel.
+    CREATE TABLE IF NOT EXISTS run_templates (
+      id              TEXT PRIMARY KEY,
+      name            TEXT NOT NULL,
+      prompt          TEXT NOT NULL,
+      mount_id        TEXT,
+      folder          TEXT,
+      isolate         INTEGER NOT NULL DEFAULT 1,
+      -- Stored beside the budget rather than inside it, unlike runs.budget,
+      -- because this is the one field on a template that decides what a spawned
+      -- agent is allowed to do. A column is greppable; a key in a JSON blob is
+      -- not. See the narrowing note in templates.ts.
+      permission_mode TEXT NOT NULL,
+      budget          TEXT NOT NULL,
+      created_at      INTEGER NOT NULL,
+      updated_at      INTEGER NOT NULL
+    );
+
+    -- Branches waiting to be landed, one after another.
+    --
+    -- Landing several branches is several merges and each changes the base for
+    -- the next, which is why they are a *queue* rather than a batch: exactly one
+    -- is in flight, and every one of them is re-previewed against git
+    -- immediately before its own merge rather than against whatever the page
+    -- showed when the queue was made.
+    --
+    -- Its own table for the reason run_templates has one: this is a list with
+    -- identity, whose rows are created, worked through and reported on
+    -- individually. The position column is the operator's chosen order and is
+    -- the only thing that decides what runs next — never created_at, which would
+    -- silently reorder two branches queued in the same millisecond.
+    CREATE TABLE IF NOT EXISTS merge_queue (
+      id           TEXT PRIMARY KEY,
+      batch_id     TEXT NOT NULL,
+      run_id       TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      position     INTEGER NOT NULL,
+      strategy     TEXT NOT NULL,
+      -- Whether a conflict may be sent to Claude. Per batch, recorded per row:
+      -- it authorises billed spend, and an authorisation belongs with the thing
+      -- it authorises rather than in a setting that could change underneath it.
+      auto_resolve INTEGER NOT NULL DEFAULT 0,
+      status       TEXT NOT NULL,
+      -- What happened, in the operator's words rather than git's where the two
+      -- differ. Always set for a row that is no longer queued.
+      message      TEXT,
+      created_at   INTEGER NOT NULL,
+      started_at   INTEGER,
+      finished_at  INTEGER,
+      -- Cost of the conflict resolution this row paid for, if it needed one.
+      -- Never added to the run's spend, for the same reason run_reviews.cost_usd
+      -- is not: it did no work cycle.
+      resolve_cost REAL NOT NULL DEFAULT 0
+    );
+
     CREATE INDEX IF NOT EXISTS idx_run_events_run
       ON run_events(run_id, id);
+    CREATE INDEX IF NOT EXISTS idx_merge_queue_batch
+      ON merge_queue(batch_id, position);
+    -- The worker's own query: the next queued row, across every batch.
+    CREATE INDEX IF NOT EXISTS idx_merge_queue_status
+      ON merge_queue(status, position);
     CREATE INDEX IF NOT EXISTS idx_run_reviews_run
       ON run_reviews(run_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_runs_created
@@ -131,6 +201,13 @@ function migrate(db: Database.Database) {
       ON runs(status);
     CREATE INDEX IF NOT EXISTS idx_otlp_run
       ON otlp_requests(run_id, ts);
+    -- Names identify a template to a person, so two that differ only in case
+    -- are the same template as far as the picker is concerned. Enforced in the
+    -- schema rather than checked before the insert: this process is a single
+    -- writer, but a check-then-insert is still the wrong shape for a rule the
+    -- database can state outright.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_templates_name
+      ON run_templates(name COLLATE NOCASE);
   `);
 
   // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already
@@ -188,6 +265,14 @@ function migrate(db: Database.Database) {
   // fail out on restart — and because both are the same accounting fact:
   // money spent on a run *outside* its work cycles.
   addColumn(db, "run_reviews", "kind", "TEXT NOT NULL DEFAULT 'review'");
+
+  // What a conflict resolution produced. The merge commit is the only handle on
+  // it: the checkout it was made in is removed as soon as the row is written,
+  // and the row's text is the agent's account of the work rather than the work.
+  // The paths are the files it was handed, kept so that what is shown afterwards
+  // is the resolution rather than everything the merge brought across.
+  addColumn(db, "run_reviews", "resolved_commit", "TEXT");
+  addColumn(db, "run_reviews", "resolved_paths", "TEXT");
 }
 
 function addColumn(
