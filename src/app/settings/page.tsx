@@ -169,7 +169,10 @@ export default function SettingsPage() {
       <h1 className="mb-1 text-xl font-semibold tracking-tight">Settings</h1>
       <p className="mb-4 text-ink-muted">
         Transcripts: <span className="mono">{String(env.claudeHome ?? "—")}</span>{" "}
-        · Admin key: {env.adminKeyConfigured ? "configured" : "not set"}
+        · Admin key: {env.adminKeyConfigured ? "configured" : "not set"} · GitHub:{" "}
+        {env.githubTokenConfigured
+          ? "token configured"
+          : "no token (runs cannot push or use gh)"}
         <br />
         Workspaces:{" "}
         {workspaceMounts.length === 0 ? (
@@ -758,7 +761,13 @@ export default function SettingsPage() {
           hunt for after editing something at the top. */}
       {/* The negative margin must match the shell's gutter at each breakpoint,
           or the bar is wider than the page and scrolls it sideways. */}
-      <div className="sticky bottom-0 -mx-4 border-t border-line bg-canvas/95 px-4 py-3 backdrop-blur sm:-mx-5 sm:px-5">
+      {/* Opaque and raised, not translucent: this bar spends most of its life
+          lying across the middle of a card, and `bg-canvas/95` + blur left the
+          card's border and text showing faintly through it — in dark mode,
+          where canvas and surface are four hex digits apart, it read as a card
+          torn in half with a button floating in the gap rather than as a bar in
+          front of one. The upward shadow is what says "in front". */}
+      <div className="sticky bottom-0 z-10 -mx-4 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
         <ButtonRow>
           <Button onClick={save} disabled={busy || !dirty}>
             {busy ? "Saving…" : "Save settings"}

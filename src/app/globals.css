@@ -127,6 +127,10 @@
   --shadow-e1: 0 1px 2px light-dark(rgb(15 23 32 / .06), rgb(0 0 0 / .40));
   --shadow-e2: 0 4px 12px -2px light-dark(rgb(15 23 32 / .10), rgb(0 0 0 / .55));
   --shadow-e3: 0 12px 32px -8px light-dark(rgb(15 23 32 / .16), rgb(0 0 0 / .70));
+  /* e2 cast upwards, for a bar pinned to the bottom of the viewport. Depth is
+     what separates "floating above the page" from "the card is sliced in
+     half", and the direction has to match where the element actually is. */
+  --shadow-bar: 0 -4px 12px -2px light-dark(rgb(15 23 32 / .10), rgb(0 0 0 / .55));
 
   --container-shell: 73.75rem; /* 1180px */
 }
@@ -271,6 +275,10 @@ section + section { margin-top: 24px; }
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Same reason as the kit's CardTitle: this row carries the card's buttons
+     ("Stop run", "Try now" + "Give up"), and a button that cannot wrap is a
+     button that squashes its own label onto two lines and then overflows. */
+  flex-wrap: wrap;
 }
 
 .stat { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }

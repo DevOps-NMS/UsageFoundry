@@ -6,6 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import {
   CLAUDE_BIN,
+  GITHUB_TOKEN,
   OTLP_SELF_URL,
   WORKSPACE_MOUNTS,
   mountById,
@@ -658,13 +659,60 @@ export function isUsageLimit(text: string): boolean {
 }
 
 /**
+ * Whether a refusal is a transport or upstream failure that clears by itself.
+ *
+ * The third answer to a refusal, and the one this app used to be missing: a
+ * cycle can die because the connection dropped mid-response or the upstream
+ * was briefly overloaded, which says nothing about the run, the allowance or
+ * the task. Filing that as `failed` ends a run for a fault that fixes itself,
+ * and does it in the state where stopping costs most — a live session, a held
+ * folder, an agent part-way through the work.
+ *
+ * The stream-truncation sentences are the CLI's own, read out of the shipped
+ * binary rather than guessed. It renders `API Error: ` followed by one of
+ * `Connection closed mid-response…`, `Server error mid-response…`, `Response
+ * stalled mid-stream…`, or the two `…while thinking, before producing a
+ * response. Try again.` variants — so they are matched on the fragments the
+ * five share rather than as whole sentences, which is what keeps a reworded
+ * sixth one from falling out of the set.
+ *
+ * The rest is the SDK's own error text arriving by the same route: a status
+ * for each code Anthropic documents as retryable, the `error.type` names those
+ * bodies carry, and the socket failures that never reach a status at all.
+ *
+ * Narrow in three deliberate ways. It never sees an allowance refusal, because
+ * `isUsageLimit` is tested first and a wall is not a blip. It matches no 4xx
+ * but 408 and 429 — a malformed request, a revoked key or an exhausted credit
+ * balance fails identically however many times it is retried. And the status
+ * match is anchored to the `API Error:` prefix, because a bare `429` or `500`
+ * is ordinary text.
+ */
+export function isTransientApiError(text: string): boolean {
+  if (!text) return false;
+  return (
+    /mid-response|mid-stream|before producing a response/i.test(text) ||
+    /\bAPI Error:\s*(?:408|429|500|502|503|504|529)\b/i.test(text) ||
+    /\b(?:overloaded_error|api_error|rate_limit_error|timeout_error)\b/i.test(
+      text,
+    ) ||
+    /\bconnection error\b|\bunable to connect to api\b/i.test(text) ||
+    /\b(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN)\b/.test(
+      text,
+    ) ||
+    /socket hang up|fetch failed/i.test(text)
+  );
+}
+
+/**
  * An allowance refusal that only ever reached stderr.
  *
  * Deliberately narrower than the `<synthetic>` path: stderr carries build
  * noise, deprecation warnings and whatever the agent's own tooling printed, so
  * only a line that classifies as an allowance refusal is promoted to one.
  * Anything else stays an ordinary log line and the exit code decides, exactly
- * as it does today.
+ * as it does today. `isTransientApiError` is deliberately *not* consulted here:
+ * an agent's own build output says "connection error" all the time, and a run
+ * must not re-spawn because its test suite could not reach a registry.
  */
 function refusalInStderr(tail: string): string | null {
   if (!tail) return null;
@@ -691,6 +739,52 @@ const MAX_REFUSAL_WAIT_MS = 6 * 3_600_000;
  * else's counter, and a misread one must not re-park forever.
  */
 export const MAX_PAUSES_PER_RUN = 3;
+
+/**
+ * How long a run waits before re-spawning after a transient API failure.
+ *
+ * Seconds, not minutes: these are dropped connections and overload bursts, and
+ * the whole point of separating them from an allowance refusal is that there
+ * is no window to wait out. The ladder still climbs, because the second
+ * failure in a row is evidence the first was not a one-off.
+ *
+ * Retried in place rather than parked. `resume_at` and `sweepPaused` exist to
+ * wait out a five-hour window, and parking a run for a 20-second fault would
+ * yield its folder to whatever is queued behind it — for a run whose session
+ * is intact and whose next cycle is seconds away.
+ */
+const TRANSIENT_BACKOFF_MS = [5_000, 20_000, 60_000];
+
+/**
+ * How many transient failures **in a row** one run may retry.
+ *
+ * Counted consecutively and reset by any cycle that gets through, so a long
+ * run that meets one blip an hour is never terminated by the total, while an
+ * upstream that is actually down ends the run inside ~85 seconds and says so.
+ * Held in `startRun`'s own frame rather than on the row, like `resumeRetried`
+ * and unlike `pause_count`: a restart hours later is not "in a row".
+ */
+export const MAX_TRANSIENT_RETRIES = TRANSIENT_BACKOFF_MS.length;
+
+/**
+ * Sleep, unless the run is interrupted first.
+ *
+ * The loop's `cancelled` checkpoints only run between cycles, so sleeping
+ * straight through a backoff would leave `stopRun` unacknowledged for its whole
+ * length — the operator presses stop and watches the row sit `running`. Polled
+ * rather than event-driven because `interruptRun` is the single kill path, and
+ * a second notification channel into it is a second thing to keep in sync.
+ */
+async function waitUnlessInterrupted(id: string, ms: number): Promise<void> {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (interrupts.has(id)) return;
+    const slice = Math.min(500, until - Date.now());
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, slice).unref?.();
+    });
+  }
+}
 
 /**
  * When a run refused for want of allowance should try again.
@@ -1595,6 +1689,88 @@ function telemetryEnv(runId: string): Record<string, string> {
 }
 
 /**
+ * Answers git's credential request for github.com from `$GH_TOKEN`.
+ *
+ * A `!`-prefixed helper is a command git runs through a shell, with the
+ * operation appended as an argument — hence the `test "$1" = get`, so `store`
+ * and `erase` are no-ops rather than errors. The token is read from the
+ * environment at call time instead of being baked into the value, so it never
+ * appears in `git config --list` output the agent may paste into its own log.
+ */
+const GITHUB_CREDENTIAL_HELPER =
+  `!f() { test "$1" = get && printf 'username=x-access-token\\npassword=%s\\n' "$GH_TOKEN"; }; f`;
+
+/**
+ * GitHub credentials for a work cycle, or nothing when no token is configured.
+ *
+ * Everything an agent does with GitHub — `gh issue view`, `git push`, opening a
+ * pull request — needs a credential the container has no other way to get. The
+ * `~/.claude` mount carries Claude's login and nothing else: no `~/.gitconfig`,
+ * no `~/.ssh`, no `~/.config/gh`. So without this every one of those commands
+ * fails, and it fails *inside* a tool call the run loop never inspects — the
+ * cycle ends looking like the agent chose not to push.
+ *
+ * Three things are set, and each covers a different way that failure arrives:
+ *
+ *   `GH_TOKEN`/`GITHUB_TOKEN` — what the `gh` CLI reads. Both, because scripts
+ *   and actions-derived snippets reach for either.
+ *
+ *   a credential helper for `https://github.com` — what plain `git` reads.
+ *   Registered by *resetting the list first* (an empty value, then ours): a
+ *   repository cloned on the host can carry `credential.helper` in its own
+ *   config naming a program this image does not have — `osxkeychain` is the
+ *   common one — and git consults helpers in configured order.
+ *
+ *   `url.…insteadOf` — an SSH remote rewritten to HTTPS. This container holds
+ *   no key and reaches no agent, so `git@github.com:` can never authenticate
+ *   here however the token is set; it is the difference between a repository
+ *   cloned over SSH and one cloned over HTTPS, which is exactly the kind of
+ *   difference that makes this fail on *some* runs and not others.
+ *
+ * All of it travels as `GIT_CONFIG_*` rather than being written to a config
+ * file: the settings then apply to every git the agent runs, in whatever
+ * repository, and disappear with the process instead of outliving the run in a
+ * mounted working tree.
+ *
+ * The token is deliberately absent from `reviewEnv()` in `review.ts` — it
+ * strips the whole `UF_` namespace, and a reviewer that cannot write files has
+ * nothing to authenticate. Same for `gitEnv()` in `git.ts`, whose children run
+ * repository-controlled hooks.
+ *
+ * `token` is a parameter so the function is pure and testable; production
+ * always uses the process-level value.
+ */
+export function githubEnv(token: string = GITHUB_TOKEN): Record<string, string> {
+  if (!token) return {};
+
+  const config: Array<[string, string]> = [
+    ["credential.https://github.com.helper", ""],
+    ["credential.https://github.com.helper", GITHUB_CREDENTIAL_HELPER],
+    ["url.https://github.com/.insteadOf", "git@github.com:"],
+    ["url.https://github.com/.insteadOf", "ssh://git@github.com/"],
+  ];
+
+  const env: Record<string, string> = {
+    GH_TOKEN: token,
+    GITHUB_TOKEN: token,
+    // A wrong or expired token should end the command, not the cycle: with a
+    // helper installed nothing should prompt, and a git that decides to ask
+    // anyway has no stdin to ask on and would sit there until the run's own
+    // duration limit stopped it.
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_COUNT: String(config.length),
+  };
+  // Every index below the count must carry both halves — git ignores the whole
+  // block if one is missing, which would put the run straight back into the
+  // failure this function exists to remove, silently.
+  config.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
+}
+
+/**
  * Signal a child and everything it started.
  *
  * Falls back to signalling the process alone when the group is unavailable —
@@ -1643,7 +1819,7 @@ function runIteration(
     // quotes, backticks, or semicolons is inert rather than interpreted.
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {
       cwd,
-      env: childEnv(telemetryEnv(runId)),
+      env: childEnv({ ...telemetryEnv(runId), ...githubEnv() }),
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, so a kill reaches the builds, test runners and
       // servers the agent started. Those are what actually hold the working
@@ -1963,6 +2139,8 @@ export async function startRun(id: string): Promise<void> {
   let justRetriggered = false;
   let cyclesThisSegment = 0;
   let resumeRetried = false;
+  /** Transient API failures retried since the last cycle that got through. */
+  let transientRetries = 0;
 
   /**
    * Take a session id as the run's own, and record it immediately.
@@ -2237,24 +2415,88 @@ export async function startRun(id: string): Promise<void> {
       // before the DONE test below, because a refusal that exits 0 would
       // otherwise match nothing and re-spawn straight back into the wall.
       const refusal = res.apiError ?? refusalInStderr(res.stderrTail);
-      if (refusal) {
+
+      // A transient error the CLI recovered from is not a refusal at all, and
+      // this is the difference between the two halves of the same fault. When a
+      // stream drops after some blocks have been yielded, Claude Code finalises
+      // the partial response with an ordinary `end_turn` and carries the cycle
+      // on: the `<synthetic>` turn saying `Connection closed mid-response` is
+      // then a *warning about a completed cycle*, followed by a clean `result`
+      // and exit 0. `apiError` latches on first sight and nothing downstream
+      // asked whether the cycle went on to succeed, so a run whose work cycle
+      // finished was still being ended by the marker it left behind.
+      //
+      // Both conditions are load-bearing. Success is read from the CLI's own
+      // verdict — its `result` event, a success subtype and a zero exit — never
+      // inferred from the text. And an allowance refusal is excluded by name,
+      // because a wall that somehow exits 0 must still stop the run rather than
+      // re-spawn into itself; that is the whole reason this test sits ahead of
+      // the exit-code test.
+      const recovered =
+        refusal !== null &&
+        res.sawResult &&
+        !res.isError &&
+        res.exitCode === 0 &&
+        !isUsageLimit(refusal) &&
+        isTransientApiError(refusal);
+      if (recovered) {
+        log(
+          id,
+          `Claude Code reported an API error and recovered from it within the work cycle: ${refusal}`,
+        );
+      }
+
+      if (refusal && !recovered) {
         const limited = isUsageLimit(refusal);
         const canWait =
           limited &&
           policy.enforcement === "live-resume" &&
           (run.pause_count ?? 0) < MAX_PAUSES_PER_RUN;
+        // A dropped connection is neither the wall nor the agent's doing, and
+        // it clears in seconds — so it is retried here rather than parked or
+        // reported as a failure. Tested after `limited` because an exhausted
+        // allowance is not something backing off five seconds can fix.
+        const retryable = !limited && isTransientApiError(refusal);
+        const retrying = retryable && transientRetries < MAX_TRANSIENT_RETRIES;
+        const backoff = TRANSIENT_BACKOFF_MS[transientRetries];
 
         emit({
           runId: id,
           ts: Date.now(),
           kind: "error",
           payload: {
+            // The log line renders `message`, and this event had none — so the
+            // one entry that says why a run died read `✗ undefined`, with the
+            // actual sentence only on the row's stop reason.
+            message: retrying
+              ? `${refusal} — retrying in ${Math.round(backoff / 1000)}s (${
+                  transientRetries + 1
+                } of ${MAX_TRANSIENT_RETRIES}).`
+              : refusal,
             apiError: refusal,
             exitCode: res.exitCode,
             usageLimit: limited,
             waiting: canWait,
+            retrying,
           },
         });
+
+        if (retrying) {
+          transientRetries += 1;
+          // Refunded for the same reason a parked cycle is: the loop increments
+          // before it spawns, so this cycle has already been charged for a turn
+          // that never completed. Left charged, a run with `maxIterations: 1`
+          // could only ever retry into its own cycle cap.
+          iterations -= 1;
+          // And this segment still has not completed a cycle, which is exactly
+          // what `cyclesThisSegment` counts. Without the matching decrement a
+          // retry that fails to resume the session is no longer the segment's
+          // first cycle, so `looksLikeResumeFailure` stops recognising it and
+          // the run reports "exited with code 1" instead of naming the session.
+          cyclesThisSegment -= 1;
+          await waitUnlessInterrupted(id, backoff);
+          continue;
+        }
 
         if (canWait) {
           // Not `snapshot.session.endsAt`. This snapshot predates the cycle, so
@@ -2279,10 +2521,21 @@ export async function startRun(id: string): Promise<void> {
 
         stopReason = limited
           ? `Claude refused the work cycle: ${refusal}`
-          : `Claude Code refused the request: ${refusal}`;
+          : retryable
+            ? // Reached only with the retries spent, so say that rather than
+              // reporting the last attempt as if it were the only one.
+              `Claude Code hit a transient API error on ${
+                MAX_TRANSIENT_RETRIES + 1
+              } attempts in a row: ${refusal}`
+            : `Claude Code refused the request: ${refusal}`;
         finalStatus = "failed";
         break;
       }
+
+      // Reached only when this cycle was not cut short by a transient failure,
+      // which is what makes the count above "in a row": a run that meets one
+      // blip an hour must never accumulate its way to a stop.
+      transientRetries = 0;
 
       if (res.exitCode !== 0 || res.isError) {
         // A cycle resuming a session that a kill truncated mid-turn can be
