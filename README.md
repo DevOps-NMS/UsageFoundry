@@ -535,6 +535,49 @@ the guard by some other route.
 
 ---
 
+## The orchestrator chat
+
+Filling in the run form once is fine. Filling it in eleven times, once per open
+GitHub issue, is the part nobody does. The **Orchestrator** page is a chat that
+can read your issues and propose a run for each one — and then stops, because
+proposing and starting are deliberately different things here.
+
+Ask it something like *"check the open bugs on acme/api and propose a run for
+each one that has a reproduction"*. It will list your templates, list your
+folders, run `gh issue list`, and write one proposal per issue into the panel
+beside the conversation. Nothing is running at that point. You tick the ones you
+want and press Approve, and those become real runs — queued behind whatever is
+already working, under the concurrency limit you already set.
+
+**A proposal carries a task, not a policy.** This is the whole reason the feature
+is safe to have. Every guard a proposed run will start under — its budget, its
+work-cycle limit, its permission mode, whether it gets its own checkout — comes
+from a **template** you wrote and saved from the new-run form. The chat picks
+which template applies and what the task text says; it cannot set, raise or
+invent a single guard, and there is no field on a proposal that would let it. If
+no template fits, it is supposed to say so rather than propose against a wrong
+one. With no templates saved at all, it can propose nothing.
+
+**The approval is per batch and there is no way to turn it off.** Not a setting
+left switched on by default — there is no setting. The route takes the explicit
+list of proposals the page was showing when you clicked, so anything the chat
+added in between is not swept into a decision you did not see.
+
+**What the chat itself may do.** It runs with an allowlist: this app's four
+tools, `Read`/`Glob`/`Grep`, and read-only `gh` subcommands. It has no `Write`
+and no `Edit`, `gh api` is excluded because it can POST, and anything not on the
+list is refused and reported in the thread rather than swallowed — a chat that
+could not run `gh` should not read as a chat that found no issues.
+
+**It costs money, and the cost is shown apart.** A chat turn spends against the
+same 5-hour window as everything else. It is refused outright when that window is
+already past the ceiling you configured, and `chatTurnBudgetUSD` (default $2,
+blank for none) caps a single turn. What it has spent appears on the chat page
+only — never added to a run's spend and never to the dashboard meters, the same
+separation reviews already get.
+
+---
+
 ## Reviewing and landing what a run did
 
 A finished run tells you it spent $3.40 over four work cycles and put six commits
@@ -763,8 +806,11 @@ src/lib/
   diff.ts          a run's <base>...<branch> as a budgeted file list + patches
   review.ts        the on-demand reviewer (a third, deliberate child process)
   land.ts          merge preview, landing, branch deletion, branch inventory
-  db.ts            SQLite (runs, events, reviews, settings)
-src/app/api/       usage · account · runs · branches · calibrate · settings · folders
+  chat.ts          the orchestrator chat (a fourth, deliberate child process)
+  workspace.ts     the folder walk, shared by the picker and the chat's tools
+  db.ts            SQLite (runs, events, reviews, chats, proposals, settings)
+src/app/api/       usage · account · runs · branches · calibrate · settings ·
+                   folders · chat · mcp
 ```
 
 Transcripts are re-read incrementally: only bytes appended since the last scan
@@ -1039,6 +1085,24 @@ Built and exercised against real transcripts:
   inline text boxes wrapping inside a paragraph, and the save bar overlaying the
   page as a sticky bar is meant to.
 
+- **The orchestrator chat, end to end against the real CLI.** A template was
+  saved, a chat asked to list what it could see and propose one run, the
+  proposal was approved, and the resulting run started and completed — $0.22 for
+  the chat turn, $0.165 for the run. The chat's own tool calls landed on
+  `/api/mcp` (the hand-written `initialize` / `tools/list` / `tools/call`
+  handlers answer the pinned CLI 2.1.226 correctly), `list_folders` identified
+  the repository's GitHub remote, and the proposal recorded the right template
+  and folder.
+- **That the chat cannot write.** Asked directly, in the same turn, to create a
+  file inside the workspace, it reported `No such tool available: Write. Write
+  is disabled for this session, in subagents as well as here.` and the file did
+  not exist afterwards.
+- **That `--permission-mode plan` cannot be used for this.** Measured, not
+  assumed: the first attempt ran the chat in plan mode and every MCP call came
+  back `Cannot call mcp__uf__list_templates while in plan mode`, which would
+  have left the chat able to read GitHub and not this app. `manual` plus the
+  allowlist is what shipped, and the allowlist is therefore the guarantee.
+
 ### Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
@@ -1049,6 +1113,20 @@ through before trusting this unattended:
 - Whether `claude -p` flushes its `result` event on `SIGINT`. If it does, an
   interrupted cycle keeps its measured cost and the transcript reconciliation
   becomes a fallback rather than the norm.
+- **The chat's `/api/mcp` middleware exemption under an actual `UF_AUTH_TOKEN`.**
+  The end-to-end run above was done with auth off, because the sandbox it was
+  done in cannot execute Next's edge runtime at all (`EvalError: Code generation
+  from strings disallowed`), which takes `middleware.ts` out of the picture along
+  with the exemption. The capability check in the route itself is what was
+  exercised — every tool call carried one and was accepted. What has *not* been
+  watched is a token-protected deployment letting an unauthenticated `/api/mcp`
+  request through to that check. Worth ten minutes with `UF_AUTH_TOKEN` set
+  before trusting it, since the failure mode if the exemption is wrong in the
+  other direction is a chat whose every tool call 401s.
+- **The chat against a repository with a large number of open issues.**
+  `MAX_PENDING_PROPOSALS` (25) and `MAX_REMOTES_READ` (25) were reasoned about
+  rather than hit. What a chat does when it reaches the proposal cap mid-answer —
+  whether it reports the refusal usefully or simply stops — has not been seen.
 - **The derived 5-hour boundary against a live `/usage` reading.** Removing the
   hour rounding was argued from the CLI's own header handling and rendering, not
   from watching the two side by side, and what is left over — the opening turn's

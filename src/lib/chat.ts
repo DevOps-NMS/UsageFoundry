@@ -573,13 +573,25 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       prompt,
       "--output-format",
       "json",
-      // The one named guarantee that this child cannot write. The allowlist
-      // below is the second half: unlike a deny list it fails *closed*, so a
-      // write tool added by a future CLI is refused by not being on it.
+      // `manual` asks before every tool call, and a `-p` child has nobody to
+      // ask — so the allowlist below decides and everything else is refused.
+      //
+      // Not `plan`, which is what `review.ts` uses and what this was written
+      // against: plan mode refuses MCP tool calls outright ("Cannot call
+      // mcp__uf__list_templates while in plan mode"), so the chat could see
+      // GitHub and not this app. That leaves the allowlist as the whole
+      // guarantee rather than the second half of one, which is why the deny
+      // list below exists as well. A deny list fails open on the next write
+      // tool the CLI ships and is worth nothing on its own — under an
+      // allowlist that already excludes everything, it costs nothing and
+      // catches the one case that would otherwise be silent: a future CLI
+      // treating some write tool as always-permitted.
       "--permission-mode",
-      "plan",
+      "manual",
       "--allowedTools",
       ...ALLOWED_TOOLS,
+      "--disallowedTools",
+      ...DENIED_TOOLS,
       "--mcp-config",
       configPath,
       // Without this, an MCP server configured in the mounted ~/.claude joins
@@ -817,10 +829,11 @@ export function reconcileChatsOnBoot(): void {
  *
  * An allowlist rather than a deny list, which is the opposite of the choice
  * `review.ts` explains and for a reason that inverts cleanly: a review needs no
- * tools at all, so a named mode is the whole guarantee; this one needs `gh`, so
- * something has to name what it may run. A deny list fails open on the next
- * tool the CLI ships — an allowlist fails closed, and the failure is a refused
- * call recorded in `permission_denials` and shown in the thread.
+ * tools at all, so a named mode is the whole guarantee; this one needs `gh` and
+ * this app's own tools, so something has to name what it may run. A deny list
+ * fails open on the next tool the CLI ships — an allowlist fails closed, and
+ * the failure is a refused call recorded in `permission_denials` and shown in
+ * the thread rather than swallowed.
  *
  * `gh` entries are read-only subcommands, spelled out one at a time. `gh api`
  * is deliberately absent: it takes `--method POST` and would be a way to write
@@ -843,6 +856,20 @@ const ALLOWED_TOOLS = [
   "Bash(gh repo view:*)",
 ];
 
+/**
+ * The second latch.
+ *
+ * Redundant by construction — none of these is on the allowlist, so `manual`
+ * mode refuses them already — and kept anyway because the thing it guards
+ * against is a CLI that stops consulting the allowlist for some tool it comes
+ * to treat as always-available. That failure would be silent and would arrive
+ * on a version bump, which is the same class of risk `ARG CLAUDE_CLI_VERSION`
+ * exists to bound. It is not a substitute for the allowlist and must never be
+ * allowed to become one: a deny list has to grow an entry for every new write
+ * tool, and it fails open when it does not.
+ */
+const DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
+
 function systemPrompt(): string {
   return [
     "You are the orchestrator for UsageFoundry, a tool that runs unattended",
@@ -857,7 +884,7 @@ function systemPrompt(): string {
     "the budget, the work-cycle limit, the permission mode, whether the run gets",
     "its own checkout — and you cannot set or change any of them. If no template",
     "fits what is being asked, say that instead of proposing against a wrong one;",
-    "the operator makes templates on the Settings page.",
+    "the operator saves templates from the new-run form.",
     "",
     "Working method:",
     "- Call list_templates and list_folders before proposing anything. Folder",

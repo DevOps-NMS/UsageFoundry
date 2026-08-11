@@ -164,8 +164,8 @@ export default function ChatPage() {
       {templateCount === 0 && (
         <Notice tone="warn">
           There are no run templates yet, so the chat has no guards to propose
-          runs under and will say so. Create one on the{" "}
-          <Link href="/settings">Settings</Link> page first — the template is
+          runs under and will say so. Save one from the{" "}
+          <Link href="/runs/new">new run</Link> form first — the template is
           where a run&rsquo;s budget, work-cycle limit and permission mode come
           from.
         </Notice>

@@ -277,8 +277,8 @@ async function callTool(
         return text(
           "There are no run templates. A proposal must name one, because a " +
             "template is where a run's budget, work-cycle limit and permission " +
-            "mode come from. Tell the operator to create one on the Settings " +
-            "page before you can propose anything.",
+            "mode come from. Tell the operator to save one from the new-run " +
+            "form before you can propose anything.",
         );
       }
       return text(
