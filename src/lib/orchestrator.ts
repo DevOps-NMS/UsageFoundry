@@ -2405,6 +2405,15 @@ export async function startRun(id: string): Promise<void> {
       // Registered for exactly as long as a child exists. The closure reads
       // this function's own locals, which stay alive because it is suspended on
       // the await below — no database round trip, no second copy of progress.
+      //
+      // Reading them live is not the same as their being live. `spentUSD` and
+      // `spentTokens` come from the CLI's terminal `result` event, folded in
+      // below *after* `runIteration` returns — and the `finally` has removed
+      // this entry by then. So the spend fields are frozen at what the
+      // pre-cycle guard already passed, and `run_cost`/`run_tokens` are
+      // effectively between-cycles even here, however often the ticker runs.
+      // What genuinely moves per tick is `duration` and the two window
+      // fractions, which come from the ticker's own clock and snapshot.
       if (policy.enforcement !== "between-cycles") {
         liveGuards.set(id, {
           policy,
