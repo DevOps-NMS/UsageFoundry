@@ -426,6 +426,12 @@ nothing. Blank there sends the same pushback prompt as *When Claude says the
 task is done* above — re-read the task, run the tests, fix what fails — which
 you can edit in Settings.
 
+That is what the agent said, not how the run ended. A run that stopped because
+it used up its work cycles is *finished* in the same green sense and said
+nothing of the kind, so blank tells it to continue like any other run cut off
+mid-task — the pushback would open by telling it that it had reported the task
+complete, and then forbid it from starting the work it was reopened to do.
+
 Resuming asks for the limits again, pre-filled from the run, because the usual
 reason a run needs picking up is that its own limits ended it. They are totals,
 not top-ups: a run that used 1 of 1 cycles needs the cycle limit raised above 1,
@@ -1354,9 +1360,12 @@ through before trusting this unattended:
   another run has taken — were checked against the live container.
 - Picking a `completed` run back up with a follow-up message: that the note
   arrives as the next turn of the same conversation rather than as a new task,
-  and that leaving it blank sends the DONE pushback instead of the continuation
-  prompt. The branch that decides this is unit-tested; the delivery to a real
-  CLI is not.
+  and that leaving it blank sends the DONE pushback only to a run whose agent
+  really replied `DONE` — a run that merely used up its work cycles gets the
+  continuation. The branch that decides this is unit-tested, and the column it
+  reads was watched being written end to end against a *stub* CLI printing the
+  two `stream-json` events the loop reads. Neither the recording nor the
+  delivery has been through a real `claude`.
 - `detached: true`: that Ctrl-C during `npm run dev` still kills the agent (via
   the new `instrumentation.ts` handler) and that a long command the agent
   started dies with it.

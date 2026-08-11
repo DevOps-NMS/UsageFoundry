@@ -107,6 +107,12 @@ export interface RunRow {
   pause_count: number;
   done_retriggers: number;
   /**
+   * Whether the last work cycle replied DONE. `completed` covers both that and
+   * a run that merely used up its cycle cap, and the two need different first
+   * prompts when the run is picked up again — see `reopenPrompt`.
+   */
+  reported_done: number;
+  /**
    * The operator's next message, waiting for the next spawn. Set by
    * `reopenRun`, cleared by the loop as soon as it is delivered.
    */
@@ -1648,6 +1654,75 @@ function priorWorkNotice(cycles: number, branch: string | null): string {
  */
 const ISOLATED_GIT_TOOLS = ["Bash(git add:*)", "Bash(git commit:*)"];
 
+/**
+ * Name-matched process killers, withheld from every agent.
+ *
+ * This server is a Next.js process and Next renames it: inside the container
+ * `ps` shows `next-server (v…)`, not `node server.js`. An agent verifying a
+ * change starts its own dev server, and once that has booted it carries the
+ * *same* title — `next dev` hands off to a child that renames itself the same
+ * way, which is why an agent that tries `pkill -f "next dev"` and finds the
+ * port still held broadens the pattern rather than narrowing it. The two
+ * processes are then indistinguishable by name, and the one `pkill` reaches is
+ * the one that was already running.
+ *
+ * Measured, not reasoned: a run issued `pkill -f "next-server|next dev"` to
+ * clean up a dev server it had started on 3100. tini lost its child,
+ * `restart: unless-stopped` brought the container back, and `reconcileOnBoot`
+ * marked fourteen runs failed 690ms later — including the one that ran it.
+ *
+ * Withheld by name because there is no ownership boundary to withhold it by:
+ * compose runs a single uid, so an agent and the server supervising it can
+ * signal each other freely, and the container has neither a docker socket nor
+ * a docker CLI — this is the only route from an agent to a restart, and it does
+ * not look like one from the agent's side.
+ *
+ * `kill` itself stays permitted, deliberately. A pid is a handle on a process
+ * the agent actually started; a pattern is a guess about every process on the
+ * machine. Denying both would leave an agent unable to stop the dev server it
+ * was told to start, which is a port held for the rest of the container's life.
+ *
+ * Deny beats `--permission-mode`, verified against the pinned CLI: a
+ * `bypassPermissions` session is still refused these.
+ */
+const PROCESS_KILLERS = ["Bash(pkill:*)", "Bash(killall:*)"];
+
+/**
+ * What every agent is told about the process it is running inside.
+ *
+ * `PROCESS_KILLERS` stops two commands; this is what stops the agent routing
+ * around them, which otherwise takes it one turn — `kill $(pgrep -f
+ * next-server)` is not `pkill` and is exactly as fatal.
+ *
+ * A recipe rather than a prohibition, and the difference is the whole point. An
+ * agent told only "do not kill things by name" and left holding a dev server
+ * whose pid it no longer has does the safe thing, which is nothing: the server
+ * survives the cycle and holds its port for the life of the container, and the
+ * next cycle finds the port taken and starts another. That is the failure this
+ * would have traded the first one for. So the pattern that is actually safe is
+ * spelled out — match on the port, which names one process the agent chose,
+ * never on the title, which names two — along with the child-process form,
+ * since `next dev` forking a child it does not kill is what sent the run that
+ * caused all this looking for `pkill` in the first place.
+ *
+ * On the system prompt rather than in the task, because the task is only sent
+ * on the first cycle of a session and this is true of every cycle. It says
+ * nothing about docker on purpose: there is no docker in this image, and
+ * warning about an absent command is how an agent learns to look for it.
+ */
+const SELF_HOSTING_NOTICE =
+  "You are running inside a long-lived server process that is also supervising " +
+  "other agents. Ending it ends every run in flight, including your own, and " +
+  "nothing you have not committed survives. `pkill` and `killall` are therefore " +
+  "unavailable to you. To stop a background process you started, record its pid " +
+  "(`cmd & pid=$!`) and use `kill \"$pid\"`; a dev server usually forks a child, " +
+  "so `kill $(pgrep -P \"$pid\") \"$pid\"` or start it under `setsid` and use " +
+  "`kill -- -$pid`. If you no longer have the pid, select on something unique to " +
+  "the process you started — the port you chose, e.g. `kill $(pgrep -f 3100)` — " +
+  "and never on `next-server`, `next dev` or `node`: this server's process title " +
+  "is `next-server`, which is also the title your own dev server takes, so a " +
+  "match on it cannot tell the two apart.";
+
 export function buildArgs(opts: {
   prompt: string;
   model: string | null;
@@ -1663,6 +1738,11 @@ export function buildArgs(opts: {
   // still follows the mode. It is not the allowlist `chat.ts` runs under, where
   // `manual` mode is what makes the same flag exhaustive.
   if (opts.isolated) args.push("--allowedTools", ...ISOLATED_GIT_TOOLS);
+  // Unconditional, and deliberately not paired with the isolation flag above:
+  // a run in the operator's own checkout is inside the same process as one in a
+  // worktree, and the kill does not care which.
+  args.push("--disallowedTools", ...PROCESS_KILLERS);
+  args.push("--append-system-prompt", SELF_HOSTING_NOTICE);
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   return args;
 }
@@ -2269,6 +2349,12 @@ export async function startRun(id: string): Promise<void> {
   let spentEstTokens = run.spent_tokens_est;
   let iterations = run.iterations;
   let doneRetriggers = run.done_retriggers;
+  /**
+   * Whether the most recent work cycle replied DONE. Hydrated for the same
+   * reason `doneRetriggers` is: a segment that ends before any cycle completes
+   * has learnt nothing new about what the agent last said.
+   */
+  let reportedDone = run.reported_done !== 0;
   let sessionId: string | null = run.session_id;
   /** The operator's message for the first cycle of this segment, if any. */
   let followUp: string | null = run.follow_up ?? null;
@@ -2771,8 +2857,13 @@ export async function startRun(id: string): Promise<void> {
         break;
       }
 
-      // Completion signal from the continuation protocol.
-      if (/^\s*DONE\s*$/m.test(res.finalText)) {
+      // Completion signal from the continuation protocol. Recorded even when it
+      // is absent, because "the agent said the task was finished" is the only
+      // thing that separates a `completed` run from one that simply ran out of
+      // work cycles below, and the answer is gone by the time the run is picked
+      // up again.
+      reportedDone = /^\s*DONE\s*$/m.test(res.finalText);
+      if (reportedDone) {
         if (!policy.continueAfterDone) {
           stopReason =
             doneRetriggers > 0
@@ -2843,6 +2934,7 @@ export async function startRun(id: string): Promise<void> {
       spent_usd_est: spentEstUSD,
       spent_tokens_est: spentEstTokens,
       done_retriggers: doneRetriggers,
+      reported_done: reportedDone ? 1 : 0,
       work_dir: workDir,
       session_id: sessionId,
     };
@@ -3239,6 +3331,42 @@ export type ReopenOutcome = { ok: true } | { ok: false; reason: string };
 const REOPENABLE: readonly RunStatus[] = ["failed", "stopped", "completed"];
 
 /**
+ * What a reopened run says on its first cycle, or `""` for the continuation.
+ *
+ * Pure, and separated from `reopenRun` because every branch is billed and the
+ * wrong one is silent. `donePushbackPrompt` opens by telling the agent it
+ * reported the task complete and then forbids it from starting new work — which
+ * is the right thing to say to a run that really did reply DONE, and a false
+ * statement to a run that was cut off mid-implementation when it used up its
+ * cycle cap. Both end as `completed`, so the status cannot decide this on its
+ * own: `reported_done` records what the agent actually said, and a run that ran
+ * out of cycles is picked up exactly like the `failed` and `stopped` runs it
+ * resembles.
+ *
+ * Rows written before that column read as not-done, which is the cheaper error:
+ * a continuation into a session that did say DONE buys one billed cycle that
+ * says it again, where the pushback costs the work the operator reopened the
+ * run to finish.
+ */
+export function reopenPrompt(o: {
+  status: RunStatus;
+  /** The agent's last cycle replied DONE. False for a cycle-capped run. */
+  reportedDone: boolean;
+  sessionId: string | null;
+  /** The operator's own message, already trimmed. Wins over both. */
+  note: string;
+  donePushback: string;
+}): string {
+  if (o.note) return o.note;
+  // Without a session there is nothing to push back against — `nextPrompt`
+  // starts the original task over — so the substitution is dropped entirely.
+  if (o.status === "completed" && o.reportedDone && o.sessionId) {
+    return o.donePushback;
+  }
+  return "";
+}
+
+/**
  * Put a finished run back to work, continuing its Claude Code session, and
  * optionally say something to it.
  *
@@ -3257,14 +3385,12 @@ const REOPENABLE: readonly RunStatus[] = ["failed", "stopped", "completed"];
  * change.
  *
  * `completed` is included because the agent's judgement that a task is finished
- * is not the operator's. What it costs is one branch: the continuation prompt
- * asks for DONE if the work is complete, so sending it back into a session that
- * has just said DONE buys an immediate second DONE and nothing else. A reopened
- * `completed` run therefore always carries a first-cycle prompt — the
- * operator's own note if they wrote one, and `donePushbackPrompt` if they did
- * not, which is the prompt `continueAfterDone` already uses for this exact
- * situation. `failed` and `stopped` runs were interrupted mid-task and need no
- * such substitution.
+ * is not the operator's. What it costs is one branch, and `reopenPrompt` owns
+ * it: a run whose agent replied DONE carries `donePushbackPrompt` when the
+ * operator wrote no note, because the continuation prompt asks for DONE if the
+ * work is complete and would buy an immediate second one. A run that ended by
+ * using up its cycle cap is `completed` too and said nothing of the kind, so it
+ * is continued like the `failed` and `stopped` runs it resembles.
  *
  * `started_at` is cleared, and that is the one deliberate difference from a
  * pause. A parked run keeps its original start so wall clock stays a terminus
@@ -3336,17 +3462,16 @@ export function reopenRun(
   const blob = JSON.stringify({ ...policy, permissionMode: stored.permissionMode });
 
   // Resolved to the literal text the next cycle will send, rather than to a
-  // flag the loop re-interprets later: the substitution below depends on the
-  // status this run is being picked up *from*, which the queued row no longer
-  // records. Without a session there is nothing to push back against, so the
-  // default is dropped and only a real note survives — `nextPrompt` appends it
-  // to the original task.
+  // flag the loop re-interprets later: the choice depends on the status this
+  // run is being picked up *from*, which the queued row no longer records.
   const note = String(followUp ?? "").trim();
-  const firstPrompt =
-    note ||
-    (run.status === "completed" && run.session_id
-      ? getSettings().donePushbackPrompt
-      : "");
+  const firstPrompt = reopenPrompt({
+    status: run.status,
+    reportedDone: run.reported_done !== 0,
+    sessionId: run.session_id,
+    note,
+    donePushback: getSettings().donePushbackPrompt,
+  });
 
   const flip = db()
     .prepare(
