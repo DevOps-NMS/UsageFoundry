@@ -315,7 +315,7 @@ function List({
           <li key={id} className="flex gap-2">
             <span
               aria-hidden="true"
-              className="w-4 shrink-0 text-right tabular-nums text-ink-faint"
+              className="w-4 shrink-0 text-right tabular-nums text-ink-muted"
             >
               {node.item.marker}
             </span>
