@@ -107,6 +107,12 @@ export interface RunRow {
   pause_count: number;
   done_retriggers: number;
   /**
+   * Whether the last work cycle replied DONE. `completed` covers both that and
+   * a run that merely used up its cycle cap, and the two need different first
+   * prompts when the run is picked up again — see `reopenPrompt`.
+   */
+  reported_done: number;
+  /**
    * The operator's next message, waiting for the next spawn. Set by
    * `reopenRun`, cleared by the loop as soon as it is delivered.
    */
@@ -2269,6 +2275,12 @@ export async function startRun(id: string): Promise<void> {
   let spentEstTokens = run.spent_tokens_est;
   let iterations = run.iterations;
   let doneRetriggers = run.done_retriggers;
+  /**
+   * Whether the most recent work cycle replied DONE. Hydrated for the same
+   * reason `doneRetriggers` is: a segment that ends before any cycle completes
+   * has learnt nothing new about what the agent last said.
+   */
+  let reportedDone = run.reported_done !== 0;
   let sessionId: string | null = run.session_id;
   /** The operator's message for the first cycle of this segment, if any. */
   let followUp: string | null = run.follow_up ?? null;
@@ -2771,8 +2783,13 @@ export async function startRun(id: string): Promise<void> {
         break;
       }
 
-      // Completion signal from the continuation protocol.
-      if (/^\s*DONE\s*$/m.test(res.finalText)) {
+      // Completion signal from the continuation protocol. Recorded even when it
+      // is absent, because "the agent said the task was finished" is the only
+      // thing that separates a `completed` run from one that simply ran out of
+      // work cycles below, and the answer is gone by the time the run is picked
+      // up again.
+      reportedDone = /^\s*DONE\s*$/m.test(res.finalText);
+      if (reportedDone) {
         if (!policy.continueAfterDone) {
           stopReason =
             doneRetriggers > 0
@@ -2843,6 +2860,7 @@ export async function startRun(id: string): Promise<void> {
       spent_usd_est: spentEstUSD,
       spent_tokens_est: spentEstTokens,
       done_retriggers: doneRetriggers,
+      reported_done: reportedDone ? 1 : 0,
       work_dir: workDir,
       session_id: sessionId,
     };
@@ -3239,6 +3257,42 @@ export type ReopenOutcome = { ok: true } | { ok: false; reason: string };
 const REOPENABLE: readonly RunStatus[] = ["failed", "stopped", "completed"];
 
 /**
+ * What a reopened run says on its first cycle, or `""` for the continuation.
+ *
+ * Pure, and separated from `reopenRun` because every branch is billed and the
+ * wrong one is silent. `donePushbackPrompt` opens by telling the agent it
+ * reported the task complete and then forbids it from starting new work — which
+ * is the right thing to say to a run that really did reply DONE, and a false
+ * statement to a run that was cut off mid-implementation when it used up its
+ * cycle cap. Both end as `completed`, so the status cannot decide this on its
+ * own: `reported_done` records what the agent actually said, and a run that ran
+ * out of cycles is picked up exactly like the `failed` and `stopped` runs it
+ * resembles.
+ *
+ * Rows written before that column read as not-done, which is the cheaper error:
+ * a continuation into a session that did say DONE buys one billed cycle that
+ * says it again, where the pushback costs the work the operator reopened the
+ * run to finish.
+ */
+export function reopenPrompt(o: {
+  status: RunStatus;
+  /** The agent's last cycle replied DONE. False for a cycle-capped run. */
+  reportedDone: boolean;
+  sessionId: string | null;
+  /** The operator's own message, already trimmed. Wins over both. */
+  note: string;
+  donePushback: string;
+}): string {
+  if (o.note) return o.note;
+  // Without a session there is nothing to push back against — `nextPrompt`
+  // starts the original task over — so the substitution is dropped entirely.
+  if (o.status === "completed" && o.reportedDone && o.sessionId) {
+    return o.donePushback;
+  }
+  return "";
+}
+
+/**
  * Put a finished run back to work, continuing its Claude Code session, and
  * optionally say something to it.
  *
@@ -3257,14 +3311,12 @@ const REOPENABLE: readonly RunStatus[] = ["failed", "stopped", "completed"];
  * change.
  *
  * `completed` is included because the agent's judgement that a task is finished
- * is not the operator's. What it costs is one branch: the continuation prompt
- * asks for DONE if the work is complete, so sending it back into a session that
- * has just said DONE buys an immediate second DONE and nothing else. A reopened
- * `completed` run therefore always carries a first-cycle prompt — the
- * operator's own note if they wrote one, and `donePushbackPrompt` if they did
- * not, which is the prompt `continueAfterDone` already uses for this exact
- * situation. `failed` and `stopped` runs were interrupted mid-task and need no
- * such substitution.
+ * is not the operator's. What it costs is one branch, and `reopenPrompt` owns
+ * it: a run whose agent replied DONE carries `donePushbackPrompt` when the
+ * operator wrote no note, because the continuation prompt asks for DONE if the
+ * work is complete and would buy an immediate second one. A run that ended by
+ * using up its cycle cap is `completed` too and said nothing of the kind, so it
+ * is continued like the `failed` and `stopped` runs it resembles.
  *
  * `started_at` is cleared, and that is the one deliberate difference from a
  * pause. A parked run keeps its original start so wall clock stays a terminus
@@ -3336,17 +3388,16 @@ export function reopenRun(
   const blob = JSON.stringify({ ...policy, permissionMode: stored.permissionMode });
 
   // Resolved to the literal text the next cycle will send, rather than to a
-  // flag the loop re-interprets later: the substitution below depends on the
-  // status this run is being picked up *from*, which the queued row no longer
-  // records. Without a session there is nothing to push back against, so the
-  // default is dropped and only a real note survives — `nextPrompt` appends it
-  // to the original task.
+  // flag the loop re-interprets later: the choice depends on the status this
+  // run is being picked up *from*, which the queued row no longer records.
   const note = String(followUp ?? "").trim();
-  const firstPrompt =
-    note ||
-    (run.status === "completed" && run.session_id
-      ? getSettings().donePushbackPrompt
-      : "");
+  const firstPrompt = reopenPrompt({
+    status: run.status,
+    reportedDone: run.reported_done !== 0,
+    sessionId: run.session_id,
+    note,
+    donePushback: getSettings().donePushbackPrompt,
+  });
 
   const flip = db()
     .prepare(

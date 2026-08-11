@@ -49,6 +49,7 @@ const {
   nextPrompt,
   permissionDenials,
   refusalResumeAt,
+  reopenPrompt,
   selectPromotable,
   MAX_PAUSES_PER_RUN,
   MAX_TRANSIENT_RETRIES,
@@ -265,6 +266,64 @@ describe("prompt for the next work cycle", () => {
       nextPrompt({ ...base, priorCycles: 3, worktreeBranch: "uf/thing" }),
       "CONTINUE",
     );
+  });
+});
+
+/**
+ * Covers which prompt a reopened run opens with. Pure, billed, and silent when
+ * wrong in the direction that matters: `donePushbackPrompt` states that the
+ * agent reported the task complete and then forbids new work, so sending it to
+ * a run that was cut off by its cycle cap spends a cycle telling it not to
+ * finish the job the operator reopened it for. `completed` is written for both
+ * endings, which is why the status alone cannot decide this.
+ */
+describe("prompt for a reopened run", () => {
+  const base = {
+    status: "completed" as const,
+    reportedDone: true,
+    sessionId: "sess-1" as string | null,
+    note: "",
+    donePushback: "PUSHBACK",
+  };
+
+  it("pushes back only on a run whose agent really said DONE", () => {
+    assert.equal(reopenPrompt(base), "PUSHBACK");
+  });
+
+  it("continues a run that only used up its work cycles", () => {
+    // The `completed` row `startRun` writes when `iterations >= maxIterations`:
+    // same status, same session, and nothing said about the task being done.
+    assert.equal(reopenPrompt({ ...base, reportedDone: false }), "");
+    assert.notEqual(
+      reopenPrompt({ ...base, reportedDone: false }),
+      reopenPrompt(base),
+    );
+  });
+
+  it("continues a run that was interrupted mid-task", () => {
+    assert.equal(reopenPrompt({ ...base, status: "failed", reportedDone: false }), "");
+    assert.equal(reopenPrompt({ ...base, status: "stopped", reportedDone: false }), "");
+    // A DONE latched from an earlier segment does not survive the interruption
+    // that ended this one: those runs stopped part-way and are continued.
+    assert.equal(reopenPrompt({ ...base, status: "stopped" }), "");
+  });
+
+  it("sends the operator's note whatever the run did", () => {
+    assert.equal(reopenPrompt({ ...base, note: "NOTE" }), "NOTE");
+    assert.equal(
+      reopenPrompt({ ...base, reportedDone: false, note: "NOTE" }),
+      "NOTE",
+    );
+    assert.equal(
+      reopenPrompt({ ...base, sessionId: null, note: "NOTE" }),
+      "NOTE",
+    );
+  });
+
+  it("drops the pushback when there is no session to push back into", () => {
+    // The run restarts from its original task, and `nextPrompt` appends a note
+    // to it rather than sending one alone.
+    assert.equal(reopenPrompt({ ...base, sessionId: null }), "");
   });
 });
 
