@@ -1,16 +1,21 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { PassThrough } from "node:stream";
+import { after, describe, it } from "node:test";
 
-import { chatPrompt, composeTask, planProposal, type ChatProposalRow } from "./chat";
-import { githubSlug } from "./workspace";
+import type { ChatProposalRow } from "./chat";
 import type { RunTemplate } from "./templates";
 import type { RunGuards } from "./settings";
 
 /**
- * Covers `planProposal`, `chatPrompt` and `githubSlug`, and only those.
+ * Covers `planProposal`, `chatPrompt`, `githubSlug` and the turn claim in
+ * `sendChatMessage`, and only those.
  *
  * Each is the same class of failure the rest of this suite is reserved for —
- * pure, silent, and expensive:
+ * silent, and expensive:
  *
  *  - `planProposal` is where text a model wrote becomes a process with write
  *    access to a directory. The branch that matters most is the one that is not
@@ -30,7 +35,72 @@ import type { RunGuards } from "./settings";
  *  - `githubSlug` names the repository the chat then reads issues out of. A
  *    wrong answer is not an error — it is proposals for somebody else's
  *    project, described convincingly.
+ *  - `sendChatMessage` is the only check-then-act in this file, and the one
+ *    thing it decides is whether a second billed child joins a conversation
+ *    that already has one. It is not pure, so it is driven against a temporary
+ *    database with `spawn` replaced — the assertion is the number of children,
+ *    which is what the failure costs.
  */
+
+/* ------------------------------------------------------------------ */
+/* Harness for the impure one                                          */
+/* ------------------------------------------------------------------ */
+
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf-chat-")));
+fs.mkdirSync(path.join(tmp, "claude", "projects"), { recursive: true });
+
+process.env.DATA_DIR = path.join(tmp, "data");
+process.env.CLAUDE_HOME = path.join(tmp, "claude");
+// Belt to the fake `spawn` below: if the replacement ever stopped taking
+// effect, this is a path that cannot be executed rather than a real, billed CLI.
+process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
+
+// `require`, not `import`: imports are hoisted above the environment above, and
+// `config.ts` fixes `DATA_DIR` and `CLAUDE_HOME` at load. Same reason
+// `orchestrator.test.ts` does it.
+const {
+  chatPrompt,
+  composeTask,
+  createChat,
+  getChat,
+  listMessages,
+  planProposal,
+  sendChatMessage,
+} = require("./chat") as typeof import("./chat");
+const { githubSlug } = require("./workspace") as typeof import("./workspace");
+
+/**
+ * Count the children a turn would start, without starting one.
+ *
+ * `chat.ts` calls `spawn` through the module object under the test build's
+ * CommonJS emit, so replacing it here is what every turn below gets. The fake
+ * closes with no output, which lands the turn exactly as a CLI that printed
+ * nothing would — the MCP config file is unlinked and the capability revoked,
+ * rather than left behind by a turn that never finished.
+ */
+const childProcess = require("node:child_process") as Record<string, unknown>;
+const realSpawn = childProcess.spawn;
+let spawnCount = 0;
+
+childProcess.spawn = () => {
+  spawnCount++;
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+  });
+  setImmediate(() => child.emit("close", 0));
+  return child;
+};
+
+after(() => {
+  childProcess.spawn = realSpawn;
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+/** Let a landed turn finish writing before the next assertion reads the row. */
+const settle = async () => {
+  for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+};
 
 const template: RunTemplate = {
   id: "tpl1",
@@ -327,5 +397,70 @@ describe("githubSlug", () => {
     ]) {
       assert.equal(githubSlug(url), null, url);
     }
+  });
+});
+
+describe("sendChatMessage", () => {
+  it("starts one child when two messages race into one chat", async () => {
+    const chat = createChat();
+    const before = spawnCount;
+
+    // Both callers read the row before either writes it: the first suspends on
+    // `assistRefusal()`, which rescans every transcript under `CLAUDE_HOME`,
+    // and the second runs its whole synchronous prefix while it is suspended.
+    // Two tabs produce this, and so does one tab reloaded mid-turn — the page's
+    // own `busy` flag is per-tab React state and guards nothing here.
+    const outcomes = await Promise.all([
+      sendChatMessage(chat.id, "first"),
+      sendChatMessage(chat.id, "second"),
+    ]);
+
+    // The assertion that survives a change of interleaving: however the two
+    // callers resume, one billed child joins the conversation and not two.
+    assert.equal(spawnCount - before, 1, "a second child must not be spawned");
+
+    assert.equal(outcomes.filter((o) => o.ok).length, 1);
+    const loser = outcomes.find((o) => !o.ok);
+    assert.ok(loser, "one of the two must be refused");
+    if (loser.ok) return;
+    assert.match(loser.reason, /still working on the last message/);
+
+    const users = listMessages(chat.id).filter((m) => m.role === "user");
+    assert.equal(users.length, 1, "the losing request must add nothing to the thread");
+    assert.equal(getChat(chat.id)?.status, "thinking");
+
+    await settle();
+  });
+
+  it("still takes a message after a turn that failed", async () => {
+    // The claim is `status <> 'thinking'`, not `= 'idle'`: a failed turn is
+    // exactly when an operator retries, and a claim that matched only 'idle'
+    // would leave the chat permanently unusable with nothing said about why.
+    const chat = createChat();
+
+    const first = await sendChatMessage(chat.id, "hello");
+    assert.equal(first.ok, true);
+    await settle();
+    assert.equal(getChat(chat.id)?.status, "failed");
+
+    const before = spawnCount;
+    const second = await sendChatMessage(chat.id, "again");
+    assert.equal(second.ok, true);
+    assert.equal(spawnCount - before, 1);
+    await settle();
+  });
+
+  it("refuses a message sent while a turn is in flight", async () => {
+    const chat = createChat();
+    assert.equal((await sendChatMessage(chat.id, "hello")).ok, true);
+
+    const before = spawnCount;
+    const second = await sendChatMessage(chat.id, "and another thing");
+    assert.equal(second.ok, false);
+    if (second.ok) return;
+    assert.match(second.reason, /still working on the last message/);
+    assert.equal(spawnCount - before, 0);
+
+    await settle();
   });
 });

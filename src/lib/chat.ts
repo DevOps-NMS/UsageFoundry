@@ -576,6 +576,40 @@ export function chatForCapability(token: string): string | null {
 
 export type ChatOutcome = { ok: true } | { ok: false; reason: string };
 
+const ALREADY_THINKING: ChatOutcome = {
+  ok: false,
+  reason: "This chat is still working on the last message.",
+};
+
+/**
+ * Take the turn, or return null because this chat is already in one.
+ *
+ * A conditional UPDATE whose `changes` count decides, exactly as `startRun`
+ * claims a queued run. Reading the status and then writing it is the
+ * check-then-act shape `createRun`'s folder claim is built to avoid, and here
+ * the two halves were separated by `await assistRefusal()` — a full transcript
+ * scan, seconds long on a large `~/.claude`. Every message that arrived inside
+ * that window read `idle` and started a second billed child on the same
+ * conversation, with a second capability token live beside the first and
+ * `status` left last-write-wins between them.
+ *
+ * `<> 'thinking'` rather than `= 'idle'`: a turn that failed leaves the row
+ * `failed`, and the next message is how an operator retries it.
+ *
+ * Returns the row as it stood at the claim, because a read taken before that
+ * await is stale by definition — `session_id` above all, which decides whether
+ * the turn resumes the conversation or pays to replay the thread.
+ */
+function claimTurn(chatId: string): ChatRow | null {
+  const claim = db()
+    .prepare(
+      `UPDATE chat_sessions SET status='thinking', error=NULL, updated_at=?
+        WHERE id=? AND status<>'thinking'`,
+    )
+    .run(Date.now(), chatId);
+  return claim.changes === 1 ? getChat(chatId) : null;
+}
+
 /**
  * Send a message and return as soon as the child is on its way.
  *
@@ -589,9 +623,9 @@ export async function sendChatMessage(
 ): Promise<ChatOutcome> {
   const chat = getChat(chatId);
   if (!chat) return { ok: false, reason: "No such chat." };
-  if (chat.status === "thinking") {
-    return { ok: false, reason: "This chat is still working on the last message." };
-  }
+  // Answers the common case without paying for a transcript scan first. It
+  // decides nothing — `claimTurn` below is the check that holds.
+  if (chat.status === "thinking") return ALREADY_THINKING;
 
   const text = message.trim();
   if (!text) return { ok: false, reason: "Nothing to send." };
@@ -603,19 +637,21 @@ export async function sendChatMessage(
   const refusal = await assistRefusal();
   if (refusal) return { ok: false, reason: refusal };
 
+  // From here to the spawn there is deliberately no `await`: one event-loop
+  // turn covers claiming the chat, recording the message and starting the
+  // child, so a request that loses the claim adds nothing to the thread.
+  const claimed = claimTurn(chatId);
+  if (!claimed) return ALREADY_THINKING;
+
   appendMessage(chatId, "user", text);
   const history = listMessages(chatId)
     .slice(0, -1)
     .map((m) => ({ role: m.role, text: m.text }));
 
-  db()
-    .prepare("UPDATE chat_sessions SET status='thinking', error=NULL, updated_at=? WHERE id=?")
-    .run(Date.now(), chatId);
-
-  const prompt = chatPrompt({ sessionId: chat.session_id, history }, text);
+  const prompt = chatPrompt({ sessionId: claimed.session_id, history }, text);
 
   // Not awaited: it runs for minutes and the row is what reports on it.
-  void runTurn(chat, prompt).catch((err) => {
+  void runTurn(claimed, prompt).catch((err) => {
     finishTurn(chatId, {
       status: "failed",
       error: err instanceof Error ? err.message : String(err),
