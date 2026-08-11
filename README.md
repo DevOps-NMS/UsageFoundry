@@ -497,9 +497,12 @@ it spends against the same 5-hour allowance your runs do.
 and everything that principle protected is a check rather than a caveat:
 
 - The merge is previewed with `git merge-tree`, entirely in memory. You find out
-  whether it fast-forwards, merges cleanly, or conflicts — and which files — with
-  nothing written to any working tree. (Needs git 2.38+; an older one says so
-  rather than guessing.)
+  whether it fast-forwards, merges cleanly, or conflicts — and for a conflict,
+  which files, what kind of conflict each one is, and the `<<<<<<<` blocks
+  themselves — with nothing written to any working tree. That last part is free:
+  the tree `merge-tree` writes holds each file exactly as a real merge would
+  leave it, so the conflict can be read before deciding anything. (Needs git
+  2.38+; an older one says so rather than guessing.)
 - Landing needs your checkout **clean** and **on the branch the run started
   from**, which is recorded when the run is created. Anything else is refused with
   the reason, not greyed out. "Could not read your checkout" counts as dirty.
@@ -529,6 +532,11 @@ above.
 Your own checkout is not involved at any point, and a resolution that goes badly
 costs a branch nobody has landed. Like a review, it is billed and shown with its
 own cost — never added to the run's spend.
+
+Afterwards the card shows both halves of it: what Claude says it kept and why,
+and the diff of the merge commit it made, against the branch as it stood before
+the merge. The first is an account of the work; the second is the work, and it
+is what landing will bring across.
 
 **The Branches page** lists every `uf/*` branch across runs: which run made it,
 what it lands into, how far ahead it is, and whether it is merged. Merged
@@ -816,6 +824,22 @@ Built and exercised against real transcripts:
   hunk; the size budget naming what it left out; `merge-tree` output read as
   clean, conflicting, or undetermined-on-an-old-git; and every `landRefusal`
   branch.
+- The conflict display, against a scratch repository with a content conflict and
+  a modify/delete conflict in the same merge, on git 2.50. `merge-tree
+  --write-tree -z` was run for real and its output fed through
+  `parseMergeTree`: both files listed once, `contents` and `modify/delete` read
+  off the informational records, git's explanation kept only where it says
+  something the type and the path do not, and the `<<<<<<<` block read back out
+  of the merged tree. Then the same fixture through a live dev server and a
+  browser: the conflict list, the type, the clash count and the block itself all
+  render on the run page, with the modify/delete file showing git's sentence and
+  no block.
+- The resolution display, from a `run_reviews` row written straight into SQLite
+  with the merge commit of a by-hand resolution: `GET /api/runs/<id>/land`
+  returned the resolution's own diff against the branch's pre-merge tip,
+  restricted to the recorded conflicted paths, and the run page rendered it under
+  the model's prose. The row was seeded rather than produced by a real agent —
+  which the *Not yet verified* list below already covers.
 - Run templates against a live dev server on a scratch workspace: create, list
   (ordered by name, case-insensitively), update, and delete, with a second
   delete answering 404. Every refusal came back as a 400 with the sentence the
@@ -896,7 +920,12 @@ through before trusting this unattended:
 - Landing inside the container, where git is 2.39 rather than the 2.50 the
   scratch repositories above were driven with. `merge-tree --write-tree` and its
   conflict format both date from 2.38, and an older git is reported rather than
-  guessed at, but that path has not been run against 2.39 itself.
+  guessed at, but that path has not been run against 2.39 itself. The conflict
+  *types* are the part most likely to differ: they come from the `-z`
+  informational records, whose field layout was captured from 2.50. A 2.39 that
+  writes them differently loses the type and the explanation and still lists
+  every conflicting file, because that list comes from the stage records — but
+  which of those two happens on 2.39 is unconfirmed.
 - A repository large enough to hit the diff's size budget in the wild.
 - The new-run form's template UI driven through a browser: that loading a
   template fills every field, that *Start another like this* pre-fills from a
@@ -909,7 +938,8 @@ There is no linter run in this repo, and `npm test` covers seven things: the
 folder-collision predicate, which queued runs may start, the budget policy, how
 a provider refusal is classified and backed off from, which prompt a work cycle
 spawns with, how a run's diff is parsed and budgeted, when a branch may be
-landed, and whether a conflict was really resolved. `npm run typecheck` plus
+landed, and what counts as a conflict marker — both for deciding whether one was
+really resolved and for deciding what to show. `npm run typecheck` plus
 a `docker compose up --build` smoke test is still the real verification loop,
 and the list above records what was checked by hand.
 

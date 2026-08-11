@@ -349,13 +349,44 @@ export interface RunReviewDTO {
   diffFiles: number;
   diffShown: number;
   truncated: boolean;
+  /** The files a resolution was handed. Empty for a review. */
+  paths: string[];
+  /**
+   * What a completed resolution changed on the branch, against the branch as it
+   * stood before the merge. Null while it is running, when it failed, and for a
+   * review — and for resolutions made before this was recorded.
+   */
+  changed: ResolutionChangeDTO | null;
+}
+
+export interface ResolutionChangeDTO {
+  commit: string;
+  files: DiffFileDTO[];
+  omittedPatches: number;
+}
+
+/** One `<<<<<<< … >>>>>>>` block, as the merge would leave it. */
+export interface ConflictRegionDTO {
+  text: string;
+  truncated: boolean;
+}
+
+export interface ConflictFileDTO {
+  path: string;
+  /** git's own name for the conflict — `content`, `modify/delete`, … */
+  type: string | null;
+  message: string | null;
+  regions: ConflictRegionDTO[];
+  regionsOmitted: number;
+  /** False when the merged content was not read, so `regions` says nothing. */
+  regionsRead: boolean;
 }
 
 export type MergePreviewDTO =
   | { outcome: "already-merged" }
   | { outcome: "fast-forward" }
   | { outcome: "clean" }
-  | { outcome: "conflict"; files: string[] }
+  | { outcome: "conflict"; files: ConflictFileDTO[] }
   | { outcome: "unknown"; reason: string };
 
 export interface LandStateDTO {

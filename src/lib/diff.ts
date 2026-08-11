@@ -406,6 +406,59 @@ async function rangeDiff(run: RunRow): Promise<RunDiff> {
 }
 
 /**
+ * What one commit did to a given set of paths.
+ *
+ * Against the commit's **first** parent, which is what makes it meaningful for
+ * the merge commit a conflict resolution produces: parent one is the run's
+ * branch as it stood, so the diff reads as "what arrived, and how it was
+ * reconciled" rather than as a merge's usual empty-looking self.
+ *
+ * Returns null when git could not produce it. An empty file list is a real
+ * answer — the commit changed none of those paths — and is not the same thing.
+ */
+export async function commitDiff(
+  repoRoot: string,
+  commit: string,
+  paths: readonly string[],
+): Promise<{ files: DiffFile[]; omittedPatches: number } | null> {
+  const range = `${commit}^1..${commit}`;
+  // Pinned for the same reason `patchesFor` pins them: these came out of git
+  // and go back in as pathspecs, where `*` in a filename is a glob.
+  const pathspecs = paths.map((p) => `:(top,literal)${p}`);
+
+  const numstat = await git(
+    repoRoot,
+    ["diff", ...DIFF_FLAGS, "--numstat", "-z", range, "--", ...pathspecs],
+    { maxBytes: MAX_DIFF_BYTES },
+  );
+  if (!numstat.ok) return null;
+
+  const entries = parseNumstat(numstat.stdout);
+  if (entries.length === 0) return { files: [], omittedPatches: 0 };
+
+  const statuses = parseNameStatus(
+    (
+      await git(repoRoot, [
+        "diff",
+        ...DIFF_FLAGS,
+        "--name-status",
+        "-z",
+        range,
+        "--",
+        ...pathspecs,
+      ])
+    ).stdout,
+  );
+
+  const { selected, omitted } = selectForPatch(entries);
+  const patches = await patchesFor(repoRoot, range, selected);
+  return {
+    files: buildFiles(entries, statuses, selected, patches),
+    omittedPatches: omitted.length,
+  };
+}
+
+/**
  * A run that worked in the operator's own folder.
  *
  * There is no range to take: the run committed into their branch, or left

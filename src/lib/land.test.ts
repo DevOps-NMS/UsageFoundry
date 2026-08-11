@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  conflictRegions,
   hasConflictMarkers,
   landRefusal,
   parseMergeTree,
   unresolvedFiles,
   type CheckoutState,
+  type ConflictFile,
 } from "./land";
 
 /**
@@ -16,36 +18,89 @@ import {
  * owns. `parseMergeTree` reading a failure as "no conflicts" would offer a
  * merge that cannot work; `landRefusal` missing a branch would merge into a
  * dirty tree, or onto the wrong branch, and neither is something this app can
- * undo afterwards.
+ * undo afterwards. `conflictRegions` earns its place for the reason
+ * `hasConflictMarkers` does: it decides what counts as a conflict marker in
+ * arbitrary file content, and a parser that fires on a markdown heading
+ * underline renders half a document as a conflict.
  */
 
 /* ------------------------------------------------------------------ */
-/* Reading `git merge-tree --write-tree`                               */
+/* Reading `git merge-tree --write-tree -z`                            */
 /* ------------------------------------------------------------------ */
+
+/** Records are NUL-separated, and the two sections are split by an empty one. */
+const z = (...fields: string[]) => fields.join("\0");
 
 describe("parseMergeTree", () => {
   it("reads exit 0 as a clean merge", () => {
     assert.deepEqual(parseMergeTree("<tree-oid>", "", 0), { outcome: "clean" });
   });
 
-  it("lists each conflicting path once", () => {
+  it("lists each conflicting path once, with git's own account of it", () => {
     // Captured from git 2.50. The same path appears once per stage — base,
     // ours, theirs — and reporting "3 files conflict" for one file is a
-    // sentence the operator would act on wrongly.
-    const stdout = [
+    // sentence the operator would act on wrongly. `Auto-merging` is an
+    // informational record like any other and is not a conflict.
+    const stdout = z(
       "5452f5aaf2e2cb93837db0fc00ec78e4ca86d851",
+      "100644 de98044 1\td.txt",
+      "100644 343809c 2\td.txt",
       "100644 de98044 1\tf.txt",
       "100644 343809c 2\tf.txt",
       "100644 3b6f40a 3\tf.txt",
       "",
-      "Auto-merging f.txt",
-      "CONFLICT (content): Merge conflict in f.txt",
-    ].join("\n");
+      "1",
+      "d.txt",
+      "CONFLICT (modify/delete)",
+      "CONFLICT (modify/delete): d.txt deleted in feature and modified in main.\n",
+      "1",
+      "f.txt",
+      "Auto-merging",
+      "Auto-merging f.txt\n",
+      "1",
+      "f.txt",
+      "CONFLICT (contents)",
+      "CONFLICT (content): Merge conflict in f.txt\n",
+      "",
+    );
 
-    assert.deepEqual(parseMergeTree(stdout, "", 1), {
-      outcome: "conflict",
-      files: ["f.txt"],
-    });
+    const preview = parseMergeTree(stdout, "", 1);
+    assert.equal(preview.outcome, "conflict");
+    const files = preview.outcome === "conflict" ? preview.files : [];
+    assert.deepEqual(
+      files.map((f) => [f.path, f.type]),
+      [
+        ["d.txt", "modify/delete"],
+        ["f.txt", "contents"],
+      ],
+    );
+    // What survives is what the type and the path do not already say. For a
+    // plain content clash that is nothing, and the regions below it are the
+    // information.
+    assert.match(files[0].message ?? "", /^d\.txt deleted in feature/);
+    assert.equal(files[1].message, null);
+    // Nothing has read the merged tree at this point, and "no regions" would
+    // otherwise read as "this file has no clashes in it".
+    assert.equal(files[0].regionsRead, false);
+  });
+
+  it("still lists the conflicting files when the messages make no sense", () => {
+    // The stage records are the authoritative statement of what conflicts. The
+    // informational section is another git version's format away from being
+    // unreadable, and losing an annotation must not lose a file.
+    const stdout = z(
+      "5452f5aaf2e2cb93837db0fc00ec78e4ca86d851",
+      "100644 de98044 1\tf.txt",
+      "",
+      "not-a-count",
+      "garbage",
+    );
+
+    const preview = parseMergeTree(stdout, "", 1);
+    assert.deepEqual(
+      preview.outcome === "conflict" ? preview.files.map((f) => f.path) : [],
+      ["f.txt"],
+    );
   });
 
   it("does not read a git that is too old as a clean merge", () => {
@@ -137,10 +192,21 @@ describe("landRefusal", () => {
   });
 
   it("refuses a conflicting merge, before anything is written", () => {
+    const conflicting = (path: string): ConflictFile => ({
+      path,
+      type: "contents",
+      message: null,
+      regions: [],
+      regionsOmitted: 0,
+      regionsRead: true,
+    });
     assert.match(
       landRefusal({
         ...landable,
-        preview: { outcome: "conflict", files: ["a.ts", "b.ts"] },
+        preview: {
+          outcome: "conflict",
+          files: [conflicting("a.ts"), conflicting("b.ts")],
+        },
       }) ?? "",
       /conflicts in 2 file/,
     );
@@ -207,6 +273,52 @@ describe("conflict markers", () => {
 
   it("does not fire on the markers appearing mid-line", () => {
     assert.equal(hasConflictMarkers('const s = "<<<<<<< not a marker";'), false);
+  });
+
+  it("keeps a region from its opening marker to its closing one", () => {
+    const text = [
+      "before",
+      "<<<<<<< uf/x",
+      "ours",
+      "=======",
+      "theirs",
+      ">>>>>>> main",
+      "after",
+    ].join("\n");
+
+    const { regions, omitted } = conflictRegions(text);
+    assert.equal(omitted, 0);
+    assert.equal(regions.length, 1);
+    assert.equal(
+      regions[0].text,
+      "<<<<<<< uf/x\nours\n=======\ntheirs\n>>>>>>> main",
+    );
+    assert.equal(regions[0].truncated, false);
+  });
+
+  it("does not start a region on a markdown heading underline", () => {
+    assert.deepEqual(conflictRegions("Heading\n=======\n\nbody\n"), {
+      regions: [],
+      omitted: 0,
+    });
+  });
+
+  it("flags a region whose closing marker never arrives", () => {
+    // What a file cut short by the read budget looks like. Showing it as a
+    // complete clash would be a quiet lie about where it ends.
+    const { regions } = conflictRegions("<<<<<<< uf/x\nours\n=======\ntheirs");
+    assert.equal(regions.length, 1);
+    assert.equal(regions[0].truncated, true);
+  });
+
+  it("counts the regions it does not show", () => {
+    const one = "<<<<<<< uf/x\nours\n=======\ntheirs\n>>>>>>> main";
+    const { regions, omitted } = conflictRegions(
+      [one, one, one].join("\ncontext\n"),
+      { maxRegions: 2, maxLines: 80 },
+    );
+    assert.equal(regions.length, 2);
+    assert.equal(omitted, 1);
   });
 
   it("treats an unreadable file as unresolved", () => {

@@ -3,10 +3,11 @@ import {
   deleteBranch,
   landRun,
   landState,
+  resolutionChange,
   resolveConflicts,
   type LandStrategy,
 } from "@/lib/land";
-import { latestAssist } from "@/lib/review";
+import { latestAssist, reviewPaths } from "@/lib/review";
 import { getRun } from "@/lib/orchestrator";
 import { getSettings } from "@/lib/settings";
 
@@ -28,6 +29,9 @@ export async function GET(_req: Request, ctx: Ctx) {
   if (!getRun(id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   // The latest resolution travels with the state so the card polls one route.
+  // Its diff is read only once it has one: the card polls this route every few
+  // seconds while a resolution runs, and there is nothing to diff until it
+  // commits.
   const row = latestAssist(id, "resolve");
   return NextResponse.json({
     state: await landState(id),
@@ -47,6 +51,8 @@ export async function GET(_req: Request, ctx: Ctx) {
           diffFiles: row.diff_files,
           diffShown: row.diff_shown,
           truncated: row.truncated === 1,
+          paths: reviewPaths(row),
+          changed: await resolutionChange(row),
         }
       : null,
   });
