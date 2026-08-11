@@ -79,6 +79,8 @@ export interface ChatMessageRow {
   id: string;
   chat_id: string;
   ts: number;
+  /** Insert order across every chat. What the thread is ordered by; see below. */
+  seq: number;
   role: ChatRole;
   text: string;
 }
@@ -154,9 +156,21 @@ export function latestChat(): ChatRow {
   return listChats(1)[0] ?? createChat();
 }
 
+/**
+ * A thread, in the order it was written.
+ *
+ * Ordered by `seq` alone rather than by `ts` and then something: the timestamp
+ * is a tie for every message a turn writes — `finishTurn` appends the reply,
+ * an error and a denial note in one synchronous block — and the tiebreak it
+ * used to fall through to was `id`, which is a random UUID. A denial note is a
+ * footnote about the reply above it, so half the time the operator was told
+ * "the tool was refused, and separately here is an answer". `seq` is the order
+ * the rows were written and nothing else can reorder them, including a clock
+ * that steps backwards mid-conversation.
+ */
 export function listMessages(chatId: string): ChatMessageRow[] {
   return db()
-    .prepare("SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY ts, id")
+    .prepare("SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY seq")
     .all(chatId) as ChatMessageRow[];
 }
 
@@ -169,7 +183,11 @@ export function appendMessage(
   const now = Date.now();
   db()
     .prepare(
-      "INSERT INTO chat_messages (id, chat_id, ts, role, text) VALUES (?, ?, ?, ?, ?)",
+      // `seq` is taken inside the INSERT rather than read first: better-sqlite3
+      // is synchronous and this app is a single writer, so one statement is the
+      // only shape in which "the next number" cannot be handed out twice.
+      "INSERT INTO chat_messages (id, chat_id, ts, seq, role, text)" +
+        " VALUES (?, ?, ?, (SELECT IFNULL(MAX(seq), 0) + 1 FROM chat_messages), ?, ?)",
     )
     .run(id, chatId, now, role, text);
   db()

@@ -372,6 +372,23 @@ function migrate(db: Database.Database) {
   // The prompt the chat wrote for one specific run. Added rather than rebuilt,
   // because a nullable column is the one change ALTER does support.
   addColumn(db, "chat_proposals", "prompt_override", "TEXT");
+
+  // The order a chat's messages were written in, because `ts` does not decide
+  // it: `finishTurn` appends the reply, an error and a denial note inside one
+  // synchronous block, so they routinely share a millisecond, and the primary
+  // key they were then ordered by is a random UUID — a coin toss rather than a
+  // tiebreak, which rendered a footnote above the message it annotates and so
+  // reversed what the operator was being told. Recorded rather than taken from
+  // `rowid`, which SQLite is free to renumber on a VACUUM or a table rebuild.
+  //
+  // The backfill is the *existing* rows' order: `rowid` on a table nothing has
+  // rebuilt is the order they were inserted, so a deployed thread keeps the
+  // order it was written in. It runs on every boot rather than only on the one
+  // that adds the column — it is a scan of a small table, and it repairs a null
+  // rather than leaving a message to sort to the top of a thread. `seq` must be
+  // set by every insert; `appendMessage` is the only one there is.
+  addColumn(db, "chat_messages", "seq", "INTEGER");
+  db.exec("UPDATE chat_messages SET seq = rowid WHERE seq IS NULL");
 }
 
 /**

@@ -1156,6 +1156,19 @@ Built and exercised against real transcripts:
   handlers answer the pinned CLI 2.1.226 correctly), `list_folders` identified
   the repository's GitHub remote, and the proposal recorded the right template
   and folder.
+- **The order a chat thread renders in** (`npm test`, 3 cases, against a real
+  database under a temporary `DATA_DIR`): a reply and the denial note that
+  annotates it, appended under a frozen clock, come back in that order rather
+  than by the coin toss the random `id` was; ten messages written in one
+  millisecond come back in insert order, and still do after the connection is
+  closed and reopened; and rows carrying a null `seq` — the state a deployed
+  database is in between the `ALTER TABLE` and the backfill — come back in the
+  order they were written, with a message appended afterwards landing below them
+  rather than among them. The migration itself was driven separately against a
+  hand-built database file predating the column, using the three rows read out
+  of the live deployment: it gains `seq`, they backfill to 1/2/3 in insert
+  order, and the assistant reply that used to render *below* the denial note now
+  renders above it.
 - **That the chat could not write, under the configuration it had then.** Asked
   directly, in the same turn, to create a file inside the workspace, it reported
   `No such tool available: Write. Write is disabled for this session, in
@@ -1391,9 +1404,10 @@ policy, how a provider refusal is classified and backed off from, which prompt a
 work cycle spawns with, the GitHub credentials handed to a work cycle, how a
 run's diff is parsed and budgeted, when a branch may be landed, what a queued
 merge does with the branch it reaches, what counts as a conflict marker — both
-for deciding whether one was really resolved and for deciding what to show — and
-the two renderings that would lie quietly about a number: an unconfigured
-ceiling, and a first-party figure shown beside the meters. `npm run typecheck`
+for deciding whether one was really resolved and for deciding what to show, the
+order a chat's thread renders in — and the two renderings that would lie quietly
+about a number: an unconfigured ceiling, and a first-party figure shown beside
+the meters. `npm run typecheck`
 plus a `docker compose up --build` smoke test is still the real verification
 loop, and the list above records what was checked by hand.
 
