@@ -598,8 +598,26 @@ separation reviews already get.
 ## Reviewing and landing what a run did
 
 A finished run tells you it spent $3.40 over four work cycles and put six commits
-on `uf/foo-1`. It does not tell you whether any of that is worth keeping. Three
+on `uf/foo-1`. It does not tell you whether any of that is worth keeping. Four
 things on the run page answer that.
+
+**The agent's own report.** The last thing each work cycle said, rendered as the
+markdown it was written as — headings, numbered steps, code fences. That text is
+in the live log too, but as one monospace line per content block among the tool
+calls, which makes the one paragraph explaining what a cycle did the hardest
+thing on the page to find. The most recent cycle is open and earlier ones fold
+away, but each is still there: the cycle where an agent said it was stuck is
+rarely the last one. It is derived from the events already on disk, so it works
+on runs that finished before it existed, and it costs nothing — no fetch, no
+second source, no spend.
+
+There is no markdown dependency behind it, and that is deliberate rather than
+frugal. The renderer emits React nodes, so there is no `dangerouslySetInnerHTML`
+and no sanitiser to keep current — which matters precisely because this text is
+model-written and unreviewed. It understands fenced code, headings, list items
+and inline code/bold/italic, and anything else falls through as plain text
+rather than as markup it guessed at. Underscore emphasis is excluded on purpose:
+`snake_case_name` would otherwise render as a corrupted identifier.
 
 **The diff.** `<base>...<branch>` as a file list you can expand, which for an
 isolated run is exactly that run's work and nothing else. A run that worked
@@ -1148,6 +1166,15 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **The whole of "The agent's own report" above — including that it compiles.**
+  It was written by a run whose permission allowlist carried no `npm`, so
+  `npm run typecheck`, `npm test` and `npm run build` were never executed against
+  `src/lib/cycles.ts`, `src/components/Markdown.tsx`,
+  `src/components/RunOutput.tsx` or their two test files. They were read for type
+  errors by hand and by nothing else, and no browser has rendered the card. The
+  same run could not reach `gh`, so the issue it was written from was never read
+  either — what is here follows the task text's summary of it. Run the three
+  commands and open one finished run's page before trusting any of it.
 - Whether `claude -p` flushes its `result` event on `SIGINT`. If it does, an
   interrupted cycle keeps its measured cost and the transcript reconciliation
   becomes a fallback rather than the norm.

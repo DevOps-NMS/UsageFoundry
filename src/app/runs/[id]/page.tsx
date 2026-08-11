@@ -14,6 +14,7 @@ import {
 } from "@/lib/format";
 import { RunDiff } from "@/components/RunDiff";
 import { RunLand } from "@/components/RunLand";
+import { RunOutput } from "@/components/RunOutput";
 import { RunReview } from "@/components/RunReview";
 
 /** Render one event as a single log line. */
@@ -393,7 +394,9 @@ export default function RunDetail({
 
       {/* The outcome, then what it means, then what to do with it — above the
           accounting, because "was any of this worth keeping?" is the question
-          a finished run actually raises. */}
+          a finished run actually raises. The agent's own account comes first
+          within that: it is the only one of these that says why. */}
+      <RunOutput events={events} />
       <RunDiff run={run} />
       {run.isolation === "worktree" && run.worktree_branch && (
         <>
