@@ -72,26 +72,36 @@ export default function ChatPage() {
     if (!message || !chatId || busy) return;
     setBusy(true);
     setError(null);
-    const result = await chatRequest(`/api/chat/${chatId}/message`, { message });
-    if (!result.ok) setError(result.error ?? "The message could not be sent.");
-    else {
-      setDraft("");
-      if (result.chat) setChat(result.chat);
+    try {
+      const result = await chatRequest(`/api/chat/${chatId}/message`, { message });
+      if (!result.ok) setError(result.error ?? "The message could not be sent.");
+      else {
+        setDraft("");
+        if (result.chat) setChat(result.chat);
+      }
+    } finally {
+      // `busy` disables every button here at once and only this line clears it,
+      // so it is released on the way out however the request ended. No `catch`:
+      // `chatRequest` returns the transport failure instead of throwing it, and
+      // anything still reaching here is a bug that should not be swallowed.
+      setBusy(false);
     }
-    setBusy(false);
   };
 
   const decide = async (action: "approve" | "reject", ids: string[]) => {
     if (!chatId || ids.length === 0 || busy) return;
     setBusy(true);
     setError(null);
-    const result = await chatRequest(`/api/chat/${chatId}/proposals`, { action, ids });
-    if (!result.ok) setError(result.error ?? "That could not be applied.");
-    else {
-      setSelected(new Set());
-      if (result.chat) setChat(result.chat);
+    try {
+      const result = await chatRequest(`/api/chat/${chatId}/proposals`, { action, ids });
+      if (!result.ok) setError(result.error ?? "That could not be applied.");
+      else {
+        setSelected(new Set());
+        if (result.chat) setChat(result.chat);
+      }
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   };
 
   const newChat = async () => {
