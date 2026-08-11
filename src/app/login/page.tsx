@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Field, Input } from "@/components/ui/Field";
-import { Notice } from "@/components/ui/Notice";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -36,27 +35,57 @@ export default function LoginPage() {
   return (
     <div className="mx-auto mt-[12vh] max-w-[380px]">
       <Card emphasis="primary">
-        <h1 className="mb-1 text-xl font-semibold tracking-tight">
-          UsageFoundry
-        </h1>
-        <p className="mb-4 text-ink-muted">
-          Enter the access token from{" "}
-          <span className="mono">UF_AUTH_TOKEN</span>.
-        </p>
+        {/* The first thing anyone sees of this app. The mark and the name are
+            the whole of it — there is one field below and nothing to choose. */}
+        <div className="mb-4 flex items-center gap-2.5">
+          <svg
+            viewBox="0 0 24 24"
+            className="h-7 w-7 shrink-0"
+            aria-hidden
+            focusable="false"
+          >
+            <rect width="24" height="24" rx="6" className="fill-accent" />
+            <rect x="6" y="13" width="3" height="5" rx="1.5" fill="#fff" />
+            <rect x="10.5" y="9.5" width="3" height="8.5" rx="1.5" fill="#fff" />
+            <rect x="15" y="6" width="3" height="12" rx="1.5" fill="#fff" />
+          </svg>
+          <h1 className="text-xl font-semibold tracking-tight">UsageFoundry</h1>
+        </div>
+
         <form onSubmit={submit}>
-          <Field label="Access token" htmlFor="token">
+          <Field
+            label="Access token"
+            htmlFor="token"
+            hint={
+              <>
+                The value of <span className="mono">UF_AUTH_TOKEN</span> in your{" "}
+                <span className="mono">.env</span>
+              </>
+            }
+            // On the field rather than in a Notice below the form: the message
+            // is about this one box, so it reaches the box as
+            // aria-describedby, turns its border red, and is announced when it
+            // arrives. A banner under the button was none of those things.
+            error={error}
+          >
             <Input
               id="token"
               type="password"
+              name="token"
+              autoComplete="current-password"
               value={token}
-              onChange={(e) => setToken(e.target.value)}
+              onChange={(e) => {
+                setToken(e.target.value);
+                // The message described the previous attempt. Keeping it while
+                // the value changes says the new value is wrong too.
+                if (error) setError(null);
+              }}
               autoFocus
               required
             />
           </Field>
-          {error && <Notice tone="danger">{error}</Notice>}
-          <Button type="submit" disabled={busy || !token}>
-            {busy ? "Checking…" : "Sign in"}
+          <Button type="submit" busy={busy} disabled={!token} className="w-full">
+            Sign in
           </Button>
         </form>
       </Card>
