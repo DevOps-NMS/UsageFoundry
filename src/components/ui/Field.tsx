@@ -19,23 +19,25 @@ import { Hint, type HintTone } from "@/components/ui/Hint";
  * `w-full` and collapsed the sibling input to nothing. Each caller states its
  * own width exactly once.
  *
- * The border colour is not in here either, for the same reason: it is one of
- * the two strings below, so a resting border and an invalid border can never
- * both be emitted for the same element and leave the winner to Tailwind.
+ * The border colour and the vertical padding are not in here either, for the
+ * same reason: each is one of the strings below, so no element can be handed
+ * two of them and leave the winner to Tailwind.
  */
 const CONTROL_BASE =
-  "ui-transition rounded-sm border bg-inset px-2.5 py-1.5 text-sm text-ink " +
+  "ui-transition rounded-sm border bg-inset px-2.5 text-sm text-ink " +
   "placeholder:text-ink-faint " +
   "focus:border-accent focus:outline-none focus:shadow-focus " +
   "disabled:cursor-not-allowed disabled:bg-canvas disabled:text-ink-faint";
 
-/** 36px, so a control is aimed at rather than passed over. */
-const CONTROL_H = "min-h-[var(--control-h-lg)]";
+/** One line of text in a 36px box, so a control is aimed at, not passed over. */
+const CONTROL_LINE = "min-h-[var(--control-h-lg)] py-1.5";
+/** Many lines, where the padding is what keeps the text off the border. */
+const CONTROL_BLOCK = "py-2";
 
 const BORDER_REST = "border-line enabled:hover:border-line-strong";
 const BORDER_INVALID = "border-danger enabled:hover:border-danger";
 
-const CONTROL = `w-full ${CONTROL_BASE} ${CONTROL_H}`;
+const CONTROL = `w-full ${CONTROL_BASE} ${CONTROL_LINE}`;
 
 /**
  * What a `Field` tells the control inside it.
@@ -190,7 +192,7 @@ export function Input({
       disabled={bits.disabled}
       aria-describedby={bits.describedBy}
       aria-invalid={bits.ariaInvalid}
-      className={`${affixed ? "min-w-0 flex-1" : "w-full"} ${CONTROL_BASE} ${CONTROL_H} ${bits.border} ${className}`}
+      className={`${affixed ? "min-w-0 flex-1" : "w-full"} ${CONTROL_BASE} ${CONTROL_LINE} ${bits.border} ${className}`}
     />
   );
   if (!affixed) return control;
@@ -233,7 +235,7 @@ export function Textarea({
       disabled={bits.disabled}
       aria-describedby={bits.describedBy}
       aria-invalid={bits.ariaInvalid}
-      className={`w-full ${CONTROL_BASE} ${bits.border} min-h-[90px] resize-y font-mono text-sm ${className}`}
+      className={`w-full ${CONTROL_BASE} ${CONTROL_BLOCK} ${bits.border} min-h-[90px] resize-y font-mono text-sm ${className}`}
     />
   );
 }
@@ -300,7 +302,7 @@ export function LimitField({
   return (
     <div className="flex items-center gap-2">
       <select
-        className={`${CONTROL_BASE} ${CONTROL_H} ${bits.border} w-auto shrink-0`}
+        className={`${CONTROL_BASE} ${CONTROL_LINE} ${bits.border} w-auto shrink-0`}
         value={enabled ? "on" : "off"}
         onChange={(e) => onEnabledChange(e.target.value === "on")}
         disabled={bits.disabled}
@@ -316,7 +318,7 @@ export function LimitField({
             type="number"
             min={min}
             step={step}
-            className={`${CONTROL_BASE} ${CONTROL_H} ${bits.border} w-full min-w-0 flex-1`}
+            className={`${CONTROL_BASE} ${CONTROL_LINE} ${bits.border} w-full min-w-0 flex-1`}
             value={value}
             onChange={(e) => onValueChange(e.target.value)}
             disabled={bits.disabled}
