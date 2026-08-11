@@ -910,7 +910,16 @@ export default function RunDetail({
             className="ml-auto transition-colors duration-150"
             aria-expanded={showLog}
             aria-controls="run-log"
-            onClick={() => setLogOpen(!showLog)}
+            onClick={() => {
+              // Reopening lands on the live edge: a fresh scroll container
+              // starts at the top, and a reader who asked to see the log again
+              // wants the end of it, not the beginning.
+              if (!showLog) {
+                pinnedToBottom.current = true;
+                setAtLiveEdge(true);
+              }
+              setLogOpen(!showLog);
+            }}
           >
             {showLog ? "Hide" : "Show"}
           </Button>

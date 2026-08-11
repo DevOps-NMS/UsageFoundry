@@ -300,51 +300,58 @@ export function RunLand({ run }: { run: RunDTO }) {
         </Hint>
       )}
 
+      {/* What just happened, announced: landing writes into a directory the
+          operator is working in, and it is the one outcome on this page they
+          may not be looking at the moment it arrives. The region holds only
+          this, so a conflict list is not read out with it. */}
+      <div aria-live="polite">
+        {error ? (
+          <Notice tone="danger" className="mt-3">
+            {error}
+          </Notice>
+        ) : note ? (
+          <Notice tone="info" className="mt-3">
+            {note}
+          </Notice>
+        ) : null}
+      </div>
+
       {/* One line about the state, not three. "Already in main", "landed on
           Tuesday" and "merged just now" are the same fact told three ways, and
-          a card that stacks them reads as three separate things happening.
-          Announced, because a merge into the operator's own checkout is the one
-          thing on this page that changes a directory they are working in. */}
-      <div aria-live="polite">
-      {error ? (
-        <Notice tone="danger" className="mt-3">
-          {error}
-        </Notice>
-      ) : note ? (
-        <Notice tone="info" className="mt-3">
-          {note}
-        </Notice>
-      ) : state.landedAt ? (
-        <Notice tone="info" quiet className="mt-3">
-          Merged into <span className="mono">{state.landedInto}</span> on{" "}
-          {fmtDateTime(state.landedAt)} ({state.landedStrategy}). Reopening this run
-          can put new commits on the branch, so this describes a moment, not a
-          permanent state.
-        </Notice>
-      ) : state.preview.outcome === "conflict" ? (
-        <>
-          <Notice tone="warn" className="mt-3">
-            <strong>
-              Conflicts with {state.target} in {state.preview.files.length} file
-              {state.preview.files.length === 1 ? "" : "s"}.
-            </strong>{" "}
-            Nothing was written to find that out — the merge was tried in memory,
-            and what is below is how it would land.
+          a card that stacks them reads as three separate things happening — so
+          the outcome of the last action, above, replaces this while it stands. */}
+      {!error &&
+        !note &&
+        (state.landedAt ? (
+          <Notice tone="info" quiet className="mt-3">
+            Merged into <span className="mono">{state.landedInto}</span> on{" "}
+            {fmtDateTime(state.landedAt)} ({state.landedStrategy}). Reopening this
+            run can put new commits on the branch, so this describes a moment, not
+            a permanent state.
           </Notice>
-          <div className="mt-2">
-            {state.preview.files.map((f) => (
-              <ConflictFile key={f.path} file={f} />
-            ))}
-          </div>
-        </>
-      ) : (
-        state.blocked && (
-          <Notice tone={state.merged ? "info" : "warn"} className="mt-3">
-            {state.blocked}
-          </Notice>
-        )
-      )}
-      </div>
+        ) : state.preview.outcome === "conflict" ? (
+          <>
+            <Notice tone="warn" className="mt-3">
+              <strong>
+                Conflicts with {state.target} in {state.preview.files.length} file
+                {state.preview.files.length === 1 ? "" : "s"}.
+              </strong>{" "}
+              Nothing was written to find that out — the merge was tried in
+              memory, and what is below is how it would land.
+            </Notice>
+            <div className="mt-2">
+              {state.preview.files.map((f) => (
+                <ConflictFile key={f.path} file={f} />
+              ))}
+            </div>
+          </>
+        ) : (
+          state.blocked && (
+            <Notice tone={state.merged ? "info" : "warn"} className="mt-3">
+              {state.blocked}
+            </Notice>
+          )
+        ))}
 
       {state.pending && (
         <PendingWork
