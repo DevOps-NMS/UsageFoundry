@@ -9,6 +9,7 @@ import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
 import { Spinner } from "@/components/ui/Log";
+import { Markdown } from "@/components/Markdown";
 
 /**
  * An AI read of what the run changed — asked for, never automatic.
@@ -17,47 +18,11 @@ import { Spinner } from "@/components/ui/Log";
  * and one that ran on its own would be spend nobody authorised. Its cost is
  * shown here and nowhere else — it is deliberately absent from the run's own
  * spend, which counts work cycles.
+ *
+ * The renderer this used to own now lives in `Markdown.tsx`, because a work
+ * cycle's own final message is rendered with it too. It gained fenced code and
+ * inline markers there — a review that quotes a patch is better for it.
  */
-
-/**
- * The three headings the reviewer is asked for, rendered without a markdown
- * dependency. Deliberately small: it handles headings, bullets and paragraphs,
- * and anything else falls through as text rather than as markup this cannot be
- * sure of.
- */
-function Rendered({ text }: { text: string }) {
-  return (
-    <div className="text-sm leading-relaxed">
-      {text.split("\n").map((line, i) => {
-        const trimmed = line.trim();
-        if (trimmed.startsWith("#")) {
-          return (
-            <div
-              key={i}
-              className="mt-3.5 mb-1 text-sm font-semibold text-ink first:mt-0"
-            >
-              {trimmed.replace(/^#+\s*/, "")}
-            </div>
-          );
-        }
-        if (/^[-*]\s+/.test(trimmed) || /^\d+\.\s+/.test(trimmed)) {
-          return (
-            <div key={i} className="mb-1 flex gap-2 pl-1">
-              <span className="text-ink-faint">•</span>
-              <span className="min-w-0 flex-1">{trimmed.replace(/^([-*]|\d+\.)\s+/, "")}</span>
-            </div>
-          );
-        }
-        if (!trimmed) return <div key={i} className="h-2" />;
-        return (
-          <p key={i} className="mb-1.5">
-            {trimmed}
-          </p>
-        );
-      })}
-    </div>
-  );
-}
 
 function ReviewBody({ review }: { review: RunReviewDTO }) {
   return (
@@ -92,7 +57,7 @@ function ReviewBody({ review }: { review: RunReviewDTO }) {
       {review.status === "running" && (
         <Empty>Reading the diff — this takes a minute or two.</Empty>
       )}
-      {review.text && <Rendered text={review.text} />}
+      {review.text && <Markdown text={review.text} />}
     </div>
   );
 }
