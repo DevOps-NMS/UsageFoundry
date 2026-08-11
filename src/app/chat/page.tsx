@@ -42,7 +42,7 @@ export default function ChatPage() {
   const chatId = chat?.id ?? null;
 
   const load = useCallback(async (id: string | null) => {
-    const res = await fetch(id ? `/api/chat/${id}` : "/api/chat");
+    const res = await fetch(id ? `/api/chat/${id}` : "/api/chat", { cache: "no-store" });
     if (!res.ok) return;
     const data = (await res.json()) as { chat: ChatDTO; chats?: ChatListEntryDTO[] };
     setChat(data.chat);
