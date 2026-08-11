@@ -40,6 +40,7 @@ process.env.DATA_DIR = path.join(tmp, "data");
 const {
   conflictKey,
   overlaps,
+  githubEnv,
   isUsageLimit,
   nextPrompt,
   refusalResumeAt,
@@ -362,5 +363,74 @@ describe("refusal wake-up time", () => {
     });
     assert.equal(Number.isFinite(atCap), true);
     assert.equal(atCap <= now + 6 * hour, true);
+  });
+});
+
+/**
+ * The credential block handed to a work cycle.
+ *
+ * It earns a test on the same grounds as the rest of this file: it is pure, and
+ * every way it can be wrong is silent. Git ignores a `GIT_CONFIG_*` block whose
+ * count and pairs disagree — no warning, no non-zero exit — so a mistake here
+ * looks exactly like the unauthenticated container it exists to fix, and only
+ * shows up as an agent that could not push, inside a tool call nothing here
+ * reads. The empty case matters just as much: injecting a helper that answers
+ * with an empty password turns "no credentials configured" into a rejected
+ * login against whatever the agent was doing.
+ */
+describe("github credentials for a work cycle", () => {
+  const token = "ghp_example";
+  const env = githubEnv(token);
+
+  it("hands nothing to the child when no token is configured", () => {
+    assert.deepEqual(githubEnv(""), {});
+  });
+
+  it("sets both names the gh CLI and its ecosystem read", () => {
+    assert.equal(env.GH_TOKEN, token);
+    assert.equal(env.GITHUB_TOKEN, token);
+  });
+
+  it("numbers the git config block so git does not discard all of it", () => {
+    const count = Number(env.GIT_CONFIG_COUNT);
+    assert.equal(Number.isInteger(count) && count > 0, true);
+    for (let i = 0; i < count; i += 1) {
+      assert.equal(typeof env[`GIT_CONFIG_KEY_${i}`], "string");
+      assert.equal(typeof env[`GIT_CONFIG_VALUE_${i}`], "string");
+    }
+    // A pair past the count is a pair git never reads.
+    assert.equal(env[`GIT_CONFIG_KEY_${count}`], undefined);
+  });
+
+  it("resets the credential helper list before adding its own", () => {
+    // A repository cloned on the host can name a helper this image does not
+    // have; git consults them in order, so ours has to be the only one.
+    const keys: string[] = [];
+    const values: string[] = [];
+    for (let i = 0; i < Number(env.GIT_CONFIG_COUNT); i += 1) {
+      keys.push(env[`GIT_CONFIG_KEY_${i}`]);
+      values.push(env[`GIT_CONFIG_VALUE_${i}`]);
+    }
+    const first = keys.indexOf("credential.https://github.com.helper");
+    assert.notEqual(first, -1);
+    assert.equal(values[first], "");
+    assert.equal(values[first + 1]?.startsWith("!"), true);
+    assert.equal(keys[first + 1], "credential.https://github.com.helper");
+  });
+
+  it("rewrites an ssh remote, which is the case that cannot be authenticated", () => {
+    const rewrites = Object.entries(env)
+      .filter(([k]) => k.startsWith("GIT_CONFIG_KEY_"))
+      .filter(([, v]) => v === "url.https://github.com/.insteadOf")
+      .map(([k]) => env[k.replace("KEY", "VALUE")]);
+    assert.deepEqual(rewrites.sort(), ["git@github.com:", "ssh://git@github.com/"]);
+  });
+
+  it("keeps the token out of the git config it writes", () => {
+    // `git config --list` is something an agent prints; the helper reads the
+    // environment at call time so the value there is `$GH_TOKEN`, not the token.
+    for (const [key, value] of Object.entries(env)) {
+      if (key.startsWith("GIT_CONFIG_")) assert.equal(value.includes(token), false);
+    }
   });
 });

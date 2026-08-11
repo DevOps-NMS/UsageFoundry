@@ -169,7 +169,10 @@ export default function SettingsPage() {
       <h1 className="mb-1 text-xl font-semibold tracking-tight">Settings</h1>
       <p className="mb-4 text-ink-muted">
         Transcripts: <span className="mono">{String(env.claudeHome ?? "—")}</span>{" "}
-        · Admin key: {env.adminKeyConfigured ? "configured" : "not set"}
+        · Admin key: {env.adminKeyConfigured ? "configured" : "not set"} · GitHub:{" "}
+        {env.githubTokenConfigured
+          ? "token configured"
+          : "no token (runs cannot push or use gh)"}
         <br />
         Workspaces:{" "}
         {workspaceMounts.length === 0 ? (

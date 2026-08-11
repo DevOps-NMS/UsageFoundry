@@ -6,6 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import {
   CLAUDE_BIN,
+  GITHUB_TOKEN,
   OTLP_SELF_URL,
   WORKSPACE_MOUNTS,
   mountById,
@@ -1592,6 +1593,88 @@ function telemetryEnv(runId: string): Record<string, string> {
 }
 
 /**
+ * Answers git's credential request for github.com from `$GH_TOKEN`.
+ *
+ * A `!`-prefixed helper is a command git runs through a shell, with the
+ * operation appended as an argument — hence the `test "$1" = get`, so `store`
+ * and `erase` are no-ops rather than errors. The token is read from the
+ * environment at call time instead of being baked into the value, so it never
+ * appears in `git config --list` output the agent may paste into its own log.
+ */
+const GITHUB_CREDENTIAL_HELPER =
+  `!f() { test "$1" = get && printf 'username=x-access-token\\npassword=%s\\n' "$GH_TOKEN"; }; f`;
+
+/**
+ * GitHub credentials for a work cycle, or nothing when no token is configured.
+ *
+ * Everything an agent does with GitHub — `gh issue view`, `git push`, opening a
+ * pull request — needs a credential the container has no other way to get. The
+ * `~/.claude` mount carries Claude's login and nothing else: no `~/.gitconfig`,
+ * no `~/.ssh`, no `~/.config/gh`. So without this every one of those commands
+ * fails, and it fails *inside* a tool call the run loop never inspects — the
+ * cycle ends looking like the agent chose not to push.
+ *
+ * Three things are set, and each covers a different way that failure arrives:
+ *
+ *   `GH_TOKEN`/`GITHUB_TOKEN` — what the `gh` CLI reads. Both, because scripts
+ *   and actions-derived snippets reach for either.
+ *
+ *   a credential helper for `https://github.com` — what plain `git` reads.
+ *   Registered by *resetting the list first* (an empty value, then ours): a
+ *   repository cloned on the host can carry `credential.helper` in its own
+ *   config naming a program this image does not have — `osxkeychain` is the
+ *   common one — and git consults helpers in configured order.
+ *
+ *   `url.…insteadOf` — an SSH remote rewritten to HTTPS. This container holds
+ *   no key and reaches no agent, so `git@github.com:` can never authenticate
+ *   here however the token is set; it is the difference between a repository
+ *   cloned over SSH and one cloned over HTTPS, which is exactly the kind of
+ *   difference that makes this fail on *some* runs and not others.
+ *
+ * All of it travels as `GIT_CONFIG_*` rather than being written to a config
+ * file: the settings then apply to every git the agent runs, in whatever
+ * repository, and disappear with the process instead of outliving the run in a
+ * mounted working tree.
+ *
+ * The token is deliberately absent from `reviewEnv()` in `review.ts` — it
+ * strips the whole `UF_` namespace, and a reviewer that cannot write files has
+ * nothing to authenticate. Same for `gitEnv()` in `git.ts`, whose children run
+ * repository-controlled hooks.
+ *
+ * `token` is a parameter so the function is pure and testable; production
+ * always uses the process-level value.
+ */
+export function githubEnv(token: string = GITHUB_TOKEN): Record<string, string> {
+  if (!token) return {};
+
+  const config: Array<[string, string]> = [
+    ["credential.https://github.com.helper", ""],
+    ["credential.https://github.com.helper", GITHUB_CREDENTIAL_HELPER],
+    ["url.https://github.com/.insteadOf", "git@github.com:"],
+    ["url.https://github.com/.insteadOf", "ssh://git@github.com/"],
+  ];
+
+  const env: Record<string, string> = {
+    GH_TOKEN: token,
+    GITHUB_TOKEN: token,
+    // A wrong or expired token should end the command, not the cycle: with a
+    // helper installed nothing should prompt, and a git that decides to ask
+    // anyway has no stdin to ask on and would sit there until the run's own
+    // duration limit stopped it.
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_COUNT: String(config.length),
+  };
+  // Every index below the count must carry both halves — git ignores the whole
+  // block if one is missing, which would put the run straight back into the
+  // failure this function exists to remove, silently.
+  config.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
+}
+
+/**
  * Signal a child and everything it started.
  *
  * Falls back to signalling the process alone when the group is unavailable —
@@ -1640,7 +1723,7 @@ function runIteration(
     // quotes, backticks, or semicolons is inert rather than interpreted.
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {
       cwd,
-      env: childEnv(telemetryEnv(runId)),
+      env: childEnv({ ...telemetryEnv(runId), ...githubEnv() }),
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, so a kill reaches the builds, test runners and
       // servers the agent started. Those are what actually hold the working
