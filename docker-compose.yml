@@ -84,7 +84,13 @@ services:
       - ${UF_WORKSPACE_3:-${UF_WORKSPACE}}:/workspace3
       - ${UF_WORKSPACE_4:-${UF_WORKSPACE}}:/workspace4
 
-      # SQLite database (runs, events, settings).
+      # SQLite database (runs, events, settings). A named volume rather than a
+      # bind mount, so `docker compose -p <project>` namespaces it and two
+      # instances do not share one database — but it also means its root
+      # ownership and mode are copied from /data *in the image* when Docker
+      # first creates it, not taken from the host. That is why the Dockerfile
+      # marks that directory world-writable: this container runs as UF_UID
+      # above, and a fresh volume has to be writable by whatever that is.
       - usagefoundry-data:/data
 
     restart: unless-stopped

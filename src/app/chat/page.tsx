@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { ChatDTO, ChatListEntryDTO, ChatProposalDTO } from "@/lib/apiTypes";
 import { chatRequest } from "@/lib/chatRequest";
-import { fmtRelative, fmtUSD } from "@/lib/format";
+import { fmtRelative, fmtUSD, pollFailureMessage } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
@@ -36,18 +36,47 @@ export default function ChatPage() {
   const [chats, setChats] = useState<ChatListEntryDTO[]>([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Separate from `error`, which the send and approve handlers own: they clear
+  // theirs on every click, and a poll lands between clicks — one state would
+  // have each wiping the other's sentence seconds after it appeared.
+  const [pollError, setPollError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const threadRef = useRef<HTMLDivElement>(null);
 
   const chatId = chat?.id ?? null;
 
+  /**
+   * Neither failure may be dropped. A poll that returns early leaves the last
+   * snapshot on screen as though it were current — a thread that was thinking
+   * when the polls started failing then shows "Thinking…" for ever, which is
+   * indistinguishable from a turn still working.
+   */
   const load = useCallback(async (id: string | null) => {
-    const res = await fetch(id ? `/api/chat/${id}` : "/api/chat");
-    if (!res.ok) return;
-    const data = (await res.json()) as { chat: ChatDTO; chats?: ChatListEntryDTO[] };
-    setChat(data.chat);
-    if (data.chats) setChats(data.chats);
+    try {
+      const res = await fetch(id ? `/api/chat/${id}` : "/api/chat");
+      // Parsed before the status check: a 500 from inside `chatDTO` carries no
+      // JSON, and letting that throw would report a reachable server as an
+      // unreachable one.
+      const data = (await res.json().catch(() => ({}))) as {
+        chat?: ChatDTO;
+        chats?: ChatListEntryDTO[];
+        error?: string;
+      };
+      if (!res.ok || !data.chat) {
+        const detail = data.error ?? (res.ok ? "no thread in the response" : null);
+        setPollError(pollFailureMessage(res.status, detail));
+        return;
+      }
+      setChat(data.chat);
+      if (data.chats) setChats(data.chats);
+      setPollError(null);
+    } catch (err) {
+      // `void load(id)` from an interval: without this the rejection is an
+      // unhandled one and, again, nothing on screen changes.
+      const cause = err instanceof Error ? err.message : String(err);
+      setPollError(pollFailureMessage(null, cause));
+    }
   }, []);
 
   useEffect(() => {
@@ -56,8 +85,11 @@ export default function ChatPage() {
 
   // The list only changes when a turn ends or a chat is created, so it is
   // refetched with the thread rather than on its own timer.
+  // No `if (!chatId) return`: a first load that fails leaves no thread to poll
+  // for, so the guard that used to stand here meant the page never tried again
+  // and the failure notice stood for ever. The cadence is unchanged — with no
+  // thread there is no `thinking` status, so this is the idle timer.
   useEffect(() => {
-    if (!chatId) return;
     const period = chat?.status === "thinking" ? POLL_ACTIVE_MS : POLL_IDLE_MS;
     const t = setInterval(() => void load(chatId), period);
     return () => clearInterval(t);
@@ -86,6 +118,28 @@ export default function ChatPage() {
       // anything still reaching here is a bug that should not be swallowed.
       setBusy(false);
     }
+  };
+
+  /**
+   * Stop a turn that is not going to finish.
+   *
+   * The only way back from a thread stuck on "Thinking…" short of restarting
+   * the server — which stops every run in flight to clear one conversation. It
+   * is deliberately not a send: the guard that refuses a message while a turn
+   * is in flight is what stops two billed children on one conversation.
+   */
+  const stop = async () => {
+    if (!chatId || busy) return;
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/chat/${chatId}/cancel`, { method: "POST" });
+    const data = (await res.json().catch(() => ({}))) as {
+      chat?: ChatDTO;
+      error?: string;
+    };
+    if (!res.ok) setError(data.error ?? "The turn could not be stopped.");
+    else if (data.chat) setChat(data.chat);
+    setBusy(false);
   };
 
   const decide = async (action: "approve" | "reject", ids: string[]) => {
@@ -157,6 +211,7 @@ export default function ChatPage() {
         is what keeps it out of your checkouts.
       </Notice>
 
+      {pollError && <Notice tone="danger">{pollError}</Notice>}
       {error && <Notice tone="danger">{error}</Notice>}
       {chat?.error && chat.status === "failed" && (
         <Notice tone="danger">{chat.error}</Notice>
@@ -180,7 +235,13 @@ export default function ChatPage() {
                   <Message key={m.id} role={m.role} text={m.text} ts={m.ts} />
                 ))}
                 {thinking && (
-                  <div className="text-sm text-ink-faint">Thinking…</div>
+                  // `thinking` is only ever as fresh as the last poll that
+                  // worked, so once one has failed this may no longer be true.
+                  <div className="text-sm text-ink-faint">
+                    {pollError
+                      ? "Was thinking when the last refresh failed — state unknown."
+                      : "Thinking…"}
+                  </div>
                 )}
               </div>
             )}
@@ -205,7 +266,16 @@ export default function ChatPage() {
               <Button onClick={() => void send()} disabled={thinking || busy || !draft.trim()}>
                 {thinking ? "Working…" : "Send"}
               </Button>
-              <Hint className="mt-0">Enter sends, Shift+Enter adds a line.</Hint>
+              {thinking && (
+                <Button variant="secondary" disabled={busy} onClick={() => void stop()}>
+                  Stop
+                </Button>
+              )}
+              <Hint className="mt-0">
+                {thinking
+                  ? "Stop ends this turn and signals the process answering it."
+                  : "Enter sends, Shift+Enter adds a line."}
+              </Hint>
             </ButtonRow>
           </div>
         </Card>
