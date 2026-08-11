@@ -1384,6 +1384,10 @@ through before trusting this unattended:
   that needs authentication. The credential block itself was driven into a real
   git (above); what has not been watched is the CLI's own git picking it up out
   of the environment mid-run.
+- The chat page's "Earlier chats" list going stale-free in a browser. The route
+  it polls now answers with the list, and that is unit-tested against the
+  handler itself — what has not been watched is the sidebar picking up a title
+  and a waiting count on the 10s poll without a reload.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
