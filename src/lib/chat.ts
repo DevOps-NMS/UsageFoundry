@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -119,6 +119,9 @@ const THREAD_REPLAY_BYTES = 20_000;
 
 /** A chat turn that has not finished in this long is not going to. */
 const CHAT_TIMEOUT_MS = 10 * 60_000;
+
+/** How long `close` is given to deliver the last of stdout after the exit. */
+const EXIT_DRAIN_MS = 2_000;
 
 /* ------------------------------------------------------------------ */
 /* Storage                                                             */
@@ -746,7 +749,7 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       land({ status: "failed", error: `Could not launch ${CLAUDE_BIN}: ${err.message}` });
     });
 
-    child.on("close", (code) => {
+    settleOnExit(child, (code) => {
       if (timedOut) {
         land({
           status: "failed",
@@ -757,6 +760,43 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       land(parseTurnOutput(stdout, stderr, code));
     });
   });
+}
+
+/**
+ * Settle a turn on the child's `exit`, giving `close` a grace period first.
+ *
+ * `close` is the better signal — it means stdout has been fully drained — but
+ * it fires only once every inherited pipe has shut, and the CLI's own children
+ * hold those. A `claude` that leaves a grandchild behind has *exited* and will
+ * never *close*, so a turn wired to `close` alone sits at "Thinking…" until the
+ * ten-minute timeout kills the group and throws the answer away — and for ever
+ * when `killProcessGroup` is off, because then there is no group to kill and
+ * nothing else reaps the grandchild.
+ *
+ * `runIteration` settles the identical hazard the identical way, and for the
+ * same reason: `exit` is the guarantee, `close` is the fast path, and the grace
+ * period exists only so a normal exit flushes its last chunk through `close`
+ * before anything is parsed.
+ *
+ * Exported because the shape it exists for — a child that exits while a
+ * grandchild holds its stdout — is only reachable from a test through this
+ * seam; `runTurn` itself needs a database, a settings row and a spend gate.
+ */
+export function settleOnExit(
+  child: ChildProcess,
+  settle: (code: number | null) => void,
+): void {
+  let done = false;
+  const once = (code: number | null) => {
+    if (done) return;
+    done = true;
+    settle(code);
+  };
+
+  child.on("exit", (code) => {
+    setTimeout(() => once(code), EXIT_DRAIN_MS).unref?.();
+  });
+  child.on("close", (code) => once(code));
 }
 
 /**

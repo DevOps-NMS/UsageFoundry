@@ -1,16 +1,28 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
-import { chatPrompt, composeTask, planProposal, type ChatProposalRow } from "./chat";
+import {
+  chatPrompt,
+  composeTask,
+  parseTurnOutput,
+  planProposal,
+  settleOnExit,
+  type ChatProposalRow,
+} from "./chat";
 import { githubSlug } from "./workspace";
 import type { RunTemplate } from "./templates";
 import type { RunGuards } from "./settings";
 
 /**
- * Covers `planProposal`, `chatPrompt` and `githubSlug`, and only those.
+ * Covers `planProposal`, `chatPrompt`, `githubSlug` and `settleOnExit`, and only
+ * those.
  *
  * Each is the same class of failure the rest of this suite is reserved for —
- * pure, silent, and expensive:
+ * silent, and expensive:
  *
  *  - `planProposal` is where text a model wrote becomes a process with write
  *    access to a directory. The branch that matters most is the one that is not
@@ -30,6 +42,12 @@ import type { RunGuards } from "./settings";
  *  - `githubSlug` names the repository the chat then reads issues out of. A
  *    wrong answer is not an error — it is proposals for somebody else's
  *    project, described convincingly.
+ *  - `settleOnExit` decides whether a turn ever ends. It is the only one here
+ *    that is not a pure function, and it earns the subprocess because the fault
+ *    it guards against cannot be reproduced without one: pipes a grandchild
+ *    holds open are the whole mechanism. Wired to `close` alone, a chat whose
+ *    answer is already sitting in the buffer reads as "Thinking…" for ten
+ *    minutes and then as a timeout — or for ever, with no error recorded.
  */
 
 const template: RunTemplate = {
@@ -328,4 +346,80 @@ describe("githubSlug", () => {
       assert.equal(githubSlug(url), null, url);
     }
   });
+});
+
+/**
+ * A `claude` of the shape the fault needs: it prints a complete result object,
+ * leaves a child holding the stdout it inherited, and exits straight away.
+ */
+const FAKE_CLAUDE = `#!/bin/sh
+printf '{"type":"result","subtype":"success","is_error":false,"result":"hi","session_id":"s1","total_cost_usd":0.01}\\n'
+sleep 30 &
+exit 0
+`;
+
+describe("settleOnExit", () => {
+  it(
+    "settles once the child exits, with a grandchild still holding stdout",
+    {
+      // POSIX shell and process groups; nothing here is meaningful on Windows.
+      skip: process.platform === "win32" ? "no process groups on Windows" : false,
+      // Without this the pre-fix wiring does not fail, it hangs: `node --test`
+      // waits for ever on a promise nothing is going to resolve.
+      timeout: 20_000,
+    },
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "uf-chat-settle-"));
+      const bin = path.join(dir, "fake-claude");
+      fs.writeFileSync(bin, FAKE_CLAUDE, { mode: 0o755 });
+
+      // Detached so the cleanup below can reach the grandchild through the
+      // group: a test that leaks a process holding this pipe open leaves the
+      // runner unable to exit.
+      const child = spawn(bin, [], {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      });
+
+      try {
+        let stdout = "";
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (c: string) => (stdout += c));
+
+        // Recorded rather than awaited. If `close` fires, the wiring this
+        // replaces would have settled the turn too and the test proves nothing.
+        let closed = false;
+        child.on("close", () => {
+          closed = true;
+        });
+
+        const startedAt = Date.now();
+        const code = await new Promise<number | null>((resolve) =>
+          settleOnExit(child, resolve),
+        );
+        const elapsed = Date.now() - startedAt;
+
+        assert.equal(closed, false, "the grandchild should still hold stdout open");
+        assert.ok(elapsed < 10_000, `settled after ${elapsed}ms`);
+        assert.equal(code, 0);
+
+        // The answer was in the buffer the whole time: parsed as an answer,
+        // not thrown away as a timeout.
+        const result = parseTurnOutput(stdout, "", code);
+        assert.equal(result.status, "idle");
+        assert.equal(result.text, "hi");
+        assert.equal(result.sessionId, "s1");
+        assert.equal(result.costUSD, 0.01);
+      } finally {
+        try {
+          if (child.pid) process.kill(-child.pid, "SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        child.stdout.destroy();
+        child.stderr.destroy();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
