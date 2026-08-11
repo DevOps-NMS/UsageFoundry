@@ -1654,6 +1654,75 @@ function priorWorkNotice(cycles: number, branch: string | null): string {
  */
 const ISOLATED_GIT_TOOLS = ["Bash(git add:*)", "Bash(git commit:*)"];
 
+/**
+ * Name-matched process killers, withheld from every agent.
+ *
+ * This server is a Next.js process and Next renames it: inside the container
+ * `ps` shows `next-server (v…)`, not `node server.js`. An agent verifying a
+ * change starts its own dev server, and once that has booted it carries the
+ * *same* title — `next dev` hands off to a child that renames itself the same
+ * way, which is why an agent that tries `pkill -f "next dev"` and finds the
+ * port still held broadens the pattern rather than narrowing it. The two
+ * processes are then indistinguishable by name, and the one `pkill` reaches is
+ * the one that was already running.
+ *
+ * Measured, not reasoned: a run issued `pkill -f "next-server|next dev"` to
+ * clean up a dev server it had started on 3100. tini lost its child,
+ * `restart: unless-stopped` brought the container back, and `reconcileOnBoot`
+ * marked fourteen runs failed 690ms later — including the one that ran it.
+ *
+ * Withheld by name because there is no ownership boundary to withhold it by:
+ * compose runs a single uid, so an agent and the server supervising it can
+ * signal each other freely, and the container has neither a docker socket nor
+ * a docker CLI — this is the only route from an agent to a restart, and it does
+ * not look like one from the agent's side.
+ *
+ * `kill` itself stays permitted, deliberately. A pid is a handle on a process
+ * the agent actually started; a pattern is a guess about every process on the
+ * machine. Denying both would leave an agent unable to stop the dev server it
+ * was told to start, which is a port held for the rest of the container's life.
+ *
+ * Deny beats `--permission-mode`, verified against the pinned CLI: a
+ * `bypassPermissions` session is still refused these.
+ */
+const PROCESS_KILLERS = ["Bash(pkill:*)", "Bash(killall:*)"];
+
+/**
+ * What every agent is told about the process it is running inside.
+ *
+ * `PROCESS_KILLERS` stops two commands; this is what stops the agent routing
+ * around them, which otherwise takes it one turn — `kill $(pgrep -f
+ * next-server)` is not `pkill` and is exactly as fatal.
+ *
+ * A recipe rather than a prohibition, and the difference is the whole point. An
+ * agent told only "do not kill things by name" and left holding a dev server
+ * whose pid it no longer has does the safe thing, which is nothing: the server
+ * survives the cycle and holds its port for the life of the container, and the
+ * next cycle finds the port taken and starts another. That is the failure this
+ * would have traded the first one for. So the pattern that is actually safe is
+ * spelled out — match on the port, which names one process the agent chose,
+ * never on the title, which names two — along with the child-process form,
+ * since `next dev` forking a child it does not kill is what sent the run that
+ * caused all this looking for `pkill` in the first place.
+ *
+ * On the system prompt rather than in the task, because the task is only sent
+ * on the first cycle of a session and this is true of every cycle. It says
+ * nothing about docker on purpose: there is no docker in this image, and
+ * warning about an absent command is how an agent learns to look for it.
+ */
+const SELF_HOSTING_NOTICE =
+  "You are running inside a long-lived server process that is also supervising " +
+  "other agents. Ending it ends every run in flight, including your own, and " +
+  "nothing you have not committed survives. `pkill` and `killall` are therefore " +
+  "unavailable to you. To stop a background process you started, record its pid " +
+  "(`cmd & pid=$!`) and use `kill \"$pid\"`; a dev server usually forks a child, " +
+  "so `kill $(pgrep -P \"$pid\") \"$pid\"` or start it under `setsid` and use " +
+  "`kill -- -$pid`. If you no longer have the pid, select on something unique to " +
+  "the process you started — the port you chose, e.g. `kill $(pgrep -f 3100)` — " +
+  "and never on `next-server`, `next dev` or `node`: this server's process title " +
+  "is `next-server`, which is also the title your own dev server takes, so a " +
+  "match on it cannot tell the two apart.";
+
 export function buildArgs(opts: {
   prompt: string;
   model: string | null;
@@ -1669,6 +1738,11 @@ export function buildArgs(opts: {
   // still follows the mode. It is not the allowlist `chat.ts` runs under, where
   // `manual` mode is what makes the same flag exhaustive.
   if (opts.isolated) args.push("--allowedTools", ...ISOLATED_GIT_TOOLS);
+  // Unconditional, and deliberately not paired with the isolation flag above:
+  // a run in the operator's own checkout is inside the same process as one in a
+  // worktree, and the kill does not care which.
+  args.push("--disallowedTools", ...PROCESS_KILLERS);
+  args.push("--append-system-prompt", SELF_HOSTING_NOTICE);
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   return args;
 }
