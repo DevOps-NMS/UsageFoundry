@@ -297,9 +297,25 @@ because UsageFoundry restarted under it, because you stopped it, because it hit
 one of its own limits, or because the agent reported the task done — has a
 button on its page: **Resume**, or **Ask for more** when it completed. It keeps
 its folder, its isolated checkout and branch, its spend so far, and its Claude
-Code session, so it continues the conversation rather than starting a new one. A
-run that died before it had a session to continue starts again from the original
-task instead, and says so.
+Code session, so it continues the conversation rather than starting a new one.
+The session is recorded as soon as Claude Code names it, not when the work cycle
+finishes, so a run that crashed — or that UsageFoundry restarted underneath —
+still has one to continue.
+
+A run that genuinely never got that far starts again from the original task
+instead, and says so on its page. When it had already worked, the agent is told:
+the prompt opens by naming how many cycles the previous attempt ran and where its
+output is — the run's own branch when it is isolated, the folder otherwise — and
+tells it to read that before doing anything. There is no conversation left to
+carry any of it, and an agent handed a bare task does the first thing the task
+says, which is the work it is standing on.
+
+If the session exists but Claude Code will not resume it — a transcript truncated
+by a mid-turn kill is the known way that happens — the run tries once more and
+then stops, saying so and naming the `claude --resume <id>` command to pick it up
+by hand. It does not quietly start a fresh session: that would lose the
+conversation the resume existed to keep, and it is what "picking a run back up"
+means here.
 
 The form takes a message as well as the limits. Whatever you write is sent
 verbatim as the next turn of the same conversation — that is how you keep
@@ -321,6 +337,52 @@ and the button refuses and says so rather than queueing a run that would stop
 again on its first check. The time limit is the exception — it runs from the
 moment it starts again, since counting the hours it spent dead would refuse
 every run older than its own limit. Everything else carries over untouched.
+
+### Running the same task again
+
+Two ways, and the cheap one is worth knowing first.
+
+**Start another like this** — a link in the header of any run page. It opens the
+new-run form pre-filled from that run: the same task, the same workspace and
+folder, the same isolation, the same limits, the same permission mode. Nothing
+happens until you press *Start run*, and nothing about the original run changes.
+This is not a resume — it is a new run that happens to be configured identically,
+which is what you want when last week's task comes round again but you would
+rather not touch the run that already finished.
+
+**Templates** — a named, saved version of the same thing. The *Templates* card at
+the top of the new-run form loads one into the form, or saves whatever the form
+is currently holding under a name. Loading a template fills in every field and
+starts nothing; you can edit anything before you run it, and editing the form
+does not write back to the template.
+
+What a template holds is the task, the limits, how it behaves, and — optionally —
+the folder. *Remember the workspace and folder* is a switch on the save row,
+because both answers are right for different tasks: "update the changelog for
+this project" wants a folder recorded, "run the test suite and fix what fails"
+wants to be asked. A template with no folder leaves the picker alone rather than
+guessing.
+
+Three things it does **not** do, each on purpose:
+
+- **It does not carry the model.** That is a single global setting
+  (Settings → *Model*), and a second place to set it is how the two drift.
+- **It does not apply a live-enforcement mode quietly.** There is deliberately no
+  global "default enforcement", because one edit that turns *every* run into a
+  cycle-killing run is a mistake with no undo. A template is a second way to
+  inherit that choice, so a template carrying *Stop the cycle in flight* (or
+  *…carry on next window*) says so in a banner above the form, with a button that
+  puts it back to the mode that loses no work. Same for `bypassPermissions`,
+  which gets the danger banner it gets everywhere else.
+- **It does not let you save something that cannot run.** A template with no
+  cycle limit and no time limit is refused when you save it, with the same
+  message `POST /api/runs` would give — the point of validating twice is that the
+  error arrives while you are still looking at the form that caused it, rather
+  than the week you finally use the template.
+
+A template is form input and nothing more. It holds no folder, blocks no run,
+occupies no concurrency slot, and deleting one cannot affect anything that has
+already started — a run copies every value it needs the moment it is created.
 
 ---
 
@@ -785,6 +847,16 @@ Built and exercised against real transcripts:
   hunk; the size budget naming what it left out; `merge-tree` output read as
   clean, conflicting, or undetermined-on-an-old-git; and every `landRefusal`
   branch.
+- Run templates against a live dev server on a scratch workspace: create, list
+  (ordered by name, case-insensitively), update, and delete, with a second
+  delete answering 404. Every refusal came back as a 400 with the sentence the
+  form shows — a duplicate name differing only in case, a blank prompt, an
+  unknown permission mode, and the no-cycle-limit-and-no-time-limit pair that
+  `POST /api/runs` refuses. Read-time narrowing was checked by writing a row
+  straight into SQLite with `permission_mode = 'bypassEverything'` and a corrupt
+  budget blob: it comes back as `plan` (the only mode that cannot write) and one
+  work cycle, rather than as a wider permission or a throw. `normalizeTemplateInput`
+  and `rowToTemplate` also have 20 assertions under `npm test`.
 
 ### Not yet verified by hand
 
@@ -809,7 +881,22 @@ through before trusting this unattended:
   assistant turn. `refusalInStderr` covers that case but has never fired.
 - Whether `claude --resume` accepts a session whose transcript was truncated by
   a mid-turn kill. The recovery ladder retries once and then stops, naming the
-  command — it deliberately does not start a fresh session.
+  command — it deliberately does not start a fresh session. That ladder now also
+  covers a run picked up by hand rather than only one coming back from a pause,
+  which makes this the failure an operator is most likely to meet: a run that
+  cannot be resumed cannot be reopened into either, and the manual command is
+  the only way out of it.
+- **Which session id `claude -p --resume <id>` reports back.** Every cycle's
+  stream is read for one and the run adopts it; a value differing from the one
+  passed to `--resume` is written to the run log and otherwise treated as
+  normal, because nothing here has watched a real resume on the wire. If it
+  turns out the CLI always mints a fresh id, that line is noise and should
+  become a debug-level detail rather than a log entry per resumed cycle.
+- Whether a session id reported by an `init` event that is then killed seconds
+  later is resumable at all. It is now persisted, so such a run is reopened as a
+  continuation rather than a restart — which is the point — but the conversation
+  it attaches to holds only the original task, and a continuation prompt that
+  restates nothing is relying on that first user turn having been flushed.
 - A run parking and resuming across a real 5-hour boundary, in the same
   worktree, on the same branch, with its commits intact.
 - A paused run surviving `docker compose restart`, and a stale one being closed
@@ -850,6 +937,12 @@ through before trusting this unattended:
   next to the meters — whether the separation is as plain on screen as it is in
   the copy — and whether the figure visibly moves during a single work cycle at
   the 5s poll.
+- The new-run form's template UI driven through a browser: that loading a
+  template fills every field, that *Start another like this* pre-fills from a
+  run without the folder and settings loaders racing it, and that the two
+  banners — a carried live-enforcement mode, a carried `bypassPermissions` —
+  appear on load and clear when the control is touched. The routes underneath
+  were exercised directly; only the client wiring is unconfirmed.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

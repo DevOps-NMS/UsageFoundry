@@ -156,6 +156,21 @@ export type PermissionMode =
   | "bypassPermissions"
   | "plan";
 
+/**
+ * The four literals `--permission-mode` accepts, as a value rather than a type.
+ *
+ * Every route that can put a value on that flag narrows against this list, and
+ * there are now three of them — the run form, a saved template, and reading a
+ * template back. One shared constant is what keeps a fourth from being written
+ * against a list that has quietly drifted.
+ */
+export const PERMISSION_MODES: readonly PermissionMode[] = [
+  "default",
+  "acceptEdits",
+  "bypassPermissions",
+  "plan",
+];
+
 export const DEFAULT_CONTINUATION_PROMPT =
   "Continue working on the task. If it is fully complete and verified, reply " +
   "with exactly DONE on its own line and make no further changes.";

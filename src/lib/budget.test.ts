@@ -5,6 +5,7 @@ import {
   evaluateBudget,
   normalizePolicy,
 } from "./budget";
+import { pctField } from "./format";
 import type { UsageSnapshot, WindowState } from "./windows";
 
 /**
@@ -139,6 +140,34 @@ describe("normalizePolicy", () => {
     assert.equal(normalizePolicy({ maxWeeklyFraction: 80 }).maxWeeklyFraction, 0.8);
     assert.equal(normalizePolicy({ maxWeeklyFraction: 0.8 }).maxWeeklyFraction, 0.8);
     assert.equal(normalizePolicy({ maxWeeklyFraction: 400 }).maxWeeklyFraction, 1);
+  });
+
+  it("round-trips a stored fraction through the form's percentage field", () => {
+    // `pctField` fills the run form's 0-100 boxes from a stored 0-1 fraction —
+    // loading a template, or copying an earlier run — and the form submits
+    // `Number(field) / 100` straight back here. The two have to be exact
+    // inverses: a guard that came back a hundredth of what was saved parks a
+    // live-resume run on its first check and reads, from the outside, as a run
+    // patiently waiting for a window that is never going to satisfy it.
+    const submit = (field: string) => (field ? Number(field) / 100 : null);
+    for (const f of [0.05, 0.5, 0.8, 0.855, 0.999, 1]) {
+      const back = normalizePolicy({
+        maxSessionFraction: submit(pctField(f)),
+      }).maxSessionFraction;
+      // Within float noise rather than bit-identical: a decimal percentage
+      // cannot survive binary division exactly (0.999 comes back as
+      // 0.9990000000000001), and the error this guards against is three orders
+      // of magnitude larger than that.
+      assert.ok(
+        back !== null && Math.abs(back - f) < 1e-9,
+        `round trip failed for ${f}: got ${back}`,
+      );
+    }
+    // No guard stays no guard. A "0" in the box would be a guard set to zero
+    // percent, which trips on the first check of every run.
+    assert.equal(pctField(null), "");
+    assert.equal(submit(pctField(null)), null);
+    assert.equal(normalizePolicy({ maxSessionFraction: null }).maxSessionFraction, null);
   });
 });
 
