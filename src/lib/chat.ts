@@ -1,8 +1,13 @@
-import { spawn } from "node:child_process";
+import {
+  spawn,
+  type ChildProcess,
+  type ChildProcessByStdio,
+} from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import {
   CLAUDE_BIN,
   MCP_SELF_URL,
@@ -73,12 +78,21 @@ export interface ChatRow {
   cost_usd: number;
   tokens: number;
   error: string | null;
+  /**
+   * When the turn in flight began, and null when none is. Deliberately not
+   * `updated_at`: the chat's own `save_template` tool writes a system message
+   * mid-turn, which moves that column and would push the timeout out by
+   * however long the turn had already been running.
+   */
+  turn_started_at: number | null;
 }
 
 export interface ChatMessageRow {
   id: string;
   chat_id: string;
   ts: number;
+  /** Insert order across every chat. What the thread is ordered by; see below. */
+  seq: number;
   role: ChatRole;
   text: string;
 }
@@ -118,7 +132,23 @@ const THREAD_REPLAY_MESSAGES = 20;
 const THREAD_REPLAY_BYTES = 20_000;
 
 /** A chat turn that has not finished in this long is not going to. */
-const CHAT_TIMEOUT_MS = 10 * 60_000;
+export const CHAT_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * How long past that bound the sweeper waits before failing a row out.
+ *
+ * The in-closure timer above fires at exactly `CHAT_TIMEOUT_MS` and then gives
+ * the child five seconds to die, so a turn that is being stopped properly
+ * settles well inside this margin. What is left over when the margin expires is
+ * a turn whose `close` is not coming — the case this whole path exists for.
+ */
+export const STALE_TURN_MARGIN_MS = 60_000;
+
+/** How often a `thinking` row is checked against that deadline. */
+const CHAT_SWEEP_MS = 30_000;
+
+/** How long `close` is given to deliver the last of stdout after the exit. */
+const EXIT_DRAIN_MS = 2_000;
 
 /* ------------------------------------------------------------------ */
 /* Storage                                                             */
@@ -154,9 +184,21 @@ export function latestChat(): ChatRow {
   return listChats(1)[0] ?? createChat();
 }
 
+/**
+ * A thread, in the order it was written.
+ *
+ * Ordered by `seq` alone rather than by `ts` and then something: the timestamp
+ * is a tie for every message a turn writes — `finishTurn` appends the reply,
+ * an error and a denial note in one synchronous block — and the tiebreak it
+ * used to fall through to was `id`, which is a random UUID. A denial note is a
+ * footnote about the reply above it, so half the time the operator was told
+ * "the tool was refused, and separately here is an answer". `seq` is the order
+ * the rows were written and nothing else can reorder them, including a clock
+ * that steps backwards mid-conversation.
+ */
 export function listMessages(chatId: string): ChatMessageRow[] {
   return db()
-    .prepare("SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY ts, id")
+    .prepare("SELECT * FROM chat_messages WHERE chat_id = ? ORDER BY seq")
     .all(chatId) as ChatMessageRow[];
 }
 
@@ -169,7 +211,11 @@ export function appendMessage(
   const now = Date.now();
   db()
     .prepare(
-      "INSERT INTO chat_messages (id, chat_id, ts, role, text) VALUES (?, ?, ?, ?, ?)",
+      // `seq` is taken inside the INSERT rather than read first: better-sqlite3
+      // is synchronous and this app is a single writer, so one statement is the
+      // only shape in which "the next number" cannot be handed out twice.
+      "INSERT INTO chat_messages (id, chat_id, ts, seq, role, text)" +
+        " VALUES (?, ?, ?, (SELECT IFNULL(MAX(seq), 0) + 1 FROM chat_messages), ?, ?)",
     )
     .run(id, chatId, now, role, text);
   db()
@@ -490,6 +536,58 @@ export function rejectProposal(id: string): boolean {
   return res.changes > 0;
 }
 
+/** What one click on Approve or Reject did, in the terms the thread records it. */
+export interface DecisionTally {
+  action: "approve" | "reject";
+  started: number;
+  rejected: number;
+  failed: Array<{ title: string; reason: string }>;
+  /** Proposals of this chat that are no longer pending. */
+  decided: number;
+  /** Ids naming no proposal of this chat — another thread's, or gone. */
+  foreign: number;
+}
+
+/**
+ * The sentence a decision is recorded by — a note in the thread when something
+ * happened, and the refusal when nothing did.
+ *
+ * Pure and unit-tested because it is the *only* account the operator gets of a
+ * click that acted on nothing. The route's scoping to `pendingProposals(id)`
+ * already stops a stale id being approved, so what is left to get wrong is a
+ * true 200 carrying a false explanation: `decided` and `foreign` are two
+ * different facts, and reporting the second as the first tells one thread that
+ * proposals still waiting in another were "already decided". Nothing throws on
+ * that and nothing typechecks it away — it is a permanent, wrong line in a
+ * conversation the operator later reads back as a record of what they did.
+ */
+export function decisionNote(t: DecisionTally): string {
+  const parts = [
+    t.started > 0 ? `Approved and queued ${t.started} run(s).` : "",
+    t.rejected > 0 ? `Rejected ${t.rejected} proposal(s).` : "",
+    ...t.failed.map((f) => `Could not start “${f.title}”: ${f.reason}`),
+    t.decided > 0
+      ? `${t.decided} proposal(s) had already been decided and were left alone.`
+      : "",
+    t.foreign > 0
+      ? `${t.foreign} selected proposal(s) are not in this chat and were left alone.`
+      : "",
+  ].filter(Boolean);
+
+  // Nothing moved, so the first thing said has to be that nothing moved. Left
+  // to the clauses above, a batch that did nothing reads as a report of two
+  // proposals it declined to touch, which is what "the button appears to have
+  // done nothing" looks like from the thread.
+  const acted = t.started > 0 || t.rejected > 0 || t.failed.length > 0;
+  if (!acted && parts.length > 0) {
+    parts.unshift(
+      t.action === "approve" ? "Nothing was approved." : "Nothing was rejected.",
+    );
+  }
+
+  return parts.join(" ");
+}
+
 function markProposal(
   id: string,
   status: ProposalStatus,
@@ -576,6 +674,213 @@ export function chatForCapability(token: string): string | null {
 
 export type ChatOutcome = { ok: true } | { ok: false; reason: string };
 
+const ALREADY_THINKING: ChatOutcome = {
+  ok: false,
+  reason: "This chat is still working on the last message.",
+};
+
+/**
+ * Take the turn, or return null because this chat is already in one.
+ *
+ * A conditional UPDATE whose `changes` count decides, exactly as `startRun`
+ * claims a queued run. Reading the status and then writing it is the
+ * check-then-act shape `createRun`'s folder claim is built to avoid, and here
+ * the two halves were separated by `await assistRefusal()` — a full transcript
+ * scan, seconds long on a large `~/.claude`. Every message that arrived inside
+ * that window read `idle` and started a second billed child on the same
+ * conversation, with a second capability token live beside the first and
+ * `status` left last-write-wins between them.
+ *
+ * `<> 'thinking'` rather than `= 'idle'`: a turn that failed leaves the row
+ * `failed`, and the next message is how an operator retries it.
+ *
+ * `turn_started_at` is written by this same statement rather than beside it,
+ * for the same reason the claim is a single statement at all: it is what
+ * `staleTurn` reads, and a turn that became unstoppable between two writes is
+ * exactly the turn that has to have a deadline on it.
+ *
+ * Returns the row as it stood at the claim, because a read taken before that
+ * await is stale by definition — `session_id` above all, which decides whether
+ * the turn resumes the conversation or pays to replay the thread.
+ */
+function claimTurn(chatId: string): ChatRow | null {
+  const now = Date.now();
+  const claim = db()
+    .prepare(
+      `UPDATE chat_sessions
+          SET status='thinking', error=NULL, updated_at=?, turn_started_at=?
+        WHERE id=? AND status<>'thinking'`,
+    )
+    .run(now, now, chatId);
+  return claim.changes === 1 ? getChat(chatId) : null;
+}
+
+/** stdin is "ignore", so the child has readable stdout/stderr and no stdin. */
+type ChatProcess = ChildProcessByStdio<null, Readable, Readable>;
+
+/**
+ * The chats with a child this process can still signal.
+ *
+ * The row says a turn is in flight; this says whether anything is still there
+ * to stop. The two disagree exactly when a turn is stranded — which is the
+ * state this map exists to make recoverable rather than to prevent. On
+ * `globalThis` for the reason every other long-lived singleton here is: a dev
+ * hot reload would otherwise re-evaluate the module and lose the handle on a
+ * live child, leaving the operator with an unstoppable turn and a billed agent.
+ */
+const turns = ((globalThis as unknown as {
+  __ufChatTurns?: Map<string, ChatProcess>;
+}).__ufChatTurns ??= new Map<string, ChatProcess>());
+
+const sweeper = ((globalThis as unknown as {
+  __ufChatSweep?: { timer: NodeJS.Timeout | null };
+}).__ufChatSweep ??= { timer: null });
+
+/** What the row says afterwards. The two causes must not read alike. */
+const CANCELLED_REASON =
+  "You stopped this message while it was being answered.";
+const TIMED_OUT_REASON =
+  `The chat did not answer within ${CHAT_TIMEOUT_MS / 60_000} minutes and was stopped.`;
+
+/**
+ * Whether a turn has outlived the bound on one, given the row and the clock.
+ *
+ * Pure and unit-tested, for the reason `landRefusal` and `planItem` are: every
+ * way of getting it wrong is silent. Too eager and a legitimate three-minute
+ * turn is failed out from under a live child; never true and the ten-minute
+ * bound quietly stops existing, which is the state this issue started from —
+ * a thread that says "Thinking…" for ever with nothing in the process able to
+ * move it.
+ */
+export function staleTurn(
+  chat: Pick<ChatRow, "status" | "turn_started_at" | "updated_at">,
+  now: number,
+): boolean {
+  if (chat.status !== "thinking") return false;
+  // A row that was already `thinking` when this column was added has no start
+  // instant. `updated_at` is the conservative stand-in — mid-turn writes only
+  // ever move it forward, so the fallback waits longer than the real deadline
+  // rather than ending a turn early.
+  const startedAt = chat.turn_started_at ?? chat.updated_at;
+  return now - startedAt >= CHAT_TIMEOUT_MS + STALE_TURN_MARGIN_MS;
+}
+
+/**
+ * End a turn now, and signal whatever is still running it.
+ *
+ * The row is settled *here* rather than when the child closes, which is the
+ * whole point: the turns that need ending are the ones whose `close` is not
+ * coming. `finishTurn` latches on `status='thinking'`, so a `close` that does
+ * arrive afterwards cannot move the row back or overwrite what this said.
+ *
+ * The signal ladder is `interruptRun`'s, and SIGINT leads for the same reason:
+ * it is the signal a CLI is most likely to handle deliberately, and a chat turn
+ * is spawned `detached` under the same `killProcessGroup` setting an agent is,
+ * so what has to die is the group rather than the wrapper.
+ *
+ * Each step re-checks that *this* child is still running rather than that it is
+ * still the registered one, which is where this diverges from `interruptRun`:
+ * the row is usable the instant this returns, so the operator can send a new
+ * message — and register a new child under the same id — while the old one is
+ * still working through the ladder. Not `child.killed`, which records only that
+ * a signal was sent and is already true by the second step.
+ */
+function endTurn(chatId: string, error: string): boolean {
+  const changed =
+    db()
+      .prepare(
+        "UPDATE chat_sessions SET status='failed', error=?, updated_at=?," +
+          " turn_started_at=NULL WHERE id=? AND status='thinking'",
+      )
+      .run(error, Date.now(), chatId).changes > 0;
+  // In the thread as well as on the row: the conversation should read as what
+  // happened to it, and a turn that stops without a word looks like an answer
+  // that never came.
+  if (changed) appendMessage(chatId, "system", error);
+
+  const child = turns.get(chatId);
+  if (!child) return false;
+
+  const running = () => child.exitCode === null && child.signalCode === null;
+  signalTree(child, "SIGINT");
+  setTimeout(() => {
+    if (running()) signalTree(child, "SIGTERM");
+  }, 3_000).unref?.();
+  setTimeout(() => {
+    if (running()) signalTree(child, "SIGKILL");
+  }, 8_000).unref?.();
+  return true;
+}
+
+export type CancelOutcome =
+  | { ok: true; outcome: "signalled" | "cleared" }
+  | { ok: false; reason: string };
+
+/**
+ * Stop the turn a chat is waiting on, from the page.
+ *
+ * The counterpart to `stopRun`, and it reports the same distinction for the
+ * same reason: `signalled` means a child was told to stop, `cleared` means
+ * there was nothing left to stop and only the row needed clearing. Both are
+ * successes — reporting the second as a failure (which a bare boolean would)
+ * makes a working button look broken in precisely the case it was added for.
+ *
+ * It does not send anything, and it deliberately leaves the `thinking` guard in
+ * `sendChatMessage` alone: that guard is what stops two billed children on one
+ * conversation, and the recovery is a way to *end* the turn, not around it.
+ */
+export function cancelChatTurn(chatId: string): CancelOutcome {
+  const chat = getChat(chatId);
+  if (!chat) return { ok: false, reason: "No such chat." };
+  if (chat.status !== "thinking") {
+    return { ok: false, reason: "This chat is not working on a message." };
+  }
+  return {
+    ok: true,
+    outcome: endTurn(chatId, CANCELLED_REASON) ? "signalled" : "cleared",
+  };
+}
+
+/**
+ * Fail out every turn that has outlived the bound.
+ *
+ * The backstop under the in-closure timer in `runTurn`, which cannot be one:
+ * that timer signals the child and then waits for `close`, so it rescues
+ * nothing when `close` is what went missing, and it does not exist at all for a
+ * turn whose child was never spawned. This reads the row instead, so the
+ * ten-minute bound holds however the turn was lost.
+ *
+ * Nothing is resumed or re-asked — same rule `reconcileChatsOnBoot` follows,
+ * and for the same reason: a chat turn is a question somebody put minutes ago,
+ * and re-asking it unattended is spend nobody is present to want.
+ */
+function sweepStuckChats(): void {
+  const thinking = db()
+    .prepare("SELECT * FROM chat_sessions WHERE status='thinking'")
+    .all() as ChatRow[];
+  if (thinking.length === 0) {
+    stopChatSweeper();
+    return;
+  }
+  const now = Date.now();
+  for (const chat of thinking) {
+    if (staleTurn(chat, now)) endTurn(chat.id, TIMED_OUT_REASON);
+  }
+}
+
+/** Lazily started when a turn begins, stopped when none is left to watch. */
+function startChatSweeper(): void {
+  if (sweeper.timer) return;
+  sweeper.timer = setInterval(sweepStuckChats, CHAT_SWEEP_MS);
+  sweeper.timer.unref?.();
+}
+
+function stopChatSweeper(): void {
+  if (!sweeper.timer) return;
+  clearInterval(sweeper.timer);
+  sweeper.timer = null;
+}
+
 /**
  * Send a message and return as soon as the child is on its way.
  *
@@ -589,9 +894,9 @@ export async function sendChatMessage(
 ): Promise<ChatOutcome> {
   const chat = getChat(chatId);
   if (!chat) return { ok: false, reason: "No such chat." };
-  if (chat.status === "thinking") {
-    return { ok: false, reason: "This chat is still working on the last message." };
-  }
+  // Answers the common case without paying for a transcript scan first. It
+  // decides nothing — `claimTurn` below is the check that holds.
+  if (chat.status === "thinking") return ALREADY_THINKING;
 
   const text = message.trim();
   if (!text) return { ok: false, reason: "Nothing to send." };
@@ -603,24 +908,46 @@ export async function sendChatMessage(
   const refusal = await assistRefusal();
   if (refusal) return { ok: false, reason: refusal };
 
+  // From here to the spawn there is deliberately no `await`: one event-loop
+  // turn covers claiming the chat, recording the message and starting the
+  // child, so a request that loses the claim adds nothing to the thread.
+  const claimed = claimTurn(chatId);
+  if (!claimed) return ALREADY_THINKING;
+
   appendMessage(chatId, "user", text);
   const history = listMessages(chatId)
     .slice(0, -1)
     .map((m) => ({ role: m.role, text: m.text }));
 
-  db()
-    .prepare("UPDATE chat_sessions SET status='thinking', error=NULL, updated_at=? WHERE id=?")
-    .run(Date.now(), chatId);
+  // The sweeper watches `thinking` rows, and this row became one at the claim
+  // above — which is also where `turn_started_at` was written, in that same
+  // statement, so the deadline exists from the instant the turn does.
+  startChatSweeper();
 
-  const prompt = chatPrompt({ sessionId: chat.session_id, history }, text);
+  const prompt = chatPrompt({ sessionId: claimed.session_id, history }, text);
 
   // Not awaited: it runs for minutes and the row is what reports on it.
-  void runTurn(chat, prompt).catch((err) => {
-    finishTurn(chatId, {
-      status: "failed",
-      error: err instanceof Error ? err.message : String(err),
+  //
+  // Wrapped as well as `.catch`ed, because `runTurn` is not `async`: it mints
+  // the capability and writes the MCP config *while this call expression is
+  // being evaluated*, so a throw from either happens before `.catch` is
+  // attached to anything. Unhandled, it propagates out of this function with
+  // the row already claimed as `thinking` — a state nothing but a restart
+  // clears, and one this function refuses to send into.
+  try {
+    void runTurn(claimed, prompt).catch((err) => {
+      finishTurn(chatId, {
+        status: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
-  });
+  } catch (err) {
+    const reason = `Could not start the turn: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+    finishTurn(chatId, { status: "failed", error: reason });
+    return { ok: false, reason };
+  }
 
   return { ok: true };
 }
@@ -637,7 +964,17 @@ interface TurnResult {
 
 function runTurn(chat: ChatRow, prompt: string): Promise<void> {
   const token = mintCapability(chat.id);
-  const configPath = writeMcpConfig(token);
+  let configPath: string;
+  try {
+    configPath = writeMcpConfig(token);
+  } catch (err) {
+    // `land` is the only thing that revokes, and it is inside the promise this
+    // never reaches — so a token minted for a turn that cannot start would
+    // stay live in memory until it expired, an hour later. The caller records
+    // the failure on the row; this releases what the failed setup took.
+    revokeCapability(token);
+    throw err;
+  }
 
   return new Promise((resolve) => {
     const settings = getSettings();
@@ -710,6 +1047,10 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       detached: settings.killProcessGroup && process.platform !== "win32",
     });
 
+    // Registered before anything can go wrong with it, so an operator pressing
+    // Stop reaches the child rather than orphaning it.
+    turns.set(chat.id, child);
+
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");
@@ -730,6 +1071,10 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Only this child's own entry: a turn cancelled and re-sent while the old
+      // child was still dying would otherwise have its live handle deleted by
+      // the corpse of the previous one.
+      if (turns.get(chat.id) === child) turns.delete(chat.id);
       // Both of these are why the token is worth having: the credential dies
       // with the turn, and the file that carried it does not outlive it either.
       revokeCapability(token);
@@ -746,17 +1091,51 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       land({ status: "failed", error: `Could not launch ${CLAUDE_BIN}: ${err.message}` });
     });
 
-    child.on("close", (code) => {
+    settleOnExit(child, (code) => {
       if (timedOut) {
-        land({
-          status: "failed",
-          error: `The chat did not answer within ${CHAT_TIMEOUT_MS / 60_000} minutes and was stopped.`,
-        });
+        land({ status: "failed", error: TIMED_OUT_REASON });
         return;
       }
       land(parseTurnOutput(stdout, stderr, code));
     });
   });
+}
+
+/**
+ * Settle a turn on the child's `exit`, giving `close` a grace period first.
+ *
+ * `close` is the better signal — it means stdout has been fully drained — but
+ * it fires only once every inherited pipe has shut, and the CLI's own children
+ * hold those. A `claude` that leaves a grandchild behind has *exited* and will
+ * never *close*, so a turn wired to `close` alone sits at "Thinking…" until the
+ * ten-minute timeout kills the group and throws the answer away — and for ever
+ * when `killProcessGroup` is off, because then there is no group to kill and
+ * nothing else reaps the grandchild.
+ *
+ * `runIteration` settles the identical hazard the identical way, and for the
+ * same reason: `exit` is the guarantee, `close` is the fast path, and the grace
+ * period exists only so a normal exit flushes its last chunk through `close`
+ * before anything is parsed.
+ *
+ * Exported because the shape it exists for — a child that exits while a
+ * grandchild holds its stdout — is only reachable from a test through this
+ * seam; `runTurn` itself needs a database, a settings row and a spend gate.
+ */
+export function settleOnExit(
+  child: ChildProcess,
+  settle: (code: number | null) => void,
+): void {
+  let done = false;
+  const once = (code: number | null) => {
+    if (done) return;
+    done = true;
+    settle(code);
+  };
+
+  child.on("exit", (code) => {
+    setTimeout(() => once(code), EXIT_DRAIN_MS).unref?.();
+  });
+  child.on("close", (code) => once(code));
 }
 
 /**
@@ -825,12 +1204,39 @@ export function parseTurnOutput(
 
 function finishTurn(chatId: string, r: TurnResult): void {
   const now = Date.now();
+  const prior = getChat(chatId)?.session_id ?? null;
+
+  // `WHERE status='thinking'` makes the row itself the settle-once latch, which
+  // is what lets `cancelChatTurn` and the sweeper end a turn without waiting
+  // for a `close` that may never come: a late one lands here and changes
+  // nothing, rather than reviving the thread or replacing "you stopped this"
+  // with whatever the killed child left on stderr. Nothing is lost by that —
+  // the CLI reports cost and session id only in the final JSON object, which a
+  // child that was signalled never prints.
+  const changed =
+    db()
+      .prepare(
+        `UPDATE chat_sessions
+            SET status=?, error=?, updated_at=?, turn_started_at=NULL,
+                cost_usd = cost_usd + ?, tokens = tokens + ?,
+                session_id = COALESCE(?, session_id)
+          WHERE id=? AND status='thinking'`,
+      )
+      .run(
+        r.status,
+        r.error ?? null,
+        now,
+        r.costUSD ?? 0,
+        r.tokens ?? 0,
+        r.sessionId,
+        chatId,
+      ).changes > 0;
+  if (!changed) return;
 
   // Session id is adopted rather than compared, and a change is recorded rather
   // than treated as a failure — same posture the run loop takes. Which id the
   // CLI reports for a resumed conversation is its business; what must not
   // happen is continuing a conversation nobody chose without saying so.
-  const prior = getChat(chatId)?.session_id ?? null;
   if (r.sessionId && prior && r.sessionId !== prior) {
     appendMessage(
       chatId,
@@ -839,24 +1245,6 @@ function finishTurn(chatId: string, r: TurnResult): void {
         `the one this chat resumed (${prior}). Continuing with the new one.`,
     );
   }
-
-  db()
-    .prepare(
-      `UPDATE chat_sessions
-          SET status=?, error=?, updated_at=?,
-              cost_usd = cost_usd + ?, tokens = tokens + ?,
-              session_id = COALESCE(?, session_id)
-        WHERE id=?`,
-    )
-    .run(
-      r.status,
-      r.error ?? null,
-      now,
-      r.costUSD ?? 0,
-      r.tokens ?? 0,
-      r.sessionId,
-      chatId,
-    );
 
   if (r.text) appendMessage(chatId, "assistant", r.text);
   if (r.error) appendMessage(chatId, "system", r.error);
@@ -897,11 +1285,16 @@ function finishTurn(chatId: string, r: TurnResult): void {
  * spins an indicator for ever. Nothing is resumed — a chat turn is a question
  * somebody asked minutes ago, and re-asking it unattended is spend nobody is
  * present to want.
+ *
+ * Still the cheapest way out of a stranded turn, and no longer the only one:
+ * `cancelChatTurn` clears one on request and the sweeper clears one that has
+ * run past its deadline, so recovering a thread no longer means restarting the
+ * server for everything else running in it.
  */
 export function reconcileChatsOnBoot(): void {
   db()
     .prepare(
-      "UPDATE chat_sessions SET status='failed'," +
+      "UPDATE chat_sessions SET status='failed', turn_started_at=NULL," +
         " error='The server restarted while this message was being answered.'" +
         " WHERE status='thinking'",
     )
@@ -1047,18 +1440,32 @@ function writeMcpConfig(token: string): string {
     os.tmpdir(),
     `uf-mcp-${randomBytes(9).toString("hex")}.json`,
   );
-  fs.writeFileSync(
-    file,
-    JSON.stringify({
-      mcpServers: {
-        uf: {
-          type: "http",
-          url: MCP_SELF_URL,
-          headers: { Authorization: `Bearer ${token}` },
+  try {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        mcpServers: {
+          uf: {
+            type: "http",
+            url: MCP_SELF_URL,
+            headers: { Authorization: `Bearer ${token}` },
+          },
         },
-      },
-    }),
-    { mode: 0o600 },
-  );
+      }),
+      { mode: 0o600 },
+    );
+  } catch (err) {
+    // A write that fails part-way — ENOSPC, the likeliest of these — leaves the
+    // file behind with whatever reached the disk, and what it carries is the
+    // capability token. Nothing else would ever remove it: the unlink in `land`
+    // is inside a promise this failure never reaches.
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      // Never created, or the same condition that failed the write. The
+      // original error is the one worth reporting.
+    }
+    throw err;
+  }
   return file;
 }

@@ -1,6 +1,6 @@
-import { NextResponse } from "next/server";
 import { createChat, latestChat, listChats, pendingProposals } from "@/lib/chat";
 import type { ChatListEntryDTO } from "@/lib/apiTypes";
+import { jsonNoStore } from "@/lib/http";
 import { chatDTO } from "./dto";
 
 export const runtime = "nodejs";
@@ -22,10 +22,10 @@ export async function GET() {
     costUSD: c.cost_usd,
     pendingCount: pendingProposals(c.id).length,
   }));
-  return NextResponse.json({ chats, chat: chatDTO(chat) });
+  return jsonNoStore({ chats, chat: chatDTO(chat) });
 }
 
 /** Start a fresh thread. Nothing is carried over — not even the session id. */
 export async function POST() {
-  return NextResponse.json({ chat: chatDTO(createChat()) });
+  return jsonNoStore({ chat: chatDTO(createChat()) });
 }

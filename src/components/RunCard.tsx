@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { RunDTO } from "@/lib/apiTypes";
 import {
   STATUS_TONE,
+  fmtCycleInFlight,
   fmtCycles,
   fmtDuration,
   fmtRelative,
@@ -56,8 +57,14 @@ function progressOf(run: RunDTO, now: number) {
   return bars;
 }
 
-/** Status line that says what the run is *waiting on*, not just its state. */
+/**
+ * Status line that says what the run is *waiting on* — or, once it is working,
+ * which cycle it has open. The bars above count finished cycles, so without
+ * this a run eight minutes into cycle 1 is indistinguishable from one that was
+ * marked running and never started.
+ */
 function statusDetail(run: RunDTO, now: number): string | null {
+  if (run.status === "running") return fmtCycleInFlight(run);
   if (run.status === "queued") {
     const ahead = run.queuePosition ?? 0;
     return ahead === 0
@@ -122,8 +129,20 @@ export function RunCard({
         {run.prompt}
       </p>
 
+      {/* Amber for the two states that are waiting on something; a run that is
+          simply working is not a warning. Full class strings either side of the
+          ternary, never an interpolated fragment — Tailwind scans source as
+          text and would emit neither. */}
       {detail && (
-        <div className="mb-3 text-xs text-warn">{detail}</div>
+        <div
+          className={
+            run.status === "running"
+              ? "mb-3 text-xs text-ink-muted"
+              : "mb-3 text-xs text-warn"
+          }
+        >
+          {detail}
+        </div>
       )}
 
       {bars.length > 0 ? (

@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
 import { getChat } from "@/lib/chat";
+import { jsonNoStore } from "@/lib/http";
 import { chatDTO } from "../dto";
 
 export const runtime = "nodejs";
@@ -10,6 +10,6 @@ type Ctx = { params: Promise<{ id: string }> };
 export async function GET(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const chat = getChat(id);
-  if (!chat) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json({ chat: chatDTO(chat) });
+  if (!chat) return jsonNoStore({ error: "Not found" }, { status: 404 });
+  return jsonNoStore({ chat: chatDTO(chat) });
 }
