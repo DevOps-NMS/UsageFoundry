@@ -139,6 +139,34 @@ One thing the mount also cannot carry is `~/.claude.json` — it sits *next to*
 the directory, not inside it — so user-scoped MCP servers are not available to
 the containerised agent.
 
+### Giving a run access to GitHub
+
+The same gap applies to git hosting, and it bites later in a run rather than at
+the start of one. `~/.claude` carries your Claude login; it does not carry
+`~/.gitconfig`, `~/.ssh` or `~/.config/gh`. So an agent that tries to push a
+branch, open a pull request or read an issue gets an authentication failure
+*inside a tool call* — which nothing in the run loop reads. From the outside the
+cycle simply ends without the PR you asked for.
+
+Set one token in `.env`:
+
+```bash
+UF_GITHUB_TOKEN=github_pat_…
+```
+
+Scope it to the repositories you run agents against — Contents: read and write,
+plus Pull requests and Issues if the agent should open them (a classic token
+needs `repo`). An unattended agent can use everything the token can.
+
+With it set, each work cycle is spawned with `GH_TOKEN`/`GITHUB_TOKEN` for the
+`gh` CLI, a git credential helper for `github.com`, and a rewrite of
+`git@github.com:` remotes to HTTPS — the container holds no SSH key, so a
+repository cloned over SSH could otherwise never authenticate while one cloned
+over HTTPS could, which is what makes this fail on some runs and not others.
+Those variables reach the agent and nothing else: not the reviewer, and not the
+git this app itself runs, whose children execute repository-controlled hooks.
+Settings shows whether a token is configured.
+
 ### Required environment
 
 | Variable | Purpose |
@@ -146,6 +174,7 @@ the containerised agent.
 | `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. Absolute path; compose refuses to start without it. |
 | `UF_AUTH_TOKEN` | Shared secret for the UI. Blank disables auth — only acceptable on loopback. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
+| `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid the container runs as; must own the mounts. Default 1000. |
 
 Compose also mounts `~/.claude` **read-write** — Claude Code writes new session
@@ -692,6 +721,12 @@ mounted code. Treat it as privileged.
   containing shell metacharacters is inert.
 - `bypassPermissions` lets the agent run any command in the mounted folder
   without asking. The UI warns; the default is `acceptEdits`.
+- `UF_GITHUB_TOKEN` is handed to the agent's work cycles and to nothing else.
+  The reviewer does not get it (it cannot write), and neither does the git this
+  app runs itself — `worktree add` and `merge` execute hooks the repository
+  controls, and this app's own git never touches the network. The credential
+  helper is scoped to `https://github.com`, so another host asking for
+  credentials gets none.
 
 ---
 
@@ -941,6 +976,16 @@ Built and exercised against real transcripts:
   budget blob: it comes back as `plan` (the only mode that cannot write) and one
   work cycle, rather than as a wider permission or a throw. `normalizeTemplateInput`
   and `rowToTemplate` also have 20 assertions under `npm test`.
+- The GitHub credential block, driven into a real `git` (2.39.5) in a scratch
+  repository rather than only asserted in a test: `git credential fill` for
+  `github.com` returns the token even when the repository's own config names a
+  helper the image does not have (`osxkeychain`), which is the reset entry
+  earning its place; `store`/`erase` are accepted as no-ops; both
+  `git@github.com:owner/repo` and `ssh://git@github.com/owner/repo` rewrite to
+  HTTPS under `ls-remote --get-url`; and a request for `gitlab.com` gets no
+  credential at all and fails immediately instead of prompting. Plus six
+  assertions in `npm test` on the block itself — the count matching its pairs is
+  the silent one, since git discards the whole block if it does not.
 
 ### Not yet verified by hand
 
@@ -1044,18 +1089,25 @@ through before trusting this unattended:
   banners — a carried live-enforcement mode, a carried `bypassPermissions` —
   appear on load and clear when the control is touched. The routes underneath
   were exercised directly; only the client wiring is unconfirmed.
+- **The image with `gh` in it.** The install layer, the checksum check and the
+  arch mapping have not been built — no Docker on the machine this was written
+  on — so `docker compose up --build` is the first thing to run against this.
+- A real agent using the token: a `git push` of a run's branch, and a `gh` call
+  that needs authentication. The credential block itself was driven into a real
+  git (above); what has not been watched is the CLI's own git picking it up out
+  of the environment mid-run.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
-work cycle spawns with, how a run's diff is parsed and budgeted, when a branch
-may be landed, what a queued merge does with the branch it reaches, what counts
-as a conflict marker — both for deciding whether one
-was really resolved and for deciding what to show — and the two renderings that
-would lie quietly about a number: an unconfigured ceiling, and a first-party
-figure shown beside the meters. `npm run typecheck` plus
-a `docker compose up --build` smoke test is still the real verification loop,
-and the list above records what was checked by hand.
+work cycle spawns with, the GitHub credentials handed to a work cycle, how a
+run's diff is parsed and budgeted, when a branch may be landed, what a queued
+merge does with the branch it reaches, what counts as a conflict marker — both
+for deciding whether one was really resolved and for deciding what to show — and
+the two renderings that would lie quietly about a number: an unconfigured
+ceiling, and a first-party figure shown beside the meters. `npm run typecheck`
+plus a `docker compose up --build` smoke test is still the real verification
+loop, and the list above records what was checked by hand.
 
 ---
 

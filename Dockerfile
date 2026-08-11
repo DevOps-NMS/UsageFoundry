@@ -100,6 +100,33 @@ RUN git config --system user.name "UsageFoundry Agent" \
  && git config --system user.email "agent@usagefoundry.local" \
  && git config --system --add safe.directory '*'
 
+# The GitHub CLI, which is how an agent reads an issue, opens a pull request or
+# checks CI. Without it `gh` is a command not found *inside a tool call*, which
+# no part of the run loop reads: the cycle ends looking like the agent decided
+# not to open the PR it was asked for.
+#
+# From the release tarball rather than an apt source: one layer, no extra
+# repository left in the image, and a version that moves when this line moves.
+# The checksum is verified against the release's own manifest — same TLS trust
+# as fetching a keyring, but it fails loudly if the artefact is not the one the
+# manifest describes, and this container holds credentials.
+ARG GH_CLI_VERSION=2.97.0
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) gharch=amd64 ;; \
+      arm64) gharch=arm64 ;; \
+      *) echo "no gh release for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    cd /tmp; \
+    base="https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}"; \
+    curl -fsSL -O "${base}/gh_${GH_CLI_VERSION}_linux_${gharch}.tar.gz"; \
+    curl -fsSL -O "${base}/gh_${GH_CLI_VERSION}_checksums.txt"; \
+    sha256sum --ignore-missing --check "gh_${GH_CLI_VERSION}_checksums.txt"; \
+    tar -xzf "gh_${GH_CLI_VERSION}_linux_${gharch}.tar.gz"; \
+    install -m 0755 "gh_${GH_CLI_VERSION}_linux_${gharch}/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh_*; \
+    gh --version
+
 # The agent runs inside this container, so Claude Code has to be in the image.
 #
 # Pinned because the run loop parses this CLI's `stream-json` output and its

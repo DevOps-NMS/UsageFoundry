@@ -149,6 +149,23 @@ export const AUTH_TOKEN = env("UF_AUTH_TOKEN", "");
 /** Admin API key (sk-ant-admin01-...). Optional. */
 export const ADMIN_API_KEY = env("ANTHROPIC_ADMIN_KEY", "");
 
+/**
+ * GitHub credential handed to spawned agents, or empty when unset.
+ *
+ * Read from `UF_GITHUB_TOKEN` rather than from `GH_TOKEN` directly, and the
+ * namespace is the whole point: `gitEnv()` strips `UF_*` from every git child
+ * this app runs, and those children execute repository-controlled code —
+ * `worktree add` fires `post-checkout`, `merge` fires `pre-merge-commit`. A
+ * token named `GH_TOKEN` in the environment of this server would be inherited
+ * by all of them. Named this way it reaches exactly one place, because
+ * `githubEnv()` puts it there on purpose.
+ *
+ * Nothing this app itself does with git touches the network, so it never needs
+ * the token: it is the agent's `git push`, `gh pr create` and `gh issue view`
+ * that fail without one.
+ */
+export const GITHUB_TOKEN = env("UF_GITHUB_TOKEN", "");
+
 /** Path to the Claude Code executable inside the container. */
 export const CLAUDE_BIN = env("CLAUDE_BIN", "claude");
 
@@ -160,4 +177,5 @@ export const ANTHROPIC_API_BASE = env("ANTHROPIC_API_BASE", "https://api.anthrop
 export const USER_AGENT = "UsageFoundry/0.1.0";
 
 export const hasAdminKey = () => ADMIN_API_KEY.length > 0;
+export const hasGithubToken = () => GITHUB_TOKEN.length > 0;
 export const authEnabled = () => AUTH_TOKEN.length > 0;

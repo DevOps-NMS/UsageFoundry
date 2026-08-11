@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSettings, saveSettings, type Settings } from "@/lib/settings";
 import {
   hasAdminKey,
+  hasGithubToken,
   WORKSPACE_MOUNTS,
   WORKSPACE_ROOT,
   CLAUDE_HOME,
@@ -19,6 +20,10 @@ export async function GET() {
       workspaceMounts: WORKSPACE_MOUNTS,
       claudeHome: CLAUDE_HOME,
       adminKeyConfigured: hasAdminKey(),
+      // Reported, never echoed: a run that cannot reach GitHub fails inside a
+      // tool call, so the only cheap way to know beforehand is to say here
+      // whether the container was given a credential at all.
+      githubTokenConfigured: hasGithubToken(),
     },
   });
 }
