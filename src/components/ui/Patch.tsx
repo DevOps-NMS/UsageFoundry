@@ -33,16 +33,24 @@ function conflictClass(line: string): string {
 export function Patch({
   text,
   kind = "diff",
+  label,
   className = "",
 }: {
   text: string;
   kind?: "diff" | "conflict";
+  /** Names the scrollable region — see the tabIndex note below. */
+  label?: string;
   className?: string;
 }) {
   const classFor = kind === "conflict" ? conflictClass : diffClass;
   return (
     <div
-      className={`max-h-[420px] overflow-auto rounded-sm border border-line bg-inset p-2.5 font-mono text-xs leading-relaxed ${className}`}
+      // Focusable for the same reason the run log is: a patch taller than
+      // 420px is otherwise unreachable without a pointer.
+      tabIndex={0}
+      role="group"
+      aria-label={label ?? (kind === "conflict" ? "Conflicting file" : "Patch")}
+      className={`max-h-[420px] overflow-auto rounded-sm border border-line bg-inset p-2.5 font-mono text-xs leading-relaxed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent ${className}`}
     >
       {text.split("\n").map((line, i) => (
         <div key={i} className={`whitespace-pre ${classFor(line)}`}>
@@ -66,7 +74,10 @@ const STATUS_LABEL: Record<DiffFileDTO["status"], string> = {
 export function DiffFileRow({ file }: { file: DiffFileDTO }) {
   return (
     <details className="border-b border-line py-1.5 last:border-b-0">
-      <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
+      {/* The row is the control, so the whole row answers the pointer and the
+          whole row takes focus. The disclosure triangle stays: it is the only
+          thing on screen that says there is more behind this line. */}
+      <summary className="ui-transition -mx-1 flex min-h-[var(--control-h)] cursor-pointer flex-wrap items-center gap-2 rounded-sm px-1 text-sm hover:bg-inset focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
         <span className="mono min-w-0 flex-1 break-all text-ink">
           {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
         </span>
