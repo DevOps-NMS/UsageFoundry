@@ -1032,7 +1032,12 @@ export default function RunDetail({
 
       <Card emphasis="quiet" className="mt-6">
         <CardTitle>Task</CardTitle>
-        <div className="mono max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-sm border border-line bg-inset p-2.5 text-ink-muted">
+        <div
+          tabIndex={0}
+          role="group"
+          aria-label="Task given to the agent"
+          className="mono max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-sm border border-line bg-inset p-2.5 text-ink-muted"
+        >
           {run.prompt}
         </div>
       </Card>

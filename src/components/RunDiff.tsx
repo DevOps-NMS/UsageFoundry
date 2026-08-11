@@ -27,8 +27,16 @@ import { DiffFileRow } from "@/components/ui/Patch";
 const SCROLL_FILE_LIST_ABOVE = 24;
 
 export function RunDiff({ run }: { run: RunDTO }) {
+  // Loaded once for a run that is over, on request for one that is not. A diff
+  // costs several git processes, and an active run's is a moment-in-time
+  // reading that is stale as soon as it renders.
+  const settled =
+    run.status === "completed" || run.status === "stopped" || run.status === "failed";
   const [diff, setDiff] = useState<RunDiffDTO | null>(null);
-  const [loading, setLoading] = useState(false);
+  // A settled run starts in the loading state because the effect below is about
+  // to fetch: initialising to false renders one frame of "nothing loaded",
+  // which is a different sentence from the true one.
+  const [loading, setLoading] = useState(settled);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -49,14 +57,14 @@ export function RunDiff({ run }: { run: RunDTO }) {
     }
   }, [run.id]);
 
-  // Loaded once for a run that is over, on request for one that is not. A diff
-  // costs several git processes, and an active run's is a moment-in-time
-  // reading that is stale as soon as it renders.
-  const settled =
-    run.status === "completed" || run.status === "stopped" || run.status === "failed";
   useEffect(() => {
     if (settled) void load();
   }, [settled, load]);
+
+  // A scroll container is not reachable by keyboard unless it is focusable, so
+  // the cap above would otherwise hide the tail of a long list from anyone not
+  // using a pointer.
+  const filesScroll = (diff?.files.length ?? 0) > SCROLL_FILE_LIST_ABOVE;
 
   return (
     // The outcome once a run is over, and a one-line stub while it is still
@@ -82,7 +90,10 @@ export function RunDiff({ run }: { run: RunDTO }) {
         <div aria-busy="true" aria-live="polite">
           <span className="sr-only">Reading the repository…</span>
           {[0, 1, 2].map((i) => (
-            <div key={i} className="flex items-center gap-2 border-b border-line py-2.5 last:border-b-0">
+            <div
+              key={i}
+              className="flex items-center gap-2 border-b border-line py-2.5 last:border-b-0"
+            >
               <div className="h-3.5 flex-1 rounded-sm bg-inset" />
               <div className="h-3.5 w-12 rounded-sm bg-inset" />
             </div>
@@ -138,10 +149,13 @@ export function RunDiff({ run }: { run: RunDTO }) {
 
           <div
             className={
-              diff.files.length > SCROLL_FILE_LIST_ABOVE
+              filesScroll
                 ? "max-h-[26rem] overflow-y-auto rounded-sm border border-line px-2.5"
                 : ""
             }
+            tabIndex={filesScroll ? 0 : undefined}
+            role={filesScroll ? "group" : undefined}
+            aria-label={filesScroll ? "Changed files" : undefined}
           >
             {diff.files.map((f) => (
               <DiffFileRow key={`${f.oldPath ?? ""}:${f.path}`} file={f} />
