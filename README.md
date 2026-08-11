@@ -245,6 +245,29 @@ same conversation and same checkout, when the next 5-hour window opens, so one
 task can stretch across several of them until the weekly percentage (or the time
 limit, or the cycle cap) ends it for good.
 
+A dropped connection is a third thing again, and it is handled in every mode.
+`API Error: Connection closed mid-response`, an overloaded upstream, a burst of
+429s — none of these say anything about your allowance or about the task, and
+all of them clear in seconds.
+
+Often Claude Code has already dealt with it before UsageFoundry sees it: when a
+stream drops part-way, the CLI finalises what it had and carries the work cycle
+on, leaving the error behind as a note. A cycle that ends that way — its own
+`result`, a clean exit — is a cycle that **worked**, and the run simply carries
+on with a line in its log saying what happened. (Runs used to die there, on the
+note rather than on the fault.)
+
+When the cycle really was cut short, the run waits 5, then 20, then 60 seconds
+and spawns again into the same conversation, rather than ending. It
+never parks for one (there is no window to wait out, and parking would hand its
+folder to whatever is queued behind it), and it never retries more than three
+times **in a row** — a cycle that gets through resets the count, so a long run
+that meets a blip an hour is unaffected, while an upstream that is genuinely
+down ends the run inside a minute and a half and says how many attempts it made.
+Each attempt is one line in the run log. A bad key, a malformed request or an
+exhausted credit balance is not in this category and still fails immediately:
+retrying those buys three more copies of the same answer.
+
 Only the 5-hour window is ever waited out, because it is the only limit here that
 refills on its own, on a schedule, without being told anything. A weekly window
 takes days to refill — and unless you have set your reset day in Settings it has
@@ -828,13 +851,18 @@ Built and exercised against real transcripts:
   under `live-resume` and never on the weekly one, **ends** rather than parks a
   run that is also out of time, still refuses a fraction guard with no ceiling,
   and blocks on reconciled spend that `spent_usd` alone would have missed.
-- Provider refusals (`npm test`, 11 cases): `isUsageLimit` matches both the
+- Provider refusals (`npm test`, 18 cases): `isUsageLimit` matches both the
   wording the CLI renders and the wording in its own error taxonomy, including a
   model label it has never seen; leaves `Not logged in`, a spend cap and a
   credit balance to fail as themselves; and treats a 429, an overloaded upstream
   and a plain rate limit as transient rather than as an exhausted allowance —
   money and blips are the two things that must not be waited out.
-  `refusalResumeAt` waits for a window still open, backs
+  `isTransientApiError` picks those blips back up: all five stream-truncation
+  sentences the CLI can render, the statuses and `error.type` names the provider
+  documents as retryable, and a connection that never reached a status — while
+  leaving a bad key, a malformed request and an empty credit balance to fail as
+  themselves, and reading neither `Wrote 500 lines` nor `429 tests passed` as a
+  status. `refusalResumeAt` waits for a window still open, backs
   off 20/40/60 minutes for one already passed or invisible, never re-spawns
   inside five minutes, and never holds a folder past six hours.
 - Reviewing and landing, exercised end to end against real scratch repositories
@@ -935,6 +963,18 @@ through before trusting this unattended:
   enough to correct it.
 - Whether a refusal ever arrives on stderr alone rather than as a `<synthetic>`
   assistant turn. `refusalInStderr` covers that case but has never fired.
+- **What a dropped stream does to the cycle around it.** The five sentences
+  `isTransientApiError` matches were read out of the shipped binary's own
+  strings, and one of them (`Connection closed mid-response`) is confirmed from
+  a real run — which this app then filed as `failed`. The binary also shows the
+  CLI finalising a partial response and carrying on rather than aborting, which
+  is why a cycle that still reports success is now treated as having recovered.
+  What has not been watched end to end is which of the two paths that real run
+  actually took, or whether `--resume` accepts a session a drop truncated
+  mid-turn — and so whether a retry carries on or lands in the resume-failure
+  ladder above. Every outcome is recorded either way: a recovery is a log line
+  naming the error, each retry is an `error` event carrying its backoff, and the
+  stop reason names the attempt count if all of them fail.
 - Whether `claude --resume` accepts a session whose transcript was truncated by
   a mid-turn kill. The recovery ladder retries once and then stops, naming the
   command — it deliberately does not start a fresh session. That ladder now also
