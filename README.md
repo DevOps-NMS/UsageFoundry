@@ -526,14 +526,28 @@ for every API request and will push it to any OTLP endpoint. Turning on *Agent
 self-reporting* in Settings points agents this app spawns back at this server,
 which records one row per request — a first-party number that needs no price
 table, no dedupe key, and no file polling. It is shown as its own card on the
-run page and is **never** merged into `spent_usd`, the dashboard, or the budget
-guard, all of which stay transcript-derived.
+run page and its own card on the dashboard, and is **never** merged into
+`spent_usd`, the dashboard's meters, or the budget guard, all of which stay
+transcript-derived.
 
 Its one real advantage: per-iteration spend normally comes from the CLI's
 terminal `result` event, so a work cycle killed before that event reports $0.
 Telemetry arrives per request as the run proceeds, so it captures that work. A
 telemetry figure *higher* than the run's own total is the expected outcome of an
 interrupted run, not a discrepancy.
+
+The same property is why it is on the dashboard. Because per-cycle spend is only
+reported when a cycle *ends*, a run that has been working for twenty minutes
+reads $0 everywhere until it finishes — so nothing on the page attributed the
+week's most expensive activity to the thing currently doing it. The **Live from
+runs** card covers the same five hours as the session meter, lists the heaviest
+runs by name with their status, and says how long ago the last request landed.
+It is a third reading rather than a correction: the meters count every Claude
+Code session on this machine through our price table, the card counts one class
+of session through Anthropic's own, and the work overlaps — so the two are shown
+side by side and never added. While a run is working the dashboard polls every
+5s instead of 10s; the rest of the time it does not, because rebuilding the
+snapshot competes with the agent for the same CPU.
 
 It cannot replace the transcript scan: there is no historical backfill, no `cwd`
 so no per-project attribution, and `cache_creation_tokens` is a single number
@@ -655,6 +669,23 @@ Built and exercised against real transcripts:
   inserts 0 rows (delivery is at-least-once); an unknown run returns null
   rather than a zero row; and malformed or null payloads return empty instead
   of throwing, since a rejected batch would be retried forever.
+- The dashboard's **Live from runs** card, against a real database with batches
+  pushed through the live ingest route: the window total counts only the five
+  requests inside the 5-hour window and attributed to a run, so a record seven
+  hours old, a record carrying no `uf.run_id`, and a redelivered `request_id`
+  are each left out; per-run rows carry the run's real status from the `runs`
+  join (`running`, `completed`, and `—` when no row matches) and are ordered
+  heaviest first; eight runs in the window list six and still report `runCount`
+  8; `workingRunCount` counts the one `running` row, which is what switches the
+  poll to 5s. The transcript-derived `session.costUSD` in the same response
+  contains none of it, and the card disappears entirely when *Agent
+  self-reporting* is switched back off.
+- That card's own rendering (`npm test`, 5 cases): the first-party figure never
+  renders without all three sentences that stop it being read as an addend to
+  the meters; a list capped by `TOP_RUNS` names the number of runs it left out
+  and a complete list claims no omission; a telemetry row with no matching
+  `runs` row renders `—` rather than inventing a status; and nothing is
+  described as "working" when `workingRunCount` is 0.
 - Plan detection reads `Claude Max 20x` from `.credentials.json` with no email,
   name, or account UUID crossing the wire; caches for 60s including misses (the
   CLI writes these files lazily); and degrades to "plan unknown" with no error
@@ -811,12 +842,22 @@ through before trusting this unattended:
   conflict format both date from 2.38, and an older git is reported rather than
   guessed at, but that path has not been run against 2.39 itself.
 - A repository large enough to hit the diff's size budget in the wild.
+- **The Live from runs card in a browser, fed by a real telemetry-enabled run.**
+  Its query was driven against a real database through the real ingest route and
+  its markup was rendered and read, but the batches were synthesised from the
+  captured payload rather than pushed by a live `claude -p`, and the card has
+  not been *looked at* on the page. What that leaves unconfirmed is how it reads
+  next to the meters — whether the separation is as plain on screen as it is in
+  the copy — and whether the figure visibly moves during a single work cycle at
+  the 5s poll.
 
-There is no linter run in this repo, and `npm test` covers seven things: the
-folder-collision predicate, which queued runs may start, the budget policy, how
-a provider refusal is classified and backed off from, which prompt a work cycle
-spawns with, how a run's diff is parsed and budgeted, when a branch may be
-landed, and whether a conflict was really resolved. `npm run typecheck` plus
+There is no linter run in this repo, and `npm test` covers a deliberately short
+list: the folder-collision predicate, which queued runs may start, the budget
+policy, how a provider refusal is classified and backed off from, which prompt a
+work cycle spawns with, how a run's diff is parsed and budgeted, when a branch
+may be landed, whether a conflict was really resolved, and the two renderings
+that would lie quietly about a number — an unconfigured ceiling, and a
+first-party figure shown beside the meters. `npm run typecheck` plus
 a `docker compose up --build` smoke test is still the real verification loop,
 and the list above records what was checked by hand.
 

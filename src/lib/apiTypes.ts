@@ -99,6 +99,38 @@ export interface UsageResponse {
      */
     account: AccountProfileDTO;
   };
+  /**
+   * What runs have reported over their own telemetry inside the same 5-hour
+   * window as `snapshot.session`. `null` when agent self-reporting is off or
+   * nothing has reported — a normal state, not an error.
+   *
+   * A third reading on a page whose meters are transcript-derived, and kept
+   * apart from them: it moves while a work cycle is still going, which neither
+   * `runs.spent_usd` nor the guard can. Never add it to `snapshot` figures.
+   */
+  telemetry: TelemetryWindowDTO | null;
+}
+
+/** One run's first-party total inside the window. */
+export interface TelemetryRunDTO {
+  runId: string;
+  /** `null` only if the run row has gone — runs are not deleted, so in practice set. */
+  status: RunDTO["status"] | null;
+  requests: number;
+  costUSD: number;
+  tokens: number;
+  lastAt: number;
+}
+
+export interface TelemetryWindowDTO {
+  requests: number;
+  costUSD: number;
+  tokens: number;
+  lastAt: number;
+  runCount: number;
+  workingRunCount: number;
+  /** Heaviest first, and shorter than `runCount` when there were more. */
+  runs: TelemetryRunDTO[];
 }
 
 /**
