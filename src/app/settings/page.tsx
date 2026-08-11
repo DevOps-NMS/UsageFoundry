@@ -98,6 +98,17 @@ const EDITABLE_PATHS = [
   "telemetryForRuns",
 ] as const;
 
+/**
+ * Drops the trailing field margin so a card's bottom padding matches its top.
+ *
+ * `mb-0` on the last `Field` does not do this and never did: two margin
+ * utilities on one element resolve by their order in the generated stylesheet,
+ * and `.mb-0` is emitted before `.mb-3.5`, so the primitive's own margin wins.
+ * The `last:` variant compiles to `.last\:mb-0:last-child`, which outranks a
+ * bare utility, and is inert on a field that is not last.
+ */
+const FLUSH = "last:mb-0";
+
 function at(obj: unknown, path: string): unknown {
   return path
     .split(".")
@@ -613,47 +624,49 @@ export default function SettingsPage() {
           </>
         }
       >
-        <div className="grid gap-x-4 sm:grid-cols-2">
-          <FormField
-            label="Permission mode"
-            htmlFor="cgpm"
-            edited={isEdited("chatDefaultGuards.permissionMode")}
+        {/* Not a two-column row with the switch beside the select: a Field with
+            no label starts where the other one's label does, so the two
+            controls sit a label's height apart. */}
+        <FormField
+          label="Permission mode"
+          htmlFor="cgpm"
+          edited={isEdited("chatDefaultGuards.permissionMode")}
+        >
+          <Select
+            id="cgpm"
+            className="sm:max-w-72"
+            value={guards.permissionMode}
+            onChange={(e) => patchGuards({ permissionMode: e.target.value })}
           >
-            <Select
-              id="cgpm"
-              value={guards.permissionMode}
-              onChange={(e) => patchGuards({ permissionMode: e.target.value })}
-            >
-              {PERMISSION_MODES.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </Select>
-            <Hint tone={modeNote.tone}>{modeNote.text}</Hint>
-          </FormField>
+            {PERMISSION_MODES.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </Select>
+          <Hint tone={modeNote.tone}>{modeNote.text}</Hint>
+        </FormField>
 
-          <FormField edited={isEdited("chatDefaultGuards.isolate")}>
-            <Toggle
-              id="cgiso"
-              checked={guards.isolate}
-              onChange={(v) => patchGuards({ isolate: v })}
-              label={
-                <>
-                  Work in its own checkout
-                  {isEdited("chatDefaultGuards.isolate") && (
-                    <span className="sr-only"> — edited, not saved</span>
-                  )}
-                </>
-              }
-            />
-            <Hint tone={guards.isolate ? "neutral" : "warn"}>
-              {guards.isolate
-                ? "The run works on its own branch in a separate checkout, so another run can use the same project meanwhile — you land it from Branches once you have read it"
-                : "The agent edits the folder you pick, and no other run may touch anything in that tree until it finishes"}
-            </Hint>
-          </FormField>
-        </div>
+        <FormField edited={isEdited("chatDefaultGuards.isolate")}>
+          <Toggle
+            id="cgiso"
+            checked={guards.isolate}
+            onChange={(v) => patchGuards({ isolate: v })}
+            label={
+              <>
+                Work in its own checkout
+                {isEdited("chatDefaultGuards.isolate") && (
+                  <span className="sr-only"> — edited, not saved</span>
+                )}
+              </>
+            }
+          />
+          <Hint tone={guards.isolate ? "neutral" : "warn"}>
+            {guards.isolate
+              ? "The run works on its own branch in a separate checkout, so another run can use the same project meanwhile — you land it from Branches once you have read it"
+              : "The agent edits the folder you pick, and no other run may touch anything in that tree until it finishes"}
+          </Hint>
+        </FormField>
 
         <div className="grid gap-x-4 sm:grid-cols-3">
           <FormField
@@ -752,7 +765,7 @@ export default function SettingsPage() {
             unit="USD per message"
             htmlFor="chatbudget"
             edited={isEdited("chatTurnBudgetUSD")}
-            className="mb-0"
+            className={FLUSH}
           >
             <Input
               id="chatbudget"
@@ -896,7 +909,10 @@ export default function SettingsPage() {
           open={tokenCeilingsOpen}
           onToggle={(e) => setTokenCeilingsOpen(e.currentTarget.open)}
         >
-          <summary className="inline-flex min-h-8 cursor-pointer items-center text-xs text-ink-muted">
+          {/* Padding rather than a flex box with a min height: Chrome drops the
+              disclosure triangle the moment `display` stops being `list-item`,
+              and a summary that looks like a sentence is not a control. */}
+          <summary className="cursor-pointer py-2 text-xs text-ink-muted">
             Raw-token ceilings
             {(isEdited("sessionTokenLimit") || isEdited("weeklyTokenLimit")) && (
               <span className="ml-2 text-accent">· edited</span>
@@ -1068,7 +1084,7 @@ export default function SettingsPage() {
           </FormField>
         </div>
 
-        <FormField edited={isEdited("includeSidechains")} className="mb-0">
+        <FormField edited={isEdited("includeSidechains")}>
           <Toggle
             id="side"
             checked={effective.includeSidechains}
@@ -1191,9 +1207,9 @@ export default function SettingsPage() {
                     {cal.confidence ?? "unknown"}
                   </Badge>
                 </EnvRow>
-                <EnvRow label="Measured">
+                <EnvRow label="5-hour blocks">
                   <span className="tabular-nums">
-                    {evCount("closedBlocks", "completed 5-hour blocks")}
+                    {evCount("closedBlocks", "completed")}
                   </span>
                   {ev("blockCostP50") !== null && ev("blockCostP95") !== null && (
                     <span className="tabular-nums">
@@ -1203,9 +1219,9 @@ export default function SettingsPage() {
                     </span>
                   )}
                 </EnvRow>
-                <EnvRow label="Weekly">
+                <EnvRow label="7-day windows">
                   <span className="tabular-nums">
-                    {evCount("weeklyWindowsSampled", "seven-day windows")}
+                    {evCount("weeklyWindowsSampled", "sampled")}
                   </span>
                 </EnvRow>
               </dl>
@@ -1331,7 +1347,7 @@ export default function SettingsPage() {
             label="Landing a branch"
             htmlFor="landstrategy"
             edited={isEdited("landStrategy")}
-            className="mb-0"
+            className={FLUSH}
           >
             <Select
               id="landstrategy"
@@ -1398,7 +1414,7 @@ export default function SettingsPage() {
           label="Isolated-run preamble"
           htmlFor="isopre"
           edited={isEdited("isolationPreamble")}
-          className="mb-0"
+          className={FLUSH}
         >
           <Textarea
             id="isopre"
@@ -1464,7 +1480,7 @@ export default function SettingsPage() {
         </FormField>
 
         <FormField
-          label="Keep parked runs after a restart for"
+          label="Restart grace"
           unit="hours"
           htmlFor="grace"
           edited={isEdited("resumeGraceHours")}
@@ -1478,12 +1494,13 @@ export default function SettingsPage() {
             onChange={(e) => patch({ resumeGraceHours: Number(e.target.value) })}
           />
           <Hint>
-            Past this age a parked run is closed out instead of picked up, so a
-            forgotten run cannot wake up days later and start spending
+            A parked run older than this is closed out at boot rather than
+            picked up, so a forgotten run cannot wake up days later and start
+            spending
           </Hint>
         </FormField>
 
-        <FormField edited={isEdited("telemetryForRuns")} className="mb-0">
+        <FormField edited={isEdited("telemetryForRuns")} className={FLUSH}>
           <Toggle
             id="telemetry"
             checked={effective.telemetryForRuns}
