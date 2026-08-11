@@ -645,6 +645,23 @@ export default function SettingsPage() {
           </Hint>
         </Field>
 
+        <Field label="Landing a branch" htmlFor="landstrategy">
+          <Select
+            id="landstrategy"
+            value={s.landStrategy}
+            onChange={(e) =>
+              patch({ landStrategy: e.target.value as "merge" | "squash" })
+            }
+          >
+            <option value="merge">Merge, keeping the run&rsquo;s commits</option>
+            <option value="squash">Squash the run into one commit</option>
+          </Select>
+          <Hint>
+            Merging keeps the run page&rsquo;s diff meaningful afterwards;
+            squashing gives your history one commit per run
+          </Hint>
+        </Field>
+
         <Field label="Keep waiting runs after a restart for" htmlFor="grace" className="mb-0">
           <div className="flex items-center gap-2">
             <Input

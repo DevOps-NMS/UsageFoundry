@@ -20,6 +20,13 @@ export async function register() {
     const { reconcileOnBoot, killAllAgents } = await import("./lib/orchestrator");
     reconcileOnBoot();
 
+    // Same problem, different table: a review is a child process too, and a row
+    // left saying `running` would spin a progress indicator for ever. Called
+    // from here rather than from inside `reconcileOnBoot` so that
+    // `orchestrator.ts` does not have to import `review.ts`, which imports it.
+    const { reconcileReviewsOnBoot } = await import("./lib/review");
+    reconcileReviewsOnBoot();
+
     // Agents are spawned into their own process group so a kill reaches the
     // commands they started. That also takes them out of the terminal's
     // foreground group, so Ctrl-C during `npm run dev` no longer reaches them

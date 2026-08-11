@@ -331,10 +331,10 @@ same folder depends on whether that folder is a git repository.
 
 **A git repository — they run in parallel.** Each run gets its own `git worktree`
 on its own branch, under `.uf-worktrees/` beside the repository, and works there.
-Your own checkout is never touched: your uncommitted changes stay yours, and you
-stay on your branch. When the run ends you get a handoff card with the commands
-to review the branch and, if your checkout is clean, to merge it. **UsageFoundry
-never merges anything itself.**
+Your own checkout is never touched while the run works: your uncommitted changes
+stay yours, and you stay on your branch. When it finishes, the run page shows
+what it changed and can bring the branch home — see [Reviewing and landing what a
+run did](#reviewing-and-landing-what-a-run-did).
 
 Two consequences worth knowing before you rely on it:
 
@@ -399,6 +399,86 @@ keep moving — this run's own spend stops accruing the moment a cycle is killed
 before it could report, and both window fractions can fall. A policy with
 neither is refused at creation, and refused again as `no_terminus` if it reaches
 the guard by some other route.
+
+---
+
+## Reviewing and landing what a run did
+
+A finished run tells you it spent $3.40 over four work cycles and put six commits
+on `uf/foo-1`. It does not tell you whether any of that is worth keeping. Three
+things on the run page answer that.
+
+**The diff.** `<base>...<branch>` as a file list you can expand, which for an
+isolated run is exactly that run's work and nothing else. A run that worked
+directly in your folder gets a file list of the folder's current state with the
+caveat attached — your own edits are in there too and nothing records which is
+which, so no patch is shown rather than a confident diff of the wrong thing.
+
+Large changes are budgeted: every changed file is always listed, and patch bodies
+stop at a size limit. When that happens the page says how many files are listed
+without contents, because a diff that quietly shows twelve of forty reads as a run
+that touched twelve.
+
+**The review.** A button that runs Claude once against the diff, the task the run
+was given, and how it ended, and asks what changed, what to look at first, and
+what looks risky. It is on demand only and never automatic — it is billed, and a
+review nobody asked for is spend nobody authorised. It cannot edit anything
+(`--permission-mode plan`), and **its cost is shown separately and never added to
+the run's own spend**, which counts work cycles. If the diff was too large to send
+whole, the reviewer is told which files it did not see, and the card repeats that
+above the review.
+
+A review is refused outright if either window is already at a ceiling you set —
+it spends against the same 5-hour allowance your runs do.
+
+**Landing.** UsageFoundry used to refuse to merge on principle. It now merges,
+and everything that principle protected is a check rather than a caveat:
+
+- The merge is previewed with `git merge-tree`, entirely in memory. You find out
+  whether it fast-forwards, merges cleanly, or conflicts — and which files — with
+  nothing written to any working tree. (Needs git 2.38+; an older one says so
+  rather than guessing.)
+- Landing needs your checkout **clean** and **on the branch the run started
+  from**, which is recorded when the run is created. Anything else is refused with
+  the reason, not greyed out. "Could not read your checkout" counts as dirty.
+- A branch belonging to a run that is still `running`, `queued` or `paused` is
+  never landable — it can gain commits at any moment.
+- A merge that conflicts is aborted immediately and the conflicting files
+  reported. Your checkout is left as it was found.
+- Merge or squash, defaulted in Settings. Merging keeps the run's commits, so the
+  diff above still means something afterwards; squashing gives your history one
+  commit per run.
+
+Landing several branches is several merges, and each changes the base for the
+next — so it is one button per run rather than a batch operation.
+
+**Conflicts can be resolved by Claude, and never in your checkout.** When the
+preview reports a conflict, *Resolve with Claude* merges the target branch
+**into the run's branch**, the opposite direction from landing, inside an
+isolated checkout — the run's own if it still has it, otherwise a throwaway one
+that is deleted afterwards. Claude edits the conflicted files and nothing else;
+it is not allowed to run git. UsageFoundry then checks that no conflict marker
+survived and makes the commit itself. If anything is still unresolved the merge
+is rolled back and the branch is exactly as it was — an agent that says "done"
+without doing it cannot get past that check. When it works, the branch now
+contains the target, so landing it is a plain fast-forward under all the checks
+above.
+
+Your own checkout is not involved at any point, and a resolution that goes badly
+costs a branch nobody has landed. Like a review, it is billed and shown with its
+own cost — never added to the run's spend.
+
+**The Branches page** lists every `uf/*` branch across runs: which run made it,
+what it lands into, how far ahead it is, and whether it is merged. Merged
+branches can be deleted there, and its checkout slot is freed at the same time.
+Branches with commits of their own are not deletable from the UI at all — that is
+the one action here with no undo.
+
+A squashed branch is a special case worth knowing: git cannot see a squash as a
+merge, so the tool records the branch tip it took instead. That is what lets a
+squashed branch show as landed and be deleted — and it stops being true the
+moment the branch gains a commit, which is exactly when deleting would lose
+something.
 
 ---
 
@@ -499,8 +579,12 @@ src/lib/
   adminApi.ts      Admin API client (rate limits, usage, cost) w/ pagination
   budget.ts        policy evaluation
   orchestrator.ts  run loop, process spawn, stream-json parsing, SSE bus
-  db.ts            SQLite (runs, events, settings)
-src/app/api/       usage · account · runs · calibrate · settings · folders
+  git.ts           the one way this app runs git — argv only, environment scrubbed
+  diff.ts          a run's <base>...<branch> as a budgeted file list + patches
+  review.ts        the on-demand reviewer (a third, deliberate child process)
+  land.ts          merge preview, landing, branch deletion, branch inventory
+  db.ts            SQLite (runs, events, reviews, settings)
+src/app/api/       usage · account · runs · branches · calibrate · settings · folders
 ```
 
 Transcripts are re-read incrementally: only bytes appended since the last scan
@@ -633,6 +717,43 @@ Built and exercised against real transcripts:
   `refusalResumeAt` waits for a window still open, backs
   off 20/40/60 minutes for one already passed or invisible, never re-spawns
   inside five minutes, and never holds a folder past six hours.
+- Reviewing and landing, exercised end to end against real scratch repositories
+  (the compiled modules driven directly, with a stub CLI standing in for
+  `claude` so nothing was billed):
+  - A diff over a change containing an edit, a rename, a binary file and a
+    filename containing a tab: file list, statuses, line counts and per-file
+    patches all correct, and the tab-containing name survives intact.
+  - Landing refused while the checkout was dirty, and refused again while it was
+    on a different branch — naming both branches. A clean fast-forward landed and
+    the tree matched.
+  - A conflicting branch: previewed as conflicting in `f.txt` with nothing
+    written, and the merge attempt refused with the checkout left clean and HEAD
+    unmoved.
+  - A squash land: one commit on the target, the run's task as its subject, and
+    the branch then deletable by tip comparison — with its worktree removed
+    first, and refused while that worktree held uncommitted work.
+  - A run predating target recording: the target deduced from the base commit and
+    flagged as inferred.
+  - The branch inventory reporting merged/ahead state, and `branch -d` after it.
+  - The review path with a stub CLI: prompt assembled with the task and the whole
+    diff, `--output-format json --permission-mode plan` on the command line, cost
+    and tokens recorded to `run_reviews`, `running`/`completed` events emitted,
+    and a second concurrent review refused.
+  - Conflict resolution, both ways, with stub CLIs: one that resolves the
+    markers — the branch gained a merge commit, the preview went from
+    *conflicts* to *fast-forward*, the temporary checkout was removed, the
+    operator's tree stayed clean throughout, and the branch then landed — and
+    one that reported success without touching anything, which was caught, the
+    merge rolled back, the branch left byte-identical, and the cost still
+    recorded.
+  - The run page, the branches page and the land/delete actions driven through
+    the browser against that fixture.
+- Parsers and budgets under `npm test` (24 further assertions): NUL-separated
+  numstat and name-status records including renames, binaries and a tab in a
+  filename; patch splitting that does not split on a `diff --git` line *inside* a
+  hunk; the size budget naming what it left out; `merge-tree` output read as
+  clean, conflicting, or undetermined-on-an-old-git; and every `landRefusal`
+  branch.
 
 ### Not yet verified by hand
 
@@ -678,11 +799,24 @@ through before trusting this unattended:
 - `detached: true`: that Ctrl-C during `npm run dev` still kills the agent (via
   the new `instrumentation.ts` handler) and that a long command the agent
   started dies with it.
+- **A review or a conflict resolution against the real CLI.** The spawn, the flags, the JSON result shape
+  and the accounting were exercised with a stub that prints the same object the
+  `stream-json` `result` event carries — but no real `claude -p … --output-format
+  json --permission-mode plan` has been run through this path, so neither the
+  quality of the review nor `plan` mode's behaviour in print mode is confirmed.
+  The same goes for whether a real agent under `acceptEdits` resolves conflict
+  markers well; that it cannot get a bad resolution *committed* is verified.
+- Landing inside the container, where git is 2.39 rather than the 2.50 the
+  scratch repositories above were driven with. `merge-tree --write-tree` and its
+  conflict format both date from 2.38, and an older git is reported rather than
+  guessed at, but that path has not been run against 2.39 itself.
+- A repository large enough to hit the diff's size budget in the wild.
 
-There is no linter run in this repo, and `npm test` covers five things: the
+There is no linter run in this repo, and `npm test` covers seven things: the
 folder-collision predicate, which queued runs may start, the budget policy, how
-a provider refusal is classified and backed off from, and which prompt a work
-cycle spawns with. `npm run typecheck` plus
+a provider refusal is classified and backed off from, which prompt a work cycle
+spawns with, how a run's diff is parsed and budgeted, when a branch may be
+landed, and whether a conflict was really resolved. `npm run typecheck` plus
 a `docker compose up --build` smoke test is still the real verification loop,
 and the list above records what was checked by hand.
 
