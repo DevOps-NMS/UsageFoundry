@@ -286,6 +286,12 @@ export interface RunDTO {
   /** How many times the agent said DONE and was sent back in anyway. */
   done_retriggers?: number;
   /**
+   * Whether the last work cycle replied DONE. Separates a run that finished
+   * from one that used up its cycle cap — both are `completed`, and they are
+   * picked up with different prompts.
+   */
+  reported_done?: number;
+  /**
    * Spend reconciled from transcripts for work cycles killed before Claude Code
    * reported theirs. Shown beside `spent_usd`, never folded into it.
    */

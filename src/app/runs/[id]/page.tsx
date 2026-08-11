@@ -265,6 +265,10 @@ export default function RunDetail({
     run.status === "failed" ||
     run.status === "stopped" ||
     run.status === "completed";
+  // What blank sends, which is the one thing this form's copy has to get right.
+  // A `completed` run that used up its cycle cap never reported anything, and
+  // is continued rather than pushed back on — same branch as `reopenPrompt`.
+  const saidDone = run.status === "completed" && Boolean(run.reported_done);
   const handoff = [...events].reverse().find((e) => e.kind === "handoff");
   const costPct = run.budget.maxRunCostUSD
     ? Math.min(run.spent_usd / run.budget.maxRunCostUSD, 1)
@@ -549,7 +553,7 @@ export default function RunDetail({
             <div className="subsection-title">
               {!run.session_id
                 ? "Start this run again from its original task"
-                : run.status === "completed"
+                : saidDone
                   ? "Send this run back into the same session"
                   : "Carry on from where this run stopped"}
             </div>
@@ -565,7 +569,7 @@ export default function RunDetail({
               <div className="hint">
                 {!run.session_id
                   ? "This run never reported a session to resume, so it starts the original task again with this added to the end."
-                  : run.status === "completed"
+                  : saidDone
                     ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails."
                     : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue."}
               </div>

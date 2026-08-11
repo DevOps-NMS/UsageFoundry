@@ -320,6 +320,17 @@ function migrate(db: Database.Database) {
   addColumn(db, "runs", "pause_count", "INTEGER NOT NULL DEFAULT 0");
   addColumn(db, "runs", "done_retriggers", "INTEGER NOT NULL DEFAULT 0");
 
+  // Whether the agent's last work cycle actually replied DONE. `completed` is
+  // written for two different endings — that reply, and the cycle cap being
+  // reached — and only the first of them may be answered with the DONE
+  // pushback, which opens by telling the agent it reported the task complete.
+  // The stop reason distinguishes them in prose, which is not something to
+  // parse. Rows written before this column read as false: sending a
+  // continuation into a session that did say DONE costs one billed cycle that
+  // says it again, where the pushback tells a run that was cut off mid-task not
+  // to start new work.
+  addColumn(db, "runs", "reported_done", "INTEGER NOT NULL DEFAULT 0");
+
   // What the next work cycle says, when an operator has picked a finished run
   // up by hand. Consumed rather than kept: the loop clears it the moment it
   // hands it to a spawn, so a run that parks or is picked up again later does
