@@ -149,8 +149,49 @@ function migrate(db: Database.Database) {
       updated_at      INTEGER NOT NULL
     );
 
+    -- Branches waiting to be landed, one after another.
+    --
+    -- Landing several branches is several merges and each changes the base for
+    -- the next, which is why they are a *queue* rather than a batch: exactly one
+    -- is in flight, and every one of them is re-previewed against git
+    -- immediately before its own merge rather than against whatever the page
+    -- showed when the queue was made.
+    --
+    -- Its own table for the reason run_templates has one: this is a list with
+    -- identity, whose rows are created, worked through and reported on
+    -- individually. The position column is the operator's chosen order and is
+    -- the only thing that decides what runs next — never created_at, which would
+    -- silently reorder two branches queued in the same millisecond.
+    CREATE TABLE IF NOT EXISTS merge_queue (
+      id           TEXT PRIMARY KEY,
+      batch_id     TEXT NOT NULL,
+      run_id       TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      position     INTEGER NOT NULL,
+      strategy     TEXT NOT NULL,
+      -- Whether a conflict may be sent to Claude. Per batch, recorded per row:
+      -- it authorises billed spend, and an authorisation belongs with the thing
+      -- it authorises rather than in a setting that could change underneath it.
+      auto_resolve INTEGER NOT NULL DEFAULT 0,
+      status       TEXT NOT NULL,
+      -- What happened, in the operator's words rather than git's where the two
+      -- differ. Always set for a row that is no longer queued.
+      message      TEXT,
+      created_at   INTEGER NOT NULL,
+      started_at   INTEGER,
+      finished_at  INTEGER,
+      -- Cost of the conflict resolution this row paid for, if it needed one.
+      -- Never added to the run's spend, for the same reason run_reviews.cost_usd
+      -- is not: it did no work cycle.
+      resolve_cost REAL NOT NULL DEFAULT 0
+    );
+
     CREATE INDEX IF NOT EXISTS idx_run_events_run
       ON run_events(run_id, id);
+    CREATE INDEX IF NOT EXISTS idx_merge_queue_batch
+      ON merge_queue(batch_id, position);
+    -- The worker's own query: the next queued row, across every batch.
+    CREATE INDEX IF NOT EXISTS idx_merge_queue_status
+      ON merge_queue(status, position);
     CREATE INDEX IF NOT EXISTS idx_run_reviews_run
       ON run_reviews(run_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_runs_created

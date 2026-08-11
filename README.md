@@ -514,8 +514,26 @@ and everything that principle protected is a check rather than a caveat:
   diff above still means something afterwards; squashing gives your history one
   commit per run.
 
-Landing several branches is several merges, and each changes the base for the
-next — so it is one button per run rather than a batch operation.
+**Several branches can be queued, and a queue is not a batch.** Tick them on the
+Branches page in the order you want them landed and they go through one at a
+time, each re-previewed against git at its own turn rather than against whatever
+the page showed when you queued them — because every landing changes the base for
+the one behind it. Every check above still applies to every one of them, taken
+fresh.
+
+Two failures are told apart deliberately. A branch that cannot be landed is
+reported and the queue carries on to the next. A problem with your *checkout* —
+uncommitted changes, or standing on the wrong branch — would refuse every
+remaining branch in that repository for the same reason, so the queue stops
+there and says so once instead of ten times. Nothing is left half-merged either
+way, and the queue never resumes itself after a restart: queued merges are
+cancelled, because a server coming back up and merging four branches into the
+tree you are working in is the one thing it must not do on its own.
+
+Optionally — and it is a toggle on the form, not a setting — a conflict can be
+sent to Claude as it comes up, resolved on the run's branch exactly as below, and
+then landed. That spends money unattended, so the toggle carries the warning, the
+cost lands on each queue row, and nothing switches it on for you.
 
 **Conflicts can be resolved by Claude, and never in your checkout.** When the
 preview reports a conflict, *Resolve with Claude* merges the target branch
@@ -539,7 +557,8 @@ the merge. The first is an account of the work; the second is the work, and it
 is what landing will bring across.
 
 **The Branches page** lists every `uf/*` branch across runs: which run made it,
-what it lands into, how far ahead it is, and whether it is merged. Merged
+what it lands into, how far ahead it is, and whether it is merged. It is also
+where the merge queue lives. Merged
 branches can be deleted there, and its checkout slot is freed at the same time.
 Branches with commits of their own are not deletable from the UI at all — that is
 the one action here with no undo.
@@ -855,6 +874,19 @@ Built and exercised against real transcripts:
   hunk; the size budget naming what it left out; `merge-tree` output read as
   clean, conflicting, or undetermined-on-an-old-git; and every `landRefusal`
   branch.
+- The merge queue, against a five-branch scratch repository on a live dev server,
+  with the stub CLI standing in for the resolver. Three branches queued in an
+  order that was not the list's — one clean, one conflicting, one clean — landed
+  in exactly that order: the conflict was resolved in a throwaway checkout, its
+  $0.07 recorded on the queue row and never on the run, and the two clean merges
+  went either side of it. With the resolver toggled off, the conflicting branch
+  failed with its own reason and the branch behind it still landed. With the
+  operator's checkout deliberately dirtied, both queued branches were skipped
+  with one reason between them, nothing was written, and the conflicting one was
+  **not** paid to be resolved — the checkout is tested before the conflict
+  precisely so that a merge which was going to be refused is never billed for
+  first. Driven through the browser as well as the API, including the selection
+  order badges and the inventory re-reading itself once the queue stopped.
 - The conflict display, against a scratch repository with a content conflict and
   a modify/delete conflict in the same merge, on git 2.50. `merge-tree
   --write-tree -z` was run for real and its output fed through
@@ -977,7 +1009,8 @@ There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
 work cycle spawns with, how a run's diff is parsed and budgeted, when a branch
-may be landed, what counts as a conflict marker — both for deciding whether one
+may be landed, what a queued merge does with the branch it reaches, what counts
+as a conflict marker — both for deciding whether one
 was really resolved and for deciding what to show — and the two renderings that
 would lie quietly about a number: an unconfigured ceiling, and a first-party
 figure shown beside the meters. `npm run typecheck` plus

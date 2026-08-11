@@ -448,6 +448,38 @@ export interface LandStateDTO {
   landedStrategy: string | null;
 }
 
+/** One branch waiting to be landed, or already dealt with. */
+export interface MergeQueueItemDTO {
+  id: string;
+  runId: string;
+  branch: string | null;
+  target: string | null;
+  position: number;
+  status:
+    | "queued"
+    | "landing"
+    | "resolving"
+    | "landed"
+    | "failed"
+    | "skipped"
+    | "cancelled";
+  strategy: string;
+  autoResolve: boolean;
+  message: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** What its conflict resolution cost. Never added to the run's spend. */
+  resolveCostUSD: number;
+}
+
+export interface MergeQueueDTO {
+  batchId: string | null;
+  /** True while the worker is between or inside merges. */
+  working: boolean;
+  items: MergeQueueItemDTO[];
+}
+
 export interface BranchSummaryDTO {
   runId: string;
   runStatus: RunDTO["status"];
@@ -470,6 +502,8 @@ export interface BranchInventoryDTO {
   branches: BranchSummaryDTO[];
   /** Runs with a branch that the per-request cap left out. */
   notShown: number;
+  /** `settings.landStrategy`, so the queue form can default to it. */
+  defaultStrategy: "merge" | "squash";
 }
 
 export interface RateLimitEntryDTO {

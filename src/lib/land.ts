@@ -605,7 +605,16 @@ export function landRefusal(s: {
 /* ------------------------------------------------------------------ */
 
 export type LandOutcome =
-  | { ok: true; message: string }
+  | {
+      ok: true;
+      message: string;
+      /**
+       * The `run_reviews` row a conflict resolution started, for a caller that
+       * has to wait for it. Absent when nothing was spawned — including the
+       * resolution that finds the branches agree after all.
+       */
+      assistId?: string;
+    }
   | { ok: false; reason: string; conflicts?: string[] };
 
 /**
@@ -993,6 +1002,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
     ? {
         ok: true,
         message: `Resolving ${conflicted.length} conflicting file(s) in an isolated checkout. Your own checkout is not involved.`,
+        assistId: outcome.id,
       }
     : { ok: false, reason: outcome.reason };
 }

@@ -107,6 +107,20 @@ export function latestAssist(runId: string, kind: AssistKind): ReviewRow | null 
   return listReviews(runId, kind)[0] ?? null;
 }
 
+/**
+ * One by id, for a caller waiting on the invocation it started itself.
+ *
+ * `latestAssist` is the wrong tool for that: it answers "the newest one for
+ * this run", which is a different row the moment anything else starts one.
+ */
+export function getAssist(id: string): ReviewRow | null {
+  return (
+    (db().prepare("SELECT * FROM run_reviews WHERE id = ?").get(id) as
+      | ReviewRow
+      | undefined) ?? null
+  );
+}
+
 export function assistRunning(runId: string, kind: AssistKind): boolean {
   const row = db()
     .prepare(
