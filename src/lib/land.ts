@@ -1,0 +1,1056 @@
+import fs from "node:fs";
+import path from "node:path";
+import { git } from "./git";
+import { db } from "./db";
+import { getSettings } from "./settings";
+import { assistRefusal, assistRunning, startAssist } from "./review";
+import {
+  activeRuns,
+  auxWorktreePath,
+  conflictKey,
+  describeFolder,
+  emitRunEvent,
+  getRun,
+  listRuns,
+  overlaps,
+  resolveWorkspaceFolder,
+  workDirOf,
+  type RunRow,
+} from "./orchestrator";
+
+/**
+ * Bringing an isolated run's branch home.
+ *
+ * CLAUDE.md said "an isolated run works on a branch, and the tool never
+ * merges", and this is the deliberate replacement for that rule rather than a
+ * repeal of it. What the rule protected still holds, and every one of those
+ * protections is enforced here rather than described in a caveat:
+ *
+ *   - **A merge into a dirty tree can lose work.** The operator's checkout must
+ *     be clean, and "could not tell" counts as dirty — the same rule
+ *     `emitHandoff` uses to decide whether to print a merge command at all.
+ *   - **The tool must not write into the operator's checkout by surprise.**
+ *     Nothing here touches it until the operator presses land. Finding out
+ *     *whether* a merge would work touches nothing at all: `merge-tree` does a
+ *     three-way merge in memory and writes only unreferenced objects.
+ *   - **A conflict is never resolved in the operator's checkout.** A merge that
+ *     fails there is aborted immediately and the conflicting files reported.
+ *     Claude can be asked to resolve one, but it does so in an *isolated*
+ *     checkout, merging the target into the run's branch — the opposite
+ *     direction — so a resolution that goes badly costs a branch nobody has
+ *     landed yet. See `resolveConflicts`.
+ *   - **An active run's branch is not landable.** A `running` or `paused` run is
+ *     still committing to it, and the base it merges cleanly against now is not
+ *     the base it will have in ten minutes.
+ *
+ * Branch names are never accepted from the wire. Every entry point takes a run
+ * id and reads the branch off the row, which is the only place it was ever
+ * written — by this app, as `uf/<slot>-<id8>`.
+ */
+
+export type LandStrategy = "merge" | "squash";
+
+export type MergePreview =
+  | { outcome: "already-merged" }
+  | { outcome: "fast-forward" }
+  | { outcome: "clean" }
+  | { outcome: "conflict"; files: string[] }
+  /** Could not be determined — git too old, or the command failed. */
+  | { outcome: "unknown"; reason: string };
+
+export interface CheckoutState {
+  path: string;
+  /** Branch the operator has checked out, or null when detached/unreadable. */
+  headBranch: string | null;
+  dirty: boolean;
+  /** False when `git status` itself failed — which counts as dirty. */
+  readable: boolean;
+}
+
+export interface LandState {
+  runId: string;
+  runStatus: RunRow["status"];
+  branch: string;
+  /** Branch this work lands into. */
+  target: string | null;
+  /**
+   * True when the target was not recorded at creation and has been worked out
+   * from the base commit instead. Surfaced, never hidden: it is a deduction.
+   */
+  targetInferred: boolean;
+  branchExists: boolean;
+  ahead: number;
+  behind: number;
+  merged: boolean;
+  /**
+   * Landed by this tool, and unchanged since. The only way to know a squash
+   * landed: git sees no ancestry, so without this the branch reads as unmerged
+   * for ever and would be offered for landing a second time.
+   */
+  landedUnchanged: boolean;
+  preview: MergePreview;
+  checkout: CheckoutState | null;
+  /** Why landing is refused right now, or null when it is offered. */
+  blocked: string | null;
+  landedAt: number | null;
+  landedInto: string | null;
+  landedStrategy: string | null;
+}
+
+/**
+ * Folders with a land in flight.
+ *
+ * A merge is a multi-step, non-atomic write into a directory, and two of them
+ * interleaved is the same failure the run loop's folder claim exists to
+ * prevent. `globalThis` for the reason every other long-lived map here uses it:
+ * module state resets on a dev hot reload.
+ */
+const landing = ((globalThis as unknown as { __ufLanding?: Set<string> })
+  .__ufLanding ??= new Set<string>());
+
+/* ------------------------------------------------------------------ */
+/* Reading the state                                                   */
+/* ------------------------------------------------------------------ */
+
+/** Re-prove a stored path inside its mount, exactly as the run loop does. */
+function repoPathFor(dir: string): string | null {
+  try {
+    const resolved = resolveWorkspaceFolder(dir, describeFolder(dir).mountId);
+    return resolved === dir ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse `git merge-tree --write-tree`.
+ *
+ * Exit 0 is a clean merge, exit 1 means conflicts, anything else is an error —
+ * including "unknown option" from a git older than 2.38, which is a real
+ * possibility on a host-mounted toolchain and must not read as "no conflicts".
+ *
+ * On conflict the output is the merged tree's oid, then one
+ * `<mode> <oid> <stage>\t<path>` line per conflicted path, then a blank line
+ * and human-readable messages. The same path appears once per stage, so the
+ * list is de-duplicated.
+ */
+export function parseMergeTree(
+  stdout: string,
+  stderr: string,
+  code: number | null,
+): MergePreview {
+  if (code === 0) return { outcome: "clean" };
+  if (code !== 1) {
+    const detail = stderr.split("\n")[0] ?? "";
+    return {
+      outcome: "unknown",
+      reason: /unknown option|usage: git merge-tree/i.test(stderr)
+        ? "This git is too old to preview a merge — 2.38 or newer is needed."
+        : `git could not preview the merge${detail ? `: ${detail}` : "."}`,
+    };
+  }
+
+  const files = new Set<string>();
+  for (const line of stdout.split("\n").slice(1)) {
+    if (line === "") break;
+    const tab = line.indexOf("\t");
+    if (tab === -1) continue;
+    files.add(line.slice(tab + 1));
+  }
+  return { outcome: "conflict", files: [...files] };
+}
+
+/**
+ * Which branch this run's work belongs to.
+ *
+ * `worktree_base_branch` is recorded at creation and is the answer whenever it
+ * is there. Rows written before that column existed have only a commit, so the
+ * branch currently checked out is offered instead — but only after proving the
+ * run's base commit is an ancestor of it, which is what makes it a deduction
+ * rather than an assumption. A run that branched from somewhere else entirely
+ * gets no target and cannot be landed by this tool at all.
+ */
+async function targetOf(
+  run: RunRow,
+  repoRoot: string,
+  checkout: CheckoutState | null,
+): Promise<{ branch: string; inferred: boolean } | null> {
+  if (run.worktree_base_branch) {
+    return { branch: run.worktree_base_branch, inferred: false };
+  }
+  const head = checkout?.headBranch;
+  if (!head || !run.worktree_base) return null;
+
+  const descends = await git(repoRoot, [
+    "merge-base",
+    "--is-ancestor",
+    run.worktree_base,
+    head,
+  ]);
+  return descends.ok ? { branch: head, inferred: true } : null;
+}
+
+async function checkoutStateOf(folder: string): Promise<CheckoutState> {
+  const head = await git(folder, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const status = await git(folder, ["status", "--porcelain"]);
+  return {
+    path: folder,
+    headBranch: head.ok && head.stdout !== "HEAD" ? head.stdout : null,
+    // Unreadable counts as dirty. A status that failed on a stray index.lock
+    // returns an empty stdout, which would otherwise read as "clean" and permit
+    // a merge at exactly the moment it is least safe.
+    dirty: !status.ok || status.stdout !== "",
+    readable: status.ok,
+  };
+}
+
+/**
+ * Everything the run page and the branches page need to decide about a branch.
+ *
+ * Returns null when the run never had a branch — a non-isolated run, or one
+ * that died before its checkout existed. That is an empty state, not an error.
+ */
+export async function landState(runId: string): Promise<LandState | null> {
+  const run = getRun(runId);
+  if (!run || run.isolation !== "worktree" || !run.worktree_branch || !run.repo_root) {
+    return null;
+  }
+
+  const branch = run.worktree_branch;
+  const repoRoot = repoPathFor(run.repo_root);
+  const base: LandState = {
+    runId,
+    runStatus: run.status,
+    branch,
+    target: null,
+    targetInferred: false,
+    branchExists: false,
+    ahead: 0,
+    behind: 0,
+    merged: false,
+    landedUnchanged: false,
+    preview: { outcome: "unknown", reason: "Not checked." },
+    checkout: null,
+    blocked: null,
+    landedAt: run.landed_at,
+    landedInto: run.landed_into,
+    landedStrategy: run.landed_strategy,
+  };
+
+  if (!repoRoot) {
+    return {
+      ...base,
+      blocked: "This run's repository is no longer inside a workspace mount.",
+    };
+  }
+
+  const exists = await git(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+  if (!exists.ok) {
+    return { ...base, blocked: `Branch ${branch} no longer exists.` };
+  }
+
+  const folder = repoPathFor(run.folder);
+  const checkout = folder ? await checkoutStateOf(folder) : null;
+  const target = await targetOf(run, repoRoot, checkout);
+
+  if (!target) {
+    return {
+      ...base,
+      branchExists: true,
+      checkout,
+      blocked:
+        "This run predates target-branch recording and its base commit is not " +
+        `on the branch you have checked out, so there is no way to tell where ${branch} belongs. ` +
+        "Merge it by hand.",
+    };
+  }
+
+  const targetExists = await git(repoRoot, [
+    "rev-parse",
+    "--verify",
+    `refs/heads/${target.branch}`,
+  ]);
+  if (!targetExists.ok) {
+    return {
+      ...base,
+      branchExists: true,
+      checkout,
+      target: target.branch,
+      targetInferred: target.inferred,
+      blocked: `The branch this run started from (${target.branch}) no longer exists.`,
+    };
+  }
+
+  const counts = await git(repoRoot, [
+    "rev-list",
+    "--left-right",
+    "--count",
+    `${target.branch}...${branch}`,
+  ]);
+  const [behind = "0", ahead = "0"] = counts.stdout.split(/\s+/);
+
+  const merged = (
+    await git(repoRoot, ["merge-base", "--is-ancestor", branch, target.branch])
+  ).ok;
+
+  const tip = (await git(repoRoot, ["rev-parse", branch])).stdout;
+  const landedUnchanged = !!run.landed_tip && run.landed_tip === tip;
+
+  // Not previewed while the run can still commit: the answer would be stale
+  // before it rendered, and `merge-tree` writes objects to work it out.
+  // `landRefusal` tests the run's status ahead of the preview, so this never
+  // becomes the reason shown.
+  const active = ["running", "queued", "paused"].includes(run.status);
+
+  const preview = merged
+    ? ({ outcome: "already-merged" } as const)
+    : active
+      ? ({ outcome: "unknown", reason: "This run can still commit to it." } as const)
+      : (await git(repoRoot, ["merge-base", "--is-ancestor", target.branch, branch])).ok
+        ? ({ outcome: "fast-forward" } as const)
+        : await previewMerge(repoRoot, target.branch, branch);
+
+  const state: LandState = {
+    ...base,
+    branchExists: true,
+    target: target.branch,
+    targetInferred: target.inferred,
+    ahead: Number(ahead) || 0,
+    behind: Number(behind) || 0,
+    merged,
+    landedUnchanged,
+    preview,
+    checkout,
+  };
+  return { ...state, blocked: landRefusal(state) };
+}
+
+/**
+ * A three-way merge in memory: no checkout, no index, nothing written to any
+ * working tree. It does add loose objects to the repository's object store,
+ * which gc collects — that is the whole cost of finding out honestly.
+ */
+async function previewMerge(
+  repoRoot: string,
+  target: string,
+  branch: string,
+): Promise<MergePreview> {
+  // No `--name-only`: it lands the conflict list in a simpler shape but arrived
+  // two releases after `--write-tree` itself, and this has to work on whatever
+  // git the host mounted.
+  const res = await git(repoRoot, ["merge-tree", "--write-tree", target, branch]);
+  return parseMergeTree(res.stdout, res.stderr, res.code);
+}
+
+/* ------------------------------------------------------------------ */
+/* Deciding                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Why this branch cannot be landed right now, or null when it can.
+ *
+ * Pure, and separated from everything that touches a filesystem, because this
+ * is the decision that writes into a directory the operator owns. Every branch
+ * of it is a refusal that has to be *explained*: the handoff card's rule was
+ * "withhold and say why, never show-and-caveat", and a landing button that is
+ * simply greyed out is the same failure in a different shape.
+ */
+export function landRefusal(s: {
+  runStatus: RunRow["status"];
+  branchExists: boolean;
+  target: string | null;
+  merged: boolean;
+  landedUnchanged: boolean;
+  ahead: number;
+  preview: MergePreview;
+  checkout: CheckoutState | null;
+}): string | null {
+  if (!s.branchExists) return "This branch no longer exists.";
+  if (!s.target) return "There is no recorded branch for this work to land into.";
+
+  if (s.runStatus === "running" || s.runStatus === "queued" || s.runStatus === "paused") {
+    return (
+      "This run is still active. It can commit again at any moment, so anything " +
+      "landed now would be half its work."
+    );
+  }
+
+  if (s.merged) return `Already in ${s.target} — there is nothing left to land.`;
+  // A squash leaves no ancestry to find, so without this the branch reads as
+  // unmerged and would be offered for landing a second time — which replays a
+  // change that is already in the target.
+  if (s.landedUnchanged) {
+    return `Already squashed into ${s.target}, and nothing new has been committed to it since.`;
+  }
+  if (s.ahead === 0) return "This branch has no commits of its own.";
+
+  if (s.preview.outcome === "conflict") {
+    return `Merging into ${s.target} conflicts in ${s.preview.files.length} file(s). Resolve it by hand.`;
+  }
+  if (s.preview.outcome === "unknown") return s.preview.reason;
+
+  if (!s.checkout) return "This run's folder is no longer inside a workspace mount.";
+  if (!s.checkout.readable) {
+    return "Could not read your checkout's status, so nothing is offered. Check it by hand.";
+  }
+  if (s.checkout.dirty) {
+    return "Your checkout has uncommitted changes — commit or stash them first.";
+  }
+  if (s.checkout.headBranch !== s.target) {
+    return (
+      `Your checkout is on ${s.checkout.headBranch ?? "a detached HEAD"}, and this work belongs on ` +
+      `${s.target}. Switch to it first — landing onto the wrong branch is not something this can undo.`
+    );
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Doing it                                                            */
+/* ------------------------------------------------------------------ */
+
+export type LandOutcome =
+  | { ok: true; message: string }
+  | { ok: false; reason: string; conflicts?: string[] };
+
+/**
+ * Merge the run's branch into its target, in the operator's own checkout.
+ *
+ * The one write this app makes outside `.uf-worktrees`. Every check is taken
+ * again here from a fresh read rather than trusted from whatever the page was
+ * showing — the page may have been open for an hour, and the checkout is
+ * somewhere a person also works.
+ */
+export async function landRun(
+  runId: string,
+  strategy: LandStrategy = getSettings().landStrategy,
+): Promise<LandOutcome> {
+  const run = getRun(runId);
+  if (!run) return { ok: false, reason: "No such run." };
+
+  const state = await landState(runId);
+  if (!state) return { ok: false, reason: "This run has no branch to land." };
+  if (state.blocked) return { ok: false, reason: state.blocked };
+
+  const folder = state.checkout!.path;
+  const target = state.target!;
+  const branch = state.branch;
+
+  // A run working in this folder — or in anything above or below it — makes the
+  // tree move under the merge. `conflictKey`/`overlaps` is the same comparison
+  // the folder claim uses, so "the same folder" means the same thing here as it
+  // does there.
+  const key = conflictKey(folder);
+  const busy = activeRuns().find((r) => overlaps(key, conflictKey(workDirOf(r))));
+  if (busy) {
+    return {
+      ok: false,
+      reason: `Run ${busy.id.slice(0, 8)} is working in this folder. Landing while it writes would merge into a moving tree.`,
+    };
+  }
+
+  if (landing.has(folder)) {
+    return { ok: false, reason: "Another branch is being landed into this folder." };
+  }
+  landing.add(folder);
+
+  try {
+    // Read before the merge: after a squash there is nothing in the target's
+    // history that points back at these commits, and this is what makes them
+    // identifiable afterwards.
+    const tip = (await git(folder, ["rev-parse", branch])).stdout;
+
+    const merge =
+      strategy === "squash"
+        ? await git(folder, ["merge", "--squash", branch], { timeoutMs: 120_000 })
+        : await git(folder, ["merge", "--no-edit", branch], { timeoutMs: 120_000 });
+
+    if (!merge.ok) {
+      const conflicts = await conflictedFiles(folder);
+      await unwind(folder, strategy);
+      return {
+        ok: false,
+        reason:
+          conflicts.length > 0
+            ? `The merge conflicted and was rolled back — your checkout is untouched. Conflicting: ${conflicts.join(", ")}`
+            : `git refused the merge and it was rolled back: ${merge.stderr.split("\n")[0] || "unknown error"}`,
+        conflicts,
+      };
+    }
+
+    if (strategy === "squash") {
+      // `--squash` stages the change and stops. Without this the operator is
+      // left holding a staged merge that the app claims to have landed.
+      const commit = await git(folder, [
+        "commit",
+        "-m",
+        squashSubject(run),
+        "-m",
+        `Squashed from ${branch} (UsageFoundry run ${run.id}).`,
+      ]);
+      if (!commit.ok) {
+        await unwind(folder, strategy);
+        return {
+          ok: false,
+          reason: `The squash could not be committed and was rolled back: ${commit.stderr.split("\n")[0] || "unknown error"}`,
+        };
+      }
+    }
+
+    const now = Date.now();
+    db()
+      .prepare(
+        "UPDATE runs SET landed_at=?, landed_into=?, landed_strategy=?, landed_tip=? WHERE id=?",
+      )
+      .run(now, target, strategy, tip || null, runId);
+
+    emitRunEvent({
+      runId,
+      ts: now,
+      kind: "land",
+      payload: { branch, target, strategy, folder },
+    });
+
+    return {
+      ok: true,
+      message:
+        strategy === "squash"
+          ? `Squashed ${branch} into ${target} as one commit.`
+          : `Merged ${branch} into ${target}.`,
+    };
+  } finally {
+    landing.delete(folder);
+  }
+}
+
+/** Paths git left conflicted, read before the merge is unwound. */
+async function conflictedFiles(folder: string): Promise<string[]> {
+  const res = await git(folder, ["diff", "--name-only", "--diff-filter=U"]);
+  return res.ok && res.stdout ? res.stdout.split("\n") : [];
+}
+
+/**
+ * Put the checkout back the way it was found.
+ *
+ * `merge --abort` is the right undo for a real merge. A failed `--squash` never
+ * writes MERGE_HEAD, so abort has nothing to work from and `reset --hard` is
+ * the only recovery — safe here, and only here, because the tree was proved
+ * clean seconds earlier and no run is allowed to be writing in it.
+ */
+async function unwind(folder: string, strategy: LandStrategy): Promise<void> {
+  const abort = await git(folder, ["merge", "--abort"]);
+  if (abort.ok || strategy !== "squash") return;
+  await git(folder, ["reset", "--hard", "HEAD"]);
+}
+
+/** First line of the task, as a commit subject. */
+function squashSubject(run: RunRow): string {
+  const first = run.prompt.split("\n").find((l) => l.trim() !== "")?.trim() ?? "";
+  const subject = first.length > 68 ? `${first.slice(0, 65)}…` : first;
+  return subject || `UsageFoundry run ${run.id.slice(0, 8)}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Resolving a conflict, with help                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Conflict markers git leaves in a file it could not merge.
+ *
+ * Only the two labelled markers, never the bare `=======` line: that is an
+ * ordinary markdown heading underline, and treating it as evidence of a
+ * conflict would refuse a perfectly resolved file.
+ */
+export function hasConflictMarkers(text: string): boolean {
+  return /^(<<<<<<< |>>>>>>> )/m.test(text);
+}
+
+/** Which of the conflicted files the agent left with markers still in them. */
+export function unresolvedFiles(
+  files: ReadonlyArray<{ path: string; text: string | null }>,
+): string[] {
+  // A file that cannot be read is unresolved: refusing to commit is the
+  // recoverable mistake, committing half a merge is not.
+  return files.filter((f) => f.text === null || hasConflictMarkers(f.text)).map((f) => f.path);
+}
+
+/** Where the resolution happens: never the operator's checkout. */
+interface ResolveCheckout {
+  path: string;
+  /** True when this call created it, so this call removes it. */
+  temporary: boolean;
+}
+
+/**
+ * A checkout of the run's branch to merge into, outside the operator's tree.
+ *
+ * Prefers the run's own slot when it still holds that branch and is clean —
+ * nothing to create, nothing to delete. Otherwise a dedicated one, because a
+ * slot is reused by later runs and taking one that another run is about to
+ * adopt is the collision the whole worktree scheme exists to avoid.
+ */
+async function resolveCheckout(
+  repoRoot: string,
+  run: RunRow,
+  branch: string,
+): Promise<ResolveCheckout> {
+  const own = run.worktree_path;
+  if (own && fs.existsSync(own)) {
+    const head = await git(own, ["rev-parse", "--abbrev-ref", "HEAD"]);
+    const status = await git(own, ["status", "--porcelain"]);
+    if (head.ok && head.stdout === branch && status.ok && status.stdout === "") {
+      return { path: own, temporary: false };
+    }
+  }
+
+  // Throws unless the store is a real directory inside the mount.
+  const slot = auxWorktreePath(repoRoot, "resolve");
+  if (fs.existsSync(slot)) {
+    // Left behind by an earlier attempt that could not clean up. Removing it is
+    // safe only because this path is ours alone and nothing else ever adopts it.
+    await git(repoRoot, ["worktree", "remove", "--force", slot]);
+    fs.rmSync(slot, { recursive: true, force: true });
+  }
+  await git(repoRoot, ["worktree", "prune"]);
+
+  const add = await git(repoRoot, ["worktree", "add", slot, branch], {
+    timeoutMs: 30 * 60_000,
+  });
+  if (!add.ok) {
+    throw new Error(`Could not create a checkout to resolve in: ${add.stderr.split("\n")[0]}`);
+  }
+  return { path: slot, temporary: true };
+}
+
+async function discardCheckout(
+  repoRoot: string,
+  checkout: ResolveCheckout,
+): Promise<void> {
+  if (!checkout.temporary) return;
+  await git(repoRoot, ["worktree", "remove", "--force", checkout.path]);
+}
+
+/**
+ * Merge the target *into* the run's branch, and have Claude resolve what git
+ * could not.
+ *
+ * The direction is the whole design. Merging the operator's branch into the
+ * run's branch happens in an isolated checkout, so a resolution that goes badly
+ * costs a branch nobody has landed yet and touches nothing the operator owns.
+ * When it goes well the branch contains the target, and landing it becomes a
+ * fast-forward — which the ordinary landing path then performs under all of its
+ * usual checks. There is no path here that writes into the operator's checkout.
+ *
+ * The agent resolves *text* and nothing else: it is not asked to commit, and
+ * `acceptEdits` does not let it run git. This app checks that no marker
+ * survived and then makes the commit itself. An agent that reports success
+ * having left `<<<<<<<` in a file is the exact failure this ordering prevents.
+ */
+export async function resolveConflicts(runId: string): Promise<LandOutcome> {
+  const run = getRun(runId);
+  if (!run) return { ok: false, reason: "No such run." };
+  if (assistRunning(runId, "resolve")) {
+    return { ok: false, reason: "A resolution for this run is already running." };
+  }
+
+  const state = await landState(runId);
+  if (!state) return { ok: false, reason: "This run has no branch." };
+  if (!state.branchExists || !state.target) {
+    return { ok: false, reason: state.blocked ?? "There is nothing to resolve." };
+  }
+  if (["running", "queued", "paused"].includes(run.status)) {
+    return {
+      ok: false,
+      reason: "This run is still active — it can commit again, and would be resolving against a moving branch.",
+    };
+  }
+  if (state.preview.outcome !== "conflict") {
+    return {
+      ok: false,
+      reason:
+        state.preview.outcome === "unknown"
+          ? state.preview.reason
+          : `${state.branch} does not conflict with ${state.target}, so there is nothing to resolve.`,
+    };
+  }
+
+  const refusal = await assistRefusal();
+  if (refusal) return { ok: false, reason: refusal };
+
+  const repoRoot = repoPathFor(run.repo_root!);
+  if (!repoRoot) {
+    return { ok: false, reason: "This run's repository is no longer inside a workspace mount." };
+  }
+
+  const target = state.target;
+  const branch = state.branch;
+  let checkout: ResolveCheckout;
+  try {
+    checkout = await resolveCheckout(repoRoot, run, branch);
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+
+  const merge = await git(checkout.path, ["merge", "--no-edit", target], {
+    timeoutMs: 120_000,
+  });
+  if (merge.ok) {
+    // The preview was stale — the branches agree after all. The merge commit is
+    // real and useful: landing is now a fast-forward.
+    await discardCheckout(repoRoot, checkout);
+    return {
+      ok: true,
+      message: `${target} merged into ${branch} with no conflicts, so nothing needed resolving.`,
+    };
+  }
+
+  const conflicted = await conflictedFiles(checkout.path);
+  if (conflicted.length === 0) {
+    await git(checkout.path, ["merge", "--abort"]);
+    await discardCheckout(repoRoot, checkout);
+    return {
+      ok: false,
+      reason: `git could not merge ${target} into ${branch}: ${merge.stderr.split("\n")[0] || "unknown error"}`,
+    };
+  }
+
+  const outcome = startAssist({
+    run,
+    kind: "resolve",
+    cwd: checkout.path,
+    // It edits files in an isolated checkout and does nothing else. It is not
+    // given `bypassPermissions`, and it is not asked to run git — the commit is
+    // made below, after the result has been checked.
+    permissionMode: "acceptEdits",
+    prompt: resolvePrompt(branch, target, conflicted),
+    counts: { files: conflicted.length, shown: conflicted.length, truncated: false },
+    after: async (result) => {
+      // The spawn itself failed — a crash, a timeout, a refusal. Roll back and
+      // keep its own error: reporting "markers are still in f.txt" would be
+      // true and useless, because the agent never ran.
+      if (result.status === "failed") {
+        await git(checkout.path, ["merge", "--abort"]);
+        await discardCheckout(repoRoot, checkout);
+        return;
+      }
+
+      const left = unresolvedFiles(
+        conflicted.map((p) => ({ path: p, text: readIfPossible(path.join(checkout.path, p)) })),
+      );
+      if (left.length > 0) {
+        await git(checkout.path, ["merge", "--abort"]);
+        await discardCheckout(repoRoot, checkout);
+        return {
+          status: "failed" as const,
+          error: `Conflict markers are still in ${left.join(", ")}. The merge was rolled back; ${branch} is unchanged.`,
+        };
+      }
+
+      const staged = await git(checkout.path, [
+        "add",
+        "--",
+        ...conflicted.map((p) => `:(top,literal)${p}`),
+      ]);
+      const unmerged = await git(checkout.path, ["ls-files", "-u"]);
+      if (!staged.ok || !unmerged.ok || unmerged.stdout !== "") {
+        await git(checkout.path, ["merge", "--abort"]);
+        await discardCheckout(repoRoot, checkout);
+        return {
+          status: "failed" as const,
+          error: `The resolution could not be staged, so the merge was rolled back and ${branch} is unchanged.`,
+        };
+      }
+
+      const commit = await git(checkout.path, ["commit", "--no-edit"]);
+      if (!commit.ok) {
+        await git(checkout.path, ["merge", "--abort"]);
+        await discardCheckout(repoRoot, checkout);
+        return {
+          status: "failed" as const,
+          error: `The merge could not be committed and was rolled back: ${commit.stderr.split("\n")[0] || "unknown error"}`,
+        };
+      }
+
+      await discardCheckout(repoRoot, checkout);
+      emitRunEvent({
+        runId,
+        ts: Date.now(),
+        kind: "land",
+        payload: { branch, target, resolved: conflicted },
+      });
+      return { status: "completed" as const };
+    },
+  });
+
+  return outcome.ok
+    ? {
+        ok: true,
+        message: `Resolving ${conflicted.length} conflicting file(s) in an isolated checkout. Your own checkout is not involved.`,
+      }
+    : { ok: false, reason: outcome.reason };
+}
+
+function readIfPossible(file: string): string | null {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function resolvePrompt(branch: string, target: string, files: string[]): string {
+  return [
+    `You are resolving a git merge conflict in an isolated checkout. \`${target}\` has just been`,
+    `merged into \`${branch}\` and git could not reconcile these files:`,
+    "",
+    ...files.map((f) => `  ${f}`),
+    "",
+    "Each one contains conflict markers (<<<<<<<, =======, >>>>>>>). Edit every one of them so",
+    "that the result keeps the intent of *both* sides — the branch's change and the change that",
+    "arrived from the other branch — and remove every marker. Read the surrounding code first;",
+    "picking one side wholesale is almost always wrong.",
+    "",
+    "Rules:",
+    "- Edit only the files listed above. Do not touch anything else.",
+    "- Do not run git. Do not commit or stage anything: that is done for you once your work has",
+    "  been checked, and a merge with a marker left in it is rejected.",
+    "- If two changes genuinely cannot both stand, keep the one from the branch being merged in",
+    `  (\`${target}\`) and say so in your answer.`,
+    "",
+    "When you are done, reply with one short paragraph per file saying what you kept and why.",
+  ].join("\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* Deleting a landed branch                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Delete a branch whose commits are all in its target.
+ *
+ * The one action here with no undo, so it is offered for merged branches only —
+ * and "merged" is re-established from git at the moment of the request rather
+ * than read from `landed_at`, because `reopenRun` can put commits back on a
+ * branch this tool landed weeks ago.
+ *
+ * Its checkout goes first when one is still registered: git will not delete a
+ * branch that a worktree has checked out, and a slot holding uncommitted work
+ * is left alone rather than forced.
+ */
+export async function deleteBranch(runId: string): Promise<LandOutcome> {
+  const run = getRun(runId);
+  if (!run?.worktree_branch || !run.repo_root) {
+    return { ok: false, reason: "This run has no branch." };
+  }
+  const state = await landState(runId);
+  if (!state) return { ok: false, reason: "This run has no branch." };
+  if (!state.branchExists) return { ok: false, reason: "This branch is already gone." };
+  if (["running", "queued", "paused"].includes(run.status)) {
+    return { ok: false, reason: "This run is still active." };
+  }
+
+  const repoRoot = repoPathFor(run.repo_root);
+  if (!repoRoot) {
+    return { ok: false, reason: "This run's repository is no longer inside a workspace mount." };
+  }
+
+  // A squash rewrites the commits, so git's ancestry test can never call this
+  // branch merged and `branch -d` would refuse it for ever. The tip recorded at
+  // land time is the stronger statement in that case — it says *these exact
+  // commits* are the ones that were taken — and it stops being true the moment
+  // the branch moves, which is precisely when deleting would lose something.
+  if (!state.merged && !state.landedUnchanged) {
+    return {
+      ok: false,
+      reason: run.landed_at
+        ? `${state.branch} has gained commits since it was landed. Land those too, or delete it by hand.`
+        : `${state.branch} has ${state.ahead} commit(s) that are not in ${state.target ?? "any branch"}. Deleting it would be the only unrecoverable thing here.`,
+    };
+  }
+
+  const slot = await worktreeHolding(repoRoot, state.branch);
+  if (slot) {
+    const status = await git(slot, ["status", "--porcelain"]);
+    if (!status.ok || status.stdout !== "") {
+      return {
+        ok: false,
+        reason: `Its checkout at ${slot} still holds uncommitted work. Clear it first.`,
+      };
+    }
+    const removed = await git(repoRoot, ["worktree", "remove", slot]);
+    if (!removed.ok) {
+      return { ok: false, reason: `Could not remove its checkout: ${removed.stderr.split("\n")[0]}` };
+    }
+  }
+
+  // `-d` wherever git can see the merge for itself: its check is a second
+  // opinion on the one above, and disagreeing with it is a reason to stop
+  // rather than to force. `-D` only for a squash, where git structurally
+  // cannot see it and the tip comparison above is what stands in for it.
+  const del = await git(repoRoot, [
+    "branch",
+    state.merged ? "-d" : "-D",
+    state.branch,
+  ]);
+  if (!del.ok) {
+    return { ok: false, reason: `git refused to delete the branch: ${del.stderr.split("\n")[0]}` };
+  }
+
+  emitRunEvent({
+    runId,
+    ts: Date.now(),
+    kind: "land",
+    payload: { branch: state.branch, deleted: true, worktreeRemoved: slot ?? null },
+  });
+
+  return {
+    ok: true,
+    message: slot
+      ? `Deleted ${state.branch} and freed its checkout slot.`
+      : `Deleted ${state.branch}.`,
+  };
+}
+
+/** The worktree with this branch checked out, if any is still registered. */
+async function worktreeHolding(
+  repoRoot: string,
+  branch: string,
+): Promise<string | null> {
+  const list = await git(repoRoot, ["worktree", "list", "--porcelain"]);
+  if (!list.ok) return null;
+
+  let current: string | null = null;
+  for (const line of list.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) current = line.slice("worktree ".length);
+    else if (line === `branch refs/heads/${branch}`) return current;
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* Inventory                                                           */
+/* ------------------------------------------------------------------ */
+
+export interface BranchSummary {
+  runId: string;
+  runStatus: RunRow["status"];
+  branch: string;
+  target: string | null;
+  repoRoot: string;
+  repoLabel: string;
+  createdAt: number;
+  ahead: number;
+  merged: boolean;
+  /** Landed by this tool and unchanged since — how a squash shows as done. */
+  landedUnchanged: boolean;
+  exists: boolean;
+  active: boolean;
+  landedAt: number | null;
+  prompt: string;
+}
+
+export interface BranchInventory {
+  branches: BranchSummary[];
+  /** Runs with a branch that were not examined, because the list is capped. */
+  notShown: number;
+}
+
+/** Branches examined per request. Each costs a `rev-list --count`. */
+const MAX_INVENTORY = 60;
+
+/**
+ * Every branch this app has produced, with enough state to decide about it.
+ *
+ * Grouped by repository so the two set-shaped questions — which refs still
+ * exist, and which are merged into a given target — are one `for-each-ref` each
+ * rather than one git call per branch. The per-branch commit count is not
+ * set-shaped and stays one call, which is what the cap above bounds.
+ */
+export async function branchInventory(): Promise<BranchInventory> {
+  const candidates = listRuns(400).filter(
+    (r) => r.isolation === "worktree" && r.worktree_branch && r.repo_root,
+  );
+  const examined = candidates.slice(0, MAX_INVENTORY);
+  const active = new Set(activeRuns().map((r) => r.id));
+
+  const byRepo = new Map<string, RunRow[]>();
+  for (const run of examined) {
+    const list = byRepo.get(run.repo_root!) ?? [];
+    list.push(run);
+    byRepo.set(run.repo_root!, list);
+  }
+
+  const branches: BranchSummary[] = [];
+
+  for (const [rawRoot, runs] of byRepo) {
+    const repoRoot = repoPathFor(rawRoot);
+    if (!repoRoot) continue;
+
+    // Name and tip together: the tip is what identifies a squash-landed branch,
+    // and asking for it here costs nothing over asking for the name alone.
+    const tips = new Map<string, string>();
+    for (const line of (
+      await git(repoRoot, [
+        "for-each-ref",
+        "--format=%(refname:short) %(objectname)",
+        "refs/heads/uf/",
+      ])
+    ).stdout.split("\n")) {
+      const sp = line.lastIndexOf(" ");
+      if (sp > 0) tips.set(line.slice(0, sp), line.slice(sp + 1));
+    }
+
+    // One membership query per distinct target, not per branch.
+    const mergedByTarget = new Map<string, Set<string>>();
+    for (const run of runs) {
+      const target = run.worktree_base_branch;
+      if (!target || mergedByTarget.has(target)) continue;
+      const res = await git(repoRoot, [
+        "for-each-ref",
+        "--merged",
+        target,
+        "--format=%(refname:short)",
+        "refs/heads/uf/",
+      ]);
+      mergedByTarget.set(
+        target,
+        new Set(res.ok ? res.stdout.split("\n").filter(Boolean) : []),
+      );
+    }
+
+    for (const run of runs) {
+      const branch = run.worktree_branch!;
+      const target = run.worktree_base_branch;
+      const exists = tips.has(branch);
+      const merged = exists && !!target && (mergedByTarget.get(target)?.has(branch) ?? false);
+
+      const ahead =
+        exists && target
+          ? Number(
+              (await git(repoRoot, ["rev-list", "--count", `${target}..${branch}`]))
+                .stdout,
+            ) || 0
+          : 0;
+
+      branches.push({
+        runId: run.id,
+        runStatus: run.status,
+        branch,
+        target,
+        repoRoot,
+        repoLabel: describeFolder(repoRoot).relPath || repoRoot,
+        createdAt: run.created_at,
+        ahead,
+        merged,
+        landedUnchanged: !!run.landed_tip && run.landed_tip === tips.get(branch),
+        exists,
+        active: active.has(run.id),
+        landedAt: run.landed_at,
+        prompt: run.prompt,
+      });
+    }
+  }
+
+  branches.sort((a, b) => b.createdAt - a.createdAt);
+  return { branches, notShown: candidates.length - examined.length };
+}

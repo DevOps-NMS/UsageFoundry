@@ -50,10 +50,36 @@ ENV NODE_ENV=production \
     CLAUDE_HOME=/home/node/.claude \
     CLAUDE_CONFIG_DIR=/home/node/.claude
 
-# git and ripgrep are what the agent actually reaches for; ca-certificates is
-# needed for outbound TLS to the Anthropic API.
+# What the agent needs on PATH to do the work, not just to be started.
+#
+#   git, ripgrep      — what it reaches for constantly; git additionally backs
+#                       isolation, the diff view and landing a branch.
+#   ca-certificates   — outbound TLS to the Anthropic API.
+#   tini              — reaps the claude children (see ENTRYPOINT).
+#
+#   python3, make, g++ — node-gyp's toolchain. Node ships with this image but a
+#                       native addon does not: `npm ci` builds from source
+#                       whenever no prebuild matches, and better-sqlite3 — which
+#                       this app and both projects it was built against depend
+#                       on — is exactly that case. Without these an isolated run
+#                       fails on its first `npm install`, which is the command a
+#                       fresh worktree needs before it can run anything at all.
+#                       The `deps` stage above installs the same three for the
+#                       same reason; this is that gap closed on the runtime side.
+#   curl              — the universal "is the server I just started answering?"
+#                       and the form every README writes a smoke test in.
+#   procps            — `ps`/`pkill`. Debian slim omits it, so an agent that
+#                       backgrounds a dev server cannot check whether it lives.
+#   less              — git's pager. Absent, `git log` still works but prints a
+#                       broken-pager warning the agent then reasons about.
+#
+# This costs roughly 250 MB, nearly all of it g++. A compiler in the runtime
+# image is a deliberate trade: the alternative is an agent that cannot install
+# dependencies, and a run that fails at step one is worth less than the layer.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git ripgrep ca-certificates tini \
+ && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates tini \
+      python3 make g++ curl procps less \
  && rm -rf /var/lib/apt/lists/*
 
 # Two things git cannot work out for itself inside a container, both of which

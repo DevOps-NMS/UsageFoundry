@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
@@ -6,12 +6,12 @@ import path from "node:path";
 import fs from "node:fs";
 import {
   CLAUDE_BIN,
-  GIT_BIN,
   OTLP_SELF_URL,
   WORKSPACE_MOUNTS,
   mountById,
   type WorkspaceMount,
 } from "./config";
+import { git, gitSync } from "./git";
 import { db } from "./db";
 import { getSettings, limitConfig, type PermissionMode } from "./settings";
 import {
@@ -86,6 +86,19 @@ export interface RunRow {
   worktree_branch: string | null;
   /** Commit the worktree branched from, for the handoff diff range. */
   worktree_base: string | null;
+  /**
+   * Branch the operator had checked out when the run was created — the branch
+   * this run's work is meant to land *into*. A commit is not enough: it names
+   * where the work started, not where it belongs, and "merge into whatever you
+   * have checked out right now" is a guess the app should not make.
+   */
+  worktree_base_branch: string | null;
+  /** When this tool merged the branch into its target. Null means never. */
+  landed_at: number | null;
+  landed_into: string | null;
+  landed_strategy: string | null;
+  /** Branch tip at that moment — the only proof a squash took these commits. */
+  landed_tip: string | null;
   /** Paused runs: when to look again. A hint, not a promise — see sweepPaused. */
   resume_at: number | null;
   paused_at: number | null;
@@ -122,6 +135,8 @@ export interface RunEvent {
     | "budget"
     | "result"
     | "handoff"
+    | "land"
+    | "review"
     | "error";
   payload: Record<string, unknown>;
 }
@@ -212,6 +227,19 @@ function emit(e: RunEvent) {
 
 function log(runId: string, message: string, extra: Record<string, unknown> = {}) {
   emit({ runId, ts: Date.now(), kind: "log", payload: { message, ...extra } });
+}
+
+/**
+ * Write to a run's log from outside the loop.
+ *
+ * Landing a branch and reviewing a diff are operator actions that happen after
+ * a run is over, and both belong in that run's history rather than only in the
+ * response to the request that triggered them. Persist-then-publish is what
+ * makes the stream lossless for a page that reconnects, so it stays the one
+ * write path.
+ */
+export function emitRunEvent(e: RunEvent): void {
+  emit(e);
 }
 
 export function getRun(id: string): RunRow | null {
@@ -715,110 +743,14 @@ export function lastSpendingWindowEnd(snapshot: UsageSnapshot): number | null {
 /* Git                                                                 */
 /* ------------------------------------------------------------------ */
 
-/**
- * The second and last place this module spawns a process.
- *
- * Like the agent spawn below it, arguments go as an array and never through a
- * shell. The environment is scrubbed of this app's secrets because git runs
- * repository-controlled code: `core.fsmonitor` is a command git executes, and
- * `worktree add` fires the repo's `post-checkout` hook. `core.fsmonitor` is
- * cleared on every call for the same reason, and terminal prompting is disabled
- * because these children have no stdin — a credential prompt would hang until
- * the run's time limit.
- *
- * Synchronous on purpose: the admission decision in `createRun` has to stay
- * free of `await`, and these calls are single-digit milliseconds.
- */
-interface GitResult {
-  ok: boolean;
-  stdout: string;
-  stderr: string;
-}
-
-function gitEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
-  for (const k of Object.keys(env)) {
-    if (k.startsWith("ANTHROPIC_") || k.startsWith("UF_")) delete env[k];
-  }
-  return env;
-}
-
-/**
- * `core.fsmonitor` is a command git runs, so it is cleared on every call.
- *
- * `safe.directory` is waived for the same reason the image waives it: a
- * bind-mounted repository carries the host's uid, which need not be this
- * process's, and git's refusal is indistinguishable from "not a repository" by
- * the time `probeIsolation` sees it. The check it disables guards against
- * repositories reached by surprise on a shared host; every path that gets here
- * has already been proved to sit inside a configured mount by `resolveInMount`.
- */
-const gitArgs = (args: string[]) => [
-  "-c",
-  "core.fsmonitor=",
-  "-c",
-  "safe.directory=*",
-  ...args,
-];
-
-function gitSync(cwd: string, args: string[]): GitResult {
-  const res = spawnSync(GIT_BIN, gitArgs(args), {
-    cwd,
-    env: gitEnv(),
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: 20_000,
-  });
-
-  return {
-    ok: res.status === 0,
-    stdout: (res.stdout ?? "").trim(),
-    stderr: (res.stderr ?? "").trim(),
-  };
-}
-
-/**
- * Async twin of `gitSync`, for everything outside the admission decision.
- *
- * `worktree add` is a full checkout — minutes on a large repository — and the
- * synchronous form would hold the event loop for all of it, stalling every
- * other run's event stream and every poll in every open tab. Only `createRun`
- * needs the sync version, and only because its atomicity depends on running
- * without a yield point.
- */
-function git(cwd: string, args: string[], timeoutMs = 20_000): Promise<GitResult> {
-  return new Promise((resolve) => {
-    const child = spawn(GIT_BIN, gitArgs(args), {
-      cwd,
-      env: gitEnv(),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (c: string) => (stdout += c));
-    child.stderr.on("data", (c: string) => (stderr += c));
-
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    timer.unref?.();
-
-    const finish = (ok: boolean) => {
-      clearTimeout(timer);
-      resolve({ ok, stdout: stdout.trim(), stderr: stderr.trim() });
-    };
-    child.on("error", () => finish(false));
-    child.on("close", (code) => finish(code === 0));
-  });
-}
-
 export interface IsolationPlan {
   mode: "worktree" | "none";
   /** Why isolation was not used. Surfaced so a silent downgrade is impossible. */
   reason?: string;
   repoRoot?: string;
   base?: string;
+  /** Branch the base commit was taken from — where this work lands. */
+  baseBranch?: string;
   worktreePath?: string;
   branch?: string;
 }
@@ -903,7 +835,17 @@ export function probeIsolation(folder: string): IsolationPlan {
     };
   }
 
-  return { mode: "worktree", repoRoot, base: head.stdout };
+  // Recorded alongside the commit, because the commit alone cannot say where
+  // this work is supposed to end up. A detached HEAD answers the literal string
+  // "HEAD", which names no branch — stored as null so the landing path refuses
+  // rather than merging into something it guessed.
+  const headBranch = gitSync(folder, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const baseBranch =
+    headBranch.ok && headBranch.stdout && headBranch.stdout !== "HEAD"
+      ? headBranch.stdout
+      : undefined;
+
+  return { mode: "worktree", repoRoot, base: head.stdout, baseBranch };
 }
 
 /** Where a repo's isolated checkouts live: a hidden sibling inside the mount. */
@@ -915,6 +857,56 @@ function worktreeStore(repoRoot: string): string | null {
   // and outside the repo so it cannot show up in `git status` or be swept into
   // a commit as a gitlink.
   return path.join(realMountPath(mount), ".uf-worktrees");
+}
+
+/**
+ * The checkout store, validated and created — the one place that is checked.
+ *
+ * Extracted so that every caller which is about to let git write a full
+ * checkout somewhere gets the same three guarantees: the store is not a
+ * symlink (a symlinked `.uf-worktrees` would put a checkout wherever it
+ * points), it is a directory, and it still resolves inside the workspace mount.
+ * Validating *before* git writes is the whole point — checking afterwards is
+ * checking too late.
+ */
+export function prepareWorktreeStore(repoRoot: string): string {
+  const store = worktreeStore(repoRoot);
+  if (!store) throw new Error("Workspace mount for this repository is gone.");
+
+  let storeStat: fs.Stats | null = null;
+  try {
+    storeStat = fs.lstatSync(store);
+  } catch {
+    storeStat = null;
+  }
+  if (storeStat?.isSymbolicLink()) {
+    throw new Error(`Refusing to use ${store}: it is a symlink.`);
+  }
+  if (storeStat && !storeStat.isDirectory()) {
+    throw new Error(`Refusing to use ${store}: it is not a directory.`);
+  }
+  if (!storeStat) fs.mkdirSync(store, { recursive: true });
+
+  const realStore = fs.realpathSync(store);
+  const { mountId } = describeFolder(repoRoot);
+  const mount = mountId ? mountById(mountId) : null;
+  if (!mount || !within(realMountPath(mount), realStore)) {
+    throw new Error(`Refusing to use ${store}: it resolves outside the workspace.`);
+  }
+  return store;
+}
+
+/**
+ * A path in the store for a checkout that is not a run's own slot.
+ *
+ * Named from the repository's path within its mount, exactly as
+ * `allocateSlotPath` is, so two repositories with the same basename cannot
+ * collide on one directory.
+ */
+export function auxWorktreePath(repoRoot: string, suffix: string): string {
+  const store = prepareWorktreeStore(repoRoot);
+  const slug = slugify(describeFolder(repoRoot).relPath || path.basename(repoRoot));
+  return path.join(store, `${slug}-${slugify(suffix)}`);
 }
 
 /** True when a checkout exists and has work in it that must not be clobbered. */
@@ -939,32 +931,8 @@ async function ensureWorktree(run: RunRow): Promise<string> {
   const branch = run.worktree_branch!;
   const base = run.worktree_base ?? "HEAD";
 
-  const store = worktreeStore(repoRoot);
-  if (!store) throw new Error("Workspace mount for this repository is gone.");
-
-  // Validate the store *before* git writes into it. A symlinked .uf-worktrees
-  // would put a full checkout wherever it points, and checking afterwards is
-  // checking too late.
-  let storeStat: fs.Stats | null = null;
-  try {
-    storeStat = fs.lstatSync(store);
-  } catch {
-    storeStat = null;
-  }
-  if (storeStat?.isSymbolicLink()) {
-    throw new Error(`Refusing to use ${store}: it is a symlink.`);
-  }
-  if (storeStat && !storeStat.isDirectory()) {
-    throw new Error(`Refusing to use ${store}: it is not a directory.`);
-  }
-  if (!storeStat) fs.mkdirSync(store, { recursive: true });
-
-  const realStore = fs.realpathSync(store);
-  const { mountId } = describeFolder(repoRoot);
-  const mount = mountId ? mountById(mountId) : null;
-  if (!mount || !within(realMountPath(mount), realStore)) {
-    throw new Error(`Refusing to use ${store}: it resolves outside the workspace.`);
-  }
+  // Validated before git writes into it — see `prepareWorktreeStore`.
+  prepareWorktreeStore(repoRoot);
 
   // Drop registrations for checkouts that were deleted from disk, so a stale
   // entry does not make `worktree add` refuse a path that is actually free.
@@ -1015,7 +983,7 @@ async function ensureWorktree(run: RunRow): Promise<string> {
     const add = await git(
       repoRoot,
       ["worktree", "add", "-b", branch, slotPath, base],
-      30 * 60_000,
+      { timeoutMs: 30 * 60_000 },
     );
     if (!add.ok) throw new Error(`Could not create a checkout: ${add.stderr}`);
   }
@@ -1275,8 +1243,8 @@ export function createRun(input: CreateRunInput): RunRow {
       .prepare(
         `INSERT INTO runs
            (id, folder, prompt, model, status, budget, max_iterations, iterations, created_at, spent_usd, spent_tokens,
-            work_dir, isolation, repo_root, worktree_path, worktree_branch, worktree_base)
-         VALUES (?, ?, ?, ?, 'queued', ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?)`,
+            work_dir, isolation, repo_root, worktree_path, worktree_branch, worktree_base, worktree_base_branch)
+         VALUES (?, ?, ?, ?, 'queued', ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1295,6 +1263,7 @@ export function createRun(input: CreateRunInput): RunRow {
         plan.worktreePath ?? null,
         plan.branch ?? null,
         plan.base ?? null,
+        plan.baseBranch ?? null,
       );
 
     emit({
@@ -1583,12 +1552,19 @@ function telemetryEnv(runId: string): Record<string, string> {
 }
 
 /**
- * Signal the agent and everything it started.
+ * Signal a child and everything it started.
  *
  * Falls back to signalling the process alone when the group is unavailable —
  * `detached` turned off, Windows, or a group that has already gone (ESRCH).
+ *
+ * Exported for the review spawn in `review.ts`, which is `detached` for the
+ * same reason the agent is: what actually has to die is whatever the child
+ * started, not the CLI wrapper around it.
  */
-function signalTree(child: AgentProcess, sig: NodeJS.Signals): void {
+export function signalTree(
+  child: { pid?: number; kill: (sig: NodeJS.Signals) => boolean },
+  sig: NodeJS.Signals,
+): void {
   if (child.pid !== undefined && process.platform !== "win32") {
     try {
       process.kill(-child.pid, sig);
@@ -1802,7 +1778,15 @@ function handleStreamLine(runId: string, line: string, acc: IterationResult) {
 /* The loop                                                            */
 /* ------------------------------------------------------------------ */
 
-async function currentSnapshot() {
+/**
+ * A fresh read of the transcripts, as the guard sees it.
+ *
+ * Exported because a review spawn is billed against the same 5-hour window a
+ * work cycle is, and refusing one while that window is already over its ceiling
+ * has to use the same numbers the loop does — not a second, subtly different
+ * reading of them.
+ */
+export async function currentSnapshot() {
   const { entries } = await scanUsage();
   const settings = getSettings();
   const filtered = settings.includeSidechains

@@ -164,6 +164,11 @@ export async function PUT(req: Request) {
     patch.resumeGraceHours = n === null ? 24 : Math.max(1, Math.floor(n));
   }
 
+  if ("landStrategy" in body) {
+    const v = String(body.landStrategy);
+    if (v === "merge" || v === "squash") patch.landStrategy = v;
+  }
+
   if ("killProcessGroup" in body) {
     patch.killProcessGroup = Boolean(body.killProcessGroup);
   }

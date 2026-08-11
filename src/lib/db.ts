@@ -94,8 +94,36 @@ function migrate(db: Database.Database) {
       effort                TEXT
     );
 
+    -- On-demand AI reviews of what a run changed.
+    --
+    -- Its own table rather than a column on runs, for the same reason
+    -- spent_usd_est is its own column: runs.spent_usd is a floor of what
+    -- Claude Code measured *for work cycles*, and folding a review's cost
+    -- into it would make the run read as more expensive than the work was.
+    -- Rows accumulate — a second review of the same run does not replace the
+    -- first, because the interesting comparison is usually between them.
+    CREATE TABLE IF NOT EXISTS run_reviews (
+      id          TEXT PRIMARY KEY,
+      run_id      TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      created_at  INTEGER NOT NULL,
+      finished_at INTEGER,
+      status      TEXT NOT NULL,
+      model       TEXT,
+      cost_usd    REAL NOT NULL DEFAULT 0,
+      tokens      INTEGER NOT NULL DEFAULT 0,
+      text        TEXT,
+      error       TEXT,
+      -- What the model was actually shown, so a review of a truncated diff is
+      -- never mistaken for a review of the whole change.
+      diff_files  INTEGER NOT NULL DEFAULT 0,
+      diff_shown  INTEGER NOT NULL DEFAULT 0,
+      truncated   INTEGER NOT NULL DEFAULT 0
+    );
+
     CREATE INDEX IF NOT EXISTS idx_run_events_run
       ON run_events(run_id, id);
+    CREATE INDEX IF NOT EXISTS idx_run_reviews_run
+      ON run_reviews(run_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_runs_created
       ON runs(created_at DESC);
     -- Every admission decision and every promotion pass reads the active rows.
@@ -138,6 +166,28 @@ function migrate(db: Database.Database) {
   // portion lands here, so adding them never double-counts.
   addColumn(db, "runs", "spent_usd_est", "REAL NOT NULL DEFAULT 0");
   addColumn(db, "runs", "spent_tokens_est", "INTEGER NOT NULL DEFAULT 0");
+
+  // Where an isolated run's work belongs, and whether it got there.
+  // `worktree_base` is a commit; it says where the branch started, not which
+  // branch it should be merged into. Rows written before this column existed
+  // have null and the landing path infers a target rather than assuming one —
+  // see `targetOf` in land.ts.
+  addColumn(db, "runs", "worktree_base_branch", "TEXT");
+  addColumn(db, "runs", "landed_at", "INTEGER");
+  addColumn(db, "runs", "landed_into", "TEXT");
+  addColumn(db, "runs", "landed_strategy", "TEXT");
+  // The branch tip at the moment it was landed. A squash does not make the
+  // branch's commits ancestors of the target, so git can never call it merged
+  // and would refuse to delete it for ever. This records exactly which commits
+  // were taken, so "the branch still points at what we squashed" is a fact
+  // rather than a guess.
+  addColumn(db, "runs", "landed_tip", "TEXT");
+
+  // What a `run_reviews` row is: a read-only review, or a conflict resolution.
+  // One table because the lifecycle is identical — spawn, poll, record cost,
+  // fail out on restart — and because both are the same accounting fact:
+  // money spent on a run *outside* its work cycles.
+  addColumn(db, "run_reviews", "kind", "TEXT NOT NULL DEFAULT 'review'");
 }
 
 function addColumn(

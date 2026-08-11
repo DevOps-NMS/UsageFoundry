@@ -129,6 +129,16 @@ export interface Settings {
    */
   resumeGraceHours: number;
   /**
+   * How an isolated run's branch is brought into the branch it started from.
+   *
+   * `merge` keeps what the run actually did — its commits, in order, which is
+   * what makes the run page's `<base>...<branch>` diff still mean something
+   * afterwards. `squash` collapses it to one commit and loses that, in exchange
+   * for a history with one entry per run. Neither is right for everyone, which
+   * is why it is a setting rather than a decision baked into the button.
+   */
+  landStrategy: "merge" | "squash";
+  /**
    * Spawn each agent in its own process group, so a kill also reaps the builds,
    * test runners and servers it started.
    *
@@ -198,6 +208,7 @@ const DEFAULTS: Settings = {
   donePushbackPrompt: DEFAULT_DONE_PUSHBACK_PROMPT,
   liveGuardIntervalSeconds: 60,
   resumeGraceHours: 24,
+  landStrategy: "merge",
   killProcessGroup: true,
 };
 

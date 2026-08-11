@@ -12,6 +12,9 @@ import {
   fmtUSD,
   shortPath,
 } from "@/lib/format";
+import { RunDiff } from "@/components/RunDiff";
+import { RunLand } from "@/components/RunLand";
+import { RunReview } from "@/components/RunReview";
 
 /** Render one event as a single log line. */
 function lineFor(e: RunEventDTO): string | null {
@@ -46,6 +49,25 @@ function lineFor(e: RunEventDTO): string | null {
     case "handoff": {
       const commits = Array.isArray(p.commits) ? p.commits.length : 0;
       return `⇢ ${commits} commit${commits === 1 ? "" : "s"} on ${p.branch}`;
+    }
+    case "land": {
+      if (p.deleted) return `⌫ deleted ${p.branch}`;
+      const resolved = Array.isArray(p.resolved) ? p.resolved.length : null;
+      return resolved !== null
+        ? `⇄ merged ${p.target} into ${p.branch}, resolving ${resolved} file${
+            resolved === 1 ? "" : "s"
+          }`
+        : `⇥ landed ${p.branch} into ${p.target} (${p.strategy})`;
+    }
+    case "review": {
+      // The same event kind carries both — a read-only review and a conflict
+      // resolution — because they are the same billed, out-of-cycle spawn.
+      const what = p.assist === "resolve" ? "conflict resolution" : "review";
+      return p.status === "running"
+        ? `⌕ ${what} started — ${p.shown}/${p.files} files`
+        : p.status === "failed"
+          ? `⌕ ${what} failed: ${p.error}`
+          : `⌕ ${what} done — ${fmtUSD(Number(p.costUSD ?? 0))}`;
     }
     case "status": {
       // `message` is what a hand-driven transition says about itself — a
@@ -361,6 +383,17 @@ export default function RunDetail({
             )}
           </div>
         </div>
+      )}
+
+      {/* The outcome, then what it means, then what to do with it — above the
+          accounting, because "was any of this worth keeping?" is the question
+          a finished run actually raises. */}
+      <RunDiff run={run} />
+      {run.isolation === "worktree" && run.worktree_branch && (
+        <>
+          <RunReview run={run} />
+          <RunLand run={run} />
+        </>
       )}
 
       <section className="grid grid-3">

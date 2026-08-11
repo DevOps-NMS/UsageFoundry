@@ -218,6 +218,12 @@ export interface RunDTO {
   isolation?: "none" | "worktree" | null;
   worktree_branch?: string | null;
   worktree_base?: string | null;
+  /** Branch this run's work lands into. Null on rows created before it was recorded. */
+  worktree_base_branch?: string | null;
+  /** When this tool merged the branch into its target. Null means never. */
+  landed_at?: number | null;
+  landed_into?: string | null;
+  landed_strategy?: string | null;
   /** Paused runs only: epoch ms at which the run next tries again. */
   resume_at?: number | null;
   paused_at?: number | null;
@@ -247,9 +253,130 @@ export interface RunEventDTO {
     | "budget"
     | "result"
     | "handoff"
+    | "land"
+    | "review"
     | "error"
     | "replay-complete";
   payload: Record<string, unknown>;
+}
+
+/* ------------------------------------------------------------------ */
+/* Reviewing and landing a run's work                                  */
+/* ------------------------------------------------------------------ */
+
+export type DiffFileStatusDTO =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "renamed"
+  | "copied"
+  | "changed";
+
+export interface DiffFileDTO {
+  path: string;
+  oldPath: string | null;
+  status: DiffFileStatusDTO;
+  /** Null for a binary file — git reports no line counts for one. */
+  added: number | null;
+  deleted: number | null;
+  binary: boolean;
+  /** Null when the patch was withheld to stay inside the size budget. */
+  patch: string | null;
+  patchTruncated: boolean;
+}
+
+export interface RunDiffDTO {
+  /** `range` is exact; `worktree` includes the operator's own edits. */
+  kind: "range" | "worktree" | "none";
+  reason: string | null;
+  base: string | null;
+  branch: string | null;
+  files: DiffFileDTO[];
+  filesChanged: number;
+  added: number;
+  deleted: number;
+  omittedPatches: number;
+  uncommitted: string[];
+  caveat: string | null;
+}
+
+/**
+ * One billed Claude invocation about a run, outside its work cycles: a review
+ * of what it changed, or a resolution of a merge conflict on its branch.
+ */
+export interface RunReviewDTO {
+  id: string;
+  kind: "review" | "resolve";
+  createdAt: number;
+  finishedAt: number | null;
+  status: "running" | "completed" | "failed";
+  model: string | null;
+  /** Never added to `RunDTO.spent_usd` — a review is not a work cycle. */
+  costUSD: number;
+  tokens: number;
+  text: string | null;
+  error: string | null;
+  diffFiles: number;
+  diffShown: number;
+  truncated: boolean;
+}
+
+export type MergePreviewDTO =
+  | { outcome: "already-merged" }
+  | { outcome: "fast-forward" }
+  | { outcome: "clean" }
+  | { outcome: "conflict"; files: string[] }
+  | { outcome: "unknown"; reason: string };
+
+export interface LandStateDTO {
+  runId: string;
+  runStatus: RunDTO["status"];
+  branch: string;
+  target: string | null;
+  /** True when the target was deduced from the base commit, not recorded. */
+  targetInferred: boolean;
+  branchExists: boolean;
+  ahead: number;
+  behind: number;
+  merged: boolean;
+  /** Landed by this tool and unchanged since — how a squash reads as done. */
+  landedUnchanged: boolean;
+  preview: MergePreviewDTO;
+  checkout: {
+    path: string;
+    headBranch: string | null;
+    dirty: boolean;
+    readable: boolean;
+  } | null;
+  /** Why landing is refused right now. Null means it is offered. */
+  blocked: string | null;
+  landedAt: number | null;
+  landedInto: string | null;
+  landedStrategy: string | null;
+}
+
+export interface BranchSummaryDTO {
+  runId: string;
+  runStatus: RunDTO["status"];
+  branch: string;
+  target: string | null;
+  repoRoot: string;
+  repoLabel: string;
+  createdAt: number;
+  ahead: number;
+  merged: boolean;
+  landedUnchanged: boolean;
+  exists: boolean;
+  /** The producing run can still commit to it. */
+  active: boolean;
+  landedAt: number | null;
+  prompt: string;
+}
+
+export interface BranchInventoryDTO {
+  branches: BranchSummaryDTO[];
+  /** Runs with a branch that the per-request cap left out. */
+  notShown: number;
 }
 
 export interface RateLimitEntryDTO {
@@ -289,5 +416,7 @@ export interface SettingsDTO {
   donePushbackPrompt: string;
   liveGuardIntervalSeconds: number;
   resumeGraceHours: number;
+  /** How an isolated run's branch is brought into the branch it started from. */
+  landStrategy: "merge" | "squash";
   killProcessGroup: boolean;
 }

@@ -18,6 +18,8 @@ const KIND: Record<RunEventDTO["kind"], string> = {
   result: "text-ok",
   status: "text-ink-muted font-semibold",
   handoff: "text-accent font-semibold",
+  land: "text-ok font-semibold",
+  review: "text-accent",
   log: "text-ink-muted",
   "replay-complete": "text-ink-faint",
 };
