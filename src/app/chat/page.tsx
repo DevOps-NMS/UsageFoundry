@@ -301,15 +301,26 @@ export default function ChatPage() {
                 {chats
                   .filter((c) => c.id !== chatId)
                   .map((c) => (
+                    // Two lines, because one truncated line in a 360px column
+                    // was all title: an 80-character first message clipped away
+                    // both the time and the waiting count, which are the only
+                    // two things telling these rows apart. Only the title
+                    // truncates now, and it carries the full string for hover
+                    // and assistive tech — the pairing RunCard already uses.
                     <button
                       key={c.id}
                       onClick={() => void load(c.id)}
-                      className="cursor-pointer truncate text-left text-xs text-ink-muted hover:text-ink"
+                      title={c.title ?? "Untitled"}
+                      className="cursor-pointer text-left text-xs text-ink-muted hover:text-ink"
                     >
-                      {c.title ?? "Untitled"}{" "}
-                      <span className="text-ink-faint">
-                        · {fmtRelative(c.updatedAt)}
-                        {c.pendingCount > 0 && ` · ${c.pendingCount} waiting`}
+                      <span className="block truncate">
+                        {c.title ?? "Untitled"}
+                      </span>
+                      <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-2xs text-ink-faint">
+                        {fmtRelative(c.updatedAt)}
+                        {c.pendingCount > 0 && (
+                          <Badge tone="accent">{c.pendingCount} waiting</Badge>
+                        )}
                       </span>
                     </button>
                   ))}

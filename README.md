@@ -1377,6 +1377,12 @@ through before trusting this unattended:
   banners — a carried live-enforcement mode, a carried `bypassPermissions` —
   appear on load and clear when the control is touched. The routes underneath
   were exercised directly; only the client wiring is unconfirmed.
+- The *Earlier chats* rows in a browser. Each one is now two lines — a
+  truncating title, then the time and a *waiting* badge — because a single
+  truncated line in the 360px column was all title. The metadata sits outside
+  the truncating element and every utility it needs is in the built stylesheet,
+  but no browser has rendered it at that width, so how the two-line rows read
+  against the 6px gap between them is unmeasured.
 - **The image with `gh` in it.** The install layer, the checksum check and the
   arch mapping have not been built — no Docker on the machine this was written
   on — so `docker compose up --build` is the first thing to run against this.
