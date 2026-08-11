@@ -1371,6 +1371,15 @@ through before trusting this unattended:
   next to the meters — whether the separation is as plain on screen as it is in
   the copy — and whether the figure visibly moves during a single work cycle at
   the 5s poll.
+- **The in-flight cycle line on a real run.** `runs.active_iteration` is written
+  at the spawn and cleared when the cycle returns, and `fmtCycleInFlight` is
+  unit-tested for every branch including the stale-row one — but no agent has
+  been started through a running server to watch the card go from nothing to
+  "cycle 1 of 2 in flight" and back to a plain count between cycles. Two things
+  to watch: that the line disappears during the pre-cycle transcript scan rather
+  than lingering over finished work, and that a run killed with the container
+  down comes back reading `failed` with no cycle claimed. Start a run and open
+  `/runs` during cycle 1.
 - The new-run form's template UI driven through a browser: that loading a
   template fills every field, that *Start another like this* pre-fills from a
   run without the folder and settings loaders racing it, and that the two

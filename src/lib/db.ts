@@ -326,6 +326,14 @@ function migrate(db: Database.Database) {
   // not deliver the same message twice.
   addColumn(db, "runs", "follow_up", "TEXT");
 
+  // The work cycle that is open right now, stamped at the spawn and cleared the
+  // moment it returns. `iterations` counts cycles that *finished*, so for the
+  // whole of cycle 1 — routinely tens of minutes — a working run read `0/N`,
+  // which is bit-for-bit what a run that never started reads. Its own column
+  // rather than an early write to `iterations`: the guard and every "cycles
+  // used" reading must keep meaning completed cycles.
+  addColumn(db, "runs", "active_iteration", "INTEGER");
+
   // Spend reconciled from transcripts for work cycles that were killed before
   // Claude Code reported their cost. Held apart from spent_usd rather than
   // added to it: spent_usd stays a floor of what the CLI itself measured, and

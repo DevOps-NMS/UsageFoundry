@@ -112,6 +112,15 @@ export interface RunRow {
    */
   follow_up: string | null;
   /**
+   * The work cycle currently in flight, or null when no child is running.
+   *
+   * Deliberately not `iterations`, which is written only when a cycle returns
+   * and must go on meaning "cycles completed" — the guard reads it. This is the
+   * same number one tick earlier, so a run in its first cycle can say so
+   * instead of reading `0/N` like a run that never started.
+   */
+  active_iteration: number | null;
+  /**
    * Spend recovered from transcripts for cycles killed before Claude Code
    * reported theirs. Never added into `spent_usd`; the two are shown side by
    * side and summed only where a total is wanted.
@@ -2437,6 +2446,16 @@ export async function startRun(id: string): Promise<void> {
         payload: { n: iterations, prompt, resuming: sessionId },
       });
 
+      // The same fact as the event above, on the row. The event only reaches a
+      // page that is streaming this one run's log; everything that renders a
+      // run as a *row* — the runs list, the run's own stat block — reads the
+      // row, and until this was written it said `iterations = 0` for the whole
+      // of the first cycle. Cleared in the post-cycle UPDATE below, so between
+      // cycles it is null rather than naming a cycle that has already returned.
+      db()
+        .prepare("UPDATE runs SET active_iteration = ? WHERE id = ?")
+        .run(iterations, id);
+
       const args = buildArgs({
         prompt,
         model: run.model,
@@ -2568,7 +2587,7 @@ export async function startRun(id: string): Promise<void> {
         .prepare(
           "UPDATE runs SET iterations = ?, spent_usd = ?, spent_tokens = ?," +
             " spent_usd_est = ?, spent_tokens_est = ?, session_id = ?," +
-            " done_retriggers = ? WHERE id = ?",
+            " done_retriggers = ?, active_iteration = NULL WHERE id = ?",
         )
         .run(
           iterations,
@@ -2845,6 +2864,11 @@ export async function startRun(id: string): Promise<void> {
       done_retriggers: doneRetriggers,
       work_dir: workDir,
       session_id: sessionId,
+      // No cycle is in flight once this function is unwinding, on any path —
+      // including the one that threw before the post-cycle UPDATE could clear
+      // it. A finished run still claiming an open cycle is the same lie as a
+      // working run reading zero, in the other direction.
+      active_iteration: null,
     };
 
     if (finalStatus === "paused") {
