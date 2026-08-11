@@ -216,6 +216,31 @@ echo "UF_GID=$(id -g)" >> .env
 Run compose as yourself, not under `sudo`: `$HOME` comes from your shell, and
 `sudo` would point the credential mount at root's home.
 
+**The database volume is handled in the image, not here.** `/data` is a named
+volume rather than a bind mount, so it does not carry your host's ownership the
+way the other two mounts do: Docker copies the ownership and mode of `/data`
+*in the image* onto the volume root the first time it creates it. That used to
+be uid 1000, mode 0755 — unwritable by the uid you have just set, which meant
+the app could not create its SQLite file and every data route failed. The image
+now marks that one directory world-writable, so a fresh volume works under any
+`UF_UID`. Nothing to configure.
+
+**Changing `UF_UID` on an install that already has data** is the one case that
+still needs a hand. Docker only initialises a volume once, so an existing
+`usagefoundry-data` keeps the files uid 1000 wrote, and the new uid cannot write
+them. Hand the volume over once:
+
+```bash
+docker compose down
+docker compose run --rm --user 0:0 --entrypoint sh usagefoundry \
+  -c "chown -R $(id -u):$(id -g) /data"
+docker compose up -d
+```
+
+Double quotes, so `$(id -u)` is expanded by your shell rather than inside the
+container. If you do not mind losing run history and settings, `docker compose
+down -v` and starting again does the same thing by destroying the volume.
+
 ### Multiple workspaces
 
 Up to four host directories can be mounted, and the New run form picks one
@@ -1384,6 +1409,27 @@ through before trusting this unattended:
   that needs authentication. The credential block itself was driven into a real
   git (above); what has not been watched is the CLI's own git picking it up out
   of the environment mid-run.
+- **That a fresh `usagefoundry-data` volume is writable under a non-1000
+  `UF_UID`.** The image marks `/data` mode 0777 so that Docker copies a
+  world-writable root onto the volume when it first creates it; that Docker does
+  copy the mount point's mode and not only its ownership is the step this rests
+  on, and no `docker build` has been run since the change — Docker was not
+  available on the machine it was made on. `src/lib/deployment.test.ts` pins the
+  image and compose halves against each other, which is a different claim. The
+  check is four commands, on a Linux host where `id -u` is not 1000:
+
+  ```bash
+  UF_UID=1001 UF_GID=1001 UF_PORT=3100 UF_CONTAINER_NAME=usagefoundry-uidtest \
+    docker compose -p uf-uidtest up --build -d
+  docker compose -p uf-uidtest exec usagefoundry ls -ld /data   # expect drwxrwxrwx
+  curl -fsS localhost:3100/api/usage >/dev/null && echo OK      # with UF_AUTH_TOKEN blank
+  docker compose -p uf-uidtest down -v
+  ```
+
+  `UF_PORT`/`UF_CONTAINER_NAME` are there because `container_name` is *not*
+  namespaced by the compose project, so without them this collides with an
+  instance already running. Run it a second time with the two uid variables
+  unset to confirm the 1000 default is unchanged.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
@@ -1393,7 +1439,11 @@ run's diff is parsed and budgeted, when a branch may be landed, what a queued
 merge does with the branch it reaches, what counts as a conflict marker — both
 for deciding whether one was really resolved and for deciding what to show — and
 the two renderings that would lie quietly about a number: an unconfigured
-ceiling, and a first-party figure shown beside the meters. `npm run typecheck`
+ceiling, and a first-party figure shown beside the meters. One entry is neither
+a function nor a rendering — that the image leaves the data volume writable by
+whatever uid compose runs the container as, which is otherwise checked by
+nothing here and fails only on Linux, only under a non-1000 `UF_UID`, and only
+by refusing every data route. `npm run typecheck`
 plus a `docker compose up --build` smoke test is still the real verification
 loop, and the list above records what was checked by hand.
 
