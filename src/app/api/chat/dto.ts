@@ -1,13 +1,22 @@
+// Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
+// rewrites the path alias at runtime, so a module a test loads has to import
+// the way src/lib and Meter.tsx already do.
 import {
+  listChats,
   listMessages,
   listProposals,
+  pendingProposals,
   type ChatRow,
-} from "@/lib/chat";
-import { getTemplate } from "@/lib/templates";
-import { chatGuards } from "@/lib/settings";
-import { mountById } from "@/lib/config";
-import { fmtUSD } from "@/lib/format";
-import type { ChatDTO, ChatProposalDTO } from "@/lib/apiTypes";
+} from "../../../lib/chat";
+import { getTemplate } from "../../../lib/templates";
+import { chatGuards } from "../../../lib/settings";
+import { mountById } from "../../../lib/config";
+import { fmtUSD } from "../../../lib/format";
+import type {
+  ChatDTO,
+  ChatListEntryDTO,
+  ChatProposalDTO,
+} from "../../../lib/apiTypes";
 
 /**
  * A chat as the page reads it.
@@ -36,6 +45,27 @@ export function chatDTO(chat: ChatRow): ChatDTO {
     })),
     proposals: listProposals(chat.id).map(proposalDTO),
   };
+}
+
+/**
+ * The chat list, as every chat GET answers with it.
+ *
+ * Here rather than in the list route because the *single-chat* route returns it
+ * too: that is the only route the page polls, so a list assembled by the list
+ * route alone is fetched once on mount and then stops describing reality — a
+ * thread stays "Untitled" after `finishTurn` names it, and a waiting count
+ * never moves. Sharing the projection is the same rule `chatDTO` follows: two
+ * routes that answer about the same rows must not answer differently.
+ */
+export function chatListDTO(): ChatListEntryDTO[] {
+  return listChats().map((c) => ({
+    id: c.id,
+    title: c.title,
+    updatedAt: c.updated_at,
+    status: c.status,
+    costUSD: c.cost_usd,
+    pendingCount: pendingProposals(c.id).length,
+  }));
 }
 
 function proposalDTO(p: ReturnType<typeof listProposals>[number]): ChatProposalDTO {

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import { createChat, latestChat, listChats, pendingProposals } from "@/lib/chat";
-import type { ChatListEntryDTO } from "@/lib/apiTypes";
-import { chatDTO } from "./dto";
+import { createChat, latestChat } from "@/lib/chat";
+import { chatDTO, chatListDTO } from "./dto";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,15 +13,7 @@ export const dynamic = "force-dynamic";
  */
 export async function GET() {
   const chat = latestChat();
-  const chats: ChatListEntryDTO[] = listChats().map((c) => ({
-    id: c.id,
-    title: c.title,
-    updatedAt: c.updated_at,
-    status: c.status,
-    costUSD: c.cost_usd,
-    pendingCount: pendingProposals(c.id).length,
-  }));
-  return NextResponse.json({ chats, chat: chatDTO(chat) });
+  return NextResponse.json({ chats: chatListDTO(), chat: chatDTO(chat) });
 }
 
 /** Start a fresh thread. Nothing is carried over — not even the session id. */

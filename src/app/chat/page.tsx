@@ -44,17 +44,18 @@ export default function ChatPage() {
   const load = useCallback(async (id: string | null) => {
     const res = await fetch(id ? `/api/chat/${id}` : "/api/chat");
     if (!res.ok) return;
-    const data = (await res.json()) as { chat: ChatDTO; chats?: ChatListEntryDTO[] };
+    const data = (await res.json()) as { chat: ChatDTO; chats: ChatListEntryDTO[] };
     setChat(data.chat);
-    if (data.chats) setChats(data.chats);
+    setChats(data.chats);
   }, []);
 
   useEffect(() => {
     void load(null);
   }, [load]);
 
-  // The list only changes when a turn ends or a chat is created, so it is
-  // refetched with the thread rather than on its own timer.
+  // Both halves come back from this one request — the thread route answers with
+  // the list too — so the list stays current on the thread's own period and
+  // never on a timer of its own.
   useEffect(() => {
     if (!chatId) return;
     const period = chat?.status === "thinking" ? POLL_ACTIVE_MS : POLL_IDLE_MS;
