@@ -1341,7 +1341,7 @@ export default function NewRunPage() {
             </Hint>
           )}
 
-          <Field className="mb-0">
+          <Field>
             <FieldHead htmlFor="prompt" marker={mark("task")}>
               Task
             </FieldHead>
@@ -1457,7 +1457,6 @@ export default function NewRunPage() {
               setCarriedPermission(false);
             }}
             marker={mark("permission")}
-            className="mb-2"
             choices={[
               {
                 value: "acceptEdits",
@@ -1877,7 +1876,7 @@ export default function NewRunPage() {
               </Hint>
             )}
 
-            <Field className="mb-0">
+            <Field>
               <FieldHead marker={mark("afterDone")}>
                 When Claude says the task is done
               </FieldHead>
@@ -1951,7 +1950,7 @@ export default function NewRunPage() {
             </Hint>
           </Field>
 
-          <Field className="mb-0">
+          <Field>
             <Toggle
               id="tpl-folder"
               checked={rememberFolder}
