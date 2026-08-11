@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
 import { createChat, latestChat } from "@/lib/chat";
+import { jsonNoStore } from "@/lib/http";
 import { chatDTO, chatListDTO } from "./dto";
 
 export const runtime = "nodejs";
@@ -13,10 +13,10 @@ export const dynamic = "force-dynamic";
  */
 export async function GET() {
   const chat = latestChat();
-  return NextResponse.json({ chats: chatListDTO(), chat: chatDTO(chat) });
+  return jsonNoStore({ chats: chatListDTO(), chat: chatDTO(chat) });
 }
 
 /** Start a fresh thread. Nothing is carried over — not even the session id. */
 export async function POST() {
-  return NextResponse.json({ chat: chatDTO(createChat()) });
+  return jsonNoStore({ chat: chatDTO(createChat()) });
 }

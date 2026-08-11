@@ -1,8 +1,8 @@
-import { NextResponse } from "next/server";
 // Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
 // rewrites the path alias at runtime, so a module a test loads has to import
 // the way src/lib and Meter.tsx already do.
 import { getChat } from "../../../../lib/chat";
+import { jsonNoStore } from "../../../../lib/http";
 import { chatDTO, chatListDTO } from "../dto";
 
 export const runtime = "nodejs";
@@ -23,6 +23,6 @@ type Ctx = { params: Promise<{ id: string }> };
 export async function GET(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const chat = getChat(id);
-  if (!chat) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json({ chat: chatDTO(chat), chats: chatListDTO() });
+  if (!chat) return jsonNoStore({ error: "Not found" }, { status: 404 });
+  return jsonNoStore({ chat: chatDTO(chat), chats: chatListDTO() });
 }
