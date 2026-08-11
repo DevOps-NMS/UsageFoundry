@@ -84,13 +84,18 @@ export function gitSync(cwd: string, args: string[]): GitResult {
  * of a generated-file change is a heap the server does not have. Hitting it
  * kills the child and reports `ok: false` rather than returning a patch that is
  * short by an unstated amount.
+ *
+ * `trim: false` is for the one output shape where leading whitespace carries
+ * meaning: `git status --porcelain` writes an unstaged edit as `" M path"`, and
+ * trimming the stream eats that first space — which shifts the whole record and
+ * reads the status letters off the middle of a filename.
  */
 export function git(
   cwd: string,
   args: string[],
-  opts: { timeoutMs?: number; maxBytes?: number } = {},
+  opts: { timeoutMs?: number; maxBytes?: number; trim?: boolean } = {},
 ): Promise<GitResult & { overflowed: boolean }> {
-  const { timeoutMs = 20_000, maxBytes = 0 } = opts;
+  const { timeoutMs = 20_000, maxBytes = 0, trim = true } = opts;
 
   return new Promise((resolve) => {
     const child = spawn(GIT_BIN, gitArgs(args), {
@@ -124,7 +129,7 @@ export function git(
       clearTimeout(timer);
       resolve({
         ok: code === 0 && !overflowed,
-        stdout: stdout.trim(),
+        stdout: trim ? stdout.trim() : stdout,
         stderr: stderr.trim(),
         code,
         overflowed,

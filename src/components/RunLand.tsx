@@ -11,6 +11,7 @@ import { fmtDateTime, fmtUSD } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
+import { Input } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
 import { Spinner } from "@/components/ui/Log";
@@ -91,10 +92,88 @@ function ConflictFile({ file }: { file: ConflictFileDTO }) {
   );
 }
 
+/**
+ * What the agent wrote and never committed.
+ *
+ * Its own block rather than a line in the summary, because it is the one state
+ * here the operator can be holding without knowing: the branch reads as empty,
+ * the run reads as having done nothing, and the checkout slot stays out of
+ * circulation until this is dealt with.
+ */
+function PendingWork({
+  pending,
+  busy,
+  message,
+  onMessage,
+  onCommit,
+}: {
+  pending: NonNullable<LandStateDTO["pending"]>;
+  busy: boolean;
+  message: string;
+  onMessage: (value: string) => void;
+  onCommit: () => void;
+}) {
+  const hidden = pending.count - pending.files.length;
+
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      <div className="mb-1.5 text-xs font-semibold text-ink">
+        Uncommitted in its checkout
+      </div>
+
+      {!pending.readable ? (
+        <Hint tone="warn">
+          Could not read <span className="mono">{pending.path}</span>, so nothing is
+          offered — check it by hand
+        </Hint>
+      ) : (
+        <>
+          <div className="max-h-40 overflow-y-auto">
+            {pending.files.map((f) => (
+              <div key={f.path} className="flex gap-2 text-xs leading-relaxed">
+                <span className="mono w-6 shrink-0 whitespace-pre text-ink-faint">
+                  {f.code}
+                </span>
+                <span className="mono min-w-0 break-all text-ink-muted">
+                  {f.origPath ? `${f.origPath} → ${f.path}` : f.path}
+                </span>
+              </div>
+            ))}
+          </div>
+          {hidden > 0 && (
+            <Hint>{hidden} further path{hidden === 1 ? "" : "s"} not listed</Hint>
+          )}
+
+          <ButtonRow className="mt-2.5">
+            <Input
+              className="min-w-0 flex-1"
+              value={message}
+              onChange={(e) => onMessage(e.target.value)}
+              placeholder={pending.suggestedMessage}
+              aria-label="Commit message"
+            />
+            <Button variant="secondary" onClick={onCommit} disabled={busy}>
+              {busy ? "Committing…" : `Commit ${pending.count}`}
+            </Button>
+          </ButtonRow>
+          <Hint>
+            Commits everything above onto the branch and frees the checkout slot
+            for the next run
+          </Hint>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function RunLand({ run }: { run: RunDTO }) {
   const [state, setState] = useState<LandStateDTO | null>(null);
   const [resolution, setResolution] = useState<RunReviewDTO | null>(null);
   const [strategy, setStrategy] = useState<"merge" | "squash">("merge");
+  const [message, setMessage] = useState("");
+  // Armed by a first press. A purge is the one action here that destroys
+  // committed work, so it takes two.
+  const [confirmPurge, setConfirmPurge] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -125,7 +204,7 @@ export function RunLand({ run }: { run: RunDTO }) {
     return () => clearInterval(t);
   }, [resolving, load]);
 
-  async function act(action: "land" | "delete" | "resolve") {
+  async function act(action: "land" | "delete" | "resolve" | "commit" | "purge") {
     setBusy(true);
     setError(null);
     setNote(null);
@@ -133,14 +212,26 @@ export function RunLand({ run }: { run: RunDTO }) {
       const res = await fetch(`/api/runs/${run.id}/land`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action, strategy }),
+        body: JSON.stringify({
+          action,
+          strategy,
+          // Omitted rather than sent empty, so an untouched box means "use the
+          // task" and a cleared one is refused.
+          message: message || undefined,
+          confirmBranch: state?.branch,
+        }),
       });
       const json = (await res.json().catch(() => ({}))) as {
         message?: string;
         error?: string;
       };
-      if (res.ok) setNote(json.message ?? null);
-      else setError(json.error ?? "That did not work.");
+      if (res.ok) {
+        setNote(json.message ?? null);
+        setMessage("");
+      } else {
+        setError(json.error ?? "That did not work.");
+      }
+      setConfirmPurge(false);
       await load();
     } finally {
       setBusy(false);
@@ -159,6 +250,11 @@ export function RunLand({ run }: { run: RunDTO }) {
   // The merge happens the other way round, in an isolated checkout — see
   // `resolveConflicts`.
   const canResolve = state.preview.outcome === "conflict" && settled;
+  // The other door out of a branch, for everything `canDelete` refuses. Not
+  // offered beside Delete: when git can see the work is safe, that is the
+  // button, and two destructive controls side by side is how the wrong one
+  // gets pressed.
+  const canPurge = state.branchExists && settled && !canDelete;
 
   return (
     <Card className="mt-6">
@@ -243,6 +339,16 @@ export function RunLand({ run }: { run: RunDTO }) {
         )
       )}
 
+      {state.pending && (
+        <PendingWork
+          pending={state.pending}
+          busy={busy}
+          message={message}
+          onMessage={setMessage}
+          onCommit={() => act("commit")}
+        />
+      )}
+
       {resolution && (
         <div className="mt-3 border-t border-line pt-3">
           <div className="mb-1.5 flex flex-wrap items-center gap-2 text-xs text-ink-muted">
@@ -314,7 +420,7 @@ export function RunLand({ run }: { run: RunDTO }) {
         </div>
       )}
 
-      {(canLand || canDelete || canResolve) && (
+      {(canLand || canDelete || canResolve || canPurge) && (
         <ButtonRow className="mt-3.5">
           {canLand && (
             <>
@@ -342,7 +448,36 @@ export function RunLand({ run }: { run: RunDTO }) {
               Delete branch
             </Button>
           )}
+          {/* Two presses, and the second one names what goes. Nothing here can
+              put back a commit that was never landed. */}
+          {canPurge &&
+            (confirmPurge ? (
+              <Button variant="danger" onClick={() => act("purge")} disabled={busy}>
+                {busy
+                  ? "Purging…"
+                  : `Purge ${state.branch} and its ${state.ahead} commit${
+                      state.ahead === 1 ? "" : "s"
+                    }`}
+              </Button>
+            ) : (
+              <Button
+                variant="ghost"
+                onClick={() => setConfirmPurge(true)}
+                disabled={busy}
+              >
+                Purge branch
+              </Button>
+            ))}
         </ButtonRow>
+      )}
+
+      {confirmPurge && (
+        <Hint tone="danger">
+          Deletes the branch, its {state.ahead} commit
+          {state.ahead === 1 ? "" : "s"}
+          {state.pending ? ` and ${state.pending.count} uncommitted path(s)` : ""}, and
+          its checkout — none of it recoverable from here
+        </Hint>
       )}
 
       {canLand && (

@@ -52,7 +52,17 @@ function lineFor(e: RunEventDTO): string | null {
       return `⇢ ${commits} commit${commits === 1 ? "" : "s"} on ${p.branch}`;
     }
     case "land": {
+      if (p.purged) {
+        return `⌫ purged ${p.branch} — ${p.commits} commit${
+          p.commits === 1 ? "" : "s"
+        } and ${p.discarded} uncommitted path${p.discarded === 1 ? "" : "s"} gone`;
+      }
       if (p.deleted) return `⌫ deleted ${p.branch}`;
+      if (p.commit) {
+        return `⊕ committed ${p.files} path${p.files === 1 ? "" : "s"} to ${
+          p.branch
+        } as ${p.commit}`;
+      }
       const resolved = Array.isArray(p.resolved) ? p.resolved.length : null;
       return resolved !== null
         ? `⇄ merged ${p.target} into ${p.branch}, resolving ${resolved} file${

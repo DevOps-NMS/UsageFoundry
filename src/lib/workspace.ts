@@ -171,9 +171,10 @@ export const MAX_REMOTES_READ = 25;
  * `owner/name` for each git repository in a scan, as GitHub would name it.
  *
  * The chat needs this and nothing else about a repository: `gh issue list`
- * takes `--repo owner/name`, so supplying it is what keeps the chat's shell
- * allowlist down to read-only `gh` subcommands instead of also having to permit
- * `git remote` inside every checkout.
+ * takes `--repo owner/name`, so supplying it saves the chat a shell round trip
+ * per folder — and, more usefully, saves it *guessing*. It could run `git
+ * remote` itself now that it runs without an allowlist; what it could not do is
+ * be told when the answer is "this is not a GitHub repository".
  *
  * A remote that is not GitHub, or missing, yields no entry — never a guess. The
  * chat is then told it could not identify the repository, which is a sentence
