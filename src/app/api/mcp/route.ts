@@ -1,15 +1,42 @@
 import { NextResponse } from "next/server";
 import {
+  appendMessage,
   chatForCapability,
   createProposal,
+  listProposals,
   MAX_PENDING_PROPOSALS,
   pendingProposals,
 } from "@/lib/chat";
-import { listTemplates, getTemplate } from "@/lib/templates";
-import { describeFolder, listRuns, resolveWorkspaceFolder } from "@/lib/orchestrator";
+import {
+  createTemplate,
+  getTemplate,
+  listTemplates,
+  normalizeTemplateInput,
+  updateTemplate,
+} from "@/lib/templates";
+import {
+  activeRuns,
+  currentSnapshot,
+  describeFolder,
+  getRun,
+  listRuns,
+  resolveWorkspaceFolder,
+  runEvents,
+} from "@/lib/orchestrator";
+import { diffAsText, runDiff } from "@/lib/diff";
+import { chatGuards } from "@/lib/settings";
 import { githubRemotes, scanWorkspace } from "@/lib/workspace";
 import { mountById } from "@/lib/config";
 import { fmtUSD } from "@/lib/format";
+
+/**
+ * What one `get_run_diff` may return.
+ *
+ * Smaller than the reviewer's budget on purpose: a review is one call about one
+ * diff, where this is a turn that may look at several runs and still has to
+ * think afterwards — and `settings.chatTurnBudgetUSD` is what pays for it.
+ */
+const MAX_DIFF_TEXT_BYTES = 60_000;
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -64,9 +91,9 @@ const TOOLS = [
   {
     name: "list_templates",
     description:
-      "List saved run templates. A template supplies every guard a proposed " +
-      "run will start under — budget, work-cycle limit, permission mode, " +
-      "isolation. Proposals must name one of these by id.",
+      "List saved run templates, with the guards each one supplies — budget, " +
+      "work-cycle limit, permission mode, isolation — and the default guard " +
+      "set a proposal that names no template runs under.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -83,17 +110,103 @@ const TOOLS = [
     },
   },
   {
-    name: "propose_run",
+    name: "get_run",
     description:
-      "Propose one run for the operator to approve. This does NOT start " +
-      "anything: it records a proposal that a person approves or rejects by " +
-      "hand. Guards come from the template and cannot be set here.",
+      "Everything known about one run: its task, how it ended, what it spent, " +
+      "the tail of its log, and a summary of the files it changed. Read this " +
+      "before proposing follow-up work on a run that already happened.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: { type: "string", description: "id from list_runs." },
+        events: {
+          type: "number",
+          description: "How many recent log entries to include (default 20).",
+        },
+      },
+      required: ["runId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_run_diff",
+    description:
+      "The patch a run produced, truncated at a file boundary if it is large " +
+      "— the file list is always complete and the omitted files are named.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: { type: "string", description: "id from list_runs." },
+      },
+      required: ["runId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_usage",
+    description:
+      "How much of the 5-hour and weekly windows is spent, the current burn " +
+      "rate, and how many runs are working or queued. Use it to say whether " +
+      "now is a good time to start work, not to decide any run's guards.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "list_proposals",
+    description:
+      "The proposals already made in this conversation and what became of " +
+      "them, so the same work is not proposed twice.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "save_template",
+    description:
+      "Save a reusable task prompt as a template, or rewrite an existing " +
+      "one's prompt. Prompt and name only: a new template takes the " +
+      "operator's default guard set and an existing one keeps its own guards, " +
+      "neither of which this tool can change.",
     inputSchema: {
       type: "object",
       properties: {
         templateId: {
           type: "string",
-          description: "id from list_templates. Supplies every guard.",
+          description: "Omit to create. Given, rewrites that template.",
+        },
+        name: {
+          type: "string",
+          description: "Required when creating. Must be unique.",
+        },
+        prompt: {
+          type: "string",
+          description:
+            "The standing instructions every run from this template starts " +
+            "with. The per-run task is appended below it.",
+        },
+      },
+      required: ["prompt"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "propose_run",
+    description:
+      "Propose one run for the operator to approve. This does NOT start " +
+      "anything: it records a proposal that a person approves or rejects by " +
+      "hand. Guards come from the template — or from the operator's default " +
+      "guard set when no template is named — and cannot be set here.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        templateId: {
+          type: "string",
+          description:
+            "id from list_templates. Omit to use the operator's default " +
+            "guard set, which is the right choice for one-off work.",
+        },
+        promptOverride: {
+          type: "string",
+          description:
+            "Replaces the template's own prompt for this run only. Use when " +
+            "the template nearly fits; the task is still appended below it.",
         },
         title: {
           type: "string",
@@ -117,7 +230,7 @@ const TOOLS = [
             "when mountId is given; \"\" means the mount root.",
         },
       },
-      required: ["templateId", "title", "task"],
+      required: ["title", "task"],
       additionalProperties: false,
     },
   },
@@ -247,6 +360,11 @@ async function callTool(
             mounts: mounts.map((m) => ({
               mountId: m.id,
               label: m.label,
+              // The absolute path, because `Read`, `Grep` and `git log` all
+              // need one to reach a mount that is not the child's cwd — and
+              // every mount is already `--add-dir`ed into this child, so
+              // naming it grants nothing that was not already granted.
+              path: m.path,
               available: m.available,
               error: m.error,
               truncated: m.truncated,
@@ -272,27 +390,25 @@ async function callTool(
     }
 
     case "list_templates": {
-      const templates = listTemplates();
-      if (templates.length === 0) {
-        return text(
-          "There are no run templates. A proposal must name one, because a " +
-            "template is where a run's budget, work-cycle limit and permission " +
-            "mode come from. Tell the operator to save one from the new-run " +
-            "form before you can propose anything.",
-        );
-      }
+      // The default guard set is reported alongside, because it is what a
+      // proposal naming no template runs under — a model shown only the
+      // templates would read an empty list as "nothing can be proposed", which
+      // is what this tool used to say and no longer true.
       return text(
         JSON.stringify(
-          templates.map((t) => ({
-            templateId: t.id,
-            name: t.name,
-            prompt: t.prompt,
-            mountId: t.mountId,
-            folder: t.folder,
-            isolate: t.isolate,
-            permissionMode: t.permissionMode,
-            budget: t.budget,
-          })),
+          {
+            templates: listTemplates().map((t) => ({
+              templateId: t.id,
+              name: t.name,
+              prompt: t.prompt,
+              mountId: t.mountId,
+              folder: t.folder,
+              isolate: t.isolate,
+              permissionMode: t.permissionMode,
+              budget: t.budget,
+            })),
+            guardsWhenNoTemplateNamed: chatGuards(),
+          },
           null,
           1,
         ),
@@ -323,11 +439,267 @@ async function callTool(
       );
     }
 
+    case "get_run":
+      return getRunDetail(args);
+
+    case "get_run_diff":
+      return getRunPatch(args);
+
+    case "get_usage":
+      return usageReport();
+
+    case "list_proposals": {
+      const proposals = listProposals(chatId);
+      if (proposals.length === 0) {
+        return text("Nothing has been proposed in this conversation yet.");
+      }
+      return text(
+        JSON.stringify(
+          proposals.map((p) => ({
+            proposalId: p.id,
+            title: p.title,
+            status: p.status,
+            templateId: p.template_id,
+            runId: p.run_id,
+            error: p.error,
+            task: p.task.slice(0, 200),
+          })),
+          null,
+          1,
+        ),
+      );
+    }
+
+    case "save_template":
+      return saveTemplate(args, chatId);
+
     case "propose_run":
       return proposeRun(args, chatId);
 
     default:
       return text(`Unknown tool: ${name}`, true);
+  }
+}
+
+/**
+ * One run, as much as is worth reading in a tool result.
+ *
+ * The log is tailed rather than sent whole for the reason the run page tails
+ * it: a run that worked for a day has tens of thousands of events, and a tool
+ * result that large is spend with no information in it. `dropped` is reported
+ * for the same reason a shortened diff says so.
+ *
+ * The diff is a *summary* here — file names and line counts — with the patch
+ * itself behind `get_run_diff`. Splitting them is what keeps "what did this run
+ * touch" cheap enough to ask about several runs in a row.
+ */
+async function getRunDetail(args: Record<string, unknown>) {
+  const runId = String(args.runId ?? "").trim();
+  const run = getRun(runId);
+  if (!run) return text(`No run with id "${runId}". Call list_runs.`, true);
+
+  const limit = Math.min(Math.max(Number(args.events) || 20, 1), 100);
+  const { events, dropped } = runEvents(runId, 0, limit);
+  const { mountId, relPath } = describeFolder(run.folder);
+  const diff = await runDiff(runId);
+
+  return text(
+    JSON.stringify(
+      {
+        runId: run.id,
+        status: run.status,
+        mountId,
+        folder: relPath,
+        isolated: run.isolation === "worktree",
+        branch: run.worktree_branch,
+        baseBranch: run.worktree_base_branch,
+        createdAt: new Date(run.created_at).toISOString(),
+        iterations: run.iterations,
+        spent: fmtUSD(run.spent_usd),
+        stopReason: run.stop_reason,
+        landedAt: run.landed_at ? new Date(run.landed_at).toISOString() : null,
+        task: run.prompt,
+        changed: {
+          kind: diff.kind,
+          reason: diff.reason,
+          filesChanged: diff.filesChanged,
+          added: diff.added,
+          deleted: diff.deleted,
+          files: diff.files
+            .slice(0, 50)
+            .map((f) => `${f.status} ${f.path} (+${f.added ?? "?"} −${f.deleted ?? "?"})`),
+          filesOmittedFromThisList: Math.max(0, diff.files.length - 50),
+          caveat: diff.caveat,
+        },
+        recentLog: events.map((e) => ({
+          at: new Date(e.ts).toISOString(),
+          kind: e.kind,
+          detail: clip(JSON.stringify(e.payload)),
+        })),
+        logEntriesOlderThanThese: dropped,
+      },
+      null,
+      1,
+    ),
+  );
+}
+
+/**
+ * One log entry's payload, bounded.
+ *
+ * An `assistant` event carries a whole model turn and a `tool` event carries a
+ * tool's entire input, so a hundred of them unbounded is a tool result larger
+ * than the conversation asking for it — and this is the one tool a model is
+ * told to call repeatedly. Truncated with the size named rather than silently:
+ * the same rule the diff follows.
+ */
+function clip(s: string, max = 600): string {
+  return s.length <= max
+    ? s
+    : `${s.slice(0, max)}… [${s.length - max} more characters]`;
+}
+
+/** The patch, bounded — and saying so when it is, for `diffAsText`'s reason. */
+async function getRunPatch(args: Record<string, unknown>) {
+  const runId = String(args.runId ?? "").trim();
+  if (!getRun(runId)) return text(`No run with id "${runId}". Call list_runs.`, true);
+
+  const diff = await runDiff(runId);
+  if (diff.files.length === 0) {
+    return text(diff.reason ?? "This run changed nothing.");
+  }
+
+  const { text: body, shown, truncated } = diffAsText(diff, MAX_DIFF_TEXT_BYTES);
+  return text(
+    `${shown} of ${diff.files.length} changed files, ` +
+      `+${diff.added} −${diff.deleted}${truncated ? " (truncated)" : ""}` +
+      `${diff.caveat ? `\n${diff.caveat}` : ""}\n${body}`,
+  );
+}
+
+/**
+ * The windows, as the dashboard reads them.
+ *
+ * `guardFraction` alongside `fraction` rather than instead of it: the guard
+ * charges unpriced models a fallback rate and the display does not, so a chat
+ * told only the displayed number would confidently say there is room in a
+ * window that will refuse the next run. Both, named, is the honest answer.
+ *
+ * Every number here is for talking about *timing*. Nothing downstream reads it:
+ * a proposal's guards come from a template or from settings, and `evaluateBudget`
+ * re-reads the windows itself before every work cycle.
+ */
+async function usageReport() {
+  const snapshot = await currentSnapshot();
+  const active = activeRuns();
+
+  const window = (w: typeof snapshot.session) => ({
+    startsAt: new Date(w.startsAt).toISOString(),
+    endsAt: new Date(w.endsAt).toISOString(),
+    spent: fmtUSD(w.costUSD),
+    ceiling: w.limit === null ? null : fmtUSD(w.limit),
+    fraction: w.fraction,
+    guardFraction: w.guardFraction,
+  });
+
+  return text(
+    JSON.stringify(
+      {
+        now: new Date(snapshot.now).toISOString(),
+        session: window(snapshot.session),
+        weekly: window(snapshot.weekly),
+        burnCostPerHour: fmtUSD(snapshot.burnCostPerHour),
+        projectedExhaustionAt: snapshot.projectedExhaustionAt
+          ? new Date(snapshot.projectedExhaustionAt).toISOString()
+          : null,
+        running: active.filter((r) => r.status === "running").length,
+        queued: active.filter((r) => r.status === "queued").length,
+        paused: active.filter((r) => r.status === "paused").length,
+        // A null ceiling is not zero and not "unlimited" — it is a number
+        // Anthropic does not publish and the operator has not supplied, so
+        // every fraction above it is null too. Said outright, because a model
+        // reading null as 0% would report a fresh window on a spent one.
+        note:
+          snapshot.session.limit === null || snapshot.weekly.limit === null
+            ? "A null ceiling means the operator has set none for that window, " +
+              "so its fraction is unknown rather than zero."
+            : null,
+      },
+      null,
+      1,
+    ),
+  );
+}
+
+/**
+ * Write a template's name and prompt, and nothing else.
+ *
+ * The guards are read off the existing row or off `chatGuards()` and written
+ * straight back, so there is no argument on this tool that could move one. That
+ * is the same division `planProposal` enforces at approval time, applied here
+ * because a template the chat could arm would be a route to `--permission-mode`
+ * that outlives the conversation — worse than a proposal, which at least gets
+ * looked at once before it runs.
+ *
+ * The write is recorded in the thread rather than left to the model to mention.
+ * A proposal has a card; this has nothing, and rewriting a prompt the operator
+ * wrote and tested is not something they should find out about by reading a
+ * template weeks later and wondering when it changed.
+ */
+function saveTemplate(args: Record<string, unknown>, chatId: string) {
+  const prompt = String(args.prompt ?? "").trim();
+  if (!prompt) return text("A template needs a prompt.", true);
+
+  const templateId = String(args.templateId ?? "").trim();
+  const existing = templateId ? getTemplate(templateId) : null;
+  if (templateId && !existing) {
+    return text(
+      `No template with id "${templateId}". Call list_templates, or omit ` +
+        "templateId to create a new one.",
+      true,
+    );
+  }
+
+  const name = String(args.name ?? "").trim() || existing?.name || "";
+  const guards = existing ?? chatGuards();
+  const input = {
+    name,
+    prompt,
+    mountId: existing?.mountId ?? null,
+    folder: existing?.folder ?? null,
+    isolate: guards.isolate,
+    permissionMode: guards.permissionMode,
+    budget: guards.budget,
+  };
+
+  // Re-read through the same normaliser the form uses, so a prompt or name this
+  // tool accepts is exactly one the operator could have typed.
+  const normalized = normalizeTemplateInput(input);
+  if (!normalized.ok) return text(normalized.error, true);
+
+  try {
+    const saved = existing
+      ? updateTemplate(existing.id, normalized.value)
+      : createTemplate(normalized.value);
+    if (!saved) return text("That template was deleted while saving.", true);
+    appendMessage(
+      chatId,
+      "system",
+      existing
+        ? `The chat rewrote the prompt of the “${saved.name}” template. Its ` +
+          "guards are unchanged."
+        : `The chat saved a new template, “${saved.name}”, under your default ` +
+          "guard set.",
+    );
+    return text(
+      `${existing ? "Rewrote" : "Saved"} template “${saved.name}” (id ${saved.id}). ` +
+        `Its guards are unchanged: ${saved.permissionMode}, ` +
+        `${saved.isolate ? "own checkout" : "the operator's own folder"}, ` +
+        `${saved.budget.maxIterations ?? "no"} work-cycle limit.`,
+    );
+  } catch (err) {
+    // A duplicate name arrives here as the sentence the form would show.
+    return text(err instanceof Error ? err.message : String(err), true);
   }
 }
 
@@ -343,9 +715,10 @@ async function callTool(
 function proposeRun(args: Record<string, unknown>, chatId: string) {
   const templateId = String(args.templateId ?? "").trim();
   const template = templateId ? getTemplate(templateId) : null;
-  if (!template) {
+  if (templateId && !template) {
     return text(
-      `No template with id "${templateId}". Call list_templates and use an id from it.`,
+      `No template with id "${templateId}". Call list_templates and use an id ` +
+        "from it, or omit templateId to use the operator's default guard set.",
       true,
     );
   }
@@ -386,6 +759,12 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
         true,
       );
     }
+  } else if (!template) {
+    return text(
+      "A proposal with no template has to name where it runs. Pass mountId " +
+        "and folder from list_folders.",
+      true,
+    );
   } else if (template.mountId === null) {
     return text(
       `The "${template.name}" template does not name a folder, so this ` +
@@ -406,9 +785,22 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
     );
   }
 
-  const proposal = createProposal(chatId, { templateId, title, task, mountId, folder });
+  const promptOverride = String(args.promptOverride ?? "").trim() || null;
+
+  const proposal = createProposal(chatId, {
+    templateId: template ? template.id : null,
+    title,
+    task,
+    promptOverride,
+    mountId,
+    folder,
+  });
+
+  const guards = template
+    ? `template "${template.name}"${promptOverride ? ", with a prompt you rewrote" : ""}`
+    : "the operator's default guard set";
   return text(
-    `Proposed "${title}" (id ${proposal.id}) against template "${template.name}". ` +
-      "It is waiting for the operator to approve it; nothing is running.",
+    `Proposed "${title}" (id ${proposal.id}) under ${guards}. It is waiting ` +
+      "for the operator to approve it; nothing is running.",
   );
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { SettingsDTO } from "@/lib/apiTypes";
+import type { BudgetPolicyDTO, RunGuardsDTO, SettingsDTO } from "@/lib/apiTypes";
 import { fmtTokens, fmtUSD } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
@@ -160,6 +160,11 @@ export default function SettingsPage() {
   if (!s) return <Empty>Loading settings…</Empty>;
 
   const numOrEmpty = (v: number | null) => (v === null ? "" : String(v));
+  const guards = s.chatDefaultGuards;
+  const patchGuards = (p: Partial<RunGuardsDTO>) =>
+    patch({ chatDefaultGuards: { ...guards, ...p } });
+  const patchGuardBudget = (p: Partial<BudgetPolicyDTO>) =>
+    patchGuards({ budget: { ...guards.budget, ...p } });
   const workspaceMounts = Array.isArray(env.workspaceMounts)
     ? (env.workspaceMounts as Array<{ id: string; label: string; path: string }>)
     : [];
@@ -554,6 +559,103 @@ export default function SettingsPage() {
             <Hint>Pre-selected on the new-run form; every run can override it</Hint>
           </Field>
         </div>
+
+        <Subsection title="Untemplated chat proposals">
+          <Hint className="mb-2.5 mt-0">
+            What a run proposed by the orchestrator chat may do when it names no
+            template — the chat cannot change any of it
+          </Hint>
+
+          <div className="grid gap-x-4 sm:grid-cols-2">
+            <Field label="Permission mode" htmlFor="cgpm">
+              <Select
+                id="cgpm"
+                value={guards.permissionMode}
+                onChange={(e) => patchGuards({ permissionMode: e.target.value })}
+              >
+                <option value="acceptEdits">acceptEdits</option>
+                <option value="default">default</option>
+                <option value="plan">plan</option>
+                <option value="bypassPermissions">bypassPermissions</option>
+              </Select>
+            </Field>
+
+            <Field label="Spend limit" htmlFor="cgcost">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-ink-muted">$</span>
+                <Input
+                  id="cgcost"
+                  type="number"
+                  min={0}
+                  step="0.5"
+                  className="flex-1"
+                  placeholder="no limit"
+                  value={numOrEmpty(guards.budget.maxRunCostUSD)}
+                  onChange={(e) =>
+                    patchGuardBudget({
+                      maxRunCostUSD:
+                        e.target.value === "" ? null : Number(e.target.value),
+                    })
+                  }
+                />
+                <span className="whitespace-nowrap text-xs text-ink-muted">
+                  per run
+                </span>
+              </div>
+            </Field>
+
+            <Field label="Work cycles" htmlFor="cgcycles">
+              <Input
+                id="cgcycles"
+                type="number"
+                min={1}
+                placeholder="no limit"
+                value={numOrEmpty(guards.budget.maxIterations)}
+                onChange={(e) =>
+                  patchGuardBudget({
+                    maxIterations:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </Field>
+
+            <Field label="Time limit" htmlFor="cgmins">
+              <div className="flex items-center gap-2">
+                <Input
+                  id="cgmins"
+                  type="number"
+                  min={1}
+                  className="flex-1"
+                  placeholder="no limit"
+                  value={numOrEmpty(guards.budget.maxDurationMinutes)}
+                  onChange={(e) =>
+                    patchGuardBudget({
+                      maxDurationMinutes:
+                        e.target.value === "" ? null : Number(e.target.value),
+                    })
+                  }
+                />
+                <span className="whitespace-nowrap text-xs text-ink-muted">
+                  minutes
+                </span>
+              </div>
+              <Hint>Blank is only allowed alongside a work-cycle limit</Hint>
+            </Field>
+          </div>
+
+          <Field className="mb-0">
+            <Toggle
+              id="cgiso"
+              checked={guards.isolate}
+              onChange={(v) => patchGuards({ isolate: v })}
+              label="Work in its own checkout"
+            />
+            <Hint>
+              Off puts an agent nobody has met in the folder you are working in
+            </Hint>
+          </Field>
+        </Subsection>
       </SectionCard>
 
       <SectionCard id="prompts" title="Prompts">

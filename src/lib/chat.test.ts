@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { chatPrompt, planProposal, type ChatProposalRow } from "./chat";
+import { chatPrompt, composeTask, planProposal, type ChatProposalRow } from "./chat";
 import { githubSlug } from "./workspace";
 import type { RunTemplate } from "./templates";
+import type { RunGuards } from "./settings";
 
 /**
  * Covers `planProposal`, `chatPrompt` and `githubSlug`, and only those.
@@ -15,8 +16,13 @@ import type { RunTemplate } from "./templates";
  *    access to a directory. The branch that matters most is the one that is not
  *    there: nothing on a proposal may set a guard, a permission mode or an
  *    isolation choice, because the whole approval gate rests on those coming
- *    from a template a person wrote. A regression here type-checks perfectly
- *    and shows up as an agent running somewhere nobody chose.
+ *    from something a person wrote — a template, or the untemplated guard set
+ *    in settings. A regression here type-checks perfectly and shows up as an
+ *    agent running somewhere nobody chose.
+ *  - `composeTask` decides what the agent is actually told. It is the one half
+ *    of a run the chat may write, and getting the two halves the wrong way
+ *    round — or dropping one — is a run that does something adjacent to the
+ *    task, expensively, without failing.
  *  - `chatPrompt` decides whether a turn is billed with the thread or without
  *    it. Getting it wrong is invisible: a model that silently lost the
  *    conversation still answers confidently, and the reply reads as a
@@ -48,9 +54,30 @@ const template: RunTemplate = {
   updatedAt: 0,
 };
 
+/**
+ * The untemplated guard set, deliberately different from the template's in
+ * every field — so a test that passes is a test that read the right one.
+ */
+const defaults: RunGuards = {
+  permissionMode: "plan",
+  isolate: false,
+  budget: {
+    maxIterations: 1,
+    maxDurationMinutes: 30,
+    maxRunCostUSD: 2,
+    maxRunTokens: null,
+    maxWeeklyFraction: null,
+    maxSessionFraction: null,
+    enforcement: "live",
+    continueAfterDone: false,
+  },
+};
+
 const proposal = (over: Partial<ChatProposalRow> = {}) =>
   ({
     task: "Fix the flaky auth test in #412.",
+    template_id: "tpl1",
+    prompt_override: null,
     mount_id: null,
     folder: null,
     status: "pending",
@@ -58,12 +85,18 @@ const proposal = (over: Partial<ChatProposalRow> = {}) =>
     ...over,
   }) as Pick<
     ChatProposalRow,
-    "task" | "mount_id" | "folder" | "status" | "title"
+    | "task"
+    | "mount_id"
+    | "folder"
+    | "status"
+    | "title"
+    | "template_id"
+    | "prompt_override"
   >;
 
 describe("planProposal", () => {
   it("takes every guard from the template and none from the proposal", () => {
-    const plan = planProposal(proposal(), template);
+    const plan = planProposal(proposal(), template, defaults);
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
 
@@ -73,7 +106,7 @@ describe("planProposal", () => {
   });
 
   it("leads with the template's prompt and marks where the chat's task starts", () => {
-    const plan = planProposal(proposal(), template);
+    const plan = planProposal(proposal(), template, defaults);
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
 
@@ -83,7 +116,7 @@ describe("planProposal", () => {
   });
 
   it("falls back to the template's folder when the proposal names none", () => {
-    const plan = planProposal(proposal(), template);
+    const plan = planProposal(proposal(), template, defaults);
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
     assert.equal(plan.input.mountId, "workspace");
@@ -94,6 +127,7 @@ describe("planProposal", () => {
     const plan = planProposal(
       proposal({ mount_id: "other", folder: "acme/web" }),
       template,
+      defaults,
     );
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
@@ -109,25 +143,29 @@ describe("planProposal", () => {
     const plan = planProposal(
       proposal({ mount_id: "workspace", folder: "" }),
       template,
+      defaults,
     );
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
     assert.equal(plan.input.folder, "");
   });
 
-  it("refuses when the template is gone", () => {
-    const plan = planProposal(proposal(), null);
+  it("refuses when the named template is gone, rather than using the defaults", () => {
+    // The quiet failure this rules out: a proposal the operator approved
+    // because the card said "Fix a bug" starting under a different permission
+    // mode entirely, because the template was tidied away in between.
+    const plan = planProposal(proposal(), null, defaults);
     assert.equal(plan.ok, false);
     if (plan.ok) return;
     assert.match(plan.reason, /no longer exists/);
   });
 
   it("refuses when nothing names a folder", () => {
-    const plan = planProposal(proposal(), {
-      ...template,
-      mountId: null,
-      folder: null,
-    });
+    const plan = planProposal(
+      proposal(),
+      { ...template, mountId: null, folder: null },
+      defaults,
+    );
     assert.equal(plan.ok, false);
     if (plan.ok) return;
     assert.match(plan.reason, /names a folder/);
@@ -135,14 +173,91 @@ describe("planProposal", () => {
 
   it("refuses a proposal that was already decided", () => {
     for (const status of ["approved", "rejected", "failed"] as const) {
-      const plan = planProposal(proposal({ status }), template);
+      const plan = planProposal(proposal({ status }), template, defaults);
       assert.equal(plan.ok, false, `${status} should not be approvable`);
     }
   });
 
   it("refuses an empty task", () => {
-    const plan = planProposal(proposal({ task: "   " }), template);
+    const plan = planProposal(proposal({ task: "   " }), template, defaults);
     assert.equal(plan.ok, false);
+  });
+
+  const untemplated = (over: Partial<ChatProposalRow> = {}) =>
+    proposal({ template_id: null, mount_id: "workspace", folder: "acme/api", ...over });
+
+  it("takes every guard from the operator's defaults when there is no template", () => {
+    const plan = planProposal(untemplated(), null, defaults);
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+
+    assert.equal(plan.input.permissionMode, "plan");
+    assert.equal(plan.input.isolate, false);
+    assert.deepEqual(plan.input.budget, defaults.budget);
+  });
+
+  it("sends only the task when there is no template and no override", () => {
+    // No heading with nothing above it: the section marker exists to separate
+    // standing instructions from this run's brief, and with no standing
+    // instructions it would be a marker for a section that is not there.
+    const plan = planProposal(untemplated(), null, defaults);
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.prompt, "Fix the flaky auth test in #412.");
+  });
+
+  it("refuses an untemplated proposal that names no folder", () => {
+    const plan = planProposal(
+      proposal({ template_id: null }),
+      null,
+      defaults,
+    );
+    assert.equal(plan.ok, false);
+    if (plan.ok) return;
+    assert.match(plan.reason, /names no folder/);
+  });
+
+  it("uses the proposal's prompt over the template's, and keeps its guards", () => {
+    // The whole point of the split: prompt text is the half a model may write,
+    // and every guard beside it still comes from the template.
+    const plan = planProposal(
+      proposal({ prompt_override: "Read only. Report, do not edit." }),
+      template,
+      defaults,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+
+    assert.ok(plan.input.prompt.startsWith("Read only. Report, do not edit."));
+    assert.ok(!plan.input.prompt.includes("Work carefully"));
+    assert.equal(plan.input.permissionMode, template.permissionMode);
+    assert.deepEqual(plan.input.budget, template.budget);
+  });
+
+  it("ignores a blank override rather than dropping the template's prompt", () => {
+    const plan = planProposal(
+      proposal({ prompt_override: "   " }),
+      template,
+      defaults,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.ok(plan.input.prompt.startsWith("Work carefully and commit as you go."));
+  });
+});
+
+describe("composeTask", () => {
+  it("puts the standing instructions first and the task under a heading", () => {
+    const out = composeTask("Standing orders.", "This one thing.");
+    assert.equal(
+      out,
+      "Standing orders.\n\n## This run specifically\n\nThis one thing.",
+    );
+  });
+
+  it("is the task alone when there are no standing instructions", () => {
+    assert.equal(composeTask(null, "This one thing."), "This one thing.");
+    assert.equal(composeTask("  ", "This one thing."), "This one thing.");
   });
 });
 

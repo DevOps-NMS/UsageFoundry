@@ -33,7 +33,6 @@ const PROPOSAL_TONE = {
 export default function ChatPage() {
   const [chat, setChat] = useState<ChatDTO | null>(null);
   const [chats, setChats] = useState<ChatListEntryDTO[]>([]);
-  const [templateCount, setTemplateCount] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -52,10 +51,6 @@ export default function ChatPage() {
 
   useEffect(() => {
     void load(null);
-    void fetch("/api/templates")
-      .then((r) => (r.ok ? r.json() : { templates: [] }))
-      .then((d: { templates: unknown[] }) => setTemplateCount(d.templates.length))
-      .catch(() => setTemplateCount(null));
   }, [load]);
 
   // The list only changes when a turn ends or a chat is created, so it is
@@ -155,21 +150,12 @@ export default function ChatPage() {
       <Notice tone="info" quiet>
         <strong>Nothing here starts a run.</strong> The chat can only propose
         work; each proposal waits for you to approve it, and it then runs under
-        the guards of the template it names — not under anything the chat chose.
-        A chat turn spends against the same 5-hour window as everything else, and
-        its cost is shown here only, never added to a run&rsquo;s or to the
-        dashboard meters.
+        the guards of the template it names, or under the default guard set in{" "}
+        <Link href="/settings">Settings</Link> when it names none — never under
+        anything the chat chose. A chat turn spends against the same 5-hour
+        window as everything else, and its cost is shown here only, never added
+        to a run&rsquo;s or to the dashboard meters.
       </Notice>
-
-      {templateCount === 0 && (
-        <Notice tone="warn">
-          There are no run templates yet, so the chat has no guards to propose
-          runs under and will say so. Save one from the{" "}
-          <Link href="/runs/new">new run</Link> form first — the template is
-          where a run&rsquo;s budget, work-cycle limit and permission mode come
-          from.
-        </Notice>
-      )}
 
       {error && <Notice tone="danger">{error}</Notice>}
       {chat?.error && chat.status === "failed" && (
@@ -274,9 +260,9 @@ export default function ChatPage() {
                   </Button>
                 </ButtonRow>
                 <Hint>
-                  Approving starts each one as a real run under its
-                  template&rsquo;s guards. Runs beyond the concurrency limit
-                  queue rather than being refused.
+                  Approving starts each one as a real run under the guards shown
+                  on it. Runs beyond the concurrency limit queue rather than
+                  being refused.
                 </Hint>
               </>
             )}
@@ -379,7 +365,6 @@ function Proposal({
   checked: boolean;
   onToggle: () => void;
 }) {
-  const gone = proposal.templateName === null;
   return (
     <label className="flex cursor-pointer gap-2 rounded-sm border border-line bg-inset p-2.5">
       <input
@@ -395,11 +380,12 @@ function Proposal({
         </div>
         <div className="mt-1 text-2xs text-ink-faint">
           {proposal.folderLabel ?? "folder from the template"} ·{" "}
-          {gone ? (
+          {proposal.guardsSource === "missing" ? (
             <span className="text-danger">template deleted</span>
           ) : (
-            proposal.templateName
+            proposal.guardsLabel
           )}
+          {proposal.promptRewritten && " · prompt rewritten"}
         </div>
       </div>
     </label>

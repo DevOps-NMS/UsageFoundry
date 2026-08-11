@@ -4,7 +4,9 @@ import {
   type ChatRow,
 } from "@/lib/chat";
 import { getTemplate } from "@/lib/templates";
+import { chatGuards } from "@/lib/settings";
 import { mountById } from "@/lib/config";
+import { fmtUSD } from "@/lib/format";
 import type { ChatDTO, ChatProposalDTO } from "@/lib/apiTypes";
 
 /**
@@ -37,12 +39,20 @@ export function chatDTO(chat: ChatRow): ChatDTO {
 }
 
 function proposalDTO(p: ReturnType<typeof listProposals>[number]): ChatProposalDTO {
-  const template = getTemplate(p.template_id);
+  const template = p.template_id ? getTemplate(p.template_id) : null;
   return {
     id: p.id,
     createdAt: p.created_at,
     templateId: p.template_id,
     templateName: template?.name ?? null,
+    guardsSource:
+      template !== null ? "template" : p.template_id ? "missing" : "defaults",
+    guardsLabel: template
+      ? template.name
+      : p.template_id
+        ? "template deleted"
+        : defaultGuardsLabel(),
+    promptRewritten: p.prompt_override !== null,
     title: p.title,
     task: p.task,
     folderLabel: folderLabel(p.mount_id, p.folder),
@@ -50,6 +60,33 @@ function proposalDTO(p: ReturnType<typeof listProposals>[number]): ChatProposalD
     runId: p.run_id,
     error: p.error,
   };
+}
+
+/**
+ * What an untemplated proposal would be allowed to do, spelled out.
+ *
+ * A templated proposal says the template's name instead, because that is a
+ * thing the operator wrote and can go and read. An untemplated one has no such
+ * handle, so the card has to carry the guards themselves — otherwise the only
+ * place the answer exists is a settings page two clicks away, and an approval
+ * gate that does not show what is being approved is a gate that gets clicked
+ * through.
+ */
+function defaultGuardsLabel(): string {
+  const guards = chatGuards();
+  const { maxIterations, maxDurationMinutes, maxRunCostUSD } = guards.budget;
+
+  return [
+    guards.permissionMode,
+    guards.isolate ? "own checkout" : "your folder",
+    maxIterations === null
+      ? null
+      : `${maxIterations} cycle${maxIterations === 1 ? "" : "s"}`,
+    maxDurationMinutes === null ? null : `${maxDurationMinutes} min`,
+    maxRunCostUSD === null ? null : fmtUSD(maxRunCostUSD),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 /**

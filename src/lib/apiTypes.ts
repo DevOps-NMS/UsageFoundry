@@ -548,6 +548,15 @@ export interface SettingsDTO {
   killProcessGroup: boolean;
   /** Hard ceiling on one orchestrator-chat turn. Null means no cap. */
   chatTurnBudgetUSD: number | null;
+  /** What a chat proposal runs under when it names no template. */
+  chatDefaultGuards: RunGuardsDTO;
+}
+
+/** What an agent may do, as against what it is asked to do. */
+export interface RunGuardsDTO {
+  permissionMode: string;
+  isolate: boolean;
+  budget: BudgetPolicyDTO;
 }
 
 /* ------------------------------------------------------------------ */
@@ -564,9 +573,19 @@ export interface ChatMessageDTO {
 export interface ChatProposalDTO {
   id: string;
   createdAt: number;
-  templateId: string;
-  /** Null when the template has since been deleted — approval will refuse. */
+  /** Null when the proposal runs under the operator's default guard set. */
+  templateId: string | null;
+  /** Null when there is no template, or when it has since been deleted. */
   templateName: string | null;
+  /**
+   * Where the guards come from. `missing` is a named template that has been
+   * deleted since — approval will refuse it rather than fall back.
+   */
+  guardsSource: "template" | "defaults" | "missing";
+  /** The template's name, or the default guards written out. */
+  guardsLabel: string;
+  /** The chat wrote this run's prompt instead of taking the template's. */
+  promptRewritten: boolean;
   title: string;
   task: string;
   /** Where it would run, as a person reads it. Null means "as the template says". */

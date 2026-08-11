@@ -1,4 +1,5 @@
 import { getJSON, setJSON } from "./db";
+import { normalizePolicy, type BudgetPolicy } from "./budget";
 import type { LimitConfig, WeeklyAnchor } from "./windows";
 
 /**
@@ -160,6 +161,43 @@ export interface Settings {
    * issue in the repository" can spend a lot inside ten minutes.
    */
   chatTurnBudgetUSD: number | null;
+  /**
+   * What an agent may do when a chat proposal names no template.
+   *
+   * The chat used to be able to propose only against a saved template, which
+   * made it useless on an install that has none — and made "propose a run for
+   * this issue" fail on a rule about form input rather than about the work. So
+   * a proposal may now name no template, and this is what it runs under
+   * instead.
+   *
+   * It is emphatically **not** a widening of what the chat decides. The
+   * division of labour is unchanged — the proposal says what work to do, and
+   * something a *person* wrote says what an agent may do — this is just the
+   * second place a person can write it. Nothing off a proposal reaches these
+   * fields, exactly as nothing off one reaches a template's.
+   *
+   * Unlike a window ceiling these numbers are not a guess at something
+   * Anthropic knows and we do not, so the no-default-numbers rule does not
+   * apply: they bound this app's own behaviour, and a default of "no limit"
+   * would be the unsafe reading. Kept small on purpose — an untemplated
+   * proposal is the least considered kind, so it gets the least rope.
+   */
+  chatDefaultGuards: RunGuards;
+}
+
+/**
+ * Everything that decides what an agent may do, as against what it is asked to
+ * do.
+ *
+ * The split is the whole approval gate: `CreateRunInput` is this plus a folder
+ * and a prompt, and every route that builds one takes this half from something
+ * a person wrote — a template, the run form, or the settings above — and the
+ * other half from whatever asked for the work.
+ */
+export interface RunGuards {
+  permissionMode: PermissionMode;
+  isolate: boolean;
+  budget: BudgetPolicy;
 }
 
 export type PermissionMode =
@@ -216,6 +254,32 @@ export const DEFAULT_ISOLATION_PREAMBLE =
   "user's checkout. Commit your work as you go, with clear messages; anything " +
   "left uncommitted will not be visible to the user.";
 
+/**
+ * The guard set an untemplated proposal starts under until an operator changes
+ * it.
+ *
+ * `isolate` is true and the permission mode is the same `acceptEdits` the run
+ * form defaults to, so the worst case is commits on a branch nobody has landed.
+ * The three limits are all present rather than only the terminus pair, because
+ * this is the path with no form behind it: four cycles is enough to fix a small
+ * issue and not enough to rewrite a project, and an hour and $5 stop a run that
+ * misunderstood the task from spending all afternoon proving it.
+ */
+export const DEFAULT_CHAT_GUARDS: RunGuards = {
+  permissionMode: "acceptEdits",
+  isolate: true,
+  budget: {
+    maxIterations: 4,
+    maxDurationMinutes: 60,
+    maxRunCostUSD: 5,
+    maxRunTokens: null,
+    maxWeeklyFraction: null,
+    maxSessionFraction: null,
+    enforcement: "between-cycles",
+    continueAfterDone: false,
+  },
+};
+
 const DEFAULTS: Settings = {
   sessionCostLimit: null,
   weeklyCostLimit: null,
@@ -238,6 +302,7 @@ const DEFAULTS: Settings = {
   landStrategy: "merge",
   killProcessGroup: true,
   chatTurnBudgetUSD: 2,
+  chatDefaultGuards: DEFAULT_CHAT_GUARDS,
 };
 
 const KEY = "settings";
@@ -260,6 +325,36 @@ export function saveSettings(patch: Partial<Settings>): Settings {
  * exhaustion projection all agree on one effective number. The raw configured
  * values stay on Settings for display.
  */
+/**
+ * The untemplated guard set, narrowed the way a stored template is.
+ *
+ * Read-time narrowing, for the reason `rowToTemplate` does it: this blob is
+ * JSON in a settings row, so it can outlive the build that wrote it and it can
+ * be edited by hand. The rules are the same three — an unrecognised permission
+ * mode degrades to `plan`, the only one of the four that cannot write, never to
+ * something more permissive; the budget goes through `normalizePolicy`; and a
+ * policy with neither terminus is read as one work cycle rather than as an
+ * uncapped loop, since the alternative is a proposal that can be approved and
+ * then refused by `evaluateBudget` a second later with nothing said about why.
+ * `PUT /api/settings` refuses that pair at the door, so reaching this is
+ * already a hand-edited row.
+ */
+export function chatGuards(s: Settings = getSettings()): RunGuards {
+  const raw = s.chatDefaultGuards ?? DEFAULT_CHAT_GUARDS;
+  const permissionMode = (PERMISSION_MODES as readonly string[]).includes(
+    String(raw.permissionMode),
+  )
+    ? (raw.permissionMode as PermissionMode)
+    : "plan";
+
+  const budget = normalizePolicy(raw.budget ?? {});
+  if (budget.maxIterations === null && budget.maxDurationMinutes === null) {
+    budget.maxIterations = 1;
+  }
+
+  return { permissionMode, isolate: raw.isolate !== false, budget };
+}
+
 export function limitConfig(s: Settings = getSettings()): LimitConfig {
   const reserve = Math.min(Math.max(s.reservedHeadroomFraction ?? 0, 0), 0.95);
   const usable = (v: number | null) => (v === null ? null : v * (1 - reserve));

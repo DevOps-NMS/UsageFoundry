@@ -10,7 +10,7 @@ import {
   WORKSPACE_ROOT,
 } from "./config";
 import { db } from "./db";
-import { getSettings } from "./settings";
+import { chatGuards, getSettings, type RunGuards } from "./settings";
 import { assistRefusal } from "./review";
 import {
   createRun,
@@ -40,9 +40,11 @@ import { getTemplate, type RunTemplate } from "./templates";
  *     down here rather than absorbed quietly.
  *
  * What it is **not** allowed to be is a route to spend nobody authorised. It
- * cannot start a run. It can only write a `chat_proposals` row, which holds no
- * folder claim and consumes no concurrency slot until a person approves it —
- * the same posture `run_templates` takes, and for the same reason.
+ * cannot start a run. Everything it writes is form input: a `chat_proposals`
+ * row, or a `run_templates` prompt — neither holds a folder claim, neither
+ * consumes a concurrency slot, and neither does anything at all until a person
+ * approves it. Every tool that could widen what an agent may do is absent from
+ * that list rather than guarded inside it.
  *
  * Its own cost never reaches `runs.spent_usd`, exactly as a review's does not.
  */
@@ -79,9 +81,12 @@ export interface ChatProposalRow {
   id: string;
   chat_id: string;
   created_at: number;
-  template_id: string;
+  /** Null when the proposal runs under `settings.chatDefaultGuards` instead. */
+  template_id: string | null;
   title: string;
   task: string;
+  /** The prompt the task is appended to, when the chat wrote one for this run. */
+  prompt_override: string | null;
   mount_id: string | null;
   folder: string | null;
   status: ProposalStatus;
@@ -190,9 +195,12 @@ export function pendingProposals(chatId: string): ChatProposalRow[] {
 }
 
 export interface ProposalInput {
-  templateId: string;
+  /** Null runs it under the operator's untemplated guard set. */
+  templateId: string | null;
   title: string;
   task: string;
+  /** Replaces the template's prompt for this run only. Null keeps it. */
+  promptOverride: string | null;
   mountId: string | null;
   folder: string | null;
 }
@@ -205,8 +213,9 @@ export function createProposal(
   db()
     .prepare(
       `INSERT INTO chat_proposals
-         (id, chat_id, created_at, template_id, title, task, mount_id, folder, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         (id, chat_id, created_at, template_id, title, task, prompt_override,
+          mount_id, folder, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
     )
     .run(
       id,
@@ -215,6 +224,7 @@ export function createProposal(
       input.templateId,
       input.title,
       input.task,
+      input.promptOverride,
       input.mountId,
       input.folder,
     );
@@ -232,25 +242,38 @@ export type ProposalPlan =
 /**
  * Turn an approved proposal into the run it asks for, or say why not.
  *
- * Pure — it takes the proposal and the template rather than reading either —
- * and unit-tested, for the reason `planItem` and `landRefusal` are: it is the
- * step where something a model wrote becomes a process with write access to a
- * directory, and every branch of it is a decision an operator would want to
- * have been made the same way twice.
+ * Pure — it takes the proposal, the template and the untemplated guard set
+ * rather than reading any of them — and unit-tested, for the reason `planItem`
+ * and `landRefusal` are: it is the step where something a model wrote becomes a
+ * process with write access to a directory, and every branch of it is a
+ * decision an operator would want to have been made the same way twice.
  *
  * The division of labour it enforces is the whole design: **the proposal says
- * what work to do, the template says what an agent may do**. Guards,
- * permission mode and isolation are read from the template only. There is
- * deliberately no branch in which a value off the proposal widens any of them,
- * because a proposal is text a model produced and `--permission-mode` is not a
- * thing a model should be able to reach for.
+ * what work to do, and something a person wrote says what an agent may do**.
+ * There are two of those now — a named template, or `settings.chatDefaultGuards`
+ * when the proposal names none, which is what lets the chat be useful on an
+ * install with no templates saved. What has not changed is the branch that is
+ * *not* here: no value off a proposal sets a guard, a permission mode or an
+ * isolation choice, because a proposal is text a model produced and
+ * `--permission-mode` is not a thing a model should be able to reach for.
+ *
+ * The prompt is the exception, and it is an exception on purpose: prompt text
+ * *is* the half of a run a model may write. A proposal can therefore replace
+ * the template's prompt for one run, and the card says when it did.
  */
 export function planProposal(
   proposal: Pick<
     ChatProposalRow,
-    "task" | "mount_id" | "folder" | "status" | "title"
+    | "task"
+    | "mount_id"
+    | "folder"
+    | "status"
+    | "title"
+    | "template_id"
+    | "prompt_override"
   >,
   template: RunTemplate | null,
+  defaults: RunGuards,
 ): ProposalPlan {
   if (proposal.status !== "pending") {
     return {
@@ -259,16 +282,20 @@ export function planProposal(
     };
   }
 
-  if (!template) {
+  if (proposal.template_id !== null && !template) {
     // Reachable by ordinary use: the chat proposes against a template, the
     // operator tidies their templates, then approves. Failing by name is what
-    // lets them re-propose rather than wonder which run did not start.
+    // lets them re-propose rather than wonder which run did not start. Not
+    // silently falling back to the untemplated guard set: the operator picked
+    // that template, and a run starting under different rules than the card
+    // said is the one outcome this gate exists to prevent.
     return {
       ok: false,
       reason:
         "The template this proposal was made against no longer exists, so " +
         "there are no guards to start it under. Ask the chat to propose it " +
-        "again against a template that does.",
+        "again — against a template that does, or against no template, which " +
+        "uses the guards in Settings.",
     };
   }
 
@@ -281,42 +308,78 @@ export function planProposal(
   // does not: on both a template and a proposal it is the mount root, the one
   // selection that blocks every other run in the tree, so collapsing the two
   // would silently promote "no folder named" into "the whole workspace".
-  const mountId = proposal.mount_id ?? template.mountId;
-  const folder = proposal.mount_id !== null ? proposal.folder : template.folder;
+  const mountId = proposal.mount_id ?? template?.mountId ?? null;
+  const folder =
+    proposal.mount_id !== null ? proposal.folder : (template?.folder ?? null);
 
   if (mountId === null) {
     return {
       ok: false,
-      reason:
-        `Neither this proposal nor the “${template.name}” template names a ` +
-        "folder to work in, so there is nothing to start it against.",
+      reason: template
+        ? `Neither this proposal nor the “${template.name}” template names a ` +
+          "folder to work in, so there is nothing to start it against."
+        : "This proposal names no folder to work in, and it names no template " +
+          "to take one from.",
     };
   }
+
+  const guards: RunGuards = template
+    ? {
+        permissionMode: template.permissionMode,
+        isolate: template.isolate,
+        budget: template.budget,
+      }
+    : defaults;
 
   return {
     ok: true,
     input: {
       folder: folder ?? "",
       mountId,
-      prompt: composeTask(template, task),
-      // Every one of these comes from the template. See the note above.
-      permissionMode: template.permissionMode,
-      isolate: template.isolate,
-      budget: template.budget,
+      prompt: composeTask(basePrompt(proposal, template), task),
+      // Every one of these comes from the template or from settings, and none
+      // of them from the proposal. See the note above.
+      permissionMode: guards.permissionMode,
+      isolate: guards.isolate,
+      budget: guards.budget,
     },
   };
 }
 
 /**
+ * The standing instructions the task is appended to, or null for none.
+ *
+ * An override written by the chat wins over the template's own prompt, which
+ * reads backwards until you notice what a template is: a saved *form*, and the
+ * prompt field is the one field on it a person expects to edit before pressing
+ * start. The chat doing that for a run it is proposing is the same edit, and
+ * the alternative — restating the standing instructions inside the task — puts
+ * the same text in the run either way with nothing recording that it happened.
+ */
+function basePrompt(
+  proposal: Pick<ChatProposalRow, "prompt_override">,
+  template: RunTemplate | null,
+): string | null {
+  const override = proposal.prompt_override?.trim();
+  if (override) return override;
+  return template?.prompt ?? null;
+}
+
+/**
  * The prompt a proposed run is started with.
  *
- * The template's prompt leads, because that is the part the operator wrote and
- * tested; the chat's task follows it as the specific instance. Kept in this
+ * The standing instructions lead, because that is the part written to hold for
+ * every run; the chat's task follows as the specific instance. Kept in this
  * order and separated by a heading rather than interleaved, so an operator
- * reading the run afterwards can see which half came from a model.
+ * reading the run afterwards can see which half came from a model. With no
+ * template and no override there is nothing to lead with, and the task is the
+ * whole prompt rather than a heading with nothing above it.
  */
-export function composeTask(template: RunTemplate, task: string): string {
-  return `${template.prompt.trim()}\n\n## This run specifically\n\n${task.trim()}`;
+export function composeTask(base: string | null, task: string): string {
+  const lead = base?.trim();
+  return lead
+    ? `${lead}\n\n## This run specifically\n\n${task.trim()}`
+    : task.trim();
 }
 
 /**
@@ -388,7 +451,11 @@ export function approveProposal(id: string): ApprovalOutcome {
   const proposal = getProposal(id);
   if (!proposal) return { ok: false, reason: "No such proposal." };
 
-  const plan = planProposal(proposal, getTemplate(proposal.template_id));
+  const plan = planProposal(
+    proposal,
+    proposal.template_id ? getTemplate(proposal.template_id) : null,
+    chatGuards(),
+  );
   if (!plan.ok) {
     markProposal(id, "failed", { error: plan.reason });
     return { ok: false, reason: plan.reason };
@@ -843,6 +910,11 @@ const ALLOWED_TOOLS = [
   "mcp__uf__list_folders",
   "mcp__uf__list_templates",
   "mcp__uf__list_runs",
+  "mcp__uf__get_run",
+  "mcp__uf__get_run_diff",
+  "mcp__uf__get_usage",
+  "mcp__uf__list_proposals",
+  "mcp__uf__save_template",
   "mcp__uf__propose_run",
   "Read",
   "Glob",
@@ -851,9 +923,38 @@ const ALLOWED_TOOLS = [
   "Bash(gh issue view:*)",
   "Bash(gh pr list:*)",
   "Bash(gh pr view:*)",
+  "Bash(gh pr diff:*)",
+  "Bash(gh pr checks:*)",
+  "Bash(gh run list:*)",
+  "Bash(gh run view:*)",
   "Bash(gh search issues:*)",
+  "Bash(gh search prs:*)",
   "Bash(gh label list:*)",
   "Bash(gh repo view:*)",
+  // Enumerated one subcommand at a time for the reason `gh` is: `git` as a
+  // prefix would admit `git commit` and `git push` into a list that reads as
+  // read-only. These three answer "who has touched this lately", which is the
+  // question that decides whether work is worth proposing at all.
+  //
+  // `git diff` and `git show` are deliberately absent: rendering a patch runs
+  // `diff.external` and `.gitattributes` textconv drivers, which are commands
+  // the repository configures and git obeys — the same execution every git call
+  // in this app passes `--no-ext-diff --no-textconv` to avoid. The diff a
+  // proposal is actually about is available scrubbed, as `get_run_diff`.
+  //
+  // This does not make the list airtight — `git log -p` renders patches too —
+  // and that is worth stating rather than implying. What bounds it is that both
+  // drivers have to be named in the local repository's config, which a clone
+  // does not carry: reaching them needs a repository someone already edited on
+  // this host.
+  "Bash(git log:*)",
+  "Bash(git status:*)",
+  "Bash(git branch:*)",
+  // Not decoration: the child's cwd is the first mount, and a `git` subcommand
+  // is only allowed by the entries above under its own name — `git -C <path>
+  // log` matches none of them. `cd <folder> && git log` is what is left, and
+  // each half of that is matched separately.
+  "Bash(cd:*)",
 ];
 
 /**
@@ -876,27 +977,48 @@ function systemPrompt(): string {
     "Claude Code agents against folders on this machine. You are talking to its",
     "operator in a chat panel.",
     "",
-    "You cannot start a run. The only thing you can do is call propose_run,",
-    "which records a proposal the operator then approves or rejects by hand.",
-    "Say so plainly rather than implying work has started.",
+    "You cannot start, stop or resume a run. The only thing you can do is call",
+    "propose_run, which records a proposal the operator then approves or rejects",
+    "by hand. Say so plainly rather than implying work has started.",
     "",
-    "A proposal names a template and a task. The template supplies every guard —",
-    "the budget, the work-cycle limit, the permission mode, whether the run gets",
-    "its own checkout — and you cannot set or change any of them. If no template",
-    "fits what is being asked, say that instead of proposing against a wrong one;",
-    "the operator saves templates from the new-run form.",
+    "What decides what an agent may do — the budget, the work-cycle limit, the",
+    "permission mode, whether it works in its own checkout — is never yours to",
+    "set. It comes from the template a proposal names, or, when it names none,",
+    "from the operator's default guard set in Settings. What is yours is the",
+    "*work*: which folder, which task, and the prompt the agent is given.",
     "",
-    "Working method:",
-    "- Call list_templates and list_folders before proposing anything. Folder",
-    "  paths must come from list_folders; do not invent one.",
-    "- list_folders gives a GitHub `repo` for repositories it could identify.",
-    "  Use it as `gh issue list --repo owner/name`. If a repository has no repo",
-    "  field, say you could not identify it rather than guessing a name.",
-    "- One proposal per unit of work. Give each a short, specific title.",
-    "- The task text is the whole brief the agent gets besides the template's own",
-    "  prompt. Include the issue number, the URL and what done looks like.",
-    "- Check list_runs before proposing: work already running against a folder is",
-    "  worth mentioning rather than duplicating.",
+    "Reading the state of things:",
+    "- list_folders: the mounts and their project folders, which runs are already",
+    "  working there, and a GitHub `repo` for repositories it could identify.",
+    "  Folder paths must come from here; do not invent one. No repo field means",
+    "  say you could not identify it rather than guessing a name. A folder on",
+    "  disk is <mount path>/<folder>: use that to Read or Grep it, and",
+    "  `cd <that> && git log …` to see who has touched it lately.",
+    "- list_runs, then get_run for one of them: status, spend, how it ended, its",
+    "  recent log and what it changed. get_run_diff gives the patch itself.",
+    "  Check these before proposing — work already in flight against a folder is",
+    "  worth mentioning rather than duplicating, and a run that failed is worth",
+    "  reading before proposing the same thing again.",
+    "- get_usage: how much of the 5-hour and weekly windows is gone. If a window",
+    "  is nearly spent, say so — approving ten runs into a full window means ten",
+    "  runs that stop on their first guard check.",
+    "- list_proposals: what is already waiting for the operator in this chat.",
+    "",
+    "Proposing:",
+    "- One proposal per unit of work, with a short specific title.",
+    "- The task text is the whole brief the agent gets. Include the issue number,",
+    "  the URL and what done looks like. It is read by an agent that cannot ask",
+    "  you a follow-up question.",
+    "- templateId is optional. Name one when a saved template fits — its prompt",
+    "  is instructions the operator wrote and tested. Omit it for one-off work",
+    "  and the run uses the default guard set; say which you did.",
+    "- promptOverride replaces the template's prompt for that one run when it",
+    "  does not fit. Use it rather than contradicting the template inside the",
+    "  task, and say that you rewrote it.",
+    "- save_template writes a template's name and prompt back for reuse. It",
+    "  cannot touch guards: creating one takes the default guard set, and",
+    "  updating one keeps the guards it already has. Tell the operator to adjust",
+    "  those on the new-run form if they matter.",
     "",
     "Be brief. When you have proposed, reply with a short list of what you",
     "proposed and what you deliberately left out. The proposals appear in the",

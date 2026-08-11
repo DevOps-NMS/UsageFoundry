@@ -543,31 +543,48 @@ can read your issues and propose a run for each one — and then stops, because
 proposing and starting are deliberately different things here.
 
 Ask it something like *"check the open bugs on acme/api and propose a run for
-each one that has a reproduction"*. It will list your templates, list your
-folders, run `gh issue list`, and write one proposal per issue into the panel
-beside the conversation. Nothing is running at that point. You tick the ones you
-want and press Approve, and those become real runs — queued behind whatever is
-already working, under the concurrency limit you already set.
+each one that has a reproduction"*. It will list your folders, run `gh issue
+list`, and write one proposal per issue into the panel beside the conversation.
+Nothing is running at that point. You tick the ones you want and press Approve,
+and those become real runs — queued behind whatever is already working, under
+the concurrency limit you already set.
 
 **A proposal carries a task, not a policy.** This is the whole reason the feature
 is safe to have. Every guard a proposed run will start under — its budget, its
 work-cycle limit, its permission mode, whether it gets its own checkout — comes
-from a **template** you wrote and saved from the new-run form. The chat picks
-which template applies and what the task text says; it cannot set, raise or
-invent a single guard, and there is no field on a proposal that would let it. If
-no template fits, it is supposed to say so rather than propose against a wrong
-one. With no templates saved at all, it can propose nothing.
+from something *you* wrote: the **template** the proposal names, or, when it
+names none, the **default guard set** under Settings → Run defaults. The chat
+picks which of those applies and what the work is; it cannot set, raise or
+invent a single guard, and there is no field on a proposal that would let it.
+Every proposal card says which guard set it will run under, spelling the
+untemplated one out in full — an approval gate that does not show what is being
+approved is a gate that gets clicked through.
+
+**The prompt is the exception, deliberately.** Prompt text is the half of a run
+a model may write. So a proposal can rewrite the template's prompt for that one
+run when the template nearly fits — the card marks it — and `save_template` can
+write a prompt back for reuse. Neither can touch a guard: a new template takes
+your default guard set, and an existing one keeps the guards it already has.
 
 **The approval is per batch and there is no way to turn it off.** Not a setting
 left switched on by default — there is no setting. The route takes the explicit
 list of proposals the page was showing when you clicked, so anything the chat
 added in between is not swept into a decision you did not see.
 
-**What the chat itself may do.** It runs with an allowlist: this app's four
-tools, `Read`/`Glob`/`Grep`, and read-only `gh` subcommands. It has no `Write`
-and no `Edit`, `gh api` is excluded because it can POST, and anything not on the
-list is refused and reported in the thread rather than swallowed — a chat that
-could not run `gh` should not read as a chat that found no issues.
+**What the chat itself may do.** It runs with an allowlist: this app's own tools,
+`Read`/`Glob`/`Grep`, read-only `gh` subcommands, and `git log`/`status`/`branch`.
+It has no `Write` and no `Edit`, `gh api` is excluded because it can POST, and
+`git diff`/`git show` are excluded because rendering a patch runs diff drivers
+the repository configures — the app's own scrubbed diff is a tool instead.
+Anything not on the list is refused and reported in the thread rather than
+swallowed: a chat that could not run `gh` should not read as a chat that found no
+issues.
+
+**It can look before it proposes.** `get_usage` gives it the 5-hour and weekly
+windows, so it can tell you that approving ten runs into a nearly-spent window
+means ten runs that stop on their first guard check. `get_run` and `get_run_diff`
+give it a finished run's log, spend and patch, so "why did that one fail, and
+what should we do about it" is a question it can actually answer.
 
 **It costs money, and the cost is shown apart.** A chat turn spends against the
 same 5-hour window as everything else. It is refused outright when that window is
@@ -1127,6 +1144,22 @@ through before trusting this unattended:
   `MAX_PENDING_PROPOSALS` (25) and `MAX_REMOTES_READ` (25) were reasoned about
   rather than hit. What a chat does when it reaches the proposal cap mid-answer —
   whether it reports the refusal usefully or simply stops — has not been seen.
+- **The chat's inspection tools, and proposals with no template.** `get_run`,
+  `get_run_diff`, `get_usage`, `list_proposals` and `save_template` answer from
+  the same functions the pages already use, and they typecheck — but no real CLI
+  has called one. Two things to watch. Whether a turn asked about three runs
+  stays inside `chatTurnBudgetUSD` now that a single tool call can return 60KB
+  of patch; and whether the untemplated path gets used where a template would
+  have been better, since it is the branch with no form behind it and its guard
+  set is the one thing on a proposal card an operator has to *read* rather than
+  recognise.
+- **The `chat_proposals` rebuild on a database that predates it.** Dropping the
+  NOT NULL from `template_id` needs a table rebuild, which was exercised against
+  SQLite directly — rows preserved, index recreated, foreign key and its cascade
+  intact, a null `template_id` accepted afterwards — but not through
+  better-sqlite3 in a running container, because the environment it was written
+  in has a native module built for another platform. The first `docker compose
+  up` on an existing `.data` is the test.
 - **The derived 5-hour boundary against a live `/usage` reading.** Removing the
   hour rounding was argued from the CLI's own header handling and rendering, not
   from watching the two side by side, and what is left over — the opening turn's

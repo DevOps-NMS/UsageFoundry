@@ -15,6 +15,39 @@ import { DATA_DIR, DB_PATH } from "./config";
 
 const globalDb = globalThis as unknown as { __ufDb?: Database.Database };
 
+/**
+ * Written once and used twice — by `migrate()` and by the rebuild below, which
+ * exists because `template_id` was NOT NULL before a proposal could go without
+ * a template. Two copies of a CREATE statement drift, and the copy that drifts
+ * is the one only an upgraded install ever runs.
+ */
+const CHAT_PROPOSALS_TABLE = `
+    CREATE TABLE IF NOT EXISTS chat_proposals (
+      id          TEXT PRIMARY KEY,
+      chat_id     TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      created_at  INTEGER NOT NULL,
+      -- The template supplying every guard, or null for the untemplated guard
+      -- set in settings. Not a foreign key: a template deleted between proposal
+      -- and approval must fail the approval with a sentence, not vanish the row
+      -- the operator is looking at.
+      template_id TEXT,
+      title       TEXT NOT NULL,
+      task        TEXT NOT NULL,
+      -- The prompt the task is appended to, when the chat wrote one for this
+      -- run rather than taking the template's. Prompt text only: it is the half
+      -- of a run a model may write, which is exactly what guards are not.
+      prompt_override TEXT,
+      -- Null means "whatever the template says". The empty string is a real
+      -- answer here as it is on a template — the mount root.
+      mount_id    TEXT,
+      folder      TEXT,
+      -- 'pending' | 'approved' | 'rejected' | 'failed'
+      status      TEXT NOT NULL DEFAULT 'pending',
+      run_id      TEXT,
+      decided_at  INTEGER,
+      error       TEXT
+    );`;
+
 function open(): Database.Database {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const db = new Database(DB_PATH);
@@ -231,30 +264,12 @@ function migrate(db: Database.Database) {
     -- operator approves it, it is form input.
     --
     -- What it deliberately does *not* hold: guards, a permission mode, a model.
-    -- Those come from the template it names, at approval time. The chat picks
-    -- what work to do; the template decides what an agent may do. Storing a
-    -- budget here would make the chat the second route to --permission-mode
-    -- that reopenRun refuses to become the third.
-    CREATE TABLE IF NOT EXISTS chat_proposals (
-      id          TEXT PRIMARY KEY,
-      chat_id     TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
-      created_at  INTEGER NOT NULL,
-      -- The template supplying every guard. Not a foreign key: a template
-      -- deleted between proposal and approval must fail the approval with a
-      -- sentence, not vanish the row the operator is looking at.
-      template_id TEXT NOT NULL,
-      title       TEXT NOT NULL,
-      task        TEXT NOT NULL,
-      -- Null means "whatever the template says". The empty string is a real
-      -- answer here as it is on a template — the mount root.
-      mount_id    TEXT,
-      folder      TEXT,
-      -- 'pending' | 'approved' | 'rejected' | 'failed'
-      status      TEXT NOT NULL DEFAULT 'pending',
-      run_id      TEXT,
-      decided_at  INTEGER,
-      error       TEXT
-    );
+    -- Those come from the template it names, or from settings.chatDefaultGuards
+    -- when it names none, and either way from something a person wrote. The
+    -- chat picks what work to do; a person decides what an agent may do.
+    -- Storing a budget here would make the chat the second route to
+    -- --permission-mode that reopenRun refuses to become the third.
+    ${CHAT_PROPOSALS_TABLE}
 
     CREATE INDEX IF NOT EXISTS idx_run_events_run
       ON run_events(run_id, id);
@@ -348,6 +363,50 @@ function migrate(db: Database.Database) {
   // is the resolution rather than everything the merge brought across.
   addColumn(db, "run_reviews", "resolved_commit", "TEXT");
   addColumn(db, "run_reviews", "resolved_paths", "TEXT");
+
+  // A proposal may now name no template at all, which the column above was
+  // declared NOT NULL to forbid. SQLite cannot relax that with ALTER, so the
+  // table is rebuilt — once, only where the old shape is still there.
+  relaxProposalTemplate(db);
+
+  // The prompt the chat wrote for one specific run. Added rather than rebuilt,
+  // because a nullable column is the one change ALTER does support.
+  addColumn(db, "chat_proposals", "prompt_override", "TEXT");
+}
+
+/**
+ * Drop the NOT NULL from `chat_proposals.template_id`, preserving the rows.
+ *
+ * The alternative — dropping the table and letting it be recreated — would take
+ * the decided proposals with it, which are the record of what the operator
+ * approved and what came of it. A rebuild costs fifteen lines and keeps that.
+ *
+ * The index is recreated at the end rather than before: renaming a table brings
+ * its indexes along under their own names, so `CREATE INDEX` would collide with
+ * the copy still attached to the old table until that table is dropped.
+ */
+function relaxProposalTemplate(db: Database.Database) {
+  const column = (
+    db.prepare("PRAGMA table_info(chat_proposals)").all() as {
+      name: string;
+      notnull: number;
+    }[]
+  ).find((c) => c.name === "template_id");
+  if (!column || column.notnull === 0) return;
+
+  db.exec(`
+    ALTER TABLE chat_proposals RENAME TO chat_proposals_old;
+    ${CHAT_PROPOSALS_TABLE}
+    INSERT INTO chat_proposals
+      (id, chat_id, created_at, template_id, title, task, mount_id, folder,
+       status, run_id, decided_at, error)
+    SELECT id, chat_id, created_at, template_id, title, task, mount_id, folder,
+           status, run_id, decided_at, error
+      FROM chat_proposals_old;
+    DROP TABLE chat_proposals_old;
+    CREATE INDEX IF NOT EXISTS idx_chat_proposals_chat
+      ON chat_proposals(chat_id, created_at);
+  `);
 }
 
 function addColumn(

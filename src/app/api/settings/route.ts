@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
-import { getSettings, saveSettings, type Settings } from "@/lib/settings";
+import {
+  getSettings,
+  PERMISSION_MODES,
+  saveSettings,
+  type Settings,
+} from "@/lib/settings";
+import { normalizePolicy } from "@/lib/budget";
 import {
   hasAdminKey,
   hasGithubToken,
@@ -176,6 +182,42 @@ export async function PUT(req: Request) {
 
   if ("killProcessGroup" in body) {
     patch.killProcessGroup = Boolean(body.killProcessGroup);
+  }
+
+  if ("chatDefaultGuards" in body) {
+    const g = (body.chatDefaultGuards ?? {}) as Record<string, unknown>;
+    const rawBudget = (g.budget ?? {}) as Record<string, unknown>;
+    const mode = String(g.permissionMode ?? "");
+    if (!(PERMISSION_MODES as readonly string[]).includes(mode)) {
+      return NextResponse.json(
+        { error: `Unknown permission mode: ${mode}` },
+        { status: 400 },
+      );
+    }
+
+    const budget = normalizePolicy(rawBudget);
+    // The same pair `POST /api/runs` and `normalizeTemplateInput` refuse, and
+    // refused here for the third time rather than coerced: a proposal approved
+    // under a guard set with no terminus would be admitted and then refused by
+    // `evaluateBudget` seconds later, with the row flickering queued → stopped
+    // and nothing said about what to change.
+    if (budget.maxIterations === null && budget.maxDurationMinutes === null) {
+      return NextResponse.json(
+        {
+          error:
+            "A guard set with no work-cycle limit needs a time limit. Wall " +
+            "clock is the only limit that keeps advancing whether or not the " +
+            "agent reports what it spent.",
+        },
+        { status: 400 },
+      );
+    }
+
+    patch.chatDefaultGuards = {
+      permissionMode: mode as Settings["defaultPermissionMode"],
+      isolate: g.isolate !== false,
+      budget,
+    };
   }
 
   if ("chatTurnBudgetUSD" in body) {
