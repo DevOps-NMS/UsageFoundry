@@ -240,6 +240,36 @@ export interface RunDTO {
   queuePosition?: number;
 }
 
+/**
+ * Long enough for a sentence-shaped template name, short enough that the picker
+ * stays one line. Here rather than in `templates.ts` so the form can bound the
+ * input without a client component importing a module that opens SQLite.
+ */
+export const MAX_TEMPLATE_NAME = 80;
+
+/**
+ * A saved task prompt and the guards to run it under.
+ *
+ * `permissionMode` is top-level here rather than folded into `budget` the way
+ * `RunDTO` folds it: on a run that key is a historical record of what was used,
+ * on a template it is a setting the operator is choosing again every time they
+ * apply it, and the UI has to warn about it separately.
+ */
+export interface RunTemplateDTO {
+  id: string;
+  name: string;
+  prompt: string;
+  /** Null means the template does not name a folder — the form asks for one. */
+  mountId: string | null;
+  /** Path within the mount. `""` is the mount root, and is not null. */
+  folder: string | null;
+  isolate: boolean;
+  permissionMode: string;
+  budget: BudgetPolicyDTO;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface RunEventDTO {
   id?: number;
   runId: string;

@@ -1,17 +1,20 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { MAX_TEMPLATE_NAME } from "@/lib/apiTypes";
 import type {
+  BudgetPolicyDTO,
   FoldersResponse,
   RunDTO,
+  RunTemplateDTO,
   SettingsDTO,
   UsageResponse,
   WorkspaceFolderDTO,
   WorkspaceMountDTO,
 } from "@/lib/apiTypes";
-import { fmtPct } from "@/lib/format";
+import { fmtPct, fmtUSD, pctField } from "@/lib/format";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import {
@@ -20,9 +23,43 @@ import {
   LimitField,
   Select,
   Textarea,
+  Toggle,
 } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
+
+/** Everything a template or an earlier run supplies to this form. */
+interface FormSeed {
+  mountId: string | null;
+  folder: string | null;
+  prompt: string;
+  isolate: boolean;
+  permissionMode: string;
+  budget: BudgetPolicyDTO;
+}
+
+/** One line describing what a template will do, for the picker's hint. */
+function describeTemplate(t: RunTemplateDTO): string {
+  const parts: string[] = [
+    t.budget.maxIterations === null
+      ? "no cycle limit"
+      : `${t.budget.maxIterations} ${t.budget.maxIterations === 1 ? "cycle" : "cycles"}`,
+  ];
+  if (t.budget.maxRunCostUSD !== null)
+    parts.push(`up to ${fmtUSD(t.budget.maxRunCostUSD)}`);
+  if (t.budget.maxDurationMinutes !== null)
+    parts.push(`${t.budget.maxDurationMinutes} min`);
+  if (t.budget.enforcement !== "between-cycles")
+    parts.push(
+      t.budget.enforcement === "live-resume"
+        ? "stops cycles in flight, carries on next window"
+        : "stops cycles in flight",
+    );
+  if (t.permissionMode !== "acceptEdits") parts.push(t.permissionMode);
+  if (t.budget.continueAfterDone) parts.push("ignores DONE");
+  parts.push(t.folder === null ? "asks for a folder" : t.folder || "whole workspace");
+  return parts.join(" · ");
+}
 
 export default function NewRunPage() {
   const router = useRouter();
@@ -58,7 +95,37 @@ export default function NewRunPage() {
   >("between-cycles");
   const [continueAfterDone, setContinueAfterDone] = useState(false);
 
+  // Templates. `templateName` is the save box rather than a mirror of the
+  // picker: typing a name that already exists is how an edit is expressed, and
+  // the save button says which of the two it will do.
+  const [templates, setTemplates] = useState<RunTemplateDTO[]>([]);
+  const [templateId, setTemplateId] = useState("");
+  const [templateName, setTemplateName] = useState("");
+  const [rememberFolder, setRememberFolder] = useState(true);
+  const [templateNote, setTemplateNote] = useState<string | null>(null);
+  const [templateError, setTemplateError] = useState<string | null>(null);
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [armedDelete, setArmedDelete] = useState(false);
+  // Whether the two settings that decide what an unattended agent may do came
+  // from a template rather than from this operator, just now. Cleared the
+  // moment either control is touched — after that it is their choice, and a
+  // banner saying otherwise would be wrong.
+  const [carriedEnforcement, setCarriedEnforcement] = useState(false);
+  const [carriedPermission, setCarriedPermission] = useState(false);
+
+  // Set before any fetch is issued, so the loaders below can tell "nobody has
+  // chosen yet" from "a seed is on its way". Without it the mount default and
+  // the settings default race a seed that arrives later and win or lose
+  // depending on the connection.
+  const seeded = useRef(false);
+
   useEffect(() => {
+    // Read from `window` rather than `useSearchParams`, which would force this
+    // page behind a Suspense boundary purely to read one optional parameter.
+    // Synchronous, so the guard below is in place before anything is fetched.
+    const seedRunId = new URLSearchParams(window.location.search).get("from");
+    if (seedRunId) seeded.current = true;
+
     fetch("/api/folders", { cache: "no-store" })
       .then((r) => r.json())
       .then((d: FoldersResponse) => {
@@ -71,7 +138,7 @@ export default function NewRunPage() {
           d.mounts?.find((m) => m.available && m.folderCount > 0) ??
           d.mounts?.find((m) => m.available) ??
           d.mounts?.[0];
-        if (first) setMountId(first.id);
+        if (first && !seeded.current) setMountId(first.id);
       })
       .catch(() => setFoldersLoaded(true));
 
@@ -79,7 +146,7 @@ export default function NewRunPage() {
       .then((r) => r.json())
       .then((d) => {
         setSettings(d.settings);
-        if (d.settings?.defaultPermissionMode)
+        if (d.settings?.defaultPermissionMode && !seeded.current)
           setPermissionMode(d.settings.defaultPermissionMode);
       })
       .catch(() => void 0);
@@ -88,6 +155,42 @@ export default function NewRunPage() {
       .then((r) => r.json())
       .then(setUsage)
       .catch(() => void 0);
+
+    fetch("/api/templates", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => setTemplates(d.templates ?? []))
+      .catch(() => void 0);
+
+    if (seedRunId) {
+      fetch(`/api/runs/${seedRunId}`, { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          const run = d?.run as RunDTO | undefined;
+          if (!run) return;
+          // A run stores its folder absolute; `relPath` is the same folder as
+          // the picker names it. A run whose mount has since gone gives null,
+          // and then the folder cannot be carried at all.
+          //
+          // `isolation` is what the run *did*, not what it asked for — a run
+          // that requested a worktree and got none because the folder was not
+          // a repository comes back as "work in the folder itself". Copying the
+          // outcome is the honest reading: it is the arrangement that produced
+          // the result being copied.
+          applySeed(
+            {
+              mountId: run.mountId ?? null,
+              folder: run.mountId ? (run.relPath ?? "") : null,
+              prompt: run.prompt,
+              isolate: run.isolation === "worktree",
+              permissionMode: run.budget.permissionMode ?? "acceptEdits",
+              budget: run.budget,
+            },
+            `Copied from run ${run.id.slice(0, 8)}`,
+          );
+        })
+        .catch(() => void 0);
+    }
+    // Runs once. `applySeed` only calls setters, all of which are stable.
   }, []);
 
   const activeMount = useMemo(
@@ -102,6 +205,16 @@ export default function NewRunPage() {
     () => folders.find((f) => f.path === folder) ?? null,
     [folders, folder],
   );
+  const selectedTemplate = useMemo(
+    () => templates.find((t) => t.id === templateId) ?? null,
+    [templates, templateId],
+  );
+  // Case-insensitive, because the unique index on the name is. Without it the
+  // button would offer to create a template the server then refuses.
+  const nameTaken = useMemo(() => {
+    const name = templateName.trim().toLowerCase();
+    return name !== "" && templates.some((t) => t.name.toLowerCase() === name);
+  }, [templates, templateName]);
 
   // Isolation needs a repository to branch from. Offering the choice on a plain
   // folder would promise parallelism the folder cannot give.
@@ -132,6 +245,169 @@ export default function NewRunPage() {
     setFolder("");
   }
 
+  /**
+   * The budget as the wire wants it. Shared by starting a run and saving a
+   * template so the two cannot describe the same form differently — a template
+   * that normalises even slightly unlike the run it was saved from would start
+   * something other than what was tested.
+   */
+  function currentBudget() {
+    return {
+      // null is the wire form of "no limit" for all four of these —
+      // normalizePolicy maps it to an unset cap rather than to a default.
+      maxIterations: iterationsCapped ? maxIterations : null,
+      maxRunCostUSD: costLimited ? maxRunCostUSD : null,
+      maxDurationMinutes: timeLimited ? maxDurationMinutes : null,
+      // Sent as a 0–1 fraction rather than the 0–100 the field shows.
+      // normalizePolicy's frac() reads a bare 1 as 100%, so a user typing
+      // "1" into a field labelled (%) would otherwise get no guard at all.
+      maxWeeklyFraction: maxWeeklyFraction
+        ? Number(maxWeeklyFraction) / 100
+        : null,
+      maxSessionFraction: maxSessionFraction
+        ? Number(maxSessionFraction) / 100
+        : null,
+      enforcement,
+      continueAfterDone,
+    };
+  }
+
+  /**
+   * Fill the form from a template or an earlier run.
+   *
+   * A limit that is off keeps whatever number is already in its box, so
+   * switching it back on offers a sensible figure rather than an empty field
+   * that reads as zero.
+   */
+  function applySeed(seed: FormSeed, note: string) {
+    if (seed.mountId) {
+      setMountId(seed.mountId);
+      setFolder(seed.folder ?? "");
+    }
+    // A seed with no mount leaves the picker alone: it is saying "ask me",
+    // and moving the selection would be answering on the operator's behalf.
+    setPrompt(seed.prompt);
+    setIsolate(seed.isolate);
+    setPermissionMode(seed.permissionMode);
+
+    const b = seed.budget;
+    setIterationsCapped(b.maxIterations !== null);
+    if (b.maxIterations !== null) setMaxIterations(String(b.maxIterations));
+    setCostLimited(b.maxRunCostUSD !== null);
+    if (b.maxRunCostUSD !== null) setMaxRunCostUSD(String(b.maxRunCostUSD));
+    setTimeLimited(b.maxDurationMinutes !== null);
+    if (b.maxDurationMinutes !== null)
+      setMaxDurationMinutes(String(b.maxDurationMinutes));
+    setMaxSessionFraction(pctField(b.maxSessionFraction));
+    setMaxWeeklyFraction(pctField(b.maxWeeklyFraction));
+    setEnforcement(b.enforcement);
+    setContinueAfterDone(b.continueAfterDone === true);
+
+    // The two that decide what an unattended agent may do. Applied, but
+    // announced — see the notices under the template card.
+    setCarriedEnforcement(b.enforcement !== "between-cycles");
+    setCarriedPermission(seed.permissionMode === "bypassPermissions");
+
+    setTemplateNote(note);
+    setTemplateError(null);
+    setStarted(null);
+    setFormError(null);
+  }
+
+  function pickTemplate(id: string) {
+    setTemplateId(id);
+    setArmedDelete(false);
+    const t = templates.find((x) => x.id === id);
+    if (!t) {
+      setTemplateNote(null);
+      setTemplateError(null);
+      setCarriedEnforcement(false);
+      setCarriedPermission(false);
+      return;
+    }
+    applySeed(t, `Loaded “${t.name}”`);
+    setTemplateName(t.name);
+    setRememberFolder(t.folder !== null);
+  }
+
+  async function saveTemplate() {
+    const name = templateName.trim();
+    // Typing an existing name is how an edit is asked for. Matched
+    // case-insensitively because the unique index is, so the alternative is a
+    // "already exists" refusal on a name that looks like the one in the box.
+    const existing = templates.find(
+      (t) => t.name.toLowerCase() === name.toLowerCase(),
+    );
+    setSavingTemplate(true);
+    setTemplateError(null);
+    setTemplateNote(null);
+    try {
+      const res = await fetch(
+        existing ? `/api/templates/${existing.id}` : "/api/templates",
+        {
+          method: existing ? "PUT" : "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name,
+            prompt,
+            // Both or neither: a path means nothing without the mount it is
+            // relative to. Off means the template asks for a folder each time.
+            mountId: rememberFolder ? mountId : null,
+            folder: rememberFolder ? folder : null,
+            // Stored raw rather than gated through `canIsolate`, which is about
+            // the folder selected right now. The run form re-gates it against
+            // whatever folder the template is eventually used on.
+            isolate,
+            permissionMode,
+            budget: currentBudget(),
+          }),
+        },
+      );
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? "Failed to save the template");
+      const saved = json.template as RunTemplateDTO;
+      setTemplates((prev) =>
+        [...prev.filter((t) => t.id !== saved.id), saved].sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+        ),
+      );
+      setTemplateId(saved.id);
+      setTemplateNote(
+        existing ? `Updated “${saved.name}”` : `Saved “${saved.name}”`,
+      );
+    } catch (err) {
+      setTemplateError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingTemplate(false);
+    }
+  }
+
+  async function removeTemplate() {
+    const t = templates.find((x) => x.id === templateId);
+    if (!t) return;
+    // Two clicks rather than a dialog: the prompt inside a template is the
+    // thing this feature exists to stop people losing, and the rest of the app
+    // arms nothing. This one is worth arming.
+    if (!armedDelete) {
+      setArmedDelete(true);
+      return;
+    }
+    setArmedDelete(false);
+    setTemplateError(null);
+    try {
+      const res = await fetch(`/api/templates/${t.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error ?? "Failed to delete the template");
+      }
+      setTemplates((prev) => prev.filter((x) => x.id !== t.id));
+      setTemplateId("");
+      setTemplateNote(`Deleted “${t.name}”. The form still holds its settings.`);
+    } catch (err) {
+      setTemplateError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
@@ -147,24 +423,7 @@ export default function NewRunPage() {
           prompt,
           permissionMode,
           isolate: canIsolate ? isolate : false,
-          budget: {
-            // null is the wire form of "no limit" for all four of these —
-            // normalizePolicy maps it to an unset cap rather than to a default.
-            maxIterations: iterationsCapped ? maxIterations : null,
-            maxRunCostUSD: costLimited ? maxRunCostUSD : null,
-            maxDurationMinutes: timeLimited ? maxDurationMinutes : null,
-            // Sent as a 0–1 fraction rather than the 0–100 the field shows.
-            // normalizePolicy's frac() reads a bare 1 as 100%, so a user typing
-            // "1" into a field labelled (%) would otherwise get no guard at all.
-            maxWeeklyFraction: maxWeeklyFraction
-              ? Number(maxWeeklyFraction) / 100
-              : null,
-            maxSessionFraction: maxSessionFraction
-              ? Number(maxSessionFraction) / 100
-              : null,
-            enforcement,
-            continueAfterDone,
-          },
+          budget: currentBudget(),
         }),
       });
       const json = await res.json();
@@ -201,6 +460,168 @@ export default function NewRunPage() {
       )}
 
       <form onSubmit={submit}>
+        <Card className="mb-4" emphasis="quiet">
+          <CardTitle>Templates</CardTitle>
+
+          {templates.length > 0 && (
+            <Field label="Start from a saved template" htmlFor="tpl">
+              <Select
+                id="tpl"
+                value={templateId}
+                onChange={(e) => pickTemplate(e.target.value)}
+              >
+                <option value="">— start from scratch —</option>
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </Select>
+              <Hint>
+                {selectedTemplate
+                  ? describeTemplate(selectedTemplate)
+                  : "Loading one fills in everything below. Nothing starts until you press Start run."}
+              </Hint>
+            </Field>
+          )}
+
+          <Field label="Save this form as a template" htmlFor="tpl-name">
+            <div className="flex items-center gap-2">
+              <Input
+                id="tpl-name"
+                className="min-w-0 flex-1"
+                value={templateName}
+                onChange={(e) => {
+                  setTemplateName(e.target.value);
+                  setArmedDelete(false);
+                }}
+                placeholder="Update dependencies and fix what breaks"
+                maxLength={MAX_TEMPLATE_NAME}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                className="shrink-0"
+                onClick={saveTemplate}
+                disabled={savingTemplate || !templateName.trim() || !prompt}
+              >
+                {savingTemplate
+                  ? "Saving…"
+                  : nameTaken
+                    ? "Update"
+                    : "Save"}
+              </Button>
+              {templateId && (
+                <Button
+                  type="button"
+                  variant={armedDelete ? "danger" : "ghost"}
+                  className="shrink-0"
+                  onClick={removeTemplate}
+                >
+                  {armedDelete ? "Really delete" : "Delete"}
+                </Button>
+              )}
+            </div>
+            <Hint>
+              {!prompt
+                ? "Write the task below first — the prompt is the part worth saving"
+                : nameTaken
+                  ? `Replaces the template already called “${templateName.trim()}”`
+                  : "Saves the task, the limits and how it behaves. Not the model — that stays a single global setting"}
+            </Hint>
+          </Field>
+
+          <Field className="mb-0">
+            <Toggle
+              id="tpl-folder"
+              checked={rememberFolder}
+              onChange={setRememberFolder}
+              label="Remember the workspace and folder chosen below"
+            />
+            <Hint>
+              {rememberFolder
+                ? "The template pre-selects that folder. Right for a task about one project"
+                : "The template asks for a folder each time. Right for a task that applies to any project"}
+            </Hint>
+          </Field>
+
+          {templateNote && (
+            <Hint className="mt-3">{templateNote}</Hint>
+          )}
+          {templateError && (
+            <Hint tone="danger" className="mt-3">
+              {templateError}
+            </Hint>
+          )}
+        </Card>
+
+        {/* Applying a template must not be the same as not choosing. These two
+            settings decide what an unattended agent is allowed to do, and both
+            are deliberately absent from Settings for that reason — there is no
+            `defaultEnforcement` precisely so that no single edit can turn every
+            run into a live-killing one. A template is a second way to inherit
+            that choice, so it is applied, named, and offered back. */}
+        {carriedEnforcement && (
+          <Notice tone="warn">
+            <strong>This carries a limit mode that cuts cycles short.</strong>{" "}
+            {enforcement === "live-resume"
+              ? "“Stop the cycle, carry on next window”"
+              : "“Stop the cycle in flight”"}{" "}
+            reads your limits mid-cycle and kills the agent when one trips, so
+            that cycle&rsquo;s work is thrown away. It is worth choosing again
+            rather than inheriting — there is no global default for it for the
+            same reason.
+            <ButtonRow className="mt-2.5">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => {
+                  setEnforcement("between-cycles");
+                  setCarriedEnforcement(false);
+                }}
+              >
+                Let the cycle finish instead
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setCarriedEnforcement(false)}
+              >
+                Keep it
+              </Button>
+            </ButtonRow>
+          </Notice>
+        )}
+
+        {carriedPermission && (
+          <Notice tone="danger">
+            <strong>
+              This carries <span className="mono">bypassPermissions</span>.
+            </strong>{" "}
+            The agent can run any command in the folder without asking. Only use
+            it on code and a container you are willing to have modified.
+            <ButtonRow className="mt-2.5">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => {
+                  setPermissionMode("acceptEdits");
+                  setCarriedPermission(false);
+                }}
+              >
+                Use acceptEdits instead
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setCarriedPermission(false)}
+              >
+                Keep it
+              </Button>
+            </ButtonRow>
+          </Notice>
+        )}
+
         <Card className="mb-4">
           <CardTitle>What to work on</CardTitle>
 
@@ -218,16 +639,29 @@ export default function NewRunPage() {
                 </option>
               ))}
             </Select>
-            <Hint>
+            {/* The stale-mount case is separate from the no-mounts case
+                because a template or an earlier run can name a workspace that
+                has since been removed from `.env`. Reported here rather than
+                left to `POST /api/runs`, which would refuse it correctly but
+                only after the operator pressed Start. */}
+            <Hint
+              tone={
+                !activeMount && foldersLoaded && mounts.length > 0
+                  ? "warn"
+                  : "neutral"
+              }
+            >
               {activeMount ? (
                 <>
                   Mounted at <span className="mono">{activeMount.path}</span>
                   {activeMount.error ? ` — ${activeMount.error}` : ""}
                 </>
-              ) : foldersLoaded ? (
+              ) : !foldersLoaded ? (
+                "Loading workspaces…"
+              ) : mounts.length === 0 ? (
                 "No workspace mounts are configured"
               ) : (
-                "Loading workspaces…"
+                "That workspace is not configured any more — pick one above"
               )}
             </Hint>
           </Field>
@@ -477,7 +911,12 @@ export default function NewRunPage() {
             <Select
               id="perm"
               value={permissionMode}
-              onChange={(e) => setPermissionMode(e.target.value)}
+              onChange={(e) => {
+                setPermissionMode(e.target.value);
+                // Chosen here, so it is no longer inherited — the banner above
+                // would be describing a decision that is now the operator's.
+                setCarriedPermission(false);
+              }}
             >
               <option value="acceptEdits">
                 acceptEdits — auto-accept file edits
@@ -509,9 +948,10 @@ export default function NewRunPage() {
             <Select
               id="enf"
               value={enforcement}
-              onChange={(e) =>
-                setEnforcement(e.target.value as typeof enforcement)
-              }
+              onChange={(e) => {
+                setEnforcement(e.target.value as typeof enforcement);
+                setCarriedEnforcement(false);
+              }}
             >
               <option value="between-cycles">
                 Let the cycle finish, then stop
