@@ -301,7 +301,10 @@ function List({
   keyBase: string;
   nested?: boolean;
 }) {
-  const nodes = nest(items);
+  // Only the outer call nests. `indentDepth` yields 0 or 1, so every item in a
+  // child list is depth 1 — running them through `nest` again would file the
+  // second sub-item under the first instead of beside it.
+  const nodes = nested ? items.map((item) => ({ item, children: [] })) : nest(items);
   const ordered = nodes[0].item.ordered;
   const Tag = ordered ? "ol" : "ul";
   return (

@@ -108,7 +108,17 @@ test("an indented item hangs under the one above it", () => {
     { kind: "item", marker: "•", ordered: false, depth: 1, text: "child" },
   ]);
   const html = renderToStaticMarkup(<Markdown text={"- parent\n  - child"} />);
-  assert.match(html, /<ul[\s\S]*parent[\s\S]*<ul[\s\S]*child/, "the child list is inside the parent item");
+  assert.match(
+    html,
+    /<ul[\s\S]*parent[\s\S]*<ul[\s\S]*child/,
+    "the child list is inside the parent item",
+  );
+
+  // Two sub-items are siblings. Nesting the second under the first is what
+  // happens if the child list is re-nested by depth, and it reads as an outline
+  // the model did not write.
+  const two = renderToStaticMarkup(<Markdown text={"- parent\n  - one\n  - two"} />);
+  assert.equal(two.match(/<ul/g)?.length, 2, "one list per level, not one per item");
 });
 
 test("a link is a link, and an unknown scheme is not", () => {
