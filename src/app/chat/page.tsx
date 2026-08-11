@@ -155,6 +155,11 @@ export default function ChatPage() {
         anything the chat chose. A chat turn spends against the same 5-hour
         window as everything else, and its cost is shown here only, never added
         to a run&rsquo;s or to the dashboard meters.
+        <br />
+        The chat itself runs with no tool restrictions, so it can read, run
+        commands and reach GitHub while it works out what to propose. It is
+        instructed not to do the work — that instruction, not a permission mode,
+        is what keeps it out of your checkouts.
       </Notice>
 
       {error && <Notice tone="danger">{error}</Notice>}

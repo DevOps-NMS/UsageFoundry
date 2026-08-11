@@ -40,11 +40,17 @@ import { getTemplate, type RunTemplate } from "./templates";
  *     down here rather than absorbed quietly.
  *
  * What it is **not** allowed to be is a route to spend nobody authorised. It
- * cannot start a run. Everything it writes is form input: a `chat_proposals`
- * row, or a `run_templates` prompt — neither holds a folder claim, neither
- * consumes a concurrency slot, and neither does anything at all until a person
- * approves it. Every tool that could widen what an agent may do is absent from
- * that list rather than guarded inside it.
+ * cannot start a run: everything it writes *through this app* is form input — a
+ * `chat_proposals` row, or a `run_templates` prompt — neither of which holds a
+ * folder claim, consumes a concurrency slot, or does anything at all until a
+ * person approves it. Every tool that could widen what an agent may do is
+ * absent from that list rather than guarded inside it.
+ *
+ * Its *own* tool surface, by contrast, is now unrestricted: it runs
+ * `bypassPermissions` with no allowlist, so it can read anything, run anything
+ * and — with the GitHub token above in its environment — reach the network.
+ * That is a deliberate trade, and the reasoning is in `runTurn` where the flag
+ * is set. What keeps it an orchestrator is the system prompt, not the mode.
  *
  * Its own cost never reaches `runs.spent_usd`, exactly as a review's does not.
  */
@@ -640,25 +646,35 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       prompt,
       "--output-format",
       "json",
-      // `manual` asks before every tool call, and a `-p` child has nobody to
-      // ask — so the allowlist below decides and everything else is refused.
+      // Every tool the CLI has, with the system prompt above as the boundary
+      // rather than a list of names.
       //
-      // Not `plan`, which is what `review.ts` uses and what this was written
-      // against: plan mode refuses MCP tool calls outright ("Cannot call
-      // mcp__uf__list_templates while in plan mode"), so the chat could see
-      // GitHub and not this app. That leaves the allowlist as the whole
-      // guarantee rather than the second half of one, which is why the deny
-      // list below exists as well. A deny list fails open on the next write
-      // tool the CLI ships and is worth nothing on its own — under an
-      // allowlist that already excludes everything, it costs nothing and
-      // catches the one case that would otherwise be silent: a future CLI
-      // treating some write tool as always-permitted.
+      // This used to be `manual` plus an allowlist — this app's tools,
+      // `Read`/`Glob`/`Grep`, read-only `gh` and three `git` subcommands — and
+      // that allowlist was the whole guarantee, because `plan` (what
+      // `review.ts` uses) refuses MCP tool calls outright ("Cannot call
+      // mcp__uf__list_templates while in plan mode") and would leave the chat
+      // able to see GitHub and not this app. Its cost was every question the
+      // list did not anticipate: a build log, a test run, `gh api`, `git -C
+      // <path> log`, anything compound. Each came back refused, and an
+      // orchestrator that cannot look proposes work badly — which is the one
+      // failure this feature has no other defence against, since a bad
+      // proposal is approved by a person who is trusting it to have looked.
+      //
+      // `bypassPermissions` rather than `acceptEdits`: that mode holds every
+      // mutating shell command for an approval a `-p` child has nobody to give
+      // — measured, in the isolated-run failure that `ISOLATED_GIT_TOOLS`
+      // exists to fix — so it would reproduce exactly the refusals this is
+      // removing, only less predictably.
+      //
+      // What bounds this child is therefore not the mode. Nothing it can call
+      // starts a run; `--strict-mcp-config` keeps the mounted `~/.claude`'s own
+      // MCP servers out; the capability token dies with the turn; and
+      // `chatTurnBudgetUSD` caps the spend. It can, however, now write to the
+      // mounts and reach GitHub with the token in its environment, and the
+      // chat page says so.
       "--permission-mode",
-      "manual",
-      "--allowedTools",
-      ...ALLOWED_TOOLS,
-      "--disallowedTools",
-      ...DENIED_TOOLS,
+      "bypassPermissions",
       "--mcp-config",
       configPath,
       // Without this, an MCP server configured in the mounted ~/.claude joins
@@ -668,8 +684,10 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       systemPrompt(),
     ];
 
-    // Read access to the mounts, so "look at what this repo is like" works.
-    // Widening what can be *read* only: nothing in ALLOWED_TOOLS writes.
+    // Access to the mounts, so "look at what this repo is like" works. Under
+    // `bypassPermissions` this is no longer read-only, which is the half of
+    // the trade above that costs something: a chat told to leave the work
+    // alone is now the only thing stopping it from editing a checkout.
     for (const mount of WORKSPACE_MOUNTS) {
       if (fs.existsSync(mount.path)) args.push("--add-dir", mount.path);
     }
@@ -844,14 +862,17 @@ function finishTurn(chatId: string, r: TurnResult): void {
   if (r.error) appendMessage(chatId, "system", r.error);
 
   // A denial is the difference between "there are no open issues" and "I was
-  // not allowed to look", and only one of those is worth acting on.
+  // not allowed to look", and only one of those is worth acting on. Kept now
+  // that the chat runs unrestricted precisely because it should be empty: a
+  // refusal here is the CLI declining something on its own, which is worth
+  // seeing rather than reading as a chat that looked and found nothing.
   if (r.denials && r.denials.length > 0) {
     appendMessage(
       chatId,
       "system",
       `Refused tool calls this turn: ${[...new Set(r.denials)].join(", ")}. ` +
-        "The chat is allowed read-only tools and this app's own; anything else " +
-        "is denied by design.",
+        "The chat runs with no tool allowlist, so this is the CLI itself " +
+        "declining the call.",
     );
   }
 
@@ -888,91 +909,21 @@ export function reconcileChatsOnBoot(): void {
 }
 
 /* ------------------------------------------------------------------ */
-/* What the child is allowed to be                                     */
+/* What the child is told to be                                        */
 /* ------------------------------------------------------------------ */
 
 /**
- * Every tool this child may use.
+ * What the child is, in the absence of a mechanism that makes it so.
  *
- * An allowlist rather than a deny list, which is the opposite of the choice
- * `review.ts` explains and for a reason that inverts cleanly: a review needs no
- * tools at all, so a named mode is the whole guarantee; this one needs `gh` and
- * this app's own tools, so something has to name what it may run. A deny list
- * fails open on the next tool the CLI ships — an allowlist fails closed, and
- * the failure is a refused call recorded in `permission_denials` and shown in
- * the thread rather than swallowed.
- *
- * `gh` entries are read-only subcommands, spelled out one at a time. `gh api`
- * is deliberately absent: it takes `--method POST` and would be a way to write
- * to a repository through a list that reads as read-only.
+ * This carried the *role* when the allowlist carried the *limits*. It now
+ * carries both, because the child runs `bypassPermissions` — so the paragraph
+ * below about not doing the work is the only thing between an orchestrator and
+ * an agent that fixes the bug it was asked to write a proposal about. It is
+ * stated as a job description rather than a list of forbidden tools on purpose:
+ * a model told "you may not edit" reaches for the nearest thing that is not
+ * editing, where one told "your job is to look and propose" has nowhere to go
+ * but the proposal.
  */
-const ALLOWED_TOOLS = [
-  "mcp__uf__list_folders",
-  "mcp__uf__list_templates",
-  "mcp__uf__list_runs",
-  "mcp__uf__get_run",
-  "mcp__uf__get_run_diff",
-  "mcp__uf__get_usage",
-  "mcp__uf__list_proposals",
-  "mcp__uf__save_template",
-  "mcp__uf__propose_run",
-  "Read",
-  "Glob",
-  "Grep",
-  "Bash(gh issue list:*)",
-  "Bash(gh issue view:*)",
-  "Bash(gh pr list:*)",
-  "Bash(gh pr view:*)",
-  "Bash(gh pr diff:*)",
-  "Bash(gh pr checks:*)",
-  "Bash(gh run list:*)",
-  "Bash(gh run view:*)",
-  "Bash(gh search issues:*)",
-  "Bash(gh search prs:*)",
-  "Bash(gh label list:*)",
-  "Bash(gh repo view:*)",
-  // Enumerated one subcommand at a time for the reason `gh` is: `git` as a
-  // prefix would admit `git commit` and `git push` into a list that reads as
-  // read-only. These three answer "who has touched this lately", which is the
-  // question that decides whether work is worth proposing at all.
-  //
-  // `git diff` and `git show` are deliberately absent: rendering a patch runs
-  // `diff.external` and `.gitattributes` textconv drivers, which are commands
-  // the repository configures and git obeys — the same execution every git call
-  // in this app passes `--no-ext-diff --no-textconv` to avoid. The diff a
-  // proposal is actually about is available scrubbed, as `get_run_diff`.
-  //
-  // This does not make the list airtight — `git log -p` renders patches too —
-  // and that is worth stating rather than implying. What bounds it is that both
-  // drivers have to be named in the local repository's config, which a clone
-  // does not carry: reaching them needs a repository someone already edited on
-  // this host.
-  "Bash(git log:*)",
-  "Bash(git status:*)",
-  "Bash(git branch:*)",
-  // Not decoration: the child's cwd is the first mount, and a `git` subcommand
-  // is only allowed by the entries above under its own name — `git -C <path>
-  // log` matches none of them. `cd <folder> && git log` is what is left, which
-  // rests on the CLI matching each half of a compound command separately. That
-  // is how it is documented and it has not been watched here; if it is wrong
-  // the call is refused and named in the thread, which is the loud direction.
-  "Bash(cd:*)",
-];
-
-/**
- * The second latch.
- *
- * Redundant by construction — none of these is on the allowlist, so `manual`
- * mode refuses them already — and kept anyway because the thing it guards
- * against is a CLI that stops consulting the allowlist for some tool it comes
- * to treat as always-available. That failure would be silent and would arrive
- * on a version bump, which is the same class of risk `ARG CLAUDE_CLI_VERSION`
- * exists to bound. It is not a substitute for the allowlist and must never be
- * allowed to become one: a deny list has to grow an entry for every new write
- * tool, and it fails open when it does not.
- */
-const DENIED_TOOLS = ["Edit", "Write", "NotebookEdit", "MultiEdit"];
-
 function systemPrompt(): string {
   return [
     "You are the orchestrator for UsageFoundry, a tool that runs unattended",
@@ -982,6 +933,20 @@ function systemPrompt(): string {
     "You cannot start, stop or resume a run. The only thing you can do is call",
     "propose_run, which records a proposal the operator then approves or rejects",
     "by hand. Say so plainly rather than implying work has started.",
+    "",
+    "You have every tool the CLI offers, and you are trusted with them because",
+    "your job is to look, not to build. Use them to gather whatever you need to",
+    "propose good work: read files, grep, run read-only commands, read issues,",
+    "pull requests and CI logs with `gh`, read history with `git log`, run a",
+    "build or a test suite when knowing whether something is broken changes what",
+    "you would propose.",
+    "",
+    "Do not do the work yourself. Do not edit, create or delete files in a",
+    "workspace; do not stage, commit, push or create branches; do not open,",
+    "close, merge or comment on anything on GitHub. A task small enough that you",
+    "are tempted to just fix it is a proposal that says it is small. The one",
+    "exception is your own scratch space: a temporary file outside the mounts is",
+    "fine if it helps you think.",
     "",
     "What decides what an agent may do — the budget, the work-cycle limit, the",
     "permission mode, whether it works in its own checkout — is never yours to",
@@ -1046,7 +1011,10 @@ function chatCwd(): string {
  * configuration and any inherited telemetry routing — plus `githubEnv()`, which
  * until now reached work cycles and nothing else. That widening is the point of
  * the feature: a chat asked to look at open issues cannot, otherwise, and it
- * would fail inside a tool call the way `git push` used to.
+ * would fail inside a tool call the way `git push` used to. With no allowlist
+ * above it, that token now authenticates *writes* as well; the system prompt is
+ * what says not to make them, and `UF_*` still leaves by namespace, so nothing
+ * hands this child the app's own credentials.
  *
  * No telemetry, for the reason a review gets none: `otlp_requests.run_id` is
  * compared against a run's own spend, and a chat's requests in that comparison
