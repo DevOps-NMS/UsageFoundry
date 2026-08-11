@@ -320,11 +320,30 @@ function migrate(db: Database.Database) {
   addColumn(db, "runs", "pause_count", "INTEGER NOT NULL DEFAULT 0");
   addColumn(db, "runs", "done_retriggers", "INTEGER NOT NULL DEFAULT 0");
 
+  // Whether the agent's last work cycle actually replied DONE. `completed` is
+  // written for two different endings — that reply, and the cycle cap being
+  // reached — and only the first of them may be answered with the DONE
+  // pushback, which opens by telling the agent it reported the task complete.
+  // The stop reason distinguishes them in prose, which is not something to
+  // parse. Rows written before this column read as false: sending a
+  // continuation into a session that did say DONE costs one billed cycle that
+  // says it again, where the pushback tells a run that was cut off mid-task not
+  // to start new work.
+  addColumn(db, "runs", "reported_done", "INTEGER NOT NULL DEFAULT 0");
+
   // What the next work cycle says, when an operator has picked a finished run
   // up by hand. Consumed rather than kept: the loop clears it the moment it
   // hands it to a spawn, so a run that parks or is picked up again later does
   // not deliver the same message twice.
   addColumn(db, "runs", "follow_up", "TEXT");
+
+  // The work cycle that is open right now, stamped at the spawn and cleared the
+  // moment it returns. `iterations` counts cycles that *finished*, so for the
+  // whole of cycle 1 — routinely tens of minutes — a working run read `0/N`,
+  // which is bit-for-bit what a run that never started reads. Its own column
+  // rather than an early write to `iterations`: the guard and every "cycles
+  // used" reading must keep meaning completed cycles.
+  addColumn(db, "runs", "active_iteration", "INTEGER");
 
   // Spend reconciled from transcripts for work cycles that were killed before
   // Claude Code reported their cost. Held apart from spent_usd rather than
@@ -372,6 +391,14 @@ function migrate(db: Database.Database) {
   // The prompt the chat wrote for one specific run. Added rather than rebuilt,
   // because a nullable column is the one change ALTER does support.
   addColumn(db, "chat_proposals", "prompt_override", "TEXT");
+
+  // When the turn now in flight began, so the ten-minute bound on a chat turn
+  // is enforceable by something outside the closure that spawned it. Not
+  // `updated_at`, which looks like the same instant and is not: the chat's own
+  // `save_template` tool appends a system message mid-turn, and every such
+  // append would push the deadline out by however long the turn has already
+  // run. Null whenever no turn is in flight.
+  addColumn(db, "chat_sessions", "turn_started_at", "INTEGER");
 }
 
 /**
