@@ -116,6 +116,34 @@ export function shortPath(p: string, keep = 3): string {
   return `…/${parts.slice(-keep).join("/")}`;
 }
 
+/**
+ * What a polling page says when a poll fails.
+ *
+ * `status` is null when the request never got an answer at all — a rejected
+ * `fetch`: the server restarting, the container rebuilt, a dropped connection.
+ * 401 is called out by name because it is the one failure the operator can
+ * clear themselves, and `middleware.ts` answers `/api/*` with it rather than a
+ * redirect, so nothing else on screen would say the session had lapsed.
+ *
+ * The return is never empty, and that is the point rather than a nicety: the
+ * caller renders it as `{message && <Notice…>}`, so a blank string is a
+ * swallowed failure — the exact defect this exists to fix. A server that
+ * answers `{"error":""}` must still put a sentence on the page.
+ */
+export function pollFailureMessage(
+  status: number | null,
+  detail?: string | null,
+): string {
+  const cause = detail?.trim();
+  const stale = "This page has stopped refreshing, so what is shown may be out of date.";
+  if (status === 401) {
+    return `Signed out${cause ? ` (${cause})` : ""} — sign in again. ${stale}`;
+  }
+  const head =
+    status === null ? "The server could not be reached" : `The server answered ${status}`;
+  return `${head}${cause ? ` — ${cause}` : ""}. ${stale}`;
+}
+
 export type Severity = "ok" | "warn" | "danger";
 
 export function severityFor(fraction: number | null): Severity {

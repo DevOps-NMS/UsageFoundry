@@ -1384,6 +1384,14 @@ through before trusting this unattended:
   that needs authentication. The credential block itself was driven into a real
   git (above); what has not been watched is the CLI's own git picking it up out
   of the environment mid-run.
+- **The chat page's failed-poll notice in a browser.** A poll that fails now
+  puts a sentence on the page and stops the thread claiming to be thinking, and
+  the sentence itself is unit-tested — but no browser has been pointed at a
+  stopped server or at a `UF_AUTH_TOKEN` deployment with the `uf_session` cookie
+  deleted, which are the two reproductions. What that leaves unconfirmed is the
+  client wiring rather than the copy: that the notice appears within one poll,
+  that it clears on the next successful one, and that a page opened while the
+  server is down recovers by itself once the server is back.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
