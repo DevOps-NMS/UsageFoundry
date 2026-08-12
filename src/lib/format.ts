@@ -134,6 +134,46 @@ export function fmtDuration(ms: number): string {
   return `${h}h ${m % 60}m`;
 }
 
+/**
+ * A calendar bucket's span, as a person reads it.
+ *
+ * The boundaries were cut in the browser's own zone (`/api/usage?tz=`), so
+ * rendering them with the browser's own locale is the one thing that keeps the
+ * label and the arithmetic describing the same day. A week is shown as its span
+ * rather than as "week of", because an anchored week does not start on a
+ * Monday and a label that implies it would be wrong for the operators who
+ * configured one.
+ */
+export function fmtPeriodLabel(
+  granularity: "day" | "week" | "month",
+  startsAt: number,
+  endsAt: number,
+): string {
+  const start = new Date(startsAt);
+  if (granularity === "month") {
+    return start.toLocaleDateString([], { month: "long", year: "numeric" });
+  }
+  if (granularity === "day") {
+    return start.toLocaleDateString([], {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+    });
+  }
+  // The last *instant* of the week belongs to the next one, so name the day
+  // before it — otherwise every week reads as eight days long.
+  const last = new Date(endsAt - 1);
+  const sameMonth =
+    start.getMonth() === last.getMonth() &&
+    start.getFullYear() === last.getFullYear();
+  const from = start.toLocaleDateString([], {
+    day: "numeric",
+    ...(sameMonth ? {} : { month: "short" }),
+  });
+  const to = last.toLocaleDateString([], { day: "numeric", month: "short" });
+  return `${from} – ${to}`;
+}
+
 /** Shorten an absolute path for display, keeping the tail meaningful. */
 export function shortPath(p: string, keep = 3): string {
   if (!p) return "—";
