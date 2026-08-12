@@ -1400,8 +1400,11 @@ function chatCwd(): string {
 /**
  * Environment for the chat.
  *
- * The same two exclusions every other child gets — this app's own `UF_*`
- * configuration and any inherited telemetry routing — plus `githubEnv()`, which
+ * The same three exclusions every other child gets — this app's own `UF_*`
+ * configuration, any inherited telemetry routing, and `DATA_DIR` (written out
+ * in full over `childEnv` in `orchestrator.ts`; this child runs
+ * `bypassPermissions` with no allowlist, so of the four it is the one most able
+ * to start a second server against the database) — plus `githubEnv()`, which
  * until now reached work cycles and nothing else. That widening is the point of
  * the feature: a chat asked to look at open issues cannot, otherwise, and it
  * would fail inside a tool call the way `git push` used to. With no allowlist
@@ -1420,7 +1423,8 @@ function chatEnv(): NodeJS.ProcessEnv {
       key.startsWith("UF_") ||
       key.startsWith("OTEL_") ||
       key === "ANTHROPIC_ADMIN_KEY" ||
-      key === "CLAUDE_CODE_ENABLE_TELEMETRY"
+      key === "CLAUDE_CODE_ENABLE_TELEMETRY" ||
+      key === "DATA_DIR"
     ) {
       delete env[key];
     }

@@ -479,12 +479,16 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
 /**
  * Environment for the reviewer.
  *
- * Same two exclusions the agent gets — this app's own configuration, and any
- * inherited telemetry routing — for the same reasons. Telemetry is *not* turned
- * back on for a review even when `telemetryForRuns` is set: those records are
- * keyed by run id and compared against the run's own spend, and a review's
- * requests appearing in that comparison would make an accurate run look
- * unaccounted-for.
+ * Same three exclusions the agent gets — this app's own configuration, any
+ * inherited telemetry routing, and `DATA_DIR` — for the same reasons, the last
+ * of them written out in full over `childEnv` in `orchestrator.ts`. A reviewer
+ * runs `--permission-mode plan` and so cannot start a server itself, but the
+ * exclusion is not conditional on that: what it withholds is the address of
+ * this app's database, and there is no reading of a diff that needs it.
+ * Telemetry is *not* turned back on for a review even when `telemetryForRuns`
+ * is set: those records are keyed by run id and compared against the run's own
+ * spend, and a review's requests appearing in that comparison would make an
+ * accurate run look unaccounted-for.
  */
 function reviewEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: "0" };
@@ -493,7 +497,8 @@ function reviewEnv(): NodeJS.ProcessEnv {
       key.startsWith("UF_") ||
       key.startsWith("OTEL_") ||
       key === "ANTHROPIC_ADMIN_KEY" ||
-      key === "CLAUDE_CODE_ENABLE_TELEMETRY"
+      key === "CLAUDE_CODE_ENABLE_TELEMETRY" ||
+      key === "DATA_DIR"
     ) {
       delete env[key];
     }

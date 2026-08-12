@@ -1791,6 +1791,20 @@ export function buildArgs(opts: {
  *   app's decision, not an inheritance from whoever started the server.
  *   Otherwise an operator's ambient collector silently receives every run.
  *
+ *   `DATA_DIR` — where this app's SQLite database lives, and the one exclusion
+ *   here that the `UF_` namespace rule above does not cover, because the
+ *   variable predates it and the CLI's own tooling reads the same name. An
+ *   agent working on UsageFoundry itself routinely starts a dev server to check
+ *   its work, and `next dev` runs `instrumentation.ts`, whose four reconcilers
+ *   close out every row that says `running` on the grounds that its process
+ *   died with the last server. Measured, not reasoned: one `setsid npm run dev`
+ *   in a worktree marked three runs failed while their agents carried on
+ *   working and billing for another minute, and the rows blamed a restart that
+ *   never happened. Withheld, that second server falls back to `./.data`,
+ *   writes an empty database of its own, and closes out nothing. `serverLock.ts`
+ *   is the same failure guarded from the other side, for the routes this does
+ *   not cover — a `.env` in the worktree, an agent that sets it by hand.
+ *
  * Everything else passes through. The CLI needs PATH, HOME, CLAUDE_CONFIG_DIR,
  * proxy and CA settings, and locale to function at all, so an allowlist would
  * fail in ways that are tedious to diagnose from inside a container.
@@ -1802,7 +1816,8 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
       key.startsWith("UF_") ||
       key.startsWith("OTEL_") ||
       key === "ANTHROPIC_ADMIN_KEY" ||
-      key === "CLAUDE_CODE_ENABLE_TELEMETRY"
+      key === "CLAUDE_CODE_ENABLE_TELEMETRY" ||
+      key === "DATA_DIR"
     ) {
       delete env[key];
     }
