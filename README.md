@@ -119,38 +119,8 @@ Max plan's quota is in any unit. So:
   outright** when no ceiling exists, rather than silently passing. A guard you
   believe is active but isn't is worse than no guard.
 
-### Usage by period — and why a day's percentage is a pace
-
-The dashboard's **Usage by period** card cuts spend into calendar buckets and
-toggles between **Daily** (14), **Weekly** (12) and **Monthly** (12), showing
-dollars, tokens, turns and a share of the ceiling for each. It answers "what has
-this been costing me", which is a different question from the two meters above
-it — those answer "may I start a run right now".
-
-The percentage needs the same denominator problem solved, and here it is worse:
-Anthropic enforces a 5-hour window and a weekly one and **nothing in between**.
-So a *week* is measured against your configured weekly ceiling as it stands,
-while a *day* and a *month* are measured against that ceiling spread evenly over
-their own length — $700/week is $100/day and $3,100 for a 31-day month. That is
-a **pace, not an allowance**, and the card says so in those words rather than
-leaving you to infer it. No budget guard reads any of it; `evaluateBudget` is
-passed windows, never periods.
-
-Two details that would otherwise be wrong quietly:
-
-- **Buckets are cut in your browser's timezone**, not the container's. The
-  container runs in UTC, so a 22:30 turn in CEST is already tomorrow to you and
-  yesterday to the server. The page sends its zone as `?tz=`; an unrecognised
-  one falls back to the server's rather than failing.
-- **Buckets meet exactly** — each one's end is the next one's start, including
-  across a DST change, so a 25-hour local day is 25 hours and no spend can fall
-  between two rows. Buckets that closed before your first recorded turn are
-  dropped, so a fresh install shows what it has rather than eleven empty months
-  above one real one.
-
-Weekly buckets follow **Settings → weekly reset day** when you have set one, and
-ISO Mondays otherwise — so the newest bucket matches the weekly meter directly
-above it rather than quietly measuring a different seven days.
+Percentages for a *calendar* day, week or month are a separate question with a
+separate answer — see [Usage by period](#accuracy-notes) under *Accuracy notes*.
 
 ---
 

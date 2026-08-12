@@ -294,19 +294,21 @@ export function UsagePeriods({
         </div>
       </div>
 
+      {/* The meter's own detail already handles the no-ceiling case and the
+          page already carries one "set a ceiling" notice, so this says the two
+          things neither of them does: which zone the days were cut in, and —
+          only where it could be misread — that a pro-rated percentage stops no
+          run. Said for a week too, it would imply the weekly window is
+          unguarded, which is the opposite of true. */}
       <div className="mt-3 max-w-[80ch] text-xs text-ink-muted">
         Calendar {noun}s in <span className="mono">{series.timeZone}</span>,
         priced from the same transcripts as the meters above — so the same floor
-        applies.{" "}
-        {series.limitBasis === null ? (
+        applies.
+        {series.limitBasis === "prorated" && (
           <>
-            <Link href="/settings">Set a weekly ceiling</Link> to put a
-            percentage against each one.
-          </>
-        ) : (
-          <>
-            No budget guard reads these: {ADJECTIVE[series.granularity]} spend is
-            history, and what stops a run is the 5-hour and weekly window above.
+            {" "}
+            No budget guard reads a {noun}: what stops a run is the 5-hour and{" "}
+            <Link href="/settings">weekly</Link> window above.
           </>
         )}
       </div>
