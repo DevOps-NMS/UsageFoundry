@@ -3,7 +3,15 @@ import { describe, it } from "node:test";
 
 import { ZERO_TOKENS } from "./pricing";
 import type { UsageEntry } from "./transcripts";
-import { FIVE_HOURS_MS, buildSessionBlocks, buildSnapshot } from "./windows";
+import {
+  FIVE_HOURS_MS,
+  PERIOD_COUNT,
+  WEEK_MS,
+  buildPeriods,
+  buildSessionBlocks,
+  buildSnapshot,
+  resolveTimeZone,
+} from "./windows";
 
 /**
  * Covers the two ways a 5-hour boundary is decided: where a derived block
@@ -163,5 +171,282 @@ describe("session reset override", () => {
     assert.equal(blocks.length, 1);
     assert.equal(blocks[0].startsAt, earlier);
     assert.equal(blocks[0].endsAt, earlier + FIVE_HOURS_MS);
+  });
+});
+
+/**
+ * The provider's own reading, and what it displaces.
+ *
+ * Every one of these is a silent failure: a percentage that came from the
+ * wrong denominator still renders as a perfectly ordinary meter, and the
+ * budget guard acts on the same number. On the machine this was written
+ * against the derived reading was 1.3% where the provider said 5.0% — right
+ * arithmetic, ceiling somebody had typed — so what needs pinning is which of
+ * the two reaches `fraction`, and that the fallback is still there when the
+ * read fails.
+ */
+describe("provider-reported utilisation", () => {
+  const CEILINGS = {
+    sessionCostLimit: 100,
+    weeklyCostLimit: 1000,
+    sessionTokenLimit: null,
+    weeklyTokenLimit: null,
+    weeklyAnchor: null,
+  };
+
+  const plan = (
+    session: { utilization: number; resetsAt: number | null } | null,
+    weekly: { utilization: number; resetsAt: number | null } | null = null,
+    scopedWeekly: Array<{
+      label: string;
+      window: { utilization: number; resetsAt: number | null };
+    }> = [],
+  ) => ({ session, weekly, scopedWeekly, fetchedAt: now });
+
+  // One turn costing $10 inside the current window: 10% of the typed $100
+  // ceiling, against whatever the provider says.
+  const spend = [entry(now - HOUR, 10)];
+
+  it("reports the provider's fraction rather than the typed ceiling's", () => {
+    const snap = buildSnapshot(spend, CEILINGS, now, null, plan({
+      utilization: 0.4,
+      resetsAt: null,
+    }));
+    assert.equal(snap.session.fraction, 0.4);
+    assert.equal(snap.session.fractionMetric, "plan");
+    assert.equal(snap.session.planFraction, 0.4);
+    // The derived reading is kept, not overwritten — it is what the "your
+    // configured ceiling says otherwise" footnote is drawn from.
+    assert.equal(snap.session.costFraction, 0.1);
+    // Nothing to describe: the provider names a percentage, not a ceiling.
+    assert.equal(snap.session.limit, null);
+    assert.equal(snap.session.limitMetric, "plan");
+  });
+
+  it("guards on the provider's fraction too, with no unpriced-model markup", () => {
+    // costGuardUSD is deliberately higher than costUSD here, the shape an
+    // unpriced model leaves behind. That markup exists because our price table
+    // can fail to place a model; the provider's own accounting cannot, so it
+    // must not inflate a first-party figure.
+    const unpriced: UsageEntry[] = [
+      { ...entry(now - HOUR, 10), costGuardUSD: 50 },
+    ];
+    const snap = buildSnapshot(unpriced, CEILINGS, now, null, plan({
+      utilization: 0.4,
+      resetsAt: null,
+    }));
+    assert.equal(snap.session.guardFraction, 0.4);
+  });
+
+  it("falls back to the derived reading when the read failed", () => {
+    const snap = buildSnapshot(spend, CEILINGS, now, null, null);
+    assert.equal(snap.session.fraction, 0.1);
+    assert.equal(snap.session.fractionMetric, "cost");
+    assert.equal(snap.session.planFraction, null);
+  });
+
+  it("falls back per window, so one missing reading does not blank the other", () => {
+    const snap = buildSnapshot(spend, CEILINGS, now, null, plan(null, {
+      utilization: 0.6,
+      resetsAt: null,
+    }));
+    assert.equal(snap.session.fractionMetric, "cost");
+    assert.equal(snap.weekly.fractionMetric, "plan");
+    assert.equal(snap.weekly.fraction, 0.6);
+  });
+
+  it("guards the week on the worst of it and every model-scoped wall", () => {
+    // An Opus week that is nearly full while the all-model window is a
+    // quarter spent is a wall that stops runs and never reaches the meter.
+    const snap = buildSnapshot(spend, CEILINGS, now, null, plan(
+      null,
+      { utilization: 0.25, resetsAt: null },
+      [{ label: "Opus", window: { utilization: 0.93, resetsAt: null } }],
+    ));
+    assert.equal(snap.weekly.fraction, 0.25);
+    assert.equal(snap.weekly.guardFraction, 0.93);
+  });
+
+  it("anchors the 5-hour window on the provider's reset, over a typed one", () => {
+    // `sessionResetOverrideAt` exists only because this instant could not be
+    // read. A stale typed value must not keep splitting blocks once it can.
+    const providerReset = now + HOUR;
+    const snap = buildSnapshot(
+      [entry(now - 6 * HOUR, 1), entry(now - 30 * 60_000, 2)],
+      NO_LIMITS,
+      now,
+      resetAt,
+      plan({ utilization: 0.1, resetsAt: providerReset }),
+    );
+    assert.equal(snap.session.startsAt, providerReset - FIVE_HOURS_MS);
+    assert.equal(snap.session.endsAt, providerReset);
+    // The turn from four hours ago opened a window that has since closed, so
+    // only the recent one is in the window being enforced.
+    assert.equal(snap.session.costUSD, 2);
+  });
+
+  it("measures the week against the provider's reset instead of a trailing 7 days", () => {
+    const weeklyReset = now + 2 * 24 * HOUR;
+    const snap = buildSnapshot(spend, NO_LIMITS, now, null, plan(null, {
+      utilization: 0.2,
+      resetsAt: weeklyReset,
+    }));
+    assert.equal(snap.weekly.endsAt, weeklyReset);
+    assert.equal(snap.weekly.startsAt, weeklyReset - 7 * 24 * HOUR);
+    // A trailing total has no reset to wait for; this one does, and the label
+    // is what tells the operator which of the two they are looking at.
+    assert.equal(snap.weekly.label, "Weekly quota");
+  });
+});
+
+/**
+ * Calendar bucketing, which fails silently in three ways that all render as a
+ * perfectly ordinary table.
+ *
+ * A boundary cut in the wrong zone files an evening's work under the next day,
+ * and the container runs in UTC while every reader is somewhere else. A
+ * pro-rated ceiling off by the span ratio prints a confident percentage against
+ * a number nobody set — the failure `guardCostOf` and the no-default-ceilings
+ * rule both exist to prevent, arriving here as display rather than as a guard.
+ * And a gap between two buckets loses spend outright: an entry that falls in no
+ * bucket is simply not in the totals, and nothing on the page would say so.
+ */
+describe("calendar periods", () => {
+  const BERLIN = "Europe/Berlin";
+  const LIMITS = { ...NO_LIMITS, weeklyCostLimit: 700 };
+
+  // 22:30 UTC on 11 August is already 00:30 on the 12th in Berlin. Bucketing in
+  // UTC would file it under the 11th, and it is the entry that decides which
+  // day the reader is told they spent it on.
+  const lateEvening = Date.UTC(2026, 7, 11, 22, 30);
+  const berlinNow = Date.UTC(2026, 7, 12, 10, 0);
+
+  it("cuts a day at local midnight, not at UTC midnight", () => {
+    const series = buildPeriods(
+      [entry(lateEvening)],
+      "day",
+      NO_LIMITS,
+      berlinNow,
+      BERLIN,
+    );
+    const today = series.buckets[0];
+    assert.equal(today.isCurrent, true);
+    assert.equal(today.entryCount, 1, "the turn belongs to the local day");
+    // 00:00 Berlin on 12 August is 22:00 UTC on the 11th (CEST, UTC+2).
+    assert.equal(today.startsAt, Date.UTC(2026, 7, 11, 22, 0));
+    assert.equal(today.endsAt, Date.UTC(2026, 7, 12, 22, 0));
+  });
+
+  it("leaves no gap between buckets, across a DST change", () => {
+    // 25 October 2026: Berlin leaves CEST, so one local day is 25 hours long.
+    const afterDst = Date.UTC(2026, 9, 28, 12, 0);
+    // Old enough that no granularity trims a bucket for want of history, so
+    // this walks the full span of each series.
+    const ancient = [entry(Date.UTC(2025, 0, 1))];
+    for (const granularity of ["day", "week", "month"] as const) {
+      const series = buildPeriods(
+        ancient,
+        granularity,
+        NO_LIMITS,
+        afterDst,
+        BERLIN,
+      );
+      assert.equal(series.buckets.length, PERIOD_COUNT[granularity]);
+      // Newest first, so walking backwards is walking forwards in time.
+      for (let i = series.buckets.length - 1; i > 0; i--) {
+        assert.equal(
+          series.buckets[i].endsAt,
+          series.buckets[i - 1].startsAt,
+          `${granularity} bucket ${i} does not meet the next one`,
+        );
+      }
+    }
+    const days = buildPeriods(ancient, "day", NO_LIMITS, afterDst, BERLIN)
+      .buckets;
+    const longDay = days.find(
+      (b) => b.startsAt === Date.UTC(2026, 9, 24, 22, 0),
+    );
+    assert.ok(longDay, "25 October is in the fortnight");
+    assert.equal(longDay.endsAt - longDay.startsAt, 25 * HOUR);
+  });
+
+  it("measures a week against the weekly ceiling as it stands", () => {
+    const series = buildPeriods(
+      [entry(berlinNow - HOUR, 350)],
+      "week",
+      LIMITS,
+      berlinNow,
+      BERLIN,
+    );
+    assert.equal(series.limitBasis, "weekly");
+    assert.equal(series.buckets[0].limit, 700);
+    assert.equal(series.buckets[0].fraction, 0.5);
+  });
+
+  it("spreads that ceiling over a day and a month, and says which", () => {
+    const day = buildPeriods([], "day", LIMITS, berlinNow, BERLIN);
+    assert.equal(day.limitBasis, "prorated");
+    assert.equal(day.buckets[0].limit, 100);
+
+    // August has 31 days, so a month is not a fixed multiple of a week.
+    const month = buildPeriods([], "month", LIMITS, berlinNow, BERLIN);
+    assert.equal(month.limitBasis, "prorated");
+    assert.equal(month.buckets[0].limit, (700 * 31) / 7);
+  });
+
+  it("reports no basis at all when no weekly ceiling is set", () => {
+    const series = buildPeriods([], "week", NO_LIMITS, berlinNow, BERLIN);
+    assert.equal(series.limitBasis, null);
+    assert.equal(series.buckets[0].limit, null);
+    // Null, never 0 — an unknown share renders as the hatched meter.
+    assert.equal(series.buckets[0].fraction, null);
+  });
+
+  it("aligns weekly buckets to a configured anchor, not to Monday", () => {
+    const anchored = {
+      ...NO_LIMITS,
+      weeklyAnchor: { weekday: 4, hourUTC: 9 }, // Thursday 09:00 UTC
+    };
+    const series = buildPeriods([], "week", anchored, berlinNow, BERLIN);
+    const current = series.buckets[0];
+    // 12 August 2026 is a Wednesday, so the live week opened the Thursday
+    // before it. A calendar Monday here would put a different total under the
+    // same word as the weekly meter above it on the page.
+    assert.equal(current.startsAt, Date.UTC(2026, 7, 6, 9, 0));
+    assert.equal(current.endsAt, current.startsAt + WEEK_MS);
+  });
+
+  it("drops buckets that closed before the first recorded turn", () => {
+    const firstTurn = Date.UTC(2026, 7, 10, 12, 0);
+    const series = buildPeriods(
+      [entry(firstTurn)],
+      "day",
+      NO_LIMITS,
+      berlinNow,
+      BERLIN,
+    );
+    // Two days of history, not a fortnight of $0.00 above it.
+    assert.equal(series.buckets.length, 3);
+    assert.ok(series.buckets.length < PERIOD_COUNT.day);
+  });
+
+  it("keeps every turn in the window in exactly one bucket", () => {
+    const spread = [
+      entry(berlinNow - 30 * HOUR),
+      entry(berlinNow - 6 * HOUR),
+      entry(berlinNow - HOUR),
+      entry(lateEvening),
+    ];
+    const series = buildPeriods(spread, "day", NO_LIMITS, berlinNow, BERLIN);
+    const counted = series.buckets.reduce((n, b) => n + b.entryCount, 0);
+    assert.equal(counted, spread.length);
+  });
+
+  it("falls back to the server's zone rather than throwing on a bad one", () => {
+    const server = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    assert.equal(resolveTimeZone("Europe/Berlin"), "Europe/Berlin");
+    assert.equal(resolveTimeZone("Mars/Olympus_Mons"), server);
+    assert.equal(resolveTimeZone(null), server);
+    assert.equal(resolveTimeZone("x".repeat(200)), server);
   });
 });

@@ -43,6 +43,7 @@ function window(guardFraction: number | null, endsAt = 0): WindowState {
     // here so a test cannot accidentally exercise a state that cannot occur.
     fraction: guardFraction,
     fractionMetric: guardFraction === null ? null : "cost",
+    planFraction: null,
     costFraction: guardFraction,
     tokenFraction: null,
     guardFraction,

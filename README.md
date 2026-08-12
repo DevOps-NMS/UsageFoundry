@@ -16,9 +16,9 @@ treats them separately on purpose:
 | | Claude Code subscription (Pro/Max) | Console API account |
 |---|---|---|
 | What a "limit" is | 5-hour session window, weekly quota | rate limits (RPM / ITPM / OTPM), spend |
-| Official API | **none** — Anthropic publishes no endpoint and no numeric quota value | `/v1/organizations/rate_limits`, `/usage_report/messages`, `/cost_report` |
-| How this tool reads it | parses `~/.claude/projects/**/*.jsonl` locally | Admin API, with an `sk-ant-admin01-…` key |
-| Accuracy | **volumes and costs are exact; percentages are estimates** | authoritative |
+| Official API | `/api/oauth/usage` — **percentages only**, no numeric quota value | `/v1/organizations/rate_limits`, `/usage_report/messages`, `/cost_report` |
+| How this tool reads it | percentages from that endpoint; volumes and costs by parsing `~/.claude/projects/**/*.jsonl` locally | Admin API, with an `sk-ant-admin01-…` key |
+| Accuracy | **volumes and costs are exact; percentages are the provider's own, or estimates when it cannot be reached** | authoritative |
 
 The **Dashboard** is the subscription view. The **API account** page is the
 Console view, and stays empty unless you set an Admin key. They are never summed
@@ -101,11 +101,47 @@ Same work, 3.2× disagreement. Cost is the primary metric everywhere; raw-token
 ceilings remain available as a fallback and render as a secondary line when both
 are set.
 
-### Why percentages need configuration at all
+### Where percentages come from
 
 Token counts and dollar costs come straight from your transcripts and are exact.
-But a *percentage* needs a denominator, and Anthropic does not publish what a
-Max plan's quota is in any unit. So:
+A *percentage* needs a denominator, and Anthropic still publishes no numeric
+value for a Max quota in any unit — but it will tell you the percentage itself.
+
+`GET /api/oauth/usage`, authenticated with the OAuth token Claude Code already
+keeps in `.credentials.json`, returns what `claude /usage` and claude.ai show:
+utilisation and a reset instant for the 5-hour window, the week, and any weekly
+wall scoped to one model family. That is a **first-party figure for the whole
+account**, so unlike anything derived here it also counts the surfaces that
+share your allowance and write nothing to this disk — the web app, Desktop,
+Cowork. It leads every meter, and its reset instants anchor both windows.
+
+This was not a refinement. Measured on one machine: the provider reported 5.0%
+of the 5-hour window while the dashboard, dividing local spend by a hand-typed
+$650 ceiling, showed 1.3%. The arithmetic behind that $8.49 was fine —
+cross-checking 4,995 turns against Claude Code's own per-request OTLP cost put
+`pricing.ts` within **0.8%** in aggregate — and the derived window boundary was
+53 seconds off the provider's. The denominator was simply a guess, and no
+adjustment to a token weight can repair a guessed denominator.
+
+Three things to know about that source:
+
+- **It is percentages, not numbers.** There is still no ceiling to read, and
+  nothing here ever populates one by itself. **Settings → Calibrate** can now
+  *divide* by it — a window that cost $71 and took 15% of the allowance implies
+  a ~$474 ceiling — which is a measurement rather than the observed-peak lower
+  bound below it. It errs the same way and for a new reason: the cost is Claude
+  Code's and the percentage is every surface's, so a window that also held web
+  or Desktop work divides part of the spend by all of the usage.
+- **It can be unreachable** — an expired login, an offline container, or its own
+  rate limiter (a handful of requests inside a minute earns a `429`). It is
+  therefore cached on Claude Code's own cadence, a failure re-serves the last
+  good reading rather than blanking a meter, and past an hour it falls back to
+  the derived reading instead of passing off a stale percentage as current.
+- **It is undocumented**, so every failure is a miss and never an error.
+
+Turn it off with **Settings → "Read plan usage from Anthropic"**, and everything
+below is what you get back — which is also what you get for a window the
+provider did not answer for:
 
 - With no ceiling configured, meters render **hatched** ("no ceiling set"), not
   at 0%. An empty bar would read as "plenty left", which is the opposite of
@@ -118,6 +154,9 @@ Max plan's quota is in any unit. So:
 - Any budget rule expressed as a fraction (`stop at 80% of weekly`) is **refused
   outright** when no ceiling exists, rather than silently passing. A guard you
   believe is active but isn't is worse than no guard.
+
+Percentages for a *calendar* day, week or month are a separate question with a
+separate answer — see [Usage by period](#accuracy-notes) under *Accuracy notes*.
 
 ---
 
@@ -834,6 +873,42 @@ the window total instead of quietly omitting a remainder. Effort is typically
 the largest single lever; excluding sub-agent turns in Settings empties the
 by-agent table, which the card says outright.
 
+**Usage by period (day / week / month).** The two meters answer *may I start a
+run right now*; the **Usage by period** card answers *what has this been
+costing me*. It cuts the same deduplicated, same-priced entries into calendar
+buckets — a fortnight of days, a quarter of weeks, a year of months — and shows
+each one's cost, tokens, turns, and share of the ceiling. The toggle switches
+between the three without a request: all three series ship on the same poll.
+
+Two details are load-bearing.
+
+*The buckets are cut in your timezone, not the container's.* The container runs
+in UTC, so a 22:30 UTC turn is already tomorrow in Berlin, and bucketing it in
+UTC would file an evening's work under the wrong day. The browser sends its own
+zone (`/api/usage?tz=`), the server rejects anything that is not one and falls
+back to its own, and the label is rendered from the same zone the boundary was
+cut in. DST is handled by taking each bucket's end from the next bucket's
+start, so the series is contiguous by construction — the 25-hour day when the
+clocks go back is 25 hours long and nothing falls between two buckets.
+
+*A day and a month have no published allowance, so their percentage is a pace.*
+Anthropic enforces a 5-hour window and a weekly one and nothing in between. The
+weekly ceiling is therefore the only configured number a calendar bucket can be
+measured against: a **week** uses it as it stands, and a **day** and a **month**
+get it spread evenly over their own length. The card says so in words on every
+non-weekly view — *"your weekly ceiling spread over 31 days. Anthropic sets no
+monthly limit, so this is a pace rather than an allowance"* — and the wording is
+driven by the same value that produced the fraction, so the two cannot drift.
+Nothing here reaches `evaluateBudget`: no guard has ever had a daily threshold
+and this does not add one. With no weekly ceiling set, every bucket reads as the
+hatched indeterminate meter, never 0%.
+
+Weekly buckets follow the **weekly reset day** when one is configured, rather
+than a calendar Monday, so the newest bucket is the same seven hours-to-the-
+minute as the weekly meter above it. Buckets that closed before your first
+recorded turn are dropped rather than shown as `$0.00`, so a fresh install sees
+the days it has instead of thirteen empty ones above them.
+
 **Agent self-reporting (optional, off by default).** Claude Code computes a cost
 for every API request and will push it to any OTLP endpoint. Turning on *Agent
 self-reporting* in Settings points agents this app spawns back at this server,
@@ -907,7 +982,8 @@ mounted code. Treat it as privileged.
 ```
 src/lib/
   transcripts.ts   JSONL parser — incremental byte-offset reads, dedupe
-  windows.ts       5-hour block + weekly rollups, burn rate, projection
+  windows.ts       5-hour block + weekly rollups, burn rate, projection,
+                   calendar day/week/month history (display only)
   pricing.ts       per-model rates, cache-TTL multipliers, fast mode
   adminApi.ts      Admin API client (rate limits, usage, cost) w/ pagination
   budget.ts        policy evaluation
@@ -973,6 +1049,18 @@ Built and exercised against real transcripts:
   reconcile to the window total to within a rounding error ($138.3639 over 998
   turns), every turn lands in exactly one bucket per breakdown (998 = 998), and
   the `groupBy` refactor left `byModel` / `byProject` reconciling as before.
+- **Calendar periods against 9,200 real deduped turns from 303 files**, in
+  `Europe/Berlin` while the machine ran UTC. Every day boundary landed on local
+  midnight (`00:00:00` Berlin, i.e. `22:00` UTC the day before under CEST), all
+  three granularities were contiguous with no gap between adjacent buckets, and
+  every turn in each series' span landed in exactly one bucket (9,200 = 9,200,
+  three times). Pro-rating checked against a $700 weekly ceiling: a day read
+  $100.00 and a 31-day August read $3,100.00. The weekly bucket's total matched
+  the weekly meter's exactly ($1,228.79), the `limitBasis` was `weekly` for
+  weeks and `prorated` for the other two, and the day series was three buckets
+  rather than fourteen because the transcripts start on 10 August. Nine unit
+  tests cover the same ground plus the DST case, an anchored week, and the
+  no-ceiling case (`fraction === null`, never `0`).
 - Stop path, end to end against a stub CLI that ignores SIGTERM: the run now
   reaches `stopped` about 8s after the stop (5s escalation + 2s drain grace),
   where it previously stayed `running` indefinitely. Two independent causes
@@ -1283,6 +1371,16 @@ through before trusting this unattended:
   same run could not reach `gh`, so the issue it was written from was never read
   either — what is here follows the task text's summary of it. Run the three
   commands and open one finished run's page before trusting any of it.
+- **The Usage by period card in a browser.** The rollup behind it was exercised
+  against 9,200 real turns (see *Verified*) and `npm run typecheck` and
+  `npm test` both pass, but no browser has rendered it: the sandbox it was
+  written in cannot execute Next's edge runtime at all (`EvalError: Code
+  generation from strings disallowed`, the same limitation noted below for
+  `/api/mcp`), which takes `next build` and every page request with it. What
+  has not been seen is the layout — the tab strip beside the card title at a
+  narrow width, a fourteen-row daily table, and a meter reading 798% of a
+  pro-rated day, which is a real figure from those transcripts and clamps to a
+  full bar.
 - Whether `claude -p` flushes its `result` event on `SIGINT`. If it does, an
   interrupted cycle keeps its measured cost and the transcript reconciliation
   becomes a fallback rather than the norm.

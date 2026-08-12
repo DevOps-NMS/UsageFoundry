@@ -1,4 +1,9 @@
-node_modules/
+# No trailing slash: an isolated run installs dependencies by symlinking
+# node_modules at a checkout that has none, and `node_modules/` matches
+# directories only — so the link stayed untracked-but-not-ignored and
+# `commitPending`'s `git add -A` would put a link pointing outside the
+# repository onto the run's branch.
+node_modules
 .next/
 .data/
 

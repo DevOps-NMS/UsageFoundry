@@ -61,6 +61,25 @@ export interface Settings {
    * ceiling so the guard trips early instead.
    */
   reservedHeadroomFraction: number | null;
+  /**
+   * Ask Anthropic what this account has actually used, instead of deriving it.
+   *
+   * On by default, which is the opposite of `telemetryForRuns` below, and the
+   * difference is worth stating. That one turns telemetry on inside a child
+   * process and points it at this server — a new side effect, so it is opted
+   * into. This one makes an authenticated read of the signed-in account's own
+   * usage with the credential Claude Code already keeps on this disk, to the
+   * host every agent this app spawns already talks to. Nothing leaves that was
+   * not already there, and what comes back is the only figure on the dashboard
+   * that is not a guess: the ceiling behind every derived percentage is a
+   * number the user typed, and on the machine this was written against that
+   * guess was out by a factor of four.
+   *
+   * Off falls back to the derived reading, which is what shipped before it —
+   * so this is a switch between "measured" and "estimated", never between
+   * "shown" and "hidden".
+   */
+  planUsageFromApi: boolean;
   /** Default permission mode for new runs. */
   defaultPermissionMode: PermissionMode;
   /** Default model passed to Claude Code, or null to use its own default. */
@@ -288,6 +307,7 @@ const DEFAULTS: Settings = {
   weeklyAnchor: null,
   sessionResetOverrideAt: null,
   reservedHeadroomFraction: null,
+  planUsageFromApi: true,
   defaultPermissionMode: "acceptEdits",
   defaultModel: null,
   continuationPrompt: DEFAULT_CONTINUATION_PROMPT,

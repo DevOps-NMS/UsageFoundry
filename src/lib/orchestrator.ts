@@ -28,6 +28,7 @@ import {
 import { scanUsage, type UsageEntry } from "./transcripts";
 import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
+import { planUsage } from "./planUsage";
 import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
 import type { RunDependencyDTO } from "./apiTypes";
 
@@ -2852,8 +2853,17 @@ function handleStreamLine(
  * reading of them.
  */
 export async function currentSnapshot() {
-  const { entries } = await scanUsage();
   const settings = getSettings();
+  // Both are cached and neither throws, so this costs a transcript scan and,
+  // at most once every five minutes, one HTTP request. The guard reads the
+  // provider's own window fractions when they are there: a figure that can be
+  // up to five minutes old but is on the right scale beats one that is
+  // instant and low by a factor of four, which is what a fraction guard
+  // measured against a typed ceiling was.
+  const [{ entries }, plan] = await Promise.all([
+    scanUsage(),
+    settings.planUsageFromApi ? planUsage() : Promise.resolve(null),
+  ]);
   const filtered = settings.includeSidechains
     ? entries
     : entries.filter((e) => !e.isSidechain);
@@ -2862,6 +2872,7 @@ export async function currentSnapshot() {
     limitConfig(settings),
     Date.now(),
     settings.sessionResetOverrideAt,
+    plan,
   );
 }
 

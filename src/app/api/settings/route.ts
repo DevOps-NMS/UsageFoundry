@@ -14,6 +14,7 @@ import {
   CLAUDE_HOME,
 } from "@/lib/config";
 import { FIVE_HOURS_MS } from "@/lib/windows";
+import { invalidatePlanUsage } from "@/lib/planUsage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -123,6 +124,14 @@ export async function PUT(req: Request) {
 
   if ("telemetryForRuns" in body) {
     patch.telemetryForRuns = Boolean(body.telemetryForRuns);
+  }
+
+  if ("planUsageFromApi" in body) {
+    patch.planUsageFromApi = Boolean(body.planUsageFromApi);
+    // The cached reading outlives the setting otherwise: switching this off
+    // and reloading would keep showing provider percentages for up to five
+    // minutes, which reads as the switch not working.
+    invalidatePlanUsage();
   }
 
   if ("includeSidechains" in body) {

@@ -1,29 +1,50 @@
 import { NextResponse } from "next/server";
 import { scanUsage } from "@/lib/transcripts";
-import { buildSnapshot } from "@/lib/windows";
+import { buildPeriods, buildSnapshot, resolveTimeZone } from "@/lib/windows";
 import { getSettings, limitConfig } from "@/lib/settings";
 import { readAccountProfile } from "@/lib/account";
+import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
 import { PROJECTS_DIR } from "@/lib/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
-    const scan = await scanUsage();
-    const account = await readAccountProfile();
     const settings = getSettings();
+    const [scan, account, plan] = await Promise.all([
+      scanUsage(),
+      readAccountProfile(),
+      settings.planUsageFromApi ? planUsage() : Promise.resolve(null),
+    ]);
     const entries = settings.includeSidechains
       ? scan.entries
       : scan.entries.filter((e) => !e.isSidechain);
 
+    const now = Date.now();
+    const limits = limitConfig(settings);
     const snapshot = buildSnapshot(
       entries,
-      limitConfig(settings),
-      Date.now(),
+      limits,
+      now,
       settings.sessionResetOverrideAt,
+      plan,
     );
+
+    // Calendar buckets are wrong at every edge if they are cut in the wrong
+    // zone, and the container runs in UTC — so the browser names the zone it is
+    // displaying in and `resolveTimeZone` refuses anything that is not one.
+    // All three granularities on every poll: the client toggle then costs no
+    // request, and the whole set is a tenth of what the snapshot already is.
+    const timeZone = resolveTimeZone(
+      new URL(req.url).searchParams.get("tz"),
+    );
+    const periods = {
+      day: buildPeriods(entries, "day", limits, now, timeZone),
+      week: buildPeriods(entries, "week", limits, now, timeZone),
+      month: buildPeriods(entries, "month", limits, now, timeZone),
+    };
 
     // Bounded by the snapshot's own window so the card describes the same five
     // hours as the session meter — and read only when the setting is on, so a
@@ -35,6 +56,7 @@ export async function GET() {
 
     return NextResponse.json({
       snapshot,
+      periods,
       telemetry,
       meta: {
         transcriptDir: PROJECTS_DIR,
@@ -42,10 +64,23 @@ export async function GET() {
         entryCount: entries.length,
         unpricedModels: scan.unpricedModels,
         scannedAt: scan.scannedAt,
+        // "Can this window show a percentage at all", which the provider's own
+        // reading answers without anything being configured — the whole point
+        // of it. Reading the snapshot rather than the settings is what keeps
+        // the "no ceilings" banner off a dashboard that is showing real
+        // percentages.
         hasSessionCeiling:
-          settings.sessionCostLimit !== null || settings.sessionTokenLimit !== null,
+          snapshot.session.fraction !== null ||
+          settings.sessionCostLimit !== null ||
+          settings.sessionTokenLimit !== null,
         hasWeeklyCeiling:
-          settings.weeklyCostLimit !== null || settings.weeklyTokenLimit !== null,
+          snapshot.weekly.fraction !== null ||
+          settings.weeklyCostLimit !== null ||
+          settings.weeklyTokenLimit !== null,
+        // Whether the setting is on, so the UI can tell "switched off" apart
+        // from "on, but the provider did not answer" — the second is worth a
+        // sentence and the first is not.
+        planUsageFromApi: settings.planUsageFromApi,
         reservedHeadroomFraction: settings.reservedHeadroomFraction ?? 0,
         // What the user typed, so the meters can name it alongside the reduced
         // ceiling they are actually measured against.

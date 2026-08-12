@@ -76,6 +76,7 @@ const EDITABLE_PATHS = [
   "chatDefaultGuards.budget.maxIterations",
   "chatDefaultGuards.budget.maxDurationMinutes",
   "chatTurnBudgetUSD",
+  "planUsageFromApi",
   "sessionCostLimit",
   "weeklyCostLimit",
   "reservedHeadroomFraction",
@@ -794,12 +795,35 @@ export default function SettingsPage() {
       <Section
         id="limits"
         title="Subscription limits"
-        lede="What this app believes your plan allows. Every percentage on the dashboard, and every window guard, is computed against these."
+        lede="Where the percentages on the dashboard, and every window guard, come from."
       >
+        <FormField edited={isEdited("planUsageFromApi")}>
+          <Toggle
+            id="planusage"
+            checked={effective.planUsageFromApi}
+            onChange={(v) => patch({ planUsageFromApi: v })}
+            label={
+              <>
+                Read plan usage from Anthropic
+                {isEdited("planUsageFromApi") && (
+                  <span className="sr-only"> — edited, not saved</span>
+                )}
+              </>
+            }
+          />
+          <Hint>
+            The figure <span className="mono">/usage</span> shows, for the whole
+            account rather than Claude Code alone, read with the credential the
+            CLI already keeps here. The one percentage on the dashboard that is
+            measured rather than estimated — the ceilings below are what it
+            falls back to
+          </Hint>
+        </FormField>
+
         <Notice tone="warn">
-          Anthropic publishes no numeric value for a Pro/Max limit and offers no
-          endpoint to read one. Anything you enter here is an{" "}
-          <strong>estimate</strong>.
+          Anthropic publishes no numeric value for a Pro/Max limit, so anything
+          you enter below is an <strong>estimate</strong>. It is what the meters
+          and guards fall back to when the reading above is off or unavailable.
         </Notice>
 
         <div className="grid gap-x-4 sm:grid-cols-2">
@@ -884,9 +908,9 @@ export default function SettingsPage() {
             }
           />
           <Hint>
-            Cowork, Desktop and the web app share your limits and write no local
-            transcripts, so this tool cannot see them — reserving headroom
-            shrinks every ceiling so guards trip early
+            {effective.planUsageFromApi
+              ? "Applies to the estimated ceilings only. The reading above already counts Cowork, Desktop and the web app, so nothing is held back from it — subtracting a reserve there would take the same allowance off twice"
+              : "Cowork, Desktop and the web app share your limits and write no local transcripts, so this tool cannot see them — reserving headroom shrinks every ceiling so guards trip early"}
             {effectiveCeilings(
               effective.reservedHeadroomFraction,
               effective.sessionCostLimit,
@@ -1059,6 +1083,8 @@ export default function SettingsPage() {
               <span id="sessreset-hint">
                 {resetTooFarAhead ? (
                   "No window can reset more than five hours from now — check the date"
+                ) : effective.planUsageFromApi ? (
+                  "Not needed while the reading above is on: Anthropic names the reset instant itself, and that wins over anything typed here"
                 ) : effective.sessionResetOverrideAt === null ? (
                   "Blank is the normal state. Only needed after a tier change, which restarts the window with no trace in any transcript"
                 ) : Date.now() < effective.sessionResetOverrideAt ? (

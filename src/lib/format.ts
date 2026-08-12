@@ -155,6 +155,49 @@ export function fmtDuration(ms: number): string {
   return `${h}h ${m % 60}m`;
 }
 
+/**
+ * A calendar bucket's span, as a person reads it.
+ *
+ * The boundaries were cut in the browser's own zone (`/api/usage?tz=`), so
+ * rendering them with the browser's own locale is the one thing that keeps the
+ * label and the arithmetic describing the same day. A week is shown as its span
+ * rather than as "week of", because an anchored week does not start on a
+ * Monday and a label that implies it would be wrong for the operators who
+ * configured one.
+ */
+export function fmtPeriodLabel(
+  granularity: "day" | "week" | "month",
+  startsAt: number,
+  endsAt: number,
+): string {
+  const start = new Date(startsAt);
+  if (granularity === "month") {
+    return start.toLocaleDateString([], { month: "long", year: "numeric" });
+  }
+  if (granularity === "day") {
+    return start.toLocaleDateString([], {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+    });
+  }
+  // The last *instant* of the week belongs to the next one, so name the day
+  // before it — otherwise a midnight-aligned week reads as eight days long.
+  const last = new Date(endsAt - 1);
+  // `formatRange`, not two `toLocaleDateString` calls joined by a dash: where
+  // the month goes in a range is a locale decision, and concatenating produced
+  // "12 – Aug 19" — the month attached to the wrong end of the span.
+  return new Intl.DateTimeFormat([], {
+    day: "numeric",
+    month: "short",
+    // Only when the span straddles one, so an ordinary week is not stamped
+    // with a year twelve rows in a column already sorted by date.
+    ...(start.getFullYear() === last.getFullYear()
+      ? {}
+      : { year: "numeric" }),
+  }).formatRange(start, last);
+}
+
 /** Shorten an absolute path for display, keeping the tail meaningful. */
 export function shortPath(p: string, keep = 3): string {
   if (!p) return "—";
