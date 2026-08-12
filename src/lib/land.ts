@@ -1897,7 +1897,7 @@ const MAX_PENDING_PROBES = 20;
 function oneRunPerBranch(runs: readonly RunRow[]): RunRow[] {
   const byBranch = new Map<string, RunRow[]>();
   for (const run of runs) {
-    const key = `${run.repo_root} ${run.worktree_branch}`;
+    const key = `${run.repo_root}\0${run.worktree_branch}`;
     const list = byBranch.get(key);
     if (list) list.push(run);
     else byBranch.set(key, [run]);
