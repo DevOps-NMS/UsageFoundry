@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import type { WorkflowInstanceDTO } from "@/lib/apiTypes";
+import type { BadgeTone } from "@/lib/format";
 import {
   STATUS_TONE,
   fmtCycles,
@@ -26,6 +27,31 @@ const POLL_MS = 10_000;
 const CAUSE_LABEL: Record<"operator" | "guard", string> = {
   operator: "You stopped this run",
   guard: "Its budget guard stopped this run",
+};
+
+type BlockStatus = WorkflowInstanceDTO["blocks"][number]["status"];
+
+/**
+ * What a block's status is called on the page.
+ *
+ * `emitted` is deliberately not "completed": a block that decided there was
+ * nothing to start is emitted with zero runs, and the row beside this says how
+ * many — so the word has to leave room for none rather than imply work.
+ */
+const BLOCK_LABEL: Record<BlockStatus, string> = {
+  waiting: "waiting",
+  thinking: "deciding",
+  emitted: "decided",
+  failed: "failed",
+  blocked: "blocked",
+};
+
+const BLOCK_TONE: Record<BlockStatus, BadgeTone> = {
+  waiting: "neutral",
+  thinking: "accent",
+  emitted: "ok",
+  failed: "danger",
+  blocked: "neutral",
 };
 
 /**
@@ -112,6 +138,7 @@ export default function WorkflowInstancePage() {
   const nodeName = useMemo(() => {
     const map = new Map<string, string>();
     for (const n of instance?.nodes ?? []) map.set(n.nodeId, n.nodeName);
+    for (const b of instance?.blocks ?? []) map.set(b.nodeId, b.nodeName);
     return map;
   }, [instance]);
 
@@ -292,6 +319,85 @@ export default function WorkflowInstancePage() {
         )}
       </Card>
 
+      {instance.blocks.length > 0 && (
+        <>
+          <CardTitle className="mt-8">Blocks that decide</CardTitle>
+          <Card emphasis="quiet">
+            <TableWrap>
+              <Table>
+                <caption className="sr-only">
+                  Blocks that decide what to run, and blocks that never ran
+                </caption>
+                <thead>
+                  <tr>
+                    <Th scope="col" className="w-[116px]">
+                      Status
+                    </Th>
+                    <Th scope="col" className="w-full">
+                      Block
+                    </Th>
+                    <Th scope="col" num className="w-[104px]">
+                      Started
+                    </Th>
+                    <Th scope="col" num className="w-[96px]">
+                      Spent
+                    </Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {instance.blocks.map((b) => {
+                    const waits = b.waitsFor.map(
+                      (from) => nodeName.get(from) ?? from,
+                    );
+                    return (
+                      <Tr key={b.nodeId}>
+                        <Td className="align-top">
+                          <Badge tone={BLOCK_TONE[b.status]}>
+                            {BLOCK_LABEL[b.status]}
+                          </Badge>
+                        </Td>
+                        <Td className="align-top">
+                          <div className="font-medium text-ink">{b.nodeName}</div>
+                          <div className="mt-0.5 text-ink-muted">
+                            {b.kind === "run"
+                              ? "never started"
+                              : b.status === "emitted"
+                                ? `started ${b.emitted} run(s)`
+                                : waits.length === 0
+                                  ? "decides immediately"
+                                  : `after ${waits.join(", ")}`}
+                          </div>
+                          {b.error && (
+                            <div className="mt-0.5 max-w-[56ch] text-ink-muted">
+                              {b.error}
+                            </div>
+                          )}
+                        </Td>
+                        <Td num className="whitespace-nowrap align-top text-ink-muted">
+                          {b.startedAt === null ? "—" : fmtDateTime(b.startedAt)}
+                        </Td>
+                        <Td num className="whitespace-nowrap align-top">
+                          {b.kind === "run" ? "—" : fmtUSD(b.costUSD)}
+                        </Td>
+                      </Tr>
+                    );
+                  })}
+                </tbody>
+              </Table>
+            </TableWrap>
+            <Hint>
+              What a deciding block starts is created without an approval — the
+              folder, the guards and the most runs it may start were fixed when
+              the workflow was saved
+            </Hint>
+            <Hint>
+              A deciding block&rsquo;s own spend is counted against this
+              workflow&rsquo;s limit and never against a run
+            </Hint>
+          </Card>
+        </>
+      )}
+
       <CardTitle className="mt-8">Blocks</CardTitle>
       <Card emphasis="primary">
         {instance.nodes.length === 0 ? (
@@ -344,9 +450,11 @@ export default function WorkflowInstancePage() {
                           {n.nodeName}
                         </Link>
                         <div className="mt-0.5 text-ink-muted">
-                          {waits.length === 0
-                            ? "started immediately"
-                            : `after ${waits.join(", ")}`}
+                          {n.emittedBy
+                            ? `started by ${nodeName.get(n.emittedBy) ?? n.emittedBy}`
+                            : waits.length === 0
+                              ? "started immediately"
+                              : `after ${waits.join(", ")}`}
                         </div>
                         {n.run?.stopReason && (
                           <div className="mt-0.5 max-w-[56ch] text-ink-muted">

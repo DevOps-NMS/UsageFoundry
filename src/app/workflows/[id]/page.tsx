@@ -318,6 +318,16 @@ export default function WorkflowPage() {
                     </Td>
                     <Td className="align-top">
                       <div className="font-medium text-ink">{n.name}</div>
+                      {n.kind === "orchestrator" && (
+                        // Said on the row rather than only in the editor: this
+                        // is the page an operator presses Run from, and a block
+                        // that starts up to N agents on its own judgement is
+                        // not something to find out about afterwards.
+                        <div className="mt-0.5 text-warn">
+                          Decides what to run — starts up to {n.fanOut} run(s)
+                          with no approval
+                        </div>
+                      )}
                       <div className="mono mt-0.5 text-ink-muted">
                         {n.mountId} / {n.folder || "."}
                       </div>
