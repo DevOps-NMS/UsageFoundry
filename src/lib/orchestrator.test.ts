@@ -44,6 +44,7 @@ const {
   dependencyCycle,
   overlaps,
   releasableRuns,
+  resolveIsolation,
   githubEnv,
   isTransientApiError,
   isUsageLimit,
@@ -324,6 +325,155 @@ describe("dependencies", () => {
 });
 
 /**
+ * Covers where a run works, on what branch, and measured from where.
+ *
+ * Three modes now, and the third is the reason this is a function rather than a
+ * paragraph inside `planWorkspace`. Every way it can be wrong is silent and
+ * lands on disk: a continuation resolved to a fresh branch starts the second
+ * agent from the target with the first one's commits nowhere in sight, and a
+ * continuation resolved to the predecessor's *tip* instead of the chain's base
+ * makes `diff.ts`, `review.ts`, `emitHandoff` and the merge itself cover only
+ * the last link — the earlier agents' work invisible in the review and missing
+ * from the patch. Neither throws and both typecheck.
+ */
+describe("isolation for the three modes", () => {
+  const probe = {
+    mode: "worktree" as const,
+    repoRoot: "/ws/repo",
+    base: "head-now",
+    baseBranch: "main",
+  };
+
+  /** The predecessor as it stands after its own run: branch, base, slot. */
+  const predecessor = {
+    runId: "bbbbbbbb",
+    isolation: "worktree" as const,
+    repoRoot: "/ws/repo",
+    branch: "uf/repo-1-bbbbbbbb",
+    base: "chain-base",
+    baseBranch: "main",
+    worktreePath: "/ws/.uf-worktrees/repo-1",
+  };
+
+  const args = {
+    runId: "aaaaaaaa-0000-0000-0000-000000000000",
+    isolate: true,
+    probe,
+    continueFrom: null as typeof predecessor | null,
+    inheritedSlot: null as string | null,
+    freeSlot: "/ws/.uf-worktrees/repo-2" as string | null,
+  };
+
+  it("cuts a fresh branch from the folder's HEAD when nothing is continued", () => {
+    const plan = resolveIsolation(args);
+    assert.equal(plan.mode, "worktree");
+    assert.equal(plan.worktreePath, "/ws/.uf-worktrees/repo-2");
+    assert.equal(plan.base, "head-now");
+    assert.equal(plan.baseBranch, "main");
+    // Named from the run's own id, which is what makes it a branch no other run
+    // can ever mint and so a claim nothing has to reserve.
+    assert.equal(plan.branch, "uf/repo-2-aaaaaaaa");
+  });
+
+  it("works in the folder when isolation is off, and says so", () => {
+    const plan = resolveIsolation({ ...args, isolate: false });
+    assert.equal(plan.mode, "none");
+    assert.match(plan.reason ?? "", /turned off/);
+  });
+
+  it("takes the predecessor's branch and the chain's base, not its tip", () => {
+    // The whole point. `worktree_base` is what every diff, every review and the
+    // merge measure from, so anchoring on the predecessor's tip would show and
+    // land only this link and drop every commit made before it.
+    const plan = resolveIsolation({
+      ...args,
+      continueFrom: predecessor,
+      inheritedSlot: predecessor.worktreePath,
+      freeSlot: null,
+    });
+    assert.equal(plan.mode, "worktree");
+    assert.equal(plan.branch, "uf/repo-1-bbbbbbbb");
+    assert.equal(plan.base, "chain-base");
+    // The land target is the chain's, never re-read off the folder's HEAD.
+    assert.equal(plan.baseBranch, "main");
+    assert.equal(plan.worktreePath, "/ws/.uf-worktrees/repo-1");
+  });
+
+  it("falls back to a fresh checkout when the predecessor's has been taken", () => {
+    // What is claimed is the branch, not the slot — so a slot handed to an
+    // unrelated run mid-chain costs a fresh checkout and nothing else.
+    const plan = resolveIsolation({
+      ...args,
+      continueFrom: predecessor,
+      inheritedSlot: null,
+    });
+    assert.equal(plan.worktreePath, "/ws/.uf-worktrees/repo-2");
+    assert.equal(plan.branch, "uf/repo-1-bbbbbbbb");
+    assert.equal(plan.base, "chain-base");
+  });
+
+  it("refuses rather than downgrading a continuation it cannot honour", () => {
+    // The one asymmetry that matters. A run that merely asked for a checkout
+    // still does the work it was given when it cannot have one, in the folder,
+    // serialised — every case below returns `mode: "none"` with a reason. A
+    // continuation degraded the same way would commit to a branch nobody asked
+    // for, which is exactly what this mode exists to prevent, so each of these
+    // is a sentence naming what is missing.
+    const cases: Array<[string, Parameters<typeof resolveIsolation>[0], RegExp]> = [
+      [
+        "the predecessor never had a branch",
+        { ...args, continueFrom: { ...predecessor, isolation: "none", branch: null } },
+        /no branch of its own/,
+      ],
+      [
+        "the predecessor never recorded where its branch started",
+        { ...args, continueFrom: { ...predecessor, base: null } },
+        /never recorded where the branch started/,
+      ],
+      [
+        "this folder cannot have a checkout",
+        {
+          ...args,
+          probe: { mode: "none", reason: "Repository uses submodules." },
+          continueFrom: predecessor,
+        },
+        /Repository uses submodules/,
+      ],
+      [
+        "the branch belongs to another repository",
+        { ...args, continueFrom: { ...predecessor, repoRoot: "/ws/other" } },
+        /cannot be carried between repositories/,
+      ],
+      [
+        "no checkout is left to put it in",
+        { ...args, continueFrom: predecessor, inheritedSlot: null, freeSlot: null },
+        /uncommitted work/,
+      ],
+      [
+        "isolation was turned off for the run doing the continuing",
+        { ...args, isolate: false, continueFrom: predecessor },
+        /without a checkout of its own/,
+      ],
+    ];
+
+    for (const [what, input, expected] of cases) {
+      assert.throws(() => resolveIsolation(input), expected, what);
+    }
+  });
+
+  it("still downgrades an ordinary run that cannot be isolated", () => {
+    // The other side of that asymmetry, unchanged: these are reasons, not
+    // refusals, and the run works in the folder.
+    const notARepo = { mode: "none" as const, reason: "Not a git repository." };
+    assert.deepEqual(resolveIsolation({ ...args, probe: notARepo }), notARepo);
+
+    const exhausted = resolveIsolation({ ...args, freeSlot: null });
+    assert.equal(exhausted.mode, "none");
+    assert.match(exhausted.reason ?? "", /uncommitted work/);
+  });
+});
+
+/**
  * Covers which prompt a cycle spawns with. Pure, and it earns a test because
  * every wrong branch is billed: the continuation prompt asks for DONE if the
  * work is finished, so sending it into a session that has just said DONE buys
@@ -339,6 +489,12 @@ describe("prompt for the next work cycle", () => {
     isolationPreamble: null as string | null,
     priorCycles: 0,
     worktreeBranch: null as string | null,
+    continuedFrom: null as {
+      runId: string;
+      branch: string;
+      base: string | null;
+    } | null,
+    continuedWork: "READ-FIRST",
     continuation: "CONTINUE",
     donePushback: "PUSHBACK",
   };
@@ -419,6 +575,61 @@ describe("prompt for the next work cycle", () => {
     // … and a run that can resume already has the whole conversation.
     assert.equal(
       nextPrompt({ ...base, priorCycles: 3, worktreeBranch: "uf/thing" }),
+      "CONTINUE",
+    );
+  });
+
+  it("tells a run picking up another's branch whose work it is standing on", () => {
+    // A different case from the restart above, and the difference decides what
+    // the agent does: there the work is its own and "carry on from where you
+    // stopped" is the instruction, here it is a separate agent's and the branch
+    // is the only record of it. Handed the bare task instead, it does the first
+    // thing the task says — which is work that is already committed under it.
+    const continued = nextPrompt({
+      ...base,
+      sessionId: null,
+      isolationPreamble: "PRE",
+      continuedFrom: { runId: "bbbbbbbb", branch: "uf/thing", base: "abc123" },
+    });
+    assert.match(continued, /^PRE\n\n/);
+    assert.match(continued, /uf\/thing/);
+    assert.match(continued, /run bbbbbbbb/);
+    // The range is the chain's base, which is the same range the run page's
+    // diff and any review are measured over — so the agent, the reviewer and
+    // the merge are all looking at one thing.
+    assert.match(continued, /git log --oneline abc123\.\.HEAD/);
+    assert.match(continued, /git diff abc123\.\.\.HEAD/);
+    // The editable half is the guidance, and it comes last.
+    assert.match(continued, /READ-FIRST\n\nTASK$/);
+  });
+
+  it("keeps both notices, branch history before this run's own restart", () => {
+    // Both are true of a continuing run that has already been charged for a
+    // cycle, and the order is what makes them readable: read the other way the
+    // agent meets "carry on from where you stopped" before it has been told the
+    // work under it is not its own.
+    const both = nextPrompt({
+      ...base,
+      sessionId: null,
+      priorCycles: 2,
+      worktreeBranch: "uf/thing",
+      continuedFrom: { runId: "bbbbbbbb", branch: "uf/thing", base: "abc123" },
+    });
+    assert.ok(
+      both.indexOf("run bbbbbbbb") <
+        both.indexOf("A previous attempt at this task already ran 2 work cycles"),
+    );
+  });
+
+  it("says nothing about a continued branch once the session exists", () => {
+    // The agent read it on the opening turn and the conversation still holds
+    // what it found. Restating it is spend for no information, which is the
+    // same reason the continuation prompt restates nothing.
+    assert.equal(
+      nextPrompt({
+        ...base,
+        continuedFrom: { runId: "bbbbbbbb", branch: "uf/thing", base: "abc123" },
+      }),
       "CONTINUE",
     );
   });

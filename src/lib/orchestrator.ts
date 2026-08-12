@@ -95,7 +95,14 @@ export interface RunRow {
   repo_root: string | null;
   worktree_path: string | null;
   worktree_branch: string | null;
-  /** Commit the worktree branched from, for the handoff diff range. */
+  /**
+   * Commit the worktree branched from, for the handoff diff range.
+   *
+   * For a run continuing another's branch this is the *chain's* base, copied
+   * forward from the predecessor rather than taken from its tip: every diff,
+   * every review and the merge itself are `<base>...<branch>`, so anchoring on
+   * the tip would show and land only the last link's work.
+   */
   worktree_base: string | null;
   /**
    * Branch the operator had checked out when the run was created — the branch
@@ -104,6 +111,15 @@ export interface RunRow {
    * have checked out right now" is a guess the app should not make.
    */
   worktree_base_branch: string | null;
+  /**
+   * The run whose branch this one carries on, or null for a branch of its own.
+   *
+   * Recorded at admission while the rest of the isolation columns are still
+   * null — see the schema note in `db.ts`. It is what tells `ensureWorktree`
+   * the branch already exists, and what tells `landState` that more than one
+   * run has commits on it.
+   */
+  continues_run: string | null;
   /** When this tool merged the branch into its target. Null means never. */
   landed_at: number | null;
   landed_into: string | null;
@@ -901,6 +917,139 @@ export interface IsolationPlan {
   branch?: string;
 }
 
+/**
+ * The predecessor's side of a continued branch, as the decision below reads it.
+ *
+ * A projection of `RunRow` rather than the row itself, so the resolution stays
+ * a function of six recorded facts and can be tested without a database.
+ */
+export interface ContinuedBranch {
+  runId: string;
+  isolation: RunRow["isolation"];
+  repoRoot: string | null;
+  branch: string | null;
+  /** The chain's original base commit, not this predecessor's tip. */
+  base: string | null;
+  baseBranch: string | null;
+  /** The checkout it worked in, which this run reuses when it is free. */
+  worktreePath: string | null;
+}
+
+/**
+ * Where a run works, on what branch, and measured from where.
+ *
+ * Three modes, and the third is why this is pure and separated from every
+ * syscall around it. `isolate: false` works in the operator's folder;
+ * `continueFrom: null` cuts a fresh branch from the folder's HEAD; and a
+ * continuation adopts the predecessor's branch *and its base*, which is the
+ * whole point — `worktree_base` is what `diff.ts`, `review.ts`, `emitHandoff`
+ * and the merge itself measure from, so taking the predecessor's tip instead
+ * would show and land only the last link and leave the earlier agents' commits
+ * invisible in every one of them.
+ *
+ * A continuation that cannot be honoured **throws**. Everything else here
+ * degrades to `mode: "none"` with a reason, which is right for a run that
+ * merely asked for a checkout: it still does the work the operator asked for,
+ * in the folder, serialised. A continuation degraded that way would silently do
+ * something else entirely — start from the target branch with the predecessor's
+ * commits nowhere in sight, which is the exact failure this mode exists to
+ * prevent. So it is a sentence and a refusal, never a downgrade.
+ */
+export function resolveIsolation(o: {
+  runId: string;
+  isolate: boolean;
+  /** `probeIsolation`'s answer for the folder. Ignored when not isolating. */
+  probe: IsolationPlan;
+  continueFrom: ContinuedBranch | null;
+  /**
+   * The predecessor's own checkout, when no active run holds it. Null means it
+   * has been taken over, and a fresh slot is used instead — see the note on
+   * slot choice in `planWorkspace`.
+   */
+  inheritedSlot: string | null;
+  /** The next free checkout slot for this repository, or null when none is. */
+  freeSlot: string | null;
+}): IsolationPlan {
+  const cont = o.continueFrom;
+
+  if (!o.isolate) {
+    if (cont) {
+      throw new Error(
+        `This run is set to continue run ${shortId(cont.runId)}'s branch, which it cannot do ` +
+          "without a checkout of its own. Turn isolation back on, or drop the dependency's branch hand-over.",
+      );
+    }
+    return { mode: "none", reason: "Isolation was turned off for this run." };
+  }
+
+  if (!cont) {
+    if (o.probe.mode !== "worktree" || !o.probe.repoRoot) return o.probe;
+    if (!o.freeSlot) {
+      return { mode: "none", reason: slotExhaustionReason(o.probe.repoRoot) };
+    }
+    return {
+      ...o.probe,
+      worktreePath: o.freeSlot,
+      // Per run, not per slot: a slot is reused by later runs, and a reused
+      // branch name would move the ref off the previous run's commits. It is
+      // also what makes a branch unclaimable by anyone else — no other run can
+      // ever mint this name, and a continuation only ever adopts one it was
+      // explicitly pointed at.
+      branch: `uf/${path.basename(o.freeSlot)}-${o.runId.slice(0, 8)}`,
+    };
+  }
+
+  const name = `run ${shortId(cont.runId)}`;
+  if (cont.isolation !== "worktree" || !cont.branch) {
+    throw new Error(
+      `Set to continue ${name}'s branch, but that run has no branch of its own — it worked directly in the folder.`,
+    );
+  }
+  if (!cont.base || !cont.repoRoot) {
+    throw new Error(
+      `Set to continue ${name}'s branch (${cont.branch}), but that run never recorded where the branch started, ` +
+        "so there is no range for a diff or a merge to measure from.",
+    );
+  }
+  if (o.probe.mode !== "worktree" || !o.probe.repoRoot) {
+    throw new Error(
+      `Set to continue ${name}'s branch (${cont.branch}), but this folder cannot be given a checkout: ${
+        o.probe.reason ?? "isolation is unavailable here."
+      }`,
+    );
+  }
+  if (o.probe.repoRoot !== cont.repoRoot) {
+    throw new Error(
+      `Set to continue ${name}'s branch (${cont.branch}), which is in ${cont.repoRoot}, but this run is on ` +
+        `${o.probe.repoRoot}. A branch cannot be carried between repositories.`,
+    );
+  }
+
+  const slot = o.inheritedSlot ?? o.freeSlot;
+  if (!slot) {
+    // Not `slotExhaustionReason`, which ends "so this run works in the folder
+    // directly and waits its turn" — the sentence for a downgrade, and this is
+    // not one. Working in the folder would put the run on the target branch.
+    throw new Error(
+      `Set to continue ${name}'s branch (${cont.branch}), but every isolated checkout for this ` +
+        "repository still holds uncommitted work and there is nowhere to put this one. Commit or " +
+        "delete what is left in the checkout store, then start this run again.",
+    );
+  }
+
+  return {
+    mode: "worktree",
+    repoRoot: o.probe.repoRoot,
+    // The predecessor's, not the probe's. `probeIsolation` reports the folder's
+    // HEAD, which has moved on since the chain started — measuring from it
+    // would drop every commit made before this link.
+    base: cont.base,
+    baseBranch: cont.baseBranch ?? undefined,
+    worktreePath: slot,
+    branch: cont.branch,
+  };
+}
+
 /** Path-safe, collision-free name for a directory. Separators become dashes. */
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "repo";
@@ -1070,12 +1219,20 @@ function slotIsDirty(slotPath: string): boolean {
  * `git status --porcelain` is clean, and that command ignores gitignored paths
  * — so `node_modules` and friends survive from the previous run while any
  * leftover source change blocks reuse instead of being silently destroyed.
+ *
+ * A run continuing another's branch never *creates* one: the branch is already
+ * in the repository with the predecessor's commits on it, and every `-b` here
+ * would either fail outright or, worse, move the name off those commits. So it
+ * takes the third path at each of the three forks below — `checkout` rather
+ * than `checkout -b`, `worktree add <path> <branch>` rather than `worktree add
+ * -b`, and past the orphaned-branch guard rather than into it.
  */
 async function ensureWorktree(run: RunRow): Promise<string> {
   const repoRoot = run.repo_root!;
   const slotPath = run.worktree_path!;
   const branch = run.worktree_branch!;
   const base = run.worktree_base ?? "HEAD";
+  const continuing = run.continues_run !== null;
 
   // Validated before git writes into it — see `prepareWorktreeStore`.
   prepareWorktreeStore(repoRoot);
@@ -1091,12 +1248,44 @@ async function ensureWorktree(run: RunRow): Promise<string> {
 
   if (registered.includes(slotPath)) {
     const head = await git(slotPath, ["rev-parse", "--abbrev-ref", "HEAD"]);
-    // Already this run's own checkout, on its own branch, holding its commits —
-    // it is coming back from a pause. Adopt it exactly as it stands: `checkout
-    // -b` would fail on an existing branch, the dirty check below would reject
-    // work in progress the agent legitimately left, and re-seeding would
-    // overwrite files it has since edited.
+    // The checkout already holds this branch. Adopt it exactly as it stands:
+    // `checkout -b` would fail on an existing branch, the dirty check below
+    // would reject work in progress that was legitimately left there, and
+    // re-seeding would overwrite files that have since been edited.
+    //
+    // Two ways to arrive here now. Either this is the run's own checkout coming
+    // back from a pause, or it is the predecessor's, handed over. `iterations`
+    // and `pause_count` are what tell them apart — a continuing run that has
+    // worked is resuming its own tree, whatever it started from.
     if (head.ok && head.stdout === branch) {
+      const handover =
+        continuing && run.iterations === 0 && (run.pause_count ?? 0) === 0;
+      if (handover) {
+        // Whatever the predecessor left uncommitted is in this tree, on this
+        // chain's branch. `commitRefusal` already settled whose work that is:
+        // it belongs to the run whose branch the slot has checked out, and here
+        // that is this chain. So it is kept rather than refused — the
+        // alternative strands a chain on a directory the operator has a button
+        // for and no reason to look at — and the count is said out loud,
+        // because inheriting someone else's half-finished edits silently is the
+        // part that would be surprising. The agent is told too, by
+        // `continuedWorkNotice`.
+        const leftover = await git(slotPath, ["status", "--porcelain"]);
+        const paths = leftover.ok
+          ? leftover.stdout.split("\n").filter(Boolean).length
+          : null;
+        const from = `run ${shortId(run.continues_run!)}`;
+        log(
+          run.id,
+          paths === null
+            ? `Taking over ${from}'s checkout on branch ${branch}. Its status could not be read, so it may still hold uncommitted work.`
+            : paths === 0
+              ? `Taking over ${from}'s checkout on branch ${branch}, with nothing left uncommitted in it.`
+              : `Taking over ${from}'s checkout on branch ${branch}, which still holds ${paths} uncommitted path(s) from that run. They are left exactly as they are, as work in progress this run inherits.`,
+          { worktree: slotPath, branch, continuesRun: run.continues_run },
+        );
+        return slotPath;
+      }
       log(run.id, `Resuming in the existing checkout on branch ${branch}.`, {
         worktree: slotPath,
         branch,
@@ -1109,8 +1298,29 @@ async function ensureWorktree(run: RunRow): Promise<string> {
         `Checkout ${path.basename(slotPath)} still has uncommitted work. Commit or remove it first.`,
       );
     }
-    const co = await git(slotPath, ["checkout", "-b", branch, base]);
-    if (!co.ok) throw new Error(`Could not start branch ${branch}: ${co.stderr}`);
+    if (continuing) {
+      await requireBranch(repoRoot, run, branch);
+      const co = await git(slotPath, ["checkout", branch]);
+      if (!co.ok) {
+        throw new Error(`Could not check out branch ${branch}: ${co.stderr}`);
+      }
+    } else {
+      const co = await git(slotPath, ["checkout", "-b", branch, base]);
+      if (!co.ok) throw new Error(`Could not start branch ${branch}: ${co.stderr}`);
+    }
+  } else if (continuing) {
+    // Straight past the orphaned-branch guard below, and it loses nothing by
+    // it: that guard exists because `worktree add -b` would create a *second*
+    // branch at the base and leave the run's commits on a ref nothing points
+    // at. Attaching to the branch that already exists cannot orphan anything —
+    // the predecessor's commits and this run's own are the same ref, and that
+    // ref is what is being checked out. The half of the guard that is a real
+    // fact is kept: a branch that has been deleted is refused by name.
+    await requireBranch(repoRoot, run, branch);
+    const add = await git(repoRoot, ["worktree", "add", slotPath, branch], {
+      timeoutMs: 30 * 60_000,
+    });
+    if (!add.ok) throw new Error(`Could not create a checkout: ${add.stderr}`);
   } else if (run.iterations > 0 || (run.pause_count ?? 0) > 0) {
     // A resuming run whose checkout has been removed from under it. Creating a
     // fresh one would silently orphan every commit it already made, so name the
@@ -1146,12 +1356,35 @@ async function ensureWorktree(run: RunRow): Promise<string> {
   const copied = seedWorktree(repoRoot, slotPath);
   log(
     run.id,
-    `Working in an isolated checkout on branch ${branch}` +
+    (continuing
+      ? `Working in an isolated checkout, carrying on run ${shortId(run.continues_run!)}'s branch ${branch}`
+      : `Working in an isolated checkout on branch ${branch}`) +
       (copied.length ? ` (copied ${copied.join(", ")})` : ""),
-    { worktree: slotPath, branch },
+    { worktree: slotPath, branch, ...(continuing ? { continuesRun: run.continues_run } : {}) },
   );
 
   return slotPath;
+}
+
+/**
+ * Refuse a continuation whose branch has gone, naming what is missing.
+ *
+ * `purgeBranch` destroys a branch and its checkout together, and a chain link
+ * released afterwards would otherwise be handed a `worktree add` that quietly
+ * created a fresh branch at the chain's base — a run that looks like it is
+ * continuing the work and is in fact starting it over.
+ */
+async function requireBranch(
+  repoRoot: string,
+  run: RunRow,
+  branch: string,
+): Promise<void> {
+  const onDisk = await git(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+  if (onDisk.ok) return;
+  throw new Error(
+    `Branch ${branch} is gone, so there is nothing of run ${shortId(run.continues_run!)}'s work left to carry on. ` +
+      "Start this run again without the branch hand-over if it should begin from scratch.",
+  );
 }
 
 /** Match a filename against the settings glob list; later patterns win. */
@@ -1365,32 +1598,87 @@ function planWorkspace(
   id: string,
   folder: string,
   isolate: boolean,
+  continueFrom: RunRow | null,
 ): { plan: IsolationPlan; workDir: string } {
   // An isolated run gets its own subtree, so it contends with nothing but a run
   // started on the workspace root — which does contain the checkout store, and
   // correctly blocks.
-  let plan: IsolationPlan = { mode: "none" };
-  if (isolate) {
-    plan = probeIsolation(folder);
-    if (plan.mode === "worktree" && plan.repoRoot) {
-      const slotPath = allocateSlotPath(plan.repoRoot);
-      if (!slotPath) {
-        plan = { mode: "none", reason: slotExhaustionReason(plan.repoRoot) };
-      } else {
-        plan.worktreePath = slotPath;
-        // Per run, not per slot: a slot is reused by later runs, and a reused
-        // branch name would move the ref off the previous run's commits.
-        plan.branch = `uf/${path.basename(slotPath)}-${id.slice(0, 8)}`;
-      }
-    }
-  } else {
-    plan = { mode: "none", reason: "Isolation was turned off for this run." };
-  }
+  const probe = isolate ? probeIsolation(folder) : { mode: "none" as const };
+  const repoRoot = probe.mode === "worktree" ? probe.repoRoot : null;
+
+  // What a chain claims is the **branch**, not the slot, and that is what makes
+  // it safe for an unrelated run to take the predecessor's checkout in between.
+  // Three things hold it together:
+  //
+  //  - The branch cannot be handed to anyone. A fresh branch is named from the
+  //    run's own id, so no other run can ever mint this one, and a continuation
+  //    adopts only the branch it was explicitly pointed at.
+  //  - The predecessor's slot is preferred, and taken in the same event-loop
+  //    turn that records it (see `createRun`), so nothing can interleave
+  //    between reading `activeRuns()` and the write that puts this run in it —
+  //    from which point `allocateSlotPath` skips the slot like any other.
+  //  - When an active run does hold it, a fresh slot is used instead and git
+  //    attaches the existing branch to it. That run took a slot
+  //    `allocateSlotPath` had already found *clean*, so there is never
+  //    uncommitted chain work stranded in the slot left behind; and it moved
+  //    the slot off this branch with `checkout -b`, so the branch is free to be
+  //    checked out elsewhere. If it has not got that far yet, `worktree add`
+  //    refuses by name rather than branching from somewhere else.
+  const inheritedSlot =
+    continueFrom?.worktree_path &&
+    !activeRuns().some((r) => r.worktree_path === continueFrom.worktree_path)
+      ? continueFrom.worktree_path
+      : null;
+
+  const plan = resolveIsolation({
+    runId: id,
+    isolate,
+    probe,
+    continueFrom: continueFrom ? continuedBranchOf(continueFrom) : null,
+    inheritedSlot,
+    // Not allocated for a continuation that already has its slot: allocation is
+    // a claim, and claiming a second checkout it will not use would take one
+    // out of circulation for every other run on the repository.
+    freeSlot: repoRoot && !inheritedSlot ? allocateSlotPath(repoRoot) : null,
+  });
 
   return {
     plan,
     workDir:
       plan.mode === "worktree" && plan.worktreePath ? plan.worktreePath : folder,
+  };
+}
+
+/**
+ * The run whose branch this one continues, or a refusal naming it.
+ *
+ * Never null when `continues_run` is set. `run_deps` cascade-deletes with
+ * either end, so a deleted predecessor normally blocks the dependent long
+ * before it gets here — but `continues_run` is a plain column with no foreign
+ * key behind it, and reading a dangling one as "no continuation" would cut a
+ * fresh branch from the target and lose the chain silently, which is the one
+ * outcome this mode exists to prevent.
+ */
+function predecessorOf(id: string): RunRow {
+  const run = getRun(id);
+  if (!run) {
+    throw new Error(
+      `The run whose branch this one continues (${shortId(id)}) is no longer here, so there is no branch to carry on.`,
+    );
+  }
+  return run;
+}
+
+/** The six columns a continued branch is resolved from. */
+function continuedBranchOf(run: RunRow): ContinuedBranch {
+  return {
+    runId: run.id,
+    isolation: run.isolation,
+    repoRoot: run.repo_root,
+    branch: run.worktree_branch,
+    base: run.worktree_base,
+    baseBranch: run.worktree_base_branch,
+    worktreePath: run.worktree_path,
   };
 }
 
@@ -1412,10 +1700,12 @@ function planWorkspace(
 function admitDependencies(
   id: string,
   input: readonly RunDependencyInput[],
-): { links: DependencyLink[]; waiting: boolean } {
+  isolate: boolean,
+): { links: DependencyLink[]; waiting: boolean; continuesRun: string | null } {
   const links: DependencyLink[] = [];
   const targets: DependencyState[] = [];
   const seen = new Set<string>();
+  let continuesRun: string | null = null;
 
   for (const raw of input) {
     const runId = String(raw?.runId ?? "");
@@ -1437,7 +1727,58 @@ function admitDependencies(
     const target = getRun(runId);
     if (!target) throw new Error(`No such run to depend on: ${runId}`);
     seen.add(runId);
-    links.push({ runId: id, dependsOn: runId, edge });
+
+    const continues = raw?.continueBranch === true;
+    if (continues) {
+      // One branch, one predecessor. A fan-in has several dependencies and only
+      // one of them can hand over the work this run stands on; two would mean
+      // two branches, and nothing downstream — not `ensureWorktree`, not
+      // `landState` — has a way to be on both.
+      if (continuesRun) {
+        throw new Error(
+          `Runs ${shortId(continuesRun)} and ${shortId(runId)} are both set to hand their branch over. ` +
+            "A run can only continue one branch.",
+        );
+      }
+      if (!isolate) {
+        throw new Error(
+          `Continuing run ${shortId(runId)}'s branch needs a checkout of this run's own, but isolation is turned off for it.`,
+        );
+      }
+      if (target.isolation === "none") {
+        throw new Error(
+          `Run ${shortId(runId)} has no branch to hand over — isolation was turned off for it, so it works directly in the folder.`,
+        );
+      }
+      // A second run continuing the same predecessor is two runs committing to
+      // one branch, which git will not check out twice and which leaves the
+      // landing rules with no last link to name. Keeping a chain a single path
+      // is what lets `branchOwner` say which run lands it.
+      //
+      // Except from a link that came to nothing: a dependent blocked because
+      // its own dependency failed is recorded against this branch and put no
+      // commit on it, and refusing on the strength of that would make a chain
+      // unextendable for ever over a run that never opened a file. Same test as
+      // `edgeSatisfied` and `branchOwner` — a terminal run with no work cycle
+      // is not a link.
+      const rival = db()
+        .prepare(
+          `SELECT id, status FROM runs
+            WHERE continues_run = ?
+              AND (iterations > 0 OR status NOT IN ('completed','stopped','failed','blocked'))
+            LIMIT 1`,
+        )
+        .get(runId) as { id: string; status: RunStatus } | undefined;
+      if (rival) {
+        throw new Error(
+          `Run ${shortId(rival.id)} is already set to continue run ${shortId(runId)}'s branch (it is ${rival.status}). ` +
+            "Two runs cannot extend the same branch; pick that one up again instead.",
+        );
+      }
+      continuesRun = runId;
+    }
+
+    links.push({ runId: id, dependsOn: runId, edge, continueBranch: continues });
     targets.push({
       id: target.id,
       status: target.status,
@@ -1445,7 +1786,7 @@ function admitDependencies(
     });
   }
 
-  if (links.length === 0) return { links, waiting: false };
+  if (links.length === 0) return { links, waiting: false, continuesRun };
 
   // Existing edges too: this run's dependencies may themselves be waiting on
   // something, and a loop anywhere in the closure is a loop this run joins.
@@ -1461,7 +1802,7 @@ function admitDependencies(
     links,
   );
   if (block.length > 0) throw new Error(block[0].reason);
-  return { links, waiting: !release.includes(id) };
+  return { links, waiting: !release.includes(id), continuesRun };
 }
 
 /**
@@ -1500,16 +1841,29 @@ export function createRun(input: CreateRunInput): RunRow {
   });
 
   const isolate = input.isolate !== false;
-  const { links, waiting } = admitDependencies(id, input.dependsOn ?? []);
+  const { links, waiting, continuesRun } = admitDependencies(
+    id,
+    input.dependsOn ?? [],
+    isolate,
+  );
 
   // Deferred entirely for a waiting run: choosing a checkout slot *is* a claim
   // on it, and the run may not start for days. `isolation` is left null to say
   // "not decided yet" — except when the operator turned isolation off, which is
   // an answer already and is recorded as one so the release does not overrule
   // it. Every other column the plan fills is written at release too.
+  //
+  // `continues_run` is the exception and is written either way: it is an id and
+  // a statement of intent rather than a claim on anything, and the landing
+  // rules have to be able to see a chain coming before its branch exists.
   const { plan, workDir } = waiting
     ? { plan: null, workDir: null }
-    : planWorkspace(id, folder, isolate);
+    : planWorkspace(
+        id,
+        folder,
+        isolate,
+        continuesRun ? predecessorOf(continuesRun) : null,
+      );
   const isolation = plan ? plan.mode : isolate ? null : "none";
 
   const run = db().transaction((): RunRow => {
@@ -1519,8 +1873,9 @@ export function createRun(input: CreateRunInput): RunRow {
       .prepare(
         `INSERT INTO runs
            (id, folder, prompt, model, status, budget, max_iterations, iterations, created_at, spent_usd, spent_tokens,
-            work_dir, isolation, repo_root, worktree_path, worktree_branch, worktree_base, worktree_base_branch)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)`,
+            work_dir, isolation, repo_root, worktree_path, worktree_branch, worktree_base, worktree_base_branch,
+            continues_run)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1541,13 +1896,20 @@ export function createRun(input: CreateRunInput): RunRow {
         plan?.branch ?? null,
         plan?.base ?? null,
         plan?.baseBranch ?? null,
+        continuesRun,
       );
 
     const addLink = db().prepare(
-      "INSERT INTO run_deps (run_id, depends_on, edge, created_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO run_deps (run_id, depends_on, edge, continue_branch, created_at) VALUES (?, ?, ?, ?, ?)",
     );
     for (const link of links) {
-      addLink.run(link.runId, link.dependsOn, link.edge, now);
+      addLink.run(
+        link.runId,
+        link.dependsOn,
+        link.edge,
+        link.continueBranch ? 1 : 0,
+        now,
+      );
     }
 
     emit({
@@ -1562,7 +1924,13 @@ export function createRun(input: CreateRunInput): RunRow {
         ...(plan?.reason ? { isolationReason: plan.reason } : {}),
         ...(busy ? { waitingFor: busy.id } : {}),
         ...(links.length > 0
-          ? { dependsOn: links.map((l) => ({ runId: l.dependsOn, edge: l.edge })) }
+          ? {
+              dependsOn: links.map((l) => ({
+                runId: l.dependsOn,
+                edge: l.edge,
+                continueBranch: l.continueBranch,
+              })),
+            }
           : {}),
       },
     });
@@ -1579,6 +1947,13 @@ export function createRun(input: CreateRunInput): RunRow {
       log(
         id,
         `Waiting for ${links.map((l) => `run ${shortId(l.dependsOn)} (${l.edge})`).join(", ")}. It holds no folder and no checkout until then.`,
+      );
+    }
+    if (continuesRun) {
+      log(
+        id,
+        `This run carries on run ${shortId(continuesRun)}'s branch rather than starting a new one, so its work builds on that run's commits.`,
+        { continuesRun },
       );
     }
 
@@ -1692,6 +2067,16 @@ export type DependencyEdge = (typeof DEPENDENCY_EDGES)[number];
 export interface RunDependencyInput {
   runId: string;
   edge: DependencyEdge;
+  /**
+   * Carry on this dependency's branch instead of cutting a new one.
+   *
+   * Absent is false, which is the only default that can be silent here: it is
+   * what every dependency meant before this existed, and the unset reading
+   * costs a second agent starting from the target branch — visible in its first
+   * `git log` — where the wrong reading would put a run on a branch nobody
+   * asked for. At most one dependency of a run may set it.
+   */
+  continueBranch?: boolean;
 }
 
 /** The same edge as stored: the dependent, the dependency, the condition. */
@@ -1699,6 +2084,8 @@ export interface DependencyLink {
   runId: string;
   dependsOn: string;
   edge: DependencyEdge;
+  /** Whether this is the dependency whose branch the dependent takes over. */
+  continueBranch?: boolean;
 }
 
 /** Everything the decision below reads off a row, and nothing else. */
@@ -1914,6 +2301,7 @@ export function dependenciesOf(
   const rows = db()
     .prepare(
       `SELECT d.run_id AS runId, d.depends_on AS dependsOn, d.edge AS edge,
+              d.continue_branch AS continueBranch,
               r.status AS status, r.iterations AS iterations
          FROM run_deps d
          JOIN runs r ON r.id = d.depends_on
@@ -1921,7 +2309,14 @@ export function dependenciesOf(
         ORDER BY d.created_at, d.depends_on`,
     )
     .all(...ids) as Array<
-    DependencyLink & { status: RunStatus; iterations: number }
+    // `continue_branch` is stored as SQLite's 0/1, not a boolean — the column
+    // is spelled out rather than intersected in, or the widened type would let
+    // a falsy `0` through as `true` at the one call site that reads it.
+    Omit<DependencyLink, "continueBranch"> & {
+      status: RunStatus;
+      iterations: number;
+      continueBranch: number;
+    }
   >;
 
   for (const row of rows) {
@@ -1930,6 +2325,7 @@ export function dependenciesOf(
       runId: row.dependsOn,
       edge: row.edge,
       status: row.status,
+      continueBranch: !!row.continueBranch,
       satisfied: edgeSatisfied(
         { id: row.dependsOn, status: row.status, iterations: row.iterations },
         row.edge,
@@ -2031,7 +2427,16 @@ function admitWaiting(run: RunRow): boolean {
   try {
     // `isolation === 'none'` on a waiting row is the operator's own answer,
     // recorded at creation; anything else means the question was deferred.
-    ({ plan, workDir } = planWorkspace(run.id, run.folder, run.isolation !== "none"));
+    //
+    // The predecessor is read *now* rather than at admission because this is
+    // the first moment its branch exists: it may itself have been waiting, and
+    // its whole isolation plan was deferred for the same reason this one was.
+    ({ plan, workDir } = planWorkspace(
+      run.id,
+      run.folder,
+      run.isolation !== "none",
+      run.continues_run ? predecessorOf(run.continues_run) : null,
+    ));
   } catch (err) {
     const reason = `Its dependencies cleared, but its workspace could not be prepared: ${
       err instanceof Error ? err.message : String(err)
@@ -2162,12 +2567,21 @@ export function nextPrompt(o: {
   priorCycles: number;
   /** The run's own branch, for an isolated run: where that work is. */
   worktreeBranch: string | null;
+  /** The run whose branch this one took over, when it took one over. */
+  continuedFrom: { runId: string; branch: string; base: string | null } | null;
+  /** `settings.continuedWorkPrompt`, the editable half of that notice. */
+  continuedWork: string;
   continuation: string;
   donePushback: string;
 }): string {
   if (o.sessionId === null) {
     return [
       o.isolationPreamble,
+      // Ahead of the prior-work notice, and both can apply: this one is about
+      // the branch's whole history, that one about this run's own earlier
+      // attempt at the task. Read in the other order the agent meets "carry on
+      // from where you stopped" before it has been told the work is not its own.
+      o.continuedFrom ? continuedWorkNotice(o.continuedFrom, o.continuedWork) : null,
       o.priorCycles > 0 ? priorWorkNotice(o.priorCycles, o.worktreeBranch) : null,
       o.task,
       o.followUp,
@@ -2190,6 +2604,39 @@ export function nextPrompt(o: {
  * isolated run: its predecessor's output is committed there, which is the one
  * place a fresh session can still read it.
  */
+/**
+ * What an agent is told when the commits under it are another run's.
+ *
+ * A different case from `priorWorkNotice`, and the difference is what the agent
+ * has to do about it. There, the work is this run's own and the instruction is
+ * "carry on from where you stopped". Here it is someone else's: there is no
+ * conversation that was ever going to be resumed, the decisions behind those
+ * commits were never in any context, and the branch may well contain choices
+ * this agent would not have made. So it is pointed at the range rather than
+ * told to infer it — `git diff <base>...HEAD` is the chain's whole change, the
+ * same range the run page's diff and any review are measured over, which is
+ * what keeps the agent, the reviewer and the merge looking at one thing.
+ *
+ * The facts are generated and the guidance is `settings.continuedWorkPrompt`,
+ * for the reason `PeriodSeries.limitBasis` travels beside its fraction: the
+ * sentence naming the branch must not be able to drift from the branch.
+ */
+function continuedWorkNotice(
+  from: { runId: string; branch: string; base: string | null },
+  guidance: string,
+): string {
+  const range = from.base ?? "the branch point";
+  return (
+    `This branch (${from.branch}) already carries the work of run ${shortId(from.runId)}, ` +
+    `which you are continuing. That was a separate agent and a separate conversation: none of ` +
+    `what it decided is in your context, and the only record of it is the branch itself. ` +
+    `Before doing anything, read it:\n\n` +
+    `    git log --oneline ${range}..HEAD\n` +
+    `    git diff ${range}...HEAD\n\n` +
+    guidance.trim()
+  );
+}
+
 function priorWorkNotice(cycles: number, branch: string | null): string {
   const spent = `${cycles} work ${cycles === 1 ? "cycle" : "cycles"}`;
   const where = branch
@@ -3105,6 +3552,15 @@ export async function startRun(id: string): Promise<void> {
         priorCycles,
         worktreeBranch:
           run.isolation === "worktree" ? run.worktree_branch : null,
+        continuedFrom:
+          run.continues_run && run.isolation === "worktree" && run.worktree_branch
+            ? {
+                runId: run.continues_run,
+                branch: run.worktree_branch,
+                base: run.worktree_base,
+              }
+            : null,
+        continuedWork: settings.continuedWorkPrompt,
         continuation: settings.continuationPrompt,
         donePushback: settings.donePushbackPrompt,
       });

@@ -20,6 +20,7 @@ const base: LandState = {
   runId: "r1",
   runStatus: "completed",
   branch: "uf/repo-1234abcd",
+  chain: [{ runId: "r1", status: "completed", iterations: 1 }],
   target: "main",
   targetInferred: false,
   branchExists: true,

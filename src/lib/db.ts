@@ -397,6 +397,28 @@ function migrate(db: Database.Database) {
   // rather than a guess.
   addColumn(db, "runs", "landed_tip", "TEXT");
 
+  // The run whose branch this one carries on, so a second agent extends the
+  // first one's commits instead of branching from the target again.
+  //
+  // Written at *admission*, unlike every other isolation column, and that
+  // asymmetry is the point. The others are claims on disk — a checkout slot, a
+  // branch name — and a waiting run must hold none of them. This one is an id
+  // and a sentence of intent: it costs nothing, it is the operator's own
+  // answer, and the landing rules need it before the branch exists in order to
+  // know that a chain is coming. `worktree_branch` is still null until the run
+  // is released, which is when the predecessor's branch is finally known.
+  addColumn(db, "runs", "continues_run", "TEXT");
+
+  // The same fact as the operator stated it: "and take that one's branch".
+  //
+  // On the edge rather than on the run because only an edge can say *which*
+  // dependency hands the branch over — a fan-in has several, and a column on
+  // `runs` naming an id that is not among them is a state nothing checks.
+  // `runs.continues_run` above is the resolved decision the rest of the app
+  // reads, exactly as `isolation` is the decision and `isolate` was the
+  // request.
+  addColumn(db, "run_deps", "continue_branch", "INTEGER NOT NULL DEFAULT 0");
+
   // What a `run_reviews` row is: a read-only review, or a conflict resolution.
   // One table because the lifecycle is identical — spawn, poll, record cost,
   // fail out on restart — and because both are the same accounting fact:

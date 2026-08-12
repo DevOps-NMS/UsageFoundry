@@ -93,6 +93,7 @@ const EDITABLE_PATHS = [
   "continuationPrompt",
   "donePushbackPrompt",
   "isolationPreamble",
+  "continuedWorkPrompt",
   "liveGuardIntervalSeconds",
   "killProcessGroup",
   "resumeGraceHours",
@@ -1440,7 +1441,6 @@ export default function SettingsPage() {
           label="Isolated-run preamble"
           htmlFor="isopre"
           edited={isEdited("isolationPreamble")}
-          className={FLUSH}
         >
           <Textarea
             id="isopre"
@@ -1452,6 +1452,26 @@ export default function SettingsPage() {
             Prepended to the first prompt of an isolated run. Keep the
             instruction to commit: a worktree holds committed work only, so
             anything left uncommitted never reaches your branch
+          </Hint>
+        </FormField>
+
+        <FormField
+          label="Continued-branch preamble"
+          htmlFor="contwork"
+          edited={isEdited("continuedWorkPrompt")}
+          className={FLUSH}
+        >
+          <Textarea
+            id="contwork"
+            className="min-h-[110px]"
+            value={effective.continuedWorkPrompt}
+            onChange={(e) => patch({ continuedWorkPrompt: e.target.value })}
+          />
+          <Hint>
+            Sent when a run picks up the branch the run before it was working
+            on. The branch, that run and the commands to read it are added
+            around this — what you write here is what to <em>do</em> with what
+            is already there
           </Hint>
         </FormField>
       </Section>

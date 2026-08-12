@@ -810,6 +810,20 @@ export default function RunDetail({
           <span className="mono">{run.worktree_branch}</span>, not in your copy of
           the folder — so other runs can use the same project at the same time.
           Nothing lands in your checkout until you merge it.
+          {run.continues_run && (
+            <>
+              {" "}
+              It carries on the branch run{" "}
+              <Link
+                href={`/runs/${run.continues_run}`}
+                className="mono underline underline-offset-2"
+              >
+                {run.continues_run.slice(0, 8)}
+              </Link>{" "}
+              was working on, so those commits are already here and the diff
+              below covers both. Only the last run on a branch can land it.
+            </>
+          )}
         </Notice>
       )}
 

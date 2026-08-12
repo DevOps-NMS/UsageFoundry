@@ -51,10 +51,18 @@ export async function GET() {
  * or the request is refused, the same treatment `permissionMode` and
  * `enforcement` get above and for the same reason.
  *
+ * `continueBranch` is the one field here that *is* defaulted, and to false.
+ * Unlike the condition, it has a reading that was true of every dependency
+ * before it existed, and the two mistakes are not symmetric: unset, a second
+ * agent starts from the target branch and its first `git log` says so; set
+ * wrongly, a run commits onto a branch nobody put it on. So absence is the safe
+ * answer rather than an ambiguous one.
+ *
  * Everything else about the list — unknown ids, a dependency that has already
- * failed, a self-reference, a loop — is refused by `createRun`, which is the
- * single admission door and is reached from the chat's approval path too. Its
- * messages arrive here as the 400 below.
+ * failed, a self-reference, a loop, two dependencies both handing over a
+ * branch — is refused by `createRun`, which is the single admission door and is
+ * reached from the chat's approval path too. Its messages arrive here as the
+ * 400 below.
  */
 function readDependencies(
   raw: unknown,
@@ -72,7 +80,11 @@ function readDependencies(
         error: `Each dependency must name a run and a condition, as {"runId": "…", "edge": "${DEPENDENCY_EDGES[0]}"}.`,
       };
     }
-    const { runId, edge } = entry as { runId?: unknown; edge?: unknown };
+    const { runId, edge, continueBranch } = entry as {
+      runId?: unknown;
+      edge?: unknown;
+      continueBranch?: unknown;
+    };
     if (typeof runId !== "string" || runId === "") {
       return { ok: false, error: "Each dependency needs a runId." };
     }
@@ -85,7 +97,14 @@ function readDependencies(
           `(once it has finished, whatever the outcome).`,
       };
     }
-    value.push({ runId, edge: edge as DependencyEdge });
+    // `=== true`, for the reason `continueAfterDone` and `auto_resolve` are read
+    // that way: it decides which branch a billed agent commits to, so a string
+    // `"false"` off the wire has to fail safe.
+    value.push({
+      runId,
+      edge: edge as DependencyEdge,
+      continueBranch: continueBranch === true,
+    });
   }
   return { ok: true, value };
 }

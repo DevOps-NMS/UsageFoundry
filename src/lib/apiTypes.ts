@@ -326,6 +326,12 @@ export interface RunDependencyDTO {
   status: RunDTO["status"];
   /** Whether it has settled in a way that lets this run start. */
   satisfied: boolean;
+  /**
+   * Whether this run takes that one's branch over instead of cutting its own.
+   * At most one dependency of a run can, and it is what `continues_run` on the
+   * run itself resolves to.
+   */
+  continueBranch?: boolean;
 }
 
 export interface RunDTO {
@@ -380,6 +386,11 @@ export interface RunDTO {
   worktree_base?: string | null;
   /** Branch this run's work lands into. Null on rows created before it was recorded. */
   worktree_base_branch?: string | null;
+  /**
+   * The run whose branch this one carries on, or null for a branch of its own.
+   * Its `worktree_base` is the chain's, so the diff above covers every link.
+   */
+  continues_run?: string | null;
   /** When this tool merged the branch into its target. Null means never. */
   landed_at?: number | null;
   landed_into?: string | null;
@@ -702,6 +713,8 @@ export interface SettingsDTO {
   maxConcurrentRuns: number | null;
   isolationCopyGlobs: string[];
   isolationPreamble: string;
+  /** What a run is told when it picks up the branch the run before it had. */
+  continuedWorkPrompt: string;
   telemetryForRuns: boolean;
   donePushbackPrompt: string;
   liveGuardIntervalSeconds: number;

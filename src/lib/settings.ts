@@ -110,6 +110,20 @@ export interface Settings {
   /** Prepended to the first prompt of an isolated run. */
   isolationPreamble: string;
   /**
+   * What an agent is told when it picks up a branch another run was working on.
+   *
+   * Its own text rather than a reuse of `isolationPreamble`, because the
+   * situation is the opposite of a restart: the conversation is not gone, it
+   * never existed, and the commits under the agent's feet are someone else's.
+   * An agent handed a bare task does the first thing the task says, which on a
+   * continued branch is work that has already been done.
+   *
+   * The branch, the predecessor and the two commands that show what changed are
+   * generated beside this rather than written into it — a placeholder an
+   * operator can delete is a notice that can silently stop naming the branch.
+   */
+  continuedWorkPrompt: string;
+  /**
    * Ask agents this app spawns to report their own per-request cost over OTLP.
    *
    * Off by default. It turns on telemetry inside a child process and points it
@@ -268,6 +282,21 @@ export const DEFAULT_DONE_PUSHBACK_PROMPT =
   "limit, not when you report it done, so if you truly find nothing worth " +
   "doing, say so and make no changes.";
 
+/**
+ * Read first, then extend — and do not undo.
+ *
+ * The failure this guards against is not the agent being confused; it is the
+ * agent being confident. A fresh session on a branch full of work it did not do
+ * reads the task, sees the files half-changed, and either redoes the work or
+ * reverts it as leftovers. Both are billed and both look like progress.
+ */
+export const DEFAULT_CONTINUED_WORK_PROMPT =
+  "Read what is already on this branch before you change anything, and treat " +
+  "it as deliberate: extend it, fix what is wrong with it, and finish what it " +
+  "left unfinished. Do not restart the task from scratch and do not revert " +
+  "that work because it is not what you would have written. If it contradicts " +
+  "the task below, say so in your reply rather than quietly undoing it.";
+
 export const DEFAULT_ISOLATION_PREAMBLE =
   "You are working in a dedicated git worktree on your own branch, not in the " +
   "user's checkout. Commit your work as you go, with clear messages; anything " +
@@ -315,6 +344,7 @@ const DEFAULTS: Settings = {
   maxConcurrentRuns: null,
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,
+  continuedWorkPrompt: DEFAULT_CONTINUED_WORK_PROMPT,
   telemetryForRuns: false,
   donePushbackPrompt: DEFAULT_DONE_PUSHBACK_PROMPT,
   liveGuardIntervalSeconds: 60,

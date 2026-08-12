@@ -145,6 +145,7 @@ describe("landRefusal", () => {
   };
 
   const landable = {
+    runId: "run-a",
     runStatus: "completed" as const,
     branchExists: true,
     target: "main",
@@ -154,6 +155,8 @@ describe("landRefusal", () => {
     pendingCount: 0,
     preview: { outcome: "clean" as const },
     checkout: clean,
+    // One entry is the ordinary run, whose branch is its own.
+    chain: [{ runId: "run-a", status: "completed" as const, iterations: 1 }],
   };
 
   it("allows the case everything is in order", () => {
@@ -266,6 +269,126 @@ describe("landRefusal", () => {
 
   it("refuses a branch that is gone", () => {
     assert.match(landRefusal({ ...landable, branchExists: false }) ?? "", /no longer exists/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* One branch several runs share                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Runs that continue one another's work all commit to one ref, so "this run's
+ * branch" stops being a phrase that picks out a branch. Every one of them would
+ * otherwise offer to land it: the operator merges the first, the second still
+ * reads unmerged because the branch has moved on, and the merge queue takes the
+ * same branch once per link. The rule is the last link and nothing before it,
+ * and each refusal has to name the run that does own it — a greyed-out button
+ * on a page whose whole point is getting work merged is a dead end.
+ */
+describe("landRefusal for a branch a chain shares", () => {
+  const member = (
+    runId: string,
+    status: import("./land").ChainMember["status"],
+    iterations = 1,
+  ) => ({ runId, status, iterations });
+
+  const clean: CheckoutState = {
+    path: "/workspace/repo",
+    headBranch: "main",
+    dirty: false,
+    readable: true,
+  };
+
+  /** Everything else in order, so only the chain can be the reason. */
+  const base = {
+    runStatus: "completed" as const,
+    branchExists: true,
+    target: "main",
+    merged: false,
+    landedUnchanged: false,
+    ahead: 3,
+    pendingCount: 0,
+    preview: { outcome: "clean" as const },
+    checkout: clean,
+  };
+
+  it("lands from the last link and refuses the ones before it by name", () => {
+    const chain = [member("aaaaaaaa", "completed"), member("bbbbbbbb", "completed")];
+    assert.equal(landRefusal({ ...base, runId: "bbbbbbbb", chain }), null);
+
+    const refusal = landRefusal({ ...base, runId: "aaaaaaaa", chain }) ?? "";
+    assert.match(refusal, /bbbbbbbb/);
+    // Naming the owner is the point; "you cannot" with no address is not.
+    assert.match(refusal, /lands it/);
+  });
+
+  it("refuses every link but the last of a longer chain", () => {
+    const chain = [
+      member("aaaaaaaa", "completed"),
+      member("bbbbbbbb", "completed"),
+      member("cccccccc", "completed"),
+    ];
+    for (const runId of ["aaaaaaaa", "bbbbbbbb"]) {
+      assert.match(landRefusal({ ...base, runId, chain }) ?? "", /cccccccc/);
+    }
+    assert.equal(landRefusal({ ...base, runId: "cccccccc", chain }), null);
+  });
+
+  it("holds the whole branch while a link further along has not settled", () => {
+    // `waiting` is the one that matters and the one every other rule here
+    // misses: it holds no folder and no checkout, so nothing else in this app
+    // treats it as occupying anything — but it is a declared future commit on
+    // this exact ref, and landing before it runs would take half the chain.
+    for (const status of ["waiting", "queued", "running", "paused"] as const) {
+      const chain = [member("aaaaaaaa", "completed"), member("bbbbbbbb", status, 0)];
+      const refusal = landRefusal({ ...base, runId: "aaaaaaaa", chain }) ?? "";
+      assert.match(refusal, /bbbbbbbb/, `${status} should hold the branch`);
+    }
+  });
+
+  it("refuses the owner while an earlier link has been picked up again", () => {
+    // Reopening the first run puts it back on the same branch behind the run
+    // that now owns it. Every other check here reads this run's own status,
+    // which is `completed` and says nothing about the one about to commit.
+    const chain = [member("aaaaaaaa", "queued"), member("bbbbbbbb", "completed")];
+    const refusal = landRefusal({ ...base, runId: "bbbbbbbb", chain }) ?? "";
+    assert.match(refusal, /aaaaaaaa/);
+    assert.match(refusal, /still commit/);
+  });
+
+  it("hands the branch back when the link behind it never ran a cycle", () => {
+    // A dependent blocked because its dependency failed is recorded on this
+    // branch and put nothing on it. Letting it own the branch would leave the
+    // run that did the work unlandable for ever, with a sentence pointing at a
+    // run that is finished and empty.
+    for (const status of ["blocked", "stopped", "failed"] as const) {
+      const chain = [member("aaaaaaaa", "completed"), member("bbbbbbbb", status, 0)];
+      assert.equal(
+        landRefusal({ ...base, runId: "aaaaaaaa", chain }),
+        null,
+        `a ${status} link with no cycle should not own the branch`,
+      );
+    }
+  });
+
+  it("keeps a failed link that did commit as the owner", () => {
+    // The other half of the same rule: this one crashed, but it crashed with
+    // commits on the branch, so it is where the branch ends and picking it up
+    // again is the way on rather than landing from behind it.
+    const chain = [member("aaaaaaaa", "completed"), member("bbbbbbbb", "failed", 2)];
+    assert.match(landRefusal({ ...base, runId: "aaaaaaaa", chain }) ?? "", /bbbbbbbb/);
+    assert.equal(landRefusal({ ...base, runId: "bbbbbbbb", chain }), null);
+  });
+
+  it("says nothing new about a chain that is already landed", () => {
+    // `merged` is tested after the chain rules deliberately: a non-owner of a
+    // landed branch is still being told the useful thing, which is which run to
+    // look at, rather than that there is nothing to do.
+    const chain = [member("aaaaaaaa", "completed"), member("bbbbbbbb", "completed")];
+    assert.match(
+      landRefusal({ ...base, runId: "bbbbbbbb", chain, merged: true }) ?? "",
+      /Already in main/,
+    );
   });
 });
 
@@ -403,10 +526,12 @@ describe("commitRefusal", () => {
 
 describe("purgeRefusal", () => {
   const purgeable = {
+    runId: "aaaaaaaa",
     runStatus: "failed" as const,
     branch: "uf/repo-1234abcd",
     branchExists: true,
     confirmBranch: "uf/repo-1234abcd",
+    chain: [{ runId: "aaaaaaaa", status: "failed" as const, iterations: 1 }],
   };
 
   it("allows an unmerged branch, which is the whole point of it", () => {
@@ -441,6 +566,37 @@ describe("purgeRefusal", () => {
     assert.match(
       purgeRefusal({ ...purgeable, branchExists: false }) ?? "",
       /already gone/,
+    );
+  });
+
+  it("refuses while a run behind it is set to carry the branch on", () => {
+    // "Not an active run" stopped meaning "nobody is using this branch" the day
+    // a second run could be told to continue it. This run is finished and its
+    // own status says nothing about the one that has not started yet — which
+    // would then fail on a missing branch with nothing recording who took it.
+    for (const status of ["waiting", "queued", "running", "paused"] as const) {
+      const refusal =
+        purgeRefusal({
+          ...purgeable,
+          chain: [
+            { runId: "aaaaaaaa", status: "failed", iterations: 1 },
+            { runId: "bbbbbbbb", status, iterations: 0 },
+          ],
+        }) ?? "";
+      assert.match(refusal, /bbbbbbbb/, `${status} should hold the branch`);
+    }
+  });
+
+  it("still purges once every run on the branch has settled", () => {
+    assert.equal(
+      purgeRefusal({
+        ...purgeable,
+        chain: [
+          { runId: "aaaaaaaa", status: "failed", iterations: 1 },
+          { runId: "bbbbbbbb", status: "blocked", iterations: 0 },
+        ],
+      }),
+      null,
     );
   });
 });

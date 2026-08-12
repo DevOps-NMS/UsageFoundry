@@ -135,10 +135,29 @@ export interface PendingWork {
   suggestedMessage: string;
 }
 
+/**
+ * One run that holds, or is declared to hold, a branch several runs share.
+ *
+ * `iterations` is here for the same reason `edgeSatisfied` reads it: a run that
+ * finished without a work cycle put nothing on the branch and never will, so it
+ * is not a link in the chain however it is recorded. Without that, one blocked
+ * dependent would make its predecessor's branch unlandable for ever.
+ */
+export interface ChainMember {
+  runId: string;
+  status: RunRow["status"];
+  iterations: number;
+}
+
 export interface LandState {
   runId: string;
   runStatus: RunRow["status"];
   branch: string;
+  /**
+   * Every run on this branch, oldest first — one entry for the ordinary run
+   * whose branch is its own, several when runs continue one another's work.
+   */
+  chain: ChainMember[];
   /** Branch this work lands into. */
   target: string | null;
   /**
@@ -397,10 +416,12 @@ export async function landState(runId: string): Promise<LandState | null> {
 
   const branch = run.worktree_branch;
   const repoRoot = repoPathFor(run.repo_root);
+  const chain = branchChain(run);
   const base: LandState = {
     runId,
     runStatus: run.status,
     branch,
+    chain,
     target: null,
     targetInferred: false,
     branchExists: false,
@@ -516,6 +537,65 @@ export async function landState(runId: string): Promise<LandState | null> {
 }
 
 /**
+ * Every run on this run's branch, oldest first.
+ *
+ * Walked over `continues_run` rather than selected on `worktree_branch`,
+ * because a dependent that has not been released yet has no branch recorded —
+ * its whole isolation plan is deferred until it stops waiting. Selecting on the
+ * branch would therefore report a chain of one right up until the next link
+ * starts, which is exactly the window in which the first link looks landable
+ * and is not.
+ *
+ * Bounded by construction: `continues_run` is a single id per run and admission
+ * refuses a second run continuing the same one, so the walk is a path. The
+ * `seen` set is there for the row a hand-edited database could still produce.
+ *
+ * The one place admission does allow a second is a link that came to nothing —
+ * a dependent blocked because its own dependency failed, which is recorded here
+ * and never committed. So the step down prefers a successor that can still hold
+ * the branch, and only falls back to an empty one to keep the walk total. Both
+ * readings agree about what matters: `branchOwner` skips an empty terminal run
+ * and `chainBlocker` cannot match one, so which of two is followed decides
+ * nothing.
+ */
+function branchChain(run: RunRow): ChainMember[] {
+  const byId = db().prepare("SELECT * FROM runs WHERE id = ?");
+  const next = db().prepare(
+    `SELECT * FROM runs WHERE continues_run = ?
+      ORDER BY CASE WHEN iterations > 0
+                      OR status NOT IN ('completed','stopped','failed','blocked')
+                    THEN 0 ELSE 1 END,
+               created_at
+      LIMIT 1`,
+  );
+  const seen = new Set<string>([run.id]);
+
+  const head: RunRow[] = [];
+  for (let up = run; up.continues_run; ) {
+    const prev = byId.get(up.continues_run) as RunRow | undefined;
+    if (!prev || seen.has(prev.id)) break;
+    seen.add(prev.id);
+    head.unshift(prev);
+    up = prev;
+  }
+
+  const tail: RunRow[] = [];
+  for (let down = run; ; ) {
+    const after = next.get(down.id) as RunRow | undefined;
+    if (!after || seen.has(after.id)) break;
+    seen.add(after.id);
+    tail.push(after);
+    down = after;
+  }
+
+  return [...head, run, ...tail].map((r) => ({
+    runId: r.id,
+    status: r.status,
+    iterations: r.iterations,
+  }));
+}
+
+/**
  * A three-way merge in memory: no checkout, no index, nothing written to any
  * working tree. It does add loose objects to the repository's object store,
  * which gc collects — that is the whole cost of finding out honestly.
@@ -584,6 +664,55 @@ async function withRegions(
 /* Deciding                                                            */
 /* ------------------------------------------------------------------ */
 
+/** Ids are UUIDs; the whole app names a run by its first eight characters. */
+const short = (id: string) => id.slice(0, 8);
+
+/** Statuses a run leaves on its own, and so may still commit from. */
+const UNSETTLED: readonly RunRow["status"][] = [
+  "waiting",
+  "queued",
+  "running",
+  "paused",
+];
+
+/**
+ * The run in a chain that owns the branch: the last one with work on it.
+ *
+ * Ordered by creation, which is dependency order — a run can only be told to
+ * continue a branch that already exists, so it is always the younger. Members
+ * that ended without a work cycle are skipped rather than counted: a dependent
+ * that was blocked because its dependency failed is recorded on this branch and
+ * put nothing on it, and letting it own the branch would make the run that
+ * *did* the work unlandable for ever.
+ *
+ * Falls back to the first link when every member is empty. The branch then has
+ * no commits at all, which `ahead === 0` refuses two checks later — but naming
+ * the run that created it is a truer sentence than naming the last one to fail.
+ */
+function branchOwner(chain: readonly ChainMember[]): string | null {
+  const worked = chain.filter(
+    (m) => UNSETTLED.includes(m.status) || m.iterations > 0,
+  );
+  return worked.at(-1)?.runId ?? chain[0]?.runId ?? null;
+}
+
+/**
+ * Another run on this branch that can still add to it, if there is one.
+ *
+ * Read by every door that would destroy or hand over the branch —
+ * `landRefusal`, `purgeRefusal`, `deleteBranch` — because a chain turns each of
+ * them from "this run's branch" into "a ref several runs are still writing to",
+ * and all three were written when those were the same sentence.
+ */
+export function chainBlocker(
+  runId: string,
+  chain: readonly ChainMember[],
+): ChainMember | null {
+  return (
+    chain.find((m) => m.runId !== runId && UNSETTLED.includes(m.status)) ?? null
+  );
+}
+
 /**
  * Why this branch cannot be landed right now, or null when it can.
  *
@@ -594,6 +723,7 @@ async function withRegions(
  * simply greyed out is the same failure in a different shape.
  */
 export function landRefusal(s: {
+  runId: string;
   runStatus: RunRow["status"];
   branchExists: boolean;
   target: string | null;
@@ -604,6 +734,8 @@ export function landRefusal(s: {
   pendingCount: number;
   preview: MergePreview;
   checkout: CheckoutState | null;
+  /** Every run on this branch, oldest first. See `ChainMember`. */
+  chain: readonly ChainMember[];
 }): string | null {
   if (!s.branchExists) return "This branch no longer exists.";
   if (!s.target) return "There is no recorded branch for this work to land into.";
@@ -613,6 +745,32 @@ export function landRefusal(s: {
       "This run is still active. It can commit again at any moment, so anything " +
       "landed now would be half its work."
     );
+  }
+
+  // One branch, one Land button. Three runs extending each other's work share a
+  // ref, so without this every one of them offers to land it: the operator
+  // merges the first, the second still reads unmerged because the branch has
+  // moved since, and the merge queue would take the same branch three times.
+  // The last link is the one that has all of it. Both refusals name a run,
+  // because "this cannot be landed" with no address is a dead end on a page
+  // whose whole purpose is to get the work merged.
+  if (s.chain.length > 1) {
+    const owner = branchOwner(s.chain);
+    if (owner && owner !== s.runId) {
+      const last = s.chain.find((m) => m.runId === owner)!;
+      return (
+        `Run ${short(owner)} carries this branch on from here and is the one that lands it ` +
+        `(it is ${last.status}). Landing from this run would take the same branch a second time, ` +
+        "not a smaller part of it — the whole chain is on one ref."
+      );
+    }
+    const busy = chainBlocker(s.runId, s.chain);
+    if (busy) {
+      return (
+        `Run ${short(busy.runId)} is ${busy.status} on this same branch and can still commit to it, ` +
+        "so anything landed now would be part of the chain rather than all of it."
+      );
+    }
   }
 
   if (s.merged) return `Already in ${s.target} — there is nothing left to land.`;
@@ -919,6 +1077,16 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
     return {
       ok: false,
       reason: "This run is still active — it can commit again, and would be resolving against a moving branch.",
+    };
+  }
+  // Same sentence from the other end of a chain: the branch is shared, so a run
+  // further along it moves this one's branch just as surely as this run would.
+  // Refused before the spawn rather than after, because a resolution is billed.
+  const sibling = chainBlocker(run.id, state.chain);
+  if (sibling) {
+    return {
+      ok: false,
+      reason: `Run ${short(sibling.runId)} is ${sibling.status} on this same branch, so a resolution paid for now would be resolving against a moving branch.`,
     };
   }
   if (state.preview.outcome !== "conflict") {
@@ -1420,6 +1588,16 @@ export async function deleteBranch(runId: string): Promise<LandOutcome> {
   if (["running", "queued", "paused"].includes(run.status)) {
     return { ok: false, reason: "This run is still active." };
   }
+  // Merged is not "finished" once a chain shares the ref: the run behind this
+  // one is going to commit to the branch this would delete, and git's ancestry
+  // test says nothing about commits that have not been made yet.
+  const heir = chainBlocker(run.id, state.chain);
+  if (heir) {
+    return {
+      ok: false,
+      reason: `Run ${short(heir.runId)} is ${heir.status} and set to carry this branch on. Deleting it now would take its starting point away.`,
+    };
+  }
 
   const repoRoot = repoPathFor(run.repo_root);
   if (!repoRoot) {
@@ -1531,15 +1709,29 @@ async function worktreeHolding(
  * another, and it forces the interface to spell out what is about to go.
  */
 export function purgeRefusal(s: {
+  runId: string;
   runStatus: RunRow["status"];
   branch: string | null;
   branchExists: boolean;
   confirmBranch: string;
+  /** Every run on this branch, oldest first. See `ChainMember`. */
+  chain: readonly ChainMember[];
 }): string | null {
   if (!s.branch) return "This run has no branch.";
   if (!s.branchExists) return `${s.branch} is already gone.`;
   if (["running", "queued", "paused"].includes(s.runStatus)) {
     return "This run is still active. Stop it before purging the branch it is working on.";
+  }
+  // "Not an active run" stopped meaning "nobody is using this branch" the day a
+  // second run could be told to carry it on. Purging here would destroy the
+  // work under a run that has not started yet, and the run would then fail on a
+  // missing branch with no trace of who removed it.
+  const busy = chainBlocker(s.runId, s.chain);
+  if (busy) {
+    return (
+      `Run ${short(busy.runId)} is ${busy.status} and set to carry this branch on. ` +
+      "Stop that run first — purging now would take the branch out from under it."
+    );
   }
   if (s.confirmBranch !== s.branch) {
     return `Purging ${s.branch} has to name it. Nothing was deleted.`;
@@ -1573,10 +1765,12 @@ export async function purgeBranch(
   const exists = await git(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
 
   const refusal = purgeRefusal({
+    runId: run.id,
     runStatus: run.status,
     branch,
     branchExists: exists.ok,
     confirmBranch,
+    chain: branchChain(run),
   });
   if (refusal) return { ok: false, reason: refusal };
 
