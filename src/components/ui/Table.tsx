@@ -22,6 +22,10 @@ export function Th({
 } & ThHTMLAttributes<HTMLTableCellElement>) {
   return (
     <th
+      // Every header here labels a column. Without scope a screen reader has to
+      // guess, and guesses wrong on any table with a leading label column —
+      // which is most of the breakdowns on the dashboard.
+      scope={rest.scope ?? "col"}
       className={`whitespace-nowrap border-b border-line px-2.5 py-2 text-2xs font-semibold uppercase tracking-wide text-ink-faint ${
         num ? "text-right tabular-nums" : "text-left"
       } ${className}`}
@@ -53,7 +57,14 @@ export function Td({
   );
 }
 
-/** Carries the `group/row` marker `Td` uses to drop the final border. */
+/**
+ * Carries the `group/row` marker `Td` uses to drop the final border.
+ *
+ * The hover tint is not decoration: these tables run the full width of the
+ * shell with a label at one end and a figure at the other, and the tint is what
+ * keeps the two on the same line as the eye crosses. It is the faintest step
+ * the palette has — one surface, not a highlight.
+ */
 export function Tr({
   children,
   className = "",
@@ -61,5 +72,9 @@ export function Tr({
   children: ReactNode;
   className?: string;
 }) {
-  return <tr className={`group/row ${className}`}>{children}</tr>;
+  return (
+    <tr className={`group/row ui-transition hover:bg-inset ${className}`}>
+      {children}
+    </tr>
+  );
 }

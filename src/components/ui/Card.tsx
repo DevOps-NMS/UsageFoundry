@@ -87,3 +87,40 @@ export function Empty({ children }: { children: ReactNode }) {
     <div className="py-5 text-center text-sm text-ink-faint">{children}</div>
   );
 }
+
+/**
+ * The other thing a card can hold: not "nothing to show" but "not here yet".
+ *
+ * Shaped like what is coming, and sized by the caller, so the page does not
+ * jump when the poll answers — which is the whole difference between this and
+ * a spinner. Every page here polls, so every page has this moment.
+ *
+ * `aria-hidden`, and the region around it says what it is waiting for: a
+ * screen reader announcing four grey rectangles is noise.
+ */
+export function Skeleton({ className = "" }: { className?: string }) {
+  return <div className={`skeleton rounded-sm ${className}`} aria-hidden />;
+}
+
+/** Placeholder lines at body height, for a paragraph or a list that is coming. */
+export function SkeletonText({
+  lines = 3,
+  className = "",
+}: {
+  lines?: number;
+  className?: string;
+}) {
+  return (
+    <div className={`space-y-2 ${className}`} aria-hidden>
+      {Array.from({ length: lines }, (_, i) => (
+        <Skeleton
+          key={i}
+          // The last line short, because a paragraph's last line is short. A
+          // block of equal bars reads as a table, and then the table arrives
+          // and it is a paragraph.
+          className={`h-3 ${i === lines - 1 ? "w-2/3" : "w-full"}`}
+        />
+      ))}
+    </div>
+  );
+}

@@ -28,16 +28,29 @@ export function Log({
   children,
   ref,
   onScroll,
+  label = "Run output",
 }: {
   children: ReactNode;
   ref?: React.Ref<HTMLDivElement>;
   onScroll?: React.UIEventHandler<HTMLDivElement>;
+  label?: string;
 }) {
   return (
     <div
       ref={ref}
       onScroll={onScroll}
-      className="max-h-[560px] overflow-y-auto whitespace-pre-wrap break-words rounded-sm border border-line bg-inset p-3 font-mono text-xs leading-relaxed"
+      // A scrollable region that is not focusable cannot be read by anyone
+      // navigating with a keyboard — the content past the fold is simply
+      // unreachable. tabIndex is what fixes that; the outline comes from
+      // @layer base, so the tab stop is visible when it is taken.
+      tabIndex={0}
+      role="log"
+      // role="log" is politely live by default, and this one emits a line every
+      // second or so for the length of a work cycle. Off keeps the region
+      // named and navigable without narrating an agent's entire transcript.
+      aria-live="off"
+      aria-label={label}
+      className="max-h-[560px] overflow-y-auto whitespace-pre-wrap break-words rounded-sm border border-line bg-inset p-3 font-mono text-xs leading-relaxed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
     >
       {children}
     </div>
@@ -61,8 +74,18 @@ export function LogLine({
   );
 }
 
+/**
+ * Indeterminate progress. Decorative on purpose — every call site puts a word
+ * beside it ("working", "streaming"), and that word is what carries the state.
+ *
+ * Frozen by prefers-reduced-motion, which is correct: the broken ring still
+ * reads as "not finished", where a full ring would read as a bullet.
+ */
 export function Spinner() {
   return (
-    <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border-2 border-line-strong border-t-accent" />
+    <span
+      aria-hidden
+      className="inline-block h-2.5 w-2.5 animate-spin rounded-full border-2 border-line-strong border-t-accent"
+    />
   );
 }

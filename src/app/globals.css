@@ -52,6 +52,36 @@
   --warn:          light-dark(#9a6700, #d29922);
   --danger:        light-dark(#cf222e, #f85149);
 
+  /* A hairline that says which tone without being the loudest thing in the
+     card. --accent-dim was the only tint that existed, so anything needing a
+     tone-coloured *edge* — a badge, a standing banner — reached for the
+     full-strength colour and drew the eye harder than the text it was
+     annotating. Mixed against --border rather than against transparent so the
+     result stays visible on --bg-raised and --bg-inset alike; the tone stays
+     the text colour, where the 4.5:1 contrast is already met. */
+  --ok-line:       color-mix(in oklab, var(--ok) 40%, var(--border));
+  --warn-line:     color-mix(in oklab, var(--warn) 40%, var(--border));
+  --danger-line:   color-mix(in oklab, var(--danger) 40%, var(--border));
+  --accent-line:   color-mix(in oklab, var(--accent) 40%, var(--border));
+
+  /* Motion. Chosen by what the movement has to explain, not by feel:
+       fast — a control answering the pointer (hover, press, focus ring)
+       base — something arriving or leaving (a notice, a disclosure)
+       slow — something travelling a distance the eye must follow (a meter)
+     Nothing here loops except the two indeterminate indicators, and @layer
+     base flattens every duration under prefers-reduced-motion. */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 240ms;
+
+  /* Minimum hit targets, as heights rather than padding, so a control keeps
+     its box when its content changes — a button swapping its label for a
+     spinner, a select whose longest option is two characters. 32px is the
+     floor for anything clickable; 36px is what a button or a text input gets,
+     because those are aimed at rather than passed over. */
+  --control-h: 2rem;      /* 32 — nav link, icon button, compact button */
+  --control-h-lg: 2.25rem;/* 36 — button, input, select */
+
   /* Consumed only by the legacy layer below; delete with the last rule
      that reads them. Everything new reads the @theme names instead. */
   --radius: 10px;
@@ -96,6 +126,10 @@
   --color-ok:          var(--ok);
   --color-warn:        var(--warn);
   --color-danger:      var(--danger);
+  --color-ok-line:     var(--ok-line);
+  --color-warn-line:   var(--warn-line);
+  --color-danger-line: var(--danger-line);
+  --color-accent-line: var(--accent-line);
 
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -132,6 +166,24 @@
      half", and the direction has to match where the element actually is. */
   --shadow-bar: 0 -4px 12px -2px light-dark(rgb(15 23 32 / .10), rgb(0 0 0 / .55));
 
+  /* The ring a text control wears while it holds focus. A shadow rather than an
+     outline because the legacy sheet still sets `outline: none` on `input:focus`
+     and outranks @layer base — see the note there. Named so the ring is one
+     decision instead of a `ring-[3px] ring-accent-dim` pair repeated per
+     control, which is how the two of them drifted apart in the first place. */
+  --shadow-focus: 0 0 0 3px var(--accent-dim);
+  /* A pressed control is *recessed*, not merely darker. Inset, so the button
+     does not move and nothing around it reflows. */
+  --shadow-press: inset 0 1px 2px light-dark(rgb(15 23 32 / .16), rgb(0 0 0 / .40));
+
+  /* Two curves. `standard` decelerates into rest — the right shape for a state
+     that is settling (hover, focus, a colour swap). `entrance` overshoots
+     nothing but finishes far more sharply, for something that was not on screen
+     a moment ago and has to arrive rather than fade. There is deliberately no
+     accelerate-in curve: nothing here leaves in a way worth watching. */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-entrance: cubic-bezier(0.16, 1, 0.3, 1);
+
   --container-shell: 73.75rem; /* 1180px */
 }
 
@@ -153,6 +205,44 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+}
+
+/* The transition every interactive surface in the kit wears. One name rather
+   than `transition duration-[var(--motion-fast)] ease-standard` repeated at
+   thirty call sites, because the three of them only mean anything together and
+   a control that got two of the three is a control that animates wrong.
+   Deliberately does *not* list transform or width: a control must not move or
+   resize between its states, so anything animating those is a mistake this
+   utility should not make easy. Not named `transition-*`, which would sit in
+   Tailwind's own namespace and could be read as an arbitrary value. */
+@utility ui-transition {
+  transition-property: color, background-color, border-color, outline-color,
+    box-shadow, opacity, filter;
+  transition-duration: var(--motion-fast);
+  transition-timing-function: var(--ease-standard);
+}
+
+/* A placeholder shaped like the content that is coming, for the seconds before
+   a poll answers. A spinner says "something is happening"; this says what,
+   where, and how much of it — so the page does not jump when the data lands.
+   The sweep is the only looping animation in the app besides the spinner, and
+   @layer base freezes it to a flat tint under prefers-reduced-motion, which is
+   still a legible "not here yet". */
+@utility skeleton {
+  background-color: var(--bg-inset);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    light-dark(rgb(255 255 255 / 0.7), rgb(255 255 255 / 0.05)) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: uf-sweep 1.4s var(--ease-standard) infinite;
+}
+
+@keyframes uf-sweep {
+  from { background-position: 150% 0; }
+  to   { background-position: -50% 0; }
 }
 
 @layer base {
@@ -210,44 +300,9 @@
 /* Layout                                                              */
 /* ------------------------------------------------------------------ */
 
-.shell { max-width: 1180px; margin: 0 auto; padding: 0 20px 64px; }
-
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  padding: 16px 0 20px;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 24px;
-  flex-wrap: wrap;
-}
-
-.brand {
-  font-weight: 650;
-  font-size: 15px;
-  letter-spacing: -0.01em;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--fg);
-}
-.brand:hover { text-decoration: none; }
-.brand-mark {
-  width: 22px; height: 22px;
-  border-radius: 6px;
-  background: linear-gradient(140deg, var(--accent), #7a5cff);
-  display: inline-block;
-}
-
-.nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
-.nav a {
-  padding: 6px 11px;
-  border-radius: var(--radius-sm);
-  color: var(--fg-muted);
-  font-size: 13px;
-}
-.nav a:hover { background: var(--bg-raised); color: var(--fg); text-decoration: none; }
-.nav a[data-active="true"] { background: var(--accent-dim); color: var(--fg); }
+/* `.shell`, `.topbar`, `.brand`, `.brand-mark` and `.nav a` used to live here.
+   Their only call sites were layout.tsx and Nav.tsx, both now on the kit, and
+   `grep -rn` across src/ finds none of the five. */
 
 .grid { display: grid; gap: 16px; }
 .grid-2 { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
@@ -347,6 +402,13 @@ button.secondary { background: var(--bg-inset); color: var(--fg); border-color: 
 button.danger { background: var(--danger); }
 .btn-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
-.center-card { max-width: 380px; margin: 12vh auto 0; }
+/* `.center-card` used to live here; the login page, its only caller, is on the
+   kit now. */
+
+/* `.badge`, `.notice`, `.empty`, `.log`/`.log-line` and `.spinner` used to live
+   here too, with the `spin` keyframes the last of them read. All five are on the
+   kit — Badge.tsx, Notice.tsx, Card.tsx's Empty, and Log.tsx with the Spinner
+   beside it, which takes Tailwind's own `animate-spin` — and `grep -rn` across
+   src/ finds no className naming any of them. */
 
 } /* end legacy layer */

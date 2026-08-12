@@ -1,7 +1,9 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Meter } from "./Meter";
+import { Meter, type MeterSize } from "./Meter";
+
+const SIZES: MeterSize[] = ["compact", "default", "hero"];
 
 /**
  * The one invariant in this app that is expressed purely in styling: an
@@ -61,4 +63,69 @@ test("an upper reading equal to or below the known one draws no band", () => {
     <Meter label="w" fraction={0.4} upperFraction={0.4} />,
   );
   assert.doesNotMatch(equal, /hatched/);
+});
+
+/**
+ * The size variants are the only thing standing between the invariant above and
+ * a third lookup map, so each one is checked rather than only the default. A
+ * size that forgot the `known` short-circuit — or that reached the fill class
+ * through an interpolated string, which Tailwind emits as nothing — would leave
+ * exactly one meter on the page painting an unknown window as a healthy one.
+ */
+test("the unknown state survives every size", () => {
+  for (const size of SIZES) {
+    const html = renderToStaticMarkup(
+      <Meter label="Session" fraction={null} size={size} />,
+    );
+    assert.match(html, /hatched/, `${size}: unknown fill must be hatched`);
+    assert.doesNotMatch(html, /bg-ok|bg-warn|bg-danger/, `${size}: no severity`);
+    assert.match(html, /no ceiling set/, `${size}: must say it is unknown`);
+    assert.doesNotMatch(html, /aria-valuenow/, `${size}: claims no value`);
+  }
+});
+
+test("every size still colours a known reading by severity", () => {
+  for (const size of SIZES) {
+    const html = renderToStaticMarkup(
+      <Meter label="Session" fraction={0.95} size={size} />,
+    );
+    assert.match(html, /bg-danger/, `${size}: severity fill`);
+    assert.doesNotMatch(html, /hatched/, `${size}: no hatch on a known bar`);
+  }
+});
+
+test("size selects a track height rather than interpolating one", () => {
+  const at = (size: MeterSize) =>
+    renderToStaticMarkup(<Meter label="w" fraction={0.5} size={size} />);
+  assert.match(at("compact"), /h-1\.5/);
+  assert.match(at("default"), /h-2/);
+  assert.match(at("hero"), /h-3/);
+});
+
+test("an unknown reading is announced as unknown, not as a bare bar", () => {
+  const html = renderToStaticMarkup(<Meter label="Session" fraction={null} />);
+  assert.match(html, /aria-valuetext="no ceiling set"/);
+});
+
+test("a supplied value is suppressed when the fraction is unknown", () => {
+  // `value` exists for readings where the raw pair says more than the ratio
+  // ("2/5"). With no ceiling there is no pair, and any number in that slot
+  // reads as a measurement of a window nothing has measured.
+  const html = renderToStaticMarkup(
+    <Meter label="w" fraction={null} value="2/5" />,
+  );
+  assert.doesNotMatch(html, /2\/5/);
+  assert.match(html, /no ceiling set/);
+});
+
+test("a tiny non-zero reading is drawn, a zero one is not", () => {
+  // 0.2% of a 200px track is a third of a pixel, so it paints as an empty bar —
+  // "nothing used" for a window that has been used. The floor is on the drawn
+  // width only: the reported percentage and aria-valuenow are untouched.
+  const tiny = renderToStaticMarkup(<Meter label="w" fraction={0.002} />);
+  assert.match(tiny, /min-width:3px/);
+  assert.match(tiny, /aria-valuenow="0"/);
+
+  const zero = renderToStaticMarkup(<Meter label="w" fraction={0} />);
+  assert.doesNotMatch(zero, /min-width/, "a real zero must draw nothing");
 });
