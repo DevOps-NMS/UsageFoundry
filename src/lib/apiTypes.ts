@@ -463,23 +463,62 @@ export const MAX_WORKFLOW_NAME = 80;
 export const MAX_WORKFLOW_NODES = 25;
 
 /**
+ * How many runs one orchestrator block may start.
+ *
+ * Tighter than `MAX_WORKFLOW_NODES` on purpose, and the difference is who wrote
+ * them: those blocks are typed by a person one at a time, where these are chosen
+ * by a model and start with no approval between the decision and the spawn. The
+ * per-block cap an operator sets is what actually bounds a graph; this is the
+ * ceiling on what they may set.
+ */
+export const MAX_FAN_OUT = 10;
+
+/**
+ * What a block *is*.
+ *
+ * `run` is the original and the default: a fixed task, decided when the graph
+ * was written. `orchestrator` is a short agent turn that decides, at the moment
+ * the workflow reaches it, which runs to create next — and those runs start
+ * without an approval step, because the approval happened when a person saved a
+ * graph naming this block's folder, its guard set and its fan-out cap.
+ */
+export type WorkflowNodeKind = "run" | "orchestrator";
+
+/**
  * One block of work in a workflow.
  *
  * There is deliberately no budget, permission mode, isolation choice or model
  * here. Those come from `templateId`, or from `settings.chatDefaultGuards` when
  * it is null — always from something a person wrote. A block holds the *work*.
+ * That holds for an orchestrator block too: the runs it emits take their guards
+ * from the same two places, and nothing it emits can name a third.
  */
 export interface WorkflowNodeDTO {
   id: string;
   name: string;
+  kind: WorkflowNodeKind;
   /** Null means the block runs under the untemplated guards in Settings. */
   templateId: string | null;
   mountId: string;
   /** Path within the mount. `""` is the mount root, and is a real answer. */
   folder: string;
+  /**
+   * A run block's task; an orchestrator block's brief for what to decide.
+   */
   task: string;
-  /** Standing instructions replacing the template's prompt, for this block. */
+  /**
+   * Standing instructions replacing the template's prompt. For a run block,
+   * this block's own prompt; for an orchestrator block, the prompt every run it
+   * emits is started with.
+   */
   promptOverride: string | null;
+  /**
+   * How many runs an orchestrator block may start. Null on a run block, and
+   * **never** null on an orchestrator one — a block that starts agents with no
+   * approval and no ceiling is an unbounded number of billed agents from one
+   * press of Run, so it is refused at save the way the `no_terminus` pair is.
+   */
+  fanOut: number | null;
 }
 
 export interface WorkflowEdgeDTO {
@@ -526,6 +565,9 @@ export interface WorkflowDTO {
  *
  * `run` is null when the run row has gone — the mapping is a historical record
  * and says so, rather than dropping the block out of the instance.
+ *
+ * `emittedBy` names the orchestrator block that created this run, for a row that
+ * was not in the saved graph at all. Null for a block a person wrote.
  */
 export interface WorkflowInstanceNodeDTO {
   nodeId: string;
@@ -540,6 +582,31 @@ export interface WorkflowInstanceNodeDTO {
     spentUSD: number;
   } | null;
   /** Node ids this block was told to start after, from the instance's graph. */
+  waitsFor: string[];
+  emittedBy: string | null;
+}
+
+/**
+ * One block of an instance that never became a run.
+ *
+ * Either an orchestrator turn — with its own spend, which is never a run's — or
+ * a block that was never created because the orchestrator block in front of it
+ * had nothing to hand it. Both are here for the same reason: a block that simply
+ * disappears from the instance is indistinguishable from one still waiting.
+ */
+export interface WorkflowInstanceBlockDTO {
+  nodeId: string;
+  nodeName: string;
+  position: number;
+  kind: WorkflowNodeKind;
+  status: "waiting" | "thinking" | "emitted" | "failed" | "blocked";
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** The turn's own cost. Never added to a run's spend or to a meter. */
+  costUSD: number;
+  /** How many runs this block started. 0 is a real answer, not "not yet". */
+  emitted: number;
+  error: string | null;
   waitsFor: string[];
 }
 
@@ -575,11 +642,15 @@ export interface WorkflowInstanceDTO {
    * contributes zero for its whole duration. `spentGuardUSD` is what the guard
    * acts on: that, plus reconciled estimates for killed cycles, plus what
    * telemetry says the cycles in flight have cost so far. Neither is ever added
-   * to a dashboard meter or to `runs.spent_usd`.
+   * to a dashboard meter or to `runs.spent_usd`. Both include what this
+   * instance's orchestrator blocks spent deciding, which is measured the same
+   * way a run's is and belongs to the same press of Run.
    */
   spentUSD: number;
   spentGuardUSD: number;
   nodes: WorkflowInstanceNodeDTO[];
+  /** Blocks that are not runs: orchestrator turns, and blocks never created. */
+  blocks: WorkflowInstanceBlockDTO[];
 }
 
 export interface RunEventDTO {

@@ -1,5 +1,6 @@
 import type {
   WorkflowDTO,
+  WorkflowInstanceBlockDTO,
   WorkflowInstanceDTO,
   WorkflowInstanceNodeDTO,
 } from "@/lib/apiTypes";
@@ -50,7 +51,27 @@ export function instanceDTO(instance: WorkflowInstance): WorkflowInstanceDTO {
     position: n.position,
     runId: n.runId,
     run: runStateOf(n.runId),
-    waitsFor: waits.get(n.nodeId) ?? [],
+    // A run an orchestrator block emitted is in no edge of the saved graph — it
+    // did not exist when the graph was written — so what it waits for is read
+    // off the block that started it instead.
+    waitsFor: n.emittedBy
+      ? [n.emittedBy]
+      : (waits.get(n.nodeId) ?? []),
+    emittedBy: n.emittedBy,
+  }));
+
+  const blocks: WorkflowInstanceBlockDTO[] = instance.blocks.map((b) => ({
+    nodeId: b.nodeId,
+    nodeName: b.nodeName,
+    position: b.position,
+    kind: b.kind,
+    status: b.status,
+    startedAt: b.startedAt,
+    finishedAt: b.finishedAt,
+    costUSD: b.costUSD,
+    emitted: b.emitted,
+    error: b.error,
+    waitsFor: waits.get(b.nodeId) ?? [],
   }));
 
   return {
@@ -68,5 +89,6 @@ export function instanceDTO(instance: WorkflowInstance): WorkflowInstanceDTO {
     spentUSD: instance.spend.spentUSD,
     spentGuardUSD: instance.spend.spentGuardUSD,
     nodes,
+    blocks,
   };
 }

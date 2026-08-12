@@ -494,8 +494,13 @@ function plan(
   status: WorkflowInstanceStatus = "started",
   members: readonly HaltMember[] = MEMBERS,
   cause: HaltCause = OPERATOR,
+  liveBlocks = 0,
 ) {
-  return haltPlan({ status, workflowName: "Nightly" }, members, cause);
+  return haltPlan(
+    { status, workflowName: "Nightly", liveBlocks },
+    members,
+    cause,
+  );
 }
 
 /** What the halt decided about one member, by run id. */

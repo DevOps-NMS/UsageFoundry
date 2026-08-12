@@ -316,6 +316,51 @@ function migrate(db: Database.Database) {
       PRIMARY KEY (instance_id, node_id)
     );
 
+    -- Every block of an instance that is *not* a run.
+    --
+    -- Two kinds, and they are here together because what the scheduler needs of
+    -- both is identical — a status it can read, and a sentence when the answer
+    -- is "this will never happen":
+    --
+    --   'orchestrator' is a short agent turn that decides, when the workflow
+    --   reaches it, which runs to create next. It is not a run and must never
+    --   become one: it claims no folder, takes no checkout slot, consumes no
+    --   concurrency slot, and activeRuns() cannot see it. cost_usd is its own
+    --   spend, the same relation run_reviews.cost_usd and chat_sessions.cost_usd
+    --   have to runs.spent_usd — never added to that column and never to a
+    --   dashboard meter. It *is* added to the instance's own total, because that
+    --   is money this press of Run spent; see instanceSpend.
+    --
+    --   'run' is a block that was never created, because an orchestrator block
+    --   in front of it emitted nothing or could not decide. There is no run row
+    --   to carry the reason, and a block that silently vanishes from the
+    --   instance is the "waiting for ever" failure wearing different clothes —
+    --   so the reason is recorded here instead, and the page shows it.
+    --
+    -- emitted_specs is what the turn's emit_runs tool accepted, held between the
+    -- tool call and the moment the turn ends: the runs are created when the
+    -- block settles, in one synchronous pass, for the reason startWorkflow
+    -- creates a graph in one — createRun's folder claim is only atomic inside
+    -- one event-loop turn.
+    CREATE TABLE IF NOT EXISTS workflow_instance_blocks (
+      instance_id   TEXT NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+      node_id       TEXT NOT NULL,
+      node_name     TEXT NOT NULL,
+      position      INTEGER NOT NULL,
+      -- 'orchestrator' | 'run'. See above.
+      kind          TEXT NOT NULL,
+      -- 'waiting' | 'thinking' | 'emitted' | 'failed' | 'blocked'.
+      status        TEXT NOT NULL DEFAULT 'waiting',
+      started_at    INTEGER,
+      finished_at   INTEGER,
+      cost_usd      REAL NOT NULL DEFAULT 0,
+      tokens        INTEGER NOT NULL DEFAULT 0,
+      session_id    TEXT,
+      emitted_specs TEXT,
+      error         TEXT,
+      PRIMARY KEY (instance_id, node_id)
+    );
+
     -- The orchestrator chat: a conversation that proposes runs.
     --
     -- Its own three tables rather than columns anywhere else, because a chat is
@@ -413,6 +458,11 @@ function migrate(db: Database.Database) {
     -- going?" check, which both Run and Delete ask before they do anything.
     CREATE INDEX IF NOT EXISTS idx_workflow_instance_runs_run
       ON workflow_instance_runs(run_id);
+    -- The scheduler's own query: which instances still have a block that has
+    -- not settled. Asked after every terminal run transition, so it must not be
+    -- a scan of every instance ever started.
+    CREATE INDEX IF NOT EXISTS idx_workflow_instance_blocks_status
+      ON workflow_instance_blocks(status, instance_id);
   `);
 
   // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already
@@ -595,6 +645,12 @@ function migrate(db: Database.Database) {
   // `active_iteration` is, and read only for a `running` row, since nothing
   // clears either when the container dies mid-cycle.
   addColumn(db, "runs", "active_started_at", "INTEGER");
+
+  // The orchestrator block that started this run, or null for a block a person
+  // wrote into the graph. A plain column rather than a foreign key, the shape
+  // the run_id beside it already has: this is a record of where a run came
+  // from, and it must keep reading true after the block's row has gone.
+  addColumn(db, "workflow_instance_runs", "emitted_by", "TEXT");
 }
 
 /**

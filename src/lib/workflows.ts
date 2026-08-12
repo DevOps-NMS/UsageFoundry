@@ -1,20 +1,32 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./db";
-import { composeTask } from "./chat";
+import {
+  composeTask,
+  mintCapability,
+  revokeCapability,
+  runOrchestratorChild,
+  type ChatProcess,
+  type TurnResult,
+} from "./chat";
+import { assistRefusal } from "./review";
 import {
   DEPENDENCY_EDGES,
   blockWaitingRun,
   createRun,
   dependencyCycle,
+  edgeSatisfied,
   getRun,
   probeIsolation,
   promoteQueued,
   releaseDependents,
   resolveWorkspaceFolder,
+  signalTree,
   stopRun,
+  TERMINAL_STATUSES,
   type CreateRunInput,
   type DependencyEdge,
   type DependencyLink,
+  type DependencyState,
   type RunStatus,
 } from "./orchestrator";
 import { cancelQueuedFor } from "./mergeQueue";
@@ -29,10 +41,15 @@ import {
 } from "./budget";
 import { telemetrySpendSince } from "./otlp";
 import type { UsageSnapshot } from "./windows";
-import { chatGuards, type RunGuards } from "./settings";
+import { chatGuards, getSettings, type RunGuards } from "./settings";
 import { getTemplate, listTemplates, type RunTemplate } from "./templates";
-import { WORKSPACE_MOUNTS } from "./config";
-import { MAX_WORKFLOW_NAME, MAX_WORKFLOW_NODES } from "./apiTypes";
+import { WORKSPACE_MOUNTS, mountById } from "./config";
+import {
+  MAX_FAN_OUT,
+  MAX_WORKFLOW_NAME,
+  MAX_WORKFLOW_NODES,
+  type WorkflowNodeKind,
+} from "./apiTypes";
 
 /**
  * A saved, re-runnable graph of run blocks.
@@ -62,6 +79,22 @@ import { MAX_WORKFLOW_NAME, MAX_WORKFLOW_NODES } from "./apiTypes";
  * minutes after it is written, where a workflow is saved once and run for
  * months, and a template edited in between would silently move a node's run to
  * a different repository with nothing in the graph changing.
+ *
+ * **A node can also decide what the next runs should be, and they start without
+ * an approval.** An orchestrator block is a short agent turn — the chat's child,
+ * invoked without a thread — whose only tool that writes anything emits run
+ * specs: a title, a task, a folder inside the block's own mount, and the
+ * dependency edges among the runs it is emitting. The server creates them and
+ * they enter the queue. Nothing is proposed and nobody clicks Approve, and the
+ * reason that is defensible is that the approval moved rather than disappeared:
+ * a person saved a graph naming this block's folder, its guard set and the
+ * largest number of runs it may ever start. What has *not* moved is the rule
+ * every other route here follows — **no value the model emits sets a budget, a
+ * permission mode or an isolation choice.** Those come from the block's named
+ * template, or from `settings.chatDefaultGuards` when it names none, exactly as
+ * `planProposal` and `planNode` resolve them. The orchestrator *chat* still
+ * proposes and still starts nothing; this is a different thing with a different
+ * gate in front of it.
  */
 
 /* ------------------------------------------------------------------ */
@@ -78,20 +111,39 @@ export interface WorkflowNode {
   id: string;
   /** What the operator calls this step. Shown wherever a node is named. */
   name: string;
+  /**
+   * A fixed run, or a turn that decides what runs to start. See
+   * `WorkflowNodeKind` and the orchestrator-block note above.
+   */
+  kind: WorkflowNodeKind;
   /** The template supplying every guard, or null for `chatDefaultGuards`. */
   templateId: string | null;
   mountId: string;
   /** Path within the mount. `""` is the mount root, and is a real answer. */
   folder: string;
-  /** What this block is asked to do. */
+  /** What this block is asked to do, or to decide. */
   task: string;
   /**
    * Standing instructions this node's task is appended to, replacing the
    * template's prompt for this one node. Prompt text is the half of a run that
    * is *work* rather than permission, which is why this is here and a budget
    * is not — the same split `chat_proposals.prompt_override` makes.
+   *
+   * On an orchestrator block it is the prompt every run it emits starts with,
+   * for the same reason: the emitted task is the specific instance and this is
+   * what stands above it.
    */
   promptOverride: string | null;
+  /**
+   * How many runs an orchestrator block may start. Null on a run block.
+   *
+   * Never null on an orchestrator block, and that is enforced at *save* rather
+   * than at Run — the reasoning `normalizeTemplateInput` applies to the
+   * `no_terminus` pair, with more at stake: this is the one block whose runs
+   * start with nothing between the decision and the spawn, so a missing ceiling
+   * is an unbounded number of billed agents from one press of Run.
+   */
+  fanOut: number | null;
 }
 
 /** "Start `to` after `from` has settled." */
@@ -184,8 +236,17 @@ const MAX_NODE_NAME = 60;
  * Defensive about edges naming nodes that are not here: validation refuses
  * those separately, and an order that silently mis-sequenced a graph would
  * start an agent before the work it extends exists.
+ *
+ * Typed against the two fields it reads rather than against `WorkflowGraph`, so
+ * the emitted specs of an orchestrator block go through the *same* ordering as
+ * a saved graph. Those come from a model and are created in one pass exactly as
+ * a graph is, so "every node after everything it waits for" has to mean one
+ * thing here.
  */
-export function topologicalOrder(graph: WorkflowGraph): {
+export function topologicalOrder(graph: {
+  nodes: readonly { id: string }[];
+  edges: readonly { from: string; to: string }[];
+}): {
   order: string[];
   unplaced: string[];
 } {
@@ -312,12 +373,58 @@ export function normalizeWorkflowInput(
       };
     }
 
+    // Absent is `run`, and it has to be: every graph saved before orchestrator
+    // blocks existed says nothing here, and the other reading would turn a saved
+    // workflow into one that starts agents nobody wrote.
+    const rawKind = String(n.kind ?? "run");
+    if (rawKind !== "run" && rawKind !== "orchestrator") {
+      return {
+        ok: false,
+        error: `“${nodeName}” is neither a run block nor an orchestrator block: ${rawKind}.`,
+      };
+    }
+    const kind = rawKind as WorkflowNodeKind;
+
     const task = String(n.task ?? "").trim();
     if (!task) {
       return {
         ok: false,
-        error: `“${nodeName}” has no task. A block with nothing to do is a run that spends a work cycle finding that out.`,
+        error:
+          kind === "orchestrator"
+            ? `“${nodeName}” has nothing to decide. An orchestrator block with no brief is a billed turn that starts whatever it feels like.`
+            : `“${nodeName}” has no task. A block with nothing to do is a run that spends a work cycle finding that out.`,
       };
+    }
+
+    // The fan-out cap: required on an orchestrator block, refused on a run one.
+    //
+    // Refused at *save* rather than at Run, and this is the sharpest case of
+    // that rule in the file. Every other block puts one agent on the machine,
+    // written out by a person. This one starts as many as it decides to, with
+    // nothing between the decision and the spawn — so the number a person
+    // agreed to has to exist before the graph can be saved at all, exactly as
+    // the run loop refuses a policy with no monotone terminus.
+    let fanOut: number | null = null;
+    if (kind === "orchestrator") {
+      const raw = Number(n.fanOut);
+      if (!Number.isInteger(raw) || raw < 1) {
+        return {
+          ok: false,
+          error:
+            `“${nodeName}” needs a limit on how many runs it may start. It is ` +
+            "the only block whose runs start with no approval, so a missing " +
+            "limit is an unbounded number of agents from one press of Run.",
+        };
+      }
+      if (raw > MAX_FAN_OUT) {
+        return {
+          ok: false,
+          error:
+            `“${nodeName}” may start at most ${MAX_FAN_OUT} runs; it is set to ` +
+            `${raw}.`,
+        };
+      }
+      fanOut = raw;
     }
 
     // Null is "no template — use the guards in Settings", which is a real
@@ -359,6 +466,7 @@ export function normalizeWorkflowInput(
     nodes.push({
       id,
       name: nodeName,
+      kind,
       templateId,
       mountId,
       // The empty string is the mount root — the one selection that blocks
@@ -367,6 +475,7 @@ export function normalizeWorkflowInput(
       folder: String(n.folder ?? ""),
       task,
       promptOverride: promptOverride || null,
+      fanOut,
     });
     byId.set(id, nodes[nodes.length - 1]);
   }
@@ -426,6 +535,22 @@ export function normalizeWorkflowInput(
     // safe.
     const continueBranch = e.continueBranch === true;
     if (continueBranch) {
+      // An orchestrator block has no checkout and no branch: it decides what to
+      // do and spends nothing on disk. Refused by name at either end rather
+      // than left to the isolation test below, which would say "its guards work
+      // directly in the folder" — true of nothing here and misleading about
+      // what would have to change.
+      for (const node of [source, target]) {
+        if (node.kind === "orchestrator") {
+          return {
+            ok: false,
+            error:
+              `“${node.name}” decides what to run rather than working in a ` +
+              "checkout, so it has no branch to hand over or carry on.",
+          };
+        }
+      }
+
       const rival = branchFrom.get(to);
       if (rival) {
         return {
@@ -607,14 +732,7 @@ export function planNode(
   const task = node.task.trim();
   if (!task) return { ok: false, reason: `“${node.name}” has no task.` };
 
-  const guards: RunGuards = template
-    ? {
-        permissionMode: template.permissionMode,
-        isolate: template.isolate,
-        budget: template.budget,
-      }
-    : defaults;
-
+  const guards = guardsFor(template, defaults);
   const base = node.promptOverride?.trim() || template?.prompt || null;
 
   return {
@@ -630,6 +748,533 @@ export function planNode(
       budget: guards.budget,
     },
   };
+}
+
+/**
+ * The guards a block's runs go under: its template's, or the operator's own.
+ *
+ * One function rather than the same three-field literal in three places,
+ * because the *absence* of a fourth field is what the whole design rests on.
+ * `planProposal` states it, `planNode` states it, and an orchestrator block's
+ * emitted runs now state it too — and a fourth copy of a spread is a fourth
+ * chance for a value off the wire to join it.
+ */
+function guardsFor(
+  template: RunTemplate | null,
+  defaults: RunGuards,
+): RunGuards {
+  return template
+    ? {
+        permissionMode: template.permissionMode,
+        isolate: template.isolate,
+        budget: template.budget,
+      }
+    : defaults;
+}
+
+/**
+ * Turn one emitted spec into the run it asks for.
+ *
+ * `planNode` with the *task and folder* coming off the spec instead of off the
+ * node — which is exactly and only what an orchestrator block's turn is allowed
+ * to decide. Everything else is read from the block a person saved: the mount,
+ * the standing instructions, and every guard.
+ *
+ * There is deliberately no branch in here that reads a guard, a permission mode
+ * or an isolation choice off the spec, for the reason `planProposal` has none:
+ * `--permission-mode` is not a thing a model should be able to reach for, and
+ * this is the one path in the app where nobody looks at the answer before it
+ * becomes a process.
+ */
+export function planEmittedRun(
+  node: WorkflowNode,
+  spec: RunSpec,
+  template: RunTemplate | null,
+  defaults: RunGuards,
+): Omit<CreateRunInput, "dependsOn"> {
+  const guards = guardsFor(template, defaults);
+  const base = node.promptOverride?.trim() || template?.prompt || null;
+  return {
+    folder: spec.folder,
+    mountId: node.mountId,
+    prompt: composeTask(base, spec.task),
+    permissionMode: guards.permissionMode,
+    isolate: guards.isolate,
+    budget: guards.budget,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* What an orchestrator block may emit — pure                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One run an orchestrator block asks for.
+ *
+ * Four fields, and the list is the boundary rather than a starting point: a
+ * title, the brief, a folder, and which of its siblings it starts after. There
+ * is no template id, no budget, no permission mode, no isolation choice and no
+ * model, because the block's own template already answered all of those and a
+ * spec that could answer them again would be a fifth route to
+ * `--permission-mode` reached by a model with nobody reading the result.
+ */
+export interface RunSpec {
+  /** Stable within one emission; the edges below name it. */
+  id: string;
+  /** Short label, shown on the instance page in place of a block name. */
+  title: string;
+  /** The whole brief for the agent, appended to the block's standing prompt. */
+  task: string;
+  /** Path within the *block's* mount. `""` is the mount root. */
+  folder: string;
+  /** Siblings in this same emission that must settle first. */
+  dependsOn: Array<{ id: string; edge: DependencyEdge }>;
+}
+
+export type EmissionPlan =
+  | { ok: true; specs: RunSpec[] }
+  | { ok: false; reason: string };
+
+/** What a block is measured against when it emits. Injected, so this is pure. */
+export interface EmissionLimits {
+  blockName: string;
+  /** The cap a person saved. Never null — `normalizeWorkflowInput` sees to it. */
+  fanOut: number;
+  /**
+   * Why this folder cannot be used, or null when it can.
+   *
+   * Injected rather than called, for the reason `WorkflowKnowledge` is: the
+   * containment decision is a syscall (`resolveWorkspaceFolder`, run against the
+   * block's own mount and no other), and everything else here has to stay
+   * testable without one.
+   */
+  folderRefusal: (folder: string) => string | null;
+}
+
+/** How many characters of a spec's own fields are worth keeping. */
+const MAX_SPEC_TITLE = 80;
+
+/**
+ * Read what a block emitted, refusing anything that could not be started.
+ *
+ * Pure and unit-tested, and it earns that harder than anything else in this
+ * file: it is the step where text a model wrote becomes N processes with write
+ * access to a directory, with **no person between the two**. Every branch here
+ * is silent when it is wrong — a spec past the cap is an agent the operator
+ * never agreed to, a folder outside the mount is an agent in a repository this
+ * block was never pointed at, and a loop among the specs is a set of runs that
+ * would sit `waiting` for each other for ever.
+ *
+ * The cap is checked before anything else about the specs, because it is the
+ * one refusal the model can act on by emitting fewer.
+ *
+ * An empty emission is **legal**: "there is nothing to do" is a real answer and
+ * the alternative is a block that has to invent work to say so. What it means
+ * for the blocks behind it is a separate decision, and `planInstanceStep` makes
+ * it.
+ */
+export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan {
+  const list = Array.isArray(raw) ? raw : null;
+  if (!list) {
+    return {
+      ok: false,
+      reason: "runs has to be a list of run specs, even if it is empty.",
+    };
+  }
+
+  if (list.length > limits.fanOut) {
+    return {
+      ok: false,
+      reason:
+        `“${limits.blockName}” may start at most ${limits.fanOut} run(s) and ` +
+        `this asks for ${list.length}. That limit was set when the workflow ` +
+        "was saved and cannot be raised from here. Emit the most important " +
+        `${limits.fanOut} and say what you left out.`,
+    };
+  }
+
+  const specs: RunSpec[] = [];
+  const byId = new Map<string, RunSpec>();
+
+  for (const [index, entry] of list.entries()) {
+    const e = (entry ?? {}) as Record<string, unknown>;
+    const where = `Run ${index + 1}`;
+
+    const id = String(e.id ?? "").trim();
+    if (!NODE_ID.test(id)) {
+      return {
+        ok: false,
+        reason: `${where} has no usable id. An id is 1–64 letters, digits, hyphens or underscores, and the dependsOn entries name it.`,
+      };
+    }
+    if (byId.has(id)) {
+      return {
+        ok: false,
+        reason: `Two runs share the id “${id}”, so a dependsOn naming it names both.`,
+      };
+    }
+
+    const title = String(e.title ?? "").trim();
+    if (!title) return { ok: false, reason: `${where} needs a title.` };
+
+    const task = String(e.task ?? "").trim();
+    if (!task) {
+      return {
+        ok: false,
+        reason: `“${title}” has no task. It is the whole brief the agent gets, and it cannot ask a follow-up question.`,
+      };
+    }
+
+    // `""` is the mount root and a real answer, exactly as it is on a node — so
+    // it is never collapsed into "no folder named".
+    const folder = String(e.folder ?? "");
+    const refusal = limits.folderRefusal(folder);
+    if (refusal) {
+      return {
+        ok: false,
+        reason:
+          `“${title}” names a folder that cannot be used: ${refusal} A run ` +
+          `this block starts has to be inside “${limits.blockName}”'s own ` +
+          "workspace; use a folder exactly as list_folders gives it.",
+      };
+    }
+
+    specs.push({
+      id,
+      title: title.slice(0, MAX_SPEC_TITLE),
+      task,
+      folder,
+      dependsOn: [],
+    });
+    byId.set(id, specs[specs.length - 1]);
+  }
+
+  const seenPairs = new Set<string>();
+  for (const [index, entry] of list.entries()) {
+    const e = (entry ?? {}) as Record<string, unknown>;
+    const spec = specs[index];
+    const links = Array.isArray(e.dependsOn) ? e.dependsOn : [];
+
+    for (const link of links) {
+      const l = (link ?? {}) as Record<string, unknown>;
+      const from = String(l.id ?? "");
+      const target = byId.get(from);
+      if (!target) {
+        return {
+          ok: false,
+          reason:
+            `“${spec.title}” is set to start after “${from}”, which is not one ` +
+            "of the runs being emitted. A run can only wait for its siblings " +
+            "in this same emission.",
+        };
+      }
+      if (from === spec.id) {
+        return { ok: false, reason: `“${spec.title}” is set to start after itself.` };
+      }
+      const pair = `${from} ${spec.id}`;
+      if (seenPairs.has(pair)) {
+        return {
+          ok: false,
+          reason: `“${spec.title}” is set to start after “${target.title}” twice, so it is unclear which condition applies.`,
+        };
+      }
+      seenPairs.add(pair);
+
+      const edge = String(l.edge ?? "");
+      if (!(DEPENDENCY_EDGES as readonly string[]).includes(edge)) {
+        return {
+          ok: false,
+          reason: `“${spec.title}” needs a condition for starting after “${target.title}”: ${DEPENDENCY_EDGES.join(" or ")}.`,
+        };
+      }
+      spec.dependsOn.push({ id: from, edge: edge as DependencyEdge });
+    }
+  }
+
+  // The same detector the run graph and the saved graph use, given the spec ids.
+  //
+  // This is where "acyclic by construction" stops being an argument. `createRun`
+  // mints a run's id *after* reading its edges, so nothing can already point at
+  // it — which was the whole reason a cycle was impossible. That still holds for
+  // each individual insert, but the graph being inserted is now one a **model**
+  // wrote, and creating a cyclic set in topological order is not possible at
+  // all: the first spec would name a run that does not exist yet and
+  // `createRun` would refuse it as a missing run rather than as the loop it is.
+  // So the loop is named here, before anything is created, and
+  // `admitDependencies` re-runs the same check over the live graph at every one
+  // of those inserts.
+  const loop = dependencyCycle(
+    specs.flatMap((s) =>
+      s.dependsOn.map((d) => ({ runId: s.id, dependsOn: d.id, edge: d.edge })),
+    ),
+  );
+  if (loop) {
+    return {
+      ok: false,
+      reason:
+        "These runs wait for each other in a loop, so none of them could ever " +
+        `start: ${loop.map((id) => byId.get(id)?.title ?? id).join(" → ")}.`,
+    };
+  }
+
+  // Returned in the order they will be created, so every spec is created after
+  // everything it waits for — the property `startWorkflow` needs of a graph, for
+  // the identical reason.
+  const { order } = topologicalOrder({
+    nodes: specs,
+    edges: specs.flatMap((s) => s.dependsOn.map((d) => ({ from: d.id, to: s.id }))),
+  });
+  return { ok: true, specs: order.map((id) => byId.get(id)!) };
+}
+
+/* ------------------------------------------------------------------ */
+/* What the instance does next — pure                                  */
+/* ------------------------------------------------------------------ */
+
+/** Where one non-run block of an instance has got to. */
+export type BlockStatus =
+  | "waiting"
+  | "thinking"
+  | "emitted"
+  | "failed"
+  | "blocked";
+
+/** One node of an instance as the scheduler sees it. */
+export interface InstanceNodeState {
+  /** The run this node became, or null when it has not been created. */
+  run: DependencyState | null;
+  /**
+   * The ledger row: an orchestrator block's turn, or a run block that was
+   * never created because nothing in front of it could hand it any work.
+   */
+  block: {
+    status: BlockStatus;
+    /** The runs an orchestrator block started, as their rows stand now. */
+    emitted: readonly DependencyState[];
+    /** Why it ended this way, for the sentence its successors carry. */
+    error: string | null;
+  } | null;
+}
+
+/** One node that may now be created, with the edges it resolves to. */
+export interface InstanceCreation {
+  nodeId: string;
+  dependsOn: Array<{
+    runId: string;
+    edge: DependencyEdge;
+    continueBranch: boolean;
+  }>;
+}
+
+export interface InstanceStep {
+  /** Orchestrator blocks whose turn may start now. */
+  spawn: string[];
+  /** Run blocks that may now be created. */
+  create: InstanceCreation[];
+  /** Nodes that can never start, each with the sentence naming what stopped it. */
+  block: Array<{ nodeId: string; reason: string }>;
+}
+
+/** What an edge into a node says about whether that node may go ahead. */
+type EdgeVerdict =
+  | { kind: "satisfied" }
+  | { kind: "pending" }
+  | { kind: "blocked"; reason: string };
+
+const PENDING: EdgeVerdict = { kind: "pending" };
+const SATISFIED: EdgeVerdict = { kind: "satisfied" };
+
+/**
+ * What an instance may do right now: which turns to start, which blocks to
+ * create, and which can never happen at all.
+ *
+ * Pure and unit-tested, and it is `releasableRuns` for the half of a graph that
+ * is not runs yet — with the same two silent failures. A block released too
+ * early is an agent started on work that has not happened; a block neither
+ * released nor terminated is a row that sits `waiting` for ever, which for an
+ * orchestrator block means the whole subgraph behind it never starts and
+ * nothing on the page says why.
+ *
+ * **An orchestrator block that emitted nothing blocks what is behind it.** That
+ * is a decision rather than a fallout, and it is `edgeSatisfied`'s rule read one
+ * level up: a dependency that ran no work cycle satisfies nothing, because the
+ * successor's whole reason for existing is work that did not happen. A block
+ * behind a fan-out is there to review it, land it, or follow it up; started with
+ * nothing in front of it, it spends a billed cycle discovering that. Blocked
+ * costs nothing and says which block decided there was nothing to do.
+ *
+ * A node is considered only when every edge into it is *satisfied* rather than
+ * merely resolvable, which is why the runs an orchestrator block emitted have to
+ * finish before the block behind them is created. That costs nothing — a node
+ * that has not been created holds no folder, no checkout and no place in the
+ * queue, which is exactly what `waiting` was invented for — and it means the
+ * edges are recorded on a run that `admitDependencies` then re-checks.
+ *
+ * The pass repeats to a fixed point, and that loop is the cascade: a node
+ * blocked here is a settled predecessor that produced nothing, so everything
+ * behind it blocks on the next pass with its own sentence naming the node in
+ * front of it rather than one shared verdict about a block it never heard of.
+ */
+export function planInstanceStep(
+  graph: WorkflowGraph,
+  state: ReadonlyMap<string, InstanceNodeState>,
+): InstanceStep {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const incoming = new Map<string, WorkflowEdge[]>();
+  for (const e of graph.edges) {
+    if (!byId.has(e.from) || !byId.has(e.to)) continue;
+    const list = incoming.get(e.to);
+    if (list) list.push(e);
+    else incoming.set(e.to, [e]);
+  }
+
+  // A working copy, so a node blocked in one pass is a blocked *predecessor* in
+  // the next without writing anything.
+  const live = new Map<string, InstanceNodeState>();
+  for (const node of graph.nodes) {
+    live.set(node.id, state.get(node.id) ?? { run: null, block: null });
+  }
+
+  const step: InstanceStep = { spawn: [], create: [], block: [] };
+  const decided = new Set<string>();
+
+  for (;;) {
+    let changed = false;
+
+    for (const node of graph.nodes) {
+      if (decided.has(node.id)) continue;
+      const own = live.get(node.id)!;
+      // Already a run, or a turn that has started or settled: not this
+      // function's business any more. `releasableRuns` owns a created run from
+      // here on, and a `thinking` block owns itself until its child returns.
+      if (own.run || (own.block && own.block.status !== "waiting")) continue;
+      // A run block with a `waiting` ledger row cannot happen — a ledger row is
+      // written for a run block only to record that it never ran — but reading
+      // one as ready to create would create a run twice.
+      if (node.kind === "run" && own.block) continue;
+
+      let stopper: string | null = null;
+      let pending = false;
+      const dependsOn: InstanceCreation["dependsOn"] = [];
+
+      for (const edge of incoming.get(node.id) ?? []) {
+        const from = byId.get(edge.from)!;
+        const verdict = edgeVerdict(from, live.get(from.id)!, edge, dependsOn);
+        if (verdict.kind === "blocked") {
+          stopper = verdict.reason;
+          break;
+        }
+        if (verdict.kind === "pending") pending = true;
+      }
+
+      if (stopper !== null) {
+        step.block.push({ nodeId: node.id, reason: stopper });
+        live.set(node.id, {
+          run: null,
+          block: { status: "blocked", emitted: [], error: stopper },
+        });
+      } else if (pending) {
+        continue;
+      } else if (node.kind === "orchestrator") {
+        step.spawn.push(node.id);
+      } else {
+        step.create.push({ nodeId: node.id, dependsOn });
+      }
+      decided.add(node.id);
+      changed = true;
+    }
+
+    if (!changed) return step;
+  }
+}
+
+/**
+ * What one edge says, and — when it says "go ahead" — which runs it resolves to.
+ *
+ * The two kinds of predecessor answer differently and the difference is the
+ * whole point of an orchestrator block: a run block is one run, decided when the
+ * graph was written, where an orchestrator block is however many runs it turned
+ * out to emit. A successor of the second waits for *all* of them, which is
+ * `admitDependencies`' fan-in rule applied to a fan-in nobody could write down.
+ */
+function edgeVerdict(
+  from: WorkflowNode,
+  state: InstanceNodeState,
+  edge: WorkflowEdge,
+  dependsOn: InstanceCreation["dependsOn"],
+): EdgeVerdict {
+  if (from.kind === "run") {
+    if (!state.run) {
+      // Never created and never will be — the cascade, one link along.
+      if (state.block) {
+        return {
+          kind: "blocked",
+          reason: `Set to start after “${from.name}”, which never ran: ${state.block.error ?? "no reason recorded."}`,
+        };
+      }
+      return PENDING;
+    }
+    if (edgeSatisfied(state.run, edge.edge)) {
+      dependsOn.push({
+        runId: state.run.id,
+        edge: edge.edge,
+        continueBranch: edge.continueBranch,
+      });
+      return SATISFIED;
+    }
+    if (TERMINAL_STATUSES.includes(state.run.status)) {
+      return {
+        kind: "blocked",
+        reason: `Set to start after “${from.name}”, which ended ${state.run.status}.`,
+      };
+    }
+    return PENDING;
+  }
+
+  const block = state.block;
+  if (!block || block.status === "waiting" || block.status === "thinking") {
+    return PENDING;
+  }
+  if (block.status === "failed") {
+    return {
+      kind: "blocked",
+      reason: `“${from.name}” could not decide what to start: ${block.error ?? "the turn failed."}`,
+    };
+  }
+  if (block.status === "blocked") {
+    return {
+      kind: "blocked",
+      reason: `“${from.name}” never ran: ${block.error ?? "no reason recorded."}`,
+    };
+  }
+
+  // Emitted. Nothing to follow is the deliberate refusal — see `planInstanceStep`.
+  if (block.emitted.length === 0) {
+    return {
+      kind: "blocked",
+      reason:
+        `“${from.name}” decided there was nothing to start, so there is no ` +
+        "work for this block to follow.",
+    };
+  }
+
+  let pending = false;
+  for (const run of block.emitted) {
+    if (edgeSatisfied(run, edge.edge)) continue;
+    if (TERMINAL_STATUSES.includes(run.status)) {
+      return {
+        kind: "blocked",
+        reason: `Set to start after every run “${from.name}” started; one of them ended ${run.status} without qualifying.`,
+      };
+    }
+    pending = true;
+  }
+  if (pending) return PENDING;
+
+  for (const run of block.emitted) {
+    dependsOn.push({ runId: run.id, edge: edge.edge, continueBranch: false });
+  }
+  return SATISFIED;
 }
 
 /* ------------------------------------------------------------------ */
@@ -837,6 +1482,25 @@ export interface WorkflowInstanceNode {
   nodeName: string;
   position: number;
   runId: string;
+  /** The orchestrator block that started this run, or null for a saved block. */
+  emittedBy: string | null;
+}
+
+/** One block of an instance that is not a run. See `workflow_instance_blocks`. */
+export interface WorkflowInstanceBlock {
+  nodeId: string;
+  nodeName: string;
+  position: number;
+  kind: WorkflowNodeKind;
+  status: BlockStatus;
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** The turn's own spend. Never a run's, never a meter's. */
+  costUSD: number;
+  tokens: number;
+  /** How many runs it started. 0 is an answer, not "not yet". */
+  emitted: number;
+  error: string | null;
 }
 
 export interface WorkflowInstance {
@@ -866,6 +1530,8 @@ export interface WorkflowInstance {
   /** What its blocks have spent: a measured floor and the guard's figure. */
   spend: InstanceProgress;
   nodes: WorkflowInstanceNode[];
+  /** Orchestrator turns, and blocks that never became runs. */
+  blocks: WorkflowInstanceBlock[];
 }
 
 interface InstanceRow {
@@ -934,12 +1600,41 @@ export function instanceSpend(instanceId: string): InstanceProgress {
       spentGuardUSD += telemetrySpendSince(row.id, row.cycleStartedAt).costUSD;
     }
   }
-  return { spentUSD, spentGuardUSD };
+
+  // What this instance's orchestrator blocks spent deciding.
+  //
+  // In **both** figures rather than neither, and that is a deliberate reading of
+  // "a block's spend is not a run's". It is not: it never touches
+  // `runs.spent_usd`, it is never summed into `buildSnapshot()` and no dashboard
+  // meter sees it. But it is money this press of Run spent, measured by the same
+  // `total_cost_usd` the CLI reports for a work cycle, and leaving it out would
+  // give a graph with several deciding blocks a total that quietly understates
+  // itself against the one limit meant to bound the whole thing. It is in the
+  // measured figure as well as the guard's because it *is* measured — a turn
+  // that ended reported its own cost, and the display-versus-guard split exists
+  // for readings that are estimated, not for readings that are inconvenient.
+  const blocks = db()
+    .prepare(
+      "SELECT COALESCE(SUM(cost_usd), 0) AS spent FROM workflow_instance_blocks WHERE instance_id = ?",
+    )
+    .get(instanceId) as { spent: number };
+  return {
+    spentUSD: spentUSD + blocks.spent,
+    spentGuardUSD: spentGuardUSD + blocks.spent,
+  };
 }
 
-/** How many of this instance's runs are still going, in one query. */
+/**
+ * How much of this instance has not finished: runs still going, plus blocks
+ * still deciding or still waiting to.
+ *
+ * The block half is not decorative. `stopped` is derived from "nothing is live",
+ * so a halt that left an orchestrator turn running would read as *stopped* while
+ * a billed child was still deciding what to start — and `startWorkflow`'s refusal
+ * of a second press reads the same count.
+ */
 function liveMemberCount(instanceId: string): number {
-  const row = db()
+  const runs = db()
     .prepare(
       `SELECT COUNT(*) AS n
          FROM workflow_instance_runs w
@@ -948,7 +1643,43 @@ function liveMemberCount(instanceId: string): number {
           AND r.status IN (${LIVE_STATUSES.map(() => "?").join(",")})`,
     )
     .get(instanceId, ...LIVE_STATUSES) as { n: number };
-  return row.n;
+  const blocks = db()
+    .prepare(
+      "SELECT COUNT(*) AS n FROM workflow_instance_blocks" +
+        " WHERE instance_id = ? AND status IN ('waiting','thinking')",
+    )
+    .get(instanceId) as { n: number };
+  return runs.n + blocks.n;
+}
+
+/** Every non-run block of one instance, in the order the graph declared them. */
+export function blocksOf(instanceId: string): WorkflowInstanceBlock[] {
+  const rows = db()
+    .prepare(
+      `SELECT node_id AS nodeId, node_name AS nodeName, position, kind, status,
+              started_at AS startedAt, finished_at AS finishedAt,
+              cost_usd AS costUSD, tokens, emitted_specs AS specs, error
+         FROM workflow_instance_blocks
+        WHERE instance_id = ? ORDER BY position`,
+    )
+    .all(instanceId) as Array<
+    Omit<WorkflowInstanceBlock, "emitted"> & { specs: string | null }
+  >;
+  return rows.map(({ specs, ...row }) => ({
+    ...row,
+    emitted: parseSpecs(specs).length,
+  }));
+}
+
+/** Stored specs as a list. Unreadable and absent both read as "emitted none". */
+function parseSpecs(raw: string | null): RunSpec[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as RunSpec[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 function rowToInstance(row: InstanceRow): WorkflowInstance {
@@ -965,7 +1696,8 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
 
   const nodes = db()
     .prepare(
-      `SELECT node_id AS nodeId, node_name AS nodeName, position, run_id AS runId
+      `SELECT node_id AS nodeId, node_name AS nodeName, position, run_id AS runId,
+              emitted_by AS emittedBy
          FROM workflow_instance_runs WHERE instance_id = ? ORDER BY position`,
     )
     .all(row.id) as WorkflowInstanceNode[];
@@ -1000,6 +1732,7 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
     instanceBudget: parseInstanceBudget(row.instance_budget),
     spend: instanceSpend(row.id),
     nodes,
+    blocks: blocksOf(row.id),
   };
 }
 
@@ -1183,6 +1916,12 @@ export function startWorkflow(
 
   // Planned in full before anything is created. A refusal here costs nothing;
   // the same refusal three nodes into the pass costs a rollback.
+  //
+  // An orchestrator block is planned too, even though it becomes no run: what
+  // `planNode` refuses for it — a template that has been deleted — is refused
+  // for the runs it will *emit*, which take their guards from that same
+  // template, and finding that out an hour into the graph would mean a turn
+  // billed for a decision nothing can act on.
   const defaults = chatGuards();
   const plans = new Map<string, Omit<CreateRunInput, "dependsOn">>();
   for (const node of graph.nodes) {
@@ -1254,16 +1993,27 @@ export function startWorkflow(
       now,
     );
 
-  const addNode = db().prepare(
-    `INSERT INTO workflow_instance_runs
-       (instance_id, node_id, node_name, position, run_id)
-     VALUES (?, ?, ?, ?, ?)`,
+  const addBlock = db().prepare(
+    `INSERT INTO workflow_instance_blocks
+       (instance_id, node_id, node_name, position, kind, status)
+     VALUES (?, ?, ?, ?, ?, 'waiting')`,
   );
+
+  // Which nodes cannot be created yet: every node with an orchestrator block
+  // somewhere behind it. Its dependency edges will name runs that do not exist —
+  // a model has not decided on them — so it is created when they do, by
+  // `advanceInstances`. Everything else is created here, in the one synchronous
+  // pass, exactly as before.
+  const deferred = deferredNodes(graph);
 
   const runIds = new Map<string, string>();
   try {
     for (const [position, nodeId] of order.entries()) {
       const node = byId.get(nodeId)!;
+      if (node.kind === "orchestrator" || deferred.has(nodeId)) {
+        addBlock.run(instanceId, nodeId, node.name, position, node.kind);
+        continue;
+      }
       const dependsOn = (incoming.get(nodeId) ?? []).map((e) => ({
         // Every predecessor is earlier in the topological order, so its run
         // already exists. That is the whole reason the order is computed.
@@ -1273,7 +2023,13 @@ export function startWorkflow(
       }));
       const run = createRun({ ...plans.get(nodeId)!, dependsOn });
       runIds.set(nodeId, run.id);
-      addNode.run(instanceId, nodeId, node.name, position, run.id);
+      recordMember(instanceId, {
+        nodeId,
+        nodeName: node.name,
+        position,
+        runId: run.id,
+        emittedBy: null,
+      });
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
@@ -1285,6 +2041,15 @@ export function startWorkflow(
     for (const runId of [...runIds.values()].reverse()) {
       stopRun(runId, rolledBack);
     }
+    // The blocks too: nothing has spawned yet, so every one of them is
+    // `waiting`, and a row left saying so under a `failed` instance is a block
+    // the page reports as about to happen and nothing will ever pick up.
+    db()
+      .prepare(
+        "UPDATE workflow_instance_blocks SET status='blocked', finished_at=?, error=?" +
+          " WHERE instance_id=? AND status='waiting'",
+      )
+      .run(Date.now(), `${rolledBack}.`, instanceId);
     db()
       .prepare(
         "UPDATE workflow_instances SET status = 'failed', error = ? WHERE id = ?",
@@ -1301,7 +2066,66 @@ export function startWorkflow(
   // `createRun` promotes after each admission; this is what starts whatever the
   // last one made startable, exactly as the chat's approval route relies on.
   promoteQueued();
+
+  // And the other half of "start whatever can start": an orchestrator block
+  // with nothing in front of it is ready the moment the graph exists. Outside
+  // the creating pass, because it spawns.
+  advanceInstances();
   return { ok: true, instance: getInstance(instanceId)! };
+}
+
+/** One block's run, recorded against the instance it belongs to. */
+function recordMember(instanceId: string, node: WorkflowInstanceNode): void {
+  db()
+    .prepare(
+      `INSERT INTO workflow_instance_runs
+         (instance_id, node_id, node_name, position, run_id, emitted_by)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      instanceId,
+      node.nodeId,
+      node.nodeName,
+      node.position,
+      node.runId,
+      node.emittedBy,
+    );
+}
+
+/**
+ * Nodes that cannot be created until an orchestrator block has decided.
+ *
+ * Everything reachable *from* an orchestrator block, transitively. A node here
+ * has at least one dependency that is not a run yet and may turn out to be
+ * several, so there is nothing for `createRun` to name — and admitting it as
+ * `waiting` with no edges would release it immediately, which is a run started
+ * ahead of the decision that was supposed to shape it.
+ *
+ * Costing nothing is what makes the deferral safe: a node that has not been
+ * created holds no folder, no checkout slot and no place in the queue, which is
+ * the same property `waiting` was invented for one level down.
+ */
+function deferredNodes(graph: WorkflowGraph): Set<string> {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const out = new Map<string, string[]>();
+  for (const e of graph.edges) {
+    if (!byId.has(e.from) || !byId.has(e.to)) continue;
+    const list = out.get(e.from);
+    if (list) list.push(e.to);
+    else out.set(e.from, [e.to]);
+  }
+
+  const deferred = new Set<string>();
+  const queue = graph.nodes
+    .filter((n) => n.kind === "orchestrator")
+    .flatMap((n) => out.get(n.id) ?? []);
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (deferred.has(id)) continue;
+    deferred.add(id);
+    queue.push(...(out.get(id) ?? []));
+  }
+  return deferred;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1411,7 +2235,18 @@ export function haltCause(cause: HaltCause, workflowName: string): string {
  * which this refuses.
  */
 export function haltPlan(
-  instance: { status: WorkflowInstanceStatus; workflowName: string },
+  instance: {
+    status: WorkflowInstanceStatus;
+    workflowName: string;
+    /**
+     * Orchestrator blocks still deciding, or still waiting to. Counted here
+     * because "nothing is live, so there is nothing to halt" must not be
+     * answered from the runs alone: a graph whose only remaining member is a
+     * block with a billed child in flight would otherwise be told it had
+     * already finished, and the child would go on to start runs.
+     */
+    liveBlocks: number;
+  },
   members: readonly HaltMember[],
   cause: HaltCause,
 ): HaltDecision {
@@ -1430,11 +2265,14 @@ export function haltPlan(
     return { act: false, note, cause: attribution, steps: [] };
   }
 
-  // Nothing is live, so there is no door to close: members are created once and
-  // every one of them has settled, so none of them can move again. Recording a
+  // Nothing is live, so there is no door to close: every member has settled and
+  // no block is left to create another, so nothing can move again. Recording a
   // halt here would put "stopped by the operator" on a run of a workflow that
   // finished on its own, which is a false thing to say about work that landed.
-  if (!members.some((m) => m.status && LIVE_STATUSES.includes(m.status))) {
+  if (
+    instance.liveBlocks === 0 &&
+    !members.some((m) => m.status && LIVE_STATUSES.includes(m.status))
+  ) {
     return {
       act: false,
       note: "Every block of this workflow run has already finished.",
@@ -1489,6 +2327,8 @@ export interface HaltReport {
   blocked: string[];
   /** Members already finished, or whose row has gone. */
   untouched: string[];
+  /** Orchestrator blocks written off: waiting ones, and turns in flight. */
+  blocksHalted: number;
   /** Queued merges belonging to these runs, cancelled. */
   mergesCancelled: number;
 }
@@ -1550,7 +2390,10 @@ export function stopInstance(instanceId: string, cause: HaltCause): HaltOutcome 
   if (!instance) return { ok: false, reason: "No such workflow run." };
 
   const members = membersOf(instanceId);
-  const plan = haltPlan(instance, members, cause);
+  const liveBlocks = instance.blocks.filter(
+    (b) => b.status === "waiting" || b.status === "thinking",
+  ).length;
+  const plan = haltPlan({ ...instance, liveBlocks }, members, cause);
   const report: HaltReport = {
     instanceId,
     workflowName: instance.workflowName,
@@ -1560,6 +2403,7 @@ export function stopInstance(instanceId: string, cause: HaltCause): HaltOutcome 
     cancelled: [],
     blocked: [],
     untouched: [],
+    blocksHalted: 0,
     mergesCancelled: 0,
   };
   if (!plan.act) return { ok: true, report };
@@ -1592,7 +2436,7 @@ export function stopInstance(instanceId: string, cause: HaltCause): HaltOutcome 
     };
   }
 
-  walkMembers(plan.steps, plan.cause, report);
+  walkMembers(plan.steps, plan.cause, report, instanceId);
   return { ok: true, report };
 }
 
@@ -1607,7 +2451,15 @@ function walkMembers(
   steps: readonly HaltStep[],
   cause: string,
   report: HaltReport,
+  instanceId: string,
 ): void {
+  // Blocks before anything else, and for a sharper version of the reason
+  // waiting members go before running ones: a block does not merely get
+  // *released* by a stop, it creates runs. One left `thinking` while the walk
+  // ran could emit into a workflow that is being taken down, and every run it
+  // started would be a member the halt had already walked past.
+  report.blocksHalted = haltBlocks(instanceId, cause);
+
   // Waiting first — see `stopInstance`. Nothing between here and the end of the
   // walk yields to the event loop.
   for (const step of steps) {
@@ -1644,6 +2496,51 @@ function walkMembers(
 }
 
 /**
+ * Take down every block of an instance that has not settled.
+ *
+ * `blocked` for a block that never started — the status this app already writes
+ * for work refused before it cost anything, and the true thing to say — and
+ * `failed` for one whose child was in flight, because that turn was billed and
+ * saying it never ran would hide the spend already on its row. Both are written
+ * *before* the child is signalled, so the guarded UPDATE in `emitBlockRuns` and
+ * the one in `settleBlock` both refuse whatever the dying turn still tries to do.
+ *
+ * The signal ladder is the one every other child here gets, `SIGINT` first.
+ */
+function haltBlocks(instanceId: string, cause: string): number {
+  const now = Date.now();
+  const halted =
+    db()
+      .prepare(
+        "UPDATE workflow_instance_blocks SET status='blocked', finished_at=?, error=?" +
+          " WHERE instance_id=? AND status='waiting'",
+      )
+      .run(now, `${cause} before it started deciding.`, instanceId).changes +
+    db()
+      .prepare(
+        "UPDATE workflow_instance_blocks SET status='failed', finished_at=?, error=?" +
+          " WHERE instance_id=? AND status='thinking'",
+      )
+      .run(now, `${cause} while it was deciding what to start.`, instanceId)
+      .changes;
+
+  for (const [key, child] of blockTurns) {
+    if (!key.startsWith(`${instanceId}:`)) continue;
+    blockTurns.delete(key);
+    const running = () => child.exitCode === null && child.signalCode === null;
+    signalTree(child, "SIGINT");
+    setTimeout(() => {
+      if (running()) signalTree(child, "SIGTERM");
+    }, 3_000).unref?.();
+    setTimeout(() => {
+      if (running()) signalTree(child, "SIGKILL");
+    }, 8_000).unref?.();
+  }
+
+  return halted;
+}
+
+/**
  * Finish a halt the process died in the middle of.
  *
  * The walk holds its event-loop turn from the first member to the last, so this
@@ -1666,24 +2563,36 @@ export function reconcileHaltsOnBoot(): void {
 
   for (const row of rows) {
     const members = membersOf(row.id);
-    if (!members.some((m) => m.status && LIVE_STATUSES.includes(m.status))) {
+    const liveBlocks = blocksOf(row.id).filter(
+      (b) => b.status === "waiting" || b.status === "thinking",
+    ).length;
+    if (
+      liveBlocks === 0 &&
+      !members.some((m) => m.status && LIVE_STATUSES.includes(m.status))
+    ) {
       continue;
     }
     const cause = haltCause(
       row.stop_cause === "guard" ? { kind: "guard", detail: "" } : { kind: "operator" },
       row.workflow_name,
     );
-    walkMembers(memberSteps(members, cause), cause, {
-      instanceId: row.id,
-      workflowName: row.workflow_name,
-      acted: true,
-      note: null,
-      signalled: [],
-      cancelled: [],
-      blocked: [],
-      untouched: [],
-      mergesCancelled: 0,
-    });
+    walkMembers(
+      memberSteps(members, cause),
+      cause,
+      {
+        instanceId: row.id,
+        workflowName: row.workflow_name,
+        acted: true,
+        note: null,
+        signalled: [],
+        cancelled: [],
+        blocked: [],
+        untouched: [],
+        blocksHalted: 0,
+        mergesCancelled: 0,
+      },
+      row.id,
+    );
   }
 }
 
@@ -1783,6 +2692,685 @@ export function enforceInstanceBudget(
   // members does this take down" is a second chance to miss one.
   stopInstance(instance.instanceId, { kind: "guard", detail: verdict.reason });
   return { kind: "halted", verdict };
+}
+
+/* ------------------------------------------------------------------ */
+/* Orchestrator blocks: deciding, then starting what was decided        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A block turn that has not answered in this long is not going to.
+ *
+ * The chat's bound, not a second one: it is the same child doing the same kind
+ * of work, and a separate number here would be a second thing to keep in step
+ * with a timeout that already exists.
+ */
+const BLOCK_TIMEOUT_MS = 10 * 60_000;
+
+const BLOCK_TIMED_OUT =
+  `This block did not decide within ${BLOCK_TIMEOUT_MS / 60_000} minutes and was stopped.`;
+
+/**
+ * The block turns this process can still signal.
+ *
+ * The row says a turn is in flight; this says whether anything is still there to
+ * stop. On `globalThis` for the reason `chat.ts`'s registry is — a dev hot
+ * reload would otherwise lose the handle on a live, billed child and leave a
+ * halt with nothing to signal.
+ */
+const blockTurns = ((globalThis as unknown as {
+  __ufBlockTurns?: Map<string, ChatProcess>;
+}).__ufBlockTurns ??= new Map<string, ChatProcess>());
+
+const turnKey = (instanceId: string, nodeId: string) => `${instanceId}:${nodeId}`;
+
+/** One block's row, as the scheduler and the emit tool read it. */
+interface BlockRow {
+  instance_id: string;
+  node_id: string;
+  node_name: string;
+  position: number;
+  kind: WorkflowNodeKind;
+  status: BlockStatus;
+  cost_usd: number;
+  emitted_specs: string | null;
+  error: string | null;
+}
+
+function getBlock(instanceId: string, nodeId: string): BlockRow | null {
+  return (
+    (db()
+      .prepare(
+        "SELECT * FROM workflow_instance_blocks WHERE instance_id = ? AND node_id = ?",
+      )
+      .get(instanceId, nodeId) as BlockRow | undefined) ?? null
+  );
+}
+
+/**
+ * Move every started instance as far as it can go, right now.
+ *
+ * Synchronous from end to end, and that is the same requirement `createRun`'s
+ * folder claim imposes everywhere else: this creates runs, and one `await` in
+ * the middle would let two passes both decide a folder was free. The turns it
+ * starts are the exception and are deliberately fire-and-forget — a turn claims
+ * its block with a guarded UPDATE *before* anything asynchronous happens, so a
+ * second pass arriving a millisecond later finds the block `thinking` and leaves
+ * it alone.
+ *
+ * Called from three places: the end of `startWorkflow` (a block with nothing in
+ * front of it is ready immediately), `releaseDependents` (every terminal run
+ * transition in the app, which is where a block's dependencies settle), and the
+ * settling of a block turn (which may release the next one).
+ */
+export function advanceInstances(): void {
+  const rows = db()
+    .prepare(
+      `SELECT DISTINCT b.instance_id AS id
+         FROM workflow_instance_blocks b
+         JOIN workflow_instances i ON i.id = b.instance_id
+        WHERE b.status = 'waiting' AND i.status = 'started'`,
+    )
+    .all() as Array<{ id: string }>;
+  for (const row of rows) advanceInstance(row.id);
+}
+
+/** One instance: apply whatever `planInstanceStep` says can happen now. */
+function advanceInstance(instanceId: string): void {
+  const instance = getInstance(instanceId);
+  if (!instance || instance.status !== "started") return;
+
+  const step = planInstanceStep(instance.graph, instanceState(instance));
+
+  // Blocked first, for `stopInstance`'s reason turned around: a node written
+  // off here is a settled predecessor, and doing it before anything is created
+  // means the cascade has already reached the bottom of the chain when the
+  // creations happen rather than one pass later.
+  for (const { nodeId, reason } of step.block) {
+    const node = instance.graph.nodes.find((n) => n.id === nodeId);
+    upsertBlock(instanceId, node, "blocked", reason);
+  }
+
+  const defaults = chatGuards();
+  for (const creation of step.create) {
+    const node = instance.graph.nodes.find((n) => n.id === creation.nodeId);
+    if (!node) continue;
+    const plan = planNode(
+      node,
+      node.templateId ? getTemplate(node.templateId) : null,
+      defaults,
+    );
+    if (!plan.ok) {
+      upsertBlock(instanceId, node, "blocked", plan.reason);
+      continue;
+    }
+    try {
+      const run = createRun({ ...plan.input, dependsOn: creation.dependsOn });
+      recordMember(instanceId, {
+        nodeId: node.id,
+        nodeName: node.name,
+        position: nextPosition(instanceId),
+        runId: run.id,
+        emittedBy: null,
+      });
+    } catch (err) {
+      // `createRun` refuses a folder that has gone and a dependency graph it
+      // cannot satisfy. Either way this block will never run, and a row saying
+      // so is the difference between that and a block that quietly vanished.
+      upsertBlock(
+        instanceId,
+        node,
+        "blocked",
+        `It could not be started: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  // Claimed synchronously, spawned after. The claim is what makes this
+  // re-entrant safe; the spawn is what makes it worth doing.
+  const claimed = step.spawn.filter((nodeId) => claimBlock(instanceId, nodeId));
+  for (const nodeId of claimed) {
+    void startBlockTurn(instanceId, nodeId).catch((err) => {
+      settleBlock(instanceId, nodeId, {
+        status: "failed",
+        error: `The block could not be started: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      });
+    });
+  }
+}
+
+/** Every node of an instance, in the terms `planInstanceStep` reads. */
+function instanceState(
+  instance: WorkflowInstance,
+): Map<string, InstanceNodeState> {
+  const state = new Map<string, InstanceNodeState>();
+
+  const runs = db()
+    .prepare(
+      `SELECT w.node_id AS nodeId, w.emitted_by AS emittedBy, r.id AS id,
+              r.status AS status, r.iterations AS iterations
+         FROM workflow_instance_runs w
+         LEFT JOIN runs r ON r.id = w.run_id
+        WHERE w.instance_id = ?`,
+    )
+    .all(instance.id) as Array<{
+    nodeId: string;
+    emittedBy: string | null;
+    id: string | null;
+    status: RunStatus | null;
+    iterations: number | null;
+  }>;
+
+  const emitted = new Map<string, DependencyState[]>();
+  for (const row of runs) {
+    // A row whose run has been deleted is treated as gone rather than as
+    // finished, the same reading `releasableRuns` gives a missing dependency:
+    // "not found" is not "settled", and a block released on the strength of one
+    // would start on work nobody can show.
+    if (!row.id || !row.status) continue;
+    const run: DependencyState = {
+      id: row.id,
+      status: row.status,
+      iterations: row.iterations ?? 0,
+    };
+    if (row.emittedBy) {
+      const list = emitted.get(row.emittedBy);
+      if (list) list.push(run);
+      else emitted.set(row.emittedBy, [run]);
+    } else {
+      state.set(row.nodeId, { run, block: null });
+    }
+  }
+
+  for (const block of blocksOf(instance.id)) {
+    state.set(block.nodeId, {
+      run: null,
+      block: {
+        status: block.status,
+        emitted: emitted.get(block.nodeId) ?? [],
+        error: block.error,
+      },
+    });
+  }
+
+  return state;
+}
+
+/** Where a run created after the graph was instantiated sits in the list. */
+function nextPosition(instanceId: string): number {
+  const row = db()
+    .prepare(
+      `SELECT MAX(p) AS n FROM (
+         SELECT MAX(position) AS p FROM workflow_instance_runs WHERE instance_id = ?
+         UNION ALL
+         SELECT MAX(position) AS p FROM workflow_instance_blocks WHERE instance_id = ?
+       )`,
+    )
+    .get(instanceId, instanceId) as { n: number | null };
+  return (row.n ?? -1) + 1;
+}
+
+/**
+ * Record a block's ending, creating the row if the node never had one.
+ *
+ * A deferred *run* block has no row until something writes it off — that is the
+ * whole reason `workflow_instance_blocks` holds two kinds — so this is an upsert
+ * rather than an update. Guarded on the status it is leaving, so a block that
+ * settled between the plan and the write keeps its own answer.
+ */
+function upsertBlock(
+  instanceId: string,
+  node: WorkflowNode | undefined,
+  status: BlockStatus,
+  reason: string,
+): void {
+  const now = Date.now();
+  const changed = db()
+    .prepare(
+      "UPDATE workflow_instance_blocks SET status=?, error=?, finished_at=?" +
+        " WHERE instance_id=? AND node_id=? AND status IN ('waiting','thinking')",
+    )
+    .run(status, reason, now, instanceId, node?.id ?? "").changes;
+  if (changed > 0 || !node) return;
+
+  db()
+    .prepare(
+      `INSERT OR IGNORE INTO workflow_instance_blocks
+         (instance_id, node_id, node_name, position, kind, status, finished_at, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      instanceId,
+      node.id,
+      node.name,
+      nextPosition(instanceId),
+      node.kind,
+      status,
+      now,
+      reason,
+    );
+}
+
+/**
+ * Take a block's turn, or return false because something else already has.
+ *
+ * A conditional UPDATE whose `changes` count decides, exactly as `claimTurn`
+ * claims a chat and `startRun` claims a queued run. Two overlapping advance
+ * passes are ordinary here — every terminal run transition triggers one — and
+ * without this each would spawn its own billed child for the same block.
+ */
+function claimBlock(instanceId: string, nodeId: string): boolean {
+  return (
+    db()
+      .prepare(
+        "UPDATE workflow_instance_blocks SET status='thinking', started_at=?, error=NULL" +
+          " WHERE instance_id=? AND node_id=? AND status='waiting'",
+      )
+      .run(Date.now(), instanceId, nodeId).changes === 1
+  );
+}
+
+/**
+ * Spawn one block's turn.
+ *
+ * The gate in front of it is a chat turn's and no more: `assistRefusal()`, the
+ * operator's own configured ceiling already spent. There is deliberately no
+ * `evaluateBudget` here — this is not a work cycle and inventing a per-block
+ * fraction would be a threshold nobody set — and the instance's own budget is
+ * checked where every other instance-wide decision is, at a member's cycle
+ * boundary. What bounds the spend is `settings.chatTurnBudgetUSD`, inside the
+ * CLI, for the reason a chat turn's is: it is the same child answering the same
+ * kind of question.
+ */
+async function startBlockTurn(instanceId: string, nodeId: string): Promise<void> {
+  const instance = getInstance(instanceId);
+  const node = instance?.graph.nodes.find((n) => n.id === nodeId);
+  if (!instance || !node || node.fanOut === null) {
+    settleBlock(instanceId, nodeId, {
+      status: "failed",
+      error: "This block is no longer in the workflow this run was started from.",
+    });
+    return;
+  }
+
+  const refusal = await assistRefusal();
+  if (refusal) {
+    settleBlock(instanceId, nodeId, { status: "failed", error: refusal });
+    return;
+  }
+
+  // Re-read after the await: a halt may have closed the door while the
+  // transcript scan above was running, and a turn that starts into a stopping
+  // instance is a billed child deciding work for a workflow that is being
+  // taken down.
+  const fresh = getInstance(instanceId);
+  if (!fresh || fresh.status !== "started") {
+    // Written off rather than settled: nothing was spawned and nothing spent,
+    // which is what `blocked` says and `failed` would not. `upsertBlock`'s
+    // guard also means a halt that got here first keeps its own wording.
+    upsertBlock(
+      instanceId,
+      node,
+      "blocked",
+      "The workflow was stopped before this block could start deciding.",
+    );
+    return;
+  }
+
+  const template = node.templateId ? getTemplate(node.templateId) : null;
+  const settings = getSettings();
+  const key = turnKey(instanceId, nodeId);
+
+  runOrchestratorChild({
+    subject: { kind: "block", instanceId, nodeId },
+    prompt: node.task,
+    appendSystemPrompt: blockSystemPrompt(node, template, instance.workflowName),
+    cwd: safeFolder(node),
+    maxBudgetUSD: settings.chatTurnBudgetUSD,
+    timeoutMs: BLOCK_TIMEOUT_MS,
+    timedOutMessage: BLOCK_TIMED_OUT,
+    onSpawn: (child) => blockTurns.set(key, child),
+    onSettle: (result) => {
+      blockTurns.delete(key);
+      settleBlock(instanceId, nodeId, result);
+    },
+  });
+}
+
+/** The block's folder on disk, or null when it cannot be resolved any more. */
+function safeFolder(node: WorkflowNode): string | undefined {
+  try {
+    return resolveWorkspaceFolder(node.folder, node.mountId);
+  } catch {
+    // The turn still runs — it decides rather than works — and
+    // `runOrchestratorChild` falls back to the first mount. Its emitted specs
+    // go through `resolveWorkspaceFolder` again and would be refused there.
+    return undefined;
+  }
+}
+
+/**
+ * Record what a turn cost, then start what it asked for.
+ *
+ * The emission is honoured even when the turn itself came back `failed`: the
+ * specs were accepted by `emit_runs` while the child was alive, which is a
+ * decision it made deliberately, and a CLI that errored on its way out afterwards
+ * says nothing about them. The one thing that does withdraw them is the
+ * instance no longer being `started` — a halt closed the door, and a block that
+ * started runs into a stopping workflow is the member the halt would then have
+ * to chase.
+ *
+ * Latched on `status='thinking'`, so a settle arriving after a halt already
+ * wrote the block off changes nothing — the same shape `finishTurn` uses on a
+ * chat row, and for the same reason: the answer that got there first is the one
+ * the operator was shown.
+ */
+function settleBlock(
+  instanceId: string,
+  nodeId: string,
+  result: TurnResult,
+): void {
+  const specs = parseSpecs(getBlock(instanceId, nodeId)?.emitted_specs ?? null);
+  const settled =
+    db()
+      .prepare(
+        `UPDATE workflow_instance_blocks
+            SET status=?, finished_at=?, error=?, session_id=COALESCE(?, session_id),
+                cost_usd = cost_usd + ?, tokens = tokens + ?
+          WHERE instance_id=? AND node_id=? AND status='thinking'`,
+      )
+      .run(
+        result.status === "failed" && specs.length === 0 ? "failed" : "emitted",
+        Date.now(),
+        result.error ?? null,
+        result.sessionId ?? null,
+        result.costUSD ?? 0,
+        result.tokens ?? 0,
+        instanceId,
+        nodeId,
+      ).changes > 0;
+  if (!settled) return;
+
+  const instance = getInstance(instanceId);
+  if (instance?.status === "started" && specs.length > 0) {
+    createEmitted(instanceId, nodeId, specs);
+  }
+
+  promoteQueued();
+  advanceInstances();
+}
+
+/**
+ * Create the runs a block emitted, in one synchronous pass.
+ *
+ * `startWorkflow`'s pass, for a graph a model wrote rather than a person: no
+ * `await` from the first `createRun` to the last, because the folder claim is
+ * only atomic inside one event-loop turn, and the specs arrive already in
+ * topological order so every one is created after everything it waits for.
+ *
+ * It is **not** all-or-nothing, and that is the one place it diverges. A graph
+ * that half exists is a prefix nobody asked for, so `startWorkflow` rolls back;
+ * here each spec is an independent piece of work that a block decided on
+ * separately, and throwing away four runs because a fifth named a folder that
+ * has since gone would lose the whole point of the block. A spec that cannot be
+ * created is logged against the block instead — including for the specs behind
+ * it, whose edges now name a run that does not exist.
+ */
+function createEmitted(
+  instanceId: string,
+  nodeId: string,
+  specs: readonly RunSpec[],
+): void {
+  const instance = getInstance(instanceId)!;
+  const node = instance.graph.nodes.find((n) => n.id === nodeId);
+  if (!node) return;
+
+  const template = node.templateId ? getTemplate(node.templateId) : null;
+  const defaults = chatGuards();
+  const runIds = new Map<string, string>();
+  const failures: string[] = [];
+
+  for (const spec of specs) {
+    const missing = spec.dependsOn.filter((d) => !runIds.has(d.id));
+    if (missing.length > 0) {
+      failures.push(
+        `“${spec.title}” was not started: the run(s) it waits for could not be started either.`,
+      );
+      continue;
+    }
+    try {
+      // Every one of these edges names a run created moments ago in this same
+      // pass, whose id was minted after its own edges were read — so no insert
+      // here can close a loop. `admitDependencies` re-runs `dependencyCycle`
+      // over the whole live graph regardless, which is what keeps acyclicity a
+      // property of the data now that a graph written by a model reaches it;
+      // `planEmission` has already refused a cyclic emission by name.
+      const run = createRun({
+        ...planEmittedRun(node, spec, template, defaults),
+        dependsOn: spec.dependsOn.map((d) => ({
+          runId: runIds.get(d.id)!,
+          edge: d.edge,
+        })),
+      });
+      runIds.set(spec.id, run.id);
+      recordMember(instanceId, {
+        nodeId: `${nodeId}#${spec.id}`,
+        nodeName: spec.title,
+        position: nextPosition(instanceId),
+        runId: run.id,
+        emittedBy: nodeId,
+      });
+    } catch (err) {
+      failures.push(
+        `“${spec.title}” could not be started: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  if (failures.length > 0) {
+    db()
+      .prepare(
+        "UPDATE workflow_instance_blocks SET error = TRIM(COALESCE(error, '') || ' ' || ?)" +
+          " WHERE instance_id=? AND node_id=?",
+      )
+      .run(failures.join(" "), instanceId, nodeId);
+  }
+}
+
+export type EmissionOutcome =
+  | { ok: true; accepted: number }
+  | { ok: false; reason: string };
+
+/**
+ * The one tool an orchestrator block has that writes anything.
+ *
+ * It **records** the specs rather than creating the runs, and they are created
+ * when the turn ends. Two reasons, and both are about the shape rather than the
+ * timing: `createRun` has to run in one uninterrupted event-loop turn and a tool
+ * call is in the middle of an HTTP handler, and a block that started runs
+ * half-way through its own thinking would leave the operator watching agents
+ * appear from a decision that had not been made yet.
+ *
+ * Exactly one successful call per block. A refused call records nothing, so a
+ * turn told its list was too long can emit a shorter one; an accepted one closes
+ * the tool, because a second list is a second decision and the cap bounds a
+ * decision rather than a call.
+ */
+export function emitBlockRuns(
+  instanceId: string,
+  nodeId: string,
+  raw: unknown,
+): EmissionOutcome {
+  const instance = getInstance(instanceId);
+  if (!instance) return { ok: false, reason: "This workflow run no longer exists." };
+  if (instance.status !== "started") {
+    return {
+      ok: false,
+      reason:
+        "This workflow run is being stopped, so nothing further can be started from it.",
+    };
+  }
+
+  const block = getBlock(instanceId, nodeId);
+  const node = instance.graph.nodes.find((n) => n.id === nodeId);
+  if (!block || !node || node.fanOut === null) {
+    return { ok: false, reason: "This block is not part of this workflow run." };
+  }
+  if (block.status !== "thinking") {
+    return { ok: false, reason: "This block's turn has already ended." };
+  }
+  if (block.emitted_specs !== null) {
+    return {
+      ok: false,
+      reason:
+        "This block has already emitted its runs. Say what else you would have " +
+        "started in your reply instead.",
+    };
+  }
+
+  const plan = planEmission(raw, {
+    blockName: node.name,
+    fanOut: node.fanOut,
+    folderRefusal: (folder) => {
+      try {
+        // Against **this block's own mount** and no other, which is what makes
+        // "a folder inside the block's mount" mean something: containment is
+        // decided per mount by `resolveInMount`, twice, before and after the
+        // symlink is resolved.
+        resolveWorkspaceFolder(folder, node.mountId);
+        return null;
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+    },
+  });
+  if (!plan.ok) return { ok: false, reason: plan.reason };
+
+  // Guarded on `thinking` again: the halt between the read above and here would
+  // otherwise have its written-off block quietly re-armed with an emission.
+  const stored = db()
+    .prepare(
+      "UPDATE workflow_instance_blocks SET emitted_specs=? WHERE instance_id=? AND node_id=? AND status='thinking'",
+    )
+    .run(JSON.stringify(plan.specs), instanceId, nodeId).changes;
+  if (stored === 0) {
+    return { ok: false, reason: "This block's turn ended while it was emitting." };
+  }
+  return { ok: true, accepted: plan.specs.length };
+}
+
+/**
+ * What the block is, in the absence of a mechanism that makes it so.
+ *
+ * The chat's system prompt states a role because its allowlist was removed; this
+ * one states a role because the *consequences* were removed. Nothing here waits
+ * for a person: what this turn emits starts. So the paragraph that matters is
+ * not "you may not" but "these will run, under these guards, in this folder,
+ * and there are at most N of them" — the facts it needs to make a decision it
+ * cannot take back.
+ *
+ * The mount, the folder, the guard set and the cap are generated rather than
+ * left to a prompt an operator can edit, for the reason `continuedWorkNotice`'s
+ * facts are: a placeholder that can be deleted is a notice that can silently
+ * stop saying the true thing.
+ */
+function blockSystemPrompt(
+  node: WorkflowNode,
+  template: RunTemplate | null,
+  workflowName: string,
+): string {
+  const guards = template
+    ? `the “${template.name}” template`
+    : "the operator's default guard set in Settings";
+  const where = node.folder === "" ? "the whole workspace" : node.folder;
+  return [
+    "You are an orchestrator block inside UsageFoundry, a tool that runs",
+    "unattended Claude Code agents against folders on this machine. You are one",
+    `step of the workflow “${workflowName}”, and nobody is reading this turn.`,
+    "",
+    "Your job is to decide which runs should happen next and to emit them with",
+    "emit_runs. What you emit **starts immediately**. There is no approval step,",
+    "no proposal card and no operator between your answer and a billed agent",
+    "writing files. Decide as if you were the last person to look at it, because",
+    "you are.",
+    "",
+    "The bounds you are working inside, none of which you can change:",
+    `- At most ${node.fanOut} run(s). emit_runs refuses more, and the limit was`,
+    "  set when the workflow was saved.",
+    `- Every run works in the “${node.mountId}” workspace, at or under ${where}.`,
+    "  A folder outside it is refused. Call list_folders and use a path exactly",
+    "  as it gives one; \"\" is the workspace root, which blocks every other run",
+    "  in the tree and is almost never what you want.",
+    `- Every run gets its guards — budget, work-cycle limit, permission mode,`,
+    `  whether it works in a checkout of its own — from ${guards}. There is no`,
+    "  argument on emit_runs that touches any of them, deliberately.",
+    "",
+    "Emitting:",
+    "- One run per unit of work, with a short specific title.",
+    "- The task text is the whole brief the agent gets. Include the file, the",
+    "  issue number, the URL and what done looks like. It is read by an agent",
+    "  that cannot ask you a follow-up question.",
+    "- dependsOn orders the runs you are emitting against each other, and only",
+    "  against each other. Use it when two of them would edit the same files;",
+    "  runs with no link between them start in parallel.",
+    "- Call emit_runs once, with the whole list. Emitting nothing is a real",
+    "  answer when there is nothing worth doing — say so plainly, and know that",
+    "  any block set to start after this one will be stopped rather than run",
+    "  with nothing to work on.",
+    "",
+    "Before you emit, look. You have every tool the CLI offers and you are",
+    "trusted with them because your job is to decide, not to build: read files,",
+    "grep, run read-only commands, read issues and CI logs with `gh`, read",
+    "history with `git log`. Do not do the work yourself — do not edit, stage,",
+    "commit, push or act on GitHub. The runs you emit are what does the work.",
+    "",
+    "Reply with a short list of what you emitted and what you deliberately left",
+    "out. Nobody will answer you.",
+  ].join("\n");
+}
+
+/**
+ * Close out block turns a restart left mid-flight.
+ *
+ * `reconcileOnBoot`'s rule for a `waiting` run, applied one level up and for the
+ * identical reason. A `thinking` block's child died with the process that
+ * started it, so the row is a decision that will never arrive. A `waiting` block
+ * is waiting on rows this same boot has just failed or stopped, so nothing will
+ * ever wake it — and re-deciding unattended, hours later, is spend nobody is
+ * present to want, which is the queued-run rule arrived at from the other side.
+ *
+ * Runs **after** `reconcileOnBoot`, so the members it is reading about have
+ * already been closed out, and the cascade at the end is what gives every block
+ * behind these its own sentence rather than leaving it `waiting` for ever.
+ */
+export function reconcileBlocksOnBoot(): void {
+  const now = Date.now();
+  const thinking = db()
+    .prepare(
+      "UPDATE workflow_instance_blocks SET status='failed', finished_at=?," +
+        " error='The server restarted while this block was deciding what to start.'" +
+        " WHERE status='thinking'",
+    )
+    .run(now).changes;
+  const waiting = db()
+    .prepare(
+      "UPDATE workflow_instance_blocks SET status='blocked', finished_at=?," +
+        " error='The server restarted while this block was waiting for another block, and that block was closed out by the same restart.'" +
+        " WHERE status='waiting'",
+    )
+    .run(now).changes;
+
+  if (thinking + waiting === 0) return;
+  console.warn(
+    `[usagefoundry] Closed out ${thinking + waiting} workflow block(s) interrupted by a restart.`,
+  );
+  // Every block is terminal now, so this spawns nothing: what it does is write
+  // the reason onto each node behind them.
+  advanceInstances();
 }
 
 /** A run's live state for the instance view, or null when the row has gone. */

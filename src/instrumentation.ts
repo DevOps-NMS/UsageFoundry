@@ -61,7 +61,14 @@ export async function register() {
       // inside the resume grace period survives that on purpose, and without
       // this the sweeper would re-queue it under a workflow the page says is
       // stopped.
-      const { reconcileHaltsOnBoot } = await import("./lib/workflows");
+      const { reconcileBlocksOnBoot, reconcileHaltsOnBoot } = await import(
+        "./lib/workflows"
+      );
+      // A block deciding what to start when the process died, and every block
+      // behind it. Same rule as a `waiting` run and for the same reason: what
+      // it was waiting for has just been closed out, and re-deciding hours
+      // later, unattended, is spend nobody is present to want.
+      reconcileBlocksOnBoot();
       reconcileHaltsOnBoot();
     } else {
       console.warn(

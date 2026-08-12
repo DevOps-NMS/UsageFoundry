@@ -2109,8 +2109,14 @@ export interface DependencyState {
   iterations: number;
 }
 
-/** Statuses a run never leaves on its own. */
-const TERMINAL_STATUSES: readonly RunStatus[] = [
+/**
+ * Statuses a run never leaves on its own.
+ *
+ * Exported because a workflow instance's scheduler asks the same question about
+ * the runs an orchestrator block emitted, and "has this settled" answered twice
+ * is the failure `edgeSatisfied` below exists to have one answer to.
+ */
+export const TERMINAL_STATUSES: readonly RunStatus[] = [
   "completed",
   "stopped",
   "failed",
@@ -2145,7 +2151,10 @@ function shortId(id: string): string {
  * chaining two runs is actually asking. `reported_done` is on the DTO for
  * anyone who wants the stronger reading; it is not what this decides.
  */
-function edgeSatisfied(dep: DependencyState, edge: DependencyEdge): boolean {
+export function edgeSatisfied(
+  dep: DependencyState,
+  edge: DependencyEdge,
+): boolean {
   if (dep.iterations < 1) return false;
   if (edge === "on-success") return dep.status === "completed";
   return TERMINAL_STATUSES.includes(dep.status);
@@ -2371,6 +2380,20 @@ export function dependenciesOf(
 export function releaseDependents(): boolean {
   let changed = false;
   while (releasePass()) changed = true;
+
+  // A workflow's orchestrator blocks wait on the same terminal transitions this
+  // function exists to react to, so they are woken from the same place rather
+  // than from a list of call sites that would have to be kept in step with the
+  // five above. Imported here for `enforceInstanceBudget`'s reason —
+  // `workflows.ts` imports this module — and deliberately not awaited: the
+  // advance is its own synchronous pass in a later turn, so nothing it does can
+  // interleave with a folder claim being made in this one.
+  void import("./workflows")
+    .then((m) => m.advanceInstances())
+    .catch(() => {
+      /* a workflow that cannot be advanced is not a reason to fail a run */
+    });
+
   return changed;
 }
 

@@ -605,10 +605,23 @@ function markProposal(
 /* ------------------------------------------------------------------ */
 
 /**
- * What lets the chat's child call back into this server, and nothing else.
+ * Who a bearer token speaks for.
+ *
+ * Two kinds now, and they are deliberately a discriminated union rather than a
+ * pair of optional ids: `/api/mcp` publishes a *different tool list* to each —
+ * a chat may propose and save templates, an orchestrator block may emit runs
+ * and neither may do the other's — and a shape where both ids can be absent is
+ * a shape where the route can forget to check which it has.
+ */
+export type CapabilitySubject =
+  | { kind: "chat"; chatId: string }
+  | { kind: "block"; instanceId: string; nodeId: string };
+
+/**
+ * What lets an orchestrator child call back into this server, and nothing else.
  *
  * `/api/mcp` is exempt from `middleware.ts` because the middleware runs in the
- * edge runtime and cannot reach SQLite to check a per-chat credential — so the
+ * edge runtime and cannot reach SQLite to check a per-turn credential — so the
  * route authenticates itself, and this is the thing it checks. Deliberately
  * **not** `UF_AUTH_TOKEN`: that one opens every route in the app, and handing it
  * to a child would undo the reason `gitEnv`/`reviewEnv`/`childEnv` all strip
@@ -622,16 +635,16 @@ function markProposal(
  * child's credential mid-turn.
  */
 interface Capability {
-  chatId: string;
+  subject: CapabilitySubject;
   expiresAt: number;
 }
 
 const caps = ((globalThis as unknown as { __ufChatCaps?: Map<string, Capability> })
   .__ufChatCaps ??= new Map<string, Capability>());
 
-export function mintCapability(chatId: string): string {
+export function mintCapability(subject: CapabilitySubject): string {
   const token = randomBytes(32).toString("base64url");
-  caps.set(token, { chatId, expiresAt: Date.now() + CHAT_TIMEOUT_MS + 60_000 });
+  caps.set(token, { subject, expiresAt: Date.now() + CHAT_TIMEOUT_MS + 60_000 });
   return token;
 }
 
@@ -640,17 +653,18 @@ export function revokeCapability(token: string): void {
 }
 
 /**
- * The chat a bearer token speaks for, or null.
+ * What a bearer token speaks for, or null.
  *
  * Compared in constant time against every live token rather than looked up by
  * key: a `Map.get` on a secret leaks its prefix through timing, and the number
- * of live tokens here is the number of chat turns in flight — one, in practice.
+ * of live tokens here is the number of orchestrator turns in flight — one chat
+ * turn, plus whatever blocks of a workflow are deciding right now.
  */
-export function chatForCapability(token: string): string | null {
+export function subjectForCapability(token: string): CapabilitySubject | null {
   if (!token) return null;
   const offered = Buffer.from(token);
   const now = Date.now();
-  let found: string | null = null;
+  let found: CapabilitySubject | null = null;
 
   for (const [candidate, cap] of caps) {
     if (cap.expiresAt < now) {
@@ -662,7 +676,7 @@ export function chatForCapability(token: string): string | null {
       known.length === offered.length &&
       timingSafeEqual(known, offered)
     ) {
-      found = cap.chatId;
+      found = cap.subject;
     }
   }
   return found;
@@ -716,7 +730,7 @@ function claimTurn(chatId: string): ChatRow | null {
 }
 
 /** stdin is "ignore", so the child has readable stdout/stderr and no stdin. */
-type ChatProcess = ChildProcessByStdio<null, Readable, Readable>;
+export type ChatProcess = ChildProcessByStdio<null, Readable, Readable>;
 
 /**
  * The chats with a child this process can still signal.
@@ -926,21 +940,16 @@ export async function sendChatMessage(
 
   const prompt = chatPrompt({ sessionId: claimed.session_id, history }, text);
 
-  // Not awaited: it runs for minutes and the row is what reports on it.
+  // The child outlives this call: it runs for minutes and the row is what
+  // reports on it, so nothing here waits for it.
   //
-  // Wrapped as well as `.catch`ed, because `runTurn` is not `async`: it mints
-  // the capability and writes the MCP config *while this call expression is
-  // being evaluated*, so a throw from either happens before `.catch` is
-  // attached to anything. Unhandled, it propagates out of this function with
-  // the row already claimed as `thinking` — a state nothing but a restart
-  // clears, and one this function refuses to send into.
+  // Wrapped, because `runTurn` is not `async`: it mints the capability and
+  // writes the MCP config synchronously, so a throw from either happens right
+  // here. Unhandled, it would propagate out of this function with the row
+  // already claimed as `thinking` — a state nothing but a restart clears, and
+  // one this function refuses to send into.
   try {
-    void runTurn(claimed, prompt).catch((err) => {
-      finishTurn(chatId, {
-        status: "failed",
-        error: err instanceof Error ? err.message : String(err),
-      });
-    });
+    runTurn(claimed, prompt);
   } catch (err) {
     const reason = `Could not start the turn: ${
       err instanceof Error ? err.message : String(err)
@@ -952,7 +961,7 @@ export async function sendChatMessage(
   return { ok: true };
 }
 
-interface TurnResult {
+export interface TurnResult {
   status: "idle" | "failed";
   text?: string;
   error?: string;
@@ -962,8 +971,51 @@ interface TurnResult {
   denials?: string[];
 }
 
-function runTurn(chat: ChatRow, prompt: string): Promise<void> {
-  const token = mintCapability(chat.id);
+/** Everything one headless orchestrator turn differs from another by. */
+export interface OrchestratorChildOptions {
+  /** What its capability token speaks for, and so which tools it is offered. */
+  subject: CapabilitySubject;
+  prompt: string;
+  /** The role, stated. This is the boundary — see `systemPrompt`. */
+  appendSystemPrompt: string;
+  /** A conversation to continue, or null for a one-shot turn. */
+  resumeSessionId?: string | null;
+  /**
+   * Where the child runs. Defaults to the first mount, which is what a chat
+   * wants; a workflow block passes its own folder so `Read` and `git log` land
+   * on the repository it was pointed at. Every mount is `--add-dir`ed either
+   * way, so this widens nothing — it only decides where a bare path resolves.
+   */
+  cwd?: string;
+  /** `--max-budget-usd`, the only thing bounding the spend inside the CLI. */
+  maxBudgetUSD: number | null;
+  timeoutMs: number;
+  /** What the row says when the timeout is what ended it. */
+  timedOutMessage: string;
+  /** Called with the child the moment it exists, so a caller can signal it. */
+  onSpawn?: (child: ChatProcess) => void;
+  /** Called exactly once, whatever happened. */
+  onSettle: (result: TurnResult) => void;
+}
+
+/**
+ * Spawn one headless orchestrator turn.
+ *
+ * **The fourth kind of child process, invoked a second way — not a fifth kind.**
+ * `review.ts` says adding a third was a decision rather than a detail, and the
+ * chat says the same of the fourth. A workflow's orchestrator block is the same
+ * child with the same argv, the same environment, the same capability token and
+ * the same MCP config file; what differs is that there is no thread to resume
+ * and nobody typing. That is why this function exists rather than a second
+ * `spawn` call site: two of those would be two sets of flags to keep in step,
+ * and the flags are what bound the child.
+ *
+ * Everything about *what* it may do is a caller's argument — the subject decides
+ * its tool list, the system prompt states its role — and everything about how it
+ * is contained is here and identical for both.
+ */
+export function runOrchestratorChild(o: OrchestratorChildOptions): void {
+  const token = mintCapability(o.subject);
   let configPath: string;
   try {
     configPath = writeMcpConfig(token);
@@ -976,11 +1028,11 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
     throw err;
   }
 
-  return new Promise((resolve) => {
+  {
     const settings = getSettings();
     const args = [
       "-p",
-      prompt,
+      o.prompt,
       "--output-format",
       "json",
       // Every tool the CLI has, with the system prompt above as the boundary
@@ -1004,10 +1056,12 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       // exists to fix — so it would reproduce exactly the refusals this is
       // removing, only less predictably.
       //
-      // What bounds this child is therefore not the mode. Nothing it can call
-      // starts a run; `--strict-mcp-config` keeps the mounted `~/.claude`'s own
-      // MCP servers out; the capability token dies with the turn; and
-      // `chatTurnBudgetUSD` caps the spend. It can, however, now write to the
+      // What bounds this child is therefore not the mode. Its tool surface is
+      // whatever `/api/mcp` publishes for its *subject* — a chat may propose,
+      // an orchestrator block may emit, and neither can start a run under
+      // guards it chose; `--strict-mcp-config` keeps the mounted `~/.claude`'s
+      // own MCP servers out; the capability token dies with the turn; and
+      // `chatTurnBudgetUSD` caps the spend. It can, however, write to the
       // mounts and reach GitHub with the token in its environment, and the
       // chat page says so.
       "--permission-mode",
@@ -1018,7 +1072,7 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       // this child — a tool surface the operator never granted this feature.
       "--strict-mcp-config",
       "--append-system-prompt",
-      systemPrompt(),
+      o.appendSystemPrompt,
     ];
 
     // Access to the mounts, so "look at what this repo is like" works. Under
@@ -1029,19 +1083,19 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       if (fs.existsSync(mount.path)) args.push("--add-dir", mount.path);
     }
 
-    if (chat.session_id) args.push("--resume", chat.session_id);
+    if (o.resumeSessionId) args.push("--resume", o.resumeSessionId);
     if (settings.defaultModel) args.push("--model", settings.defaultModel);
-    if (settings.chatTurnBudgetUSD !== null) {
+    if (o.maxBudgetUSD !== null) {
       // A hard stop inside the CLI. Everything else here bounds a *run*; this
-      // is the only thing bounding a chat turn, which can otherwise read
-      // issues and repositories for as long as it likes.
-      args.push("--max-budget-usd", String(settings.chatTurnBudgetUSD));
+      // is the only thing bounding an orchestrator turn, which can otherwise
+      // read issues and repositories for as long as it likes.
+      args.push("--max-budget-usd", String(o.maxBudgetUSD));
     }
 
     // No shell, as everywhere else: the prompt is operator text and whatever a
     // GitHub issue body happens to contain.
     const child = spawn(CLAUDE_BIN, args, {
-      cwd: chatCwd(),
+      cwd: o.cwd && fs.existsSync(o.cwd) ? o.cwd : chatCwd(),
       env: chatEnv(),
       stdio: ["ignore", "pipe", "pipe"],
       detached: settings.killProcessGroup && process.platform !== "win32",
@@ -1049,7 +1103,7 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
 
     // Registered before anything can go wrong with it, so an operator pressing
     // Stop reaches the child rather than orphaning it.
-    turns.set(chat.id, child);
+    o.onSpawn?.(child);
 
     let stdout = "";
     let stderr = "";
@@ -1063,7 +1117,7 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       timedOut = true;
       signalTree(child, "SIGTERM");
       setTimeout(() => signalTree(child, "SIGKILL"), 5_000).unref?.();
-    }, CHAT_TIMEOUT_MS);
+    }, o.timeoutMs);
     timer.unref?.();
 
     let settled = false;
@@ -1071,10 +1125,6 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      // Only this child's own entry: a turn cancelled and re-sent while the old
-      // child was still dying would otherwise have its live handle deleted by
-      // the corpse of the previous one.
-      if (turns.get(chat.id) === child) turns.delete(chat.id);
       // Both of these are why the token is worth having: the credential dies
       // with the turn, and the file that carried it does not outlive it either.
       revokeCapability(token);
@@ -1083,8 +1133,7 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
       } catch {
         // Already gone, or a read-only tmp. Not worth failing a turn over.
       }
-      finishTurn(chat.id, result);
-      resolve();
+      o.onSettle(result);
     };
 
     child.on("error", (err) => {
@@ -1093,11 +1142,44 @@ function runTurn(chat: ChatRow, prompt: string): Promise<void> {
 
     settleOnExit(child, (code) => {
       if (timedOut) {
-        land({ status: "failed", error: TIMED_OUT_REASON });
+        land({ status: "failed", error: o.timedOutMessage });
         return;
       }
       land(parseTurnOutput(stdout, stderr, code));
     });
+  }
+}
+
+/**
+ * One chat turn: the shared child, wired to this chat's row.
+ *
+ * Everything that decides what the child *is* now lives in
+ * `runOrchestratorChild`; what is left here is what makes it a conversation —
+ * the session to resume, the registry an operator's Stop reaches into, and the
+ * row the answer lands on.
+ */
+function runTurn(chat: ChatRow, prompt: string): void {
+  const settings = getSettings();
+  let spawned: ChatProcess | null = null;
+  runOrchestratorChild({
+    subject: { kind: "chat", chatId: chat.id },
+    prompt,
+    appendSystemPrompt: systemPrompt(),
+    resumeSessionId: chat.session_id,
+    maxBudgetUSD: settings.chatTurnBudgetUSD,
+    timeoutMs: CHAT_TIMEOUT_MS,
+    timedOutMessage: TIMED_OUT_REASON,
+    onSpawn: (child) => {
+      spawned = child;
+      turns.set(chat.id, child);
+    },
+    onSettle: (result) => {
+      // Only this child's own entry: a turn cancelled and re-sent while the old
+      // child was still dying would otherwise have its live handle deleted by
+      // the corpse of the previous one.
+      if (spawned && turns.get(chat.id) === spawned) turns.delete(chat.id);
+      finishTurn(chat.id, result);
+    },
   });
 }
 

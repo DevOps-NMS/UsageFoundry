@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import {
   appendMessage,
-  chatForCapability,
   createProposal,
   listProposals,
   MAX_PENDING_PROPOSALS,
   pendingProposals,
+  subjectForCapability,
+  type CapabilitySubject,
 } from "@/lib/chat";
+import { emitBlockRuns } from "@/lib/workflows";
 import {
   createTemplate,
   getTemplate,
@@ -65,9 +67,20 @@ export const dynamic = "force-dynamic";
  * chat turn and revoked when that turn's child exits, so a copy of it recovered
  * afterwards opens nothing. Every tool below is scoped to the chat it names.
  *
- * Note what is absent: nothing here starts, stops, resumes or reopens a run,
- * and nothing here writes to a folder. The most a caller can do is add a row to
- * `chat_proposals`, which is inert until a person approves it.
+ * **The tool list depends on who is asking.** A capability speaks for a chat or
+ * for one orchestrator block of one workflow instance, and the two are offered
+ * different tools rather than one list with guards inside it: a chat proposes
+ * and saves templates and cannot emit, a block emits and cannot do either. The
+ * split is in `toolsFor` and the check is repeated in `callTool`, because a tool
+ * absent from a list is not a tool absent from the wire.
+ *
+ * Note what is absent from both: nothing here stops, resumes or reopens a run,
+ * nothing here writes to a folder, and nothing here sets a budget, a permission
+ * mode or an isolation choice. A chat's most is a `chat_proposals` row, inert
+ * until a person approves it. A block's most is a list of run specs, which start
+ * — under the guards the block's *saved* template supplies, in the mount that
+ * block was pointed at, up to the number a person agreed to when they saved the
+ * graph.
  */
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -79,7 +92,8 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
-const TOOLS = [
+/** Tools both kinds of caller get: everything that only reads. */
+const SHARED_TOOLS = [
   {
     name: "list_folders",
     description:
@@ -150,6 +164,10 @@ const TOOLS = [
       "now is a good time to start work, not to decide any run's guards.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
+];
+
+/** Tools only the orchestrator chat gets. None of them starts anything. */
+const CHAT_TOOLS = [
   {
     name: "list_proposals",
     description:
@@ -236,11 +254,104 @@ const TOOLS = [
   },
 ];
 
+/**
+ * The one tool an orchestrator block gets that writes anything.
+ *
+ * Four fields per run and no fifth. There is no template id, no budget, no
+ * permission mode, no isolation choice and no model on this schema, and their
+ * absence is the whole reason auto-start is defensible: the block's guards were
+ * chosen by a person when the graph was saved, and a field here that could name
+ * different ones would be a route to `--permission-mode` reached by a model with
+ * nobody reading the result. The description says so outright, because a model
+ * that believes it can set guards writes a task explaining what guards it wants.
+ */
+const BLOCK_TOOLS = [
+  {
+    name: "emit_runs",
+    description:
+      "Start these runs. This is NOT a proposal: what you emit is created and " +
+      "queued as soon as this turn ends, with no approval step. Guards — " +
+      "budget, work-cycle limit, permission mode, isolation — come from the " +
+      "block's own template and cannot be set here. Call it once, with the " +
+      "whole list; an empty list is a valid answer meaning there is nothing " +
+      "worth doing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runs: {
+          type: "array",
+          description: "The runs to start, at most this block's fan-out limit.",
+          items: {
+            type: "object",
+            properties: {
+              id: {
+                type: "string",
+                description:
+                  "Your own label for this run, unique in this list. dependsOn " +
+                  "entries name it. Letters, digits, hyphens, underscores.",
+              },
+              title: {
+                type: "string",
+                description: "Short specific label, e.g. 'Fix flaky auth test'.",
+              },
+              task: {
+                type: "string",
+                description:
+                  "The full brief for the agent: what to do, where, and what " +
+                  "done looks like. It cannot ask you a follow-up question.",
+              },
+              folder: {
+                type: "string",
+                description:
+                  "Path within this block's own workspace, exactly as " +
+                  "list_folders gives it. A folder outside it is refused. " +
+                  "\"\" is the workspace root.",
+              },
+              dependsOn: {
+                type: "array",
+                description:
+                  "Runs in THIS list that must settle first. Use it when two " +
+                  "of them would edit the same files.",
+                items: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string", description: "An id from this list." },
+                    edge: {
+                      type: "string",
+                      enum: ["on-success", "on-finish"],
+                      description:
+                        "on-success starts only if that run completed; " +
+                        "on-finish starts once it is out of the way.",
+                    },
+                  },
+                  required: ["id", "edge"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["id", "title", "task", "folder"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["runs"],
+      additionalProperties: false,
+    },
+  },
+];
+
+/** What this caller may see and call. See the note at the top of the file. */
+function toolsFor(subject: CapabilitySubject) {
+  return subject.kind === "chat"
+    ? [...SHARED_TOOLS, ...CHAT_TOOLS]
+    : [...SHARED_TOOLS, ...BLOCK_TOOLS];
+}
+
 export async function POST(req: Request) {
   const header = req.headers.get("authorization") ?? "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
-  const chatId = chatForCapability(bearer);
-  if (!chatId) {
+  const subject = subjectForCapability(bearer);
+  if (!subject) {
     return NextResponse.json(
       { error: "Unauthorized" },
       { status: 401 },
@@ -261,7 +372,7 @@ export async function POST(req: Request) {
   const batch = Array.isArray(body) ? body : [body];
   const replies = [];
   for (const msg of batch) {
-    const reply = await handle(msg, chatId);
+    const reply = await handle(msg, subject);
     if (reply) replies.push(reply);
   }
 
@@ -287,7 +398,7 @@ export async function DELETE() {
 
 async function handle(
   msg: JsonRpcRequest,
-  chatId: string,
+  subject: CapabilitySubject,
 ): Promise<object | null> {
   const id = msg.id ?? null;
   const method = String(msg.method ?? "");
@@ -321,13 +432,13 @@ async function handle(
       return ok({});
 
     case "tools/list":
-      return ok({ tools: TOOLS });
+      return ok({ tools: toolsFor(subject) });
 
     case "tools/call": {
       const name = String(msg.params?.name ?? "");
       const args = (msg.params?.arguments ?? {}) as Record<string, unknown>;
       try {
-        return ok(await callTool(name, args, chatId));
+        return ok(await callTool(name, args, subject));
       } catch (err) {
         // A tool that throws is reported as tool output, not as a protocol
         // error: the model can read and act on the former and only sees a
@@ -348,8 +459,27 @@ function text(body: string, isError = false) {
 async function callTool(
   name: string,
   args: Record<string, unknown>,
-  chatId: string,
+  subject: CapabilitySubject,
 ) {
+  // Checked here as well as in `toolsFor`, because a list is what a caller is
+  // *offered* and this is what it may *do*. A chat that has read a block's
+  // schema from somewhere must still not be able to start runs, and a block
+  // must not be able to write a proposal into a stranger's thread.
+  const chatId = subject.kind === "chat" ? subject.chatId : null;
+  if (chatId === null && (CHAT_TOOLS.some((t) => t.name === name))) {
+    return text(
+      `${name} is not available to an orchestrator block. Use emit_runs.`,
+      true,
+    );
+  }
+  if (chatId !== null && BLOCK_TOOLS.some((t) => t.name === name)) {
+    return text(
+      `${name} is not available in a chat. Use propose_run, which the operator ` +
+        "approves before anything starts.",
+      true,
+    );
+  }
+
   switch (name) {
     case "list_folders": {
       const { mounts, folders } = await scanWorkspace();
@@ -449,7 +579,7 @@ async function callTool(
       return usageReport();
 
     case "list_proposals": {
-      const proposals = listProposals(chatId);
+      const proposals = listProposals(chatId!);
       if (proposals.length === 0) {
         return text("Nothing has been proposed in this conversation yet.");
       }
@@ -471,10 +601,33 @@ async function callTool(
     }
 
     case "save_template":
-      return saveTemplate(args, chatId);
+      return saveTemplate(args, chatId!);
 
     case "propose_run":
-      return proposeRun(args, chatId);
+      return proposeRun(args, chatId!);
+
+    case "emit_runs": {
+      // Narrowed rather than asserted: `subject.kind` is what decides, and the
+      // union is what makes the two ids unmixable.
+      if (subject.kind !== "block") {
+        return text("emit_runs is not available here.", true);
+      }
+      const outcome = emitBlockRuns(
+        subject.instanceId,
+        subject.nodeId,
+        args.runs,
+      );
+      if (!outcome.ok) return text(outcome.reason, true);
+      return text(
+        outcome.accepted === 0
+          ? "Recorded that there is nothing to start. No runs will be created, " +
+            "and any block set to start after this one will be stopped rather " +
+            "than run with nothing to work on."
+          : `Accepted ${outcome.accepted} run(s). They are created and queued ` +
+            "when this turn ends — there is no approval step. You cannot emit " +
+            "again; say anything else you would have started in your reply.",
+      );
+    }
 
     default:
       return text(`Unknown tool: ${name}`, true);

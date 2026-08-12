@@ -8,10 +8,15 @@ import type {
   WorkflowDTO,
   WorkflowEdgeDTO,
   WorkflowNodeDTO,
+  WorkflowNodeKind,
   WorkspaceFolderDTO,
   WorkspaceMountDTO,
 } from "@/lib/apiTypes";
-import { MAX_WORKFLOW_NAME, MAX_WORKFLOW_NODES } from "@/lib/apiTypes";
+import {
+  MAX_FAN_OUT,
+  MAX_WORKFLOW_NAME,
+  MAX_WORKFLOW_NODES,
+} from "@/lib/apiTypes";
 import { pctField } from "@/lib/format";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
@@ -51,12 +56,15 @@ import { Notice } from "@/components/ui/Notice";
 interface BlockDraft {
   id: string;
   name: string;
+  kind: WorkflowNodeKind;
   /** "" means no template: the guard set in Settings. */
   templateId: string;
   mountId: string;
   folder: string;
   task: string;
   promptOverride: string;
+  /** Orchestrator blocks only. Held as a string, as every number field here is. */
+  fanOut: string;
   waitsFor: Array<{
     from: string;
     edge: WorkflowEdgeDTO["edge"];
@@ -70,15 +78,19 @@ const CONDITIONS: Array<{ id: "" | WorkflowEdgeDTO["edge"]; label: string }> = [
   { id: "on-finish", label: "Once it finishes, either way" },
 ];
 
+const DEFAULT_FAN_OUT = "3";
+
 function emptyBlock(id: string, mountId: string): BlockDraft {
   return {
     id,
     name: "",
+    kind: "run",
     templateId: "",
     mountId,
     folder: "",
     task: "",
     promptOverride: "",
+    fanOut: DEFAULT_FAN_OUT,
     waitsFor: [],
   };
 }
@@ -87,11 +99,13 @@ function toDrafts(workflow: WorkflowDTO): BlockDraft[] {
   return workflow.nodes.map((n) => ({
     id: n.id,
     name: n.name,
+    kind: n.kind ?? "run",
     templateId: n.templateId ?? "",
     mountId: n.mountId,
     folder: n.folder,
     task: n.task,
     promptOverride: n.promptOverride ?? "",
+    fanOut: n.fanOut?.toString() ?? DEFAULT_FAN_OUT,
     waitsFor: workflow.edges
       .filter((e) => e.to === n.id)
       .map((e) => ({
@@ -109,11 +123,16 @@ function toGraph(blocks: BlockDraft[]): {
   const nodes: WorkflowNodeDTO[] = blocks.map((b) => ({
     id: b.id,
     name: b.name.trim(),
+    kind: b.kind,
     templateId: b.templateId || null,
     mountId: b.mountId,
     folder: b.folder,
     task: b.task,
     promptOverride: b.promptOverride.trim() || null,
+    // Null on a run block, and the server refuses a missing one on an
+    // orchestrator block rather than defaulting it. A blank field goes over as
+    // `NaN`, which is exactly the refusal the operator needs to see.
+    fanOut: b.kind === "orchestrator" ? Number(b.fanOut) : null,
   }));
   const edges: WorkflowEdgeDTO[] = blocks.flatMap((b) =>
     b.waitsFor.map((w) => ({
@@ -557,17 +576,64 @@ export function WorkflowEditor({
                 </div>
               }
             >
-              <Field label="Name" htmlFor={`${block.id}-name`}>
-                <Input
-                  id={`${block.id}-name`}
-                  value={block.name}
-                  onChange={(e) => update(block.id, { name: e.target.value })}
-                  placeholder="Update dependencies"
-                />
-              </Field>
+              <div className="grid gap-x-4 sm:grid-cols-2">
+                <Field label="Name" htmlFor={`${block.id}-name`}>
+                  <Input
+                    id={`${block.id}-name`}
+                    value={block.name}
+                    onChange={(e) => update(block.id, { name: e.target.value })}
+                    placeholder="Update dependencies"
+                  />
+                </Field>
+
+                <Field label="Block" htmlFor={`${block.id}-kind`}>
+                  <Select
+                    id={`${block.id}-kind`}
+                    value={block.kind}
+                    onChange={(e) =>
+                      update(block.id, {
+                        kind: e.target.value as WorkflowNodeKind,
+                        // A hand-over needs a branch at both ends and an
+                        // orchestrator block has none, so the link goes with
+                        // the change rather than being refused at Save.
+                        waitsFor: block.waitsFor.map((w) => ({
+                          ...w,
+                          continueBranch: false,
+                        })),
+                      })
+                    }
+                  >
+                    <option value="run">Runs a task</option>
+                    <option value="orchestrator">Decides what to run</option>
+                  </Select>
+                </Field>
+              </div>
+
+              {block.kind === "orchestrator" && (
+                <Field
+                  label="Most runs it may start"
+                  htmlFor={`${block.id}-fanout`}
+                >
+                  <Input
+                    id={`${block.id}-fanout`}
+                    type="number"
+                    min={1}
+                    max={MAX_FAN_OUT}
+                    className="tabular-nums"
+                    value={block.fanOut}
+                    onChange={(e) =>
+                      update(block.id, { fanOut: e.target.value })
+                    }
+                  />
+                  <Hint tone="warn">
+                    What this block decides on starts with no approval — this
+                    number is the whole of what you are agreeing to
+                  </Hint>
+                </Field>
+              )}
 
               <Field
-                label="Guards"
+                label={block.kind === "orchestrator" ? "Guards for the runs it starts" : "Guards"}
                 htmlFor={`${block.id}-template`}
                 hint={
                   missingTemplate
@@ -628,11 +694,15 @@ export function WorkflowEditor({
                   label="Folder"
                   htmlFor={`${block.id}-folder`}
                   hint={
-                    block.folder === ""
-                      ? "The whole workspace — no other run in it can start meanwhile"
-                      : undefined
+                    block.kind === "orchestrator"
+                      ? "Where it looks; the runs it starts must be in this workspace"
+                      : block.folder === ""
+                        ? "The whole workspace — no other run in it can start meanwhile"
+                        : undefined
                   }
-                  hintTone={block.folder === "" ? "warn" : "neutral"}
+                  hintTone={
+                    block.kind === "run" && block.folder === "" ? "warn" : "neutral"
+                  }
                 >
                   <Select
                     id={`${block.id}-folder`}
@@ -653,19 +723,30 @@ export function WorkflowEditor({
                 </Field>
               </div>
 
-              <Field label="Task" htmlFor={`${block.id}-task`}>
+              <Field
+                label={block.kind === "orchestrator" ? "What to decide" : "Task"}
+                htmlFor={`${block.id}-task`}
+              >
                 <Textarea
                   id={`${block.id}-task`}
                   value={block.task}
                   onChange={(e) => update(block.id, { task: e.target.value })}
-                  placeholder="What this block asks the agent to do."
+                  placeholder={
+                    block.kind === "orchestrator"
+                      ? "What this block should look at, and what makes a piece of work worth starting."
+                      : "What this block asks the agent to do."
+                  }
                 />
               </Field>
 
               <Field
-                label="Standing instructions"
+                label={
+                  block.kind === "orchestrator"
+                    ? "Standing instructions for the runs it starts"
+                    : "Standing instructions"
+                }
                 htmlFor={`${block.id}-prompt`}
-                hint="Replaces the template's own prompt for this block"
+                hint="Replaces the template's own prompt"
               >
                 <Textarea
                   id={`${block.id}-prompt`}
@@ -679,7 +760,9 @@ export function WorkflowEditor({
 
               {earlier.length === 0 ? (
                 <p className="text-xs text-ink-muted">
-                  Starts as soon as its folder is free.
+                  {block.kind === "orchestrator"
+                    ? "Decides as soon as the workflow starts."
+                    : "Starts as soon as its folder is free."}
                 </p>
               ) : (
                 <fieldset className="border-0 p-0">
@@ -714,7 +797,9 @@ export function WorkflowEditor({
                             </option>
                           ))}
                         </Select>
-                        {link && (
+                        {link &&
+                          block.kind === "run" &&
+                          other.kind === "run" && (
                           <label className="flex min-h-[var(--control-h)] cursor-pointer items-center gap-1.5 text-xs text-ink-muted">
                             <input
                               type="checkbox"
