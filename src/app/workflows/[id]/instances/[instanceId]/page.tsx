@@ -321,12 +321,12 @@ export default function WorkflowInstancePage() {
 
       {instance.blocks.length > 0 && (
         <>
-          <CardTitle className="mt-8">Blocks that decide</CardTitle>
+          <CardTitle className="mt-8">Blocks not yet runs</CardTitle>
           <Card emphasis="quiet">
             <TableWrap>
               <Table>
                 <caption className="sr-only">
-                  Blocks that decide what to run, and blocks that never ran
+                  Blocks that decide what to run, and blocks waiting on one
                 </caption>
                 <thead>
                   <tr>
@@ -359,10 +359,10 @@ export default function WorkflowInstancePage() {
                         <Td className="align-top">
                           <div className="font-medium text-ink">{b.nodeName}</div>
                           <div className="mt-0.5 text-ink-muted">
-                            {b.kind === "run"
-                              ? "never started"
-                              : b.status === "emitted"
-                                ? `started ${b.emitted} run(s)`
+                            {b.status === "emitted"
+                              ? `started ${b.emitted} run(s)`
+                              : b.kind === "run" && b.status !== "waiting"
+                                ? "never started"
                                 : waits.length === 0
                                   ? "decides immediately"
                                   : `after ${waits.join(", ")}`}

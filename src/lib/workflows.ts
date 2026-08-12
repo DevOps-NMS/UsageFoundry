@@ -1144,14 +1144,12 @@ export function planInstanceStep(
     for (const node of graph.nodes) {
       if (decided.has(node.id)) continue;
       const own = live.get(node.id)!;
-      // Already a run, or a turn that has started or settled: not this
+      // Already a run, or a block that has started or settled: not this
       // function's business any more. `releasableRuns` owns a created run from
       // here on, and a `thinking` block owns itself until its child returns.
+      // A `waiting` ledger row is the *only* state that is still open, and it
+      // means the same thing for both kinds — nothing has happened yet.
       if (own.run || (own.block && own.block.status !== "waiting")) continue;
-      // A run block with a `waiting` ledger row cannot happen — a ledger row is
-      // written for a run block only to record that it never ran — but reading
-      // one as ready to create would create a run twice.
-      if (node.kind === "run" && own.block) continue;
 
       let stopper: string | null = null;
       let pending = false;
@@ -1205,8 +1203,10 @@ function edgeVerdict(
 ): EdgeVerdict {
   if (from.kind === "run") {
     if (!state.run) {
-      // Never created and never will be — the cascade, one link along.
-      if (state.block) {
+      // Not created yet. Still `waiting` means it is behind a decision that has
+      // not been made; anything else means it never will be, which is the
+      // cascade one link along.
+      if (state.block && state.block.status !== "waiting") {
         return {
           kind: "blocked",
           reason: `Set to start after “${from.name}”, which never ran: ${state.block.error ?? "no reason recorded."}`,
@@ -2830,10 +2830,20 @@ function advanceInstance(instanceId: string): void {
     }
     try {
       const run = createRun({ ...plan.input, dependsOn: creation.dependsOn });
+      // The ledger row held this node's place while it was waiting on a
+      // decision, so it carries the position the graph gave it; the row itself
+      // goes, because a node in both tables is a block shown twice on the page
+      // and counted as live for ever.
+      const held = getBlock(instanceId, node.id);
+      db()
+        .prepare(
+          "DELETE FROM workflow_instance_blocks WHERE instance_id=? AND node_id=?",
+        )
+        .run(instanceId, node.id);
       recordMember(instanceId, {
         nodeId: node.id,
         nodeName: node.name,
-        position: nextPosition(instanceId),
+        position: held?.position ?? nextPosition(instanceId),
         runId: run.id,
         emittedBy: null,
       });

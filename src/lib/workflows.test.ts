@@ -1117,6 +1117,58 @@ describe("planInstanceStep — what an instance may do next", () => {
     assert.match(step.block[1].reason, /“Review it”, which never ran/);
   });
 
+  it("creates a run block that is holding a waiting ledger row", () => {
+    // Every node behind an orchestrator block gets one of those at
+    // instantiation — it is what puts the block on the page as pending and what
+    // makes the instance visible to the advance query at all. Read as "already
+    // decided", the whole subgraph behind a fan-out would never be created and
+    // nothing would say why.
+    const step = stepOf({
+      pick: decided("emitted", [["r-1", "completed"]]),
+      review: decided("waiting"),
+    });
+    assert.deepEqual(step.create, [
+      {
+        nodeId: "review",
+        dependsOn: [{ runId: "r-1", edge: "on-finish", continueBranch: false }],
+      },
+    ]);
+  });
+
+  it("waits for a run block that has not been created yet", () => {
+    // A `waiting` ledger row on a *predecessor* is "behind a decision that has
+    // not been made", not "never ran". Read as the second, a chain of two
+    // blocks behind one fan-out would block itself at the first advance.
+    const chain: WorkflowGraph = {
+      ...FAN,
+      nodes: [
+        ...FAN.nodes,
+        {
+          id: "land",
+          name: "Land it",
+          kind: "run",
+          templateId: null,
+          mountId: "work",
+          folder: "repo",
+          task: "Land",
+          promptOverride: null,
+          fanOut: null,
+        },
+      ],
+      edges: [...FAN.edges, edge("review", "land", { edge: "on-success" })],
+    };
+    const step = stepOf(
+      {
+        pick: decided("thinking"),
+        review: decided("waiting"),
+        land: decided("waiting"),
+      },
+      chain,
+    );
+    assert.deepEqual(step.create, []);
+    assert.deepEqual(step.block, []);
+  });
+
   it("never re-creates a node that is already a run", () => {
     // Both passes see the same graph, and this runs after every terminal run
     // transition in the app. A node selected twice is a second agent in the
