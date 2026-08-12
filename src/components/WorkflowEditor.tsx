@@ -503,6 +503,10 @@ export function WorkflowEditor({
             boundary, so the total can overshoot by up to one work cycle per
             block running at the time, and blocks running at once multiply that
           </Hint>
+          <Hint>
+            Blocks that all start at once have no boundary between them, so the
+            maximum concurrent runs in Settings is what bounds this
+          </Hint>
         </Subsection>
 
         {blocks.map((block, index) => {

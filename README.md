@@ -675,6 +675,14 @@ multiply that. There is deliberately no live mode: killing every block mid-cycle
 would turn each one's measured cost into a reconciled estimate, in exchange for a
 bound that is already one cycle in the ordinary case.
 
+The limiting case is worth stating plainly. A graph of blocks that all start at
+once, each running a single work cycle, has no boundary between them at all —
+every block is already working before any of them has spent anything, so the
+guard has nothing to stop. **Settings → maximum concurrent runs is the lever for
+that**, and it is the same one that bounds a per-run spending limit's worst case:
+with a cap of one, a five-block graph checks its workflow-wide limits five times,
+once before each block starts.
+
 When one trips, the workflow is halted through the same door *Stop all* uses, and
 the instance records that its **budget guard** stopped it rather than you.
 
