@@ -19,10 +19,10 @@ import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 
 const POLL_MS = 10_000;
 
-/** How the halt is described where it is offered, and where it is recorded. */
+/** Who halted it, in the same words the member runs' own reasons use. */
 const CAUSE_LABEL: Record<"operator" | "guard", string> = {
-  operator: "stopped by you",
-  guard: "stopped by its budget guard",
+  operator: "You stopped this run",
+  guard: "Its budget guard stopped this run",
 };
 
 /**
@@ -216,9 +216,9 @@ export default function WorkflowInstancePage() {
           {instance.stoppedAt !== null && (
             <>
               {CAUSE_LABEL[instance.stopCause ?? "operator"]} at{" "}
-              {fmtDateTime(instance.stoppedAt)}.
+              {fmtDateTime(instance.stoppedAt)}.{" "}
             </>
-          )}{" "}
+          )}
           {instance.stopReason}
         </Notice>
       )}
