@@ -20,6 +20,8 @@ import { fmtPct, severityFor, type Severity } from "../lib/format";
  * not reached, with nothing on screen to explain why.
  */
 
+export type MeterSize = "compact" | "default" | "hero";
+
 /**
  * Picked by a map, not by two competing CSS rules.
  *
@@ -38,6 +40,62 @@ const SEVERITY_FILL: Record<Severity, string> = {
   danger: "bg-danger",
 };
 
+/**
+ * Complete class strings per size, never interpolated — Tailwind scans source
+ * as text, so `h-${n}` emits nothing and does it silently. Same rule the tone
+ * maps in `ui/Badge` and `ui/Button` follow.
+ *
+ * `hero` exists for the one meter the dashboard is built around: the 5-hour
+ * window. Size is how that card says it leads, so the track and the reading
+ * both step up rather than the card being tinted a different colour.
+ */
+const SIZE: Record<
+  MeterSize,
+  {
+    root: string;
+    head: string;
+    track: string;
+    value: string;
+    /** The guard's higher reading. Never larger than `value` at the same size. */
+    upper: string;
+    detail: string;
+  }
+> = {
+  compact: {
+    root: "mt-2.5 first:mt-0",
+    head: "mb-1.5",
+    track: "h-1.5",
+    value: "text-xs",
+    upper: "text-xs",
+    detail: "mt-1.5",
+  },
+  default: {
+    root: "mt-3",
+    head: "mb-1.5",
+    track: "h-2",
+    value: "text-sm",
+    upper: "text-xs",
+    detail: "mt-2",
+  },
+  hero: {
+    root: "mt-3",
+    head: "mb-2",
+    track: "h-3",
+    value: "text-lg",
+    upper: "text-sm",
+    detail: "mt-2",
+  },
+};
+
+/**
+ * A reading below about half a percent is a sub-pixel sliver on a 200px track,
+ * so it paints as an empty bar — the same lie the hatch exists to prevent at
+ * the other end of the scale. The floor is on the *drawn* width only:
+ * `aria-valuenow` and the printed percentage keep reporting the true figure,
+ * and a genuine zero still draws nothing.
+ */
+const MIN_VISIBLE_PX = 3;
+
 export function Meter({
   label,
   fraction,
@@ -45,7 +103,7 @@ export function Meter({
   detail,
   value,
   unknownHint = "no ceiling set",
-  compact = false,
+  size = "default",
 }: {
   label: string;
   fraction: number | null;
@@ -58,10 +116,11 @@ export function Meter({
    */
   value?: string;
   unknownHint?: string;
-  compact?: boolean;
+  size?: MeterSize;
 }) {
   const known = fraction !== null && Number.isFinite(fraction);
   const clamped = known ? Math.min(Math.max(fraction, 0), 1) : 1;
+  const sz = SIZE[size];
 
   // Only meaningful when it exceeds the known reading; equal values are the
   // normal, fully-priced case and must not draw a zero-width band.
@@ -76,27 +135,46 @@ export function Meter({
     : clamped;
 
   return (
-    <div className={compact ? "mt-2.5 first:mt-0" : "mt-2.5"}>
-      <div className="mb-1.5 flex items-baseline justify-between text-xs text-ink-muted">
+    <div className={sz.root}>
+      <div
+        className={`flex items-baseline justify-between gap-3 text-xs text-ink-muted ${sz.head}`}
+      >
         <span>{label}</span>
-        <span className="font-semibold tabular-nums text-ink">
-          {known ? (value ?? fmtPct(fraction)) : unknownHint}
-          {hasUpper && (
-            <span className="font-medium text-ink-muted">
-              {" "}
-              – {fmtPct(upperFraction)}
-            </span>
-          )}
-        </span>
+        {/* An unknown reading is never scaled up with the size: it is a
+            statement that there is no figure, and setting it in the headline
+            weight the known reading uses makes absence look like a value. */}
+        {known ? (
+          <span className={`font-semibold tabular-nums text-ink ${sz.value}`}>
+            {value ?? fmtPct(fraction)}
+            {hasUpper && (
+              <span className={`font-medium text-ink-muted ${sz.upper}`}>
+                {" "}
+                – {fmtPct(upperFraction)}
+              </span>
+            )}
+          </span>
+        ) : (
+          <span className="text-xs font-medium text-ink-muted">
+            {unknownHint}
+          </span>
+        )}
       </div>
       <div
-        className={`relative overflow-hidden rounded-full border border-line bg-inset ${
-          compact ? "h-1.5" : "h-[7px]"
-        }`}
+        className={`relative overflow-hidden rounded-full border border-line bg-inset ${sz.track}`}
         role="progressbar"
         aria-valuenow={known ? Math.round(clamped * 100) : undefined}
         aria-valuemin={0}
         aria-valuemax={100}
+        // Spoken instead of the bare percentage in the two cases where the
+        // number alone misleads: no ceiling at all, and a guard reading that
+        // sits above the visible bar.
+        aria-valuetext={
+          !known
+            ? unknownHint
+            : hasUpper
+              ? `${fmtPct(fraction)}, up to ${fmtPct(upperFraction)} once unpriced models are charged`
+              : undefined
+        }
         aria-label={label}
       >
         {/* Absolutely positioned so the hatched upper band can sit *behind* the
@@ -104,21 +182,29 @@ export function Meter({
             out below the first and clipped away by overflow-hidden. */}
         {hasUpper && (
           <div
-            className="hatched absolute inset-y-0 left-0 rounded-full"
+            className="hatched absolute inset-y-0 left-0 rounded-full transition-[width] duration-200 ease-out"
             data-unknown="true"
             style={{ width: `${upperClamped * 100}%` }}
           />
         )}
         <div
-          className={`absolute inset-y-0 left-0 rounded-full transition-[width] duration-300 ${
+          className={`absolute inset-y-0 left-0 rounded-full transition-[width] duration-200 ease-out ${
             known ? SEVERITY_FILL[severityFor(fraction)] : "hatched"
           }`}
           data-sev={known ? severityFor(fraction) : undefined}
           data-unknown={!known}
-          style={{ width: `${clamped * 100}%` }}
+          style={{
+            width: `${clamped * 100}%`,
+            minWidth: clamped > 0 ? MIN_VISIBLE_PX : undefined,
+          }}
         />
       </div>
-      {detail && <div className="mt-1.5 text-xs text-ink-faint">{detail}</div>}
+      {/* `text-ink-muted`, not `text-ink-faint`: this line names the ceiling the
+          bar above is measured against, and `--fg-faint` is 3.4:1 on the card
+          surface in light and 3.6:1 in dark — under 4.5:1 at 12px in both. */}
+      {detail && (
+        <div className={`text-xs text-ink-muted ${sz.detail}`}>{detail}</div>
+      )}
     </div>
   );
 }
