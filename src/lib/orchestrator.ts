@@ -29,6 +29,7 @@ import { scanUsage, type UsageEntry } from "./transcripts";
 import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
+import type { RunDependencyDTO } from "./apiTypes";
 
 /**
  * Runs Claude Code headlessly against a folder, iteration by iteration, and
@@ -51,6 +52,13 @@ import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
  */
 
 export type RunStatus =
+  /**
+   * Waiting for the runs it was told to start after, and holding nothing while
+   * it waits: no folder, no checkout slot, no concurrency slot, and absent from
+   * `activeRuns()`. It becomes `queued` — and only then takes a claim on
+   * anything — when `releaseDependents` decides its dependencies have settled.
+   */
+  | "waiting"
   | "queued"
   | "running"
   /** Stepped aside for a full 5-hour window; the sweeper will re-queue it. */
@@ -1247,6 +1255,12 @@ export interface CreateRunInput {
   /** Give this run its own checkout. Defaults on for a git repository. */
   isolate?: boolean;
   budget: unknown;
+  /**
+   * Runs that must settle before this one starts, each with the condition it
+   * must settle under. Absent or empty means it starts as soon as its folder is
+   * free, which is every run that existed before this option did.
+   */
+  dependsOn?: RunDependencyInput[];
 }
 
 /**
@@ -1258,6 +1272,12 @@ export interface CreateRunInput {
  * hand that checkout to anyone else. Its **folder** is not: a parked run has no
  * process, so it steps aside for a run that is ready to work now and takes the
  * folder back when that one finishes. See `selectPromotable`.
+ *
+ * `waiting` is absent, and that absence is the whole point of the status: a run
+ * told to start after other runs has no folder, no checkout slot and no place
+ * in the queue until they settle. Selecting it here would reserve its folder
+ * against every unrelated run submitted afterwards, so one four-run chain would
+ * stall a repository for the length of the chain.
  */
 export function activeRuns(): RunRow[] {
   return db()
@@ -1331,38 +1351,25 @@ function slotExhaustionReason(repoRoot: string): string {
 }
 
 /**
- * Admit a run, or park it behind whatever is already in its folder.
+ * Where a run will work, and on what branch.
  *
- * Everything from here to the INSERT is synchronous — `resolveWorkspaceFolder`,
- * `probeIsolation`, and the occupancy scan are all sync syscalls or sync SQLite
- * — and that is what makes the check-then-insert atomic: one Node event-loop
- * turn runs to completion, so no second request can interleave between deciding
- * a folder is free and recording that this run took it. **Introducing a single
- * `await` in this path silently reintroduces two agents in one directory.** The
- * transaction wrapper does not provide that guarantee (better-sqlite3 is
- * synchronous either way); it is there so the property survives a refactor that
- * adds a second statement.
+ * Extracted because it is now taken at two moments rather than one: at
+ * admission for a run that starts straight away, and at release for a run that
+ * was waiting on other runs — which holds no checkout slot while it waits, so
+ * the slot has to be chosen when it stops waiting. Both callers are synchronous
+ * and stay that way; `probeIsolation` and `allocateSlotPath` are sync syscalls,
+ * which is what lets a claim be decided and recorded in one event-loop turn.
  */
-export function createRun(input: CreateRunInput): RunRow {
-  const folder = resolveWorkspaceFolder(input.folder, input.mountId);
-  const prompt = String(input.prompt ?? "").trim();
-  if (!prompt) throw new Error("Prompt is required");
-
-  const policy = normalizePolicy(input.budget);
-  const settings = getSettings();
-  const id = randomUUID();
-  const now = Date.now();
-
-  const budgetBlob = JSON.stringify({
-    ...policy,
-    permissionMode: input.permissionMode ?? settings.defaultPermissionMode,
-  });
-
+function planWorkspace(
+  id: string,
+  folder: string,
+  isolate: boolean,
+): { plan: IsolationPlan; workDir: string } {
   // An isolated run gets its own subtree, so it contends with nothing but a run
   // started on the workspace root — which does contain the checkout store, and
   // correctly blocks.
   let plan: IsolationPlan = { mode: "none" };
-  if (input.isolate !== false) {
+  if (isolate) {
     plan = probeIsolation(folder);
     if (plan.mode === "worktree" && plan.repoRoot) {
       const slotPath = allocateSlotPath(plan.repoRoot);
@@ -1379,24 +1386,147 @@ export function createRun(input: CreateRunInput): RunRow {
     plan = { mode: "none", reason: "Isolation was turned off for this run." };
   }
 
-  const workDir =
-    plan.mode === "worktree" && plan.worktreePath ? plan.worktreePath : folder;
+  return {
+    plan,
+    workDir:
+      plan.mode === "worktree" && plan.worktreePath ? plan.worktreePath : folder,
+  };
+}
+
+/**
+ * Read the dependency list off a request, and say what it means for admission.
+ *
+ * Every refusal here is a graph that cannot be satisfied, and each one is
+ * cheaper said now than discovered later: a run whose dependency has already
+ * failed would otherwise be admitted only to be terminated in the same second,
+ * and a loop would be admitted and then never terminated at all.
+ *
+ * The verdict reuses `releasableRuns` rather than re-deciding what a settled
+ * dependency is. A dependency that is already satisfied means this run starts
+ * now and never touches the `waiting` status at all — the alternative, always
+ * admitting as `waiting` and letting the sweep pick it up, would leave a run
+ * created against a finished dependency sitting there until something unrelated
+ * finished and triggered a pass.
+ */
+function admitDependencies(
+  id: string,
+  input: readonly RunDependencyInput[],
+): { links: DependencyLink[]; waiting: boolean } {
+  const links: DependencyLink[] = [];
+  const targets: DependencyState[] = [];
+  const seen = new Set<string>();
+
+  for (const raw of input) {
+    const runId = String(raw?.runId ?? "");
+    const edge = raw?.edge as DependencyEdge;
+    if (!runId) throw new Error("A dependency has to name a run.");
+    if (runId === id) {
+      throw new Error(`A run cannot depend on itself (${shortId(id)}).`);
+    }
+    if (!(DEPENDENCY_EDGES as readonly string[]).includes(edge)) {
+      throw new Error(
+        `Dependency on run ${shortId(runId)} needs a condition: ${DEPENDENCY_EDGES.join(" or ")}.`,
+      );
+    }
+    if (seen.has(runId)) {
+      throw new Error(
+        `Run ${shortId(runId)} is named twice in the dependency list, so it is unclear which condition applies.`,
+      );
+    }
+    const target = getRun(runId);
+    if (!target) throw new Error(`No such run to depend on: ${runId}`);
+    seen.add(runId);
+    links.push({ runId: id, dependsOn: runId, edge });
+    targets.push({
+      id: target.id,
+      status: target.status,
+      iterations: target.iterations,
+    });
+  }
+
+  if (links.length === 0) return { links, waiting: false };
+
+  // Existing edges too: this run's dependencies may themselves be waiting on
+  // something, and a loop anywhere in the closure is a loop this run joins.
+  const loop = dependencyCycle([...allDependencyLinks(), ...links]);
+  if (loop) {
+    throw new Error(
+      `These dependencies make a loop: ${loop.map(shortId).join(" → ")}.`,
+    );
+  }
+
+  const { release, block } = releasableRuns(
+    [{ id, status: "waiting", iterations: 0 }, ...targets],
+    links,
+  );
+  if (block.length > 0) throw new Error(block[0].reason);
+  return { links, waiting: !release.includes(id) };
+}
+
+/**
+ * Admit a run, or park it behind whatever is already in its folder.
+ *
+ * Everything from here to the INSERT is synchronous — `resolveWorkspaceFolder`,
+ * `probeIsolation`, the dependency check, and the occupancy scan are all sync
+ * syscalls or sync SQLite — and that is what makes the check-then-insert
+ * atomic: one Node event-loop turn runs to completion, so no second request can
+ * interleave between deciding a folder is free and recording that this run took
+ * it. **Introducing a single `await` in this path silently reintroduces two
+ * agents in one directory.** The transaction wrapper does not provide that
+ * guarantee (better-sqlite3 is synchronous either way); it is there so the
+ * property survives a refactor that adds a second statement.
+ *
+ * A run with unsettled dependencies is admitted as `waiting` instead, and takes
+ * *no* claim: no folder, no checkout slot, no place in the queue. That is the
+ * whole reason for the status. A four-run chain admitted as `queued` would
+ * reserve its folder against every unrelated run submitted afterwards — see
+ * `selectPromotable` — so one chain would stall an entire repository for as long
+ * as it took to work through.
+ */
+export function createRun(input: CreateRunInput): RunRow {
+  const folder = resolveWorkspaceFolder(input.folder, input.mountId);
+  const prompt = String(input.prompt ?? "").trim();
+  if (!prompt) throw new Error("Prompt is required");
+
+  const policy = normalizePolicy(input.budget);
+  const settings = getSettings();
+  const id = randomUUID();
+  const now = Date.now();
+
+  const budgetBlob = JSON.stringify({
+    ...policy,
+    permissionMode: input.permissionMode ?? settings.defaultPermissionMode,
+  });
+
+  const isolate = input.isolate !== false;
+  const { links, waiting } = admitDependencies(id, input.dependsOn ?? []);
+
+  // Deferred entirely for a waiting run: choosing a checkout slot *is* a claim
+  // on it, and the run may not start for days. `isolation` is left null to say
+  // "not decided yet" — except when the operator turned isolation off, which is
+  // an answer already and is recorded as one so the release does not overrule
+  // it. Every other column the plan fills is written at release too.
+  const { plan, workDir } = waiting
+    ? { plan: null, workDir: null }
+    : planWorkspace(id, folder, isolate);
+  const isolation = plan ? plan.mode : isolate ? null : "none";
 
   const run = db().transaction((): RunRow => {
-    const busy = occupantOf(workDir);
+    const busy = plan ? occupantOf(workDir!) : null;
 
     db()
       .prepare(
         `INSERT INTO runs
            (id, folder, prompt, model, status, budget, max_iterations, iterations, created_at, spent_usd, spent_tokens,
             work_dir, isolation, repo_root, worktree_path, worktree_branch, worktree_base, worktree_base_branch)
-         VALUES (?, ?, ?, ?, 'queued', ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         folder,
         prompt,
         input.model ?? settings.defaultModel,
+        waiting ? "waiting" : "queued",
         budgetBlob,
         // 0 is the stored sentinel for "no cap" — see the schema comment in
         // db.ts. The blob above is the source of truth; this column exists so
@@ -1404,29 +1534,39 @@ export function createRun(input: CreateRunInput): RunRow {
         policy.maxIterations ?? 0,
         now,
         workDir,
-        plan.mode,
-        plan.repoRoot ?? null,
-        plan.worktreePath ?? null,
-        plan.branch ?? null,
-        plan.base ?? null,
-        plan.baseBranch ?? null,
+        isolation,
+        plan?.repoRoot ?? null,
+        plan?.worktreePath ?? null,
+        plan?.branch ?? null,
+        plan?.base ?? null,
+        plan?.baseBranch ?? null,
       );
+
+    const addLink = db().prepare(
+      "INSERT INTO run_deps (run_id, depends_on, edge, created_at) VALUES (?, ?, ?, ?)",
+    );
+    for (const link of links) {
+      addLink.run(link.runId, link.dependsOn, link.edge, now);
+    }
 
     emit({
       runId: id,
       ts: now,
       kind: "status",
       payload: {
-        status: "queued",
+        status: waiting ? "waiting" : "queued",
         folder,
         prompt,
-        isolation: plan.mode,
-        ...(plan.reason ? { isolationReason: plan.reason } : {}),
+        ...(plan ? { isolation: plan.mode } : {}),
+        ...(plan?.reason ? { isolationReason: plan.reason } : {}),
         ...(busy ? { waitingFor: busy.id } : {}),
+        ...(links.length > 0
+          ? { dependsOn: links.map((l) => ({ runId: l.dependsOn, edge: l.edge })) }
+          : {}),
       },
     });
 
-    if (plan.reason) log(id, plan.reason);
+    if (plan?.reason) log(id, plan.reason);
     if (busy) {
       log(
         id,
@@ -1434,13 +1574,20 @@ export function createRun(input: CreateRunInput): RunRow {
         { waitingFor: busy.id },
       );
     }
+    if (waiting) {
+      log(
+        id,
+        `Waiting for ${links.map((l) => `run ${shortId(l.dependsOn)} (${l.edge})`).join(", ")}. It holds no folder and no checkout until then.`,
+      );
+    }
 
     return getRun(id)!;
   })();
 
   // Outside the transaction: promotion spawns, and a spawn inside a SQLite
-  // transaction would hold the write lock for the life of the child.
-  promoteQueued();
+  // transaction would hold the write lock for the life of the child. A waiting
+  // run has freed nothing and started nothing, so there is nothing to promote.
+  if (!waiting) promoteQueued();
   return getRun(run.id)!;
 }
 
@@ -1531,6 +1678,409 @@ export function queuePosition(id: string): number {
       r.created_at <= self.created_at &&
       overlaps(key, conflictKey(workDirOf(r))),
   ).length;
+}
+
+/* ------------------------------------------------------------------ */
+/* Run dependencies                                                    */
+/* ------------------------------------------------------------------ */
+
+export const DEPENDENCY_EDGES = ["on-success", "on-finish"] as const;
+export type DependencyEdge = (typeof DEPENDENCY_EDGES)[number];
+
+/** One "start after that run" edge, as a caller states it. */
+export interface RunDependencyInput {
+  runId: string;
+  edge: DependencyEdge;
+}
+
+/** The same edge as stored: the dependent, the dependency, the condition. */
+export interface DependencyLink {
+  runId: string;
+  dependsOn: string;
+  edge: DependencyEdge;
+}
+
+/** Everything the decision below reads off a row, and nothing else. */
+export interface DependencyState {
+  id: string;
+  status: RunStatus;
+  /** Work cycles that *finished*, as `runs.iterations` counts them. */
+  iterations: number;
+}
+
+/** Statuses a run never leaves on its own. */
+const TERMINAL_STATUSES: readonly RunStatus[] = [
+  "completed",
+  "stopped",
+  "failed",
+  "blocked",
+];
+
+/** Ids are UUIDs; the whole app names a run by its first eight characters. */
+function shortId(id: string): string {
+  return id.slice(0, 8);
+}
+
+/**
+ * Whether a dependency has settled in a way that lets its dependent start.
+ *
+ * **A run that never ran a work cycle satisfies neither condition.** That one
+ * rule is what makes a chain terminate rather than sit there: a run refused by
+ * a guard at the door, a run whose own dependency failed, a run stopped before
+ * it started, and a run closed out by a restart are all `blocked`, `stopped` or
+ * `failed` with `iterations === 0`, and every one of them is a dependency that
+ * is finished and did nothing. Reading `on-finish` as "it reached a terminal
+ * status, whatever that status was" would start the next run in the chain on
+ * the strength of a run that never opened a file.
+ *
+ * `on-success` is `completed`, and deliberately **not** `completed &&
+ * reported_done`. `completed` is written for two endings — the agent replying
+ * DONE, and the run using up its cycle cap — and `maxIterations` defaults to 1,
+ * so on a stock install almost every finished run is the second kind. Keying
+ * success on the DONE reply would mean a dependent almost never starts, and
+ * would terminate the chain with "its dependency did not report done" about a
+ * run that did exactly what it was asked to. Success here is the *absence of a
+ * fault*: no crash, no guard, no operator stop — which is the question a person
+ * chaining two runs is actually asking. `reported_done` is on the DTO for
+ * anyone who wants the stronger reading; it is not what this decides.
+ */
+function edgeSatisfied(dep: DependencyState, edge: DependencyEdge): boolean {
+  if (dep.iterations < 1) return false;
+  if (edge === "on-success") return dep.status === "completed";
+  return TERMINAL_STATUSES.includes(dep.status);
+}
+
+/** Why a dependent can never start, in words naming the run that stopped it. */
+function unsatisfiableReason(dep: DependencyState, edge: DependencyEdge): string {
+  const name = `run ${shortId(dep.id)}`;
+  if (dep.iterations < 1) {
+    return `Set to start after ${name}, which ended ${dep.status} without running a work cycle.`;
+  }
+  return `Set to start only after ${name} succeeded (${edge}); it ended ${dep.status}.`;
+}
+
+/**
+ * The first dependency loop in a graph, as the ids around it, or null.
+ *
+ * A graph that cannot be satisfied is a typo rather than a run: every member of
+ * a loop waits for another member for ever, and nothing downstream of it can
+ * ever be released either. Nothing else detects that — `releasableRuns` reaches
+ * a fixed point and simply leaves those rows alone, which is exactly the
+ * "asleep for ever" row this whole design is meant to have none of. So it is
+ * refused at admission, which is the only moment an edge is created.
+ *
+ * That makes acyclicity a property of the *data* rather than of who wrote it.
+ * `createRun` cannot construct a loop today — it mints the run's id after
+ * reading the edges, so nothing can already point at it — and this check is
+ * what keeps that true if a second writer ever appears.
+ */
+export function dependencyCycle(links: readonly DependencyLink[]): string[] | null {
+  const out = new Map<string, string[]>();
+  for (const link of links) {
+    const list = out.get(link.runId);
+    if (list) list.push(link.dependsOn);
+    else out.set(link.runId, [link.dependsOn]);
+  }
+
+  const done = new Set<string>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+
+  const walk = (id: string): string[] | null => {
+    if (onStack.has(id)) {
+      // The loop itself, not the path that led into it.
+      return [...stack.slice(stack.indexOf(id)), id];
+    }
+    if (done.has(id)) return null;
+    stack.push(id);
+    onStack.add(id);
+    for (const next of out.get(id) ?? []) {
+      const loop = walk(next);
+      if (loop) return loop;
+    }
+    stack.pop();
+    onStack.delete(id);
+    done.add(id);
+    return null;
+  };
+
+  for (const id of out.keys()) {
+    const loop = walk(id);
+    if (loop) return loop;
+  }
+  return null;
+}
+
+/**
+ * Which waiting runs may join the queue now, and which can never start.
+ *
+ * Pure, and separated from the writes below for the same reason
+ * `selectPromotable` is: both failure modes are silent and neither is cheap. A
+ * run released too early starts on top of work that has not happened yet; a run
+ * never released, and never terminated either, sits `waiting` for ever holding
+ * a prompt the operator believes is queued.
+ *
+ * `runs` must carry every waiting run *and* every run named as a dependency of
+ * one. A dependency that is missing from it is treated as gone — blocked rather
+ * than released, because "not found" is not "finished".
+ *
+ * The pass repeats until nothing changes, and that loop is the cascade: a run
+ * blocked here is itself a settled dependency that ran no cycle, so everything
+ * downstream of it blocks on the next pass with its own reason naming it.
+ * Termination is by exhaustion — every pass that reports a change decides at
+ * least one waiting run, and a decided run is never revisited.
+ */
+export function releasableRuns(
+  runs: readonly DependencyState[],
+  links: readonly DependencyLink[],
+): { release: string[]; block: Array<{ id: string; reason: string }> } {
+  const byId = new Map(runs.map((r) => [r.id, r]));
+  const edges = new Map<string, DependencyLink[]>();
+  for (const link of links) {
+    const list = edges.get(link.runId);
+    if (list) list.push(link);
+    else edges.set(link.runId, [link]);
+  }
+
+  const release: string[] = [];
+  const block: Array<{ id: string; reason: string }> = [];
+  const decided = new Set<string>();
+
+  for (;;) {
+    let changed = false;
+    for (const run of runs) {
+      if (run.status !== "waiting" || decided.has(run.id)) continue;
+
+      let stopper: string | null = null;
+      let pending = false;
+      for (const link of edges.get(run.id) ?? []) {
+        const dep = byId.get(link.dependsOn);
+        if (!dep) {
+          stopper = `Set to start after run ${shortId(link.dependsOn)}, which is no longer there.`;
+          break;
+        }
+        if (edgeSatisfied(dep, link.edge)) continue;
+        // Every dependency is checked before the verdict: one that is still
+        // running does not make this run "waiting" if another has already made
+        // it unstartable, and saying so now is what stops a chain from ending
+        // one run at a time as each dependency ahead of it finishes.
+        if (TERMINAL_STATUSES.includes(dep.status)) {
+          stopper = unsatisfiableReason(dep, link.edge);
+          break;
+        }
+        pending = true;
+      }
+
+      if (stopper !== null) {
+        block.push({ id: run.id, reason: stopper });
+        // Treated as blocked from here on, which is what cascades the verdict
+        // down the chain on the next pass.
+        byId.set(run.id, { id: run.id, status: "blocked", iterations: 0 });
+      } else if (pending) {
+        continue;
+      } else {
+        release.push(run.id);
+      }
+      decided.add(run.id);
+      changed = true;
+    }
+    if (!changed) return { release, block };
+  }
+}
+
+/** Every stored edge. Small table: one row per dependency ever declared. */
+function allDependencyLinks(): DependencyLink[] {
+  return db()
+    .prepare(
+      "SELECT run_id AS runId, depends_on AS dependsOn, edge FROM run_deps",
+    )
+    .all() as DependencyLink[];
+}
+
+/**
+ * What each of these runs is waiting for, for the list and detail payloads.
+ *
+ * One query for the whole page rather than one per run: the list route reports
+ * a hundred rows, and `satisfied` is computed here rather than on the client so
+ * that "what counts as settled" has exactly one definition.
+ */
+export function dependenciesOf(
+  ids: readonly string[],
+): Map<string, RunDependencyDTO[]> {
+  const out = new Map<string, RunDependencyDTO[]>();
+  if (ids.length === 0) return out;
+
+  const rows = db()
+    .prepare(
+      `SELECT d.run_id AS runId, d.depends_on AS dependsOn, d.edge AS edge,
+              r.status AS status, r.iterations AS iterations
+         FROM run_deps d
+         JOIN runs r ON r.id = d.depends_on
+        WHERE d.run_id IN (${ids.map(() => "?").join(",")})
+        ORDER BY d.created_at, d.depends_on`,
+    )
+    .all(...ids) as Array<
+    DependencyLink & { status: RunStatus; iterations: number }
+  >;
+
+  for (const row of rows) {
+    const list = out.get(row.runId) ?? [];
+    list.push({
+      runId: row.dependsOn,
+      edge: row.edge,
+      status: row.status,
+      satisfied: edgeSatisfied(
+        { id: row.dependsOn, status: row.status, iterations: row.iterations },
+        row.edge,
+      ),
+    });
+    out.set(row.runId, list);
+  }
+  return out;
+}
+
+/**
+ * Queue every waiting run whose dependencies have settled, and end every one
+ * whose dependencies can no longer settle in its favour.
+ *
+ * Called from every path that puts a run into a terminal status — `startRun`'s
+ * `finally`, both of `stopRun`'s early branches, and the sweeper's
+ * never-clearing verdict. Missing one leaves a dependent asleep with nothing
+ * that will ever wake it, which is the failure this whole status exists to have
+ * none of. `reconcileOnBoot` is the one deliberate exception and says why.
+ *
+ * Released runs join the queue rather than starting here, so folder
+ * reservation, FIFO order and the concurrency cap stay in `promoteQueued` —
+ * the same reason `sweepPaused` re-queues rather than calling `startRun`.
+ *
+ * The outer loop exists because admitting a released run can *fail* — its
+ * repository can have moved since it was created — and a run that fails is
+ * itself a settled dependency for whatever was waiting on it. Each pass takes
+ * at least one row out of `waiting`, so it terminates.
+ */
+export function releaseDependents(): boolean {
+  let changed = false;
+  while (releasePass()) changed = true;
+  return changed;
+}
+
+function releasePass(): boolean {
+  const waiting = db()
+    .prepare("SELECT * FROM runs WHERE status = 'waiting' ORDER BY created_at")
+    .all() as RunRow[];
+  if (waiting.length === 0) return false;
+
+  const links = db()
+    .prepare(
+      `SELECT run_id AS runId, depends_on AS dependsOn, edge FROM run_deps
+        WHERE run_id IN (SELECT id FROM runs WHERE status = 'waiting')`,
+    )
+    .all() as DependencyLink[];
+
+  const states = db()
+    .prepare(
+      `SELECT id, status, iterations FROM runs
+        WHERE status = 'waiting'
+           OR id IN (SELECT depends_on FROM run_deps
+                      WHERE run_id IN (SELECT id FROM runs WHERE status = 'waiting'))`,
+    )
+    .all() as DependencyState[];
+
+  const { release, block } = releasableRuns(states, links);
+  let acted = false;
+
+  for (const { id, reason } of block) {
+    // `blocked` rather than `stopped`: it is the status this app already uses
+    // for a run refused before its first work cycle, and it says the true
+    // thing — nothing ran, nothing was spent. The reason names the run that
+    // stopped it, and the cascade gives every run behind it its own sentence
+    // naming the one in front rather than one shared verdict.
+    const done = db()
+      .prepare(
+        "UPDATE runs SET status='blocked', finished_at=?, stop_reason=? WHERE id=? AND status='waiting'",
+      )
+      .run(Date.now(), reason, id);
+    if (done.changes !== 1) continue;
+    emit({
+      runId: id,
+      ts: Date.now(),
+      kind: "status",
+      payload: { status: "blocked", stop_reason: reason },
+    });
+    acted = true;
+  }
+
+  for (const id of release) {
+    const run = waiting.find((r) => r.id === id);
+    if (run && admitWaiting(run)) acted = true;
+  }
+
+  return acted;
+}
+
+/**
+ * Give a released run its workspace and put it in the queue.
+ *
+ * Synchronous from the plan to the UPDATE, for the reason `createRun` is: the
+ * checkout slot this picks is claimed by the same statement that records it.
+ */
+function admitWaiting(run: RunRow): boolean {
+  let plan: IsolationPlan;
+  let workDir: string;
+  try {
+    // `isolation === 'none'` on a waiting row is the operator's own answer,
+    // recorded at creation; anything else means the question was deferred.
+    ({ plan, workDir } = planWorkspace(run.id, run.folder, run.isolation !== "none"));
+  } catch (err) {
+    const reason = `Its dependencies cleared, but its workspace could not be prepared: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+    const failed = db()
+      .prepare(
+        "UPDATE runs SET status='failed', finished_at=?, stop_reason=? WHERE id=? AND status='waiting'",
+      )
+      .run(Date.now(), reason, run.id);
+    if (failed.changes !== 1) return false;
+    emit({
+      runId: run.id,
+      ts: Date.now(),
+      kind: "status",
+      payload: { status: "failed", stop_reason: reason },
+    });
+    return true;
+  }
+
+  const flip = db()
+    .prepare(
+      "UPDATE runs SET status='queued', work_dir=?, isolation=?, repo_root=?," +
+        " worktree_path=?, worktree_branch=?, worktree_base=?, worktree_base_branch=?" +
+        " WHERE id=? AND status='waiting'",
+    )
+    .run(
+      workDir,
+      plan.mode,
+      plan.repoRoot ?? null,
+      plan.worktreePath ?? null,
+      plan.branch ?? null,
+      plan.base ?? null,
+      plan.baseBranch ?? null,
+      run.id,
+    );
+  if (flip.changes !== 1) return false;
+
+  if (plan.reason) log(run.id, plan.reason);
+  emit({
+    runId: run.id,
+    ts: Date.now(),
+    kind: "status",
+    payload: {
+      status: "queued",
+      isolation: plan.mode,
+      ...(plan.reason ? { isolationReason: plan.reason } : {}),
+      message: "Everything it was waiting for has finished; joining the queue.",
+    },
+  });
+  return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -3034,6 +3584,11 @@ export async function startRun(id: string): Promise<void> {
       });
     }
 
+    // This run has just settled, so anything told to start after it now knows
+    // whether it may. Before the promotion, so a run released here takes its
+    // turn in the same pass rather than waiting for the next event.
+    if (finalStatus !== "paused") releaseDependents();
+
     // The folder is free as of the status write above, so whatever was waiting
     // on it can start. Must come after, or the promotion sees this run still
     // holding its own folder and parks the next one again.
@@ -3116,12 +3671,31 @@ export function stopRun(id: string): StopOutcome {
   const run = getRun(id);
   if (!run) return "not-active";
 
-  // Nothing has spawned yet, so there is no loop to notice the flag.
+  // Nothing has spawned yet, so there is no loop to notice the flag. Both of
+  // these are terminal transitions and both release: a run whose dependency the
+  // operator has just stopped can never start, and finding that out now is the
+  // difference between a chain that ends and one that waits for ever.
   if (run.status === "queued") {
     setStatus(id, "stopped", {
       finished_at: Date.now(),
       stop_reason: "Stopped by operator before it started.",
     });
+    releaseDependents();
+    promoteQueued();
+    return "cancelled";
+  }
+
+  // A waiting run holds nothing, so this is only about the row and the runs
+  // behind it. Recorded as `stopped` with no work cycles, which every edge
+  // condition reads as "finished having done nothing" — so the chain behind it
+  // ends with its own reason rather than starting on top of work that never
+  // happened.
+  if (run.status === "waiting") {
+    setStatus(id, "stopped", {
+      finished_at: Date.now(),
+      stop_reason: "Stopped by operator while it was waiting for another run.",
+    });
+    releaseDependents();
     promoteQueued();
     return "cancelled";
   }
@@ -3136,6 +3710,7 @@ export function stopRun(id: string): StopOutcome {
         "Stopped by operator while it was waiting for the next 5-hour window.",
       resume_at: null,
     });
+    releaseDependents();
     promoteQueued();
     return "cancelled";
   }
@@ -3344,6 +3919,8 @@ async function sweepPaused(): Promise<void> {
         stop_reason: verdict.reason,
         resume_at: null,
       });
+      // A parked run that ends here is a settled dependency like any other.
+      releaseDependents();
       freed = true;
     }
 
@@ -3621,14 +4198,40 @@ export function isRunning(id: string): boolean {
  * (`settings.resumeGraceHours`) is what keeps it from becoming the very thing
  * the rule above forbids — past it, a stale pause is closed out like any other
  * stale row.
+ *
+ * Runs waiting on other runs are closed out too, and this is the one place that
+ * deliberately does **not** call `releaseDependents`. Two reasons, and either
+ * would be enough. What such a run is waiting for is a row this same boot has
+ * just marked failed or stopped, so releasing it would promote a days-old
+ * prompt into an unattended agent that accepts edits — precisely the rule the
+ * queued case above exists to enforce, arrived at from the other side. And a
+ * waiting run left alone would be waiting on a dependency that is now terminal
+ * and can never satisfy it, which is a row nothing would ever wake. Closed out
+ * before the loop below, so no terminal transition it makes can find a waiting
+ * row to release.
  */
 export function reconcileOnBoot(): void {
+  const orphaned = db()
+    .prepare("SELECT * FROM runs WHERE status = 'waiting'")
+    .all() as RunRow[];
+
   const stale = activeRuns();
-  if (stale.length === 0) return;
+  if (stale.length === 0 && orphaned.length === 0) return;
 
   let closed = 0;
   let kept = 0;
   const graceMs = getSettings().resumeGraceHours * 3_600_000;
+
+  for (const run of orphaned) {
+    setStatus(run.id, "stopped", {
+      finished_at: Date.now(),
+      stop_reason:
+        "The server restarted while this run was waiting for another run to " +
+        "finish, and that run was closed out by the same restart. Start it " +
+        "again if it is still wanted.",
+    });
+    closed += 1;
+  }
 
   for (const run of stale) {
     if (run.status === "paused") {

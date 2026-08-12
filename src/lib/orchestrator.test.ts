@@ -41,7 +41,9 @@ process.env.DATA_DIR = path.join(tmp, "data");
 const {
   buildArgs,
   conflictKey,
+  dependencyCycle,
   overlaps,
+  releasableRuns,
   githubEnv,
   isTransientApiError,
   isUsageLimit,
@@ -165,6 +167,159 @@ describe("promotion", () => {
     const first = row("running", `${ws}/.uf-worktrees/repoone-1`);
     const second = row("queued", `${ws}/.uf-worktrees/repoone-2`);
     assert.deepEqual(selectPromotable([first, second], null), [second.id]);
+  });
+
+  it("cannot see a run that is waiting for another run", () => {
+    // The point of the status: a chain admitted up front must not reserve a
+    // folder against every unrelated run submitted behind it.
+    const chained = row("waiting", `${ws}/RepoOne`);
+    const unrelated = row("queued", `${ws}/RepoOne`);
+    assert.deepEqual(selectPromotable([chained, unrelated], null), [unrelated.id]);
+    // And it spends no concurrency slot either.
+    assert.deepEqual(selectPromotable([chained, unrelated], 1), [unrelated.id]);
+  });
+});
+
+/**
+ * Covers which waiting runs may join the queue, and which can never start.
+ *
+ * Pure, and it earns a test on the same grounds as the two above: both failure
+ * modes are silent. A run released too early starts on top of work that has not
+ * happened; a run neither released nor terminated sits `waiting` for ever,
+ * holding a prompt the operator believes is queued and pointing at a run that
+ * finished days ago.
+ */
+describe("dependencies", () => {
+  type State = import("./orchestrator").DependencyState;
+  type Link = import("./orchestrator").DependencyLink;
+
+  const waiting = (id: string): State => ({ id, status: "waiting", iterations: 0 });
+  /** A dependency that did work and ended well. */
+  const done = (id: string): State => ({ id, status: "completed", iterations: 1 });
+  const link = (
+    runId: string,
+    dependsOn: string,
+    edge: Link["edge"] = "on-success",
+  ): Link => ({ runId, dependsOn, edge });
+
+  it("releases a run whose only dependency completed", () => {
+    const decision = releasableRuns([done("a"), waiting("b")], [link("b", "a")]);
+    assert.deepEqual(decision, { release: ["b"], block: [] });
+  });
+
+  it("holds it while the dependency is still going", () => {
+    for (const status of ["queued", "running", "paused"] as const) {
+      const decision = releasableRuns(
+        [{ id: "a", status, iterations: 0 }, waiting("b")],
+        [link("b", "a")],
+      );
+      assert.deepEqual(decision, { release: [], block: [] });
+    }
+  });
+
+  it("releases a chain one link at a time", () => {
+    // a done, b waiting on a, c waiting on b. Only b may go: c's dependency has
+    // not started, let alone finished.
+    const decision = releasableRuns(
+      [done("a"), waiting("b"), waiting("c")],
+      [link("b", "a"), link("c", "b")],
+    );
+    assert.deepEqual(decision, { release: ["b"], block: [] });
+  });
+
+  it("waits for both halves of a fan-in", () => {
+    const links = [link("c", "a"), link("c", "b")];
+    assert.deepEqual(
+      releasableRuns([done("a"), { id: "b", status: "running", iterations: 0 }, waiting("c")], links),
+      { release: [], block: [] },
+    );
+    assert.deepEqual(releasableRuns([done("a"), done("b"), waiting("c")], links), {
+      release: ["c"],
+      block: [],
+    });
+  });
+
+  it("releases every branch of a fan-out at once", () => {
+    const decision = releasableRuns(
+      [done("a"), waiting("b"), waiting("c")],
+      [link("b", "a"), link("c", "a")],
+    );
+    assert.deepEqual(decision, { release: ["b", "c"], block: [] });
+  });
+
+  it("terminates the whole chain when a dependency fails under on-success", () => {
+    const decision = releasableRuns(
+      [{ id: "a", status: "failed", iterations: 2 }, waiting("b"), waiting("c")],
+      [link("b", "a"), link("c", "b")],
+    );
+    assert.deepEqual(decision.release, []);
+    assert.deepEqual(
+      decision.block.map((b) => b.id),
+      ["b", "c"],
+    );
+    // Each names the run that stopped it — the one in front of it, not the one
+    // at the head of the chain, which it never heard of.
+    assert.match(decision.block[0].reason, /run a\b/);
+    assert.match(decision.block[1].reason, /run b\b/);
+  });
+
+  it("starts on a failed dependency under on-finish, but not on one that never ran", () => {
+    const links = [link("b", "a", "on-finish")];
+    assert.deepEqual(
+      releasableRuns([{ id: "a", status: "failed", iterations: 2 }, waiting("b")], links),
+      { release: ["b"], block: [] },
+    );
+    // Refused before its first cycle, stopped before it started, closed out by
+    // a restart: all terminal, all having done nothing. Treating those as
+    // "finished" would start the next run in the chain on the strength of a run
+    // that never opened a file — and would leave nothing to end the chain.
+    for (const status of ["blocked", "stopped", "failed"] as const) {
+      const decision = releasableRuns(
+        [{ id: "a", status, iterations: 0 }, waiting("b")],
+        links,
+      );
+      assert.deepEqual(decision.release, []);
+      assert.equal(decision.block.length, 1);
+      assert.match(decision.block[0].reason, /without running a work cycle/);
+    }
+  });
+
+  it("treats a run that used up its cycle cap as a success", () => {
+    // `completed` covers both the DONE reply and the cycle cap, and the cap
+    // defaults to 1 — so requiring the reply would mean a dependent almost
+    // never starts.
+    const decision = releasableRuns(
+      [{ id: "a", status: "completed", iterations: 1 }, waiting("b")],
+      [link("b", "a")],
+    );
+    assert.deepEqual(decision, { release: ["b"], block: [] });
+  });
+
+  it("blocks on a dependency that is no longer there", () => {
+    const decision = releasableRuns([waiting("b")], [link("b", "gone")]);
+    assert.deepEqual(decision.release, []);
+    assert.match(decision.block[0].reason, /no longer there/);
+  });
+
+  it("finds a loop, and leaves a graph without one alone", () => {
+    assert.equal(dependencyCycle([link("b", "a"), link("c", "b")]), null);
+    assert.deepEqual(dependencyCycle([link("a", "a")]), ["a", "a"]);
+    assert.deepEqual(
+      dependencyCycle([link("a", "b"), link("b", "c"), link("c", "a")]),
+      ["a", "b", "c", "a"],
+    );
+    // A loop off to the side of an acyclic branch is still a loop.
+    assert.ok(dependencyCycle([link("x", "y"), link("a", "b"), link("b", "a")]));
+  });
+
+  it("leaves a loop waiting rather than looping itself", () => {
+    // Which is exactly why admission refuses one: nothing downstream of this
+    // pair will ever be released or terminated either.
+    const decision = releasableRuns(
+      [waiting("a"), waiting("b")],
+      [link("a", "b"), link("b", "a")],
+    );
+    assert.deepEqual(decision, { release: [], block: [] });
   });
 });
 
