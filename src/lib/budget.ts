@@ -1,4 +1,4 @@
-import type { UsageSnapshot } from "./windows";
+import type { UsageSnapshot, WindowState } from "./windows";
 
 /**
  * Budget policy: the rules that decide whether a run may keep working.
@@ -113,6 +113,8 @@ export type BudgetStopCode =
   | "run_tokens"
   | "iterations"
   | "duration"
+  /** Everything one press of Run on a workflow has spent, across its blocks. */
+  | "instance_cost"
   | "no_ceiling"
   | "no_terminus";
 
@@ -176,6 +178,46 @@ export const LIVE_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
 export const RESUME_MARGIN_MS = 60_000;
 
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+
+/**
+ * Where one window stands against one fraction threshold.
+ *
+ * The **only** implementation of that comparison in this app, because it reads
+ * two different fields for two different questions and getting either the wrong
+ * way round is silent:
+ *
+ * - "is there a ceiling at all" reads `fraction`. That is the reading the meter
+ *   shows, and — this is the part that is easy to assume wrongly — it is *not*
+ *   only the configured ceiling. `windows.ts` prefers the provider's own
+ *   utilisation from `planUsage.ts` when it answered, so a window can have a
+ *   perfectly good `fraction` with nothing typed into Settings, and refusing
+ *   that as "no ceiling" would disable a guard the provider is happy to feed.
+ *   `guardFraction` is null exactly when `fraction` is (`buildWindow` derives
+ *   both from the same ceiling, and `makeWindow` sets both from the plan
+ *   reading), so either would answer this — `fraction` is what the refusal
+ *   below says out loud, and a missing ceiling is a configuration fact rather
+ *   than a pricing one.
+ * - "is it past the threshold" reads `guardFraction`. A model with no known
+ *   price contributes $0 to the displayed cost, so a window made entirely of
+ *   one has `fraction === 0` and no threshold could ever be crossed — the guard
+ *   would quietly stop existing the week a new model ships.
+ *
+ * `at` is the guard's reading, so a caller that prints it prints the number the
+ * decision was made on.
+ */
+export type WindowGuardReading =
+  | { state: "no-ceiling" }
+  | { state: "over"; at: number }
+  | { state: "under"; at: number };
+
+export function readWindowGuard(
+  window: WindowState,
+  threshold: number,
+): WindowGuardReading {
+  if (window.fraction === null) return { state: "no-ceiling" };
+  const at = window.guardFraction ?? 0;
+  return at >= threshold ? { state: "over", at } : { state: "under", at };
+}
 
 export function evaluateBudget(
   policy: BudgetPolicy,
@@ -315,45 +357,39 @@ export function evaluateBudget(
     );
   }
 
-  // A fraction-of-limit rule is only meaningful when a ceiling is configured.
-  // Refusing to start is the safe reading of "stop at 80% of my weekly limit"
-  // when we have no idea what 100% is — silently ignoring the rule would let a
-  // run proceed under a guard the user believes is active.
-  //
-  // The threshold is compared against `guardFraction`, not `fraction`: a model
-  // with no known price contributes $0 to the displayed cost, and with a whole
-  // window unpriced the displayed fraction is exactly 0, which no threshold
-  // can ever exceed. Guarding on the reported floor would mean the guard
-  // quietly ceases to exist the week a new model ships. The "no ceiling"
-  // refusal below still reads `fraction` — the two are null together (both come
-  // from `fractionOf(x, limit)` against the same ceiling, windows.ts), and a
-  // missing ceiling is a configuration fact, not a pricing one. Not a bug.
+  // A fraction-of-limit rule is only meaningful when there is a reading to
+  // measure against. Refusing to start is the safe reading of "stop at 80% of
+  // my weekly limit" when we have no idea what 100% is — silently ignoring the
+  // rule would let a run proceed under a guard the user believes is active.
+  // Which field answers which question is `readWindowGuard`'s business.
   if (policy.maxWeeklyFraction !== null) {
-    if (snapshot.weekly.fraction === null) {
+    const weekly = readWindowGuard(snapshot.weekly, policy.maxWeeklyFraction);
+    if (weekly.state === "no-ceiling") {
       return block(
         "no_ceiling",
         "A weekly-fraction guard is set but no weekly ceiling is configured. " +
           "Set one in Settings (or run Calibrate) before using this guard.",
       );
     }
-    if ((snapshot.weekly.guardFraction ?? 0) >= policy.maxWeeklyFraction) {
+    if (weekly.state === "over") {
       return block(
         "weekly_fraction",
-        `Weekly window is at ${pct(snapshot.weekly.guardFraction ?? 0)}, at or past the ${pct(policy.maxWeeklyFraction)} guard.`,
+        `Weekly window is at ${pct(weekly.at)}, at or past the ${pct(policy.maxWeeklyFraction)} guard.`,
       );
     }
   }
 
   if (policy.maxSessionFraction !== null) {
-    if (snapshot.session.fraction === null) {
+    const session = readWindowGuard(snapshot.session, policy.maxSessionFraction);
+    if (session.state === "no-ceiling") {
       return block(
         "no_ceiling",
         "A session-fraction guard is set but no 5-hour ceiling is configured. " +
           "Set one in Settings (or run Calibrate) before using this guard.",
       );
     }
-    if ((snapshot.session.guardFraction ?? 0) >= policy.maxSessionFraction) {
-      const at = pct(snapshot.session.guardFraction ?? 0);
+    if (session.state === "over") {
+      const at = pct(session.at);
       const guard = pct(policy.maxSessionFraction);
       // A full 5-hour window is the one tripped guard that comes back on its
       // own, so it is the one a run can wait out. Every check above measures
@@ -428,5 +464,216 @@ export function normalizePolicy(raw: unknown): BudgetPolicy {
     // the agent says it is finished, so a string "false" off the wire must read
     // as off, not as on. Fail safe beats fail consistent.
     continueAfterDone: o.continueAfterDone === true,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* The whole of one press of Run                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Limits on a workflow instance rather than on one run.
+ *
+ * Per-run guards bound one block. A graph of ten blocks under a $5 run limit is
+ * a $50 workflow with nothing standing between the operator and that number,
+ * which is what this bounds.
+ *
+ * **There is no monotone terminus here, and none is needed.** The run loop
+ * requires one because the loop itself manufactures the next unit of work: with
+ * every guard switched off nothing would ever end it, so `maxIterations` and
+ * `maxDurationMinutes` are the two quantities that only move one way and one of
+ * them must be set. An instance manufactures nothing. It is a finite graph
+ * created in a single pass, every member of which already carries its own
+ * terminus — enforced by `POST /api/runs`, and refused again as `no_terminus`
+ * above — so an instance with all three of these null still ends, when its last
+ * member does. These are *early* stops on a thing that was already going to
+ * stop, which is why all three are nullable together and why the illegal-pair
+ * check that `maxIterations` needs has no analogue here.
+ */
+export interface InstanceBudgetPolicy {
+  /** Everything this instance's blocks spend, together. null = no limit. */
+  maxInstanceCostUSD: number | null;
+  /** Stop the whole instance once the 5-hour window passes this (0–1). */
+  maxSessionFraction: number | null;
+  /** Stop the whole instance once the weekly window passes this (0–1). */
+  maxWeeklyFraction: number | null;
+}
+
+export interface InstanceProgress {
+  /**
+   * What the members' own CLIs measured, summed. A **floor**: a cycle in flight
+   * has emitted no `result`, so it contributes nothing here for its whole
+   * duration. Displayed, never guarded on.
+   */
+  spentUSD: number;
+  /**
+   * What the guard acts on: `spentUSD`, plus every member's reconciled estimate
+   * for cycles killed before they reported, plus what telemetry says the cycles
+   * in flight have cost so far. Equal to `spentUSD` when nothing is running and
+   * nothing was ever killed.
+   *
+   * The same display-versus-guard split `costUSD`/`costGuardUSD` makes for a
+   * window and `spentUSD`/`spentGuardUSD` makes for a run, for the same reason:
+   * what is shown stays a floor of measured fact, what is guarded on includes
+   * what could have been spent.
+   */
+  spentGuardUSD: number;
+}
+
+/** Nothing is set, so there is no guard to evaluate and no card to render. */
+export function instanceBudgetIsOff(policy: InstanceBudgetPolicy): boolean {
+  return (
+    policy.maxInstanceCostUSD === null &&
+    policy.maxSessionFraction === null &&
+    policy.maxWeeklyFraction === null
+  );
+}
+
+/**
+ * Whether one press of Run may put another block to work.
+ *
+ * Deliberately the same `BudgetVerdict`, the same `BudgetStopCode` vocabulary
+ * and the same `readWindowGuard` reading as the per-run guard above — an
+ * instance limit that used its own words for "no ceiling configured", or that
+ * compared against `fraction` where the run guard compares against
+ * `guardFraction`, would be a second set of budget rules to keep in step.
+ *
+ * What it does **not** share is the run guard's body, and the two differences
+ * are why: an instance has no terminus to require (see `InstanceBudgetPolicy`),
+ * and no `pause` disposition. Parking is for the one quantity that refills on
+ * its own, and it is a decision about *a run* — it yields the run's folder and
+ * keeps its checkout so the same conversation resumes later. An instance holds
+ * no folder and no session; "park the graph" would mean parking every member
+ * individually under limits none of them was given, so an instance that is over
+ * its budget stops, and starting again is a press of Run.
+ */
+export function evaluateInstanceBudget(
+  policy: InstanceBudgetPolicy,
+  snapshot: UsageSnapshot,
+  progress: InstanceProgress,
+): BudgetVerdict {
+  const meters: BudgetMeter[] = [];
+
+  if (policy.maxInstanceCostUSD !== null) {
+    meters.push({
+      label: "Spent by this workflow run",
+      // The guard's figure, so the card shows what the decision was made on —
+      // the same choice the run meters make.
+      value: progress.spentGuardUSD,
+      limit: policy.maxInstanceCostUSD,
+      unit: "usd",
+    });
+  }
+  if (policy.maxWeeklyFraction !== null && snapshot.weekly.guardFraction !== null) {
+    meters.push({
+      label: "Weekly window",
+      value: snapshot.weekly.guardFraction,
+      limit: policy.maxWeeklyFraction,
+      unit: "fraction",
+    });
+  }
+  if (
+    policy.maxSessionFraction !== null &&
+    snapshot.session.guardFraction !== null
+  ) {
+    meters.push({
+      label: "5-hour window",
+      value: snapshot.session.guardFraction,
+      limit: policy.maxSessionFraction,
+      unit: "fraction",
+    });
+  }
+
+  const block = (code: BudgetStopCode, reason: string): BudgetVerdict => ({
+    allowed: false,
+    code,
+    reason,
+    disposition: "stop",
+    meters,
+  });
+
+  // Spend first, for the reason the run guard checks its own spend before the
+  // windows: it is the one quantity here that only grows, so a verdict from it
+  // is settled, where a window fraction can fall back under the threshold on
+  // the next reading.
+  if (
+    policy.maxInstanceCostUSD !== null &&
+    progress.spentGuardUSD >= policy.maxInstanceCostUSD
+  ) {
+    return block(
+      "instance_cost",
+      `This workflow run has spent $${progress.spentGuardUSD.toFixed(2)} across its blocks, ` +
+        `reaching its $${policy.maxInstanceCostUSD.toFixed(2)} limit for the whole workflow.`,
+    );
+  }
+
+  if (policy.maxWeeklyFraction !== null) {
+    const weekly = readWindowGuard(snapshot.weekly, policy.maxWeeklyFraction);
+    if (weekly.state === "no-ceiling") {
+      return block(
+        "no_ceiling",
+        "This workflow stops at a share of the weekly window, but no weekly " +
+          "ceiling is configured. Set one in Settings (or run Calibrate) " +
+          "before using this guard.",
+      );
+    }
+    if (weekly.state === "over") {
+      return block(
+        "weekly_fraction",
+        `Weekly window is at ${pct(weekly.at)}, at or past this workflow's ${pct(policy.maxWeeklyFraction)} guard.`,
+      );
+    }
+  }
+
+  if (policy.maxSessionFraction !== null) {
+    const session = readWindowGuard(snapshot.session, policy.maxSessionFraction);
+    if (session.state === "no-ceiling") {
+      return block(
+        "no_ceiling",
+        "This workflow stops at a share of the 5-hour window, but no 5-hour " +
+          "ceiling is configured. Set one in Settings (or run Calibrate) " +
+          "before using this guard.",
+      );
+    }
+    if (session.state === "over") {
+      return block(
+        "session_fraction",
+        `5-hour window is at ${pct(session.at)}, at or past this workflow's ${pct(policy.maxSessionFraction)} guard.`,
+      );
+    }
+  }
+
+  return { allowed: true, meters };
+}
+
+/**
+ * Read an instance budget off the wire or out of a stored blob.
+ *
+ * Total and idempotent, for `normalizePolicy`'s reasons: it runs once on the
+ * saved form and again every time the stored row is read back, so a term that
+ * is not idempotent would turn a workflow that saved cleanly into one that
+ * cannot be started. `null`, `""`, `0` and a negative all mean **off**, which is
+ * this app's standing rule for every budget field — there is no default limit to
+ * restore, because a limit nobody typed is not a limit.
+ */
+export function normalizeInstanceBudget(raw: unknown): InstanceBudgetPolicy {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const frac = (v: unknown): number | null => {
+    const n = num(v);
+    if (n === null) return null;
+    // Accept either 0–1 or a percentage typed as 0–100, exactly as a run's
+    // fraction guards do — the form asks for a percentage.
+    return n > 1 ? Math.min(n / 100, 1) : n;
+  };
+
+  return {
+    maxInstanceCostUSD: num(o.maxInstanceCostUSD),
+    maxSessionFraction: frac(o.maxSessionFraction),
+    maxWeeklyFraction: frac(o.maxWeeklyFraction),
   };
 }
