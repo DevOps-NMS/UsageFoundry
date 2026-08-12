@@ -3,6 +3,7 @@ import { scanUsage } from "@/lib/transcripts";
 import { buildSnapshot } from "@/lib/windows";
 import { getSettings, limitConfig } from "@/lib/settings";
 import { readAccountProfile } from "@/lib/account";
+import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
 import { PROJECTS_DIR } from "@/lib/config";
 
@@ -11,9 +12,12 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const scan = await scanUsage();
-    const account = await readAccountProfile();
     const settings = getSettings();
+    const [scan, account, plan] = await Promise.all([
+      scanUsage(),
+      readAccountProfile(),
+      settings.planUsageFromApi ? planUsage() : Promise.resolve(null),
+    ]);
     const entries = settings.includeSidechains
       ? scan.entries
       : scan.entries.filter((e) => !e.isSidechain);
@@ -23,6 +27,7 @@ export async function GET() {
       limitConfig(settings),
       Date.now(),
       settings.sessionResetOverrideAt,
+      plan,
     );
 
     // Bounded by the snapshot's own window so the card describes the same five
@@ -42,10 +47,23 @@ export async function GET() {
         entryCount: entries.length,
         unpricedModels: scan.unpricedModels,
         scannedAt: scan.scannedAt,
+        // "Can this window show a percentage at all", which the provider's own
+        // reading answers without anything being configured — the whole point
+        // of it. Reading the snapshot rather than the settings is what keeps
+        // the "no ceilings" banner off a dashboard that is showing real
+        // percentages.
         hasSessionCeiling:
-          settings.sessionCostLimit !== null || settings.sessionTokenLimit !== null,
+          snapshot.session.fraction !== null ||
+          settings.sessionCostLimit !== null ||
+          settings.sessionTokenLimit !== null,
         hasWeeklyCeiling:
-          settings.weeklyCostLimit !== null || settings.weeklyTokenLimit !== null,
+          snapshot.weekly.fraction !== null ||
+          settings.weeklyCostLimit !== null ||
+          settings.weeklyTokenLimit !== null,
+        // Whether the setting is on, so the UI can tell "switched off" apart
+        // from "on, but the provider did not answer" — the second is worth a
+        // sentence and the first is not.
+        planUsageFromApi: settings.planUsageFromApi,
         reservedHeadroomFraction: settings.reservedHeadroomFraction ?? 0,
         // What the user typed, so the meters can name it alongside the reduced
         // ceiling they are actually measured against.

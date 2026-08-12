@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
-import type { UsageResponse, WindowStateDTO } from "@/lib/apiTypes";
+import type { PlanUsageDTO, UsageResponse, WindowStateDTO } from "@/lib/apiTypes";
 import {
   fmtDateTime,
   fmtDuration,
@@ -36,8 +36,23 @@ function ceilingDetail(
   w: WindowStateDTO,
   configured: number | null,
   reserve: number,
+  plan: PlanUsageDTO | null,
+  now: number,
 ): string {
   const reduced = reserve > 0 && configured !== null;
+
+  // The provider's own percentage has no ceiling behind it to describe, so
+  // this says where it came from and how old it is instead. Both matter: it
+  // covers surfaces the dollar figure above it cannot see, and it is cached
+  // for up to five minutes, so a reader reconciling it against a window that
+  // just moved needs to know they are looking at a reading, not a live tap.
+  if (w.fractionMetric === "plan") {
+    const age = plan ? ` Read ${fmtRelative(plan.fetchedAt, now)}.` : "";
+    return (
+      "Reported by Anthropic for this account, covering every Claude surface " +
+      `that shares the allowance — not only the turns counted above.${age}`
+    );
+  }
 
   if (w.fractionMetric === "cost") {
     return reduced
@@ -320,6 +335,19 @@ export default function Dashboard() {
 
   const { snapshot: s, meta, telemetry } = data;
   const noCeilings = !meta.hasSessionCeiling && !meta.hasWeeklyCeiling;
+  // Read off the windows rather than off the setting: the setting says we
+  // asked, this says we were answered.
+  const planPercentages =
+    s.session.fractionMetric === "plan" || s.weekly.fractionMetric === "plan";
+  // The exhaustion projection is the one thing here that still needs a number
+  // rather than a percentage — it extrapolates dollars and tokens per hour —
+  // so it stays unavailable on a provider reading alone, and has to say so in
+  // its own terms rather than borrowing `noCeilings`.
+  const noConfiguredCeilings =
+    meta.configuredCeilings.sessionCost === null &&
+    meta.configuredCeilings.weeklyCost === null &&
+    meta.configuredCeilings.sessionTokens === null &&
+    meta.configuredCeilings.weeklyTokens === null;
   const cacheShare =
     s.weekly.tokens > 0 ? s.weekly.agg.tokens.cacheRead / s.weekly.tokens : null;
   const current = breakdowns[dimension];
@@ -426,6 +454,8 @@ export default function Dashboard() {
                 ? meta.configuredCeilings.sessionTokens
                 : meta.configuredCeilings.sessionCost,
               meta.reservedHeadroomFraction,
+              s.plan,
+              s.now,
             )}
           />
 
@@ -438,13 +468,18 @@ export default function Dashboard() {
                   Against the raw-token ceiling: {fmtPct(s.session.tokenFraction)}
                 </div>
               )}
-            {/* Anthropic sends the real reset instant back on every API response
-                but writes it nowhere local, so this one is derived: the window
-                opens with your first turn and runs five hours. Say so next to
-                the time, or a few minutes' disagreement with `/usage` reads as
-                a bug rather than as the estimate it is. */}
-            {meta.sessionResetOverrideAt !== null &&
-            meta.sessionResetOverrideAt > s.now ? (
+            {/* Three different provenances for one clock, and they are worth
+                telling apart: the provider's own instant, a pinned one, and a
+                derived one that can sit minutes off `/usage`. Saying nothing
+                makes the third read as a bug rather than as the estimate it
+                is — and makes the first read as an estimate when it is not. */}
+            {s.plan?.session?.resetsAt ? (
+              <div>
+                Reset instant reported by Anthropic, so it matches{" "}
+                <span className="mono">/usage</span> exactly.
+              </div>
+            ) : meta.sessionResetOverrideAt !== null &&
+              meta.sessionResetOverrideAt > s.now ? (
               <div>
                 Window start taken from a{" "}
                 <Link href="/settings">manual reset</Link>, not from the
@@ -483,6 +518,8 @@ export default function Dashboard() {
                 ? meta.configuredCeilings.weeklyTokens
                 : meta.configuredCeilings.weeklyCost,
               meta.reservedHeadroomFraction,
+              s.plan,
+              s.now,
             )}
           />
           <div className="mt-3 space-y-1 text-xs text-ink-muted">
@@ -513,6 +550,21 @@ export default function Dashboard() {
                 </>
               )}
             </div>
+            {/* A wall that binds without ever reaching this meter: the weekly
+                allowance is split per model family on some plans, so Opus can
+                be full while the all-model window reads a quarter. The guard
+                stops on the worst of them, so name them rather than letting a
+                refusal arrive with nothing on screen behind it. */}
+            {s.plan && s.plan.scopedWeekly.length > 0 && (
+              <div className="tabular-nums">
+                Per-model weekly:{" "}
+                {s.plan.scopedWeekly
+                  .map((x) => `${x.label} ${fmtPct(x.window.utilization)}`)
+                  .join(" · ")}
+                . The bar above is the all-model window; a guard stops on
+                whichever is highest.
+              </div>
+            )}
           </div>
         </Card>
       </section>
@@ -523,14 +575,28 @@ export default function Dashboard() {
           between the title and the subject of the page. */}
       {noCeilings && (
         <Notice tone="warn">
-          <strong>No limit ceilings configured.</strong> Anthropic publishes no
-          numeric value for a Pro/Max limit and offers no endpoint to read one,
-          so percentages cannot be shown until you set a ceiling
-          {meta.account.label && (
-            <> — knowing you are on {meta.account.label} does not supply one</>
-          )}
-          . <Link href="/settings">Run Calibrate</Link> to derive one from your
-          own peak usage, or enter a value manually. Volumes and costs above are
+          <strong>No percentages available.</strong>{" "}
+          {meta.planUsageFromApi ? (
+            <>
+              Anthropic reports this account&rsquo;s own utilisation, but that
+              read did not answer — the credential Claude Code keeps on this
+              machine is missing or expired, or the request failed. Sign in with{" "}
+              <span className="mono">claude</span> and it will resume by itself.
+            </>
+          ) : (
+            <>
+              Reading the account&rsquo;s own utilisation is{" "}
+              <Link href="/settings">switched off</Link>, and Anthropic
+              publishes no numeric value for a Pro/Max limit
+              {meta.account.label && (
+                <> — knowing you are on {meta.account.label} does not supply one</>
+              )}
+              .
+            </>
+          )}{" "}
+          Until then a percentage needs a ceiling of your own:{" "}
+          <Link href="/settings">run Calibrate</Link> to derive one from your own
+          peak usage, or enter a value manually. Volumes and costs above are
           exact regardless.
         </Notice>
       )}
@@ -551,23 +617,36 @@ export default function Dashboard() {
           Rendered quiet so the conditional warnings above can outrank it;
           three equally loud warn blocks trained the eye to skip all three. */}
       <Notice quiet>
-        <strong>This covers Claude Code only.</strong> Your 5-hour and weekly
-        limits are shared with <strong>Cowork</strong>, Claude Desktop, web and
-        mobile, none of which write anything locally — so treat these figures as
-        a <em>floor</em> on your real consumption.
-        {meta.reservedHeadroomFraction > 0 ? (
+        <strong>Costs and volumes here cover Claude Code only.</strong> Your
+        5-hour and weekly limits are shared with <strong>Cowork</strong>, Claude
+        Desktop, web and mobile, none of which write anything locally — so treat
+        every dollar and token figure on this page as a <em>floor</em> on your
+        real consumption.
+        {/* Whether that blind spot also reaches the percentages is the whole
+            difference this reading makes, and it decides which of the two
+            pieces of advice below is the right one — reserving headroom
+            against a figure that already counts every surface would subtract
+            the same allowance twice. */}
+        {planPercentages ? (
           <>
             {" "}
-            You have reserved{" "}
+            The <em>percentages</em> do not have that gap: they are Anthropic&rsquo;s
+            own, for the whole account. Reserved headroom no longer applies to
+            them and is not being subtracted.
+          </>
+        ) : meta.reservedHeadroomFraction > 0 ? (
+          <>
+            {" "}
+            The percentages have the same gap. You have reserved{" "}
             <strong>{fmtPct(meta.reservedHeadroomFraction)}</strong> of each
             window for it, so the ceilings above are reduced accordingly.
           </>
         ) : (
           <>
             {" "}
-            <Link href="/settings">Reserve headroom</Link> if you use those too —
-            otherwise a guard can permit a run while your real window is already
-            close to full.
+            So do the percentages. <Link href="/settings">Reserve headroom</Link>{" "}
+            if you use those too — otherwise a guard can permit a run while your
+            real window is already close to full.
           </>
         )}
       </Notice>
@@ -600,7 +679,7 @@ export default function Dashboard() {
               >
                 at this burn rate, around {fmtDateTime(s.projectedExhaustionAt)}
               </span>
-            ) : noCeilings ? (
+            ) : noConfiguredCeilings ? (
               "needs a configured ceiling"
             ) : (
               "not projected to run out"
@@ -612,8 +691,8 @@ export default function Dashboard() {
           <CardTitle>Cache reads</CardTitle>
           <Stat>{fmtPct(cacheShare)}</Stat>
           <StatSub>
-            of tokens · they bill at 0.1×, which is why the meters are
-            cost-denominated
+            of tokens · they bill at 0.1×, which is why the dollar figures
+            track work and the token counts do not
           </StatSub>
         </Card>
 

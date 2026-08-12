@@ -19,6 +19,40 @@ import {
 export const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * One limit window as the provider itself reports it.
+ *
+ * This is the only figure here that is not derived. Everything else in this
+ * module is our arithmetic over local transcripts measured against a ceiling
+ * somebody typed; this is Anthropic's own answer for the account, covering
+ * every surface that shares the allowance — Claude Code, the web app, Desktop,
+ * Cowork — including all the ones that leave nothing on this disk to read.
+ */
+export interface PlanWindow {
+  /** 0–1. The provider reports a percentage; `planUsage.ts` divides. */
+  utilization: number;
+  /** Epoch ms at which the window resets, or null when none is named. */
+  resetsAt: number | null;
+}
+
+export interface PlanUsage {
+  /** The 5-hour window. */
+  session: PlanWindow | null;
+  /** The seven-day window. */
+  weekly: PlanWindow | null;
+  /**
+   * Weekly walls scoped to one model family ("Opus", "Fable").
+   *
+   * Each is a ceiling in its own right and can stop a run while the all-model
+   * weekly window is nowhere near full, so the guard takes the worst of them
+   * (`guardFraction`) while the meter keeps reporting the window it is
+   * labelled with. Empty on an account that has none.
+   */
+  scopedWeekly: Array<{ label: string; window: PlanWindow }>;
+  /** Epoch ms this was read from the provider — it is cached, so it ages. */
+  fetchedAt: number;
+}
+
 export interface Aggregate {
   tokens: TokenCounts;
   costUSD: number;
@@ -177,19 +211,28 @@ export interface WindowState {
   /** Equivalent API cost in the window — the cache-weighted measure. */
   costUSD: number;
   /**
-   * Primary utilisation. Cost-denominated when a cost ceiling exists, falling
-   * back to tokens otherwise.
+   * Primary utilisation. The provider's own figure when we have it, then the
+   * cost ceiling, then the token ceiling.
    *
-   * Cost is preferred because a Claude Code workload is overwhelmingly cache
-   * reads, which bill at 0.1x. Counting them at face value against a raw-token
-   * ceiling measures conversation length far more than it measures work, and
-   * the ratio swings with context size. Cost already applies the 0.1x / 1.25x
-   * / 2x multipliers, so it is the stabler proxy for "how much of my plan have
-   * I used".
+   * The provider's figure leads because it is the answer rather than an
+   * estimate of it: no price table, no ceiling to guess, and it counts the
+   * surfaces this app cannot see. Measured on this machine, the derived
+   * reading against a hand-typed ceiling was low by ~4x — right arithmetic,
+   * wrong denominator — which is exactly the failure a percentage cannot
+   * survive.
+   *
+   * Of the two derived readings cost is preferred, because a Claude Code
+   * workload is overwhelmingly cache reads, which bill at 0.1x. Counting them
+   * at face value against a raw-token ceiling measures conversation length far
+   * more than it measures work, and the ratio swings with context size. Cost
+   * already applies the 0.1x / 1.25x / 2x multipliers, so it is the stabler
+   * proxy for "how much of my plan have I used".
    */
   fraction: number | null;
   /** Which metric `fraction` was derived from. */
-  fractionMetric: "cost" | "tokens" | null;
+  fractionMetric: "plan" | "cost" | "tokens" | null;
+  /** The provider's own utilisation for this window, when it answered. */
+  planFraction: number | null;
   /** Utilisation against the cost ceiling, when one is configured. */
   costFraction: number | null;
   /** Utilisation against the token ceiling, when one is configured. */
@@ -203,11 +246,19 @@ export interface WindowState {
    * full — the meter shows what is known to have been spent, the guard acts on
    * what could have been. The dashboard renders the gap rather than letting
    * the two silently disagree.
+   *
+   * On the provider's own figure the same split still applies, for a different
+   * reason: the weekly meter reports the all-model window it is labelled with,
+   * while this takes the worst of that and every model-scoped weekly wall,
+   * because being cut off by the Opus week is being cut off.
    */
   guardFraction: number | null;
-  /** The ceiling backing `fraction`. */
+  /**
+   * The ceiling backing `fraction`, or null when the provider supplied the
+   * fraction directly — it names a percentage and no number behind it.
+   */
   limit: number | null;
-  limitMetric: "tokens" | "cost" | null;
+  limitMetric: "plan" | "tokens" | "cost" | null;
 }
 
 export interface WeeklyAnchor {
@@ -296,6 +347,14 @@ export interface UsageSnapshot {
   /** Cost by reasoning effort — usually the largest single lever. */
   byEffort: Array<{ effort: string; agg: Aggregate }>;
   totalCostUSD: number;
+  /**
+   * The provider's own reading, when it answered, so the UI can say how old it
+   * is and name the model-scoped weekly walls that never reach a meter.
+   *
+   * It is not a fourth cost source and is never added to anything: it carries
+   * percentages and reset instants, no money and no tokens.
+   */
+  plan: PlanUsage | null;
 }
 
 export function buildSnapshot(
@@ -303,10 +362,17 @@ export function buildSnapshot(
   limits: LimitConfig,
   now = Date.now(),
   sessionResetAt: number | null = null,
+  plan: PlanUsage | null = null,
 ): UsageSnapshot {
-  const blocks = buildSessionBlocks(entries, now, sessionResetAt);
+  // The provider's own reset instant outranks the operator's, because
+  // `sessionResetOverrideAt` exists only as a way to hand-correct a boundary
+  // this app could not observe. Now that it can be observed, a stale typed
+  // value must not keep splitting blocks against a window that has moved.
+  const effectiveReset = plan?.session?.resetsAt ?? sessionResetAt;
+
+  const blocks = buildSessionBlocks(entries, now, effectiveReset);
   const activeBlock = blocks.find((b) => b.isActive) ?? null;
-  const anchor = anchorOf(sessionResetAt);
+  const anchor = anchorOf(effectiveReset);
   // Live only until the reset it names; a stale value keeps splitting history
   // but must never re-open a window that has already rolled over.
   const anchorIsCurrent =
@@ -323,6 +389,9 @@ export function buildSnapshot(
     agg: Aggregate,
     costLimit: number | null,
     tokenLimit: number | null,
+    planWindow: PlanWindow | null,
+    /** Worst of every wall on this window; defaults to the window's own. */
+    planGuard: number | null = null,
   ): WindowState => {
     const tokens = totalTokens(agg.tokens);
     const costFraction = fractionOf(agg.costUSD, costLimit);
@@ -332,6 +401,7 @@ export function buildSnapshot(
     // guardFraction is null exactly when fraction is, and the "no ceiling
     // configured" refusal keeps working off either.
     const guardCostFraction = fractionOf(agg.costGuardUSD, costLimit);
+    const planFraction = planWindow ? planWindow.utilization : null;
 
     return {
       label,
@@ -340,13 +410,34 @@ export function buildSnapshot(
       agg,
       tokens,
       costUSD: agg.costUSD,
-      fraction: costFraction ?? tokenFraction,
-      fractionMetric: useCost ? "cost" : tokenFraction !== null ? "tokens" : null,
+      fraction: planFraction ?? costFraction ?? tokenFraction,
+      fractionMetric:
+        planFraction !== null
+          ? "plan"
+          : useCost
+            ? "cost"
+            : tokenFraction !== null
+              ? "tokens"
+              : null,
+      planFraction,
       costFraction,
       tokenFraction,
-      guardFraction: guardCostFraction ?? tokenFraction,
-      limit: useCost ? costLimit : tokenLimit,
-      limitMetric: useCost ? "cost" : tokenFraction !== null ? "tokens" : null,
+      // The unpriced-model fallback has nothing to say about a first-party
+      // figure: it exists because our price table can fail to place a model,
+      // and the provider's own accounting cannot.
+      guardFraction:
+        planFraction !== null
+          ? Math.max(planFraction, planGuard ?? 0)
+          : (guardCostFraction ?? tokenFraction),
+      limit: planFraction !== null ? null : useCost ? costLimit : tokenLimit,
+      limitMetric:
+        planFraction !== null
+          ? "plan"
+          : useCost
+            ? "cost"
+            : tokenFraction !== null
+              ? "tokens"
+              : null,
     };
   };
 
@@ -361,8 +452,21 @@ export function buildSnapshot(
       : now;
   const sessionAgg = activeBlock ? activeBlock.agg : ZERO_AGGREGATE;
 
-  const wkStart = weekStart(now, limits.weeklyAnchor);
-  const wkEnd = limits.weeklyAnchor ? wkStart + WEEK_MS : now;
+  // Same precedence as the session reset, and it retires the same guess: with
+  // no `weeklyAnchor` configured this window has no reset instant at all and
+  // reports a trailing total, which is a different window from the one the
+  // provider is enforcing. Its reset instant makes them the same window.
+  const planWeeklyReset = plan?.weekly?.resetsAt ?? null;
+  const wkStart =
+    planWeeklyReset !== null
+      ? planWeeklyReset - WEEK_MS
+      : weekStart(now, limits.weeklyAnchor);
+  const wkEnd =
+    planWeeklyReset !== null
+      ? planWeeklyReset
+      : limits.weeklyAnchor
+        ? wkStart + WEEK_MS
+        : now;
   const weekEntries = entries.filter((e) => e.ts >= wkStart);
   const weeklyAgg = aggregate(weekEntries);
 
@@ -373,15 +477,20 @@ export function buildSnapshot(
     sessionAgg,
     limits.sessionCostLimit,
     limits.sessionTokenLimit,
+    plan?.session ?? null,
   );
 
   const weekly = makeWindow(
-    limits.weeklyAnchor ? "Weekly quota" : "Trailing 7 days",
+    planWeeklyReset !== null || limits.weeklyAnchor
+      ? "Weekly quota"
+      : "Trailing 7 days",
     wkStart,
     wkEnd,
     weeklyAgg,
     limits.weeklyCostLimit,
     limits.weeklyTokenLimit,
+    plan?.weekly ?? null,
+    plan ? Math.max(0, ...plan.scopedWeekly.map((s) => s.window.utilization)) : null,
   );
 
   // Burn rate over the trailing hour, which tracks a bursty agent workload far
@@ -451,5 +560,6 @@ export function buildSnapshot(
     bySkill,
     byEffort,
     totalCostUSD: entries.reduce((s, e) => s + e.costUSD, 0),
+    plan,
   };
 }

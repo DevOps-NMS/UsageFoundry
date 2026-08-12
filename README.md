@@ -125,8 +125,13 @@ adjustment to a token weight can repair a guessed denominator.
 
 Three things to know about that source:
 
-- **It is percentages, not numbers.** There is still no ceiling to read, so
-  nothing here populates a ceiling and **Settings → Calibrate** is unchanged.
+- **It is percentages, not numbers.** There is still no ceiling to read, and
+  nothing here ever populates one by itself. **Settings → Calibrate** can now
+  *divide* by it — a window that cost $71 and took 15% of the allowance implies
+  a ~$474 ceiling — which is a measurement rather than the observed-peak lower
+  bound below it. It errs the same way and for a new reason: the cost is Claude
+  Code's and the percentage is every surface's, so a window that also held web
+  or Desktop work divides part of the spend by all of the usage.
 - **It can be unreachable** — an expired login, an offline container, or its own
   rate limiter (a handful of requests inside a minute earns a `429`). It is
   therefore cached on Claude Code's own cadence, a failure re-serves the last

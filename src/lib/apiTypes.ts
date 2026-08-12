@@ -29,7 +29,15 @@ export interface WindowStateDTO {
   tokens: number;
   costUSD: number;
   fraction: number | null;
-  fractionMetric: "cost" | "tokens" | null;
+  fractionMetric: "plan" | "cost" | "tokens" | null;
+  /**
+   * What Anthropic itself reports for this window, 0–1.
+   *
+   * Present whenever the provider answered, and then it *is* `fraction` — a
+   * measured percentage outranks one derived from a typed ceiling. Null falls
+   * back to the derived readings below.
+   */
+  planFraction: number | null;
   costFraction: number | null;
   tokenFraction: number | null;
   /**
@@ -40,7 +48,21 @@ export interface WindowStateDTO {
    */
   guardFraction: number | null;
   limit: number | null;
-  limitMetric: "tokens" | "cost" | null;
+  limitMetric: "plan" | "tokens" | "cost" | null;
+}
+
+/** Mirror of `PlanWindow` in `windows.ts`. */
+export interface PlanWindowDTO {
+  utilization: number;
+  resetsAt: number | null;
+}
+
+/** Mirror of `PlanUsage` in `windows.ts`. */
+export interface PlanUsageDTO {
+  session: PlanWindowDTO | null;
+  weekly: PlanWindowDTO | null;
+  scopedWeekly: Array<{ label: string; window: PlanWindowDTO }>;
+  fetchedAt: number;
 }
 
 export interface SessionBlockDTO {
@@ -67,6 +89,8 @@ export interface SnapshotDTO {
   bySkill: Array<{ skill: string; agg: AggregateDTO }>;
   byEffort: Array<{ effort: string; agg: AggregateDTO }>;
   totalCostUSD: number;
+  /** The provider's own reading, when it answered. Never a cost. */
+  plan: PlanUsageDTO | null;
 }
 
 export interface UsageResponse {
@@ -77,8 +101,14 @@ export interface UsageResponse {
     entryCount: number;
     unpricedModels: string[];
     scannedAt: number;
+    /**
+     * Whether the window can show a percentage at all — true when the provider
+     * answered, whatever is or is not configured.
+     */
     hasSessionCeiling: boolean;
     hasWeeklyCeiling: boolean;
+    /** Whether the provider's own reading was asked for at all. */
+    planUsageFromApi: boolean;
     /** Headroom reserved for surfaces this tool cannot observe (0–1). */
     reservedHeadroomFraction: number;
     /**
@@ -587,6 +617,8 @@ export interface SettingsDTO {
   /** Epoch ms of a provider-side 5-hour reset the transcripts cannot show. */
   sessionResetOverrideAt: number | null;
   reservedHeadroomFraction: number | null;
+  /** Read the account's own utilisation from Anthropic rather than deriving it. */
+  planUsageFromApi: boolean;
   defaultPermissionMode: string;
   defaultModel: string | null;
   continuationPrompt: string;
