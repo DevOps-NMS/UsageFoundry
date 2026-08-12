@@ -2,12 +2,24 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import type { ChatDTO, ChatListEntryDTO, ChatProposalDTO } from "@/lib/apiTypes";
+import type {
+  ChatDTO,
+  ChatListEntryDTO,
+  ChatMessageDTO,
+  ChatProposalDTO,
+} from "@/lib/apiTypes";
 import { chatRequest } from "@/lib/chatRequest";
-import { fmtRelative, fmtUSD, pollFailureMessage } from "@/lib/format";
+import {
+  fmtDateTime,
+  fmtDuration,
+  fmtRelative,
+  fmtUSD,
+  pollFailureMessage,
+} from "@/lib/format";
+import { Markdown } from "@/components/Markdown";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
-import { Card, CardTitle, Empty } from "@/components/ui/Card";
+import { Card, CardTitle, Empty, type CardEmphasis } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
 
@@ -17,12 +29,26 @@ import { Notice } from "@/components/ui/Notice";
  * Two halves that mean different things and are kept visually apart for that
  * reason: a conversation, which costs money and produces text, and a list of
  * proposals, which costs nothing until a person clicks. Nothing in the left
- * half starts work. Everything that does is a button in the right half.
+ * half starts work. Everything that does is a button in the right half — which
+ * is why a proposal is drawn as an object with a border, a folder and a guard
+ * set rather than as another paragraph in the thread, and why the approve row
+ * says how many unattended runs the click starts.
  */
 
 /** Faster only while a turn is in flight — the same rule the dashboard follows. */
 const POLL_IDLE_MS = 10_000;
 const POLL_ACTIVE_MS = 3_000;
+
+/**
+ * Within this of the bottom counts as reading the latest, so an arriving turn
+ * follows the reader down. Past it the page must not move at all: a poll that
+ * scrolls somebody out of the paragraph they are reading is the one jank this
+ * page can produce on its own.
+ */
+const NEAR_BOTTOM_PX = 48;
+
+/** About ten lines. Past that the composer scrolls rather than eating the thread. */
+const COMPOSER_MAX_PX = 208;
 
 const PROPOSAL_TONE = {
   pending: "accent",
@@ -31,20 +57,82 @@ const PROPOSAL_TONE = {
   failed: "danger",
 } as const;
 
+/**
+ * Complete class strings per state, never interpolated — Tailwind scans source
+ * as text, so a computed class name emits nothing at all and does it silently.
+ * Same rule the kit's own tone maps follow.
+ */
+const PROPOSAL_ROW: Record<"selected" | "idle", string> = {
+  selected: "border-accent bg-accent-dim/40 shadow-e1",
+  idle: "border-line bg-inset hover:border-line-strong",
+};
+
+const GUARD_TONE: Record<"missing" | "set", string> = {
+  missing: "text-danger",
+  set: "text-ink-muted",
+};
+
+/**
+ * `bg-transparent` and `font-normal` are not redundant: the legacy stylesheet
+ * still styles every bare `button` as a filled accent control, so a row that
+ * names no background gets one.
+ */
+const CHAT_ROW: Record<"current" | "other", string> = {
+  current: "border-l-accent bg-accent-dim/40 text-ink",
+  other: "border-l-transparent bg-transparent text-ink-muted hover:bg-inset hover:text-ink",
+};
+
+/** Shown by fading in place rather than by mounting, so nothing pops. */
+const JUMP_STATE: Record<"shown" | "hidden", string> = {
+  shown: "translate-y-0 opacity-100",
+  hidden: "pointer-events-none translate-y-1 opacity-0",
+};
+
+/** The card rises when it has something waiting for a decision. */
+const PROPOSALS_EMPHASIS: Record<"waiting" | "clear", CardEmphasis> = {
+  waiting: "primary",
+  clear: "default",
+};
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 export default function ChatPage() {
   const [chat, setChat] = useState<ChatDTO | null>(null);
   const [chats, setChats] = useState<ChatListEntryDTO[]>([]);
   const [draft, setDraft] = useState("");
+  // Three action errors rather than one, because each belongs beside the
+  // control that failed: a refused approval reported above the composer is a
+  // sentence about a button that is not on screen. `pollError` is separate
+  // again — the handlers clear theirs on every click, and a poll lands between
+  // clicks, so one state would have each wiping the other's sentence.
   const [error, setError] = useState<string | null>(null);
-  // Separate from `error`, which the send and approve handlers own: they clear
-  // theirs on every click, and a poll lands between clicks — one state would
-  // have each wiping the other's sentence seconds after it appeared.
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [decideError, setDecideError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [atBottom, setAtBottom] = useState(true);
+  const [unseen, setUnseen] = useState(0);
+
   const threadRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  // The scroll position the *effect* reads. State drives the button; a ref is
+  // what tells an arriving message whether the reader was at the bottom, and it
+  // must not be one render behind.
+  const atBottomRef = useRef(true);
+  const seen = useRef<{ chatId: string | null; count: number }>({
+    chatId: null,
+    count: 0,
+  });
 
   const chatId = chat?.id ?? null;
+  const thinking = chat?.status === "thinking";
+  const messageCount = chat?.messages.length ?? 0;
 
   /**
    * Neither failure may be dropped. A poll that returns early leaves the last
@@ -99,18 +187,84 @@ export default function ChatPage() {
     return () => clearInterval(t);
   }, [chatId, chat?.status, load]);
 
+  const scrollToLatest = useCallback((smooth: boolean) => {
+    const el = threadRef.current;
+    if (!el) return;
+    // `behavior` is not covered by the reduced-motion rule in globals.css —
+    // that one can only flatten CSS transitions, and this is a scroll.
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: smooth && !prefersReducedMotion() ? "smooth" : "auto",
+    });
+    atBottomRef.current = true;
+    setAtBottom(true);
+    setUnseen(0);
+  }, []);
+
+  const onScroll = () => {
+    const el = threadRef.current;
+    if (!el) return;
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
+    atBottomRef.current = near;
+    setAtBottom(near);
+    if (near) setUnseen(0);
+  };
+
+  /**
+   * The one place the thread is allowed to move on its own.
+   *
+   * A poll that adds nothing moves nothing, and a poll that adds a turn moves
+   * the view only for a reader who was already at the bottom. Everyone else
+   * gets a count on the jump control instead — the alternative is being pulled
+   * out of the paragraph you were reading every three seconds while a turn
+   * lands.
+   */
   useEffect(() => {
-    threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight });
-  }, [chat?.messages.length, chat?.status]);
+    const el = threadRef.current;
+    if (!el) return;
+    if (seen.current.chatId !== chatId) {
+      // A different conversation opens at its latest message, however the last
+      // one was left.
+      seen.current = { chatId, count: messageCount };
+      el.scrollTo({ top: el.scrollHeight });
+      atBottomRef.current = true;
+      setAtBottom(true);
+      setUnseen(0);
+      return;
+    }
+    const added = messageCount - seen.current.count;
+    seen.current.count = messageCount;
+    if (added <= 0) return;
+    if (atBottomRef.current) scrollToLatest(true);
+    else setUnseen((n) => n + added);
+  }, [chatId, messageCount, scrollToLatest]);
+
+  // The waiting row is content too: it appears under the message just sent, and
+  // for a reader at the bottom it should not be the thing that is cut off.
+  useEffect(() => {
+    if (thinking && atBottomRef.current) scrollToLatest(false);
+  }, [thinking, scrollToLatest]);
+
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
+  }, [draft]);
 
   const send = async () => {
     const message = draft.trim();
-    if (!message || !chatId || busy) return;
+    // `thinking` is checked here and not only on the button: the composer stays
+    // usable while a turn runs so a reply can be written, and Enter must not
+    // send into the guard that keeps one billed child per conversation.
+    if (!message || !chatId || busy || thinking) return;
     setBusy(true);
-    setError(null);
+    setSendError(null);
     try {
       const result = await chatRequest(`/api/chat/${chatId}/message`, { message });
-      if (!result.ok) setError(result.error ?? "The message could not be sent.");
+      // The draft is cleared on success only. A failed send that ate the text
+      // is a failure the operator cannot retry.
+      if (!result.ok) setSendError(result.error ?? "The message could not be sent.");
       else {
         setDraft("");
         if (result.chat) setChat(result.chat);
@@ -135,13 +289,13 @@ export default function ChatPage() {
   const stop = async () => {
     if (!chatId || busy) return;
     setBusy(true);
-    setError(null);
+    setSendError(null);
     const res = await fetch(`/api/chat/${chatId}/cancel`, { method: "POST" });
     const data = (await res.json().catch(() => ({}))) as {
       chat?: ChatDTO;
       error?: string;
     };
-    if (!res.ok) setError(data.error ?? "The turn could not be stopped.");
+    if (!res.ok) setSendError(data.error ?? "The turn could not be stopped.");
     else if (data.chat) setChat(data.chat);
     setBusy(false);
   };
@@ -149,10 +303,10 @@ export default function ChatPage() {
   const decide = async (action: "approve" | "reject", ids: string[]) => {
     if (!chatId || ids.length === 0 || busy) return;
     setBusy(true);
-    setError(null);
+    setDecideError(null);
     try {
       const result = await chatRequest(`/api/chat/${chatId}/proposals`, { action, ids });
-      if (!result.ok) setError(result.error ?? "That could not be applied.");
+      if (!result.ok) setDecideError(result.error ?? "That could not be applied.");
       else {
         setSelected(new Set());
         if (result.chat) setChat(result.chat);
@@ -163,17 +317,53 @@ export default function ChatPage() {
   };
 
   const newChat = async () => {
-    const res = await fetch("/api/chat", { method: "POST" });
-    if (!res.ok) return;
-    const data = (await res.json()) as { chat: ChatDTO };
-    setChat(data.chat);
-    setSelected(new Set());
-    void load(null);
+    setError(null);
+    try {
+      const res = await fetch("/api/chat", { method: "POST" });
+      const data = (await res.json().catch(() => ({}))) as {
+        chat?: ChatDTO;
+        error?: string;
+      };
+      // Reported rather than returned from silently: a New chat button that
+      // does nothing at all reads as a broken page.
+      if (!res.ok || !data.chat) {
+        setError(data.error ?? "A new chat could not be started.");
+        return;
+      }
+      setChat(data.chat);
+      setSelected(new Set());
+      void load(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   };
 
-  const pending = (chat?.proposals ?? []).filter((p) => p.status === "pending");
-  const decided = (chat?.proposals ?? []).filter((p) => p.status !== "pending");
-  const thinking = chat?.status === "thinking";
+  const proposals = chat?.proposals ?? [];
+  const pending = proposals.filter((p) => p.status === "pending");
+  const decided = proposals.filter((p) => p.status !== "pending");
+  const allSelected = pending.length > 0 && selected.size === pending.length;
+  const showJump = !atBottom && messageCount > 0;
+
+  const lastMessage = messageCount > 0 ? chat?.messages[messageCount - 1] : undefined;
+  // A turn that ends badly is written to the row *and* appended to the thread,
+  // so rendering both says it twice. This is the belt for the case where only
+  // the row carries it — and it belongs at the end of the conversation, where
+  // the turn failed, rather than at the top of the page.
+  const turnFailure =
+    chat?.status === "failed" && chat.error && chat.error !== lastMessage?.text
+      ? chat.error
+      : null;
+  // The turn started when the message it is answering was written.
+  const waitingSince = lastMessage?.ts ?? chat?.updatedAt ?? Date.now();
+
+  // What the click does, counted, above the button that does it. "Approve"
+  // alone is a word; this is the sentence a person needs before pressing it.
+  const approveConsequence =
+    selected.size === 0
+      ? "Approving starts each one as an unattended run under the guards shown on it."
+      : selected.size === 1
+        ? "Approve starts one unattended run that spends real money, under the guards shown on it."
+        : `Approve starts ${selected.size} unattended runs that spend real money, under the guards shown on each.`;
 
   const toggle = (id: string) => {
     setSelected((prev) => {
@@ -188,10 +378,10 @@ export default function ChatPage() {
     <>
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <h1 className="text-lg font-semibold tracking-tight">Orchestrator</h1>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-3">
           {chat && chat.costUSD > 0 && (
-            <span className="text-xs text-ink-muted">
-              This chat has spent {fmtUSD(chat.costUSD)}
+            <span className="text-xs tabular-nums text-ink-muted">
+              {fmtUSD(chat.costUSD)} this chat
             </span>
           )}
           <Button variant="secondary" onClick={() => void newChat()}>
@@ -201,91 +391,125 @@ export default function ChatPage() {
       </div>
 
       <Notice tone="info" quiet>
-        <strong>Nothing here starts a run.</strong> The chat can only propose
-        work; each proposal waits for you to approve it, and it then runs under
-        the guards of the template it names, or under the default guard set in{" "}
-        <Link href="/settings">Settings</Link> when it names none — never under
-        anything the chat chose. A chat turn spends against the same 5-hour
-        window as everything else, and its cost is shown here only, never added
-        to a run&rsquo;s or to the dashboard meters.
-        <br />
-        The chat itself runs with no tool restrictions, so it can read, run
-        commands and reach GitHub while it works out what to propose. It is
-        instructed not to do the work — that instruction, not a permission mode,
-        is what keeps it out of your checkouts.
+        <p>
+          <strong>Nothing here starts a run.</strong> The chat can only propose
+          work; each proposal waits for you to approve it, and it then runs under
+          the guards of the template it names, or under the default guard set in{" "}
+          <Link href="/settings">Settings</Link> when it names none — never under
+          anything the chat chose.
+        </p>
+        <p className="mt-2">
+          The chat itself runs with no tool restrictions, so it can read, run
+          commands and reach GitHub while it works out what to propose; the
+          instruction not to do the work, rather than a permission mode, is what
+          keeps it out of your checkouts. Its turns spend against the same
+          5-hour window as everything else, and that cost is shown here only —
+          never added to a run&rsquo;s, or to the dashboard meters.
+        </p>
       </Notice>
 
       {pollError && <Notice tone="danger">{pollError}</Notice>}
       {error && <Notice tone="danger">{error}</Notice>}
-      {chat?.error && chat.status === "failed" && (
-        <Notice tone="danger">{chat.error}</Notice>
-      )}
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <Card emphasis="primary" className="flex min-h-[60vh] flex-col">
-          <div
-            ref={threadRef}
-            className="mb-3 flex-1 overflow-y-auto"
-            style={{ maxHeight: "60vh" }}
-          >
-            {chat && chat.messages.length === 0 ? (
-              <Empty>
-                Ask it to look at something — &ldquo;check the open issues on
-                usagefoundry and propose a run for each bug&rdquo;.
-              </Empty>
-            ) : (
-              <div className="flex flex-col gap-3">
-                {chat?.messages.map((m) => (
-                  <Message key={m.id} role={m.role} text={m.text} ts={m.ts} />
-                ))}
-                {thinking && (
-                  // `thinking` is only ever as fresh as the last poll that
-                  // worked, so once one has failed this may no longer be true.
-                  <div className="text-sm text-ink-faint">
-                    {pollError
-                      ? "Was thinking when the last refresh failed — state unknown."
-                      : "Thinking…"}
+        <Card emphasis="primary" className="flex h-[68vh] min-h-[26rem] flex-col">
+          <div className="relative min-h-0 flex-1">
+            <div ref={threadRef} onScroll={onScroll} className="h-full overflow-y-auto pr-1">
+              {/* `additions` only: the waiting row's elapsed time changes every
+                  second inside this region, and the default `additions text`
+                  would read the whole thing out again each time. */}
+              <div
+                role="log"
+                aria-live="polite"
+                aria-relevant="additions"
+                aria-label="Conversation"
+                className="flex flex-col"
+              >
+                {chat === null ? (
+                  <div className="py-10 text-center text-sm text-ink-muted">
+                    {pollError ? "The conversation could not be loaded." : "Loading…"}
+                  </div>
+                ) : messageCount === 0 ? (
+                  <div className="px-2 py-10 text-center">
+                    <p className="text-sm text-ink">Nothing asked yet</p>
+                    <p className="mx-auto mt-1 max-w-[46ch] text-xs leading-normal text-ink-muted">
+                      Ask it to look at something — &ldquo;check the open issues
+                      on usagefoundry and propose a run for each bug&rdquo;.
+                    </p>
+                  </div>
+                ) : (
+                  chat.messages.map((m, i) => (
+                    <Message
+                      key={m.id}
+                      message={m}
+                      grouped={i > 0 && chat.messages[i - 1].role === m.role}
+                    />
+                  ))
+                )}
+
+                {thinking && <Waiting since={waitingSince} stale={pollError !== null} />}
+
+                {turnFailure && (
+                  <div className="mt-5 max-w-[70ch] rounded-sm border-l-2 border-l-danger bg-inset px-3 py-2 text-xs leading-normal text-danger">
+                    {turnFailure}
                   </div>
                 )}
               </div>
-            )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => scrollToLatest(true)}
+              aria-hidden={!showJump}
+              tabIndex={showJump ? 0 : -1}
+              className={`absolute right-3 bottom-3 flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 text-xs font-medium text-ink shadow-e2 transition duration-200 ease-out hover:border-ink-faint ${
+                JUMP_STATE[showJump ? "shown" : "hidden"]
+              }`}
+            >
+              <ChevronDownIcon />
+              {unseen > 0 ? `${unseen} new` : "Latest"}
+            </button>
           </div>
 
-          <div className="border-t border-line pt-3">
+          <div className="mt-4 border-t border-line pt-4">
             <textarea
-              className="w-full resize-y rounded-sm border border-line bg-inset px-2.5 py-2 text-sm text-ink focus:border-accent focus:outline-none focus:ring-[3px] focus:ring-accent-dim"
+              ref={composerRef}
+              aria-label="Message the orchestrator"
+              className="min-h-[4.5rem] w-full resize-none overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 font-sans text-sm leading-normal text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-[3px] focus:ring-accent-dim"
               rows={3}
               placeholder="Ask the orchestrator to look at something and propose runs…"
               value={draft}
-              disabled={thinking}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void send();
-                }
+                // Enter sends, Shift+Enter is a newline. `isComposing` is the
+                // one that is not obvious: an IME takes Enter to accept the
+                // candidate it is showing, and sending there posts half a word.
+                if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+                e.preventDefault();
+                void send();
               }}
             />
             <ButtonRow className="mt-2">
               <Button onClick={() => void send()} disabled={thinking || busy || !draft.trim()}>
-                {thinking ? "Working…" : "Send"}
+                Send
               </Button>
               {thinking && (
                 <Button variant="secondary" disabled={busy} onClick={() => void stop()}>
                   Stop
                 </Button>
               )}
-              <Hint className="mt-0">
+              <span className="ml-auto text-xs text-ink-muted">
                 {thinking
-                  ? "Stop ends this turn and signals the process answering it."
-                  : "Enter sends, Shift+Enter adds a line."}
-              </Hint>
+                  ? "Stop ends this turn and signals the process answering it"
+                  : "Enter sends · Shift+Enter for a new line"}
+              </span>
             </ButtonRow>
+            {sendError && <Hint tone="danger">{sendError}</Hint>}
           </div>
         </Card>
 
         <div className="flex flex-col gap-4">
-          <Card>
+          <Card emphasis={PROPOSALS_EMPHASIS[pending.length > 0 ? "waiting" : "clear"]}>
             <CardTitle>
               Proposals
               {pending.length > 0 && <Badge tone="accent">{pending.length} waiting</Badge>}
@@ -305,39 +529,40 @@ export default function ChatPage() {
                     />
                   ))}
                 </div>
-                <ButtonRow className="mt-3">
-                  <Button
-                    disabled={busy || selected.size === 0}
-                    onClick={() => void decide("approve", [...selected])}
-                  >
-                    Approve {selected.size || ""}
-                  </Button>
-                  <Button
-                    variant="secondary"
-                    disabled={busy || selected.size === 0}
-                    onClick={() => void decide("reject", [...selected])}
-                  >
-                    Reject
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() =>
-                      setSelected(
-                        selected.size === pending.length
-                          ? new Set()
-                          : new Set(pending.map((p) => p.id)),
-                      )
-                    }
-                  >
-                    {selected.size === pending.length ? "Select none" : "Select all"}
-                  </Button>
-                </ButtonRow>
-                <Hint>
-                  Approving starts each one as a real run under the guards shown
-                  on it. Runs beyond the concurrency limit queue rather than
-                  being refused.
-                </Hint>
+                <div className="mt-3 border-t border-line pt-3">
+                  <ButtonRow>
+                    <Button
+                      disabled={busy || selected.size === 0}
+                      onClick={() => void decide("approve", [...selected])}
+                    >
+                      {selected.size > 0 ? `Approve ${selected.size}` : "Approve"}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      disabled={busy || selected.size === 0}
+                      onClick={() => void decide("reject", [...selected])}
+                    >
+                      Reject
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="ml-auto"
+                      disabled={busy}
+                      onClick={() =>
+                        setSelected(
+                          allSelected ? new Set() : new Set(pending.map((p) => p.id)),
+                        )
+                      }
+                    >
+                      {allSelected ? "Select none" : "Select all"}
+                    </Button>
+                  </ButtonRow>
+                  <Hint>
+                    {approveConsequence} Runs beyond the concurrency limit queue
+                    rather than being refused.
+                  </Hint>
+                  {decideError && <Hint tone="danger">{decideError}</Hint>}
+                </div>
               </>
             )}
           </Card>
@@ -345,61 +570,40 @@ export default function ChatPage() {
           {decided.length > 0 && (
             <Card emphasis="quiet">
               <CardTitle>Decided</CardTitle>
-              <div className="flex flex-col gap-2">
-                {decided.slice().reverse().map((p) => (
-                  <div key={p.id} className="text-xs">
-                    <div className="flex items-center gap-2">
-                      <Badge tone={PROPOSAL_TONE[p.status]}>{p.status}</Badge>
-                      {p.runId ? (
-                        <Link href={`/runs/${p.runId}`}>{p.title}</Link>
-                      ) : (
-                        <span className="text-ink-muted">{p.title}</span>
-                      )}
-                    </div>
-                    {p.error && <Hint tone="danger">{p.error}</Hint>}
-                  </div>
-                ))}
+              <div className="flex flex-col divide-y divide-line">
+                {decided
+                  .slice()
+                  .reverse()
+                  .map((p) => (
+                    <Decided key={p.id} proposal={p} />
+                  ))}
               </div>
             </Card>
           )}
 
           {chats.length > 1 && (
             <Card emphasis="quiet">
-              <CardTitle>Earlier chats</CardTitle>
-              <div className="flex flex-col gap-1.5">
-                {chats
-                  .filter((c) => c.id !== chatId)
-                  .map((c) => (
-                    // Two lines, because one truncated line in a 360px column
-                    // was all title: an 80-character first message clipped away
-                    // both the time and the waiting count, which are the only
-                    // two things telling these rows apart. Only the title
-                    // truncates now, and it carries the full string for hover
-                    // and assistive tech — the pairing RunCard already uses.
-                    <button
-                      key={c.id}
-                      onClick={() => {
-                        // Ticked ids belong to the thread they were ticked in.
-                        // `newChat` clears them for the same reason; carried
-                        // over, they describe proposals not on screen and are
-                        // sent to a chat that has never held them.
-                        setSelected(new Set());
-                        void load(c.id);
-                      }}
-                      title={c.title ?? "Untitled"}
-                      className="cursor-pointer text-left text-xs text-ink-muted hover:text-ink"
-                    >
-                      <span className="block truncate">
-                        {c.title ?? "Untitled"}
-                      </span>
-                      <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-2xs text-ink-faint">
-                        {fmtRelative(c.updatedAt)}
-                        {c.pendingCount > 0 && (
-                          <Badge tone="accent">{c.pendingCount} waiting</Badge>
-                        )}
-                      </span>
-                    </button>
-                  ))}
+              <CardTitle>Conversations</CardTitle>
+              {/* The current thread is in this list rather than filtered out of
+                  it, because "which one am I in" is the first thing the list has
+                  to answer and a row missing from a list cannot answer it. */}
+              <div className="flex flex-col gap-0.5">
+                {chats.map((c) => (
+                  <ChatRow
+                    key={c.id}
+                    entry={c}
+                    current={c.id === chatId}
+                    onOpen={() => {
+                      // Ticked ids belong to the thread they were ticked in.
+                      // `newChat` clears them for the same reason; carried
+                      // over, they describe proposals not on screen and are
+                      // sent to a chat that has never held them.
+                      setSelected(new Set());
+                      setDecideError(null);
+                      void load(c.id);
+                    }}
+                  />
+                ))}
               </div>
             </Card>
           )}
@@ -416,38 +620,114 @@ export default function ChatPage() {
  * approval outcome, a failure. Styled apart from `assistant` on purpose: a
  * sentence about what the app did, rendered as though the model said it, is a
  * sentence the operator will later attribute to the wrong party.
+ *
+ * Who is speaking is carried by position and treatment rather than by a label
+ * on every turn: the operator's own words sit right in a tinted block, the
+ * answer sits left as plain prose at a readable measure, and only the first
+ * turn of a run gets a name and a time. Consecutive turns from one speaker are
+ * one utterance interrupted by a newline, and repeating the label says nothing.
  */
-function Message({
-  role,
-  text,
-  ts,
-}: {
-  role: "user" | "assistant" | "system";
-  text: string;
-  ts: number;
-}) {
+function Message({ message, grouped }: { message: ChatMessageDTO; grouped: boolean }) {
+  const { role, text, ts } = message;
+
   if (role === "system") {
     return (
-      <div className="rounded-sm border border-line border-l-[3px] border-l-ink-faint bg-inset px-3 py-2 text-xs text-ink-muted">
+      <div
+        className={`${
+          grouped ? "mt-1.5" : "mt-5"
+        } max-w-[70ch] rounded-sm border-l-2 border-l-ink-faint bg-inset px-3 py-2 text-xs leading-normal text-ink-muted first:mt-0`}
+      >
         {text}
       </div>
     );
   }
-  const mine = role === "user";
+
+  if (role === "assistant") {
+    return (
+      <div className={`${grouped ? "mt-2.5" : "mt-5"} max-w-[70ch] first:mt-0`}>
+        {!grouped && <Speaker name="Orchestrator" ts={ts} />}
+        {/* Markdown for the model's half only. The operator's own text is left
+            exactly as typed — an asterisk they meant is not emphasis. */}
+        <Markdown text={text} />
+      </div>
+    );
+  }
+
   return (
-    <div className={mine ? "self-end max-w-[85%]" : "max-w-[95%]"}>
-      <div
-        className={`whitespace-pre-wrap rounded-lg px-3 py-2 text-sm ${
-          mine ? "bg-accent-dim text-ink" : "bg-inset text-ink"
-        }`}
-      >
+    <div
+      className={`${grouped ? "mt-1.5" : "mt-5"} flex flex-col items-end first:mt-0`}
+    >
+      {!grouped && <Speaker name="You" ts={ts} />}
+      <div className="max-w-[85%] rounded-lg bg-accent-dim px-3 py-2 text-sm leading-normal whitespace-pre-wrap text-ink [overflow-wrap:anywhere]">
         {text}
       </div>
-      <div className="mt-0.5 text-2xs text-ink-faint">{fmtRelative(ts)}</div>
     </div>
   );
 }
 
+function Speaker({ name, ts }: { name: string; ts: number }) {
+  return (
+    <div className="mb-1 flex items-baseline gap-2 text-2xs tracking-wide uppercase">
+      <span className="font-semibold text-ink-muted">{name}</span>
+      <time
+        dateTime={new Date(ts).toISOString()}
+        title={fmtDateTime(ts)}
+        className="tabular-nums text-ink-muted"
+      >
+        {fmtRelative(ts)}
+      </time>
+    </div>
+  );
+}
+
+/**
+ * The wait between sending and the first word.
+ *
+ * The only thing that moves is the elapsed time, which is the only progress
+ * there is: nothing here knows how far through a turn is, and a bar or a
+ * looping dot would claim otherwise. `role="status"` holds the word alone —
+ * the clock beside it is hidden from assistive tech, or the turn would be
+ * announced once a second.
+ */
+function Waiting({ since, stale }: { since: number; stale: boolean }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(t);
+  }, []);
+
+  // `thinking` is only ever as fresh as the last poll that worked, so once one
+  // has failed this may no longer be true.
+  if (stale) {
+    return (
+      <div className="mt-5 max-w-[70ch] text-xs leading-normal text-warn">
+        Was thinking when the last refresh failed — state unknown.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-5 flex items-baseline gap-2">
+      <span role="status" className="text-xs font-medium text-ink-muted">
+        Thinking…
+      </span>
+      <span aria-hidden="true" className="text-2xs tabular-nums text-ink-muted">
+        {fmtDuration(Math.max(0, now - since))}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * A proposal waiting on a decision.
+ *
+ * Drawn as an object rather than as text: it names a folder and a guard set,
+ * and approving it starts an unattended agent that spends real money in that
+ * folder. The two facts that decide the answer — where, and under whose rules —
+ * are the last line, each behind its own mark so they cannot be read as one
+ * string.
+ */
 function Proposal({
   proposal,
   checked,
@@ -457,29 +737,173 @@ function Proposal({
   checked: boolean;
   onToggle: () => void;
 }) {
+  const missing = proposal.guardsSource === "missing";
+  const folder = proposal.folderLabel ?? "folder from the template";
+
   return (
-    <label className="flex cursor-pointer gap-2 rounded-sm border border-line bg-inset p-2.5">
+    <label
+      // `mb-0 font-normal` for the same reason ChatRow names a background: the
+      // legacy sheet still gives every `label` a bottom margin and 500 weight.
+      className={`mb-0 flex cursor-pointer gap-2.5 rounded-sm border p-3 font-normal transition-colors duration-150 ease-out has-[:focus-visible]:border-accent ${
+        PROPOSAL_ROW[checked ? "selected" : "idle"]
+      }`}
+    >
       <input
         type="checkbox"
         checked={checked}
         onChange={onToggle}
-        className="mt-0.5 shrink-0"
+        aria-label={`Select “${proposal.title}”`}
+        className="mt-0.5 size-4 shrink-0 accent-accent"
       />
-      <div className="min-w-0">
-        <div className="text-sm font-medium text-ink">{proposal.title}</div>
-        <div className="mt-0.5 line-clamp-3 text-xs text-ink-muted">
+      <div className="min-w-0 flex-1">
+        <div className="text-sm leading-snug font-semibold text-ink">{proposal.title}</div>
+        <p className="mt-1 line-clamp-3 text-xs leading-normal text-ink-muted">
           {proposal.task}
+        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-ink-muted">
+          <span className="inline-flex min-w-0 max-w-full items-center gap-1" title={folder}>
+            <FolderIcon />
+            <span className="truncate">{folder}</span>
+          </span>
+          <span
+            className={`inline-flex min-w-0 max-w-full items-center gap-1 ${
+              GUARD_TONE[missing ? "missing" : "set"]
+            }`}
+            title={proposal.guardsLabel}
+          >
+            <GuardIcon />
+            <span className="truncate">
+              {missing ? "template deleted" : proposal.guardsLabel}
+            </span>
+          </span>
+          {proposal.promptRewritten && <span>prompt rewritten</span>}
         </div>
-        <div className="mt-1 text-2xs text-ink-faint">
-          {proposal.folderLabel ?? "folder from the template"} ·{" "}
-          {proposal.guardsSource === "missing" ? (
-            <span className="text-danger">template deleted</span>
-          ) : (
-            proposal.guardsLabel
-          )}
-          {proposal.promptRewritten && " · prompt rewritten"}
-        </div>
+        {missing && (
+          <p className="mt-2 text-2xs leading-normal font-medium text-danger">
+            The template this names has been deleted, so approving it will be
+            refused.
+          </p>
+        )}
       </div>
     </label>
+  );
+}
+
+/** What happened to a proposal, and no buttons: it is not a decision any more. */
+function Decided({ proposal }: { proposal: ChatProposalDTO }) {
+  return (
+    <div className="flex items-start gap-2 py-2 first:pt-0 last:pb-0">
+      <Badge tone={PROPOSAL_TONE[proposal.status]}>{proposal.status}</Badge>
+      <div className="min-w-0 flex-1">
+        {proposal.runId ? (
+          <Link
+            href={`/runs/${proposal.runId}`}
+            title={proposal.title}
+            className="block truncate text-xs"
+          >
+            {proposal.title}
+          </Link>
+        ) : (
+          <div className="truncate text-xs text-ink-muted" title={proposal.title}>
+            {proposal.title}
+          </div>
+        )}
+        {proposal.error && <Hint tone="danger">{proposal.error}</Hint>}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One row of the thread list.
+ *
+ * Two lines, because one truncated line in a 360px column was all title: an
+ * 80-character first message clipped away both the time and the waiting count,
+ * which are the only two things telling these rows apart. Only the title
+ * truncates, and it carries the full string for hover and assistive tech — the
+ * pairing RunCard already uses.
+ */
+function ChatRow({
+  entry,
+  current,
+  onOpen,
+}: {
+  entry: ChatListEntryDTO;
+  current: boolean;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-current={current ? "true" : undefined}
+      title={entry.title ?? "Untitled"}
+      className={`cursor-pointer rounded-sm border-l-2 px-2 py-1.5 text-left font-normal transition-colors duration-150 ease-out ${
+        CHAT_ROW[current ? "current" : "other"]
+      }`}
+    >
+      <span className="block truncate text-xs">{entry.title ?? "Untitled"}</span>
+      <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-2xs text-ink-muted">
+        <span className="tabular-nums">{fmtRelative(entry.updatedAt)}</span>
+        {entry.status === "thinking" && <span className="text-accent">thinking</span>}
+        {entry.pendingCount > 0 && (
+          <Badge tone="accent">{entry.pendingCount} waiting</Badge>
+        )}
+      </span>
+    </button>
+  );
+}
+
+/* Inline SVG rather than an icon package, and each one carries information:
+   which of the two facts on a proposal you are reading, and which way the jump
+   control moves the thread. 14px on a 4px grid, stroked in the inherited
+   colour so a tone class covers the mark as well as the words. */
+
+function FolderIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      className="size-3.5 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinejoin="round"
+    >
+      <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.3a1.5 1.5 0 0 1 1.06.44l.7.7h5A1.5 1.5 0 0 1 14 5.64v5.86A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" />
+    </svg>
+  );
+}
+
+function GuardIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      className="size-3.5 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinejoin="round"
+    >
+      <path d="M8 2.2 13 4v3.9c0 3-2.1 4.9-5 5.9-2.9-1-5-2.9-5-5.9V4z" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      className="size-3.5 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M4 6.5 8 10.5l4-4" />
+    </svg>
   );
 }
