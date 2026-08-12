@@ -13,6 +13,7 @@ import {
   DEPENDENCY_EDGES,
   blockWaitingRun,
   createRun,
+  currentSnapshot,
   dependencyCycle,
   edgeSatisfied,
   getRun,
@@ -2697,14 +2698,53 @@ export function enforceInstanceBudget(
   snapshot: UsageSnapshot,
 ): InstanceGuardOutcome | null {
   const instance = guardedInstanceOf(runId);
+  if (!instance) return null;
+  return guardInstance(instance.instanceId, instance.status, instance.budget, snapshot);
+}
+
+/**
+ * The same guard, at the other kind of block boundary.
+ *
+ * An orchestrator block is about to spend and is not a member run, so the check
+ * above — which hangs off `startRun`'s pre-cycle guard — cannot see it. Left
+ * out, a graph of nothing but deciding blocks would have a workflow-wide limit
+ * that never fires, and a graph past its limit could still pay for one more
+ * decision before the first run it started reached a cycle boundary.
+ *
+ * Deliberately the same door and the same verdict vocabulary: an instance limit
+ * with its own words for "no ceiling configured" would be a second set of budget
+ * rules to keep in step.
+ */
+export function enforceInstanceBudgetForBlock(
+  instanceId: string,
+  snapshot: UsageSnapshot,
+): InstanceGuardOutcome | null {
+  const row = db()
+    .prepare(
+      "SELECT status, instance_budget AS budget FROM workflow_instances WHERE id = ?",
+    )
+    .get(instanceId) as { status: string; budget: string | null } | undefined;
+  if (!row) return null;
+
+  const budget = parseInstanceBudget(row.budget);
+  if (instanceBudgetIsOff(budget)) return null;
+  return guardInstance(instanceId, row.status, budget, snapshot);
+}
+
+function guardInstance(
+  instanceId: string,
+  status: string,
+  budget: InstanceBudgetPolicy,
+  snapshot: UsageSnapshot,
+): InstanceGuardOutcome | null {
   // `started` only. A `stopping` instance is already being taken down and a
   // second halt would run a second kill ladder; a `failed` one was rolled back.
-  if (!instance || instance.status !== "started") return null;
+  if (status !== "started") return null;
 
   const verdict = evaluateInstanceBudget(
-    instance.budget,
+    budget,
     snapshot,
-    instanceSpend(instance.instanceId),
+    instanceSpend(instanceId),
   );
   if (verdict.allowed) return null;
   if (!INSTANCE_ENFORCEABLE_CODES.includes(verdict.code)) {
@@ -2714,7 +2754,7 @@ export function enforceInstanceBudget(
   // The halt function, called rather than re-implemented: an operator's stop
   // and this differ only in the cause recorded, and a second selection of "which
   // members does this take down" is a second chance to miss one.
-  stopInstance(instance.instanceId, { kind: "guard", detail: verdict.reason });
+  stopInstance(instanceId, { kind: "guard", detail: verdict.reason });
   return { kind: "halted", verdict };
 }
 
@@ -3035,7 +3075,31 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
     return;
   }
 
-  // Re-read after the await: a halt may have closed the door while the
+  // The workflow-wide guard, at the other kind of block boundary. This is the
+  // one moment before a deciding block spends, and it is exactly what
+  // `enforceInstanceBudget` is for a member run's cycle boundary — same door,
+  // same verdict, and the halt it triggers takes this block down with the rest.
+  const guard = enforceInstanceBudgetForBlock(instanceId, await currentSnapshot());
+  if (guard?.kind === "halted") return;
+  if (guard?.kind === "unenforceable") {
+    // Logged rather than acted on, the answer this app already gives a live
+    // spending limit whose telemetry never arrived: `no_ceiling` on a stock
+    // install means the provider's percentage was not readable this minute, and
+    // halting every fraction-guarded workflow over an unreachable host is worse
+    // than the guard being unenforceable for one block boundary.
+    db()
+      .prepare(
+        "UPDATE workflow_instance_blocks SET error = TRIM(COALESCE(error, '') || ' ' || ?)" +
+          " WHERE instance_id=? AND node_id=?",
+      )
+      .run(
+        `Its workflow has a limit that could not be read here: ${guard.verdict.reason}`,
+        instanceId,
+        nodeId,
+      );
+  }
+
+  // Re-read after the awaits: a halt may have closed the door while the
   // transcript scan above was running, and a turn that starts into a stopping
   // instance is a billed child deciding work for a workflow that is being
   // taken down.
