@@ -638,6 +638,63 @@ Settings guards: you saved a graph that said "under these guards", and a run
 started under different ones is what the refusal exists to prevent. The detail
 page marks such a block in red before you press anything.
 
+### Limits for the whole workflow
+
+A block's guards bound one block. Ten blocks under a $5 block limit is a $50
+workflow, and until you set one of these nothing stands between you and that
+number. Three limits sit on the workflow itself, all of them optional:
+
+| | |
+|---|---|
+| **Spending limit** | Everything every block of one press of Run spends, together |
+| **Stop at 5-hour usage** | Stop the whole workflow once the 5-hour subscription window passes this share |
+| **Stop at weekly usage** | The same for the weekly window |
+
+They mean exactly what the identically-named per-run guards mean, and they are
+decided by the same function and the same vocabulary — a fraction guard with no
+ceiling behind it is **refused, not ignored**, and every comparison is made
+against the guard reading rather than the displayed one, so a model with no known
+price cannot make a workflow look cheaper than it is.
+
+These are the one thing on a workflow that is a guard rather than work, and they
+live in the workflow's own form. There is no field for them on the wire when you
+press Run, no override anywhere, and no route that edits a running instance's
+copy — which is what stops an orchestrator block from raising its own workflow's
+budget. Editing the workflow while an instance is running does not move the
+guard that instance is measured against either: the limits are copied onto the
+instance when Run is pressed, exactly as the graph is.
+
+**When they are checked, and by how much a workflow can overshoot.** Before a
+block starts a work cycle, never during one — the analogue of the per-run
+*between cycles* mode, and the only accounting here that is exact. Blocks are
+usually one cycle each, so in practice that is between one block and the next.
+The cost is stated rather than hidden: **a block already working carries on until
+some block reaches a cycle boundary**, so the total can overshoot by up to one
+work cycle for each block running at the time, and blocks running at once
+multiply that. There is deliberately no live mode: killing every block mid-cycle
+would turn each one's measured cost into a reconciled estimate, in exchange for a
+bound that is already one cycle in the ordinary case.
+
+When one trips, the workflow is halted through the same door *Stop all* uses, and
+the instance records that its **budget guard** stopped it rather than you.
+
+**What the figure is made of.** `spent_usd` moves only when a block's CLI emits
+its `result` event, so a cycle in flight contributes nothing to it for its whole
+duration — that figure is a floor and the instance page labels it as one. The
+guard adds two readings on top: a reconciled estimate for cycles killed before
+they could report, and Claude Code's own per-request telemetry for the cycles in
+flight. Neither ever reaches `spent_usd`, the dashboard meters or any of the
+three cost sources. It is the same measured-versus-guarded split the window
+meters already make, drawn the same way: solid fill for what was measured, a
+hatched band past it for what the guard acts on.
+
+There is deliberately **no cycle or time limit** for a workflow, and it needs
+none. A run loop needs a monotone terminus because the loop manufactures its own
+next unit of work; an instance manufactures nothing. It is a finite graph created
+in one pass, and every block in it already carries a terminus of its own, so a
+workflow with all three limits switched off still ends — when its last block
+does.
+
 ### Links between blocks
 
 A link says "start this block after that one", and carries two things:
@@ -665,6 +722,12 @@ block, a task on every block, a template that exists, a workspace that is
 mounted and a folder that resolves inside it, a condition on every link, no
 block waiting for itself, no loop, and no branch hand-over between blocks whose
 guards do not isolate. Every refusal names the block it is about.
+
+The workflow-wide limits are the one exception, and only in one direction: a
+fraction guard with no ceiling behind it saves fine and is refused at Run. A
+ceiling is a Settings value that can be typed at any moment, so such a graph is
+not unstartable — only unstartable today. The editor warns beside the field; Run
+refuses with a snapshot in hand.
 
 ### Pressing Run
 
@@ -1619,6 +1682,33 @@ through before trusting this unattended:
   reason naming the workflow, and that nothing was promoted into `running` on the
   way out. And that a stopped run's uncommitted work is still in its checkout
   afterwards, offered by the run page's Commit under that run's own branch.
+- **A workflow-wide budget tripping against real spend.**
+  `evaluateInstanceBudget` is unit tested over the cap unreached, reached
+  exactly, reached only once a block's in-flight cycle is counted, reached on
+  reconciled estimates alone with `spent_usd` still at zero, a fraction guard
+  with no ceiling, a fraction guard satisfied by the provider's own percentage
+  with no ceiling configured, a window that falls back under the guard after
+  tripping, and the ordering that reports spend ahead of a window. What is *not*
+  exercised is any of the machinery around it: no instance has been halted by a
+  guard rather than by a person, and `instanceSpend` has never summed a real
+  `otlp_requests` row. Same sandbox limitation as the entry above. What a human
+  should run, on the same stub setup:
+
+  ```bash
+  # Save a two-block workflow with a workflow spending limit of about half
+  # what one block costs, and both blocks set to several work cycles.
+  # Press Run and watch the instance page.
+  ```
+
+  Four things to watch. That the second block never starts, and that the first
+  one is halted at a cycle boundary with the instance recording *stopped by its
+  budget guard* rather than *by you*. That the guard's figure on the instance
+  page moves **during** a cycle and the measured one does not — that gap is the
+  telemetry door, and a guard reading zero because nothing arrived looks exactly
+  like a guard that was never reached. That `runs.spent_usd` still sums to what
+  the CLIs reported, with the estimate beside it and not inside it. And that a
+  workflow saved with a fraction guard and no ceiling is refused **at Run**, by
+  name, rather than starting and halting a moment later.
 - **Stopping a chat turn, in either of its two forms.** `staleTurn` is unit
   tested and the rest typechecks, but no real CLI child has been signalled by
   `cancelChatTurn` and no sweep has fired against a live row. Two things to
