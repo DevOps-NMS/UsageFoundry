@@ -18,6 +18,16 @@ import {
   type RunStatus,
 } from "./orchestrator";
 import { cancelQueuedFor } from "./mergeQueue";
+import {
+  evaluateInstanceBudget,
+  instanceBudgetIsOff,
+  normalizeInstanceBudget,
+  type BudgetVerdict,
+  type InstanceBudgetPolicy,
+  type InstanceProgress,
+} from "./budget";
+import { telemetrySpendSince } from "./otlp";
+import type { UsageSnapshot } from "./windows";
 import { chatGuards, type RunGuards } from "./settings";
 import { getTemplate, listTemplates, type RunTemplate } from "./templates";
 import { WORKSPACE_MOUNTS } from "./config";
@@ -100,6 +110,18 @@ export interface WorkflowGraph {
 export interface WorkflowInput {
   name: string;
   graph: WorkflowGraph;
+  /**
+   * Limits on the whole press of Run, as against a node's.
+   *
+   * The **one** thing on a workflow that is a guard, and it is here rather than
+   * on a node for the reason the node-level ones are on a template: it bounds
+   * something no per-run limit can see. Ten blocks under a $5 run limit is a $50
+   * workflow, and nothing before this stood between the operator and that
+   * number. It is still not a fourth route to `--permission-mode`, holds no
+   * permission mode, no isolation choice and no model, and nothing a model
+   * emits can reach it — see `startWorkflow`.
+   */
+  instanceBudget: InstanceBudgetPolicy;
 }
 
 export interface Workflow extends WorkflowInput {
@@ -497,7 +519,15 @@ export function normalizeWorkflowInput(
     };
   }
 
-  return { ok: true, value: { name, graph: { nodes, edges } } };
+  // Total, never a refusal: `null`/`""`/`0` all mean off, and a fraction guard
+  // with no ceiling behind it is refused at *Run* rather than at Save. That is
+  // the one place this file's "refuse at save what instantiation refuses" rule
+  // does not apply, and deliberately: a ceiling is a Settings value that can be
+  // typed at any time, so a graph saved without one is not unstartable — it is
+  // unstartable *today*. The editor says so beside the field.
+  const instanceBudget = normalizeInstanceBudget(o.instanceBudget);
+
+  return { ok: true, value: { name, graph: { nodes, edges }, instanceBudget } };
 }
 
 /**
@@ -611,6 +641,24 @@ interface WorkflowRow {
   graph: string;
   created_at: number;
   updated_at: number;
+  instance_budget: string | null;
+}
+
+const WORKFLOW_COLUMNS =
+  "id, name, graph, created_at, updated_at, instance_budget";
+
+/**
+ * A stored budget blob as a policy. Null, unparseable and `{}` all read the
+ * same: every limit off, which is what a workflow saved before this column
+ * existed had.
+ */
+function parseInstanceBudget(raw: string | null): InstanceBudgetPolicy {
+  if (!raw) return normalizeInstanceBudget(null);
+  try {
+    return normalizeInstanceBudget(JSON.parse(raw));
+  } catch {
+    return normalizeInstanceBudget(null);
+  }
 }
 
 /**
@@ -635,6 +683,7 @@ function rowToWorkflow(row: WorkflowRow): Workflow {
     id: row.id,
     name: row.name,
     graph,
+    instanceBudget: parseInstanceBudget(row.instance_budget),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -659,7 +708,7 @@ function withNameConflict<T>(name: string, fn: () => T): T {
 export function listWorkflows(): Workflow[] {
   const rows = db()
     .prepare(
-      "SELECT id, name, graph, created_at, updated_at FROM workflows ORDER BY name COLLATE NOCASE",
+      `SELECT ${WORKFLOW_COLUMNS} FROM workflows ORDER BY name COLLATE NOCASE`,
     )
     .all() as WorkflowRow[];
   return rows.map(rowToWorkflow);
@@ -667,9 +716,7 @@ export function listWorkflows(): Workflow[] {
 
 export function getWorkflow(id: string): Workflow | null {
   const row = db()
-    .prepare(
-      "SELECT id, name, graph, created_at, updated_at FROM workflows WHERE id = ?",
-    )
+    .prepare(`SELECT ${WORKFLOW_COLUMNS} FROM workflows WHERE id = ?`)
     .get(id) as WorkflowRow | undefined;
   return row ? rowToWorkflow(row) : null;
 }
@@ -680,10 +727,17 @@ export function createWorkflow(input: WorkflowInput): Workflow {
   withNameConflict(input.name, () =>
     db()
       .prepare(
-        `INSERT INTO workflows (id, name, graph, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT INTO workflows (id, name, graph, instance_budget, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .run(id, input.name, JSON.stringify(input.graph), now, now),
+      .run(
+        id,
+        input.name,
+        JSON.stringify(input.graph),
+        JSON.stringify(input.instanceBudget),
+        now,
+        now,
+      ),
   );
   return getWorkflow(id)!;
 }
@@ -697,9 +751,16 @@ export function updateWorkflow(
   withNameConflict(input.name, () =>
     db()
       .prepare(
-        "UPDATE workflows SET name = ?, graph = ?, updated_at = ? WHERE id = ?",
+        "UPDATE workflows SET name = ?, graph = ?, instance_budget = ?," +
+          " updated_at = ? WHERE id = ?",
       )
-      .run(input.name, JSON.stringify(input.graph), Date.now(), id),
+      .run(
+        input.name,
+        JSON.stringify(input.graph),
+        JSON.stringify(input.instanceBudget),
+        Date.now(),
+        id,
+      ),
   );
   return getWorkflow(id);
 }
@@ -729,7 +790,11 @@ export function duplicateWorkflow(id: string): Workflow | null {
     name = name.slice(0, MAX_WORKFLOW_NAME);
   }
 
-  return createWorkflow({ name, graph: source.graph });
+  return createWorkflow({
+    name,
+    graph: source.graph,
+    instanceBudget: source.instanceBudget,
+  });
 }
 
 /**
@@ -790,6 +855,15 @@ export interface WorkflowInstance {
   stopReason: string | null;
   /** Members that have not finished. Non-zero under `stopping`. */
   liveRunCount: number;
+  /**
+   * The limits this press of Run was started under — a copy taken then, never
+   * the live workflow's. Editing the workflow must not move the guard an
+   * instance is already being measured against, which is the rule the `graph`
+   * blob beside it already follows.
+   */
+  instanceBudget: InstanceBudgetPolicy;
+  /** What its blocks have spent: a measured floor and the guard's figure. */
+  spend: InstanceProgress;
   nodes: WorkflowInstanceNode[];
 }
 
@@ -804,6 +878,62 @@ interface InstanceRow {
   stopped_at: number | null;
   stop_cause: string | null;
   stop_reason: string | null;
+  instance_budget: string | null;
+}
+
+/**
+ * What one press of Run has spent, in the two figures a budget decision needs.
+ *
+ * `spentUSD` is the sum of what each member's own CLI measured and reported
+ * through its `result` event — a **floor**, because a cycle in flight has
+ * reported nothing and contributes zero for its whole duration. `spentGuardUSD`
+ * adds the two readings that exist precisely for that gap:
+ *
+ *  - `spent_usd_est`, a member's reconciled estimate for cycles that were
+ *    killed before they could report, and
+ *  - `telemetrySpendSince(runId, active_started_at)` for the cycle a member has
+ *    in flight right now — the only reading in this app that moves *during* a
+ *    cycle.
+ *
+ * That second one is a deliberate widening of the telemetry door. It was one
+ * run reading its own current cycle for its own live guard; it is now also an
+ * instance reading each member's current cycle for the instance guard. Same
+ * function, same per-run and per-cycle bound, same destination — a `*Guard*`
+ * figure that no display and no meter ever sees. Nothing here reaches
+ * `runs.spent_usd`, `buildSnapshot()` or the dashboard.
+ *
+ * Bounded to `running` members for the telemetry half, for the reason
+ * `fmtCycleInFlight` refuses the column on any other status: nothing clears
+ * `active_started_at` when the container dies mid-cycle, so a `failed` row can
+ * still name a cycle that ended hours ago.
+ */
+export function instanceSpend(instanceId: string): InstanceProgress {
+  const rows = db()
+    .prepare(
+      `SELECT r.id AS id, r.status AS status, r.spent_usd AS spent,
+              r.spent_usd_est AS est, r.active_started_at AS cycleStartedAt
+         FROM workflow_instance_runs w
+         JOIN runs r ON r.id = w.run_id
+        WHERE w.instance_id = ?`,
+    )
+    .all(instanceId) as Array<{
+    id: string;
+    status: string;
+    spent: number;
+    est: number;
+    cycleStartedAt: number | null;
+  }>;
+
+  let spentUSD = 0;
+  let spentGuardUSD = 0;
+  for (const row of rows) {
+    spentUSD += row.spent;
+    spentGuardUSD += row.spent + row.est;
+    if (row.status === "running" && row.cycleStartedAt !== null) {
+      spentGuardUSD += telemetrySpendSince(row.id, row.cycleStartedAt).costUSD;
+    }
+  }
+  return { spentUSD, spentGuardUSD };
 }
 
 /** How many of this instance's runs are still going, in one query. */
@@ -866,13 +996,15 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
         : null,
     stopReason: row.stop_reason,
     liveRunCount: live,
+    instanceBudget: parseInstanceBudget(row.instance_budget),
+    spend: instanceSpend(row.id),
     nodes,
   };
 }
 
 const INSTANCE_COLUMNS =
   "id, workflow_id, workflow_name, graph, created_at, status, error," +
-  " stopped_at, stop_cause, stop_reason";
+  " stopped_at, stop_cause, stop_reason, instance_budget";
 
 /** Statuses a run has not finished in — it will spend, or is waiting to. */
 const LIVE_STATUSES: readonly RunStatus[] = [
@@ -970,8 +1102,27 @@ export type StartOutcome =
  * prefix nobody asked for. The runs are *stopped* rather than deleted — one may
  * already hold a checkout and a child process, and the row is what the kill path
  * and `reconcileOnBoot` need.
+ *
+ * **`snapshot` is the only argument, and the instance budget is not among
+ * them.** It is read off the saved workflow and nowhere else. There is no field
+ * on the wire, no override on this function and no route that writes an
+ * instance's copy of it, which is the strongest form of "nothing a model emits
+ * may set it": an orchestrator block cannot raise its own instance's budget
+ * because there is nothing to raise it *with*. The saved workflow is a person's
+ * form, and the copy taken here is what the guard measures against for the life
+ * of the instance, so editing the workflow mid-run cannot move it either.
+ *
+ * The snapshot is passed in rather than read, because this function is
+ * synchronous from entry to the last `createRun` and `currentSnapshot()` is not
+ * — the route awaits it and hands it over. It is used once, at the door: a
+ * fraction guard with no ceiling behind it is refused here, where there is an
+ * error channel, rather than tripping at the first block's guard check and
+ * halting a graph that never should have started.
  */
-export function startWorkflow(id: string): StartOutcome {
+export function startWorkflow(
+  id: string,
+  snapshot: UsageSnapshot,
+): StartOutcome {
   const workflow = getWorkflow(id);
   if (!workflow) return { ok: false, reason: "No such workflow." };
 
@@ -1000,6 +1151,34 @@ export function startWorkflow(id: string): StartOutcome {
     };
   }
   const graph = checked.value.graph;
+  const instanceBudget = checked.value.instanceBudget;
+
+  // The workflow-wide guard, read once before anything exists. Nothing has been
+  // spent yet, so the only two verdicts reachable are the ones that are about
+  // the *configuration* and the *window* rather than about this instance:
+  //
+  //   `no_ceiling` — a fraction guard with nothing behind it. Refused, not
+  //   ignored, which is this app's standing rule: silently passing would leave
+  //   the operator believing a guard is active. Refused *here* because this is
+  //   the moment with an error channel; leaving it to the first block's check
+  //   would create every run, spend a transcript scan, and then halt the whole
+  //   graph with a sentence nobody was waiting for.
+  //
+  //   `weekly_fraction` / `session_fraction` — the window is already past the
+  //   guard. Starting would create N runs and halt them before the first one
+  //   worked, which is a workflow instance in the record for no reason.
+  if (!instanceBudgetIsOff(instanceBudget)) {
+    const verdict = evaluateInstanceBudget(instanceBudget, snapshot, {
+      spentUSD: 0,
+      spentGuardUSD: 0,
+    });
+    if (!verdict.allowed) {
+      return {
+        ok: false,
+        reason: `This workflow's own limits will not let it start: ${verdict.reason}`,
+      };
+    }
+  }
 
   // Planned in full before anything is created. A refusal here costs nothing;
   // the same refusal three nodes into the pass costs a rollback.
@@ -1058,10 +1237,21 @@ export function startWorkflow(id: string): StartOutcome {
   db()
     .prepare(
       `INSERT INTO workflow_instances
-         (id, workflow_id, workflow_name, graph, created_at, status, error)
-       VALUES (?, ?, ?, ?, ?, 'started', NULL)`,
+         (id, workflow_id, workflow_name, graph, instance_budget, created_at,
+          status, error)
+       VALUES (?, ?, ?, ?, ?, ?, 'started', NULL)`,
     )
-    .run(instanceId, id, workflow.name, JSON.stringify(graph), now);
+    .run(
+      instanceId,
+      id,
+      workflow.name,
+      JSON.stringify(graph),
+      // The copy, taken once. Everything after this reads the instance's own,
+      // so an edit to the workflow cannot move the guard under a running graph
+      // — the same reason the graph blob is copied rather than joined to.
+      JSON.stringify(instanceBudget),
+      now,
+    );
 
   const addNode = db().prepare(
     `INSERT INTO workflow_instance_runs
@@ -1494,6 +1684,90 @@ export function reconcileHaltsOnBoot(): void {
       mergesCancelled: 0,
     });
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* The workflow-wide guard                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The instance a run belongs to, if any, with everything the guard reads.
+ *
+ * Null for a run started any other way, which is every run in this app except a
+ * workflow's. One indexed lookup on the join table, and it is the first thing
+ * the guard does, so the ordinary case costs one query and stops.
+ */
+function guardedInstanceOf(runId: string): {
+  instanceId: string;
+  status: string;
+  budget: InstanceBudgetPolicy;
+} | null {
+  const row = db()
+    .prepare(
+      `SELECT i.id AS instanceId, i.status AS status,
+              i.instance_budget AS budget
+         FROM workflow_instance_runs w
+         JOIN workflow_instances i ON i.id = w.instance_id
+        WHERE w.run_id = ?`,
+    )
+    .get(runId) as
+    | { instanceId: string; status: string; budget: string | null }
+    | undefined;
+  if (!row) return null;
+
+  const budget = parseInstanceBudget(row.budget);
+  if (instanceBudgetIsOff(budget)) return null;
+  return { instanceId: row.instanceId, status: row.status, budget };
+}
+
+/**
+ * Stop the whole workflow if this member is about to push it past its limits.
+ *
+ * **Between nodes, not during one.** Called from `startRun`'s pre-cycle guard,
+ * off the snapshot that check has just read, at the one moment a member is
+ * about to commit to spending and nothing has been spawned yet. For the default
+ * `maxIterations: 1` a run has exactly one cycle boundary — its start — so this
+ * is literally "before the next block starts work"; for a multi-cycle block it
+ * is every boundary, which is tighter and never looser.
+ *
+ * There is deliberately **no live mode**. `liveGuardTick` reads one run's policy
+ * against that run's own progress and interrupts that one child, and every code
+ * on `LIVE_ENFORCEABLE_CODES` is a fact about a run; extending it to halt a
+ * whole instance would kill every member mid-cycle, turning each one's measured
+ * `result` cost into a reconciled estimate, in exchange for a bound that is
+ * already one cycle in the ordinary case. What that costs is stated rather than
+ * hidden: a block already working keeps working until some block reaches a cycle
+ * boundary, so the total can overshoot by up to one work cycle for each block
+ * running at the time — and several blocks at once multiply it. The instance
+ * page says exactly that, in those words.
+ *
+ * Returns the verdict when it halted, so a caller can log it; null when there
+ * was nothing to check or the guard passed. It does not signal this run itself:
+ * `stopInstance` is the one door a halt goes through and it stops every member
+ * including this one, which `startRun`'s pre-spawn checkpoint then sees as an
+ * ordinary interrupt.
+ */
+export function enforceInstanceBudget(
+  runId: string,
+  snapshot: UsageSnapshot,
+): (BudgetVerdict & { allowed: false }) | null {
+  const instance = guardedInstanceOf(runId);
+  // `started` only. A `stopping` instance is already being taken down and a
+  // second halt would run a second kill ladder; a `failed` one was rolled back.
+  if (!instance || instance.status !== "started") return null;
+
+  const verdict = evaluateInstanceBudget(
+    instance.budget,
+    snapshot,
+    instanceSpend(instance.instanceId),
+  );
+  if (verdict.allowed) return null;
+
+  // The halt function, called rather than re-implemented: an operator's stop
+  // and this differ only in the cause recorded, and a second selection of "which
+  // members does this take down" is a second chance to miss one.
+  stopInstance(instance.instanceId, { kind: "guard", detail: verdict.reason });
+  return verdict;
 }
 
 /** A run's live state for the instance view, or null when the row has gone. */

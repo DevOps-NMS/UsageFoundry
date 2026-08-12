@@ -152,6 +152,19 @@ export interface RunRow {
    */
   active_iteration: number | null;
   /**
+   * When the cycle named by `active_iteration` was spawned, or null between
+   * cycles. Written and cleared with it, always.
+   *
+   * The bound `telemetrySpendSince` needs to report what a cycle in flight has
+   * cost *so far* without re-counting the cycles already in `spent_usd`. A run's
+   * own live guard reads that bound off a local in `startRun`'s frame; anything
+   * asking about a different run — a workflow instance's guard is the only such
+   * caller — has nowhere but the row to read it from. Only meaningful while the
+   * row is `running`: nothing clears it when the container dies mid-cycle, the
+   * same caveat `active_iteration` carries.
+   */
+  active_started_at: number | null;
+  /**
    * Spend recovered from transcripts for cycles killed before Claude Code
    * reported theirs. Never added into `spent_usd`; the two are shown side by
    * side and summed only where a total is wanted.
@@ -3538,11 +3551,29 @@ export async function startRun(id: string): Promise<void> {
         break;
       }
 
+      // This run's own guards said yes; the workflow it belongs to may still
+      // say no. Evaluated here, off the snapshot that was just read, because
+      // this is the one moment a member is about to commit to spending and
+      // nothing has been spawned yet — the "between nodes" check, which for the
+      // default single-cycle run is literally between two blocks. A tripped
+      // instance guard halts *every* member through `stopInstance`, this run
+      // included, so what comes back is an interrupt on the next line rather
+      // than a verdict to act on here.
+      //
+      // Imported here rather than at the top of the file: `workflows.ts`
+      // imports this module for `createRun` and `stopRun`, and a static import
+      // back would make the pair a cycle. This call is already inside an async
+      // function, past the point where both modules are fully evaluated.
+      const { enforceInstanceBudget } = await import("./workflows");
+      enforceInstanceBudget(id, snapshot);
+
       // Re-check before committing to a cycle. The guard at the top of the loop
       // ran before an `await` that takes seconds on a large ~/.claude, and
       // `stopRun` promises "it will not start another work cycle" for a stop
       // landing in exactly that window — without this the operator is told
-      // spending stopped and is then billed for a whole further cycle.
+      // spending stopped and is then billed for a whole further cycle. It is
+      // also what picks up the halt above: an instance guard that tripped has
+      // already signalled this run through the one door a stop goes through.
       const preSpawn = interrupts.get(id);
       if (preSpawn) {
         applyInterrupt(preSpawn);
@@ -3596,15 +3627,29 @@ export async function startRun(id: string): Promise<void> {
         payload: { n: iterations, prompt, resuming: sessionId },
       });
 
+      // Taken here rather than immediately before the spawn so the row and this
+      // frame agree on one instant. What sits between is `buildArgs` and one
+      // containment check, and the direction of the error is the safe one: the
+      // bound can only reach further into this cycle's own telemetry, never
+      // back into the previous cycle, whose figures the UPDATE below has
+      // already folded into `spent_usd`.
+      const cycleStartedAt = Date.now();
+
       // The same fact as the event above, on the row. The event only reaches a
       // page that is streaming this one run's log; everything that renders a
       // run as a *row* — the runs list, the run's own stat block — reads the
       // row, and until this was written it said `iterations = 0` for the whole
       // of the first cycle. Cleared in the post-cycle UPDATE below, so between
       // cycles it is null rather than naming a cycle that has already returned.
+      //
+      // `active_started_at` travels with it because a workflow instance's guard
+      // reads this run's in-flight spend and has nowhere else to learn where the
+      // cycle began — see the column's note on `RunRow`.
       db()
-        .prepare("UPDATE runs SET active_iteration = ? WHERE id = ?")
-        .run(iterations, id);
+        .prepare(
+          "UPDATE runs SET active_iteration = ?, active_started_at = ? WHERE id = ?",
+        )
+        .run(iterations, cycleStartedAt, id);
 
       const args = buildArgs({
         prompt,
@@ -3626,7 +3671,6 @@ export async function startRun(id: string): Promise<void> {
         throw new Error(`Working directory changed underneath the run: ${workDir}`);
       }
 
-      const cycleStartedAt = Date.now();
       // Captured before the spawn, because `adoptSession` may move `sessionId`
       // while the child is still running.
       const resumeTarget = sessionId;
@@ -3737,7 +3781,8 @@ export async function startRun(id: string): Promise<void> {
         .prepare(
           "UPDATE runs SET iterations = ?, spent_usd = ?, spent_tokens = ?," +
             " spent_usd_est = ?, spent_tokens_est = ?, session_id = ?," +
-            " done_retriggers = ?, active_iteration = NULL WHERE id = ?",
+            " done_retriggers = ?, active_iteration = NULL," +
+            " active_started_at = NULL WHERE id = ?",
         )
         .run(
           iterations,
@@ -4025,6 +4070,7 @@ export async function startRun(id: string): Promise<void> {
       // it. A finished run still claiming an open cycle is the same lie as a
       // working run reading zero, in the other direction.
       active_iteration: null,
+      active_started_at: null,
     };
 
     if (finalStatus === "paused") {

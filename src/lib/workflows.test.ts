@@ -211,6 +211,48 @@ describe("normalizeWorkflowInput — name and blocks", () => {
     assert.equal(v.graph.nodes[0].promptOverride, "Read first.");
     assert.equal(v.graph.nodes[1].promptOverride, null);
   });
+
+  it("carries the workflow-wide limits, and reads a blank field as off", () => {
+    // The one guard a workflow itself holds, and the only value on this form
+    // that is not about *what work to do*. It earns its place here rather than
+    // on a node because it bounds something no per-block guard can see: ten
+    // blocks under a $5 block limit is a $50 workflow.
+    const set = value({
+      ...graph([node("a")]),
+      instanceBudget: {
+        maxInstanceCostUSD: "12.5",
+        maxSessionFraction: 80,
+        maxWeeklyFraction: "",
+      },
+    });
+    assert.deepEqual(set.instanceBudget, {
+      maxInstanceCostUSD: 12.5,
+      // Typed as a percentage, stored as a fraction — the same conversion a
+      // run's guards make, because the form asks the same question.
+      maxSessionFraction: 0.8,
+      maxWeeklyFraction: null,
+    });
+
+    // Absent is every limit off. A workflow saved before this existed reads the
+    // same way, which is the behaviour it had.
+    assert.deepEqual(value(graph([node("a")])).instanceBudget, {
+      maxInstanceCostUSD: null,
+      maxSessionFraction: null,
+      maxWeeklyFraction: null,
+    });
+  });
+
+  it("does not refuse a fraction guard at save for want of a ceiling", () => {
+    // The one place this file's "refuse at save what Run refuses" rule does not
+    // apply. A ceiling is a Settings value that can be typed at any moment, so
+    // a graph saved without one is not unstartable — only unstartable today,
+    // and `startWorkflow` says so with a real snapshot in hand.
+    const v = value({
+      ...graph([node("a")]),
+      instanceBudget: { maxWeeklyFraction: 60 },
+    });
+    assert.equal(v.instanceBudget.maxWeeklyFraction, 0.6);
+  });
 });
 
 /* ------------------------------------------------------------------ */

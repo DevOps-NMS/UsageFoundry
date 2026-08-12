@@ -567,6 +567,34 @@ function migrate(db: Database.Database) {
   addColumn(db, "workflow_instances", "stopped_at", "INTEGER");
   addColumn(db, "workflow_instances", "stop_cause", "TEXT");
   addColumn(db, "workflow_instances", "stop_reason", "TEXT");
+
+  // Limits on a whole press of Run rather than on one block, as JSON — the
+  // shape `runs.budget` already uses. Null on a row written before this
+  // existed, which `normalizeInstanceBudget` reads as every limit off, the same
+  // thing a saved workflow that sets none stores.
+  //
+  // Held in **two** places on purpose. `workflows.instance_budget` is the saved
+  // configuration a person edits; `workflow_instances.instance_budget` is the
+  // copy the instance was started under, taken once at instantiation. That is
+  // the rule the graph blob beside it already follows, and it is what makes
+  // editing a workflow unable to reach an instance that is already running —
+  // including the guard the running instance is being measured against. There
+  // is deliberately no route that writes the instance's copy.
+  addColumn(db, "workflows", "instance_budget", "TEXT");
+  addColumn(db, "workflow_instances", "instance_budget", "TEXT");
+
+  // When the cycle named by `active_iteration` was spawned.
+  //
+  // The other half of the fact that column already carries, and it exists for
+  // one reason: `telemetrySpendSince(runId, since)` needs a lower bound that
+  // excludes the cycles already folded into `spent_usd`, and until now the only
+  // thing holding one was a local variable inside `startRun`'s frame — reachable
+  // by that run's own live guard and by nothing else. A workflow instance's
+  // guard has to read the same figure for a *different* run, so the bound moves
+  // onto the row. Stamped and cleared in exactly the three places
+  // `active_iteration` is, and read only for a `running` row, since nothing
+  // clears either when the container dies mid-cycle.
+  addColumn(db, "runs", "active_started_at", "INTEGER");
 }
 
 /**
