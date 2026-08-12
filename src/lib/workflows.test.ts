@@ -506,11 +506,17 @@ describe("haltPlan — which members a stop selects, and what each becomes", () 
   });
 
   it("leaves a member whose run row has gone", () => {
+    // Beside a live one, because an instance with nothing live is a no-op —
+    // this is about the deleted row, not about whether the halt runs at all.
     const gone = step(
-      plan("started", [{ runId: "r-gone", nodeName: "Gone", status: null }]),
+      plan("started", [
+        MEMBERS[0],
+        { runId: "r-gone", nodeName: "Gone", status: null },
+      ]),
       "r-gone",
     );
     assert.equal(gone.action, "leave");
+    assert.equal(gone.reason, null);
   });
 });
 
@@ -583,6 +589,18 @@ describe("haltPlan — a stop that arrives when there is nothing to do", () => {
     assert.equal(decision.act, false);
     assert.deepEqual(decision.steps, []);
     assert.match(decision.note ?? "", /never started/);
+  });
+
+  it("is a no-op when every block has already finished", () => {
+    // Members are created once and these have all settled, so none of them can
+    // move again — there is no door to close. Marking the instance stopped would
+    // put "stopped by the operator" on a workflow run that finished on its own.
+    const decision = plan(
+      "started",
+      MEMBERS.filter((m) => m.status === "completed" || m.status === "failed"),
+    );
+    assert.equal(decision.act, false);
+    assert.match(decision.note ?? "", /already finished/);
   });
 
   it("selects only the blocks that exist, mid-instantiation", () => {

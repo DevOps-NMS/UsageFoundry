@@ -1239,6 +1239,19 @@ export function haltPlan(
     return { act: false, note, cause: attribution, steps: [] };
   }
 
+  // Nothing is live, so there is no door to close: members are created once and
+  // every one of them has settled, so none of them can move again. Recording a
+  // halt here would put "stopped by the operator" on a run of a workflow that
+  // finished on its own, which is a false thing to say about work that landed.
+  if (!members.some((m) => m.status && LIVE_STATUSES.includes(m.status))) {
+    return {
+      act: false,
+      note: "Every block of this workflow run has already finished.",
+      cause: attribution,
+      steps: [],
+    };
+  }
+
   return {
     act: true,
     note: null,
