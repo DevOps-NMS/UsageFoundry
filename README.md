@@ -702,6 +702,51 @@ runs carry their own prompt, guards and history. It is refused while runs it
 started are still going, because those records are the only thing saying where
 those runs came from.
 
+### Stopping one
+
+*Stop all* on an instance page halts the whole press of Run, whatever state each
+block happens to be in. There is one of it, and only the recorded reason differs
+between an operator pressing it and an instance budget guard tripping — a second
+implementation of "which blocks does this take down" is a second chance to miss
+one, and a missed block goes on spending under a workflow the page says is
+stopped.
+
+What each kind of block becomes:
+
+| Block was | Becomes | How |
+|---|---|---|
+| working now | `stopped` | The same kill ladder the *Stop* button on a run uses — `SIGINT` first, so a cycle that can still report its own cost does |
+| queued or parked | `stopped` | Closed out before it can spawn |
+| still `waiting` | `blocked` | Nothing ran and nothing was spent, which is what that status says. Everything behind it gets its own reason naming the block in front of it |
+| already finished | untouched | Rewriting a completed block as stopped would destroy the record of work that landed |
+
+**The door is closed before anything is signalled.** The instance is marked
+*stopping* first, in the same event-loop turn that then walks the blocks, so
+nothing can join it behind the stop — and the blocks still `waiting` are closed
+out *before* the working ones are signalled, because stopping a run releases
+whatever was waiting on it and a block released a moment too early would start
+*because* the workflow was stopped. Pressing Stop twice does nothing the second
+time.
+
+**What survives it.** Anything an agent committed is on its branch, untouched.
+Anything it had not committed is still in its checkout, on that run's own branch,
+and the run page's *Commit* is how it gets onto the branch — the halt never
+commits, never removes a checkout and never touches a branch. Spend is accounted
+for the same way a single *Stop* accounts for it: a cycle killed before Claude
+Code reports its cost is estimated from the transcript into `spent_usd_est` and
+never into `spent_usd`. A merge already in flight is left to finish; queued
+merges for those branches are cancelled.
+
+The instance records that it was stopped, by what, and when. A block's own
+reason says which of the three it was — halted with its workflow, halted by that
+workflow's budget guard, or stopped on its own run page — because ten rows
+reading "Stopped by operator" say nothing about whether someone stopped ten runs
+or one thing stopped all of them.
+
+Stopping is terminal. There is no pause-and-resume for an instance: a stopped
+one cannot be un-stopped, and starting the workflow again is a fresh press of
+Run with fresh runs.
+
 There is no scheduling. A workflow runs when someone presses Run.
 
 ---
@@ -1544,6 +1589,36 @@ through before trusting this unattended:
   smaller than the proposal describing it, and whether it runs `git` writes
   while investigating (it has the credentials to push, since `githubEnv()`
   reaches this child).
+- **Stopping a whole workflow instance against real runs.** `haltPlan` — which
+  members a stop selects and what each becomes — is unit tested over an instance
+  holding one running, one queued, one parked, one waiting, one completed and one
+  failed block, plus a stop arriving mid-instantiation and a second stop on an
+  instance already stopping. The writes around it typecheck and nothing else has
+  been exercised: no child has been signalled by `stopInstance`, and the sandbox
+  it was written in cannot run this app at all — `npm run dev` starts and every
+  request 500s with `EvalError: Code generation from strings disallowed`, the
+  same edge-runtime limitation noted above for `/api/mcp` and the period card,
+  which takes `instrumentation.ts` and the middleware with it. What a human
+  should run, against a scratch `DATA_DIR`, `CLAUDE_HOME` and workspace, with
+  `CLAUDE_BIN` pointed at a stub that speaks `stream-json` and stays alive:
+
+  ```bash
+  docker compose up --build          # or: npm run dev, where the edge runtime works
+  # Settings → 1 concurrent run, so one block queues behind another.
+  # Save a workflow: a quick block, a slow one, a second slow one, and a fourth
+  # set to start after the first slow one. Press Run, wait for one `running`,
+  # one `queued` and one `waiting`, then press Stop all.
+  ```
+
+  Four things to watch, none of which the unit test can see. That the signalled
+  child actually dies and its run lands `stopped` rather than `failed` — a
+  SIGTERM'd child closes with a null code that reads as `-1`, and the `cancelled`
+  check ahead of the exit-code test is what keeps a deliberate stop from being
+  filed as a crash. That a killed cycle's spend arrives in `spent_usd_est` and
+  not in `spent_usd`. That the block which was `waiting` reads `blocked` with a
+  reason naming the workflow, and that nothing was promoted into `running` on the
+  way out. And that a stopped run's uncommitted work is still in its checkout
+  afterwards, offered by the run page's Commit under that run's own branch.
 - **Stopping a chat turn, in either of its two forms.** `staleTurn` is unit
   tested and the rest typechecks, but no real CLI child has been signalled by
   `cancelChatTurn` and no sweep has fired against a live row. Two things to
