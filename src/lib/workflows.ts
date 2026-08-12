@@ -3377,9 +3377,13 @@ function blockSystemPrompt(
  * ever wake it — and re-deciding unattended, hours later, is spend nobody is
  * present to want, which is the queued-run rule arrived at from the other side.
  *
- * Runs **after** `reconcileOnBoot`, so the members it is reading about have
- * already been closed out, and the cascade at the end is what gives every block
- * behind these its own sentence rather than leaving it `waiting` for ever.
+ * Every `waiting` row goes, not only the ones directly behind a `thinking` one,
+ * and that is what keeps this consistent with the queued-run rule rather than
+ * merely similar to it. A block behind a fan-out whose runs the same boot has
+ * just failed could otherwise be released by the next advance — `on-finish` is
+ * satisfied by a run that did a cycle and then died with the container — and
+ * what that starts is an unattended agent nobody is present to have wanted.
+ * Closed out, there is nothing left for a pass to release.
  */
 export function reconcileBlocksOnBoot(): void {
   const now = Date.now();
@@ -3402,9 +3406,6 @@ export function reconcileBlocksOnBoot(): void {
   console.warn(
     `[usagefoundry] Closed out ${thinking + waiting} workflow block(s) interrupted by a restart.`,
   );
-  // Every block is terminal now, so this spawns nothing: what it does is write
-  // the reason onto each node behind them.
-  advanceInstances();
 }
 
 /** A run's live state for the instance view, or null when the row has gone. */

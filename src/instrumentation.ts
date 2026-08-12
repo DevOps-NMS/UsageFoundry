@@ -67,7 +67,8 @@ export async function register() {
       // A block deciding what to start when the process died, and every block
       // behind it. Same rule as a `waiting` run and for the same reason: what
       // it was waiting for has just been closed out, and re-deciding hours
-      // later, unattended, is spend nobody is present to want.
+      // later, unattended, is spend nobody is present to want. Before the halt
+      // reconciler, so what that one finds live is only the runs.
       reconcileBlocksOnBoot();
       reconcileHaltsOnBoot();
     } else {
