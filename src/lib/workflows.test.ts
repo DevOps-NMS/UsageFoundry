@@ -4,13 +4,20 @@ import { describe, it } from "node:test";
 import {
   haltPlan,
   normalizeWorkflowInput,
+  planEmission,
+  planInstanceStep,
   topologicalOrder,
+  type BlockStatus,
+  type EmissionLimits,
   type HaltCause,
   type HaltMember,
+  type InstanceNodeState,
   type WorkflowEdge,
+  type WorkflowGraph,
   type WorkflowInstanceStatus,
   type WorkflowKnowledge,
 } from "./workflows";
+import type { RunStatus } from "./orchestrator";
 
 /**
  * The three decisions a workflow makes with nothing spawned yet: whether the
@@ -56,6 +63,11 @@ function node(id: string, extra: Record<string, unknown> = {}) {
     promptOverride: null,
     ...extra,
   };
+}
+
+/** An orchestrator block, with the cap a saved graph must carry. */
+function decider(id: string, extra: Record<string, unknown> = {}) {
+  return node(id, { kind: "orchestrator", fanOut: 3, ...extra });
 }
 
 function edge(
@@ -189,6 +201,65 @@ describe("normalizeWorkflowInput — name and blocks", () => {
     assert.match(
       error(graph([node("a"), node("a", { name: "Second" })])),
       /share the id/,
+    );
+  });
+
+  it("reads a block with no kind as a run block", () => {
+    // Every graph saved before orchestrator blocks existed says nothing here,
+    // and the other reading would turn one of them into a graph that starts
+    // agents nobody wrote.
+    const v = value(graph([node("a")]));
+    assert.equal(v.graph.nodes[0].kind, "run");
+    assert.equal(v.graph.nodes[0].fanOut, null);
+  });
+
+  it("refuses an orchestrator block with no fan-out cap", () => {
+    // The `no_terminus` rule, applied where it bites hardest: this is the one
+    // block whose runs start with nothing between the decision and the spawn,
+    // so a missing ceiling is an unbounded number of billed agents from one
+    // press of Run. Refused at *save*, so it fails in the form that caused it.
+    for (const bad of [undefined, null, "", 0, -1, 2.5]) {
+      assert.match(
+        error(graph([decider("a", { fanOut: bad })])),
+        /needs a limit on how many runs it may start/,
+        `fanOut ${String(bad)} should be refused`,
+      );
+    }
+  });
+
+  it("refuses a fan-out cap past the ceiling, and keeps one below it", () => {
+    assert.match(error(graph([decider("a", { fanOut: 99 })])), /at most 10 runs/);
+    assert.equal(value(graph([decider("a", { fanOut: 4 })])).graph.nodes[0].fanOut, 4);
+  });
+
+  it("refuses a branch hand-over at either end of an orchestrator block", () => {
+    // It decides rather than works, so it has no checkout and no branch. Said
+    // by name rather than left to the isolation test, which would claim its
+    // guards work directly in the folder — true of nothing here.
+    assert.match(
+      error(
+        graph(
+          [decider("a"), node("b")],
+          [edge("a", "b", { continueBranch: true })],
+        ),
+      ),
+      /no branch to hand over or carry on/,
+    );
+    assert.match(
+      error(
+        graph(
+          [node("a"), decider("b")],
+          [edge("a", "b", { continueBranch: true })],
+        ),
+      ),
+      /no branch to hand over or carry on/,
+    );
+  });
+
+  it("requires a brief on an orchestrator block, in its own words", () => {
+    assert.match(
+      error(graph([decider("a", { task: "  " })])),
+      /nothing to decide/,
     );
   });
 
@@ -660,5 +731,451 @@ describe("haltPlan — a stop that arrives when there is nothing to do", () => {
       decision.steps.map((s) => s.runId),
       ["r-build", "r-test"],
     );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* What an orchestrator block may emit                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The two decisions that stand between a model's answer and N billed agents.
+ *
+ * These clear the bar the rest of `npm test` sets by a wider margin than
+ * anything else in this file, because there is no person in the loop at all.
+ * Every other route that starts a run has one: the run form, the chat's Approve
+ * button, the press of Run on a graph a person wrote. Here the graph was
+ * approved months ago and what starts is whatever the block decided a minute
+ * ago — so a cap read one too high is an agent nobody agreed to, a folder check
+ * that passes is an agent in a repository the block was never pointed at, and a
+ * block that emits nothing leaves the runs behind it either started on absent
+ * work or asleep for ever with nothing on the page to say why.
+ */
+
+/** Everything a block is measured against, so a case states only what it varies. */
+function limits(over: Partial<EmissionLimits> = {}): EmissionLimits {
+  return {
+    blockName: "Pick the work",
+    fanOut: 3,
+    // Stands in for `resolveWorkspaceFolder` against the block's own mount:
+    // "outside" is the one path this fixture refuses.
+    folderRefusal: (folder) =>
+      folder.startsWith("..") ? "It is outside the workspace." : null,
+    ...over,
+  };
+}
+
+/** One emitted spec with everything filled in. */
+function spec(id: string, over: Record<string, unknown> = {}) {
+  return {
+    id,
+    title: id.toUpperCase(),
+    task: `Do ${id}`,
+    folder: "repo",
+    ...over,
+  };
+}
+
+/** Unwrap an emission expected to be accepted. */
+function emitted(raw: unknown, over: Partial<EmissionLimits> = {}) {
+  const res = planEmission(raw, limits(over));
+  assert.ok(res.ok, `expected ok, got: ${res.ok ? "" : res.reason}`);
+  return res.specs;
+}
+
+/** The refusal for an emission expected to be rejected. */
+function refused(raw: unknown, over: Partial<EmissionLimits> = {}): string {
+  const res = planEmission(raw, limits(over));
+  assert.ok(!res.ok, "expected a refusal");
+  return res.reason;
+}
+
+describe("planEmission — which specs become runs", () => {
+  it("accepts a plain list and keeps every field the spec may set", () => {
+    const specs = emitted([spec("a"), spec("b", { folder: "repo/api" })]);
+    assert.deepEqual(
+      specs.map((s) => [s.id, s.title, s.task, s.folder]),
+      [
+        ["a", "A", "Do a", "repo"],
+        ["b", "B", "Do b", "repo/api"],
+      ],
+    );
+    // And nothing else. A spec that could carry a guard would be a route to
+    // --permission-mode reached by a model with nobody reading the result.
+    assert.deepEqual(Object.keys(specs[0]).sort(), [
+      "dependsOn",
+      "folder",
+      "id",
+      "task",
+      "title",
+    ]);
+  });
+
+  it("takes the mount root as a real answer", () => {
+    // `""` is the workspace root on a node and on a template, so it is one
+    // here too: collapsing it into "no folder named" would silently promote a
+    // deliberate choice into something else.
+    assert.equal(emitted([spec("a", { folder: "" })])[0].folder, "");
+  });
+
+  it("accepts an empty emission", () => {
+    // "There is nothing worth doing" is an answer, and the alternative is a
+    // block that has to invent work in order to say so.
+    assert.deepEqual(emitted([]), []);
+  });
+
+  it("refuses one more than the cap, naming both numbers", () => {
+    // The cap is the whole of what the operator agreed to when they saved the
+    // graph, and it is the one refusal the model can act on by emitting fewer —
+    // so it says how many it may have and how many it asked for.
+    const reason = refused([spec("a"), spec("b"), spec("c"), spec("d")]);
+    assert.match(reason, /at most 3 run\(s\)/);
+    assert.match(reason, /asks for 4/);
+    assert.match(reason, /cannot be raised from here/);
+  });
+
+  it("accepts exactly the cap", () => {
+    // Off by one in the other direction is a block that can never use its last
+    // slot, which is a quiet, permanent underuse nothing would report.
+    assert.equal(emitted([spec("a"), spec("b"), spec("c")]).length, 3);
+  });
+
+  it("refuses a folder the mount check rejects, naming the run", () => {
+    // Containment is decided per mount by `resolveInMount`, twice. What this
+    // pins is that the refusal reaches the model as a sentence it can act on
+    // rather than as a run started somewhere nobody pointed it at.
+    const reason = refused([spec("a", { folder: "../elsewhere" })]);
+    assert.match(reason, /“A” names a folder that cannot be used/);
+    assert.match(reason, /outside the workspace/);
+    assert.match(reason, /use a folder exactly as list_folders gives it/i);
+  });
+
+  it("refuses the whole emission when one spec's folder is refused", () => {
+    // Not "start the three that are fine": the block decided on a set, and
+    // silently dropping one leaves it reporting work that is not happening.
+    assert.match(
+      refused([spec("a"), spec("b", { folder: "../out" }), spec("c")]),
+      /“B” names a folder that cannot be used/,
+    );
+  });
+
+  it("refuses a spec with no title or no task", () => {
+    assert.match(refused([spec("a", { title: "  " })]), /needs a title/);
+    assert.match(refused([spec("a", { task: "" })]), /has no task/);
+  });
+
+  it("refuses two specs sharing an id", () => {
+    assert.match(
+      refused([spec("a"), spec("a")]),
+      /Two runs share the id “a”/,
+    );
+  });
+
+  it("refuses anything that is not a list", () => {
+    assert.match(refused(undefined), /has to be a list/);
+    assert.match(refused({ a: 1 }), /has to be a list/);
+  });
+
+  it("orders the specs so each is created after what it waits for", () => {
+    // The property `startWorkflow` needs of a graph, for the same reason:
+    // `createRun` names the runs a spec depends on, so one created too early
+    // would name a run that does not exist yet.
+    const specs = emitted([
+      spec("c", { dependsOn: [{ id: "b", edge: "on-success" }] }),
+      spec("b", { dependsOn: [{ id: "a", edge: "on-finish" }] }),
+      spec("a"),
+    ]);
+    assert.deepEqual(
+      specs.map((s) => s.id),
+      ["a", "b", "c"],
+    );
+    assert.deepEqual(specs[1].dependsOn, [{ id: "a", edge: "on-finish" }]);
+  });
+
+  it("names the loop rather than leaving createRun to refuse a missing run", () => {
+    // This is where "acyclic by construction" stops being the argument. Each
+    // insert still mints its id after reading its edges, but the graph being
+    // inserted is one a model wrote — and a cyclic set has no creation order at
+    // all, so the first spec would be refused for naming a run that does not
+    // exist rather than for the loop it is part of.
+    const reason = refused([
+      spec("a", { dependsOn: [{ id: "b", edge: "on-success" }] }),
+      spec("b", { dependsOn: [{ id: "a", edge: "on-success" }] }),
+    ]);
+    assert.match(reason, /wait for each other in a loop/);
+    assert.match(reason, /A|B/);
+  });
+
+  it("refuses a dependency on anything outside this emission", () => {
+    // A block orders the runs it is emitting against each other and nothing
+    // else. An edge onto a run it did not create is an edge into a graph it
+    // cannot see, and it is how a block would reach work another block owns.
+    assert.match(
+      refused([spec("a", { dependsOn: [{ id: "r-other", edge: "on-success" }] })]),
+      /not one of the runs being emitted/,
+    );
+  });
+
+  it("refuses a dependency with no condition", () => {
+    // Required rather than defaulted, the treatment every other edge in this
+    // app gets: `on-success` terminates work the operator meant to run
+    // regardless, `on-finish` starts a run on top of one that crashed.
+    assert.match(
+      refused([spec("b", { dependsOn: [{ id: "a" }] }), spec("a")]),
+      /needs a condition for starting after/,
+    );
+  });
+
+  it("refuses a self-dependency", () => {
+    assert.match(
+      refused([spec("a", { dependsOn: [{ id: "a", edge: "on-finish" }] })]),
+      /start after itself|loop/,
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* What the instance does next                                         */
+/* ------------------------------------------------------------------ */
+
+/** A run node's state: the run it became, as its row stands now. */
+function ran(
+  id: string,
+  status: RunStatus,
+  iterations = 1,
+): InstanceNodeState {
+  return { run: { id, status, iterations }, block: null };
+}
+
+/** An orchestrator block's ledger row, with the runs it started. */
+function decided(
+  status: BlockStatus,
+  emittedRuns: Array<[string, RunStatus, number?]> = [],
+  error: string | null = null,
+): InstanceNodeState {
+  return {
+    run: null,
+    block: {
+      status,
+      emitted: emittedRuns.map(([id, s, i]) => ({
+        id,
+        status: s,
+        iterations: i ?? 1,
+      })),
+      error,
+    },
+  };
+}
+
+/** A graph of one orchestrator block feeding one run block. */
+const FAN: WorkflowGraph = {
+  nodes: [
+    {
+      id: "pick",
+      name: "Pick the work",
+      kind: "orchestrator",
+      templateId: null,
+      mountId: "work",
+      folder: "repo",
+      task: "Decide",
+      promptOverride: null,
+      fanOut: 3,
+    },
+    {
+      id: "review",
+      name: "Review it",
+      kind: "run",
+      templateId: null,
+      mountId: "work",
+      folder: "repo",
+      task: "Review",
+      promptOverride: null,
+      fanOut: null,
+    },
+  ],
+  edges: [edge("pick", "review", { edge: "on-finish" })],
+};
+
+function stepOf(state: Record<string, InstanceNodeState>, g = FAN) {
+  return planInstanceStep(g, new Map(Object.entries(state)));
+}
+
+describe("planInstanceStep — what an instance may do next", () => {
+  it("starts a block with nothing in front of it", () => {
+    const step = stepOf({ pick: decided("waiting") });
+    assert.deepEqual(step.spawn, ["pick"]);
+    // And nothing behind it: the block has not decided, so there is nothing
+    // for the run block to be created against.
+    assert.deepEqual(step.create, []);
+    assert.deepEqual(step.block, []);
+  });
+
+  it("leaves a block alone while its turn is in flight", () => {
+    // The claim is a guarded UPDATE, but every terminal run transition in the
+    // app triggers an advance — so a second pass that re-selected a thinking
+    // block would be racing the claim on every one of them.
+    assert.deepEqual(stepOf({ pick: decided("thinking") }).spawn, []);
+  });
+
+  it("holds the block behind it until every emitted run has settled", () => {
+    // Not "until it emitted": the run block is there to follow the work, and
+    // created while that work is still running it would start on a branch
+    // nothing has been committed to yet.
+    const step = stepOf({
+      pick: decided("emitted", [
+        ["r-1", "completed"],
+        ["r-2", "running"],
+      ]),
+    });
+    assert.deepEqual(step.create, []);
+    assert.deepEqual(step.block, []);
+  });
+
+  it("creates the block behind it depending on every run that was emitted", () => {
+    // The fan-in nobody could write down: the graph says "after Pick the work"
+    // and what that resolves to is however many runs it turned out to emit.
+    const step = stepOf({
+      pick: decided("emitted", [
+        ["r-1", "completed"],
+        ["r-2", "failed"],
+      ]),
+    });
+    assert.deepEqual(step.create, [
+      {
+        nodeId: "review",
+        dependsOn: [
+          { runId: "r-1", edge: "on-finish", continueBranch: false },
+          { runId: "r-2", edge: "on-finish", continueBranch: false },
+        ],
+      },
+    ]);
+  });
+
+  it("blocks what is behind an empty emission, naming the block", () => {
+    // The decision this feature has to make explicitly. A block behind a
+    // fan-out exists to review, land or follow up on what the fan-out
+    // produced; started with nothing in front of it, it spends a billed cycle
+    // discovering that. `edgeSatisfied`'s rule one level up: a dependency that
+    // did no work satisfies nothing.
+    const step = stepOf({ pick: decided("emitted", []) });
+    assert.deepEqual(step.create, []);
+    assert.equal(step.block.length, 1);
+    assert.equal(step.block[0].nodeId, "review");
+    assert.match(step.block[0].reason, /“Pick the work” decided there was nothing to start/);
+  });
+
+  it("blocks what is behind a turn that failed, carrying its reason", () => {
+    const step = stepOf({
+      pick: decided("failed", [], "The chat did not answer within 10 minutes."),
+    });
+    assert.match(step.block[0].reason, /could not decide what to start/);
+    assert.match(step.block[0].reason, /did not answer within 10 minutes/);
+  });
+
+  it("blocks what is behind a run that ended without qualifying", () => {
+    const step = stepOf({
+      pick: decided("emitted", [
+        ["r-1", "completed"],
+        ["r-2", "failed"],
+      ]),
+    }, {
+      ...FAN,
+      edges: [edge("pick", "review", { edge: "on-success" })],
+    });
+    assert.deepEqual(step.create, []);
+    assert.match(step.block[0].reason, /one of them ended failed/);
+  });
+
+  it("cascades a block's verdict to everything behind it, one sentence each", () => {
+    // The fixed point is the cascade. Every run in the chain names the block in
+    // front of *it* rather than one shared verdict about a block at the head it
+    // never heard of — the rule `releasableRuns` already follows.
+    const chain: WorkflowGraph = {
+      ...FAN,
+      nodes: [
+        ...FAN.nodes,
+        {
+          id: "land",
+          name: "Land it",
+          kind: "run",
+          templateId: null,
+          mountId: "work",
+          folder: "repo",
+          task: "Land",
+          promptOverride: null,
+          fanOut: null,
+        },
+      ],
+      edges: [...FAN.edges, edge("review", "land", { edge: "on-success" })],
+    };
+    const step = stepOf({ pick: decided("emitted", []) }, chain);
+    assert.deepEqual(
+      step.block.map((b) => b.nodeId),
+      ["review", "land"],
+    );
+    assert.match(step.block[0].reason, /decided there was nothing to start/);
+    assert.match(step.block[1].reason, /“Review it”, which never ran/);
+  });
+
+  it("never re-creates a node that is already a run", () => {
+    // Both passes see the same graph, and this runs after every terminal run
+    // transition in the app. A node selected twice is a second agent in the
+    // same folder from one press of Run.
+    const step = stepOf({
+      pick: decided("emitted", [["r-1", "completed"]]),
+      review: ran("r-review", "queued", 0),
+    });
+    assert.deepEqual(step.create, []);
+    assert.deepEqual(step.block, []);
+  });
+
+  it("never re-decides a node that has already been written off", () => {
+    const step = stepOf({
+      pick: decided("emitted", []),
+      review: decided("blocked", [], "Already written off."),
+    });
+    assert.deepEqual(step.block, []);
+    assert.deepEqual(step.create, []);
+  });
+
+  it("waits for a run block in front of a block before deciding", () => {
+    // An orchestrator block is there to decide *after* the earlier work
+    // happened. Started before it, it decides against a repository in the state
+    // the workflow began in, which is the one thing it exists not to do.
+    const g: WorkflowGraph = {
+      nodes: [
+        {
+          id: "build",
+          name: "Build",
+          kind: "run",
+          templateId: null,
+          mountId: "work",
+          folder: "repo",
+          task: "Build",
+          promptOverride: null,
+          fanOut: null,
+        },
+        FAN.nodes[0],
+      ],
+      edges: [edge("build", "pick", { edge: "on-success" })],
+    };
+    assert.deepEqual(
+      stepOf({ build: ran("r-build", "running", 0), pick: decided("waiting") }, g)
+        .spawn,
+      [],
+    );
+    assert.deepEqual(
+      stepOf({ build: ran("r-build", "completed"), pick: decided("waiting") }, g)
+        .spawn,
+      ["pick"],
+    );
+    // And a dependency that can never satisfy it ends the block rather than
+    // leaving it waiting on a row that is already terminal.
+    const dead = stepOf(
+      { build: ran("r-build", "failed"), pick: decided("waiting") },
+      g,
+    );
+    assert.deepEqual(dead.spawn, []);
+    assert.match(dead.block[0].reason, /“Build”, which ended failed/);
   });
 });
