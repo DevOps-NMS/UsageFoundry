@@ -25,6 +25,7 @@ export function workflowDTO(workflow: Workflow): WorkflowDTO {
     name: workflow.name,
     nodes: workflow.graph.nodes,
     edges: workflow.graph.edges,
+    instanceBudget: workflow.instanceBudget,
     createdAt: workflow.createdAt,
     updatedAt: workflow.updatedAt,
     liveRunCount: liveRunsOf(workflow.id).length,
@@ -63,6 +64,9 @@ export function instanceDTO(instance: WorkflowInstance): WorkflowInstanceDTO {
     stopCause: instance.stopCause,
     stopReason: instance.stopReason,
     liveRunCount: instance.liveRunCount,
+    instanceBudget: instance.instanceBudget,
+    spentUSD: instance.spend.spentUSD,
+    spentGuardUSD: instance.spend.spentGuardUSD,
     nodes,
   };
 }

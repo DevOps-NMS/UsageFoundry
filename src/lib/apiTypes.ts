@@ -492,11 +492,27 @@ export interface WorkflowEdgeDTO {
   continueBranch: boolean;
 }
 
+/**
+ * Limits on a whole press of Run, as against one block's.
+ *
+ * Every field nullable and `null` means off, this app's standing rule for a
+ * budget field. There is deliberately no cycle or time limit here: an instance
+ * is a finite graph whose members each carry their own terminus, so it needs no
+ * monotone quantity of its own to be sure of ending.
+ */
+export interface InstanceBudgetDTO {
+  maxInstanceCostUSD: number | null;
+  /** 0–1. The form asks for a percentage. */
+  maxSessionFraction: number | null;
+  maxWeeklyFraction: number | null;
+}
+
 export interface WorkflowDTO {
   id: string;
   name: string;
   nodes: WorkflowNodeDTO[];
   edges: WorkflowEdgeDTO[];
+  instanceBudget: InstanceBudgetDTO;
   createdAt: number;
   updatedAt: number;
   /** Runs from this workflow that have not finished. Empty on most reads. */
@@ -549,6 +565,20 @@ export interface WorkflowInstanceDTO {
   stopReason: string | null;
   /** Members that have not finished. Non-zero for as long as `stopping` is. */
   liveRunCount: number;
+  /** The limits it was started under — a copy, not the live workflow's. */
+  instanceBudget: InstanceBudgetDTO;
+  /**
+   * What its blocks have spent together.
+   *
+   * Two figures, never one. `spentUSD` is the sum of what each block's own CLI
+   * measured and is a **floor** — a cycle in flight has reported nothing and
+   * contributes zero for its whole duration. `spentGuardUSD` is what the guard
+   * acts on: that, plus reconciled estimates for killed cycles, plus what
+   * telemetry says the cycles in flight have cost so far. Neither is ever added
+   * to a dashboard meter or to `runs.spent_usd`.
+   */
+  spentUSD: number;
+  spentGuardUSD: number;
   nodes: WorkflowInstanceNodeDTO[];
 }
 

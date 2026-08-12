@@ -8,12 +8,15 @@ import {
   STATUS_TONE,
   fmtCycles,
   fmtDateTime,
+  fmtPct,
   fmtUSD,
   pollFailureMessage,
 } from "@/lib/format";
+import { Meter } from "@/components/Meter";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
+import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 
@@ -139,6 +142,12 @@ export default function WorkflowInstancePage() {
     );
   }
 
+  const budget = instance.instanceBudget;
+  const noLimits =
+    budget.maxInstanceCostUSD === null &&
+    budget.maxSessionFraction === null &&
+    budget.maxWeeklyFraction === null;
+
   return (
     <>
       <div className="mb-6">
@@ -223,7 +232,67 @@ export default function WorkflowInstancePage() {
         </Notice>
       )}
 
-      <CardTitle>Blocks</CardTitle>
+      <CardTitle>Limits for the whole workflow</CardTitle>
+      <Card emphasis="quiet">
+        {/* `fraction === null` when no spending limit was set, which renders
+            hatched rather than as an empty bar: an instance whose share of a
+            limit is unknown and one that has spent nothing must not look alike.
+            The solid fill is what the blocks' own CLIs measured; the hatched
+            band past it is the figure the guard acts on, which adds reconciled
+            estimates for killed cycles and what telemetry has seen of the
+            cycles in flight. Same split, same rendering, as an unpriced model
+            widens a window meter. */}
+        <Meter
+          label="Spent across blocks"
+          fraction={
+            budget.maxInstanceCostUSD === null
+              ? null
+              : instance.spentUSD / budget.maxInstanceCostUSD
+          }
+          upperFraction={
+            budget.maxInstanceCostUSD === null
+              ? null
+              : instance.spentGuardUSD / budget.maxInstanceCostUSD
+          }
+          value={fmtUSD(instance.spentUSD)}
+          unknownHint="no workflow spending limit"
+          detail={
+            budget.maxInstanceCostUSD === null
+              ? `${fmtUSD(instance.spentUSD)} measured so far`
+              : `of ${fmtUSD(budget.maxInstanceCostUSD)}; the guard reads ${fmtUSD(
+                  instance.spentGuardUSD,
+                )}`
+          }
+        />
+
+        <ul className="m-0 mt-4 list-none space-y-1 p-0 text-sm text-ink-muted">
+          <li>
+            {budget.maxSessionFraction === null
+              ? "No 5-hour window guard"
+              : `Stops the workflow at ${fmtPct(budget.maxSessionFraction)} of the 5-hour window`}
+          </li>
+          <li>
+            {budget.maxWeeklyFraction === null
+              ? "No weekly window guard"
+              : `Stops the workflow at ${fmtPct(budget.maxWeeklyFraction)} of the weekly window`}
+          </li>
+        </ul>
+
+        <Hint>
+          {noLimits
+            ? "Nothing bounds this workflow as a whole — each block is bounded only by its own guards"
+            : "Checked before a block starts a work cycle, never during one — a block already working carries on until some block reaches a cycle boundary, so the total can overshoot by up to one work cycle per block running at the time, and blocks running at once multiply that"}
+        </Hint>
+        {instance.liveRunCount > 0 && (
+          <Hint>
+            {instance.liveRunCount} block(s) working — a cycle in flight reports
+            nothing until it ends, so the measured figure is a floor and the
+            guard&rsquo;s is what telemetry has seen so far
+          </Hint>
+        )}
+      </Card>
+
+      <CardTitle className="mt-8">Blocks</CardTitle>
       <Card emphasis="primary">
         {instance.nodes.length === 0 ? (
           <Empty>

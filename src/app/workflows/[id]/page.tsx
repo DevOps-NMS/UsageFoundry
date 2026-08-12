@@ -8,7 +8,7 @@ import type {
   WorkflowDTO,
   WorkflowInstanceDTO,
 } from "@/lib/apiTypes";
-import { fmtDateTime, pollFailureMessage } from "@/lib/format";
+import { fmtDateTime, fmtPct, fmtUSD, pollFailureMessage } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
@@ -263,7 +263,30 @@ export default function WorkflowPage() {
         </Notice>
       )}
 
-      <CardTitle>Blocks</CardTitle>
+      {/* Above the blocks, because it is the one thing on this page that bounds
+          all of them, and because Run is the next thing pressed. */}
+      <CardTitle>Limits for the whole workflow</CardTitle>
+      <Card emphasis="quiet">
+        <ul className="m-0 list-none space-y-1 p-0 text-sm text-ink-muted">
+          <li>
+            {workflow.instanceBudget.maxInstanceCostUSD === null
+              ? "No spending limit across the blocks"
+              : `Stops after ${fmtUSD(workflow.instanceBudget.maxInstanceCostUSD)} across the blocks`}
+          </li>
+          <li>
+            {workflow.instanceBudget.maxSessionFraction === null
+              ? "No 5-hour window guard"
+              : `Stops at ${fmtPct(workflow.instanceBudget.maxSessionFraction)} of the 5-hour window`}
+          </li>
+          <li>
+            {workflow.instanceBudget.maxWeeklyFraction === null
+              ? "No weekly window guard"
+              : `Stops at ${fmtPct(workflow.instanceBudget.maxWeeklyFraction)} of the weekly window`}
+          </li>
+        </ul>
+      </Card>
+
+      <CardTitle className="mt-8">Blocks</CardTitle>
       <Card emphasis="primary">
         <TableWrap>
           <Table>

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
   RunTemplateDTO,
+  SettingsDTO,
   WorkflowDTO,
   WorkflowEdgeDTO,
   WorkflowNodeDTO,
@@ -11,9 +12,18 @@ import type {
   WorkspaceMountDTO,
 } from "@/lib/apiTypes";
 import { MAX_WORKFLOW_NAME, MAX_WORKFLOW_NODES } from "@/lib/apiTypes";
+import { pctField } from "@/lib/format";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
-import { Field, Input, Select, Subsection, Textarea } from "@/components/ui/Field";
+import {
+  Field,
+  Input,
+  LimitField,
+  Select,
+  Subsection,
+  Textarea,
+} from "@/components/ui/Field";
+import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
 
 /**
@@ -27,9 +37,14 @@ import { Notice } from "@/components/ui/Notice";
  * because the API is reachable without this form.
  *
  * A block names a template for its guards, or names none and takes the guard
- * set in Settings. There is deliberately no permission-mode, budget or
+ * set in Settings. There is deliberately no permission-mode, per-block budget or
  * isolation control here: those decide what an agent may do, and a workflow
  * decides what work to do.
+ *
+ * The one exception is the workflow-wide budget at the top, and it is an
+ * exception because it bounds something no per-block guard can see: ten blocks
+ * under a $5 block limit is a $50 workflow. It is saved with the graph, so the
+ * form a person types it into is the only thing that can set it.
  */
 
 /** How a block is held while it is being edited. Edges are per block. */
@@ -123,6 +138,37 @@ export function WorkflowEditor({
   const [blocks, setBlocks] = useState<BlockDraft[]>(() =>
     workflow ? toDrafts(workflow) : [emptyBlock("block-1", "")],
   );
+
+  // The workflow-wide limits. Held as strings for the same reason the run
+  // form's are: "" is how a number input says "off", and `normalizeInstanceBudget`
+  // reads "", 0 and null identically.
+  const [costCapped, setCostCapped] = useState(
+    (workflow?.instanceBudget.maxInstanceCostUSD ?? null) !== null,
+  );
+  const [maxInstanceCostUSD, setMaxInstanceCostUSD] = useState(
+    workflow?.instanceBudget.maxInstanceCostUSD?.toString() ?? "20",
+  );
+  const [maxSessionFraction, setMaxSessionFraction] = useState(
+    pctField(workflow?.instanceBudget.maxSessionFraction),
+  );
+  const [maxWeeklyFraction, setMaxWeeklyFraction] = useState(
+    pctField(workflow?.instanceBudget.maxWeeklyFraction),
+  );
+  /**
+   * Whether a fraction guard would have anything to measure against.
+   *
+   * A configured ceiling is one source; the provider's own utilisation is the
+   * other, and `windows.ts` prefers it — so "nothing typed in Settings" is not
+   * the same as "no reading", and warning on the ceiling alone would nag every
+   * install that reads its percentage from Anthropic. Null until Settings
+   * answers, which is why the warning renders on `false` rather than on
+   * `!ceilings`. The exact answer is the door refusal at Run, which reads a real
+   * snapshot.
+   */
+  const [ceilings, setCeilings] = useState<{
+    session: boolean;
+    weekly: boolean;
+  } | null>(null);
   const [templates, setTemplates] = useState<RunTemplateDTO[]>([]);
   const [mounts, setMounts] = useState<WorkspaceMountDTO[]>([]);
   const [folders, setFolders] = useState<WorkspaceFolderDTO[]>([]);
@@ -170,6 +216,35 @@ export function WorkflowEditor({
       })
       .finally(() => {
         if (live) setLoaded(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // Separate from the pair above, and deliberately not blocking `loaded`: this
+  // only decides whether one warning renders, so a slow or failed read must not
+  // hold the form back or turn into an error banner over it.
+  useEffect(() => {
+    let live = true;
+    fetch("/api/settings", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        const s = d.settings as SettingsDTO | undefined;
+        if (!live || !s) return;
+        setCeilings({
+          session:
+            s.planUsageFromApi ||
+            s.sessionCostLimit !== null ||
+            s.sessionTokenLimit !== null,
+          weekly:
+            s.planUsageFromApi ||
+            s.weeklyCostLimit !== null ||
+            s.weeklyTokenLimit !== null,
+        });
+      })
+      .catch(() => {
+        /* the warning stays unrendered; Run still refuses by name */
       });
     return () => {
       live = false;
@@ -294,7 +369,19 @@ export function WorkflowEditor({
     setSaving(true);
     setError(null);
     try {
-      const body = JSON.stringify({ name, graph: toGraph(blocks) });
+      // The three limits go over as typed. `normalizeInstanceBudget` reads "",
+      // 0 and a negative all as off, so an emptied field switches a guard off
+      // rather than becoming a cap of zero — the rule every budget field here
+      // follows.
+      const body = JSON.stringify({
+        name,
+        graph: toGraph(blocks),
+        instanceBudget: {
+          maxInstanceCostUSD: costCapped ? maxInstanceCostUSD : "",
+          maxSessionFraction: maxSessionFraction,
+          maxWeeklyFraction: maxWeeklyFraction,
+        },
+      });
       const res = await fetch(
         workflow ? `/api/workflows/${workflow.id}` : "/api/workflows",
         {
@@ -336,6 +423,87 @@ export function WorkflowEditor({
             placeholder="Nightly maintenance"
           />
         </Field>
+
+        <Subsection title="Limits for the whole workflow">
+          <Field label="Spending limit" htmlFor="wf-cost">
+            <LimitField
+              id="wf-cost"
+              modeLabel="Workflow spending limit mode"
+              enabled={costCapped}
+              onEnabledChange={setCostCapped}
+              value={maxInstanceCostUSD}
+              onValueChange={setMaxInstanceCostUSD}
+              unit="USD"
+              offLabel="No workflow spending limit"
+              min={0}
+              step="0.5"
+            />
+            <Hint>
+              {costCapped
+                ? "Everything every block spends, together — each block still has its own limits from its guards"
+                : "Only the per-block guards bound this workflow, so ten blocks under a $5 block limit is a $50 workflow"}
+            </Hint>
+          </Field>
+
+          <div className="grid gap-x-4 sm:grid-cols-2">
+            <Field label="Stop at 5-hour usage" htmlFor="wf-sess">
+              <div className="flex items-center gap-2">
+                <Input
+                  id="wf-sess"
+                  type="number"
+                  min={1}
+                  max={100}
+                  placeholder="off"
+                  value={maxSessionFraction}
+                  onChange={(e) => setMaxSessionFraction(e.target.value)}
+                  className="min-w-0 flex-1 tabular-nums"
+                />
+                <span className="whitespace-nowrap text-xs text-ink-muted">
+                  %
+                </span>
+              </div>
+              {maxSessionFraction && ceilings?.session === false && (
+                <Hint tone="warn">
+                  No 5-hour ceiling is set and the account&rsquo;s own percentage
+                  is switched off, so this guard has nothing to measure and Run
+                  will refuse the workflow
+                </Hint>
+              )}
+            </Field>
+
+            <Field label="Stop at weekly usage" htmlFor="wf-week">
+              <div className="flex items-center gap-2">
+                <Input
+                  id="wf-week"
+                  type="number"
+                  min={1}
+                  max={100}
+                  placeholder="off"
+                  value={maxWeeklyFraction}
+                  onChange={(e) => setMaxWeeklyFraction(e.target.value)}
+                  className="min-w-0 flex-1 tabular-nums"
+                />
+                <span className="whitespace-nowrap text-xs text-ink-muted">
+                  %
+                </span>
+              </div>
+              {maxWeeklyFraction && ceilings?.weekly === false && (
+                <Hint tone="warn">
+                  No weekly ceiling is set and the account&rsquo;s own percentage
+                  is switched off, so this guard has nothing to measure and Run
+                  will refuse the workflow
+                </Hint>
+              )}
+            </Field>
+          </div>
+
+          <Hint>
+            Checked before a block starts a work cycle, never during one — a
+            block already working carries on until some block reaches a cycle
+            boundary, so the total can overshoot by up to one work cycle per
+            block running at the time, and blocks running at once multiply that
+          </Hint>
+        </Subsection>
 
         {blocks.map((block, index) => {
           const earlier = blocks.slice(0, index);
