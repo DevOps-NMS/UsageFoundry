@@ -2,25 +2,34 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  haltPlan,
   normalizeWorkflowInput,
   topologicalOrder,
+  type HaltCause,
+  type HaltMember,
   type WorkflowEdge,
+  type WorkflowInstanceStatus,
   type WorkflowKnowledge,
 } from "./workflows";
 
 /**
- * The two decisions a workflow makes before anything is spawned: whether the
- * graph can run at all, and in what order its blocks become runs.
+ * The three decisions a workflow makes with nothing spawned yet: whether the
+ * graph can run at all, in what order its blocks become runs, and — once they
+ * are runs — which of them a halt takes down and what each becomes.
  *
- * Both clear the bar the rest of `npm test` sets — pure functions whose failure
- * modes are silent and expensive. A wrong order starts an agent *before the
- * work it extends exists*: the run is admitted, its dependency list names runs
- * that have not been created, and what the operator sees is a run that started
- * on an empty branch and did the first thing its task said. A graph that
+ * All three clear the bar the rest of `npm test` sets — pure functions whose
+ * failure modes are silent and expensive. A wrong order starts an agent *before
+ * the work it extends exists*: the run is admitted, its dependency list names
+ * runs that have not been created, and what the operator sees is a run that
+ * started on an empty branch and did the first thing its task said. A graph that
  * validates when it should not is the same failure one step earlier — a loop
  * instantiated into rows that sit `waiting` for ever, because `releasableRuns`
  * reaches a fixed point and leaves them alone, which is precisely the row this
- * whole design has none of.
+ * whole design has none of. And a halt is silent in both directions at once: a
+ * member the selection misses goes on spending under a workflow the operator
+ * has been told is stopped, while a `completed` member rewritten as stopped
+ * destroys the record of work that landed, with nothing on the page afterwards
+ * to say it ever happened.
  *
  * Nothing here opens the database or touches the filesystem. `folderRefusal` is
  * the one check that does, and it is left to the routes for that reason.
@@ -409,5 +418,182 @@ describe("normalizeWorkflowInput — continuing a branch", () => {
     );
     assert.ok(!res.ok, "expected a refusal");
     assert.match(res.error, /no branch to hand/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Halting                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One instance holding every kind of member at once.
+ *
+ * `Review` waits behind `Build`, which is the case that decides the ordering
+ * inside the halt: stopping `Build` releases its dependents, so a waiting member
+ * left until last would be admitted, promoted and spawned *because* the workflow
+ * was stopped.
+ */
+const MEMBERS: HaltMember[] = [
+  { runId: "r-build", nodeName: "Build", status: "running" },
+  { runId: "r-test", nodeName: "Test", status: "queued" },
+  { runId: "r-docs", nodeName: "Docs", status: "paused" },
+  { runId: "r-review", nodeName: "Review", status: "waiting" },
+  { runId: "r-landed", nodeName: "Landed", status: "completed" },
+  { runId: "r-broken", nodeName: "Broken", status: "failed" },
+];
+
+const OPERATOR: HaltCause = { kind: "operator" };
+const GUARD: HaltCause = {
+  kind: "guard",
+  detail: "This workflow has spent $12.40 of its $10.00 limit.",
+};
+
+function plan(
+  status: WorkflowInstanceStatus = "started",
+  members: readonly HaltMember[] = MEMBERS,
+  cause: HaltCause = OPERATOR,
+) {
+  return haltPlan({ status, workflowName: "Nightly" }, members, cause);
+}
+
+/** What the halt decided about one member, by run id. */
+function step(decision: ReturnType<typeof plan>, runId: string) {
+  const found = decision.steps.find((s) => s.runId === runId);
+  assert.ok(found, `no step for ${runId}`);
+  return found;
+}
+
+describe("haltPlan — which members a stop selects, and what each becomes", () => {
+  it("covers every member exactly once", () => {
+    // The silent half of getting this wrong is a member nobody decided about:
+    // it is not stopped, it is not reported, and it goes on spending under a
+    // workflow the page says is stopped.
+    const decision = plan();
+    assert.equal(decision.act, true);
+    assert.deepEqual(
+      decision.steps.map((s) => s.runId),
+      MEMBERS.map((m) => m.runId),
+    );
+  });
+
+  it("sends the three live statuses through stopRun", () => {
+    // One action for all three, because `stopRun` is the one path that signals a
+    // child and it re-reads the row itself: a queued member promoted to running
+    // by an earlier stop in the same pass still lands on the right branch.
+    const decision = plan();
+    assert.equal(step(decision, "r-build").action, "stop");
+    assert.equal(step(decision, "r-test").action, "stop");
+    assert.equal(step(decision, "r-docs").action, "stop");
+  });
+
+  it("blocks a waiting member rather than stopping it", () => {
+    // `blocked` is the true thing to say: nothing ran and nothing was spent. It
+    // also keeps the run out of REOPENABLE, which is honest — picking one link
+    // of a halted chain back up would start it on work that never happened.
+    const waiting = step(plan(), "r-review");
+    assert.equal(waiting.action, "block");
+    assert.match(waiting.reason ?? "", /waiting for another run\.$/);
+  });
+
+  it("leaves a finished member exactly as it is", () => {
+    // Rewriting a completed run as stopped destroys the record of work that
+    // landed, and nothing on the page afterwards says it ever happened.
+    for (const id of ["r-landed", "r-broken"]) {
+      const settled = step(plan(), id);
+      assert.equal(settled.action, "leave");
+      assert.equal(settled.reason, null);
+    }
+  });
+
+  it("leaves a member whose run row has gone", () => {
+    const gone = step(
+      plan("started", [{ runId: "r-gone", nodeName: "Gone", status: null }]),
+      "r-gone",
+    );
+    assert.equal(gone.action, "leave");
+  });
+});
+
+describe("haltPlan — telling the three ways a run can be stopped apart", () => {
+  it("names the workflow and the operator", () => {
+    const decision = plan();
+    assert.equal(
+      decision.cause,
+      "Stopped by the operator with all of workflow “Nightly”",
+    );
+  });
+
+  it("names the workflow and the guard", () => {
+    const decision = plan("started", MEMBERS, GUARD);
+    assert.equal(
+      decision.cause,
+      "Stopped by the budget guard on workflow “Nightly”",
+    );
+  });
+
+  it("differs from what a run stopped on its own page says", () => {
+    // `stopRun`'s own default is "Stopped by operator", with no workflow in it.
+    // The three sentences have to be distinguishable on sight, or ten rows read
+    // as ten unrelated decisions.
+    for (const cause of [OPERATOR, GUARD]) {
+      const { cause: attribution } = plan("started", MEMBERS, cause);
+      assert.notEqual(attribution, "Stopped by operator");
+      assert.match(attribution, /workflow “Nightly”/);
+    }
+  });
+
+  it("keeps the attribution a fragment, because stopRun completes it", () => {
+    // Each of `stopRun`'s branches appends the clause saying what the run was
+    // doing — "… before it started." A sentence here would punctuate mid-line.
+    for (const cause of [OPERATOR, GUARD]) {
+      assert.doesNotMatch(plan("started", MEMBERS, cause).cause, /[.!?]$/);
+    }
+  });
+
+  it("keeps a guard's verdict off the member rows", () => {
+    // It is one fact about one instance and is recorded there. Copied onto ten
+    // rows it reads as ten separate findings.
+    const decision = plan("started", MEMBERS, GUARD);
+    for (const s of decision.steps) {
+      assert.doesNotMatch(s.reason ?? "", /\$12\.40/);
+    }
+  });
+});
+
+describe("haltPlan — a stop that arrives when there is nothing to do", () => {
+  it("is a no-op on an instance already stopping", () => {
+    // Idempotence: a second press must not run a second kill ladder over
+    // children that are already dying.
+    const decision = plan("stopping");
+    assert.equal(decision.act, false);
+    assert.deepEqual(decision.steps, []);
+    assert.match(decision.note ?? "", /already stopping/);
+  });
+
+  it("is a no-op on an instance whose members have all finished stopping", () => {
+    const decision = plan("stopped");
+    assert.equal(decision.act, false);
+    assert.deepEqual(decision.steps, []);
+    assert.match(decision.note ?? "", /already been stopped/);
+  });
+
+  it("is a no-op on a graph that was rolled back at creation", () => {
+    // `failed` means every run it did create was stopped again in the same pass.
+    const decision = plan("failed");
+    assert.equal(decision.act, false);
+    assert.deepEqual(decision.steps, []);
+    assert.match(decision.note ?? "", /never started/);
+  });
+
+  it("selects only the blocks that exist, mid-instantiation", () => {
+    // A stop cannot land inside the creating pass — it holds the event-loop turn
+    // from its first createRun to its last — so what it can see is whatever the
+    // instance's run table already holds. A block whose run has not been created
+    // is not a member, is not selected, and is never created either.
+    const decision = plan("started", MEMBERS.slice(0, 2));
+    assert.deepEqual(
+      decision.steps.map((s) => s.runId),
+      ["r-build", "r-test"],
+    );
   });
 });

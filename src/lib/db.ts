@@ -284,8 +284,16 @@ function migrate(db: Database.Database) {
       workflow_name TEXT NOT NULL,
       graph         TEXT NOT NULL,
       created_at    INTEGER NOT NULL,
-      -- 'started' | 'failed'. 'failed' is a graph that could not be created in
-      -- full, whose partial runs were stopped again — see startWorkflow.
+      -- 'started' | 'failed' | 'stopping'. 'failed' is a graph that could not
+      -- be created in full, whose partial runs were stopped again — see
+      -- startWorkflow. 'stopping' is the halt's closed door: written before any
+      -- member is touched, so nothing can join the instance behind it, and it
+      -- is what makes a second stop a no-op rather than a second kill ladder.
+      --
+      -- There is deliberately no 'stopped' value. Whether the halt has finished
+      -- is a fact about the member runs — a signalled child takes seconds to
+      -- die — so it is derived from their statuses at read time rather than
+      -- written by a second pass that nothing would run after a restart.
       status        TEXT NOT NULL DEFAULT 'started',
       error         TEXT
     );
@@ -545,6 +553,20 @@ function migrate(db: Database.Database) {
   // append would push the deadline out by however long the turn has already
   // run. Null whenever no turn is in flight.
   addColumn(db, "chat_sessions", "turn_started_at", "INTEGER");
+
+  // That this instance was halted, by what, and when.
+  //
+  // `stopped_at` is the moment the door was closed rather than the moment the
+  // last child died: a halt marks the row `stopping` and then walks the
+  // members, and what the operator needs to know is when nothing further could
+  // join. `stop_cause` is 'operator' or 'guard' and is what makes the three
+  // ways a member run can end tellable apart on sight — the third is a run
+  // stopped on its own page, which no instance records at all. `stop_reason`
+  // carries a guard's verdict in full, here rather than copied onto every
+  // member row, because it is one fact about one instance.
+  addColumn(db, "workflow_instances", "stopped_at", "INTEGER");
+  addColumn(db, "workflow_instances", "stop_cause", "TEXT");
+  addColumn(db, "workflow_instances", "stop_reason", "TEXT");
 }
 
 /**

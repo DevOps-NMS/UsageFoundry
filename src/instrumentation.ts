@@ -54,6 +54,15 @@ export async function register() {
       // unattended is spend nobody is present to want.
       const { reconcileChatsOnBoot } = await import("./lib/chat");
       reconcileChatsOnBoot();
+
+      // Last, because it reads what the others left: a workflow instance the
+      // process died half way through halting. `reconcileOnBoot` has already
+      // closed out its running, queued and waiting members; a *paused* one
+      // inside the resume grace period survives that on purpose, and without
+      // this the sweeper would re-queue it under a workflow the page says is
+      // stopped.
+      const { reconcileHaltsOnBoot } = await import("./lib/workflows");
+      reconcileHaltsOnBoot();
     } else {
       console.warn(
         "[usagefoundry] Another server process already holds this data " +

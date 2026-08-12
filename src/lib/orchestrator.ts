@@ -2387,24 +2387,7 @@ function releasePass(): boolean {
   let acted = false;
 
   for (const { id, reason } of block) {
-    // `blocked` rather than `stopped`: it is the status this app already uses
-    // for a run refused before its first work cycle, and it says the true
-    // thing — nothing ran, nothing was spent. The reason names the run that
-    // stopped it, and the cascade gives every run behind it its own sentence
-    // naming the one in front rather than one shared verdict.
-    const done = db()
-      .prepare(
-        "UPDATE runs SET status='blocked', finished_at=?, stop_reason=? WHERE id=? AND status='waiting'",
-      )
-      .run(Date.now(), reason, id);
-    if (done.changes !== 1) continue;
-    emit({
-      runId: id,
-      ts: Date.now(),
-      kind: "status",
-      payload: { status: "blocked", stop_reason: reason },
-    });
-    acted = true;
+    if (blockWaitingRun(id, reason)) acted = true;
   }
 
   for (const id of release) {
@@ -2413,6 +2396,36 @@ function releasePass(): boolean {
   }
 
   return acted;
+}
+
+/**
+ * End a run that has not started, in the status that says nothing was spent.
+ *
+ * `blocked` rather than `stopped`: it is what this app already writes for a run
+ * refused before its first work cycle, and it says the true thing — nothing ran,
+ * nothing was spent. The reason names whatever stopped it, and the cascade gives
+ * every run behind it its own sentence naming the one in front rather than one
+ * shared verdict.
+ *
+ * Guarded on `status='waiting'` and reported by its return value, because two
+ * callers now reach it — the dependency cascade and a workflow instance being
+ * halted — and a row that left `waiting` between the decision and the write must
+ * not be rewritten by the loser. False means the row moved; it is not an error.
+ */
+export function blockWaitingRun(id: string, reason: string): boolean {
+  const done = db()
+    .prepare(
+      "UPDATE runs SET status='blocked', finished_at=?, stop_reason=? WHERE id=? AND status='waiting'",
+    )
+    .run(Date.now(), reason, id);
+  if (done.changes !== 1) return false;
+  emit({
+    runId: id,
+    ts: Date.now(),
+    kind: "status",
+    payload: { status: "blocked", stop_reason: reason },
+  });
+  return true;
 }
 
 /**
@@ -4127,14 +4140,31 @@ function interruptRun(id: string, it: Interrupt): "signalled" | "cancelled" {
 }
 
 /**
+ * What a stop is recorded as when the caller says nothing: this run, this
+ * button. Every branch below appends its own clause to it, which is why it is a
+ * fragment with no full stop rather than a sentence.
+ */
+const OPERATOR_CAUSE = "Stopped by operator";
+
+/**
  * Ask a run to stop.
  *
  * The distinction matters to the caller: between work cycles there is no child
  * to signal, but the run is still stopped — the loop checks for an interrupt
  * before starting the next one. Reporting that as a failure (which a bare
  * boolean did) makes a working Stop button look broken.
+ *
+ * `cause` is the attribution, and it is a **fragment**: each branch appends the
+ * clause saying what the run was doing when the stop landed, so the sentence
+ * says both who stopped it and how far it had got. It exists because stopping a
+ * whole workflow instance goes through this same path — the task's "do not write
+ * a second way to signal a child" — and a member of a halted instance has to be
+ * tellable on sight from a run someone stopped on its own page. Callers pass
+ * something like `Stopped with workflow “Nightly” by its budget guard`; the
+ * detail behind a guard's verdict belongs on the instance, once, rather than
+ * repeated across ten rows.
  */
-export function stopRun(id: string): StopOutcome {
+export function stopRun(id: string, cause: string = OPERATOR_CAUSE): StopOutcome {
   const run = getRun(id);
   if (!run) return "not-active";
 
@@ -4145,7 +4175,7 @@ export function stopRun(id: string): StopOutcome {
   if (run.status === "queued") {
     setStatus(id, "stopped", {
       finished_at: Date.now(),
-      stop_reason: "Stopped by operator before it started.",
+      stop_reason: `${cause} before it started.`,
     });
     releaseDependents();
     promoteQueued();
@@ -4160,7 +4190,7 @@ export function stopRun(id: string): StopOutcome {
   if (run.status === "waiting") {
     setStatus(id, "stopped", {
       finished_at: Date.now(),
-      stop_reason: "Stopped by operator while it was waiting for another run.",
+      stop_reason: `${cause} while it was waiting for another run.`,
     });
     releaseDependents();
     promoteQueued();
@@ -4173,8 +4203,7 @@ export function stopRun(id: string): StopOutcome {
   if (run.status === "paused") {
     setStatus(id, "stopped", {
       finished_at: Date.now(),
-      stop_reason:
-        "Stopped by operator while it was waiting for the next 5-hour window.",
+      stop_reason: `${cause} while it was waiting for the next 5-hour window.`,
       resume_at: null,
     });
     releaseDependents();
@@ -4186,7 +4215,7 @@ export function stopRun(id: string): StopOutcome {
 
   return interruptRun(id, {
     kind: "operator",
-    reason: "Stopped by operator.",
+    reason: `${cause}.`,
     pause: false,
     at: Date.now(),
   });

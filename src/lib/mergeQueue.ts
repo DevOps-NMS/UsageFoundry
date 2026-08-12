@@ -263,6 +263,34 @@ export function cancelBatch(batchId: string): number {
 }
 
 /**
+ * Cancel the queued merges belonging to these runs, whichever batch they are in.
+ *
+ * The same rule `cancelBatch` follows and for the same reason: the row *in
+ * flight* is left alone, because a merge is a multi-step write into the
+ * operator's own checkout and a resolution is a child process holding one, and
+ * interrupting either part-way is worse than the second it takes to finish.
+ * What differs is the selection — a workflow instance being halted knows its
+ * runs, not which batch someone queued their branches in, and a batch may hold
+ * branches from other work that has nothing to do with the halt.
+ *
+ * An empty list is answered with 0 rather than built into `IN ()`, which SQLite
+ * refuses outright.
+ */
+export function cancelQueuedFor(
+  runIds: readonly string[],
+  message: string,
+): number {
+  if (runIds.length === 0) return 0;
+  const res = db()
+    .prepare(
+      "UPDATE merge_queue SET status='cancelled', message=?, finished_at=?" +
+        ` WHERE status = 'queued' AND run_id IN (${runIds.map(() => "?").join(",")})`,
+    )
+    .run(message, Date.now(), ...runIds);
+  return res.changes;
+}
+
+/**
  * Close out rows a restart left behind.
  *
  * Queued rows are **cancelled rather than resumed**, which is the same rule

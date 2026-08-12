@@ -3,11 +3,13 @@ import { db } from "./db";
 import { composeTask } from "./chat";
 import {
   DEPENDENCY_EDGES,
+  blockWaitingRun,
   createRun,
   dependencyCycle,
   getRun,
   probeIsolation,
   promoteQueued,
+  releaseDependents,
   resolveWorkspaceFolder,
   stopRun,
   type CreateRunInput,
@@ -15,6 +17,7 @@ import {
   type DependencyLink,
   type RunStatus,
 } from "./orchestrator";
+import { cancelQueuedFor } from "./mergeQueue";
 import { chatGuards, type RunGuards } from "./settings";
 import { getTemplate, listTemplates, type RunTemplate } from "./templates";
 import { WORKSPACE_MOUNTS } from "./config";
@@ -746,7 +749,22 @@ export function deleteWorkflow(id: string): boolean {
 /* Instances                                                           */
 /* ------------------------------------------------------------------ */
 
-export type WorkflowInstanceStatus = "started" | "failed";
+/**
+ * Where one press of Run has got to.
+ *
+ * `stopping` and `stopped` are the same stored row: the halt writes `stopping`
+ * and the difference is whether any member is still live, which is a fact about
+ * the runs rather than something a second pass writes. A signalled child takes
+ * seconds to die, and after a restart nothing would run that second pass at all.
+ */
+export type WorkflowInstanceStatus =
+  | "started"
+  | "failed"
+  | "stopping"
+  | "stopped";
+
+/** What halted an instance. `null` on an instance nobody has stopped. */
+export type HaltCauseKind = "operator" | "guard";
 
 export interface WorkflowInstanceNode {
   nodeId: string;
@@ -765,6 +783,13 @@ export interface WorkflowInstance {
   createdAt: number;
   status: WorkflowInstanceStatus;
   error: string | null;
+  /** When the halt closed the door — not when the last child died. */
+  stoppedAt: number | null;
+  stopCause: HaltCauseKind | null;
+  /** A guard's verdict in full. Null for an operator's stop, which needs none. */
+  stopReason: string | null;
+  /** Members that have not finished. Non-zero under `stopping`. */
+  liveRunCount: number;
   nodes: WorkflowInstanceNode[];
 }
 
@@ -776,6 +801,23 @@ interface InstanceRow {
   created_at: number;
   status: string;
   error: string | null;
+  stopped_at: number | null;
+  stop_cause: string | null;
+  stop_reason: string | null;
+}
+
+/** How many of this instance's runs are still going, in one query. */
+function liveMemberCount(instanceId: string): number {
+  const row = db()
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM workflow_instance_runs w
+         JOIN runs r ON r.id = w.run_id
+        WHERE w.instance_id = ?
+          AND r.status IN (${LIVE_STATUSES.map(() => "?").join(",")})`,
+    )
+    .get(instanceId, ...LIVE_STATUSES) as { n: number };
+  return row.n;
 }
 
 function rowToInstance(row: InstanceRow): WorkflowInstance {
@@ -797,20 +839,48 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
     )
     .all(row.id) as WorkflowInstanceNode[];
 
+  const live = liveMemberCount(row.id);
+
   return {
     id: row.id,
     workflowId: row.workflow_id,
     workflowName: row.workflow_name,
     graph,
     createdAt: row.created_at,
-    status: row.status === "failed" ? "failed" : "started",
+    // `stopped` is derived rather than stored — see WorkflowInstanceStatus. An
+    // unrecognised value reads as `started`, the same forgiving default the
+    // graph blob gets: this is a record, and it has to keep rendering.
+    status:
+      row.status === "failed"
+        ? "failed"
+        : row.status === "stopping"
+          ? live > 0
+            ? "stopping"
+            : "stopped"
+          : "started",
     error: row.error,
+    stoppedAt: row.stopped_at,
+    stopCause:
+      row.stop_cause === "operator" || row.stop_cause === "guard"
+        ? row.stop_cause
+        : null,
+    stopReason: row.stop_reason,
+    liveRunCount: live,
     nodes,
   };
 }
 
 const INSTANCE_COLUMNS =
-  "id, workflow_id, workflow_name, graph, created_at, status, error";
+  "id, workflow_id, workflow_name, graph, created_at, status, error," +
+  " stopped_at, stop_cause, stop_reason";
+
+/** Statuses a run has not finished in — it will spend, or is waiting to. */
+const LIVE_STATUSES: readonly RunStatus[] = [
+  "waiting",
+  "queued",
+  "running",
+  "paused",
+];
 
 export function listInstances(workflowId: string, limit = 20): WorkflowInstance[] {
   const rows = db()
@@ -845,14 +915,6 @@ export function getInstance(id: string): WorkflowInstance | null {
     .get(id) as InstanceRow | undefined;
   return row ? rowToInstance(row) : null;
 }
-
-/** Statuses a run has not finished in — it will spend, or is waiting to. */
-const LIVE_STATUSES: readonly RunStatus[] = [
-  "waiting",
-  "queued",
-  "running",
-  "paused",
-];
 
 /**
  * Runs this workflow started that have not finished.
@@ -1026,8 +1088,12 @@ export function startWorkflow(id: string): StartOutcome {
     const reason = err instanceof Error ? err.message : String(err);
     // Newest first, so a run is stopped before the one it was told to start
     // after — otherwise stopping the dependency releases the dependent into the
-    // queue on its way out.
-    for (const runId of [...runIds.values()].reverse()) stopRun(runId);
+    // queue on its way out. The attribution says which of the three stops this
+    // was: not the operator, not a guard, but a graph that could not be built.
+    const rolledBack = `Stopped because workflow “${workflow.name}” could not be started in full`;
+    for (const runId of [...runIds.values()].reverse()) {
+      stopRun(runId, rolledBack);
+    }
     db()
       .prepare(
         "UPDATE workflow_instances SET status = 'failed', error = ? WHERE id = ?",
@@ -1045,6 +1111,380 @@ export function startWorkflow(id: string): StartOutcome {
   // last one made startable, exactly as the chat's approval route relies on.
   promoteQueued();
   return { ok: true, instance: getInstance(instanceId)! };
+}
+
+/* ------------------------------------------------------------------ */
+/* Halting — one door, whatever state the instance is in               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Why an instance is being halted.
+ *
+ * The one thing an operator's stop and a tripped guard differ by. Everything
+ * else about the halt — which members it selects, what each becomes, what it
+ * refuses to touch — is identical, which is why there is one function and not
+ * two: a second implementation is a second chance to forget a member, and a
+ * missed member goes on spending.
+ */
+export type HaltCause =
+  | { kind: "operator" }
+  /** The guard's verdict, in full. Recorded on the instance, once. */
+  | { kind: "guard"; detail: string };
+
+/** What a halt does to one member. */
+export type HaltAction =
+  /**
+   * Hand it to `stopRun`. A run with a child in flight gets the kill ladder —
+   * `SIGINT` first, so a CLI that handles it can still print `result` and have
+   * its cycle *measured* rather than reconciled — and a run that has not spawned
+   * takes one of that function's pre-spawn branches. There is deliberately no
+   * second way to signal a child anywhere in this app.
+   */
+  | "stop"
+  /**
+   * Never started and now never will: `blocked`, with nothing spent. `stopRun`
+   * would write `stopped` here, which is right when the operator is stopping
+   * *that run* — but a halted member was not singled out, it never ran, and
+   * `blocked` is what this app already writes for a run refused before its first
+   * work cycle. It also keeps it out of `REOPENABLE`, which is the honest
+   * answer: reopening one link of a chain whose predecessors were just stopped
+   * would start it on work that never happened.
+   */
+  | "block"
+  /**
+   * Already terminal, or the run row has gone. Rewriting a `completed` member as
+   * stopped would destroy the record of work that landed, which is the silent
+   * half of getting this wrong.
+   */
+  | "leave";
+
+/** One member as the decision sees it: an id, a name, and a status. */
+export interface HaltMember {
+  runId: string;
+  nodeName: string;
+  /** Null when the run row has gone — the mapping is a historical record. */
+  status: RunStatus | null;
+}
+
+export interface HaltStep {
+  runId: string;
+  nodeName: string;
+  status: RunStatus | null;
+  action: HaltAction;
+  /**
+   * What gets written. For `block` it is the whole sentence; for `stop` it is
+   * the attribution handed to `stopRun`, which appends the clause saying what
+   * the run was doing when the halt landed. Null for a member left alone.
+   */
+  reason: string | null;
+}
+
+export interface HaltDecision {
+  /** False when there is nothing to do: already stopping, or never started. */
+  act: boolean;
+  /** Why not, in the operator's words. Null when `act` is true. */
+  note: string | null;
+  /** The attribution every stopped member carries. */
+  cause: string;
+  /** Empty when `act` is false — an instance is halted once. */
+  steps: HaltStep[];
+}
+
+/**
+ * Who stopped this run, in the words that go on the row.
+ *
+ * A **fragment**, because `stopRun` completes it with the clause naming what the
+ * run was doing ("… before it started."). Three endings have to be tellable
+ * apart on sight, and these are two of them; the third is `stopRun`'s own
+ * default, `Stopped by operator`, which is what a run stopped on its own page
+ * says. A guard's verdict is deliberately *not* pasted in here — it is one fact
+ * about one instance and lives on the instance row, rather than repeated across
+ * ten member rows where it would read as ten separate findings.
+ */
+export function haltCause(cause: HaltCause, workflowName: string): string {
+  return cause.kind === "operator"
+    ? `Stopped by the operator with all of workflow “${workflowName}”`
+    : `Stopped by the budget guard on workflow “${workflowName}”`;
+}
+
+/**
+ * What a halt does to each member — the whole decision, and nothing that writes.
+ *
+ * Pure and unit-tested for the reason `releasableRuns` and `selectPromotable`
+ * are: both ways of being wrong are silent and expensive. A member the selection
+ * misses goes on spending under a workflow the operator believes is stopped; a
+ * `completed` member rewritten as stopped destroys the record of work that
+ * landed, and there is nothing on the page afterwards to say it ever happened.
+ *
+ * `members` is the instance's run list *as it stands*, which is what makes a
+ * stop arriving mid-instantiation a non-event: a block whose `createRun` has not
+ * happened is not in the table, so it is not selected — and it is never created
+ * either, because `startWorkflow` holds the event-loop turn from its first
+ * `createRun` to its last and a rolled-back pass leaves the instance `failed`,
+ * which this refuses.
+ */
+export function haltPlan(
+  instance: { status: WorkflowInstanceStatus; workflowName: string },
+  members: readonly HaltMember[],
+  cause: HaltCause,
+): HaltDecision {
+  const attribution = haltCause(cause, instance.workflowName);
+
+  // Idempotence, stated as a decision rather than left to the UPDATE that
+  // enforces it: a second stop must be a no-op, not a second kill ladder run
+  // over children that are already dying.
+  if (instance.status !== "started") {
+    const note =
+      instance.status === "failed"
+        ? "This workflow run never started — its blocks were rolled back when it was created."
+        : instance.status === "stopped"
+          ? "This workflow run has already been stopped."
+          : "This workflow run is already stopping.";
+    return { act: false, note, cause: attribution, steps: [] };
+  }
+
+  return {
+    act: true,
+    note: null,
+    cause: attribution,
+    steps: memberSteps(members, attribution),
+  };
+}
+
+/** What happens to each member, given the attribution it will be recorded under. */
+function memberSteps(
+  members: readonly HaltMember[],
+  attribution: string,
+): HaltStep[] {
+  return members.map((member) => {
+    if (member.status === null) {
+      return { ...member, action: "leave" as const, reason: null };
+    }
+    if (member.status === "waiting") {
+      return {
+        ...member,
+        action: "block" as const,
+        reason: `${attribution} while it was waiting for another run.`,
+      };
+    }
+    if (LIVE_STATUSES.includes(member.status)) {
+      return { ...member, action: "stop" as const, reason: attribution };
+    }
+    return { ...member, action: "leave" as const, reason: null };
+  });
+}
+
+/** What a halt did, per member, for the caller to report. */
+export interface HaltReport {
+  instanceId: string;
+  workflowName: string;
+  /** False when nothing was done; `note` says why. */
+  acted: boolean;
+  note: string | null;
+  /** Members whose child got the kill ladder. */
+  signalled: string[];
+  /** Members closed out before they could spawn. */
+  cancelled: string[];
+  /** Members that were still waiting, now `blocked`. */
+  blocked: string[];
+  /** Members already finished, or whose row has gone. */
+  untouched: string[];
+  /** Queued merges belonging to these runs, cancelled. */
+  mergesCancelled: number;
+}
+
+export type HaltOutcome =
+  | { ok: true; report: HaltReport }
+  | { ok: false; reason: string };
+
+/**
+ * Halt a whole workflow instance, whatever state each of its members is in.
+ *
+ * **The one door.** An operator control and a tripped instance guard both call
+ * this, and differ only in the `cause` recorded — the alternative is two
+ * implementations of a selection whose failure modes are silent.
+ *
+ * **The door is closed before anything is signalled.** The instance is marked
+ * `stopping` first, by an UPDATE guarded on `status='started'`, and from there
+ * to the last member there is **no `await`** — the property `createRun`'s folder
+ * claim documents, for the same reason: one event-loop turn is what makes a
+ * check-then-act atomic here, and a member that starts after the stop began is
+ * exactly the bug the ordering prevents. The guarded UPDATE is also the
+ * idempotence: a second stop changes no rows and does nothing.
+ *
+ * **Waiting members are blocked before any of the others are touched.** Stopping
+ * a run releases its dependents, and a dependent released a moment before the
+ * halt reaches it would be admitted, promoted and spawned — a member starting
+ * *because* the workflow was stopped. Blocked first, there is nothing left to
+ * release.
+ *
+ * Stopping a queued member can still promote another queued member into
+ * `running` inside this same turn, since `stopRun` frees the folder reservation
+ * and `promoteQueued` acts on it. That is harmless and deliberately not designed
+ * around: `stopRun` re-reads the row, so it takes the `running` branch and
+ * registers an interrupt, and `startRun`'s pre-spawn checkpoint sees it before
+ * any child is spawned. The cost is a transcript scan, not a billed work cycle.
+ *
+ * What it does **not** do: it never removes a checkout, never touches a branch,
+ * and never commits. Work an agent left uncommitted stays in its slot with its
+ * own branch checked out, where `slotIsDirty` keeps the next run out of it and
+ * the run page's Commit — which goes through `commitRefusal`, the function that
+ * already settled whose work is in a slot — is the way it reaches the branch.
+ * Committing ten runs from here would need ten `await`s in the middle of the one
+ * stretch that must not have any.
+ */
+/** Every member of one instance, with the status its run row has now. */
+function membersOf(instanceId: string): HaltMember[] {
+  return db()
+    .prepare(
+      `SELECT w.run_id AS runId, w.node_name AS nodeName, r.status AS status
+         FROM workflow_instance_runs w
+         LEFT JOIN runs r ON r.id = w.run_id
+        WHERE w.instance_id = ? ORDER BY w.position`,
+    )
+    .all(instanceId) as HaltMember[];
+}
+
+export function stopInstance(instanceId: string, cause: HaltCause): HaltOutcome {
+  const instance = getInstance(instanceId);
+  if (!instance) return { ok: false, reason: "No such workflow run." };
+
+  const members = membersOf(instanceId);
+  const plan = haltPlan(instance, members, cause);
+  const report: HaltReport = {
+    instanceId,
+    workflowName: instance.workflowName,
+    acted: plan.act,
+    note: plan.note,
+    signalled: [],
+    cancelled: [],
+    blocked: [],
+    untouched: [],
+    mergesCancelled: 0,
+  };
+  if (!plan.act) return { ok: true, report };
+
+  // The door. Guarded on the status the plan was decided from, so the decision
+  // and the write cannot disagree — nothing in this process can interleave with
+  // the read above, and the guard is what makes that a statement rather than an
+  // assumption. Zero changes means another writer got here first, which is the
+  // second stop this is idempotent against.
+  const claimed = db()
+    .prepare(
+      `UPDATE workflow_instances
+          SET status='stopping', stopped_at=?, stop_cause=?, stop_reason=?
+        WHERE id=? AND status='started'`,
+    )
+    .run(
+      Date.now(),
+      cause.kind,
+      cause.kind === "guard" ? cause.detail : null,
+      instanceId,
+    );
+  if (claimed.changes !== 1) {
+    return {
+      ok: true,
+      report: {
+        ...report,
+        acted: false,
+        note: "This workflow run is already stopping.",
+      },
+    };
+  }
+
+  walkMembers(plan.steps, plan.cause, report);
+  return { ok: true, report };
+}
+
+/**
+ * Carry out a plan: the writes, in the order the halt needs them.
+ *
+ * Synchronous from the first member to the last, and separated from
+ * `stopInstance` only so a restart that caught a halt part-way can finish the
+ * same walk rather than a second version of it.
+ */
+function walkMembers(
+  steps: readonly HaltStep[],
+  cause: string,
+  report: HaltReport,
+): void {
+  // Waiting first — see `stopInstance`. Nothing between here and the end of the
+  // walk yields to the event loop.
+  for (const step of steps) {
+    if (step.action !== "block") continue;
+    if (blockWaitingRun(step.runId, step.reason!)) report.blocked.push(step.runId);
+    else report.untouched.push(step.runId);
+  }
+
+  for (const step of steps) {
+    if (step.action !== "stop") continue;
+    const outcome = stopRun(step.runId, cause);
+    if (outcome === "signalled") report.signalled.push(step.runId);
+    else if (outcome === "cancelled") report.cancelled.push(step.runId);
+    else report.untouched.push(step.runId);
+  }
+
+  for (const step of steps) {
+    if (step.action === "leave") report.untouched.push(step.runId);
+  }
+
+  // A merge already in flight is left alone, exactly as cancelling a batch
+  // leaves it: it is a multi-step write into the operator's own checkout, and
+  // stopping half way through is worse than the second it takes to finish.
+  report.mergesCancelled = cancelQueuedFor(
+    steps.map((s) => s.runId),
+    `${cause}.`,
+  );
+
+  // A run outside this instance may have been told to start after one of these.
+  // `stopRun`'s pre-spawn branches call both already; blocking a waiting member
+  // does not, and neither runs at all when every member had a child in flight.
+  releaseDependents();
+  promoteQueued();
+}
+
+/**
+ * Finish a halt the process died in the middle of.
+ *
+ * The walk holds its event-loop turn from the first member to the last, so this
+ * needs a crash *inside* that block — but the residue is a member of a stopped
+ * workflow that goes on spending, which is the one outcome the halt exists to
+ * have none of. `reconcileOnBoot` closes out `running`, `queued` and `waiting`
+ * rows already; what it deliberately spares is a recently `paused` one, and the
+ * sweeper would then re-queue it under a workflow the page says is stopped.
+ *
+ * Runs **after** `reconcileOnBoot`, so what is left is only that residue, and it
+ * re-uses the recorded cause rather than inventing one: the halt was the
+ * operator's or the guard's, and a restart is neither.
+ */
+export function reconcileHaltsOnBoot(): void {
+  const rows = db()
+    .prepare(
+      "SELECT id, workflow_name, stop_cause FROM workflow_instances WHERE status = 'stopping'",
+    )
+    .all() as Array<{ id: string; workflow_name: string; stop_cause: string | null }>;
+
+  for (const row of rows) {
+    const members = membersOf(row.id);
+    if (!members.some((m) => m.status && LIVE_STATUSES.includes(m.status))) {
+      continue;
+    }
+    const cause = haltCause(
+      row.stop_cause === "guard" ? { kind: "guard", detail: "" } : { kind: "operator" },
+      row.workflow_name,
+    );
+    walkMembers(memberSteps(members, cause), cause, {
+      instanceId: row.id,
+      workflowName: row.workflow_name,
+      acted: true,
+      note: null,
+      signalled: [],
+      cancelled: [],
+      blocked: [],
+      untouched: [],
+      mergesCancelled: 0,
+    });
+  }
 }
 
 /** A run's live state for the instance view, or null when the row has gone. */

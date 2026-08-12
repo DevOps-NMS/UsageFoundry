@@ -59,6 +59,10 @@ export function instanceDTO(instance: WorkflowInstance): WorkflowInstanceDTO {
     createdAt: instance.createdAt,
     status: instance.status,
     error: instance.error,
+    stoppedAt: instance.stoppedAt,
+    stopCause: instance.stopCause,
+    stopReason: instance.stopReason,
+    liveRunCount: instance.liveRunCount,
     nodes,
   };
 }

@@ -533,8 +533,22 @@ export interface WorkflowInstanceDTO {
   /** The workflow's name when Run was pressed; it may have been renamed since. */
   workflowName: string;
   createdAt: number;
-  status: "started" | "failed";
+  /**
+   * `stopping` is a halt whose members have not all finished yet; `stopped` is
+   * the same row once they have. The difference is derived from the runs rather
+   * than written, because a signalled child takes seconds to die.
+   */
+  status: "started" | "failed" | "stopping" | "stopped";
   error: string | null;
+  /** When the halt closed the door — not when the last child died. */
+  stoppedAt: number | null;
+  /** What halted it. The third way a member can end — stopped on its own run
+   *  page — is not an instance-level event and is null here. */
+  stopCause: "operator" | "guard" | null;
+  /** A guard's verdict in full. Null for an operator's stop, which needs none. */
+  stopReason: string | null;
+  /** Members that have not finished. Non-zero for as long as `stopping` is. */
+  liveRunCount: number;
   nodes: WorkflowInstanceNodeDTO[];
 }
 

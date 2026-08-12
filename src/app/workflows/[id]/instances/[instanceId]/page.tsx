@@ -12,11 +12,18 @@ import {
   pollFailureMessage,
 } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
+import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 
 const POLL_MS = 10_000;
+
+/** How the halt is described where it is offered, and where it is recorded. */
+const CAUSE_LABEL: Record<"operator" | "guard", string> = {
+  operator: "stopped by you",
+  guard: "stopped by its budget guard",
+};
 
 /**
  * One press of Run: every block, and what became of the run it created.
@@ -32,6 +39,9 @@ export default function WorkflowInstancePage() {
   const [instance, setInstance] = useState<WorkflowInstanceDTO | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
+  const [confirmStop, setConfirmStop] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -65,6 +75,36 @@ export default function WorkflowInstancePage() {
     const poll = setInterval(load, POLL_MS);
     return () => clearInterval(poll);
   }, [load]);
+
+  /**
+   * Halt every block at once.
+   *
+   * Guarded by `chatRequest`'s rule rather than a bare `fetch`: an unguarded
+   * rejection out of a handler that sets a busy flag leaves the button disabled
+   * with no cue and no way back but a reload — and this is the button that stops
+   * unattended agents from spending.
+   */
+  async function stopAll() {
+    setStopping(true);
+    setStopError(null);
+    try {
+      const res = await fetch(
+        `/api/workflows/${id}/instances/${instanceId}/stop`,
+        { method: "POST" },
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        instance?: WorkflowInstanceDTO;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+      if (data.instance) setInstance(data.instance);
+      setConfirmStop(false);
+    } catch (err) {
+      setStopError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStopping(false);
+    }
+  }
 
   const nodeName = useMemo(() => {
     const map = new Map<string, string>();
@@ -105,18 +145,81 @@ export default function WorkflowInstancePage() {
         <Link href={`/workflows/${id}`} className="text-sm text-ink-muted">
           ← {instance.workflowName}
         </Link>
-        <h1 className="mt-1 text-xl font-semibold tracking-tight">
-          Run of {fmtDateTime(instance.createdAt)}
-        </h1>
+        <div className="mt-1 flex flex-wrap items-center justify-between gap-3">
+          <h1 className="text-xl font-semibold tracking-tight">
+            Run of {fmtDateTime(instance.createdAt)}
+          </h1>
+          {instance.status === "started" && instance.liveRunCount > 0 && (
+            <Button
+              variant="danger"
+              onClick={() => setConfirmStop(true)}
+              disabled={confirmStop || stopping}
+            >
+              Stop all
+            </Button>
+          )}
+        </div>
       </div>
 
       <div role="alert">
         {pollError && <Notice tone="danger">{pollError}</Notice>}
+        {stopError && (
+          <Notice tone="danger" live>
+            {stopError}
+          </Notice>
+        )}
       </div>
+
+      {confirmStop && (
+        <Notice tone="danger" live>
+          <div className="mb-2">
+            Ends {instance.liveRunCount} unfinished block(s). A block working now
+            is interrupted mid-cycle, so what that cycle spent is estimated
+            rather than measured. Committed work stays on its branch; anything
+            uncommitted stays in the checkout, to commit from the run page.
+            Finished blocks are untouched.
+          </div>
+          <ButtonRow>
+            <Button
+              variant="danger"
+              size="compact"
+              onClick={stopAll}
+              busy={stopping}
+            >
+              Stop all blocks
+            </Button>
+            <Button
+              variant="ghost"
+              size="compact"
+              onClick={() => setConfirmStop(false)}
+              disabled={stopping}
+            >
+              Cancel
+            </Button>
+          </ButtonRow>
+        </Notice>
+      )}
 
       {instance.status === "failed" && (
         <Notice tone="danger">
           <strong>Nothing from this workflow is running.</strong> {instance.error}
+        </Notice>
+      )}
+
+      {(instance.status === "stopping" || instance.status === "stopped") && (
+        <Notice tone={instance.status === "stopping" ? "warn" : "info"}>
+          <strong>
+            {instance.status === "stopping"
+              ? `Stopping — ${instance.liveRunCount} block(s) still finishing.`
+              : "Stopped."}
+          </strong>{" "}
+          {instance.stoppedAt !== null && (
+            <>
+              {CAUSE_LABEL[instance.stopCause ?? "operator"]} at{" "}
+              {fmtDateTime(instance.stoppedAt)}.
+            </>
+          )}{" "}
+          {instance.stopReason}
         </Notice>
       )}
 

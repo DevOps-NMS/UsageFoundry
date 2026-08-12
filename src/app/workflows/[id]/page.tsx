@@ -374,13 +374,28 @@ export default function WorkflowPage() {
                         </Link>
                       </Td>
                       <Td className="align-top text-ink-muted">
-                        {inst.status === "failed" ? (
+                        {inst.status === "failed" && (
                           <>
                             <Badge tone="danger">not started</Badge>{" "}
                             {inst.error}
                           </>
-                        ) : (
+                        )}
+                        {inst.status === "started" && (
                           <Badge tone="ok">started</Badge>
+                        )}
+                        {inst.status === "stopping" && (
+                          <>
+                            <Badge tone="warn">stopping</Badge>{" "}
+                            {inst.liveRunCount} block(s) still finishing
+                          </>
+                        )}
+                        {inst.status === "stopped" && (
+                          <>
+                            <Badge tone="warn">stopped</Badge>{" "}
+                            {inst.stopCause === "guard"
+                              ? "by its budget guard"
+                              : "by you"}
+                          </>
                         )}
                       </Td>
                       <Td num className="align-top text-ink-muted">
