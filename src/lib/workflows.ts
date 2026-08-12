@@ -1131,33 +1131,6 @@ export type HaltCause =
   /** The guard's verdict, in full. Recorded on the instance, once. */
   | { kind: "guard"; detail: string };
 
-/** What a halt does to one member. */
-export type HaltAction =
-  /**
-   * Hand it to `stopRun`. A run with a child in flight gets the kill ladder —
-   * `SIGINT` first, so a CLI that handles it can still print `result` and have
-   * its cycle *measured* rather than reconciled — and a run that has not spawned
-   * takes one of that function's pre-spawn branches. There is deliberately no
-   * second way to signal a child anywhere in this app.
-   */
-  | "stop"
-  /**
-   * Never started and now never will: `blocked`, with nothing spent. `stopRun`
-   * would write `stopped` here, which is right when the operator is stopping
-   * *that run* — but a halted member was not singled out, it never ran, and
-   * `blocked` is what this app already writes for a run refused before its first
-   * work cycle. It also keeps it out of `REOPENABLE`, which is the honest
-   * answer: reopening one link of a chain whose predecessors were just stopped
-   * would start it on work that never happened.
-   */
-  | "block"
-  /**
-   * Already terminal, or the run row has gone. Rewriting a `completed` member as
-   * stopped would destroy the record of work that landed, which is the silent
-   * half of getting this wrong.
-   */
-  | "leave";
-
 /** One member as the decision sees it: an id, a name, and a status. */
 export interface HaltMember {
   runId: string;
@@ -1166,18 +1139,41 @@ export interface HaltMember {
   status: RunStatus | null;
 }
 
-export interface HaltStep {
-  runId: string;
-  nodeName: string;
-  status: RunStatus | null;
-  action: HaltAction;
-  /**
-   * What gets written. For `block` it is the whole sentence; for `stop` it is
-   * the attribution handed to `stopRun`, which appends the clause saying what
-   * the run was doing when the halt landed. Null for a member left alone.
-   */
-  reason: string | null;
-}
+/**
+ * What happens to one member, and what gets written on it.
+ *
+ * Three actions, and each is a decision this app has already made once:
+ *
+ *   `stop` hands it to `stopRun`. A run with a child in flight gets the kill
+ *   ladder — `SIGINT` first, so a CLI that handles it can still print `result`
+ *   and have its cycle *measured* rather than reconciled — and a run that has
+ *   not spawned takes one of that function's pre-spawn branches. There is
+ *   deliberately no second way to signal a child anywhere in this app.
+ *
+ *   `block` is for a member that never started and now never will: `blocked`,
+ *   with nothing spent. `stopRun` would write `stopped` here, which is right
+ *   when the operator is stopping *that run* — but a halted member was not
+ *   singled out and it never ran, and `blocked` is what this app already writes
+ *   for a run refused before its first work cycle. It also keeps it out of
+ *   `REOPENABLE`, which is the honest answer: reopening one link of a chain
+ *   whose predecessors were just stopped would start it on work that never
+ *   happened.
+ *
+ *   `leave` is a member already terminal, or one whose run row has gone.
+ *   Rewriting a `completed` member as stopped destroys the record of work that
+ *   landed, which is the silent half of getting this wrong.
+ *
+ * A union rather than an optional field, so a member left alone cannot carry a
+ * reason and a member being ended cannot lack one. For `block` the reason is the
+ * whole sentence; for `stop` it is the attribution handed to `stopRun`, which
+ * appends the clause saying what the run was doing when the halt landed.
+ */
+export type HaltStep =
+  | (HaltMember & { action: "stop" | "block"; reason: string })
+  | (HaltMember & { action: "leave"; reason: null });
+
+/** What a halt does to one member, for a caller that wants to name it. */
+export type HaltAction = HaltStep["action"];
 
 export interface HaltDecision {
   /** False when there is nothing to do: already stopping, or never started. */
@@ -1412,7 +1408,7 @@ function walkMembers(
   // walk yields to the event loop.
   for (const step of steps) {
     if (step.action !== "block") continue;
-    if (blockWaitingRun(step.runId, step.reason!)) report.blocked.push(step.runId);
+    if (blockWaitingRun(step.runId, step.reason)) report.blocked.push(step.runId);
     else report.untouched.push(step.runId);
   }
 
