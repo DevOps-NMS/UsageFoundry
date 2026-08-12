@@ -10,6 +10,7 @@ import {
   fmtDuration,
   fmtRelative,
   fmtUSD,
+  fmtWaitingFor,
   shortPath,
 } from "@/lib/format";
 import { Meter } from "@/components/Meter";
@@ -29,6 +30,15 @@ import { Card } from "@/components/ui/Card";
 const STATUS_GLYPH: Record<RunDTO["status"], ReactNode> = {
   // Filled: spending right now.
   running: <circle cx="5" cy="5" r="3.4" fill="currentColor" />,
+  // Held behind something: an arrow stopped by a bar. Deliberately not another
+  // circle — `queued` and `blocked` are both circles already, and a third would
+  // make the one state that is waiting on *a run* the hardest to pick out.
+  waiting: (
+    <g fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+      <path d="M1 5h3.6M3.4 3.2 5.2 5 3.4 6.8" />
+      <path d="M7.4 1.6v6.8" strokeWidth="1.7" />
+    </g>
+  ),
   // Hollow: alive but doing nothing.
   queued: (
     <circle cx="5" cy="5" r="3" fill="none" stroke="currentColor" strokeWidth="1.5" />
@@ -137,6 +147,12 @@ function statusDetail(
     const text = fmtCycleInFlight(run);
     return text ? { text } : null;
   }
+  if (run.status === "waiting") {
+    // Always a sentence, even if the list somehow came back empty: a blank line
+    // on the one status whose whole meaning is "waiting for something" would
+    // read as a run that is waiting for nothing.
+    return { text: fmtWaitingFor(run.dependsOn) ?? "waiting for another run" };
+  }
   if (run.status === "queued") {
     const ahead = run.queuePosition ?? 0;
     return {
@@ -157,8 +173,13 @@ function statusDetail(
   return null;
 }
 
-/** The three statuses whose detail line appears and disappears as they work. */
-const ACTIVE: ReadonlySet<RunDTO["status"]> = new Set(["running", "queued", "paused"]);
+/** The statuses whose detail line appears and disappears as they work. */
+const ACTIVE: ReadonlySet<RunDTO["status"]> = new Set([
+  "running",
+  "queued",
+  "paused",
+  "waiting",
+]);
 
 export function RunCard({
   run,

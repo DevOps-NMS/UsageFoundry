@@ -230,6 +230,23 @@ export interface BudgetPolicyDTO {
   permissionMode?: string;
 }
 
+/**
+ * One "start after that run" edge, as a run reports it.
+ *
+ * `satisfied` is computed on the server so that what counts as a settled
+ * dependency has one definition — `edgeSatisfied` in `orchestrator.ts` — rather
+ * than one there and a second one in every page that renders a waiting run.
+ */
+export interface RunDependencyDTO {
+  /** The run this one is waiting for. */
+  runId: string;
+  edge: "on-success" | "on-finish";
+  /** That run's status right now. */
+  status: RunDTO["status"];
+  /** Whether it has settled in a way that lets this run start. */
+  satisfied: boolean;
+}
+
 export interface RunDTO {
   id: string;
   /** Absolute, canonicalised folder the operator picked. */
@@ -242,6 +259,7 @@ export interface RunDTO {
   prompt: string;
   model: string | null;
   status:
+    | "waiting"
     | "queued"
     | "running"
     | "paused"
@@ -250,6 +268,12 @@ export interface RunDTO {
     | "failed"
     | "blocked";
   budget: BudgetPolicyDTO;
+  /**
+   * What this run was told to start after. Present on every run; empty for the
+   * ordinary one. A `waiting` run has at least one entry with `satisfied:
+   * false`, and that is what the row says it is waiting for.
+   */
+  dependsOn?: RunDependencyDTO[];
   /** Cap on work cycles. **0 means no cap** — see the note in db.ts. */
   max_iterations: number;
   /** Work cycles that have *finished*. A cycle in flight is not counted here. */

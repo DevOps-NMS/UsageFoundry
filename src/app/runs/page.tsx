@@ -25,11 +25,18 @@ import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 
-/** Runs the orchestrator still owns: they hold a folder and can spend again. */
+/**
+ * Runs the orchestrator still owns: they will spend again on their own.
+ *
+ * `waiting` belongs here even though it holds no folder — it is a run the
+ * operator started and expects to see start, and dropping it into the history
+ * table below would file a run that has not happened yet under what has.
+ */
 const ACTIVE: ReadonlySet<RunDTO["status"]> = new Set([
   "running",
   "queued",
   "paused",
+  "waiting",
 ]);
 
 /**
@@ -37,10 +44,13 @@ const ACTIVE: ReadonlySet<RunDTO["status"]> = new Set([
  * not started. Creation order put a queued run above a running one, which is
  * backwards for a band whose job is "what needs attention".
  */
-const ACTIVE_ORDER: Record<"running" | "paused" | "queued", number> = {
+const ACTIVE_ORDER: Record<"running" | "paused" | "queued" | "waiting", number> = {
   running: 0,
   paused: 1,
   queued: 2,
+  // Last: it is not waiting on this machine for anything, it is waiting on
+  // another run in this band.
+  waiting: 3,
 };
 
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -69,6 +79,14 @@ const FILTERS: Array<{ id: Filter; label: string }> = [
  */
 const STATUS_MARK: Record<RunDTO["status"], ReactNode> = {
   running: <circle cx="5" cy="5" r="3.4" fill="currentColor" />,
+  // An arrow stopped by a bar — held behind something, rather than a third
+  // circle competing with `queued` and `blocked`.
+  waiting: (
+    <g fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+      <path d="M1 5h3.6M3.4 3.2 5.2 5 3.4 6.8" />
+      <path d="M7.4 1.6v6.8" strokeWidth="1.7" />
+    </g>
+  ),
   queued: (
     <circle
       cx="5"

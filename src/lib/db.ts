@@ -218,6 +218,29 @@ function migrate(db: Database.Database) {
       resolve_cost REAL NOT NULL DEFAULT 0
     );
 
+    -- "Start this run only after those runs have settled."
+    --
+    -- A join table rather than a depends_on column on runs, because fan-in is
+    -- the point: "after both of these" is a list with identity, and a column
+    -- would either hold one id or a JSON array nothing can index or join.
+    --
+    -- The edge column is the condition, per edge rather than per run: one can
+    -- reasonably want "only if that one worked" from one dependency and "once
+    -- that one is out of the way" from another. Both ends cascade-delete with
+    -- the runs they name, so a link never outlives either of them — which is
+    -- also why the dependency is a real foreign key where chat_proposals'
+    -- template_id deliberately is not: a proposal that names a deleted template
+    -- must fail with a sentence, whereas a dependency on a run that is not
+    -- there is a graph that can never be satisfied.
+    CREATE TABLE IF NOT EXISTS run_deps (
+      run_id     TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      depends_on TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+      -- 'on-success' | 'on-finish'
+      edge       TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (run_id, depends_on)
+    );
+
     -- The orchestrator chat: a conversation that proposes runs.
     --
     -- Its own three tables rather than columns anywhere else, because a chat is
@@ -291,6 +314,11 @@ function migrate(db: Database.Database) {
       ON runs(status);
     CREATE INDEX IF NOT EXISTS idx_otlp_run
       ON otlp_requests(run_id, ts);
+    -- The wake-up query reads the graph from the *dependency* end: a run has
+    -- just finished, and what matters is who was waiting on it. The primary key
+    -- already covers the other direction.
+    CREATE INDEX IF NOT EXISTS idx_run_deps_depends_on
+      ON run_deps(depends_on);
     -- Names identify a template to a person, so two that differ only in case
     -- are the same template as far as the picker is concerned. Enforced in the
     -- schema rather than checked before the insert: this process is a single

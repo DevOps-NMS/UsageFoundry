@@ -1,6 +1,6 @@
 /** Presentation helpers. Client-safe — no node builtins in here. */
 
-import type { RunDTO } from "./apiTypes";
+import type { RunDependencyDTO, RunDTO } from "./apiTypes";
 
 /**
  * Badges and notices carry *different* vocabularies — a badge can be `accent`
@@ -17,6 +17,9 @@ export type NoticeTone = "neutral" | "info" | "warn" | "danger";
 
 /** Badge tone per run status. Shared so the list and detail pages cannot drift. */
 export const STATUS_TONE: Record<RunDTO["status"], BadgeTone> = {
+  // Neutral like `queued`: it is waiting rather than in trouble. What it is
+  // waiting for is a run, not a folder, and only the detail line says which.
+  waiting: "neutral",
   queued: "neutral",
   running: "accent",
   // Alive *and* needing attention: it will spend money again, unattended, and
@@ -58,6 +61,24 @@ export function fmtCycleInFlight(
   return run.max_iterations > 0
     ? `cycle ${n} of ${run.max_iterations} in flight`
     : `cycle ${n} in flight`;
+}
+
+/**
+ * What a run told to start after other runs is still waiting for, or null.
+ *
+ * Reads only `satisfied`, which the server computed — "settled" is one
+ * definition in `orchestrator.ts` and must not become a second one here. Names
+ * the run while there is one to name, because "waiting" on its own is what a
+ * queued and a parked run also say, and the whole point of this state is which
+ * of the three it is.
+ */
+export function fmtWaitingFor(
+  deps: readonly RunDependencyDTO[] | undefined,
+): string | null {
+  const pending = (deps ?? []).filter((d) => !d.satisfied);
+  if (pending.length === 0) return null;
+  if (pending.length === 1) return `waiting for run ${pending[0].runId.slice(0, 8)}`;
+  return `waiting for ${pending.length} runs`;
 }
 
 export function fmtTokens(n: number): string {

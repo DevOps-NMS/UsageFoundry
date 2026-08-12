@@ -111,11 +111,18 @@ function lineFor(e: RunEventDTO): string | null {
 /* What state the run is in, said once                                 */
 /* ------------------------------------------------------------------ */
 
-/** Runs the orchestrator still owns: they hold a folder and can spend again. */
+/**
+ * Runs the orchestrator still owns: they will spend again on their own.
+ *
+ * `waiting` is one of them. It holds no folder, but it is a run that has not
+ * happened yet rather than one that is over, so the page keeps its Stop button
+ * and its live log.
+ */
 const ACTIVE_STATUSES: ReadonlySet<RunDTO["status"]> = new Set([
   "running",
   "queued",
   "paused",
+  "waiting",
 ]);
 
 /**
@@ -158,6 +165,32 @@ function describeRun(
   ctx: { now: number; cycleInFlight: string | null; stoppedByGuard: boolean },
 ): RunState {
   switch (run.status) {
+    case "waiting": {
+      const pending = (run.dependsOn ?? []).filter((d) => !d.satisfied);
+      return {
+        tone: "info",
+        headline: "Waiting for another run",
+        detail: (
+          <>
+            It starts once{" "}
+            {pending.length === 1 ? (
+              <>
+                run{" "}
+                <Link className="mono" href={`/runs/${pending[0].runId}`}>
+                  {pending[0].runId.slice(0, 8)}
+                </Link>{" "}
+                has {pending[0].edge === "on-success" ? "completed" : "finished"}
+              </>
+            ) : (
+              `all ${pending.length} runs it was told to start after have finished`
+            )}
+            . It holds no folder and no checkout meanwhile, so nothing else is
+            waiting on it.
+          </>
+        ),
+      };
+    }
+
     case "queued": {
       const ahead = run.queuePosition ?? 0;
       return {
