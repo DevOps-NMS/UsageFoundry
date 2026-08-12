@@ -614,6 +614,10 @@ they follow have settled. It is the answer to "the same four steps, in the same
 order, every time" — the thing templates cannot do, because a template is one
 run and this is the shape of several.
 
+A block can also be an **orchestrator block**, which decides what to run instead
+of being told, and whose runs then start without an approval. That is a real
+trade and it has [its own section](#a-block-that-decides-what-to-run) below.
+
 ### What a block holds, and what it does not
 
 A block holds the **work**: a name, a workspace and folder, a task, and
@@ -637,6 +641,54 @@ a third. So a block that names a template which has since been deleted is
 Settings guards: you saved a graph that said "under these guards", and a run
 started under different ones is what the refusal exists to prevent. The detail
 page marks such a block in red before you press anything.
+
+### A block that decides what to run
+
+The blocks above are fixed: you write the task, and that task is what runs. An
+**orchestrator block** is the other kind. It holds a *brief* rather than a task,
+and when the workflow reaches it the server spawns one short agent turn —
+Claude Code, headless, ten-minute bound, the same child the orchestrator chat
+uses — which looks at the folder and decides which runs should happen next. What
+it emits **starts**. No proposal, no card, nothing to click.
+
+That is the one place in this tool where an agent's answer becomes a billed
+process with nobody looking at it, so it is worth being exact about what you are
+agreeing to when you save one:
+
+| You fix, when you save the graph | It decides, when the workflow reaches it |
+|---|---|
+| The workspace and folder it may start runs in | Which folders under that one, and what each run is asked to do |
+| The template every run it starts runs under — budget, work-cycle limit, permission mode, isolation | Nothing about any of these |
+| The most runs it may ever start | How many, up to that |
+| The standing prompt every run it starts begins with | The task appended under it |
+
+The fan-out cap is **required**. A graph with an orchestrator block and no cap
+cannot be saved, for the same reason a run with no work-cycle limit and no time
+limit cannot be started: the number is the whole of what you agreed to, and
+without one you agreed to an unbounded number of agents.
+
+Its emit tool carries four fields per run — a title, the task, a folder, and
+which of its siblings that run should start after — and there is no fifth. There
+is no argument on it that names a template, a budget, a permission mode or an
+isolation choice, so the sentence above holds by construction rather than by the
+model's cooperation. A folder outside the block's own workspace is refused by
+name; so is a set of runs that would wait for each other in a loop.
+
+**A block that emits nothing stops what is behind it.** "There is nothing worth
+doing" is a real answer and the block is allowed to give it. But a block set to
+start after it is there to review, land or follow up on work that did not
+happen — started anyway, it spends a work cycle finding that out — so it is
+`blocked` instead, with a reason naming the block that decided there was nothing
+to do. The same is true if the turn fails.
+
+**Its own spend is its own.** A deciding turn's cost is bounded by Settings →
+*Chat turn budget*, exactly as a chat turn's is; it lands on the block, never on
+a run's spend and never on the dashboard meters. It **is** counted against the
+workflow's own limit below, because it is money that press of Run spent.
+
+Everything it starts belongs to the instance: the workflow-wide limits below
+cover those runs, *Stop all* takes them down, and they appear on the instance
+page saying which block started them.
 
 ### Limits for the whole workflow
 
@@ -737,8 +789,10 @@ A workflow that can be saved but never started fails weeks away from the form
 that caused it, so both moments check the same things: a name, at least one
 block, a task on every block, a template that exists, a workspace that is
 mounted and a folder that resolves inside it, a condition on every link, no
-block waiting for itself, no loop, and no branch hand-over between blocks whose
-guards do not isolate. Every refusal names the block it is about.
+block waiting for itself, no loop, no branch hand-over between blocks whose
+guards do not isolate — nor one touching an orchestrator block, which has no
+checkout and so no branch — and a fan-out cap on every orchestrator block. Every
+refusal names the block it is about.
 
 The workflow-wide limits are the one exception, and only in one direction: a
 fraction guard with no ceiling behind it saves fine and is refused at Run. A
@@ -753,6 +807,14 @@ so each block's dependencies already exist as rows by the time it is admitted.
 That pass has no `await` in it, and that is a correctness requirement rather
 than a style: the folder claim that keeps two agents out of one directory is
 only atomic within one event-loop turn.
+
+A graph with an orchestrator block in it is created in stages instead, for the
+obvious reason: the blocks behind one cannot name runs that a model has not
+decided on yet. Those blocks are created when the decision arrives, and until
+then they hold nothing at all — no folder, no checkout, no place in the queue —
+so they cost exactly as much as a `waiting` run does, which is nothing. The
+instance page lists them the whole time, so a block that is pending and a block
+that quietly vanished never look alike.
 
 It is **all or nothing**. Everything checkable is checked before anything is
 created, so a failure part-way through should be unreachable; if one happens
@@ -798,6 +860,8 @@ What each kind of block becomes:
 | working now | `stopped` | The same kill ladder the *Stop* button on a run uses — `SIGINT` first, so a cycle that can still report its own cost does |
 | queued or parked | `stopped` | Closed out before it can spawn |
 | still `waiting` | `blocked` | Nothing ran and nothing was spent, which is what that status says. Everything behind it gets its own reason naming the block in front of it |
+| deciding now | `failed` | Its child gets the same ladder. `failed` rather than `blocked` because that turn was billed, and the row carries what it cost |
+| waiting to decide | `blocked` | Nothing was spawned and nothing spent |
 | already finished | untouched | Rewriting a completed block as stopped would destroy the record of work that landed |
 
 **The door is closed before anything is signalled.** The instance is marked
@@ -805,8 +869,11 @@ What each kind of block becomes:
 nothing can join it behind the stop — and the blocks still `waiting` are closed
 out *before* the working ones are signalled, because stopping a run releases
 whatever was waiting on it and a block released a moment too early would start
-*because* the workflow was stopped. Pressing Stop twice does nothing the second
-time.
+*because* the workflow was stopped. Blocks that decide go first of all, for a
+sharper version of the same reason: one left deciding while the walk ran could
+start runs into a workflow that is being taken down, and every one of them would
+be a block the halt had already walked past. Pressing Stop twice does nothing
+the second time.
 
 **What survives it.** Anything an agent committed is on its branch, untouched.
 Anything it had not committed is still in its checkout, on that run's own branch,
@@ -866,6 +933,13 @@ your default guard set, and an existing one keeps the guards it already has.
 left switched on by default — there is no setting. The route takes the explicit
 list of proposals the page was showing when you clicked, so anything the chat
 added in between is not swept into a decision you did not see.
+
+The one place in this tool where runs *do* start without a click is a workflow's
+[orchestrator block](#a-block-that-decides-what-to-run), and it is not this
+gate switched off — it is the same gate moved. There, you approved a graph that
+already named the folder, the guard set and the largest number of runs the block
+may ever start. The chat has none of those fixed in advance, which is exactly
+why it stops at a card.
 
 **What the chat itself may do: anything, and it is told not to.** It runs with no
 tool allowlist at all — every tool the CLI has, this app's own alongside them —
@@ -1218,8 +1292,10 @@ src/lib/
   diff.ts          a run's <base>...<branch> as a budgeted file list + patches
   review.ts        the on-demand reviewer (a third, deliberate child process)
   land.ts          merge preview, landing, branch deletion, branch inventory
-  chat.ts          the orchestrator chat (a fourth, deliberate child process)
-  workflows.ts     saved graphs of run blocks — form input, never a run
+  chat.ts          the orchestrator chat (a fourth, deliberate child process),
+                   and the shared spawn a workflow's deciding block reuses
+  workflows.ts     saved graphs of run blocks — form input, never a run; and
+                   the blocks that decide what to run, which are not
   workspace.ts     the folder walk, shared by the picker and the chat's tools
   db.ts            SQLite (runs, events, reviews, chats, proposals, workflows,
                    settings)
@@ -1726,6 +1802,42 @@ through before trusting this unattended:
   the CLIs reported, with the estimate beside it and not inside it. And that a
   workflow saved with a fraction guard and no ceiling is refused **at Run**, by
   name, rather than starting and halting a moment later.
+- **An orchestrator block, end to end.** Nothing about it has been run. The two
+  decisions are unit tested — `planEmission` over the cap on both sides, a
+  folder the mount check refuses, a spec graph that loops, a dependency naming a
+  run outside the emission, and an empty emission; `planInstanceStep` over a
+  block spawning, a block held while its runs are still going, the fan-in onto
+  every run that was emitted, an empty emission cascading down a chain with one
+  sentence per link, and a node that is already a run never being created twice
+  — and `npm run typecheck` and `npm test` pass. Everything around them
+  typechecks and has never executed: no `claude` child has been spawned by
+  `startBlockTurn`, no `emit_runs` call has reached `/api/mcp`, and no run has
+  been created by a block. Same sandbox limitation as the two entries above, and
+  Docker is unavailable here as well. What a human should run, against a scratch
+  `DATA_DIR`, `CLAUDE_HOME` and workspace:
+
+  ```bash
+  docker compose up --build          # or: npm run dev, where the edge runtime works
+  # Save a workflow: one orchestrator block over a repo with a few obvious
+  # small jobs in it, fan-out 2, under a template you trust; then one ordinary
+  # block set to start after it. Press Run and watch the instance page.
+  ```
+
+  Six things to watch, none of which the unit tests can see. That the block's
+  turn is offered `emit_runs` and *not* `propose_run` — `tools/list` is per
+  subject, and a block that can propose is a block whose work stops at a card
+  nobody will click. That what it emits actually starts, under the template's
+  guards and not something else: check the run's permission mode and budget
+  against the template rather than against the block's brief. That a folder
+  outside the block's workspace comes back to the model as a sentence it can act
+  on rather than as a failed run. That the block behind it is created only once
+  every emitted run has settled, and is `blocked` with a naming reason if the
+  block emitted nothing. That the block's own cost lands on the block row and in
+  the instance total, and nowhere near `runs.spent_usd` or the dashboard meters.
+  And that *Stop all* while the block is still deciding kills that child and
+  leaves no run created afterwards — the guarded UPDATEs are what should refuse
+  a late emission, and a run appearing after the page says *stopped* is the
+  failure this whole ordering exists to prevent.
 - **Stopping a chat turn, in either of its two forms.** `staleTurn` is unit
   tested and the rest typechecks, but no real CLI child has been signalled by
   `cancelChatTurn` and no sweep has fired against a live row. Two things to
