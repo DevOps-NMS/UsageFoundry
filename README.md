@@ -155,6 +155,9 @@ provider did not answer for:
   outright** when no ceiling exists, rather than silently passing. A guard you
   believe is active but isn't is worse than no guard.
 
+Percentages for a *calendar* day, week or month are a separate question with a
+separate answer — see [Usage by period](#accuracy-notes) under *Accuracy notes*.
+
 ---
 
 ## Quick start
@@ -870,6 +873,42 @@ the window total instead of quietly omitting a remainder. Effort is typically
 the largest single lever; excluding sub-agent turns in Settings empties the
 by-agent table, which the card says outright.
 
+**Usage by period (day / week / month).** The two meters answer *may I start a
+run right now*; the **Usage by period** card answers *what has this been
+costing me*. It cuts the same deduplicated, same-priced entries into calendar
+buckets — a fortnight of days, a quarter of weeks, a year of months — and shows
+each one's cost, tokens, turns, and share of the ceiling. The toggle switches
+between the three without a request: all three series ship on the same poll.
+
+Two details are load-bearing.
+
+*The buckets are cut in your timezone, not the container's.* The container runs
+in UTC, so a 22:30 UTC turn is already tomorrow in Berlin, and bucketing it in
+UTC would file an evening's work under the wrong day. The browser sends its own
+zone (`/api/usage?tz=`), the server rejects anything that is not one and falls
+back to its own, and the label is rendered from the same zone the boundary was
+cut in. DST is handled by taking each bucket's end from the next bucket's
+start, so the series is contiguous by construction — the 25-hour day when the
+clocks go back is 25 hours long and nothing falls between two buckets.
+
+*A day and a month have no published allowance, so their percentage is a pace.*
+Anthropic enforces a 5-hour window and a weekly one and nothing in between. The
+weekly ceiling is therefore the only configured number a calendar bucket can be
+measured against: a **week** uses it as it stands, and a **day** and a **month**
+get it spread evenly over their own length. The card says so in words on every
+non-weekly view — *"your weekly ceiling spread over 31 days. Anthropic sets no
+monthly limit, so this is a pace rather than an allowance"* — and the wording is
+driven by the same value that produced the fraction, so the two cannot drift.
+Nothing here reaches `evaluateBudget`: no guard has ever had a daily threshold
+and this does not add one. With no weekly ceiling set, every bucket reads as the
+hatched indeterminate meter, never 0%.
+
+Weekly buckets follow the **weekly reset day** when one is configured, rather
+than a calendar Monday, so the newest bucket is the same seven hours-to-the-
+minute as the weekly meter above it. Buckets that closed before your first
+recorded turn are dropped rather than shown as `$0.00`, so a fresh install sees
+the days it has instead of thirteen empty ones above them.
+
 **Agent self-reporting (optional, off by default).** Claude Code computes a cost
 for every API request and will push it to any OTLP endpoint. Turning on *Agent
 self-reporting* in Settings points agents this app spawns back at this server,
@@ -943,7 +982,8 @@ mounted code. Treat it as privileged.
 ```
 src/lib/
   transcripts.ts   JSONL parser — incremental byte-offset reads, dedupe
-  windows.ts       5-hour block + weekly rollups, burn rate, projection
+  windows.ts       5-hour block + weekly rollups, burn rate, projection,
+                   calendar day/week/month history (display only)
   pricing.ts       per-model rates, cache-TTL multipliers, fast mode
   adminApi.ts      Admin API client (rate limits, usage, cost) w/ pagination
   budget.ts        policy evaluation
@@ -1009,6 +1049,18 @@ Built and exercised against real transcripts:
   reconcile to the window total to within a rounding error ($138.3639 over 998
   turns), every turn lands in exactly one bucket per breakdown (998 = 998), and
   the `groupBy` refactor left `byModel` / `byProject` reconciling as before.
+- **Calendar periods against 9,200 real deduped turns from 303 files**, in
+  `Europe/Berlin` while the machine ran UTC. Every day boundary landed on local
+  midnight (`00:00:00` Berlin, i.e. `22:00` UTC the day before under CEST), all
+  three granularities were contiguous with no gap between adjacent buckets, and
+  every turn in each series' span landed in exactly one bucket (9,200 = 9,200,
+  three times). Pro-rating checked against a $700 weekly ceiling: a day read
+  $100.00 and a 31-day August read $3,100.00. The weekly bucket's total matched
+  the weekly meter's exactly ($1,228.79), the `limitBasis` was `weekly` for
+  weeks and `prorated` for the other two, and the day series was three buckets
+  rather than fourteen because the transcripts start on 10 August. Nine unit
+  tests cover the same ground plus the DST case, an anchored week, and the
+  no-ceiling case (`fraction === null`, never `0`).
 - Stop path, end to end against a stub CLI that ignores SIGTERM: the run now
   reaches `stopped` about 8s after the stop (5s escalation + 2s drain grace),
   where it previously stayed `running` indefinitely. Two independent causes
@@ -1319,6 +1371,16 @@ through before trusting this unattended:
   same run could not reach `gh`, so the issue it was written from was never read
   either — what is here follows the task text's summary of it. Run the three
   commands and open one finished run's page before trusting any of it.
+- **The Usage by period card in a browser.** The rollup behind it was exercised
+  against 9,200 real turns (see *Verified*) and `npm run typecheck` and
+  `npm test` both pass, but no browser has rendered it: the sandbox it was
+  written in cannot execute Next's edge runtime at all (`EvalError: Code
+  generation from strings disallowed`, the same limitation noted below for
+  `/api/mcp`), which takes `next build` and every page request with it. What
+  has not been seen is the layout — the tab strip beside the card title at a
+  narrow width, a fourteen-row daily table, and a meter reading 798% of a
+  pro-rated day, which is a real figure from those transcripts and clamps to a
+  full bar.
 - Whether `claude -p` flushes its `result` event on `SIGINT`. If it does, an
   interrupted cycle keeps its measured cost and the transcript reconciliation
   becomes a fallback rather than the norm.

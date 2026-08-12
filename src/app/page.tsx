@@ -9,7 +9,13 @@ import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
-import type { PlanUsageDTO, UsageResponse, WindowStateDTO } from "@/lib/apiTypes";
+import { UsagePeriods } from "@/components/UsagePeriods";
+import type {
+  PeriodGranularityDTO,
+  PlanUsageDTO,
+  UsageResponse,
+  WindowStateDTO,
+} from "@/lib/apiTypes";
 import {
   fmtDateTime,
   fmtDuration,
@@ -203,6 +209,7 @@ export default function Dashboard() {
   const [data, setData] = useState<UsageResponse | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [dimension, setDimension] = useState<Dimension>("model");
+  const [granularity, setGranularity] = useState<PeriodGranularityDTO>("week");
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   /**
@@ -216,9 +223,17 @@ export default function Dashboard() {
 
   useEffect(() => {
     let alive = true;
+    // The calendar buckets are cut server-side, and cutting them in the
+    // container's UTC would file a late-evening turn under tomorrow. Read here
+    // rather than at render: this component is server-rendered too, and the
+    // server's zone in the first paint would not match the browser's in the
+    // second. `resolveTimeZone` refuses anything that is not a zone.
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone ?? "";
     const load = async () => {
       try {
-        const res = await fetch("/api/usage", { cache: "no-store" });
+        const res = await fetch(`/api/usage?tz=${encodeURIComponent(tz)}`, {
+          cache: "no-store",
+        });
         const json = await res.json().catch(() => ({}));
         if (!alive) return;
         if (!res.ok) {
@@ -333,7 +348,7 @@ export default function Dashboard() {
     );
   }
 
-  const { snapshot: s, meta, telemetry } = data;
+  const { snapshot: s, meta, periods, telemetry } = data;
   const noCeilings = !meta.hasSessionCeiling && !meta.hasWeeklyCeiling;
   // Read off the windows rather than off the setting: the setting says we
   // asked, this says we were answered.
@@ -702,6 +717,16 @@ export default function Dashboard() {
           <StatSub>equivalent API cost, all local transcripts</StatSub>
         </Card>
       </section>
+
+      {/* History, so it sits below everything that describes right now. The
+          meters answer whether a run can start; this answers what the last
+          fortnight cost. */}
+      <UsagePeriods
+        series={periods[granularity]}
+        granularity={granularity}
+        onGranularityChange={setGranularity}
+        reservedHeadroomFraction={meta.reservedHeadroomFraction}
+      />
 
       <Card className="mb-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">

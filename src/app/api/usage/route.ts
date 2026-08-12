@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { scanUsage } from "@/lib/transcripts";
-import { buildSnapshot } from "@/lib/windows";
+import { buildPeriods, buildSnapshot, resolveTimeZone } from "@/lib/windows";
 import { getSettings, limitConfig } from "@/lib/settings";
 import { readAccountProfile } from "@/lib/account";
 import { planUsage } from "@/lib/planUsage";
@@ -10,7 +10,7 @@ import { PROJECTS_DIR } from "@/lib/config";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const settings = getSettings();
     const [scan, account, plan] = await Promise.all([
@@ -22,13 +22,29 @@ export async function GET() {
       ? scan.entries
       : scan.entries.filter((e) => !e.isSidechain);
 
+    const now = Date.now();
+    const limits = limitConfig(settings);
     const snapshot = buildSnapshot(
       entries,
-      limitConfig(settings),
-      Date.now(),
+      limits,
+      now,
       settings.sessionResetOverrideAt,
       plan,
     );
+
+    // Calendar buckets are wrong at every edge if they are cut in the wrong
+    // zone, and the container runs in UTC — so the browser names the zone it is
+    // displaying in and `resolveTimeZone` refuses anything that is not one.
+    // All three granularities on every poll: the client toggle then costs no
+    // request, and the whole set is a tenth of what the snapshot already is.
+    const timeZone = resolveTimeZone(
+      new URL(req.url).searchParams.get("tz"),
+    );
+    const periods = {
+      day: buildPeriods(entries, "day", limits, now, timeZone),
+      week: buildPeriods(entries, "week", limits, now, timeZone),
+      month: buildPeriods(entries, "month", limits, now, timeZone),
+    };
 
     // Bounded by the snapshot's own window so the card describes the same five
     // hours as the session meter — and read only when the setting is on, so a
@@ -40,6 +56,7 @@ export async function GET() {
 
     return NextResponse.json({
       snapshot,
+      periods,
       telemetry,
       meta: {
         transcriptDir: PROJECTS_DIR,

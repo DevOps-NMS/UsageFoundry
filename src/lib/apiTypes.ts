@@ -93,8 +93,59 @@ export interface SnapshotDTO {
   plan: PlanUsageDTO | null;
 }
 
+export type PeriodGranularityDTO = "day" | "week" | "month";
+
+/**
+ * One calendar period's spend.
+ *
+ * Leaner than `WindowStateDTO` on purpose: three series ship on every poll of a
+ * page that already re-reads the whole snapshot every ten seconds, and the
+ * per-bucket token *breakdown* is the half of an `AggregateDTO` nothing on this
+ * card renders.
+ */
+export interface PeriodBucketDTO {
+  key: string;
+  startsAt: number;
+  /** Exclusive, and always the next bucket's `startsAt`. */
+  endsAt: number;
+  costUSD: number;
+  tokens: number;
+  entryCount: number;
+  /** Share of the ceiling for a period this long. Null when none is configured. */
+  fraction: number | null;
+  fractionMetric: "cost" | "tokens" | null;
+  guardFraction: number | null;
+  limit: number | null;
+  /** The bucket `now` falls in. It is still filling, so its share is partial. */
+  isCurrent: boolean;
+}
+
+export interface PeriodSeriesDTO {
+  granularity: PeriodGranularityDTO;
+  /** IANA zone the boundaries were cut in — the browser's, echoed back. */
+  timeZone: string;
+  /**
+   * Where a bucket's ceiling came from. `weekly` is the configured weekly
+   * ceiling used as it stands; `prorated` is that ceiling spread evenly over a
+   * period Anthropic publishes no allowance for, which the card has to say out
+   * loud. Null when no weekly ceiling is set at all.
+   */
+  limitBasis: "weekly" | "prorated" | null;
+  /** Newest first. Shorter than the granularity's span when history is. */
+  buckets: PeriodBucketDTO[];
+}
+
 export interface UsageResponse {
   snapshot: SnapshotDTO;
+  /**
+   * Spend cut into calendar buckets, all three granularities at once so the
+   * toggle switches without a refetch.
+   *
+   * A history, never a guard input: `evaluateBudget` is passed windows, and a
+   * day and a month have no published allowance to guard against — see the
+   * `limitBasis` note above.
+   */
+  periods: Record<PeriodGranularityDTO, PeriodSeriesDTO>;
   meta: {
     transcriptDir: string;
     fileCount: number;

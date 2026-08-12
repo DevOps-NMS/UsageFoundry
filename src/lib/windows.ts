@@ -307,6 +307,63 @@ function fractionOf(value: number, limit: number | null): number | null {
   return value / limit;
 }
 
+/**
+ * A window measured against configured ceilings alone.
+ *
+ * The two metric fields are narrowed to the derived pair: the provider reports
+ * a percentage for the 5-hour and weekly windows and for nothing else, so a
+ * calendar bucket can never carry one and `buildWindow` cannot produce it.
+ * `makeWindow` is the one place a first-party reading is layered on top.
+ */
+type DerivedWindow = Omit<
+  WindowState,
+  "label" | "planFraction" | "fractionMetric" | "limitMetric"
+> & {
+  fractionMetric: "cost" | "tokens" | null;
+  limitMetric: "cost" | "tokens" | null;
+};
+
+/**
+ * Build a window, preferring the cost ceiling. Both fractions are exposed so
+ * the UI can show the token view alongside without it driving any decision.
+ *
+ * Label-free and closure-free so the calendar-period rollup below measures a
+ * bucket exactly the way `buildSnapshot` measures the two live windows — the
+ * cost-over-tokens preference and the guard split are decisions this codebase
+ * makes once.
+ */
+function buildWindow(
+  startsAt: number,
+  endsAt: number,
+  agg: Aggregate,
+  costLimit: number | null,
+  tokenLimit: number | null,
+): DerivedWindow {
+  const tokens = totalTokens(agg.tokens);
+  const costFraction = fractionOf(agg.costUSD, costLimit);
+  const tokenFraction = fractionOf(tokens, tokenLimit);
+  const useCost = costFraction !== null;
+  // Same ceiling, same preference order — only the numerator differs, so
+  // guardFraction is null exactly when fraction is, and the "no ceiling
+  // configured" refusal keeps working off either.
+  const guardCostFraction = fractionOf(agg.costGuardUSD, costLimit);
+
+  return {
+    startsAt,
+    endsAt,
+    agg,
+    tokens,
+    costUSD: agg.costUSD,
+    fraction: costFraction ?? tokenFraction,
+    fractionMetric: useCost ? "cost" : tokenFraction !== null ? "tokens" : null,
+    costFraction,
+    tokenFraction,
+    guardFraction: guardCostFraction ?? tokenFraction,
+    limit: useCost ? costLimit : tokenLimit,
+    limitMetric: useCost ? "cost" : tokenFraction !== null ? "tokens" : null,
+  };
+}
+
 /** Roll entries up under an arbitrary label, most expensive first. */
 function groupBy(
   entries: UsageEntry[],
@@ -378,10 +435,6 @@ export function buildSnapshot(
   const anchorIsCurrent =
     anchor !== null && anchor <= now && now < anchor + FIVE_HOURS_MS;
 
-  /**
-   * Build a window, preferring the cost ceiling. Both fractions are exposed so
-   * the UI can show the token view alongside without it driving any decision.
-   */
   const makeWindow = (
     label: string,
     startsAt: number,
@@ -393,51 +446,29 @@ export function buildSnapshot(
     /** Worst of every wall on this window; defaults to the window's own. */
     planGuard: number | null = null,
   ): WindowState => {
-    const tokens = totalTokens(agg.tokens);
-    const costFraction = fractionOf(agg.costUSD, costLimit);
-    const tokenFraction = fractionOf(tokens, tokenLimit);
-    const useCost = costFraction !== null;
-    // Same ceiling, same preference order — only the numerator differs, so
-    // guardFraction is null exactly when fraction is, and the "no ceiling
-    // configured" refusal keeps working off either.
-    const guardCostFraction = fractionOf(agg.costGuardUSD, costLimit);
+    const derived = buildWindow(startsAt, endsAt, agg, costLimit, tokenLimit);
     const planFraction = planWindow ? planWindow.utilization : null;
+
+    // The derived readings survive either way: `costFraction`/`tokenFraction`
+    // are what the "your configured ceiling says otherwise" footnote is drawn
+    // from, so the provider's figure displaces them at `fraction` without
+    // overwriting them.
+    if (planFraction === null) return { label, ...derived, planFraction: null };
 
     return {
       label,
-      startsAt,
-      endsAt,
-      agg,
-      tokens,
-      costUSD: agg.costUSD,
-      fraction: planFraction ?? costFraction ?? tokenFraction,
-      fractionMetric:
-        planFraction !== null
-          ? "plan"
-          : useCost
-            ? "cost"
-            : tokenFraction !== null
-              ? "tokens"
-              : null,
+      ...derived,
       planFraction,
-      costFraction,
-      tokenFraction,
+      fraction: planFraction,
+      fractionMetric: "plan",
       // The unpriced-model fallback has nothing to say about a first-party
       // figure: it exists because our price table can fail to place a model,
-      // and the provider's own accounting cannot.
-      guardFraction:
-        planFraction !== null
-          ? Math.max(planFraction, planGuard ?? 0)
-          : (guardCostFraction ?? tokenFraction),
-      limit: planFraction !== null ? null : useCost ? costLimit : tokenLimit,
-      limitMetric:
-        planFraction !== null
-          ? "plan"
-          : useCost
-            ? "cost"
-            : tokenFraction !== null
-              ? "tokens"
-              : null,
+      // and the provider's own accounting cannot. Only another of the
+      // provider's own walls can raise this.
+      guardFraction: Math.max(planFraction, planGuard ?? 0),
+      // Nothing to describe: the provider names a percentage, not a ceiling.
+      limit: null,
+      limitMetric: "plan",
     };
   };
 
@@ -561,5 +592,325 @@ export function buildSnapshot(
     byEffort,
     totalCostUSD: entries.reduce((s, e) => s + e.costUSD, 0),
     plan,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Calendar periods                                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A history of spend cut into calendar buckets, which is a different question
+ * from the two windows above and deliberately kept apart from them.
+ *
+ * The windows answer "may I start a run right now"; these answer "what has this
+ * been costing me". Nothing here reaches `evaluateBudget` — see the note on
+ * `spanLimit` for why a day and a month can carry a percentage at all when
+ * Anthropic enforces no allowance over either.
+ */
+export type PeriodGranularity = "day" | "week" | "month";
+
+/**
+ * How far back each granularity looks. A fortnight of days, a quarter of weeks,
+ * a year of months — enough to see a trend in each without the card becoming
+ * the page. Buckets older than the first recorded turn are dropped before this
+ * count is met, so a fresh install shows what it has rather than eleven empty
+ * months above one real one.
+ */
+export const PERIOD_COUNT: Record<PeriodGranularity, number> = {
+  day: 14,
+  week: 12,
+  month: 12,
+};
+
+export interface PeriodBucket {
+  /** Stable React key: a boundary instant is not unique across granularities. */
+  key: string;
+  startsAt: number;
+  /** Exclusive, and always the next bucket's `startsAt`. */
+  endsAt: number;
+  costUSD: number;
+  tokens: number;
+  entryCount: number;
+  /** Share of the ceiling for a period this long. Null when none is configured. */
+  fraction: number | null;
+  fractionMetric: "cost" | "tokens" | null;
+  /** The same reading with unpriced models charged the fallback rate. */
+  guardFraction: number | null;
+  limit: number | null;
+  /** True for the bucket `now` falls in — it is still filling. */
+  isCurrent: boolean;
+}
+
+export interface PeriodSeries {
+  granularity: PeriodGranularity;
+  /** IANA zone the calendar boundaries were cut in. */
+  timeZone: string;
+  /**
+   * How the ceiling behind `fraction` was arrived at, so the card can say it.
+   * Null when no weekly ceiling is configured and every bucket reads unknown.
+   */
+  limitBasis: "weekly" | "prorated" | null;
+  /** Newest first. */
+  buckets: PeriodBucket[];
+}
+
+/** Cached per zone: `formatToParts` is called once per boundary, not per entry. */
+const zoneFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function zoneFormatter(timeZone: string): Intl.DateTimeFormat {
+  let f = zoneFormatters.get(timeZone);
+  if (!f) {
+    f = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    zoneFormatters.set(timeZone, f);
+  }
+  return f;
+}
+
+interface ZonedParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+function zonedParts(ts: number, timeZone: string): ZonedParts {
+  const parts = zoneFormatter(timeZone).formatToParts(new Date(ts));
+  const get = (type: string) =>
+    Number(parts.find((p) => p.type === type)?.value ?? 0);
+  return {
+    year: get("year"),
+    month: get("month"),
+    day: get("day"),
+    // `hourCycle: "h23"` is requested above; the modulo is the belt to its
+    // braces, because some ICU builds still render midnight as hour 24 and
+    // that would push every boundary a day forward.
+    hour: get("hour") % 24,
+    minute: get("minute"),
+    second: get("second"),
+  };
+}
+
+/** Milliseconds `timeZone` is ahead of UTC at `ts`. */
+function zoneOffset(ts: number, timeZone: string): number {
+  const p = zonedParts(ts, timeZone);
+  return (
+    Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - ts
+  );
+}
+
+/**
+ * Epoch ms of local midnight on a calendar date in `timeZone`.
+ *
+ * Two passes, because the offset depends on the instant being solved for: the
+ * first guess reads the offset at the same wall time in UTC, which is an hour
+ * out across a DST change, and the second reads it at the instant that guess
+ * produced. On a spring-forward day whose local midnight does not exist this
+ * lands an hour to one side of it — harmless here, because a bucket's end is
+ * taken from the next bucket's start rather than computed, so the series stays
+ * contiguous whatever this returns.
+ */
+function zonedMidnight(
+  year: number,
+  month: number,
+  day: number,
+  timeZone: string,
+): number {
+  const wall = Date.UTC(year, month - 1, day);
+  const first = wall - zoneOffset(wall, timeZone);
+  return wall - zoneOffset(first, timeZone);
+}
+
+/**
+ * The `count` most recent period starts, oldest first, followed by the end of
+ * the newest — so `bounds[i]`/`bounds[i + 1]` is bucket `i` and no gap can open
+ * between two buckets.
+ */
+function periodBoundaries(
+  granularity: PeriodGranularity,
+  count: number,
+  now: number,
+  timeZone: string,
+  weeklyAnchor: WeeklyAnchor | null,
+): number[] {
+  // With an anchor configured the operator has said when their week rolls over,
+  // and the newest bucket has to be the same seven hours-to-the-minute as the
+  // weekly meter directly above it on the page — a calendar Monday would put a
+  // different total under the same word.
+  if (granularity === "week" && weeklyAnchor) {
+    const current = weekStart(now, weeklyAnchor);
+    const out: number[] = [];
+    for (let i = count - 1; i >= 0; i--) out.push(current - i * WEEK_MS);
+    out.push(current + WEEK_MS);
+    return out;
+  }
+
+  const p = zonedParts(now, timeZone);
+
+  if (granularity === "month") {
+    const out: number[] = [];
+    // Down to -1, so the last boundary is the *next* month's first and the
+    // newest bucket is the month in progress rather than the one before it.
+    for (let i = count - 1; i >= -1; i--) {
+      // Normalised through a UTC date so December rolls the year rather than
+      // producing month 13.
+      const d = new Date(Date.UTC(p.year, p.month - 1 - i, 1));
+      out.push(
+        zonedMidnight(d.getUTCFullYear(), d.getUTCMonth() + 1, 1, timeZone),
+      );
+    }
+    return out;
+  }
+
+  // A day and an anchorless week both step whole local days back from a local
+  // midnight. The weekday is read off the *zoned* date, or a Sunday evening in
+  // a positive offset would be treated as the Monday that follows it.
+  const step = granularity === "week" ? 7 : 1;
+  const weekday = new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay();
+  const intoWeek = granularity === "week" ? (weekday + 6) % 7 : 0; // ISO: Monday opens
+  const first = intoWeek + step * (count - 1);
+
+  const out: number[] = [];
+  for (let i = 0; i <= count; i++) {
+    const d = new Date(Date.UTC(p.year, p.month - 1, p.day - first + i * step));
+    out.push(
+      zonedMidnight(
+        d.getUTCFullYear(),
+        d.getUTCMonth() + 1,
+        d.getUTCDate(),
+        timeZone,
+      ),
+    );
+  }
+  return out;
+}
+
+/**
+ * The ceiling a bucket of length `spanMs` is measured against.
+ *
+ * Anthropic enforces a 5-hour window and a weekly one and nothing in between,
+ * so the weekly ceiling is the only configured number a calendar bucket can be
+ * compared with at all. A week uses it as it stands; a day and a month get it
+ * spread evenly over their own length. That is a *rate*, not a published
+ * allowance — which is why `PeriodSeries.limitBasis` travels with it and the
+ * card says so in words. It is still derived from a number the operator typed,
+ * which is what separates it from the invented ceilings `DEFAULTS` refuses to
+ * carry, and no guard reads it: `evaluateBudget` never sees a period.
+ */
+function spanLimit(weeklyLimit: number | null, spanMs: number): number | null {
+  if (weeklyLimit === null || spanMs <= 0) return null;
+  return weeklyLimit * (spanMs / WEEK_MS);
+}
+
+/**
+ * A timezone name from the wire, or the server's own when it is absent or not
+ * a zone this build's ICU knows.
+ *
+ * Calendar buckets cut in the wrong zone are wrong at every edge — an evening
+ * turn in CEST lands on the following UTC day, and the container runs in UTC —
+ * so the browser sends the zone it is displaying in and this rejects anything
+ * that is not one.
+ */
+export function resolveTimeZone(requested: string | null | undefined): string {
+  const fallback = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  if (!requested || requested.length > 64) return fallback;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: requested });
+    return requested;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Roll entries into calendar buckets of one granularity.
+ *
+ * Separate from `buildSnapshot` rather than folded into it because the
+ * orchestrator calls that on a ticker — once before every work cycle and again
+ * every `liveGuardIntervalSeconds` while one is in flight — and none of this
+ * feeds a guard decision. Only `/api/usage` pays for it.
+ */
+export function buildPeriods(
+  entries: UsageEntry[],
+  granularity: PeriodGranularity,
+  limits: LimitConfig,
+  now = Date.now(),
+  timeZone = "UTC",
+): PeriodSeries {
+  const count = PERIOD_COUNT[granularity];
+  const bounds = periodBoundaries(
+    granularity,
+    count,
+    now,
+    timeZone,
+    limits.weeklyAnchor,
+  );
+
+  // Entries arrive time-sorted (`scanUsage` sorts them), so one cursor walks
+  // the whole history into the buckets in a single pass.
+  let cursor = 0;
+  while (cursor < entries.length && entries[cursor].ts < bounds[0]) cursor++;
+
+  const buckets: PeriodBucket[] = [];
+  for (let i = 0; i < count; i++) {
+    const startsAt = bounds[i];
+    const endsAt = bounds[i + 1];
+    const slice: UsageEntry[] = [];
+    while (cursor < entries.length && entries[cursor].ts < endsAt) {
+      slice.push(entries[cursor]);
+      cursor++;
+    }
+
+    const agg = aggregate(slice);
+    const span = endsAt - startsAt;
+    const w = buildWindow(
+      startsAt,
+      endsAt,
+      agg,
+      spanLimit(limits.weeklyCostLimit, span),
+      spanLimit(limits.weeklyTokenLimit, span),
+    );
+
+    buckets.push({
+      key: `${granularity}:${startsAt}`,
+      startsAt,
+      endsAt,
+      costUSD: w.costUSD,
+      tokens: w.tokens,
+      entryCount: agg.entryCount,
+      fraction: w.fraction,
+      fractionMetric: w.fractionMetric,
+      guardFraction: w.guardFraction,
+      limit: w.limit,
+      isCurrent: now >= startsAt && now < endsAt,
+    });
+  }
+
+  // A bucket that closed before the first transcript was written is not "$0.00
+  // spent", it is a period with nothing recorded — and eleven of those push the
+  // months that do have data off the bottom of the card.
+  const firstTs = entries.length ? entries[0].ts : now;
+  const recorded = buckets.filter((b) => b.endsAt > firstTs);
+
+  return {
+    granularity,
+    timeZone,
+    limitBasis: recorded.some((b) => b.limit !== null)
+      ? granularity === "week"
+        ? "weekly"
+        : "prorated"
+      : null,
+    buckets: recorded.reverse(),
   };
 }

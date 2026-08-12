@@ -21,91 +21,12 @@ import { Card, CardTitle, Empty, Stat } from "@/components/ui/Card";
 import { Field, Input, Textarea } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Log, LogLine, Spinner } from "@/components/ui/Log";
+import { describeEvent } from "@/lib/logLine";
 import { Notice } from "@/components/ui/Notice";
 import { RunDiff } from "@/components/RunDiff";
 import { RunLand } from "@/components/RunLand";
 import { RunOutput } from "@/components/RunOutput";
 import { RunReview } from "@/components/RunReview";
-
-/** Render one event as a single log line. */
-function lineFor(e: RunEventDTO): string | null {
-  const p = e.payload ?? {};
-  switch (e.kind) {
-    case "iteration":
-      return `── work cycle ${p.n}${
-        p.resuming ? " (continuing the same conversation)" : ""
-      } ──`;
-    case "assistant":
-      return String(p.text ?? "");
-    case "tool":
-      return `⚙ ${p.name}${
-        p.input ? ` ${JSON.stringify(p.input).slice(0, 220)}` : ""
-      }`;
-    case "budget":
-      return p.allowed
-        ? `budget ok — weekly ${
-            p.weeklyFraction == null
-              ? "n/a"
-              : `${((p.weeklyFraction as number) * 100).toFixed(1)}%`
-          }`
-        : `${p.disposition === "pause" ? "budget pause" : "budget stop"}${
-            p.live ? " (mid-cycle)" : ""
-          } — ${p.reason}`;
-    case "result":
-      return `✓ turn complete — ${fmtUSD(Number(p.costUSD ?? 0))}, ${
-        p.numTurns ?? "?"
-      } turns`;
-    case "error":
-      return `✗ ${p.message}`;
-    case "handoff": {
-      const commits = Array.isArray(p.commits) ? p.commits.length : 0;
-      return `⇢ ${commits} commit${commits === 1 ? "" : "s"} on ${p.branch}`;
-    }
-    case "land": {
-      if (p.purged) {
-        return `⌫ purged ${p.branch} — ${p.commits} commit${
-          p.commits === 1 ? "" : "s"
-        } and ${p.discarded} uncommitted path${p.discarded === 1 ? "" : "s"} gone`;
-      }
-      if (p.deleted) return `⌫ deleted ${p.branch}`;
-      if (p.commit) {
-        return `⊕ committed ${p.files} path${p.files === 1 ? "" : "s"} to ${
-          p.branch
-        } as ${p.commit}`;
-      }
-      const resolved = Array.isArray(p.resolved) ? p.resolved.length : null;
-      return resolved !== null
-        ? `⇄ merged ${p.target} into ${p.branch}, resolving ${resolved} file${
-            resolved === 1 ? "" : "s"
-          }`
-        : `⇥ landed ${p.branch} into ${p.target} (${p.strategy})`;
-    }
-    case "review": {
-      // The same event kind carries both — a read-only review and a conflict
-      // resolution — because they are the same billed, out-of-cycle spawn.
-      const what = p.assist === "resolve" ? "conflict resolution" : "review";
-      return p.status === "running"
-        ? `⌕ ${what} started — ${p.shown}/${p.files} files`
-        : p.status === "failed"
-          ? `⌕ ${what} failed: ${p.error}`
-          : `⌕ ${what} done — ${fmtUSD(Number(p.costUSD ?? 0))}`;
-    }
-    case "status": {
-      // `message` is what a hand-driven transition says about itself — a
-      // pick-up, a park, a resume. Without it the log shows the status flipping
-      // and nothing about why.
-      const why = p.stop_reason ?? p.message;
-      return `status → ${p.status}${why ? `: ${why}` : ""}`;
-    }
-    case "log": {
-      const msg = String(p.message ?? "");
-      // system:init and friends are noise once the run is underway.
-      return msg.startsWith("system:") ? null : msg;
-    }
-    default:
-      return null;
-  }
-}
 
 /* ------------------------------------------------------------------ */
 /* What state the run is in, said once                                 */
@@ -380,15 +301,15 @@ export default function RunDetail({
     return () => es.close();
   }, [id]);
 
-  // Rendered once rather than per paint: `lineFor` runs over the whole stream,
-  // and the log's header counts the lines it will draw.
+  // Rendered once rather than per paint: `describeEvent` runs over the whole
+  // stream, and the log's header counts the lines it will draw.
   const lines = useMemo(
     () =>
       events.flatMap((e, i) => {
-        const text = lineFor(e);
-        return text === null
+        const entry = describeEvent(e);
+        return entry === null
           ? []
-          : [{ key: e.id ?? `${e.ts}-${i}`, kind: e.kind, ts: e.ts, text }];
+          : [{ key: e.id ?? `${e.ts}-${i}`, ts: e.ts, entry }];
       }),
     [events],
   );
@@ -939,9 +860,11 @@ export default function RunDetail({
                   </Empty>
                 )}
                 {lines.map((l) => (
-                  <LogLine key={l.key} kind={l.kind} timestamp={fmtClock(l.ts)}>
-                    {l.text}
-                  </LogLine>
+                  <LogLine
+                    key={l.key}
+                    entry={l.entry}
+                    timestamp={fmtClock(l.ts)}
+                  />
                 ))}
               </Log>
 
