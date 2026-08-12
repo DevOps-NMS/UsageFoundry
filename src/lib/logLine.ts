@@ -136,9 +136,12 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
             voice: "system",
             tone: "warn",
             label: "budget",
+            // `scope` says whose limit this was. Without it a workflow-wide
+            // stop reads as this run's own guard, which sends the operator to
+            // the wrong form to change it.
             text: `${p.disposition === "pause" ? "pause" : "stop"}${
               p.live ? ", mid-cycle" : ""
-            } — ${p.reason}`,
+            }${p.scope === "workflow" ? ", workflow-wide" : ""} — ${p.reason}`,
           };
 
     case "result":
