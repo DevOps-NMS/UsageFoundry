@@ -678,6 +678,15 @@ bound that is already one cycle in the ordinary case.
 When one trips, the workflow is halted through the same door *Stop all* uses, and
 the instance records that its **budget guard** stopped it rather than you.
 
+The one verdict that does **not** halt a running workflow is "no ceiling
+configured". That is refused when you press Run, where refusing costs nothing.
+Acting on it afterwards would mean the reading going away stops a graph
+mid-flight — and on a stock install that reading is the account's own percentage
+from Anthropic, which is discarded after an hour without a fresh answer, so an
+unreachable host would kill every workflow carrying a fraction guard and every
+in-flight cycle with it. It is not ignored: the block whose check found it writes
+a line into its log saying the guard had nothing to read.
+
 **What the figure is made of.** `spent_usd` moves only when a block's CLI emits
 its `result` event, so a cycle in flight contributes nothing to it for its whole
 duration — that figure is a floor and the instance page labels it as one. The

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   type BudgetPolicy,
   type InstanceBudgetPolicy,
+  INSTANCE_ENFORCEABLE_CODES,
   evaluateBudget,
   evaluateInstanceBudget,
   instanceBudgetIsOff,
@@ -436,6 +437,21 @@ describe("evaluateInstanceBudget — the cap on everything one press of Run spen
       const v = evaluateInstanceBudget(policy, snapshot(null, null), settled(0));
       assert.equal(v.allowed, false, window);
       assert.equal(v.allowed === false && v.code, "no_ceiling", window);
+    }
+  });
+
+  it("does not let that refusal halt a workflow that is already running", () => {
+    // `no_ceiling` is a fact about configuration, and it is checked at the door
+    // where refusing costs nothing. Acting on it *afterwards* would mean the
+    // reading going away halts a graph mid-flight — and on a stock install that
+    // reading is the provider's own percentage, which is discarded after an
+    // hour without a fresh answer. An unreachable host would kill every
+    // workflow carrying a fraction guard, and every in-flight cycle with it.
+    // Not silent, though: the run whose check found it logs that the guard had
+    // nothing to read.
+    assert.equal(INSTANCE_ENFORCEABLE_CODES.includes("no_ceiling"), false);
+    for (const code of ["instance_cost", "weekly_fraction", "session_fraction"] as const) {
+      assert.equal(INSTANCE_ENFORCEABLE_CODES.includes(code), true, code);
     }
   });
 

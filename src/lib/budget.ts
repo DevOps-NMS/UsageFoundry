@@ -520,6 +520,33 @@ export interface InstanceProgress {
   spentGuardUSD: number;
 }
 
+/**
+ * Codes a workflow instance may actually be halted on.
+ *
+ * `LIVE_ENFORCEABLE_CODES`'s reasoning, applied to the one code it excludes for
+ * being about configuration rather than about spending. `no_ceiling` is checked
+ * **at the door** — `startWorkflow`, which has an error channel and refuses the
+ * press of Run by name — and deliberately not acted on afterwards, because
+ * `fraction` going null under a running instance is not the operator having
+ * failed to set a ceiling. On a stock install that reading comes from the
+ * provider (`planUsage.ts`, preferred over any configured ceiling), and it is
+ * discarded after an hour without a fresh answer: an unreachable Anthropic host
+ * would otherwise halt every workflow carrying a fraction guard, killing the
+ * in-flight cycles of every one of their blocks. Turning a provider outage into
+ * a stopped graph is a worse failure than the one the refusal exists to prevent.
+ *
+ * It is not silently ignored either. The run whose check found it logs a line
+ * saying the guard had nothing to read — the same answer this app already gives
+ * for a live spending limit whose telemetry never arrived, and for the same
+ * reason: a guard reading nothing refuses nothing and looks exactly like a guard
+ * that was never reached.
+ */
+export const INSTANCE_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
+  "instance_cost",
+  "weekly_fraction",
+  "session_fraction",
+];
+
 /** Nothing is set, so there is no guard to evaluate and no card to render. */
 export function instanceBudgetIsOff(policy: InstanceBudgetPolicy): boolean {
   return (

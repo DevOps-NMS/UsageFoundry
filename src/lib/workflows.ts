@@ -19,6 +19,7 @@ import {
 } from "./orchestrator";
 import { cancelQueuedFor } from "./mergeQueue";
 import {
+  INSTANCE_ENFORCEABLE_CODES,
   evaluateInstanceBudget,
   instanceBudgetIsOff,
   normalizeInstanceBudget,
@@ -1741,16 +1742,27 @@ function guardedInstanceOf(runId: string): {
  * running at the time — and several blocks at once multiply it. The instance
  * page says exactly that, in those words.
  *
- * Returns the verdict when it halted, so a caller can log it; null when there
- * was nothing to check or the guard passed. It does not signal this run itself:
- * `stopInstance` is the one door a halt goes through and it stops every member
- * including this one, which `startRun`'s pre-spawn checkpoint then sees as an
- * ordinary interrupt.
+ * Returns what happened, so the caller can put it in this run's log; null when
+ * there was nothing to check or the guard passed. It does not signal this run
+ * itself: `stopInstance` is the one door a halt goes through and it stops every
+ * member including this one, which `startRun`'s pre-spawn checkpoint then sees
+ * as an ordinary interrupt.
  */
+export type InstanceGuardOutcome = {
+  /**
+   * `halted` — the workflow is being taken down, this run with it.
+   * `unenforceable` — the verdict is real but is not one an instance may be
+   * halted on. See `INSTANCE_ENFORCEABLE_CODES`; today that is `no_ceiling`
+   * alone, and the caller says so in the log rather than acting on it.
+   */
+  kind: "halted" | "unenforceable";
+  verdict: BudgetVerdict & { allowed: false };
+};
+
 export function enforceInstanceBudget(
   runId: string,
   snapshot: UsageSnapshot,
-): (BudgetVerdict & { allowed: false }) | null {
+): InstanceGuardOutcome | null {
   const instance = guardedInstanceOf(runId);
   // `started` only. A `stopping` instance is already being taken down and a
   // second halt would run a second kill ladder; a `failed` one was rolled back.
@@ -1762,12 +1774,15 @@ export function enforceInstanceBudget(
     instanceSpend(instance.instanceId),
   );
   if (verdict.allowed) return null;
+  if (!INSTANCE_ENFORCEABLE_CODES.includes(verdict.code)) {
+    return { kind: "unenforceable", verdict };
+  }
 
   // The halt function, called rather than re-implemented: an operator's stop
   // and this differ only in the cause recorded, and a second selection of "which
   // members does this take down" is a second chance to miss one.
   stopInstance(instance.instanceId, { kind: "guard", detail: verdict.reason });
-  return verdict;
+  return { kind: "halted", verdict };
 }
 
 /** A run's live state for the instance view, or null when the row has gone. */

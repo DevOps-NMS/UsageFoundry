@@ -3448,6 +3448,13 @@ export async function startRun(id: string): Promise<void> {
   let resumeRetried = false;
   /** Transient API failures retried since the last cycle that got through. */
   let transientRetries = 0;
+  /**
+   * Whether this segment has already said its workflow's guard had nothing to
+   * read. Held here rather than on the row for the reason `transientRetries` is
+   * — it is about this stretch of work, not about the run for ever — and it
+   * keeps a twenty-cycle run from writing the same line twenty times.
+   */
+  let saidUnenforceable = false;
 
   /**
    * Take a session id as the run's own, and record it immediately.
@@ -3565,7 +3572,34 @@ export async function startRun(id: string): Promise<void> {
       // back would make the pair a cycle. This call is already inside an async
       // function, past the point where both modules are fully evaluated.
       const { enforceInstanceBudget } = await import("./workflows");
-      enforceInstanceBudget(id, snapshot);
+      const instanceGuard = enforceInstanceBudget(id, snapshot);
+      if (instanceGuard?.kind === "halted") {
+        // One row, on the run whose check found it. The instance carries the
+        // verdict for the workflow; this is what makes *this* run's log explain
+        // why it stopped, rather than only naming the workflow that stopped it.
+        emit({
+          runId: id,
+          ts: Date.now(),
+          kind: "budget",
+          payload: {
+            allowed: false,
+            scope: "workflow",
+            code: instanceGuard.verdict.code,
+            reason: instanceGuard.verdict.reason,
+            disposition: "stop",
+            meters: instanceGuard.verdict.meters,
+          },
+        });
+      } else if (instanceGuard?.kind === "unenforceable" && !saidUnenforceable) {
+        // Not acted on — see `INSTANCE_ENFORCEABLE_CODES` — but never silent: a
+        // guard with nothing to read refuses nothing and looks exactly like a
+        // guard that was never reached. Once per segment, not once per cycle.
+        saidUnenforceable = true;
+        log(
+          id,
+          `This run's workflow has a limit that cannot be enforced right now: ${instanceGuard.verdict.reason}`,
+        );
+      }
 
       // Re-check before committing to a cycle. The guard at the top of the loop
       // ran before an `await` that takes seconds on a large ~/.claude, and
