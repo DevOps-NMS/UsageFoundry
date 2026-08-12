@@ -16,9 +16,9 @@ treats them separately on purpose:
 | | Claude Code subscription (Pro/Max) | Console API account |
 |---|---|---|
 | What a "limit" is | 5-hour session window, weekly quota | rate limits (RPM / ITPM / OTPM), spend |
-| Official API | **none** — Anthropic publishes no endpoint and no numeric quota value | `/v1/organizations/rate_limits`, `/usage_report/messages`, `/cost_report` |
-| How this tool reads it | parses `~/.claude/projects/**/*.jsonl` locally | Admin API, with an `sk-ant-admin01-…` key |
-| Accuracy | **volumes and costs are exact; percentages are estimates** | authoritative |
+| Official API | `/api/oauth/usage` — **percentages only**, no numeric quota value | `/v1/organizations/rate_limits`, `/usage_report/messages`, `/cost_report` |
+| How this tool reads it | percentages from that endpoint; volumes and costs by parsing `~/.claude/projects/**/*.jsonl` locally | Admin API, with an `sk-ant-admin01-…` key |
+| Accuracy | **volumes and costs are exact; percentages are the provider's own, or estimates when it cannot be reached** | authoritative |
 
 The **Dashboard** is the subscription view. The **API account** page is the
 Console view, and stays empty unless you set an Admin key. They are never summed
@@ -101,11 +101,42 @@ Same work, 3.2× disagreement. Cost is the primary metric everywhere; raw-token
 ceilings remain available as a fallback and render as a secondary line when both
 are set.
 
-### Why percentages need configuration at all
+### Where percentages come from
 
 Token counts and dollar costs come straight from your transcripts and are exact.
-But a *percentage* needs a denominator, and Anthropic does not publish what a
-Max plan's quota is in any unit. So:
+A *percentage* needs a denominator, and Anthropic still publishes no numeric
+value for a Max quota in any unit — but it will tell you the percentage itself.
+
+`GET /api/oauth/usage`, authenticated with the OAuth token Claude Code already
+keeps in `.credentials.json`, returns what `claude /usage` and claude.ai show:
+utilisation and a reset instant for the 5-hour window, the week, and any weekly
+wall scoped to one model family. That is a **first-party figure for the whole
+account**, so unlike anything derived here it also counts the surfaces that
+share your allowance and write nothing to this disk — the web app, Desktop,
+Cowork. It leads every meter, and its reset instants anchor both windows.
+
+This was not a refinement. Measured on one machine: the provider reported 5.0%
+of the 5-hour window while the dashboard, dividing local spend by a hand-typed
+$650 ceiling, showed 1.3%. The arithmetic behind that $8.49 was fine —
+cross-checking 4,995 turns against Claude Code's own per-request OTLP cost put
+`pricing.ts` within **0.8%** in aggregate — and the derived window boundary was
+53 seconds off the provider's. The denominator was simply a guess, and no
+adjustment to a token weight can repair a guessed denominator.
+
+Three things to know about that source:
+
+- **It is percentages, not numbers.** There is still no ceiling to read, so
+  nothing here populates a ceiling and **Settings → Calibrate** is unchanged.
+- **It can be unreachable** — an expired login, an offline container, or its own
+  rate limiter (a handful of requests inside a minute earns a `429`). It is
+  therefore cached on Claude Code's own cadence, a failure re-serves the last
+  good reading rather than blanking a meter, and past an hour it falls back to
+  the derived reading instead of passing off a stale percentage as current.
+- **It is undocumented**, so every failure is a miss and never an error.
+
+Turn it off with **Settings → "Read plan usage from Anthropic"**, and everything
+below is what you get back — which is also what you get for a window the
+provider did not answer for:
 
 - With no ceiling configured, meters render **hatched** ("no ceiling set"), not
   at 0%. An empty bar would read as "plenty left", which is the opposite of
