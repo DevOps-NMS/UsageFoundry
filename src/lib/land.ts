@@ -1865,7 +1865,7 @@ export interface BranchSummary {
 
 export interface BranchInventory {
   branches: BranchSummary[];
-  /** Runs with a branch that were not examined, because the list is capped. */
+  /** Branches that were not examined, because the list is capped. */
   notShown: number;
 }
 
@@ -1873,6 +1873,50 @@ export interface BranchInventory {
 const MAX_INVENTORY = 60;
 /** Checkouts whose status is read per request. Each is another git process. */
 const MAX_PENDING_PROBES = 20;
+
+/**
+ * One row per branch, not one per run that has held it.
+ *
+ * A chain of runs extending each other shares a ref, and this page is a list of
+ * *branches* — so three links would otherwise be three rows with identical
+ * ahead counts, identical merge state, three Land checkboxes and, because the
+ * table keys on the branch, three identical React keys. Picking two of them
+ * would queue the same branch twice, which is precisely the "once per link"
+ * failure `landRefusal` exists to stop.
+ *
+ * The row kept is `branchOwner`'s, so the page and the Land button agree about
+ * which run answers for the branch. Runs come newest-first, hence the reverse
+ * before the decision — `branchOwner` reads a chain oldest-first.
+ *
+ * A `waiting` link is missing from this list entirely (its branch is null until
+ * it is released), so a row can look landable while a run is queued up behind
+ * it. That is the same approximation `canLand` on the page already makes and
+ * says so: the structural question is answered here, and whether it can really
+ * be landed is re-derived from git and the full chain by `landRun`.
+ */
+function oneRunPerBranch(runs: readonly RunRow[]): RunRow[] {
+  const byBranch = new Map<string, RunRow[]>();
+  for (const run of runs) {
+    const key = `${run.repo_root} ${run.worktree_branch}`;
+    const list = byBranch.get(key);
+    if (list) list.push(run);
+    else byBranch.set(key, [run]);
+  }
+
+  const kept: RunRow[] = [];
+  for (const held of byBranch.values()) {
+    if (held.length === 1) {
+      kept.push(held[0]);
+      continue;
+    }
+    const chain = [...held]
+      .reverse()
+      .map((r) => ({ runId: r.id, status: r.status, iterations: r.iterations }));
+    const owner = branchOwner(chain);
+    kept.push(held.find((r) => r.id === owner) ?? held[0]);
+  }
+  return kept;
+}
 
 /**
  * Every branch this app has produced, with enough state to decide about it.
@@ -1883,8 +1927,10 @@ const MAX_PENDING_PROBES = 20;
  * set-shaped and stays one call, which is what the cap above bounds.
  */
 export async function branchInventory(): Promise<BranchInventory> {
-  const candidates = listRuns(400).filter(
-    (r) => r.isolation === "worktree" && r.worktree_branch && r.repo_root,
+  const candidates = oneRunPerBranch(
+    listRuns(400).filter(
+      (r) => r.isolation === "worktree" && r.worktree_branch && r.repo_root,
+    ),
   );
   const examined = candidates.slice(0, MAX_INVENTORY);
   const active = new Set(activeRuns().map((r) => r.id));

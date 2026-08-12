@@ -607,10 +607,10 @@ export default function Branches() {
       <div className="mb-6">
         <h1 className="mb-1 text-xl font-semibold tracking-tight">Branches</h1>
         <p className="max-w-[68ch] text-ink-muted">
-          One branch per isolated run. Pick several to land them one after
-          another, or open a run to preview its merge first — each landing
-          changes the base for the one behind it, so they go through in the
-          order you choose them.
+          One row per branch, listed against the last run on it. Pick several to
+          land them one after another, or open a run to preview its merge first
+          — each landing changes the base for the one behind it, so they go
+          through in the order you choose them.
         </p>
       </div>
 

@@ -672,7 +672,7 @@ export interface BranchSummaryDTO {
 
 export interface BranchInventoryDTO {
   branches: BranchSummaryDTO[];
-  /** Runs with a branch that the per-request cap left out. */
+  /** Branches the per-request cap left out. */
   notShown: number;
   /** `settings.landStrategy`, so the queue form can default to it. */
   defaultStrategy: "merge" | "squash";
