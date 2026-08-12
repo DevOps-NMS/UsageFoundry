@@ -5,6 +5,7 @@ import {
   folderRefusal,
   getWorkflow,
   listInstances,
+  liveBlocksOf,
   liveRunsOf,
   normalizeWorkflowInput,
   updateWorkflow,
@@ -74,13 +75,16 @@ export async function DELETE(_req: Request, ctx: Ctx) {
   }
 
   const live = liveRunsOf(id);
-  if (live.length > 0) {
+  const liveBlocks = liveBlocksOf(id);
+  if (live.length + liveBlocks > 0) {
     return NextResponse.json(
       {
         error:
-          `${live.length} run(s) started by this workflow have not finished ` +
-          "yet. Deleting it now would leave them with nothing saying what they " +
-          "are part of. Wait for them, or stop them on the Runs page.",
+          `${live.length} run(s) and ${liveBlocks} block(s) started by this ` +
+          "workflow have not finished yet. Deleting it now would leave them " +
+          "with nothing saying what they are part of, and a block still " +
+          "deciding would lose the graph it is deciding for. Wait for them, or " +
+          "stop that run of the workflow.",
       },
       { status: 400 },
     );

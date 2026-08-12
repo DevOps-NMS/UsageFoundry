@@ -6,6 +6,7 @@ import type {
 } from "@/lib/apiTypes";
 import {
   lastRunAt,
+  liveBlocksOf,
   liveRunsOf,
   runStateOf,
   type Workflow,
@@ -29,7 +30,7 @@ export function workflowDTO(workflow: Workflow): WorkflowDTO {
     instanceBudget: workflow.instanceBudget,
     createdAt: workflow.createdAt,
     updatedAt: workflow.updatedAt,
-    liveRunCount: liveRunsOf(workflow.id).length,
+    liveRunCount: liveRunsOf(workflow.id).length + liveBlocksOf(workflow.id),
     lastRunAt: lastRunAt(workflow.id),
   };
 }

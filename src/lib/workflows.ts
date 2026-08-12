@@ -1809,6 +1809,28 @@ export function liveRunsOf(
   }>;
 }
 
+/**
+ * Blocks of this workflow that have not settled.
+ *
+ * The other half of "is anything from this workflow still going", and it is not
+ * covered by the runs: a block still deciding has started nothing yet and is
+ * about to start several. A second press of Run while one is thinking would
+ * point the same blocks at the same folders and put two deciding turns on one
+ * repository, which is the collision `liveRunsOf` exists to refuse one step
+ * earlier than it can see.
+ */
+export function liveBlocksOf(workflowId: string): number {
+  const row = db()
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM workflow_instance_blocks b
+         JOIN workflow_instances i ON i.id = b.instance_id
+        WHERE i.workflow_id = ? AND b.status IN ('waiting','thinking')`,
+    )
+    .get(workflowId) as { n: number };
+  return row.n;
+}
+
 /* ------------------------------------------------------------------ */
 /* Instantiating                                                       */
 /* ------------------------------------------------------------------ */
@@ -1866,13 +1888,15 @@ export function startWorkflow(
   // the first instance's run already continues it. Refused here as a sentence,
   // rather than discovered four nodes into the pass.
   const live = liveRunsOf(id);
-  if (live.length > 0) {
+  const liveBlocks = liveBlocksOf(id);
+  if (live.length + liveBlocks > 0) {
     return {
       ok: false,
       reason:
-        `${live.length} run(s) from an earlier press of Run have not finished ` +
-        "yet. Starting this workflow again would point the same blocks at the " +
-        "same folders. Wait for them, or stop them on the Runs page.",
+        `${live.length} run(s) and ${liveBlocks} block(s) from an earlier press ` +
+        "of Run have not finished yet. Starting this workflow again would point " +
+        "the same blocks at the same folders. Wait for them, or stop that run of " +
+        "the workflow.",
     };
   }
 
