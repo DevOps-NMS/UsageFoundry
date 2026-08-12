@@ -56,6 +56,13 @@ const NOUN: Record<PeriodGranularityDTO, string> = {
   month: "month",
 };
 
+/** "this day" is not English. Spelled out for the same reason ADJECTIVE is. */
+const THIS_PERIOD: Record<PeriodGranularityDTO, string> = {
+  day: "today",
+  week: "this week",
+  month: "this month",
+};
+
 /** Spelled out rather than `${noun}ly`, which produces "dayly". */
 const ADJECTIVE: Record<PeriodGranularityDTO, string> = {
   day: "daily",
@@ -218,7 +225,7 @@ export function UsagePeriods({
               current.endsAt,
             )}
             <div className="mt-0.5 text-xs font-normal text-ink-muted">
-              this {noun}, so far
+              {THIS_PERIOD[series.granularity]}, so far
             </div>
           </div>
         </div>

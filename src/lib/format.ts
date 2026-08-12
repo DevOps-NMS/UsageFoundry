@@ -161,17 +161,20 @@ export function fmtPeriodLabel(
     });
   }
   // The last *instant* of the week belongs to the next one, so name the day
-  // before it — otherwise every week reads as eight days long.
+  // before it — otherwise a midnight-aligned week reads as eight days long.
   const last = new Date(endsAt - 1);
-  const sameMonth =
-    start.getMonth() === last.getMonth() &&
-    start.getFullYear() === last.getFullYear();
-  const from = start.toLocaleDateString([], {
+  // `formatRange`, not two `toLocaleDateString` calls joined by a dash: where
+  // the month goes in a range is a locale decision, and concatenating produced
+  // "12 – Aug 19" — the month attached to the wrong end of the span.
+  return new Intl.DateTimeFormat([], {
     day: "numeric",
-    ...(sameMonth ? {} : { month: "short" }),
-  });
-  const to = last.toLocaleDateString([], { day: "numeric", month: "short" });
-  return `${from} – ${to}`;
+    month: "short",
+    // Only when the span straddles one, so an ordinary week is not stamped
+    // with a year twelve rows in a column already sorted by date.
+    ...(start.getFullYear() === last.getFullYear()
+      ? {}
+      : { year: "numeric" }),
+  }).formatRange(start, last);
 }
 
 /** Shorten an absolute path for display, keeping the tail meaningful. */
