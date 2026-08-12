@@ -1,5 +1,14 @@
 import { NextResponse } from "next/server";
-import { createRun, describeFolder, listRuns, queuePosition } from "@/lib/orchestrator";
+import {
+  DEPENDENCY_EDGES,
+  createRun,
+  dependenciesOf,
+  describeFolder,
+  listRuns,
+  queuePosition,
+  type DependencyEdge,
+  type RunDependencyInput,
+} from "@/lib/orchestrator";
 import { PERMISSION_MODES, type PermissionMode } from "@/lib/settings";
 import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
 
@@ -7,7 +16,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const runs = listRuns(100).map((r) => {
+  const rows = listRuns(100);
+  const deps = dependenciesOf(rows.map((r) => r.id));
+  const runs = rows.map((r) => {
     const { mountId, mountLabel, relPath } = describeFolder(r.folder);
     // Normalised on read: rows predating enforcement modes carry no
     // `enforcement` or `continueAfterDone` key, and the DTO must not claim they
@@ -22,10 +33,61 @@ export async function GET() {
       mountId,
       mountLabel,
       relPath,
+      dependsOn: deps.get(r.id) ?? [],
       queuePosition: r.status === "queued" ? queuePosition(r.id) : undefined,
     };
   });
   return NextResponse.json({ runs });
+}
+
+/**
+ * Read `dependsOn` off the wire.
+ *
+ * The condition is required rather than defaulted, and that is deliberate:
+ * whichever way a silent default fell it would be wrong half the time and
+ * silent both times. Defaulting to `on-success` terminates a chain the operator
+ * meant to run regardless of the outcome; defaulting to `on-finish` starts a
+ * run on top of a dependency that crashed. So a dependency states its condition
+ * or the request is refused, the same treatment `permissionMode` and
+ * `enforcement` get above and for the same reason.
+ *
+ * Everything else about the list — unknown ids, a dependency that has already
+ * failed, a self-reference, a loop — is refused by `createRun`, which is the
+ * single admission door and is reached from the chat's approval path too. Its
+ * messages arrive here as the 400 below.
+ */
+function readDependencies(
+  raw: unknown,
+): { ok: true; value: RunDependencyInput[] } | { ok: false; error: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: [] };
+  if (!Array.isArray(raw)) {
+    return { ok: false, error: "dependsOn must be a list of dependencies." };
+  }
+
+  const value: RunDependencyInput[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) {
+      return {
+        ok: false,
+        error: `Each dependency must name a run and a condition, as {"runId": "…", "edge": "${DEPENDENCY_EDGES[0]}"}.`,
+      };
+    }
+    const { runId, edge } = entry as { runId?: unknown; edge?: unknown };
+    if (typeof runId !== "string" || runId === "") {
+      return { ok: false, error: "Each dependency needs a runId." };
+    }
+    if (!(DEPENDENCY_EDGES as readonly unknown[]).includes(edge)) {
+      return {
+        ok: false,
+        error:
+          `Dependency on run ${runId.slice(0, 8)} needs a condition: ` +
+          `"on-success" (only if that run completes) or "on-finish" ` +
+          `(once it has finished, whatever the outcome).`,
+      };
+    }
+    value.push({ runId, edge: edge as DependencyEdge });
+  }
+  return { ok: true, value };
 }
 
 export async function POST(req: Request) {
@@ -77,6 +139,11 @@ export async function POST(req: Request) {
     );
   }
 
+  const deps = readDependencies(body.dependsOn);
+  if (!deps.ok) {
+    return NextResponse.json({ error: deps.error }, { status: 400 });
+  }
+
   // A 5-hour percentage used to be required here, on the reasoning that without
   // one nothing could ever ask the run to step aside. That is no longer true:
   // the run also steps aside when Claude itself refuses a cycle for want of
@@ -96,6 +163,7 @@ export async function POST(req: Request) {
       permissionMode,
       isolate: body.isolate === undefined ? undefined : body.isolate !== false,
       budget: policy,
+      dependsOn: deps.value,
     });
 
     const storedBudget = JSON.parse(run.budget) as Record<string, unknown>;
@@ -106,6 +174,7 @@ export async function POST(req: Request) {
           ...normalizePolicy(storedBudget),
           permissionMode: storedBudget.permissionMode,
         },
+        dependsOn: dependenciesOf([run.id]).get(run.id) ?? [],
         queuePosition: run.status === "queued" ? queuePosition(run.id) : undefined,
       },
     });

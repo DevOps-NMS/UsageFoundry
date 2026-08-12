@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import {
+  dependenciesOf,
   describeFolder,
   getRun,
   isRunning,
@@ -50,6 +51,7 @@ export async function GET(req: Request, ctx: Ctx) {
       mountId,
       mountLabel,
       relPath,
+      dependsOn: dependenciesOf([id]).get(id) ?? [],
       queuePosition: run.status === "queued" ? queuePosition(id) : undefined,
     },
     running: isRunning(id),
