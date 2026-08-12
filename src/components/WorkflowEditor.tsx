@@ -1,0 +1,599 @@
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import type {
+  RunTemplateDTO,
+  WorkflowDTO,
+  WorkflowEdgeDTO,
+  WorkflowNodeDTO,
+  WorkspaceFolderDTO,
+  WorkspaceMountDTO,
+} from "@/lib/apiTypes";
+import { MAX_WORKFLOW_NAME, MAX_WORKFLOW_NODES } from "@/lib/apiTypes";
+import { Button, ButtonRow } from "@/components/ui/Button";
+import { Card, CardTitle } from "@/components/ui/Card";
+import { Field, Input, Select, Subsection, Textarea } from "@/components/ui/Field";
+import { Notice } from "@/components/ui/Notice";
+
+/**
+ * The form a workflow is written in.
+ *
+ * **An ordered list, where a block may wait for any block above it.** That is
+ * the whole interaction, and it is not a simplification of the graph — it is
+ * the graph: several blocks waiting for nothing is the parallel case, one block
+ * waiting for two is a fan-in, and the ordering makes a loop unwritable rather
+ * than something to be refused after the fact. The server still checks for one,
+ * because the API is reachable without this form.
+ *
+ * A block names a template for its guards, or names none and takes the guard
+ * set in Settings. There is deliberately no permission-mode, budget or
+ * isolation control here: those decide what an agent may do, and a workflow
+ * decides what work to do.
+ */
+
+/** How a block is held while it is being edited. Edges are per block. */
+interface BlockDraft {
+  id: string;
+  name: string;
+  /** "" means no template: the guard set in Settings. */
+  templateId: string;
+  mountId: string;
+  folder: string;
+  task: string;
+  promptOverride: string;
+  waitsFor: Array<{
+    from: string;
+    edge: WorkflowEdgeDTO["edge"];
+    continueBranch: boolean;
+  }>;
+}
+
+const CONDITIONS: Array<{ id: "" | WorkflowEdgeDTO["edge"]; label: string }> = [
+  { id: "", label: "No" },
+  { id: "on-success", label: "Only if it completes" },
+  { id: "on-finish", label: "Once it finishes, either way" },
+];
+
+function emptyBlock(id: string, mountId: string): BlockDraft {
+  return {
+    id,
+    name: "",
+    templateId: "",
+    mountId,
+    folder: "",
+    task: "",
+    promptOverride: "",
+    waitsFor: [],
+  };
+}
+
+function toDrafts(workflow: WorkflowDTO): BlockDraft[] {
+  return workflow.nodes.map((n) => ({
+    id: n.id,
+    name: n.name,
+    templateId: n.templateId ?? "",
+    mountId: n.mountId,
+    folder: n.folder,
+    task: n.task,
+    promptOverride: n.promptOverride ?? "",
+    waitsFor: workflow.edges
+      .filter((e) => e.to === n.id)
+      .map((e) => ({
+        from: e.from,
+        edge: e.edge,
+        continueBranch: e.continueBranch,
+      })),
+  }));
+}
+
+function toGraph(blocks: BlockDraft[]): {
+  nodes: WorkflowNodeDTO[];
+  edges: WorkflowEdgeDTO[];
+} {
+  const nodes: WorkflowNodeDTO[] = blocks.map((b) => ({
+    id: b.id,
+    name: b.name.trim(),
+    templateId: b.templateId || null,
+    mountId: b.mountId,
+    folder: b.folder,
+    task: b.task,
+    promptOverride: b.promptOverride.trim() || null,
+  }));
+  const edges: WorkflowEdgeDTO[] = blocks.flatMap((b) =>
+    b.waitsFor.map((w) => ({
+      from: w.from,
+      to: b.id,
+      edge: w.edge,
+      continueBranch: w.continueBranch,
+    })),
+  );
+  return { nodes, edges };
+}
+
+export function WorkflowEditor({
+  workflow,
+}: {
+  /** Null for a new workflow; a saved one is edited in place. */
+  workflow: WorkflowDTO | null;
+}) {
+  const router = useRouter();
+
+  const [name, setName] = useState(workflow?.name ?? "");
+  const [blocks, setBlocks] = useState<BlockDraft[]>(() =>
+    workflow ? toDrafts(workflow) : [emptyBlock("block-1", "")],
+  );
+  const [templates, setTemplates] = useState<RunTemplateDTO[]>([]);
+  const [mounts, setMounts] = useState<WorkspaceMountDTO[]>([]);
+  const [folders, setFolders] = useState<WorkspaceFolderDTO[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  // Ids are minted on a click, never during render: a value from
+  // `crypto.randomUUID()` in a state initialiser differs between the server
+  // pass and hydration, and React would silently keep one of them. Seeded past
+  // the highest suffix already in the graph rather than from the block count,
+  // because a saved workflow that has had blocks removed has gaps — `block-1`
+  // and `block-3` would otherwise mint `block-3` again, and the save would come
+  // back refusing two blocks with one id.
+  const nextId = useRef(
+    Math.max(
+      0,
+      ...blocks.map((b) => Number(/^block-(\d+)$/.exec(b.id)?.[1] ?? 0)),
+    ) + 1,
+  );
+
+  useEffect(() => {
+    let live = true;
+    Promise.all([
+      fetch("/api/templates", { cache: "no-store" }).then((r) => r.json()),
+      fetch("/api/folders", { cache: "no-store" }).then((r) => r.json()),
+    ])
+      .then(([t, f]) => {
+        if (!live) return;
+        setTemplates((t.templates ?? []) as RunTemplateDTO[]);
+        const scanned = (f.mounts ?? []) as WorkspaceMountDTO[];
+        setMounts(scanned);
+        setFolders((f.folders ?? []) as WorkspaceFolderDTO[]);
+        // A new workflow's first block has no workspace yet; give it the first
+        // usable one so the folder picker below it is not dead on arrival.
+        const first = scanned.find((m) => m.available) ?? scanned[0];
+        if (first) {
+          setBlocks((prev) =>
+            prev.map((b) => (b.mountId ? b : { ...b, mountId: first.id })),
+          );
+        }
+      })
+      .catch(() => {
+        if (live) setError("The workspace and templates could not be read.");
+      })
+      .finally(() => {
+        if (live) setLoaded(true);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const templateName = useCallback(
+    (id: string) => templates.find((t) => t.id === id)?.name ?? null,
+    [templates],
+  );
+
+  const update = useCallback((id: string, patch: Partial<BlockDraft>) => {
+    setBlocks((prev) =>
+      prev.map((b) => (b.id === id ? { ...b, ...patch } : b)),
+    );
+  }, []);
+
+  const addBlock = useCallback(() => {
+    setBlocks((prev) => {
+      const id = `block-${nextId.current++}`;
+      const mountId = prev.at(-1)?.mountId ?? mounts[0]?.id ?? "";
+      return [...prev, emptyBlock(id, mountId)];
+    });
+  }, [mounts]);
+
+  const removeBlock = useCallback((id: string) => {
+    setBlocks((prev) =>
+      prev
+        .filter((b) => b.id !== id)
+        // A link to a block that is gone is a link to nothing, and the server
+        // refuses one — so it goes with the block rather than waiting to be
+        // discovered at Save.
+        .map((b) => ({
+          ...b,
+          waitsFor: b.waitsFor.filter((w) => w.from !== id),
+        })),
+    );
+  }, []);
+
+  /**
+   * Moving a block past one it waits for would make the link point forwards,
+   * which this form has no way to show and the graph has no way to satisfy in
+   * that order. The link is dropped with the move rather than silently kept.
+   */
+  const move = useCallback((index: number, delta: number) => {
+    setBlocks((prev) => {
+      const to = index + delta;
+      if (to < 0 || to >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[to]] = [next[to], next[index]];
+      const seen = new Set<string>();
+      return next.map((b) => {
+        const kept = {
+          ...b,
+          waitsFor: b.waitsFor.filter((w) => seen.has(w.from)),
+        };
+        seen.add(b.id);
+        return kept;
+      });
+    });
+  }, []);
+
+  const setLink = useCallback(
+    (blockId: string, from: string, edge: "" | WorkflowEdgeDTO["edge"]) => {
+      setBlocks((prev) =>
+        prev.map((b) => {
+          if (b.id !== blockId) return b;
+          if (edge === "") {
+            return { ...b, waitsFor: b.waitsFor.filter((w) => w.from !== from) };
+          }
+          const existing = b.waitsFor.find((w) => w.from === from);
+          if (existing) {
+            return {
+              ...b,
+              waitsFor: b.waitsFor.map((w) =>
+                w.from === from ? { ...w, edge } : w,
+              ),
+            };
+          }
+          return {
+            ...b,
+            waitsFor: [...b.waitsFor, { from, edge, continueBranch: false }],
+          };
+        }),
+      );
+    },
+    [],
+  );
+
+  /** At most one link per block hands its branch over — the server refuses two. */
+  const setContinue = useCallback(
+    (blockId: string, from: string, on: boolean) => {
+      setBlocks((prev) =>
+        prev.map((b) =>
+          b.id === blockId
+            ? {
+                ...b,
+                waitsFor: b.waitsFor.map((w) => ({
+                  ...w,
+                  continueBranch: w.from === from ? on : false,
+                })),
+              }
+            : b,
+        ),
+      );
+    },
+    [],
+  );
+
+  const foldersFor = useCallback(
+    (mountId: string) => folders.filter((f) => f.mountId === mountId),
+    [folders],
+  );
+
+  const blockName = useMemo(() => {
+    const map = new Map<string, string>();
+    blocks.forEach((b, i) => map.set(b.id, b.name.trim() || `Block ${i + 1}`));
+    return map;
+  }, [blocks]);
+
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      const body = JSON.stringify({ name, graph: toGraph(blocks) });
+      const res = await fetch(
+        workflow ? `/api/workflows/${workflow.id}` : "/api/workflows",
+        {
+          method: workflow ? "PUT" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        },
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        workflow?: WorkflowDTO;
+        error?: string;
+      };
+      if (!res.ok || !data.workflow) {
+        throw new Error(data.error ?? `Save failed (${res.status})`);
+      }
+      router.push(`/workflows/${data.workflow.id}`);
+      router.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setSaving(false);
+    }
+  }
+
+  const full = blocks.length >= MAX_WORKFLOW_NODES;
+
+  return (
+    <>
+      <div role="alert">{error && <Notice tone="danger" live>{error}</Notice>}</div>
+
+      <Card emphasis="primary">
+        <CardTitle>{workflow ? "Edit workflow" : "New workflow"}</CardTitle>
+
+        <Field label="Name" htmlFor="wf-name">
+          <Input
+            id="wf-name"
+            value={name}
+            maxLength={MAX_WORKFLOW_NAME}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Nightly maintenance"
+          />
+        </Field>
+
+        {blocks.map((block, index) => {
+          const earlier = blocks.slice(0, index);
+          const mount = mounts.find((m) => m.id === block.mountId);
+          const missingTemplate =
+            block.templateId !== "" &&
+            loaded &&
+            templateName(block.templateId) === null;
+
+          return (
+            <Subsection
+              key={block.id}
+              title={
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    {index + 1}. {blockName.get(block.id)}
+                  </span>
+                  <ButtonRow>
+                    <Button
+                      variant="ghost"
+                      size="compact"
+                      onClick={() => move(index, -1)}
+                      disabled={index === 0}
+                      aria-label={`Move ${blockName.get(block.id)} up`}
+                    >
+                      Up
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="compact"
+                      onClick={() => move(index, 1)}
+                      disabled={index === blocks.length - 1}
+                      aria-label={`Move ${blockName.get(block.id)} down`}
+                    >
+                      Down
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="compact"
+                      onClick={() => removeBlock(block.id)}
+                      disabled={blocks.length === 1}
+                      aria-label={`Remove ${blockName.get(block.id)}`}
+                    >
+                      Remove
+                    </Button>
+                  </ButtonRow>
+                </div>
+              }
+            >
+              <Field label="Name" htmlFor={`${block.id}-name`}>
+                <Input
+                  id={`${block.id}-name`}
+                  value={block.name}
+                  onChange={(e) => update(block.id, { name: e.target.value })}
+                  placeholder="Update dependencies"
+                />
+              </Field>
+
+              <Field
+                label="Guards"
+                htmlFor={`${block.id}-template`}
+                hint={
+                  missingTemplate
+                    ? "That template has been deleted — pick another"
+                    : block.templateId === ""
+                      ? "Budget, permission mode and isolation come from Settings"
+                      : undefined
+                }
+                hintTone={missingTemplate ? "danger" : "neutral"}
+              >
+                <Select
+                  id={`${block.id}-template`}
+                  value={block.templateId}
+                  onChange={(e) =>
+                    update(block.id, { templateId: e.target.value })
+                  }
+                >
+                  <option value="">Guards from Settings</option>
+                  {templates.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                  {missingTemplate && (
+                    <option value={block.templateId}>
+                      {block.templateId} (deleted)
+                    </option>
+                  )}
+                </Select>
+              </Field>
+
+              <div className="grid gap-x-4 sm:grid-cols-2">
+                <Field label="Workspace" htmlFor={`${block.id}-mount`}>
+                  <Select
+                    id={`${block.id}-mount`}
+                    value={block.mountId}
+                    onChange={(e) =>
+                      // The folder belongs to the mount, so it cannot survive
+                      // the mount changing under it.
+                      update(block.id, {
+                        mountId: e.target.value,
+                        folder: "",
+                      })
+                    }
+                    disabled={!loaded}
+                  >
+                    {!loaded && <option value="">Loading…</option>}
+                    {mounts.map((m) => (
+                      <option key={m.id} value={m.id} disabled={!m.available}>
+                        {m.label}
+                        {m.available ? "" : "  (not mounted)"}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+
+                <Field
+                  label="Folder"
+                  htmlFor={`${block.id}-folder`}
+                  hint={
+                    block.folder === ""
+                      ? "The whole workspace — no other run in it can start meanwhile"
+                      : undefined
+                  }
+                  hintTone={block.folder === "" ? "warn" : "neutral"}
+                >
+                  <Select
+                    id={`${block.id}-folder`}
+                    value={block.folder}
+                    onChange={(e) => update(block.id, { folder: e.target.value })}
+                    disabled={!mount}
+                  >
+                    <option value="">
+                      {mount ? `${mount.label} — the whole workspace` : "—"}
+                    </option>
+                    {foldersFor(block.mountId).map((f) => (
+                      <option key={f.path} value={f.path}>
+                        {f.path}
+                        {f.isGitRepo ? "  (git)" : ""}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+
+              <Field label="Task" htmlFor={`${block.id}-task`}>
+                <Textarea
+                  id={`${block.id}-task`}
+                  value={block.task}
+                  onChange={(e) => update(block.id, { task: e.target.value })}
+                  placeholder="What this block asks the agent to do."
+                />
+              </Field>
+
+              <Field
+                label="Standing instructions"
+                htmlFor={`${block.id}-prompt`}
+                hint="Replaces the template's own prompt for this block"
+              >
+                <Textarea
+                  id={`${block.id}-prompt`}
+                  value={block.promptOverride}
+                  onChange={(e) =>
+                    update(block.id, { promptOverride: e.target.value })
+                  }
+                  className="min-h-[64px]"
+                />
+              </Field>
+
+              {earlier.length === 0 ? (
+                <p className="text-xs text-ink-muted">
+                  Starts as soon as its folder is free.
+                </p>
+              ) : (
+                <fieldset className="border-0 p-0">
+                  <legend className="mb-2 text-xs font-medium text-ink-muted">
+                    Starts after
+                  </legend>
+                  {earlier.map((other) => {
+                    const link = block.waitsFor.find((w) => w.from === other.id);
+                    return (
+                      <div
+                        key={other.id}
+                        className="mb-2 flex flex-wrap items-center gap-2"
+                      >
+                        <span className="min-w-[12ch] flex-1 truncate text-sm">
+                          {blockName.get(other.id)}
+                        </span>
+                        <Select
+                          className="w-auto shrink-0"
+                          value={link?.edge ?? ""}
+                          onChange={(e) =>
+                            setLink(
+                              block.id,
+                              other.id,
+                              e.target.value as "" | WorkflowEdgeDTO["edge"],
+                            )
+                          }
+                          aria-label={`Start ${blockName.get(block.id)} after ${blockName.get(other.id)}`}
+                        >
+                          {CONDITIONS.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.label}
+                            </option>
+                          ))}
+                        </Select>
+                        {link && (
+                          <label className="flex min-h-[var(--control-h)] cursor-pointer items-center gap-1.5 text-xs text-ink-muted">
+                            <input
+                              type="checkbox"
+                              checked={link.continueBranch}
+                              onChange={(e) =>
+                                setContinue(
+                                  block.id,
+                                  other.id,
+                                  e.target.checked,
+                                )
+                              }
+                            />
+                            Carry on its branch
+                          </label>
+                        )}
+                      </div>
+                    );
+                  })}
+                </fieldset>
+              )}
+            </Subsection>
+          );
+        })}
+
+        <div className="mt-4 border-t border-line pt-3.5">
+          <ButtonRow>
+            <Button variant="secondary" onClick={addBlock} disabled={full}>
+              Add block
+            </Button>
+            {full && (
+              <span className="text-xs text-ink-muted">
+                A workflow runs at most {MAX_WORKFLOW_NODES} blocks
+              </span>
+            )}
+          </ButtonRow>
+        </div>
+      </Card>
+
+      <ButtonRow className="mt-4">
+        <Button onClick={save} busy={saving}>
+          {workflow ? "Save changes" : "Create workflow"}
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() =>
+            router.push(workflow ? `/workflows/${workflow.id}` : "/workflows")
+          }
+        >
+          Cancel
+        </Button>
+      </ButtonRow>
+    </>
+  );
+}

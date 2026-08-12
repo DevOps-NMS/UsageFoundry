@@ -447,6 +447,97 @@ export interface RunTemplateDTO {
   updatedAt: number;
 }
 
+/* ------------------------------------------------------------------ */
+/* Workflows: a saved graph of run blocks                              */
+/* ------------------------------------------------------------------ */
+
+/** Bounded for the reason a template name is: it is picked out of a list. */
+export const MAX_WORKFLOW_NAME = 80;
+
+/**
+ * How many blocks one workflow may hold.
+ *
+ * Every block becomes a run in a single synchronous pass, each claiming a
+ * folder, so this bounds what one click can put on the machine at once.
+ */
+export const MAX_WORKFLOW_NODES = 25;
+
+/**
+ * One block of work in a workflow.
+ *
+ * There is deliberately no budget, permission mode, isolation choice or model
+ * here. Those come from `templateId`, or from `settings.chatDefaultGuards` when
+ * it is null — always from something a person wrote. A block holds the *work*.
+ */
+export interface WorkflowNodeDTO {
+  id: string;
+  name: string;
+  /** Null means the block runs under the untemplated guards in Settings. */
+  templateId: string | null;
+  mountId: string;
+  /** Path within the mount. `""` is the mount root, and is a real answer. */
+  folder: string;
+  task: string;
+  /** Standing instructions replacing the template's prompt, for this block. */
+  promptOverride: string | null;
+}
+
+export interface WorkflowEdgeDTO {
+  /** The block that must settle first. */
+  from: string;
+  /** The block that starts once it has. */
+  to: string;
+  edge: "on-success" | "on-finish";
+  /** Whether `to` carries on `from`'s branch instead of cutting its own. */
+  continueBranch: boolean;
+}
+
+export interface WorkflowDTO {
+  id: string;
+  name: string;
+  nodes: WorkflowNodeDTO[];
+  edges: WorkflowEdgeDTO[];
+  createdAt: number;
+  updatedAt: number;
+  /** Runs from this workflow that have not finished. Empty on most reads. */
+  liveRunCount?: number;
+  /** When it was last started, or null if it never has been. */
+  lastRunAt?: number | null;
+}
+
+/**
+ * One block of an instance, and what became of its run.
+ *
+ * `run` is null when the run row has gone — the mapping is a historical record
+ * and says so, rather than dropping the block out of the instance.
+ */
+export interface WorkflowInstanceNodeDTO {
+  nodeId: string;
+  nodeName: string;
+  position: number;
+  runId: string;
+  run: {
+    status: RunDTO["status"];
+    stopReason: string | null;
+    iterations: number;
+    maxIterations: number;
+    spentUSD: number;
+  } | null;
+  /** Node ids this block was told to start after, from the instance's graph. */
+  waitsFor: string[];
+}
+
+export interface WorkflowInstanceDTO {
+  id: string;
+  workflowId: string;
+  /** The workflow's name when Run was pressed; it may have been renamed since. */
+  workflowName: string;
+  createdAt: number;
+  status: "started" | "failed";
+  error: string | null;
+  nodes: WorkflowInstanceNodeDTO[];
+}
+
 export interface RunEventDTO {
   id?: number;
   runId: string;

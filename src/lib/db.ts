@@ -241,6 +241,73 @@ function migrate(db: Database.Database) {
       PRIMARY KEY (run_id, depends_on)
     );
 
+    -- A saved, re-runnable graph of run blocks.
+    --
+    -- The third table here that holds *form input, never a run*, after
+    -- run_templates and chat_proposals: it takes no folder claim, consumes no
+    -- concurrency slot, and nothing derived from activeRuns() can see it.
+    --
+    -- The graph is one JSON column rather than a nodes table and an edges
+    -- table, which is the opposite of the choice run_deps makes — and the
+    -- difference is what reads it. run_deps is queried at run time from the
+    -- dependency end ("this run just finished; who was waiting on it?"), so it
+    -- has to be indexable. A workflow is read and written whole by one form and
+    -- joined against nothing; splitting it into two tables would buy an index
+    -- nobody queries and cost a multi-statement rewrite on every save.
+    --
+    -- No guards, no permission mode, no model: a node names a template for
+    -- those, or names none and takes settings.chatDefaultGuards. The reasoning
+    -- is chat_proposals' above, and the rule is the same — the graph picks what
+    -- work to do, something a person wrote picks what an agent may do.
+    CREATE TABLE IF NOT EXISTS workflows (
+      id         TEXT PRIMARY KEY,
+      name       TEXT NOT NULL,
+      graph      TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    -- One press of Run.
+    --
+    -- workflow_name and graph are copies taken at that moment, not a join: the
+    -- workflow is editable and its blocks are replaced wholesale on every save,
+    -- so a record that read through to the live row would describe an instance
+    -- that never happened. Same reasoning run_reviews.diff_shown follows in
+    -- recording what the model was actually shown.
+    --
+    -- Cascade-deleted with the workflow, and that takes nothing but this
+    -- record: the runs carry their own prompt, guards and history, exactly as
+    -- runs started from a template do.
+    CREATE TABLE IF NOT EXISTS workflow_instances (
+      id            TEXT PRIMARY KEY,
+      workflow_id   TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+      workflow_name TEXT NOT NULL,
+      graph         TEXT NOT NULL,
+      created_at    INTEGER NOT NULL,
+      -- 'started' | 'failed'. 'failed' is a graph that could not be created in
+      -- full, whose partial runs were stopped again — see startWorkflow.
+      status        TEXT NOT NULL DEFAULT 'started',
+      error         TEXT
+    );
+
+    -- Which run each block became.
+    --
+    -- run_id is a plain column rather than a foreign key, the same shape
+    -- chat_proposals.run_id has: this is a historical record, and a run that is
+    -- no longer there should read as "the run has gone" rather than take the
+    -- block out of the instance it belonged to. node_name is copied for the
+    -- reason the graph is — the workflow's own block may since have been
+    -- renamed or removed. position is the topological order the runs were
+    -- created in, which is the order the instance is read in.
+    CREATE TABLE IF NOT EXISTS workflow_instance_runs (
+      instance_id TEXT NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+      node_id     TEXT NOT NULL,
+      node_name   TEXT NOT NULL,
+      position    INTEGER NOT NULL,
+      run_id      TEXT NOT NULL,
+      PRIMARY KEY (instance_id, node_id)
+    );
+
     -- The orchestrator chat: a conversation that proposes runs.
     --
     -- Its own three tables rather than columns anywhere else, because a chat is
@@ -326,6 +393,18 @@ function migrate(db: Database.Database) {
     -- database can state outright.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_run_templates_name
       ON run_templates(name COLLATE NOCASE);
+    -- Same rule as a template's name, for the same reason: a workflow is picked
+    -- out of a list by a person, so two that differ only in case are one
+    -- workflow as far as that list is concerned.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflows_name
+      ON workflows(name COLLATE NOCASE);
+    -- The detail page's own query: this workflow's instances, newest first.
+    CREATE INDEX IF NOT EXISTS idx_workflow_instances_workflow
+      ON workflow_instances(workflow_id, created_at DESC);
+    -- Read from the run end by the "is anything from this workflow still
+    -- going?" check, which both Run and Delete ask before they do anything.
+    CREATE INDEX IF NOT EXISTS idx_workflow_instance_runs_run
+      ON workflow_instance_runs(run_id);
   `);
 
   // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already

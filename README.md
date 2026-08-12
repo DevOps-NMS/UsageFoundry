@@ -605,6 +605,107 @@ the guard by some other route.
 
 ---
 
+## Workflows
+
+A **workflow** is a saved graph of run blocks. Pressing *Run* on one creates
+every block as a run, in one pass, with the dependencies between them already
+wired: the first ones queue immediately, the rest sit `waiting` until the blocks
+they follow have settled. It is the answer to "the same four steps, in the same
+order, every time" — the thing templates cannot do, because a template is one
+run and this is the shape of several.
+
+### What a block holds, and what it does not
+
+A block holds the **work**: a name, a workspace and folder, a task, and
+optionally a prompt that replaces its template's own for this block. That is the
+whole list, and the omission is the point.
+
+A block does **not** hold a budget, a permission mode, an isolation choice or a
+model. It **names a template**, and every guard comes from that template; a block
+naming no template runs under the untemplated guard set in Settings → *Chat
+defaults*, exactly as an untemplated chat proposal does. This is the same rule
+the orchestrator chat follows and it is worth stating in full, because it is the
+reason a workflow can be edited freely without anyone re-reading it for safety:
+
+> The graph picks **what work to do**. Something a person wrote picks **what an
+> agent may do**.
+
+`--permission-mode` already has three narrowings and exactly two routes to it —
+the run form and a saved template — and a workflow node was not going to become
+a third. So a block that names a template which has since been deleted is
+**refused by name** when you press Run, rather than quietly falling back to the
+Settings guards: you saved a graph that said "under these guards", and a run
+started under different ones is what the refusal exists to prevent. The detail
+page marks such a block in red before you press anything.
+
+### Links between blocks
+
+A link says "start this block after that one", and carries two things:
+
+| | |
+|---|---|
+| **Condition** | *Only if it completes* (`on-success`) or *once it finishes, either way* (`on-finish`). Never defaulted: `on-success` would end a chain the operator meant to run regardless, `on-finish` would start a run on top of a dependency that crashed, and both mistakes are silent. |
+| **Carry on its branch** | The successor extends the predecessor's branch instead of cutting a new one from the target. At most one link into a block may set it, and at most one block may take over any given branch. |
+
+A block with no incoming link starts as soon as its folder is free. **Several
+such blocks is the parallel case** — there is no separate "parallel" concept to
+configure, and none in the interface. A block with two incoming links is a
+fan-in; it starts when both have settled.
+
+The editor is a list, and a block may only wait for blocks **above** it. That is
+not a restriction on the graph — every acyclic graph can be written that way —
+it is what makes a loop unwritable rather than something to be refused after the
+fact. Reordering a block above one it waits for drops that link, visibly.
+
+### What is refused, and when
+
+A workflow that can be saved but never started fails weeks away from the form
+that caused it, so both moments check the same things: a name, at least one
+block, a task on every block, a template that exists, a workspace that is
+mounted and a folder that resolves inside it, a condition on every link, no
+block waiting for itself, no loop, and no branch hand-over between blocks whose
+guards do not isolate. Every refusal names the block it is about.
+
+### Pressing Run
+
+One press creates every run in a single synchronous pass, in topological order,
+so each block's dependencies already exist as rows by the time it is admitted.
+That pass has no `await` in it, and that is a correctness requirement rather
+than a style: the folder claim that keeps two agents out of one directory is
+only atomic within one event-loop turn.
+
+It is **all or nothing**. Everything checkable is checked before anything is
+created, so a failure part-way through should be unreachable; if one happens
+anyway, the runs already created are stopped and the instance is recorded as
+`not started` with the reason. Half a graph is not a smaller workflow — its
+successors were never created, so what would be left running is a prefix nobody
+asked for.
+
+Starting a workflow whose previous press still has unfinished runs is
+**refused**, with a count and a sentence. The second instance would point the
+same blocks at the same folders, and a block set to carry on a branch would be
+refused mid-pass because the first instance's run already continues it.
+
+### Watching one
+
+Every press of Run gets its own page, listing each block with its run's live
+status, what it waited for, its cycles and its spend, and a link through to the
+run itself. The runs also appear on the *Runs* page like any others — a chain
+reads there as `blocked`-then-`queued` as it advances, since a `waiting` run
+holds no folder, no checkout and no place in the queue until the runs ahead of
+it settle.
+
+The instance keeps its own copy of the graph and of the workflow's name, so
+editing or renaming the workflow afterwards cannot rewrite what it says
+happened. Deleting a workflow takes those records with it and **no run**: the
+runs carry their own prompt, guards and history. It is refused while runs it
+started are still going, because those records are the only thing saying where
+those runs came from.
+
+There is no scheduling. A workflow runs when someone presses Run.
+
+---
+
 ## The orchestrator chat
 
 Filling in the run form once is fine. Filling it in eleven times, once per open
@@ -993,10 +1094,12 @@ src/lib/
   review.ts        the on-demand reviewer (a third, deliberate child process)
   land.ts          merge preview, landing, branch deletion, branch inventory
   chat.ts          the orchestrator chat (a fourth, deliberate child process)
+  workflows.ts     saved graphs of run blocks — form input, never a run
   workspace.ts     the folder walk, shared by the picker and the chat's tools
-  db.ts            SQLite (runs, events, reviews, chats, proposals, settings)
+  db.ts            SQLite (runs, events, reviews, chats, proposals, workflows,
+                   settings)
 src/app/api/       usage · account · runs · branches · calibrate · settings ·
-                   folders · chat · mcp
+                   folders · chat · mcp · workflows
 ```
 
 Transcripts are re-read incrementally: only bytes appended since the last scan
@@ -1354,6 +1457,30 @@ Built and exercised against real transcripts:
   untracked files and a single `--force` removes it, and `git branch -d` refuses
   an unmerged branch where `-D` deletes it. Those four exit codes are the
   difference between Delete and Purge.
+- **Workflows end to end against a live dev server**, on a scratch workspace with
+  two throwaway git repositories and `CLAUDE_BIN` pointed at a stub that speaks
+  `stream-json` — so every run below is a real run of the real loop, with no
+  spend and no network. Saving refuses each case by name and in the operator's
+  words: no blocks, a blank task, a template that does not exist, a workspace
+  that is not mounted, a folder that does not resolve inside it, a link with no
+  condition, and a loop (`B → A → B`). A four-block graph — two roots, one
+  `on-success` link carrying the branch over, one `on-finish` link into another
+  repository — created four runs in one pass: the two roots went straight to
+  `running` in parallel, the two dependents sat `waiting`, and all four reached
+  `completed`. The continuation landed on its predecessor's branch
+  (`uf/repo-a-1-a89cd5db` for both, `continues_run` set on the second, and one
+  branch in the repository rather than two). Pressing Run again while the first
+  press was still going was refused with the count; deleting the workflow was
+  refused the same way and succeeded once they had finished, taking the instance
+  records and **no run** with it (the runs were still on `/api/runs`
+  afterwards). Editing the workflow — renaming it and renaming a block — left
+  the instance reporting the name and the block names it actually ran with, and
+  an instance id requested under another workflow's id answered 404. The cascade
+  was checked with a stub that exits non-zero: the root ended `failed`, its
+  `on-success` dependent ended `blocked` with *"Set to start only after run
+  274b3840 succeeded (on-success); it ended failed"*, and its `on-finish`
+  dependent started anyway and failed on its own — which is exactly what the two
+  conditions are for. All five pages compiled and answered 200.
 
 ### Not yet verified by hand
 
@@ -1618,13 +1745,38 @@ through before trusting this unattended:
   namespaced by the compose project, so without them this collides with an
   instance already running. Run it a second time with the two uid variables
   unset to confirm the 1000 default is unchanged.
+- **The workflow editor in a browser.** Every page it lives on compiled and
+  answered 200 in `next dev`, and the API underneath was driven end to end (see
+  *Verified*), but no browser has rendered the form: what is unconfirmed is the
+  interaction rather than the data. Three things to try first — moving a block
+  above one it waits for, which drops that link and should visibly do so;
+  turning on *Carry on its branch* for one link when another already has it,
+  which clears the other; and removing a block that later blocks depend on. All
+  three are refused or repaired again by the server, so the risk is a form that
+  disagrees with what gets saved, not a bad graph.
+- **A workflow instantiated against the real CLI.** Every run in the *Verified*
+  entry above came from a stub, deliberately: it is the loop, the folder claims,
+  the dependency wiring and the branch hand-over that were being tested, and a
+  real agent adds spend without adding coverage of any of them. What a stub
+  cannot show is a real work cycle's timing — in particular whether the
+  `on-success` dependent's first `git log` shows its predecessor's commits, since
+  the stub committed nothing. Run a two-block workflow with a branch hand-over
+  and read the second run's opening prompt.
+- **The rollback path.** It is written to be unreachable — the graph, the
+  templates, the mounts, every folder and both ends of every branch hand-over are
+  checked before the first `createRun` — and nothing contrived reached it in
+  testing, so the stop-everything-and-record-`failed` branch has never actually
+  run. The cheapest way to exercise it is to delete a mount from
+  `WORKSPACE_ROOTS` between the pre-flight and the pass, which is not a thing an
+  operator can do; short of that, read it rather than trust it.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
 work cycle spawns with, the GitHub credentials handed to a work cycle, how a
-run's diff is parsed and budgeted, when a branch may be landed, what a queued
-merge does with the branch it reaches, what counts as a conflict marker — both
+run's diff is parsed and budgeted, whether a saved graph of run blocks can run at
+all and the order its runs are created in, when a branch may be landed, what a
+queued merge does with the branch it reaches, what counts as a conflict marker — both
 for deciding whether one was really resolved and for deciding what to show — and
 the two renderings that would lie quietly about a number: an unconfigured
 ceiling, and a first-party figure shown beside the meters. Two entries are

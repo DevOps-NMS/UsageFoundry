@@ -8,6 +8,7 @@ const LINKS = [
   { href: "/", label: "Dashboard" },
   { href: "/chat", label: "Orchestrator" },
   { href: "/runs", label: "Runs" },
+  { href: "/workflows", label: "Workflows" },
   { href: "/branches", label: "Branches" },
   { href: "/account", label: "API account" },
   { href: "/settings", label: "Settings" },
