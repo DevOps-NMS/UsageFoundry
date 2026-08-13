@@ -522,13 +522,18 @@ export default function RunDetail({
   // could not satisfy the edge. That verdict is not revisited on its own, so if
   // the dependency has since been picked up and succeeded, this is the only way
   // back. `work_dir` is what separates it from a run its own guard refused,
-  // which is `blocked` too and already holds a checkout.
+  // which is `blocked` too and already holds a checkout — pickable as well, but
+  // through the queue rather than back into `waiting`, so it is a different
+  // sentence in the panel below rather than a different button.
   const blockedBeforeStart = run.status === "blocked" && run.work_dir === null;
+  const guardRefused = run.status === "blocked" && run.work_dir !== null;
   const pickupable =
     run.status === "failed" ||
     run.status === "stopped" ||
     run.status === "completed" ||
-    blockedBeforeStart;
+    // Both shapes of `blocked`, mirroring `reopenRun`: the guard-refused kind is
+    // the one whose whole fix is raising a limit and pressing this button.
+    run.status === "blocked";
   // Except when a whole workflow was halted on top of it. `reopenRun` refuses a
   // member of a stopped instance — a halt is terminal for the instance, and the
   // guard that bounds its spending is inert once it leaves `started` — so the
@@ -626,7 +631,9 @@ export default function RunDetail({
                 className="transition-colors duration-150"
                 onClick={openReopen}
               >
-                {blockedBeforeStart
+                {/* Both kinds of `blocked` never started a work cycle, so
+                    "Resume" would name something that never happened. */}
+                {run.status === "blocked"
                   ? "Try again"
                   : saidDone
                     ? "Ask for more"
@@ -719,11 +726,13 @@ export default function RunDetail({
             <h3 className="mb-2.5 text-xs font-semibold text-ink">
               {blockedBeforeStart
                 ? "Put this run back behind the ones it waits on"
-                : !run.session_id
-                  ? "Start this run again from its original task"
-                  : saidDone
-                    ? "Send this run back into the same session"
-                    : "Carry on from where this run stopped"}
+                : guardRefused
+                  ? "Start this run again, under the limits below"
+                  : !run.session_id
+                    ? "Start this run again from its original task"
+                    : saidDone
+                      ? "Send this run back into the same session"
+                      : "Carry on from where this run stopped"}
             </h3>
 
             <Field label="What else needs doing?" htmlFor="re-note">
@@ -736,11 +745,16 @@ export default function RunDetail({
               <Hint>
                 {blockedBeforeStart
                   ? "It starts by itself if the runs ahead of it have since succeeded, and says so again if they have not"
-                  : !run.session_id
-                    ? "This run never reported a session to resume, so it starts the original task again with this added to the end"
-                    : saidDone
-                      ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails"
-                      : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue"}
+                  : guardRefused
+                    ? // The one fact this run's operator needs and no other
+                      // branch carries: nothing here overrides the guard that
+                      // refused it, and a window percentage is not on this form.
+                      "It never started, so it begins its original task with this added to the end. Its guards are checked again before it spawns — raise whatever refused it, or it stops here again"
+                    : !run.session_id
+                      ? "This run never reported a session to resume, so it starts the original task again with this added to the end"
+                      : saidDone
+                        ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails"
+                        : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue"}
               </Hint>
             </Field>
 
