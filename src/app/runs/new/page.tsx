@@ -16,7 +16,8 @@ import type {
   WorkspaceFolderDTO,
   WorkspaceMountDTO,
 } from "@/lib/apiTypes";
-import { fmtPct, fmtUSD, pctField } from "@/lib/format";
+import { fmtPct, fmtUSD, pctField, pollFailureMessage } from "@/lib/format";
+import { jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle } from "@/components/ui/Card";
 import { Button, ButtonRow } from "@/components/ui/Button";
@@ -422,6 +423,9 @@ export default function NewRunPage() {
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // Why the picker below may not be showing the operator's own default. Set
+  // once, by the read that failed, and never cleared: nothing retries it.
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [started, setStarted] = useState<RunDTO | null>(null);
 
   const [mountId, setMountId] = useState(DEFAULT_VALUES.mountId);
@@ -493,6 +497,13 @@ export default function NewRunPage() {
   // the settings default race a seed that arrives later and win or lose
   // depending on the connection.
   const seeded = useRef(false);
+  // Whether anything other than this form's own default has answered the
+  // permission question yet — a manual pick or an applied seed. `seeded` covers
+  // only the `?from=` case, so without this the settings read landing a moment
+  // later replaced a choice the operator had already made. A ref rather than
+  // state because the loader below closes over the first render: a `useState`
+  // value read in there is `false` for ever.
+  const permissionTouched = useRef(false);
   // Belt to the disabled attribute's braces: a second submit can only come from
   // a key repeat inside the same tick, which no re-render has happened for yet.
   const inFlight = useRef(false);
@@ -530,26 +541,54 @@ export default function NewRunPage() {
       })
       .catch(() => setFoldersLoaded(true));
 
-    fetch("/api/settings")
-      .then((r) => r.json())
-      .then((d) => {
-        setSettings(d.settings);
-        if (d.settings?.defaultPermissionMode && !seeded.current) {
-          setPermissionMode(d.settings.defaultPermissionMode);
-          setBaseline((b) =>
-            b.kind === "defaults"
-              ? {
-                  ...b,
-                  values: {
-                    ...b.values,
-                    permissionMode: d.settings.defaultPermissionMode,
-                  },
-                }
-              : b,
-          );
-        }
-      })
-      .catch(() => void 0);
+    // Through `jsonRequest` rather than a raw `fetch`, because this is the one
+    // read on the page whose failure decides what an unattended agent may do,
+    // and it had two silent paths: a non-2xx answer carries a JSON body
+    // (`middleware.ts` answers 401 with one), so `r.json()` resolved, the guard
+    // below found no `defaultPermissionMode` and simply skipped; and a rejected
+    // fetch went to a `.catch` that did nothing. Either way the picker was left
+    // on this form's own `acceptEdits` — the *more* permissive value — with
+    // nothing on the page saying so. Read-time narrowing of this setting must
+    // never widen what is permitted, the rule `rowToTemplate` and `chatGuards`
+    // already apply to the same value. Folding both onto one branch is what
+    // makes the failure sayable at all.
+    void (async () => {
+      const res = await jsonRequest<{ settings?: SettingsDTO }>("/api/settings");
+      const loaded = res.ok ? res.data.settings : undefined;
+      if (!loaded) {
+        // A 200 with no `settings` in it is the same failure by a third door:
+        // `setSettings(undefined)` reads as "no ceiling configured" everywhere
+        // else on this form as well.
+        setSettingsError(
+          res.ok
+            ? pollFailureMessage(200, "no settings in the answer")
+            : pollFailureMessage(res.status, res.error),
+        );
+        return;
+      }
+      setSettings(loaded);
+      // Only while nothing else has answered the question. This lands after an
+      // arbitrary delay, so a global default arriving late must not overwrite a
+      // template's mode or a pick the operator has already made.
+      if (
+        loaded.defaultPermissionMode &&
+        !seeded.current &&
+        !permissionTouched.current
+      ) {
+        setPermissionMode(loaded.defaultPermissionMode);
+        setBaseline((b) =>
+          b.kind === "defaults"
+            ? {
+                ...b,
+                values: {
+                  ...b.values,
+                  permissionMode: loaded.defaultPermissionMode,
+                },
+              }
+            : b,
+        );
+      }
+    })();
 
     fetch("/api/usage")
       .then((r) => r.json())
@@ -956,6 +995,10 @@ export default function NewRunPage() {
     // announced — see the notices beside the controls themselves.
     setCarriedEnforcement(b.enforcement !== "between-cycles");
     setCarriedPermission(seed.permissionMode === "bypassPermissions");
+    // A template's mode is narrowed on save, on read and again by POST
+    // /api/runs; a global default landing on top of it a moment later would
+    // undo all three.
+    permissionTouched.current = true;
 
     setTemplateNote(note);
     setTemplateError(null);
@@ -1169,6 +1212,19 @@ export default function NewRunPage() {
           is. Check <span className="mono">UF_WORKSPACE</span> in{" "}
           <span className="mono">.env</span> and the volumes in{" "}
           <span className="mono">docker-compose.yml</span>.
+        </Notice>
+      )}
+
+      {/* The read that decides what an agent may do, and it failed. Said here
+          rather than swallowed, because the value left in the picker is this
+          form's own default and it is the more permissive of the two. */}
+      {settingsError && (
+        <Notice tone="warn">
+          <strong>Your settings could not be read.</strong> {settingsError} What
+          it may do without asking, below, is this form&rsquo;s built-in default
+          rather than your{" "}
+          <span className="mono">defaultPermissionMode</span> — check it before
+          starting.
         </Notice>
       )}
 
@@ -1455,6 +1511,9 @@ export default function NewRunPage() {
               // Chosen here, so it is no longer inherited — the banner above
               // would be describing a decision that is now the operator's.
               setCarriedPermission(false);
+              // And a settings read still in flight must not answer a question
+              // the operator has just answered themselves.
+              permissionTouched.current = true;
             }}
             marker={mark("permission")}
             choices={[

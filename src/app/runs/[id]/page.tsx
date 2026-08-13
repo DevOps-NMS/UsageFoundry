@@ -22,6 +22,7 @@ import { Field, Input, Textarea } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Log, LogLine, Spinner } from "@/components/ui/Log";
 import { describeEvent } from "@/lib/logLine";
+import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Notice } from "@/components/ui/Notice";
 import { RunDiff } from "@/components/RunDiff";
 import { RunLand } from "@/components/RunLand";
@@ -260,6 +261,10 @@ export default function RunDetail({
   const [connected, setConnected] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
   const [stopNote, setStopNote] = useState<string | null>(null);
+  // Held apart from `stopNote` rather than folded into it: that one renders in
+  // the accent tone as a statement about the run, and a press that may or may
+  // not have landed is neither.
+  const [actionError, setActionError] = useState<string | null>(null);
   // The reopen form. Held as strings because blank is meaningful — it is what
   // `normalizePolicy` reads as "no limit" — and a number input cannot hold it.
   const [reopenOpen, setReopenOpen] = useState(false);
@@ -432,15 +437,31 @@ export default function RunDetail({
     [events],
   );
 
+  /**
+   * Both of these read an *outcome* out of a 200 and say what it means, so a
+   * request that never got one must not fall through to that sentence: "This
+   * run is not active." is what the page says about a run that is over, and
+   * printing it because a 401 or a dropped connection came back tells the
+   * operator their agent has stopped while it goes on spending. `jsonRequest`
+   * is what puts that failure on its own branch — and in its own tone, because
+   * the accent note beside these buttons is the success voice.
+   */
   async function stop() {
-    const res = await fetch(`/api/runs/${id}`, { method: "DELETE" });
-    const json = (await res.json().catch(() => ({}))) as { outcome?: string };
+    setActionError(null);
+    const res = await jsonRequest<{ outcome?: string }>(`/api/runs/${id}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      setStopNote(null);
+      setActionError(actionFailureMessage(res, "Could not stop this run."));
+      return;
+    }
     // Between work cycles there is no child to signal, but the run still stops
     // at the next check — say so rather than leaving the button looking inert.
     setStopNote(
-      json.outcome === "signalled"
+      res.data.outcome === "signalled"
         ? "Stopping the current work cycle…"
-        : json.outcome === "cancelled"
+        : res.data.outcome === "cancelled"
           ? run?.status === "paused"
             ? "Stopped — it will not resume."
             : "Stopping — it will not start another work cycle."
@@ -449,14 +470,22 @@ export default function RunDetail({
   }
 
   async function tryNow() {
-    const res = await fetch(`/api/runs/${id}/resume`, { method: "POST" });
-    const json = (await res.json().catch(() => ({}))) as { outcome?: string };
+    setActionError(null);
+    const res = await jsonRequest<{ outcome?: string }>(
+      `/api/runs/${id}/resume`,
+      { method: "POST" },
+    );
+    if (!res.ok) {
+      setStopNote(null);
+      setActionError(actionFailureMessage(res, "Could not ask this run to try now."));
+      return;
+    }
     // Deliberately does not bypass the guard — it rejoins the queue and the
     // ordinary pre-cycle check decides. Asking early while the window is still
     // full parks it again, which is the honest outcome; a button that spends
     // past a limit the operator set would be worse than no button.
     setStopNote(
-      json.outcome === "requeued"
+      res.data.outcome === "requeued"
         ? "Trying now — if the 5-hour window is still too full it steps aside again."
         : "This run is not waiting.",
     );
@@ -471,6 +500,7 @@ export default function RunDetail({
     setReopenNote("");
     setReopenError(null);
     setStopNote(null);
+    setActionError(null);
     setReopenOpen(true);
   }
 
@@ -478,10 +508,13 @@ export default function RunDetail({
     if (!run) return;
     setReopenError(null);
     const asLimit = (v: string) => (v.trim() === "" ? null : Number(v));
-    const res = await fetch(`/api/runs/${id}/reopen`, {
+    // Same reason as `stop` above, one step further on: this one already
+    // checked `res.ok`, so a refusal was explained — but a rejected `fetch`
+    // escaped the `onClick` after `setReopenError(null)` had run, leaving the
+    // panel open with nothing said and the button looking inert.
+    const res = await jsonRequest(`/api/runs/${id}/reopen`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+      body: {
         // Everything not on this form carries over untouched — the window
         // percentages, the enforcement mode, and what happens after DONE.
         budget: {
@@ -491,11 +524,10 @@ export default function RunDetail({
           maxDurationMinutes: asLimit(reopenMinutes),
         },
         followUp: reopenNote,
-      }),
+      },
     });
-    const json = (await res.json().catch(() => ({}))) as { error?: string };
     if (!res.ok) {
-      setReopenError(json.error ?? "Could not pick this run up.");
+      setReopenError(actionFailureMessage(res, "Could not pick this run up."));
       return;
     }
     setReopenOpen(false);
@@ -522,13 +554,18 @@ export default function RunDetail({
   // could not satisfy the edge. That verdict is not revisited on its own, so if
   // the dependency has since been picked up and succeeded, this is the only way
   // back. `work_dir` is what separates it from a run its own guard refused,
-  // which is `blocked` too and already holds a checkout.
+  // which is `blocked` too and already holds a checkout — pickable as well, but
+  // through the queue rather than back into `waiting`, so it is a different
+  // sentence in the panel below rather than a different button.
   const blockedBeforeStart = run.status === "blocked" && run.work_dir === null;
+  const guardRefused = run.status === "blocked" && run.work_dir !== null;
   const pickupable =
     run.status === "failed" ||
     run.status === "stopped" ||
     run.status === "completed" ||
-    blockedBeforeStart;
+    // Both shapes of `blocked`, mirroring `reopenRun`: the guard-refused kind is
+    // the one whose whole fix is raising a limit and pressing this button.
+    run.status === "blocked";
   // Except when a whole workflow was halted on top of it. `reopenRun` refuses a
   // member of a stopped instance — a halt is terminal for the instance, and the
   // guard that bounds its spending is inert once it leaves `started` — so the
@@ -626,7 +663,9 @@ export default function RunDetail({
                 className="transition-colors duration-150"
                 onClick={openReopen}
               >
-                {blockedBeforeStart
+                {/* Both kinds of `blocked` never started a work cycle, so
+                    "Resume" would name something that never happened. */}
+                {run.status === "blocked"
                   ? "Try again"
                   : saidDone
                     ? "Ask for more"
@@ -649,6 +688,11 @@ export default function RunDetail({
             always in the DOM so a screen reader announces what arrives in it. */}
         <div aria-live="polite">
           {stopNote && <p className="mt-3 text-sm text-accent">{stopNote}</p>}
+          {actionError && (
+            <Notice tone="danger" className="mt-3">
+              {actionError}
+            </Notice>
+          )}
         </div>
 
         {/* The two figures that belong to the run itself: both come from what
@@ -719,11 +763,13 @@ export default function RunDetail({
             <h3 className="mb-2.5 text-xs font-semibold text-ink">
               {blockedBeforeStart
                 ? "Put this run back behind the ones it waits on"
-                : !run.session_id
-                  ? "Start this run again from its original task"
-                  : saidDone
-                    ? "Send this run back into the same session"
-                    : "Carry on from where this run stopped"}
+                : guardRefused
+                  ? "Start this run again, under the limits below"
+                  : !run.session_id
+                    ? "Start this run again from its original task"
+                    : saidDone
+                      ? "Send this run back into the same session"
+                      : "Carry on from where this run stopped"}
             </h3>
 
             <Field label="What else needs doing?" htmlFor="re-note">
@@ -736,11 +782,16 @@ export default function RunDetail({
               <Hint>
                 {blockedBeforeStart
                   ? "It starts by itself if the runs ahead of it have since succeeded, and says so again if they have not"
-                  : !run.session_id
-                    ? "This run never reported a session to resume, so it starts the original task again with this added to the end"
-                    : saidDone
-                      ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails"
-                      : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue"}
+                  : guardRefused
+                    ? // The one fact this run's operator needs and no other
+                      // branch carries: nothing here overrides the guard that
+                      // refused it, and a window percentage is not on this form.
+                      "It never started, so it begins its original task with this added to the end. Its guards are checked again before it spawns — raise whatever refused it, or it stops here again"
+                    : !run.session_id
+                      ? "This run never reported a session to resume, so it starts the original task again with this added to the end"
+                      : saidDone
+                        ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails"
+                        : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue"}
               </Hint>
             </Field>
 

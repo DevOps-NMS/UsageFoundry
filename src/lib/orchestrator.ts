@@ -4805,14 +4805,25 @@ export function reopenRun(
   const run = getRun(id);
   if (!run) return { ok: false, reason: "No such run." };
 
+  // `blocked` splits two ways and both are pickable — they just rejoin at
+  // different points. The two are told apart by `work_dir`, never by the reason
+  // text, which is prose.
+  //
   // A run blocked behind a dependency is picked up by going back to `waiting`,
   // not by joining the queue: it never ran, so there is no session to continue
   // and — more to the point — no workspace, and `admitWaiting` is what plans
-  // one. The two kinds of `blocked` are told apart by `work_dir`, never by the
-  // reason text: this kind never reached a checkout, where a run refused by its
-  // own guard before its first cycle already holds one.
+  // one.
   const waitingAgain = run.status === "blocked" && run.work_dir === null;
-  if (!waitingAgain && !REOPENABLE.includes(run.status)) {
+  // A run its own guard refused before its first work cycle is the other kind,
+  // and it is the case this function's budget argument exists for: raising the
+  // limit is the fix, and refusing it left the operator retyping the prompt and
+  // the budget into the new-run form. `ensureWorktree` runs before the guard, so
+  // it already holds a workspace — and a checkout, whose branch was orphaned for
+  // as long as there was no way back to this row. It therefore rejoins the queue
+  // like any other terminal row rather than going back to `waiting`, where
+  // `admitWaiting` would plan a second checkout slot on top of the first.
+  const guardRefused = run.status === "blocked" && run.work_dir !== null;
+  if (!waitingAgain && !guardRefused && !REOPENABLE.includes(run.status)) {
     return {
       ok: false,
       reason: `This run is ${run.status}, so there is nothing here to pick up.`,
