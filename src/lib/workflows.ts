@@ -3612,7 +3612,11 @@ function advanceLoop(instanceId: string, nodeId: string): void {
   if (!instance || instance.status !== "started") return;
 
   const node = instance.graph.nodes.find((n) => n.id === nodeId);
-  if (!node || node.kind !== "loop" || node.maxPasses === null) {
+  // `typeof` rather than `!== null`, and that is the difference between a loop
+  // that ends and one that does not: an instance blob written before this
+  // column existed, or by anything but `normalizeWorkflowInput`, carries
+  // `undefined` here — and `passes.length >= undefined` is false for ever.
+  if (!node || node.kind !== "loop" || typeof node.maxPasses !== "number") {
     settleLoop(
       instanceId,
       nodeId,

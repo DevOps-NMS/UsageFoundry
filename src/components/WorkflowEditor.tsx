@@ -677,7 +677,7 @@ export function WorkflowEditor({
                   <Field
                     label="Spending limit across passes"
                     htmlFor={`${block.id}-loopcost`}
-                    hint="Blank for no limit — the passes stop at the number above"
+                    hint="Checked between passes; it never widens the workflow limit above"
                   >
                     <Input
                       id={`${block.id}-loopcost`}
@@ -692,10 +692,6 @@ export function WorkflowEditor({
                         update(block.id, { maxLoopCostUSD: e.target.value })
                       }
                     />
-                    <Hint>
-                      Checked between passes, and it never widens the
-                      workflow&rsquo;s own limit above
-                    </Hint>
                   </Field>
                 </div>
               )}
