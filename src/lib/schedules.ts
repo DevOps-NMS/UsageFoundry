@@ -179,7 +179,23 @@ export function normalizeScheduleInput(
   }
 
   if (kind === "daily" || kind === "weekly") {
-    const minutes = Math.trunc(Number(o.minutes));
+    // The absence is caught **before** any coercion, and that ordering is the
+    // whole fix: a cleared `<input type="time">` reaches `save()` as `NaN`, JSON
+    // has no NaN so `JSON.stringify` emits `null`, and `Number(null)` is `0` —
+    // so the range check below is written against a NaN it can never see, and
+    // read a missing time as a deliberate midnight. The schedule then started
+    // the graph at 00:00 every day with nobody present. Refused by name the way
+    // a missing zone is, and for the reason `planUsage.ts`'s `num()` refuses to
+    // coerce: "there is no reading" and "the reading is zero" are different
+    // facts. A number is required rather than coerced from a string, because a
+    // string is exactly what carries the empty case back in.
+    if (typeof o.minutes !== "number") {
+      return {
+        ok: false,
+        error: "A daily or weekly schedule needs the time of day it starts at.",
+      };
+    }
+    const minutes = Math.trunc(o.minutes);
     if (!Number.isFinite(minutes) || minutes < 0 || minutes >= MINUTES_IN_DAY) {
       return { ok: false, error: "The time of day has to be between 00:00 and 23:59." };
     }
@@ -565,6 +581,16 @@ export function getSchedule(workflowId: string): WorkflowSchedule | null {
  * of when the first tick lands. Editing a schedule resets it for the same
  * reason: the new recurrence has no history, and reading the old one's cursor
  * would fire the new one for a window it was never set for.
+ *
+ * `paused` is deliberately **not** in the UPDATE. This press means "change the
+ * recurrence"; switching the schedule back on is what the Resume button is for,
+ * and that goes through `pauseSchedule` — the one path that re-checks
+ * `scheduleRefusal` on the way back up. Clearing the flag here restarted the
+ * only thing in this app that starts a billed agent with nobody present, as a
+ * side effect of a form that never asked: `normalizeScheduleInput` has no
+ * `paused` field precisely because it is not the form's to decide, so the SQL
+ * was deciding it alone. An edit that arrives while paused stays paused, and
+ * `startScheduler` below then finds nothing active and holds no timer.
  */
 export function putSchedule(
   workflowId: string,
@@ -577,7 +603,7 @@ export function putSchedule(
     db()
       .prepare(
         `UPDATE workflow_schedules
-            SET spec=?, time_zone=?, paused=0, updated_at=?, cursor_at=?,
+            SET spec=?, time_zone=?, updated_at=?, cursor_at=?,
                 last_code=NULL, last_reason=NULL, last_at=NULL,
                 last_fire_at=NULL, last_instance_id=NULL,
                 streak=0, streak_since=NULL

@@ -55,9 +55,21 @@ function hhmm(minutes: number): string {
   ).padStart(2, "0")}`;
 }
 
-function minutesOf(value: string): number {
+/**
+ * `"09:00"` → `540`, and null for a time input holding nothing.
+ *
+ * A `<input type="time">` legitimately holds `""` — the browser's own clear
+ * affordance produces it — and the arithmetic below turns that into `NaN`.
+ * Returning it was the bug: `JSON.stringify` has no NaN and emits `null`, which
+ * the server then read as a deliberate 00:00. Null rather than NaN so the one
+ * caller has to answer for it.
+ */
+function minutesOf(value: string): number | null {
   const [h, m] = value.split(":");
-  return Number(h) * 60 + Number(m);
+  const minutes = Number(h) * 60 + Number(m);
+  return Number.isFinite(minutes) && minutes >= 0 && minutes < 24 * 60
+    ? minutes
+    : null;
 }
 
 type Draft = {
@@ -131,17 +143,30 @@ export function WorkflowSchedule({
     }
   }
 
+  // Derived rather than held, so the message and the disabled Save cannot
+  // disagree with what `save` would actually put on the wire.
+  const minutes = draft.kind === "everyHours" ? null : minutesOf(draft.time);
+  const timeError =
+    draft.kind !== "everyHours" && minutes === null
+      ? "A schedule needs a time of day. 00:00 is a time; blank is not."
+      : null;
+
   function save() {
+    if (draft.kind === "everyHours") {
+      return send("PUT", {
+        kind: draft.kind,
+        hours: draft.hours,
+        timeZone: draft.timeZone.trim(),
+      });
+    }
+    // Unreachable behind the disabled Save, and guarded anyway: this is the step
+    // that puts the value on the wire, where a NaN becomes a null and a null
+    // used to become midnight. The server refuses it too.
+    if (minutes === null) return;
     const spec =
-      draft.kind === "everyHours"
-        ? { kind: draft.kind, hours: draft.hours }
-        : draft.kind === "daily"
-          ? { kind: draft.kind, minutes: minutesOf(draft.time) }
-          : {
-              kind: draft.kind,
-              weekday: draft.weekday,
-              minutes: minutesOf(draft.time),
-            };
+      draft.kind === "daily"
+        ? { kind: draft.kind, minutes }
+        : { kind: draft.kind, weekday: draft.weekday, minutes };
     return send("PUT", { ...spec, timeZone: draft.timeZone.trim() });
   }
 
@@ -336,7 +361,7 @@ export function WorkflowSchedule({
             )}
 
             {draft.kind !== "everyHours" && (
-              <Field label="Time" htmlFor="sched-time">
+              <Field label="Time" htmlFor="sched-time" error={timeError}>
                 <Input
                   id="sched-time"
                   type="time"
@@ -383,7 +408,13 @@ export function WorkflowSchedule({
             )}
 
             <ButtonRow>
-              <Button onClick={save} busy={busy} disabled={busy}>
+              {/* Disabled only alongside the field error that says why — a
+                  Save that is off with nothing explaining it is a dead end. */}
+              <Button
+                onClick={save}
+                busy={busy}
+                disabled={busy || timeError !== null}
+              >
                 Save schedule
               </Button>
               <Button
