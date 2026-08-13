@@ -355,6 +355,19 @@ const DEFAULTS: Settings = {
   chatDefaultGuards: DEFAULT_CHAT_GUARDS,
 };
 
+/**
+ * Every key of `Settings`, as a value rather than a type.
+ *
+ * `DEFAULTS` is the only complete enumeration of the interface there is — it is
+ * typed `Settings`, so a field added above cannot be left out of it — which
+ * makes it the one list a test can walk to check that `PUT /api/settings` still
+ * accepts all of them. It is a route built from an explicit branch per key
+ * precisely so it can narrow each one, and the cost of that shape is that a new
+ * field is dropped in silence: the page sends it, the route answers 200 without
+ * it, and the form reverts under a "Saved" confirmation.
+ */
+export const SETTINGS_KEYS = Object.keys(DEFAULTS) as (keyof Settings)[];
+
 const KEY = "settings";
 
 export function getSettings(): Settings {
