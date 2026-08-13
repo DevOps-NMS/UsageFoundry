@@ -318,9 +318,9 @@ function migrate(db: Database.Database) {
 
     -- Every block of an instance that is *not* a run.
     --
-    -- Two kinds, and they are here together because what the scheduler needs of
-    -- both is identical — a status it can read, and a sentence when the answer
-    -- is "this will never happen":
+    -- Three kinds, and they are here together because what the scheduler needs
+    -- of all of them is identical — a status it can read, and a sentence when
+    -- the answer is "this will never happen":
     --
     --   'orchestrator' is a short agent turn that decides, when the workflow
     --   reaches it, which runs to create next. It is not a run and must never
@@ -331,9 +331,18 @@ function migrate(db: Database.Database) {
     --   dashboard meter. It *is* added to the instance's own total, because that
     --   is money this press of Run spent; see instanceSpend.
     --
-    --   'run' is a block that was never created, because an orchestrator block
-    --   in front of it emitted nothing or could not decide. There is no run row
-    --   to carry the reason, and a block that silently vanishes from the
+    --   'loop' repeats one task, creating a fresh run per pass — each carrying
+    --   on the previous pass's branch, so the run graph stays a DAG and no edge
+    --   ever points backwards. It spawns nothing of its own, so its cost_usd
+    --   stays 0 and every pass's spend is on that pass's own run row. Its
+    --   passes are workflow_instance_runs rows with emitted_by set to it, the
+    --   same column an orchestrator block's runs use, which is what makes the
+    --   instance budget guard, the halt and the second-press refusal cover a
+    --   pass with no new code.
+    --
+    --   'run' is a block that was never created, because the block in front of
+    --   it emitted nothing, took no passes, or could not decide. There is no run
+    --   row to carry the reason, and a block that silently vanishes from the
     --   instance is the "waiting for ever" failure wearing different clothes —
     --   so the reason is recorded here instead, and the page shows it.
     --
@@ -347,9 +356,13 @@ function migrate(db: Database.Database) {
       node_id       TEXT NOT NULL,
       node_name     TEXT NOT NULL,
       position      INTEGER NOT NULL,
-      -- 'orchestrator' | 'run'. See above.
+      -- 'orchestrator' | 'loop' | 'run'. See above.
       kind          TEXT NOT NULL,
-      -- 'waiting' | 'thinking' | 'emitted' | 'failed' | 'blocked'.
+      -- 'waiting' | 'thinking' | 'looping' | 'emitted' | 'failed' | 'blocked'.
+      -- 'looping' is a loop with passes in flight or another one to decide on;
+      -- it is live wherever 'thinking' is, and deliberately not a settled
+      -- status — a block behind it must not be released while the loop can
+      -- still commit to the branch.
       status        TEXT NOT NULL DEFAULT 'waiting',
       started_at    INTEGER,
       finished_at   INTEGER,
@@ -646,10 +659,17 @@ function migrate(db: Database.Database) {
   // clears either when the container dies mid-cycle.
   addColumn(db, "runs", "active_started_at", "INTEGER");
 
-  // The orchestrator block that started this run, or null for a block a person
-  // wrote into the graph. A plain column rather than a foreign key, the shape
-  // the run_id beside it already has: this is a record of where a run came
-  // from, and it must keep reading true after the block's row has gone.
+  // The orchestrator block that started this run, or the loop block whose pass
+  // it is — null for a block a person wrote into the graph. A plain column
+  // rather than a foreign key, the shape the run_id beside it already has: this
+  // is a record of where a run came from, and it must keep reading true after
+  // the block's row has gone.
+  //
+  // A loop's passes carry no pass number of their own: they are ordered by
+  // `position`, which only ever increases, so pass N is the Nth row. Derived
+  // rather than stored, the same choice `workflow_instances.status` makes for
+  // 'stopped' — and it means nothing has to parse a number back out of a
+  // node_id, which is the mistake `splitPatches` exists to avoid.
   addColumn(db, "workflow_instance_runs", "emitted_by", "TEXT");
 }
 

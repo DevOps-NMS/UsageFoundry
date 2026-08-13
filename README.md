@@ -616,7 +616,9 @@ run and this is the shape of several.
 
 A block can also be an **orchestrator block**, which decides what to run instead
 of being told, and whose runs then start without an approval. That is a real
-trade and it has [its own section](#a-block-that-decides-what-to-run) below.
+trade and it has [its own section](#a-block-that-decides-what-to-run) below. Or a
+**loop block**, which repeats one task until the agent says it is done or a cap
+is reached — [its own section](#a-block-that-repeats-itself) too.
 
 ### What a block holds, and what it does not
 
@@ -689,6 +691,73 @@ workflow's own limit below, because it is money that press of Run spent.
 Everything it starts belongs to the instance: the workflow-wide limits below
 cover those runs, *Stop all* takes them down, and they appear on the instance
 page saying which block started them.
+
+### A block that repeats itself
+
+Some work does not fit in one run. "Work through the failing tests until they
+pass" is a real task and an agent given one work cycle for it stops half way,
+`completed`, with the job undone. A **loop block** is the third kind: it holds
+one task and runs it again and again, one whole run per **pass**, each pass
+carrying on the branch the last one built.
+
+> A pass is not a work cycle. A work cycle is one invocation of Claude Code
+> inside a run; a pass is a whole run, with its own work cycles, its own guards
+> and its own spend. The interface never uses one word for the other, and
+> neither should you when reading a bill.
+
+**It unrolls; it does not loop.** The obvious implementation is an edge pointing
+backwards — pass 2 depends on the loop block, which depends on pass 1 — and that
+edge is refused by this tool at admission, deliberately. A run whose
+dependencies form a loop is never released and never terminated: it sits
+`waiting` for ever, holding a prompt you believe is queued. So each pass is a
+*fresh run* that depends on the previous pass's, the run graph stays acyclic,
+and every rule written against it — folder claims, releasing, landing, *Stop
+all* — applies to a pass with nothing new bolted on.
+
+**It stops on four things, and the first is what the agent said.**
+
+| It stops when | Because |
+|---|---|
+| The last pass's agent replied `DONE` | The work is finished, which is the ending you want. Read from what the agent actually said, never from the run's status — `completed` is also what a run that merely used up its work-cycle limit is written as, and that limit defaults to 1, so a loop keyed on the status would stop after every first pass |
+| A pass did not complete | A loop is not a retry mechanism. Connection blips and provider refusals are already retried and waited out *inside* one run, so a fault that got past those is one the next pass would meet too |
+| The pass cap is reached | The number you agreed to when you saved the graph |
+| The spending limit across passes is reached | Optional; blank means the pass cap is the only bound |
+
+A pass that somehow started no run at all stops it too, with a reason — because
+the next one would be created the same way and fail the same way, one billed
+attempt at a time.
+
+There is deliberately **no shell predicate** — no "repeat until `npm test`
+exits 0". Running one would be a fifth kind of child process in a tool that has
+exactly four and treats adding one as a decision rather than a detail. Ask the
+agent to reply `DONE` when the tests pass; that is the same test, run by
+something that is already there.
+
+**The pass cap is required**, for the reason a run needs either a work-cycle
+limit or a time limit: a loop decides for itself whether to start another billed
+run, and without a number that only goes up there is nothing that has to end. A
+graph with a loop block and no cap cannot be saved.
+
+**Neither cap is a guard.** Every pass takes its budget, permission mode,
+work-cycle limit and isolation from the block's template — or from the
+untemplated guard set in Settings — exactly as every other kind of block does.
+The two numbers on a loop bound how many times it *repeats*; they can only ever
+end it earlier, they can never raise what a pass may spend, and the
+workflow-wide limits below still apply on top of them.
+
+**One branch, all the passes.** Pass 2 carries on pass 1's branch through the
+same mechanism a *carry on its branch* link uses, so the whole loop is one chain
+on one ref: one *Land* button, owned by the last pass, and one row in the
+branches table. A block set to start after a loop starts after its **last** pass
+and can carry that branch on. While a loop is still repeating, landing,
+deleting or purging its branch — and paying for a conflict resolution on it — is
+refused by name: the run that will commit to it next has not been created yet,
+so nothing else would notice.
+
+The next pass is created only once the previous one has settled, which means
+that between two passes there is briefly nothing running. That is intended: the
+exit conditions are facts about the pass that just ended, and a pass created
+before them would have to be withdrawn.
 
 ### Limits for the whole workflow
 
@@ -791,8 +860,9 @@ block, a task on every block, a template that exists, a workspace that is
 mounted and a folder that resolves inside it, a condition on every link, no
 block waiting for itself, no loop, no branch hand-over between blocks whose
 guards do not isolate — nor one touching an orchestrator block, which has no
-checkout and so no branch — and a fan-out cap on every orchestrator block. Every
-refusal names the block it is about.
+checkout and so no branch — a fan-out cap on every orchestrator block, and a
+pass cap on every loop block, whose guards must isolate for the same reason a
+hand-over's must. Every refusal names the block it is about.
 
 The workflow-wide limits are the one exception, and only in one direction: a
 fraction guard with no ceiling behind it saves fine and is refused at Run. A
@@ -808,9 +878,10 @@ That pass has no `await` in it, and that is a correctness requirement rather
 than a style: the folder claim that keeps two agents out of one directory is
 only atomic within one event-loop turn.
 
-A graph with an orchestrator block in it is created in stages instead, for the
-obvious reason: the blocks behind one cannot name runs that a model has not
-decided on yet. Those blocks are created when the decision arrives, and until
+A graph with an orchestrator or a loop block in it is created in stages instead,
+for the obvious reason: the blocks behind one cannot name runs that have not been
+decided on yet — however many a turn emits, or however many passes a loop turns
+out to take. Those blocks are created when the decision arrives, and until
 then they hold nothing at all — no folder, no checkout, no place in the queue —
 so they cost exactly as much as a `waiting` run does, which is nothing. The
 instance page lists them the whole time, so a block that is pending and a block
@@ -862,6 +933,7 @@ What each kind of block becomes:
 | still `waiting` | `blocked` | Nothing ran and nothing was spent, which is what that status says. Everything behind it gets its own reason naming the block in front of it |
 | deciding now | `failed` | Its child gets the same ladder. `failed` rather than `blocked` because that turn was billed, and the row carries what it cost |
 | waiting to decide | `blocked` | Nothing was spawned and nothing spent |
+| repeating now | `failed` | Its pass in flight is stopped like any other run, and no further pass is created. `failed` rather than `blocked` because the passes it took were billed |
 | already finished | untouched | Rewriting a completed block as stopped would destroy the record of work that landed |
 
 **The door is closed before anything is signalled.** The instance is marked
@@ -1838,6 +1910,48 @@ through before trusting this unattended:
   leaves no run created afterwards — the guarded UPDATEs are what should refuse
   a late emission, and a run appearing after the page says *stopped* is the
   failure this whole ordering exists to prevent.
+- **A loop block, end to end.** Nothing about it has been run. The pass decision
+  is unit tested — `planLoopPass` over the first pass, an unsettled pass, a pass
+  that completed without reporting done, `reported_done` (and its precedence
+  over the pass cap on the final pass), a body run that ended `failed`,
+  `stopped` or `blocked`, the pass cap including a cap of exactly 1, the spend
+  cap at and just under its limit and switched off, and a pass that produced no
+  runs at all — as is the scheduling around it: `planInstanceStep` over a loop's
+  first pass being asked for rather than created as a run, a `looping` block
+  holding everything behind it, the successor being created against the *last*
+  pass with the branch carried on, a last pass that did not qualify, a loop that
+  took no passes, and a first pass never being asked for twice.
+  `normalizeWorkflowInput` is tested over both caps, a missing or fractional or
+  oversized pass cap, a blank/zero/negative spend cap reading as off, both caps
+  staying null on the other two kinds, and a loop whose guards do not isolate.
+  `npm run typecheck` and `npm test` pass. Everything around them typechecks and
+  has never executed: no pass has been created, no branch has been carried from
+  one pass to the next, and no `looping` row has been read by `land.ts`. Same
+  sandbox limitation as the entries above, and Docker is unavailable here as
+  well. What a human should run, against a scratch `DATA_DIR`, `CLAUDE_HOME` and
+  workspace:
+
+  ```bash
+  docker compose up --build          # or: npm run dev, where the edge runtime works
+  # Save a workflow: one loop block over a git repo, 3 passes, a small
+  # spending limit, under an isolating template; then one ordinary block set to
+  # start after it, carrying on its branch. Give the loop a task that asks for
+  # DONE only when a multi-step job is finished. Press Run.
+  ```
+
+  Six things to watch, none of which the unit tests can see. That pass 2 is
+  created on the *same branch* as pass 1 and its first `git log` shows pass 1's
+  commits — the whole point of the chain, and the failure is silent because a
+  fresh branch also looks like a working run. That the run page for pass 2 shows
+  it continuing pass 1, and that admission never refuses a second run continuing
+  the same predecessor. That the branches page shows **one** row for the loop,
+  not one per pass, with one Land button. That Land, Delete and Purge are all
+  refused by name while the block still reads *repeating*, including in the
+  moment between two passes. That the loop stops on the `DONE` reply rather than
+  after the first pass — the reading that is wrong here is `completed`, and it
+  is wrong in the direction that looks like a working feature. And that *Stop
+  all* while a pass is in flight leaves no further pass created afterwards.
+
 - **Stopping a chat turn, in either of its two forms.** `staleTurn` is unit
   tested and the rest typechecks, but no real CLI child has been signalled by
   `cancelChatTurn` and no sweep has fired against a live row. Two things to
