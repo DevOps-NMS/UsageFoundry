@@ -9,6 +9,7 @@ import {
   instanceBudgetIsOff,
   normalizeInstanceBudget,
   normalizePolicy,
+  readWindowGuard,
 } from "./budget";
 import { pctField } from "./format";
 import type { UsageSnapshot, WindowState } from "./windows";
@@ -177,6 +178,32 @@ describe("normalizePolicy", () => {
   });
 });
 
+describe("readWindowGuard", () => {
+  it("reads a window sitting exactly on the guard as over it", () => {
+    // Not a corner case, the expected one: on a stock install `fraction` comes
+    // from the provider's own utilisation, which arrives as a whole-number
+    // percentage divided by 100, so an 80% guard is compared against a reading
+    // that lands on 0.8 exactly rather than near it. `>=`, so a window at the
+    // guard has reached it. This is the only implementation of that comparison,
+    // so it decides the run guard and the workflow guard together.
+    assert.deepEqual(readWindowGuard(window(0.8), 0.8), { state: "over", at: 0.8 });
+    assert.deepEqual(readWindowGuard(window(0.81), 0.8), { state: "over", at: 0.81 });
+    assert.deepEqual(readWindowGuard(window(0.79), 0.8), { state: "under", at: 0.79 });
+  });
+
+  it("answers no-ceiling off fraction, and reads guardFraction for the rest", () => {
+    // Two fields for two questions: whether there is a reading at all, and
+    // whether it is past the threshold. A window made of an unpriced model
+    // displays 0 and guards on the fallback rate, and it is the second figure
+    // the comparison above is made on.
+    assert.deepEqual(readWindowGuard(window(null), 0.8), { state: "no-ceiling" });
+    assert.deepEqual(readWindowGuard(splitWindow(0, 0.8, 100), 0.8), {
+      state: "over",
+      at: 0.8,
+    });
+  });
+});
+
 describe("evaluateBudget", () => {
   it("refuses a policy with no terminus, ahead of every other check", () => {
     const verdict = evaluateBudget(
@@ -273,6 +300,161 @@ describe("evaluateBudget", () => {
     const v = evaluateBudget(policy, snapshot(null, null), withEstimate, 0);
     assert.equal(v.allowed, false);
     assert.equal(v.allowed === false && v.code, "run_cost");
+  });
+
+  /*
+   * The four run guards at exactly their limit.
+   *
+   * Every case above tests comfortably over or comfortably under, which leaves
+   * each threshold free to move from "at or past" to "strictly past" with the
+   * suite still green. Each of these is `>=`, and a cap that only trips one unit
+   * past itself is a cap the operator did not set — `maxIterations` defaults to
+   * 1, so off by one there is every run in the app quietly doing two cycles
+   * while the run page still says 1/1.
+   */
+  it("stops at the last allowed work cycle, not one past it", () => {
+    const v = evaluateBudget(
+      { ...base, maxIterations: 2 },
+      snapshot(null, null),
+      { ...noProgress, iterations: 2 },
+      0,
+    );
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "iterations");
+
+    // One cycle short of the cap still runs, so the guard is on the boundary
+    // rather than simply always tripping.
+    assert.equal(
+      evaluateBudget(
+        { ...base, maxIterations: 2 },
+        snapshot(null, null),
+        { ...noProgress, iterations: 1 },
+        0,
+      ).allowed,
+      true,
+    );
+  });
+
+  it("stops at the time limit exactly, because the clock is a terminus", () => {
+    const policy = { ...base, maxDurationMinutes: 10 };
+    const v = evaluateBudget(
+      policy,
+      snapshot(null, null),
+      noProgress,
+      STARTED_AT + 10 * 60_000,
+    );
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "duration");
+
+    assert.equal(
+      evaluateBudget(policy, snapshot(null, null), noProgress, STARTED_AT + 9 * 60_000)
+        .allowed,
+      true,
+    );
+  });
+
+  it("stops at the run's spending limit exactly, not a cent past it", () => {
+    // The figure moves in whole `result`-event jumps, so "one cent past" is in
+    // practice a whole work cycle past.
+    const policy = { ...base, maxRunCostUSD: 5 };
+    const v = evaluateBudget(
+      policy,
+      snapshot(null, null),
+      { ...noProgress, spentUSD: 5 },
+      0,
+    );
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "run_cost");
+
+    assert.equal(
+      evaluateBudget(policy, snapshot(null, null), { ...noProgress, spentUSD: 4.99 }, 0)
+        .allowed,
+      true,
+    );
+  });
+
+  it("stops at the run's token limit exactly", () => {
+    const policy = { ...base, maxRunTokens: 50_000 };
+    const v = evaluateBudget(
+      policy,
+      snapshot(null, null),
+      { ...noProgress, spentTokens: 50_000 },
+      0,
+    );
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "run_tokens");
+
+    assert.equal(
+      evaluateBudget(
+        policy,
+        snapshot(null, null),
+        { ...noProgress, spentTokens: 49_999 },
+        0,
+      ).allowed,
+      true,
+    );
+  });
+
+  it("puts every configured limit on the budget card, and nothing else", () => {
+    // `BudgetVerdict.meters` is what the run page draws, and each meter is
+    // pushed behind its own condition — so nothing otherwise asserts that a
+    // limit the operator set appears on the card, or that one they did not stays
+    // off it. A whole-array deepEqual also pins the order the card is read in.
+    const v = evaluateBudget(
+      {
+        ...base,
+        maxIterations: 5,
+        maxRunCostUSD: 10,
+        maxRunTokens: 1_000,
+        maxWeeklyFraction: 0.8,
+        maxSessionFraction: 0.9,
+        maxDurationMinutes: 60,
+      },
+      snapshot(0.5, 0.25),
+      { ...noProgress, iterations: 2, spentUSD: 3, spentTokens: 400 },
+      STARTED_AT + 30 * 60_000,
+    );
+    assert.equal(v.allowed, true);
+    assert.deepEqual(v.meters, [
+      { label: "Work cycles used", value: 2, limit: 5, unit: "count" },
+      { label: "Spent on this run", value: 3, limit: 10, unit: "usd" },
+      { label: "Tokens used by this run", value: 400, limit: 1_000, unit: "tokens" },
+      // The window meters report `guardFraction`, the figure compared below
+      // them, so the card shows what the guard decided on.
+      { label: "Weekly window", value: 0.25, limit: 0.8, unit: "fraction" },
+      { label: "5-hour window", value: 0.5, limit: 0.9, unit: "fraction" },
+      { label: "Time elapsed", value: 30, limit: 60, unit: "minutes" },
+    ]);
+
+    // Nothing configured but the cycle cap: one meter, and no rows carrying a
+    // null limit for a guard that is switched off.
+    const one = evaluateBudget(
+      { ...base, maxIterations: 5 },
+      snapshot(null, null),
+      noProgress,
+      0,
+    );
+    assert.deepEqual(one.meters, [
+      { label: "Work cycles used", value: 0, limit: 5, unit: "count" },
+    ]);
+  });
+
+  it("omits a window meter when that window has no reading", () => {
+    // A guard the operator set against a window nothing can report is refused
+    // rather than metered: a meter with no value is a card that says a guard is
+    // active and shows nothing to judge it by.
+    const v = evaluateBudget(
+      { ...base, maxSessionFraction: 0.9, maxWeeklyFraction: 0.8 },
+      snapshot(null, null),
+      noProgress,
+      0,
+    );
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "no_ceiling");
+    assert.deepEqual(
+      v.meters.map((m) => m.label),
+      ["Work cycles used"],
+    );
   });
 
   it("omits the work-cycle meter when there is no cap", () => {
@@ -557,5 +739,31 @@ describe("evaluateInstanceBudget — the cap on everything one press of Run spen
       limit: 20,
       unit: "usd",
     });
+  });
+
+  it("puts every configured instance limit on the card, in order", () => {
+    // The same assertion the run card gets, for the same reason: each meter is
+    // pushed behind its own condition, and the instance page draws the result.
+    const all = evaluateInstanceBudget(
+      { maxInstanceCostUSD: 20, maxSessionFraction: 0.9, maxWeeklyFraction: 0.8 },
+      snapshot(0.5, 0.25),
+      settled(9),
+    );
+    assert.equal(all.allowed, true);
+    assert.deepEqual(all.meters, [
+      { label: "Spent by this workflow run", value: 9, limit: 20, unit: "usd" },
+      { label: "Weekly window", value: 0.25, limit: 0.8, unit: "fraction" },
+      { label: "5-hour window", value: 0.5, limit: 0.9, unit: "fraction" },
+    ]);
+
+    // A fraction guard with no reading behind it is refused, not metered — so
+    // the card never carries a window row with nothing in it.
+    const noReading = evaluateInstanceBudget(
+      { ...instanceBase, maxSessionFraction: 0.9, maxWeeklyFraction: 0.8 },
+      snapshot(null, null),
+      settled(0),
+    );
+    assert.equal(noReading.allowed, false);
+    assert.deepEqual(noReading.meters, []);
   });
 });

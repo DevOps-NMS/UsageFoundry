@@ -88,6 +88,40 @@ describe("derived 5-hour blocks", () => {
     assert.equal(blocks[1].endsAt, next + FIVE_HOURS_MS);
   });
 
+  // The tests above pin *where* a boundary lands. These pin which side of it an
+  // entry falls on, which is the half that can move silently: an entry landing
+  // exactly on a boundary is not a coincidence here but what a boundary is —
+  // the provider issues the reset instant itself and `anchorOf` derives the
+  // block start from it by subtraction, so it lands on the instant exactly.
+  it("opens the next block at an entry exactly five hours after this one", () => {
+    const first = Date.UTC(2026, 7, 10, 14, 47, 30);
+    const boundary = first + FIVE_HOURS_MS;
+    const blocks = buildSessionBlocks([entry(first), entry(boundary)], boundary + 1);
+    // The window is five hours long, so the entry at the fifth hour is the
+    // first one outside it. Kept in the old block it would extend that window,
+    // and because each block opens where the last one closed the error would
+    // carry down the rest of the chain.
+    assert.equal(blocks.length, 2);
+    assert.equal(blocks[0].endsAt, boundary);
+    assert.equal(blocks[0].agg.entryCount, 1);
+    assert.equal(blocks[1].startsAt, boundary);
+    assert.equal(blocks[1].agg.entryCount, 1);
+  });
+
+  it("closes a block at exactly its end instant", () => {
+    // `buildSnapshot` takes `blocks.find((b) => b.isActive)` as *the* session
+    // window and the guard reads its fraction, so a block still counted open at
+    // its own end instant is the guard measuring a window that has closed.
+    const first = Date.UTC(2026, 7, 10, 14, 47, 30);
+    const [closed] = buildSessionBlocks([entry(first)], first + FIVE_HOURS_MS);
+    assert.equal(closed.endsAt, first + FIVE_HOURS_MS);
+    assert.equal(closed.isActive, false);
+
+    // A millisecond earlier it is still the window being enforced.
+    const [open] = buildSessionBlocks([entry(first)], first + FIVE_HOURS_MS - 1);
+    assert.equal(open.isActive, true);
+  });
+
   it("reports the window a turn now would open when none is running", () => {
     const stale = now - 9 * HOUR;
     const snap = buildSnapshot([entry(stale)], NO_LIMITS, now);
@@ -163,6 +197,55 @@ describe("session reset override", () => {
     // override neither extends nor re-opens the window it named.
     assert.equal(snap.session.startsAt, later - 5 * 60_000);
     assert.equal(snap.session.costUSD, 1);
+  });
+
+  // The three boundaries the override itself turns on. Each is the `=` case of
+  // a comparison whose two readings are a whole window apart, and each renders
+  // as an ordinary meter either way.
+  it("puts a turn at the reset instant into the block the reset opens", () => {
+    // The split trigger. An entry landing exactly on the reset belongs to the
+    // window the reset opened, not to the one it ended — that is the whole of
+    // what the override does, and the provider's own instant is what a turn
+    // here lands on.
+    const blocks = buildSessionBlocks([entry(blockStart), entry(anchor)], now, resetAt);
+    assert.equal(blocks.length, 2);
+    assert.equal(blocks[0].startsAt, blockStart);
+    assert.equal(blocks[0].endsAt, anchor);
+    assert.equal(blocks[0].isActive, false);
+    assert.equal(blocks[0].agg.entryCount, 1);
+
+    // …and it starts that block at the reset rather than at itself, which is
+    // the same instant here — the block it opens expires with the provider's
+    // window rather than five hours after this turn.
+    assert.equal(blocks[1].startsAt, anchor);
+    assert.equal(blocks[1].endsAt, resetAt);
+    assert.equal(blocks[1].agg.entryCount, 1);
+  });
+
+  it("lets a turn at the end of the reset's own window open a fresh block", () => {
+    // The far edge of the override's reach. The window it opened runs from
+    // `anchor` to `resetAt`; a turn at `resetAt` is the first one past it, so
+    // it opens its own five hours rather than being folded back into a window
+    // that has just closed — which would report a window as fresh for five
+    // hours after the one it is actually spending against.
+    const blocks = buildSessionBlocks([entry(resetAt)], resetAt + 60_000, resetAt);
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].startsAt, resetAt);
+    assert.equal(blocks[0].endsAt, resetAt + FIVE_HOURS_MS);
+    assert.equal(blocks[0].isActive, true);
+  });
+
+  it("leaves a block that already ends at the reset its full five hours", () => {
+    // A block whose own window closes exactly where the reset falls. There is
+    // nothing to pull forward: it ran its five hours and ended at the reset,
+    // and it is closed either way.
+    const startsAt = anchor - FIVE_HOURS_MS;
+    const blocks = buildSessionBlocks([entry(startsAt)], now, resetAt);
+    assert.equal(blocks.length, 1);
+    assert.equal(blocks[0].startsAt, startsAt);
+    assert.equal(blocks[0].endsAt, anchor);
+    assert.equal(blocks[0].endsAt - blocks[0].startsAt, FIVE_HOURS_MS);
+    assert.equal(blocks[0].isActive, false);
   });
 
   it("leaves blocks that do not contain the reset alone", () => {
