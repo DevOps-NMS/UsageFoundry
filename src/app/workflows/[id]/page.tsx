@@ -421,8 +421,10 @@ export default function WorkflowPage() {
                     <Th scope="col" className="w-full">
                       Outcome
                     </Th>
+                    {/* Runs, not blocks: an orchestrator block's own runs are
+                        in here too, and they are not in the saved graph. */}
                     <Th scope="col" num className="w-[88px]">
-                      Blocks
+                      Runs
                     </Th>
                   </tr>
                 </thead>
@@ -445,7 +447,16 @@ export default function WorkflowPage() {
                           </>
                         )}
                         {inst.status === "started" && (
-                          <Badge tone="ok">started</Badge>
+                          <>
+                            <Badge tone="ok">started</Badge>{" "}
+                            {/* An instance with nothing live has finished in
+                                every sense the machinery has — there is no
+                                `completed` status to write, so the count is
+                                what says which of the two this is. */}
+                            {inst.liveRunCount > 0
+                              ? `${inst.liveRunCount} block(s) working`
+                              : "nothing still working"}
+                          </>
                         )}
                         {inst.status === "stopping" && (
                           <>
