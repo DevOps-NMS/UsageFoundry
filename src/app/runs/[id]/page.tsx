@@ -22,6 +22,7 @@ import { Field, Input, Textarea } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Log, LogLine, Spinner } from "@/components/ui/Log";
 import { describeEvent } from "@/lib/logLine";
+import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Notice } from "@/components/ui/Notice";
 import { RunDiff } from "@/components/RunDiff";
 import { RunLand } from "@/components/RunLand";
@@ -260,6 +261,10 @@ export default function RunDetail({
   const [connected, setConnected] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
   const [stopNote, setStopNote] = useState<string | null>(null);
+  // Held apart from `stopNote` rather than folded into it: that one renders in
+  // the accent tone as a statement about the run, and a press that may or may
+  // not have landed is neither.
+  const [actionError, setActionError] = useState<string | null>(null);
   // The reopen form. Held as strings because blank is meaningful — it is what
   // `normalizePolicy` reads as "no limit" — and a number input cannot hold it.
   const [reopenOpen, setReopenOpen] = useState(false);
@@ -432,15 +437,31 @@ export default function RunDetail({
     [events],
   );
 
+  /**
+   * Both of these read an *outcome* out of a 200 and say what it means, so a
+   * request that never got one must not fall through to that sentence: "This
+   * run is not active." is what the page says about a run that is over, and
+   * printing it because a 401 or a dropped connection came back tells the
+   * operator their agent has stopped while it goes on spending. `jsonRequest`
+   * is what puts that failure on its own branch — and in its own tone, because
+   * the accent note beside these buttons is the success voice.
+   */
   async function stop() {
-    const res = await fetch(`/api/runs/${id}`, { method: "DELETE" });
-    const json = (await res.json().catch(() => ({}))) as { outcome?: string };
+    setActionError(null);
+    const res = await jsonRequest<{ outcome?: string }>(`/api/runs/${id}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      setStopNote(null);
+      setActionError(actionFailureMessage(res, "Could not stop this run."));
+      return;
+    }
     // Between work cycles there is no child to signal, but the run still stops
     // at the next check — say so rather than leaving the button looking inert.
     setStopNote(
-      json.outcome === "signalled"
+      res.data.outcome === "signalled"
         ? "Stopping the current work cycle…"
-        : json.outcome === "cancelled"
+        : res.data.outcome === "cancelled"
           ? run?.status === "paused"
             ? "Stopped — it will not resume."
             : "Stopping — it will not start another work cycle."
@@ -449,14 +470,22 @@ export default function RunDetail({
   }
 
   async function tryNow() {
-    const res = await fetch(`/api/runs/${id}/resume`, { method: "POST" });
-    const json = (await res.json().catch(() => ({}))) as { outcome?: string };
+    setActionError(null);
+    const res = await jsonRequest<{ outcome?: string }>(
+      `/api/runs/${id}/resume`,
+      { method: "POST" },
+    );
+    if (!res.ok) {
+      setStopNote(null);
+      setActionError(actionFailureMessage(res, "Could not ask this run to try now."));
+      return;
+    }
     // Deliberately does not bypass the guard — it rejoins the queue and the
     // ordinary pre-cycle check decides. Asking early while the window is still
     // full parks it again, which is the honest outcome; a button that spends
     // past a limit the operator set would be worse than no button.
     setStopNote(
-      json.outcome === "requeued"
+      res.data.outcome === "requeued"
         ? "Trying now — if the 5-hour window is still too full it steps aside again."
         : "This run is not waiting.",
     );
@@ -471,6 +500,7 @@ export default function RunDetail({
     setReopenNote("");
     setReopenError(null);
     setStopNote(null);
+    setActionError(null);
     setReopenOpen(true);
   }
 
@@ -478,10 +508,13 @@ export default function RunDetail({
     if (!run) return;
     setReopenError(null);
     const asLimit = (v: string) => (v.trim() === "" ? null : Number(v));
-    const res = await fetch(`/api/runs/${id}/reopen`, {
+    // Same reason as `stop` above, one step further on: this one already
+    // checked `res.ok`, so a refusal was explained — but a rejected `fetch`
+    // escaped the `onClick` after `setReopenError(null)` had run, leaving the
+    // panel open with nothing said and the button looking inert.
+    const res = await jsonRequest(`/api/runs/${id}/reopen`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+      body: {
         // Everything not on this form carries over untouched — the window
         // percentages, the enforcement mode, and what happens after DONE.
         budget: {
@@ -491,11 +524,10 @@ export default function RunDetail({
           maxDurationMinutes: asLimit(reopenMinutes),
         },
         followUp: reopenNote,
-      }),
+      },
     });
-    const json = (await res.json().catch(() => ({}))) as { error?: string };
     if (!res.ok) {
-      setReopenError(json.error ?? "Could not pick this run up.");
+      setReopenError(actionFailureMessage(res, "Could not pick this run up."));
       return;
     }
     setReopenOpen(false);
@@ -656,6 +688,11 @@ export default function RunDetail({
             always in the DOM so a screen reader announces what arrives in it. */}
         <div aria-live="polite">
           {stopNote && <p className="mt-3 text-sm text-accent">{stopNote}</p>}
+          {actionError && (
+            <Notice tone="danger" className="mt-3">
+              {actionError}
+            </Notice>
+          )}
         </div>
 
         {/* The two figures that belong to the run itself: both come from what
