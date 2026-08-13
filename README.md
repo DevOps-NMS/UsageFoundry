@@ -778,10 +778,39 @@ such blocks is the parallel case** — there is no separate "parallel" concept t
 configure, and none in the interface. A block with two incoming links is a
 fan-in; it starts when both have settled.
 
-The editor is a list, and a block may only wait for blocks **above** it. That is
-not a restriction on the graph — every acyclic graph can be written that way —
-it is what makes a loop unwritable rather than something to be refused after the
-fact. Reordering a block above one it waits for drops that link, visibly.
+### Drawing one
+
+The editor is a canvas. Drag a block off the palette onto it, or press Enter on
+the palette to place one; drag from a block's *Link* handle onto another block
+to make the second start after the first, or press Enter on the handle and then
+Enter on the target. The link's own control on the canvas is where its condition
+is set, and it reads *needs a condition* until it has one — a drawn link is
+never quietly given a default. Delete or Backspace on that control removes the
+link. Everything a block holds is edited in the panel beside the canvas, which
+follows whatever is selected.
+
+Each of those three — add a block, link two, remove a link — has a keyboard
+route as well as a pointer one. Arrow keys move a selected block, Escape gets
+out of linking, and nothing on the canvas is reachable only by dragging.
+
+**A block's position is not part of the workflow.** It lives in this browser,
+keyed by workflow id, and the graph is untouched by a drag: moving a block two
+inches is not a change to what runs, and it does not bump the workflow's
+`updated_at` or show up in what an instance records. Where nobody has dragged
+anything the arrangement is derived from the edges themselves — layered left to
+right, everything that starts immediately in the first column — so a graph saved
+before the canvas existed opens readable, with no migration in front of it and
+therefore nothing that could lose a link on the way in. The cost is the obvious
+one: an arrangement you made by hand does not follow you to another browser, and
+that browser draws the derived one instead.
+
+While you draw, the editor asks the server the same question *Save* will:
+`normalizeWorkflowInput`, over `/api/workflows/validate`, with the answer shown
+in its own words rather than a generic "invalid graph". Nothing in the browser
+decides what a workflow may be — a second copy of those rules would be a second
+set to keep in step. *Save* stays pressable even while that check is refusing:
+the check is advisory and can itself be unreachable, and a check that could not
+run says so rather than reading as approval.
 
 ### What is refused, and when
 
@@ -1682,6 +1711,18 @@ Built and exercised against real transcripts:
   274b3840 succeeded (on-success); it ended failed"*, and its `on-finish`
   dependent started anyway and failed on its own — which is exactly what the two
   conditions are for. All five pages compiled and answered 200.
+- **The canvas's live check, against a dev server on a real workspace.**
+  `POST /api/workflows/validate` was driven through every refusal the canvas
+  exists to surface, and each came back as `normalizeWorkflowInput`'s own
+  sentence with a 200: no name, no blocks, a link with no condition (*"“B” needs
+  a condition for starting after “A”: on-success or on-finish."*), a loop
+  (*"…B → A → B."*), a template that has been deleted, a workspace that is not
+  mounted, a folder that does not resolve inside its mount, a block with no
+  task, and an orchestrator block with no fan-out cap. A two-block graph with an
+  `on-success` link answered `{"ok":true}`. `/workflows`, `/workflows/new`,
+  `/workflows/<id>` and `/workflows/<id>/edit` all answered 200, and the
+  canvas — the palette, the empty state and the selection panel — is in the
+  server-rendered HTML of `/workflows/new`.
 
 ### Not yet verified by hand
 
@@ -2039,15 +2080,24 @@ through before trusting this unattended:
   namespaced by the compose project, so without them this collides with an
   instance already running. Run it a second time with the two uid variables
   unset to confirm the 1000 default is unchanged.
-- **The workflow editor in a browser.** Every page it lives on compiled and
-  answered 200 in `next dev`, and the API underneath was driven end to end (see
-  *Verified*), but no browser has rendered the form: what is unconfirmed is the
-  interaction rather than the data. Three things to try first — moving a block
-  above one it waits for, which drops that link and should visibly do so;
-  turning on *Carry on its branch* for one link when another already has it,
-  which clears the other; and removing a block that later blocks depend on. All
-  three are refused or repaired again by the server, so the risk is a form that
-  disagrees with what gets saved, not a bad graph.
+- **The workflow canvas in a browser.** `/workflows`, `/workflows/new`,
+  `/workflows/<id>` and `/workflows/<id>/edit` each answered 200 in `next dev`
+  and the canvas is in the server-rendered markup; `/api/workflows/validate` was
+  driven by hand through every refusal it exists to surface (see *Verified*).
+  What no browser has done is *touch* it, and that is the whole of this feature:
+  the drag, the link gesture, the keyboard routes and the layout that is stored
+  per browser are all unexercised. Five things to try first — dragging a block
+  off the palette and dropping it; dragging from one block's *Link* handle onto
+  another; doing the same two with the keyboard only, which is the claim most
+  worth disproving; pressing Delete on a link's control; and reloading the page
+  to confirm the arrangement came back. Every graph the canvas can produce is
+  still checked by the same function *Save* checks it with, so the risk here is
+  a gesture that does not work, not a graph that should not have been saved.
+- **A workflow saved before the canvas, opened on it.** The layout for one is
+  derived rather than stored, and the derivation is unit-tested, but no
+  pre-canvas row has been opened in a browser and saved back. What to confirm is
+  that the links are all still there afterwards: nothing migrates the graph, so
+  they should be, and that is exactly the claim worth checking once.
 - **A workflow instantiated against the real CLI.** Every run in the *Verified*
   entry above came from a stub, deliberately: it is the loop, the folder claims,
   the dependency wiring and the branch hand-over that were being tested, and a
