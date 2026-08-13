@@ -3,6 +3,7 @@ import {
   dependenciesOf,
   describeFolder,
   getRun,
+  haltedWorkflowOf,
   isRunning,
   queuePosition,
   runEvents,
@@ -53,6 +54,9 @@ export async function GET(req: Request, ctx: Ctx) {
       relPath,
       dependsOn: dependenciesOf([id]).get(id) ?? [],
       queuePosition: run.status === "queued" ? queuePosition(id) : undefined,
+      // What `reopenRun` will refuse this run for, sent so the page can decline
+      // to offer the button rather than let the operator find out by pressing it.
+      haltedWorkflow: haltedWorkflowOf(id),
     },
     running: isRunning(id),
     // Reported alongside spent_usd, never merged into it. The two are

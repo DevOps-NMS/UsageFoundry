@@ -415,6 +415,16 @@ export interface RunDTO {
   spent_tokens_est?: number;
   /** Queued runs only: how many are ahead of it. 0 means next up. */
   queuePosition?: number;
+  /**
+   * The workflow run this one was halted with, or null for every other run —
+   * one started outside a workflow, or a member of an instance still going.
+   *
+   * On the DTO because the run page cannot work it out: a halted member is an
+   * ordinary `blocked` or `stopped` row, and the only difference is a join the
+   * page has no route for. `reopenRun` refuses one, so this is what keeps the
+   * page from offering a button whose whole answer is a refusal.
+   */
+  haltedWorkflow?: string | null;
 }
 
 /**
