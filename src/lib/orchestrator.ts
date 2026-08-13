@@ -1463,7 +1463,12 @@ async function emitHandoff(id: string, run: RunRow, workDir: string): Promise<vo
   const branch = run.worktree_branch ?? "";
   const base = run.worktree_base ?? "";
   const commits = (await git(workDir, ["log", "--oneline", `${base}..HEAD`])).stdout;
-  const leftover = (await git(workDir, ["status", "--porcelain"])).stdout;
+  // `trim: false` because the porcelain status carries meaning in its first two
+  // columns and trimming the stream eats the leading space off an unstaged
+  // record. Only this list's *length* reaches the page today, so nothing is
+  // visibly wrong — the flag is here because the payload holds the lines, and
+  // whoever renders them next should not have to rediscover this.
+  const leftover = (await git(workDir, ["status", "--porcelain"], { trim: false })).stdout;
 
   // "Could not tell" counts as dirty. A status that timed out or failed on a
   // stray index.lock would otherwise read as an empty stdout — i.e. clean — and
@@ -1480,7 +1485,7 @@ async function emitHandoff(id: string, run: RunRow, workDir: string): Promise<vo
       base,
       worktree: workDir,
       commits: commits ? commits.split("\n") : [],
-      uncommitted: leftover ? leftover.split("\n") : [],
+      uncommitted: leftover.split("\n").filter(Boolean),
       review: [`git log ${base}..${branch}`, `git diff ${base}...${branch}`],
       // Withheld rather than shown-and-caveated: a copyable command is going to
       // be copied.

@@ -479,14 +479,22 @@ async function worktreeDiff(run: RunRow): Promise<RunDiff> {
     return nothing("This run did not work in a git repository, so there is nothing to diff.");
   }
 
+  // `trim: false` because these lines are rendered verbatim: the porcelain
+  // format puts the status in the first two columns, so an unstaged edit reads
+  // `" M path"` and trimming the stream eats that space off the *first* record
+  // only — which both flips its meaning to staged and leaves it a column left
+  // of every row under it, in a list where alignment is the only thing
+  // separating the status from the path. The trailing newline it keeps is what
+  // `filter(Boolean)` is for.
   const status = await git(folder, ["status", "--porcelain"], {
     maxBytes: MAX_DIFF_BYTES,
+    trim: false,
   });
   if (!status.ok) {
     return nothing("Could not read the folder's git status.");
   }
 
-  const lines = status.stdout ? status.stdout.split("\n") : [];
+  const lines = status.stdout.split("\n").filter(Boolean);
   return {
     ...EMPTY,
     kind: "worktree",
@@ -503,8 +511,10 @@ async function worktreeDiff(run: RunRow): Promise<RunDiff> {
 async function uncommittedIn(run: RunRow): Promise<string[]> {
   const slot = run.worktree_path;
   if (!slot || !fs.existsSync(slot)) return [];
-  const st = await git(slot, ["status", "--porcelain"]);
-  return st.ok && st.stdout ? st.stdout.split("\n") : [];
+  // `trim: false` for the reason `worktreeDiff` states: these lines reach the
+  // page as they are, and the leading status column is part of what they say.
+  const st = await git(slot, ["status", "--porcelain"], { trim: false });
+  return st.ok ? st.stdout.split("\n").filter(Boolean) : [];
 }
 
 /**
