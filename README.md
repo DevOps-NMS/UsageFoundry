@@ -2046,6 +2046,21 @@ through before trusting this unattended:
   non-empty (the CLI's `result` field, read by `parseTurnOutput`), and that a
   block given a folder outside its workspace ends with both the refusal line and
   whatever the model said about giving up.
+
+  Eighth, and the same shape of gap one level on: that the runs a block started
+  are **watchable** from the instance page. They were always listed, mixed into
+  the graph's own blocks with a *started by* line; they now have their own table,
+  each row carrying the folder the model chose within the block's mount, when the
+  run started, and the cycle it has open — `fmtCycleInFlight`, without which a
+  run tens of minutes into its first cycle reads `0/1` and `$0.00`, which is what
+  a run that was marked running and never started reads. All of that typechecks
+  and no browser has rendered it. Three things to watch against a real fan-out:
+  that the folder line names the folder the run is actually in (an emitted run is
+  the one case where that is not derivable from the saved graph), that a run
+  working right now shows its cycle in flight and a finished one shows none, and
+  that the count under *Runs* on the workflow page moves as the block emits — it
+  is the number of runs the instance holds, which for a graph with an
+  orchestrator block in it is not the number of blocks.
 - **Stopping a chat turn, in either of its two forms.** `staleTurn` is unit
   tested and the rest typechecks, but no real CLI child has been signalled by
   `cancelChatTurn` and no sweep has fired against a live row. Two things to

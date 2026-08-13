@@ -15,6 +15,7 @@ import {
   createRun,
   currentSnapshot,
   dependencyCycle,
+  describeFolder,
   edgeSatisfied,
   getRun,
   probeIsolation,
@@ -4250,21 +4251,44 @@ export function reconcileBlocksOnBoot(): void {
   );
 }
 
-/** A run's live state for the instance view, or null when the row has gone. */
+/**
+ * A run's live state for the instance view, or null when the row has gone.
+ *
+ * `activeIteration` and `startedAt` are here for the reason `fmtCycleInFlight`
+ * exists: `iterations` counts cycles that *returned*, so a run tens of minutes
+ * into its first one reads `0/N` and `$0.00`, which is bit-for-bit what a run
+ * that was marked running and never started reads. On this page that matters
+ * more than on the runs list, because a run an orchestrator block started is one
+ * nobody clicked Create on and this is the only place it is listed against the
+ * decision that made it.
+ *
+ * The folder is split the same way `/api/runs` splits it — a run a block emitted
+ * took its folder from the model's own spec within the block's mount, so where
+ * it is working is not derivable from the graph the operator saved.
+ */
 export function runStateOf(runId: string): {
   status: RunStatus;
   stopReason: string | null;
   iterations: number;
   maxIterations: number;
+  activeIteration: number | null;
+  startedAt: number | null;
+  mountLabel: string | null;
+  relPath: string;
   spentUSD: number;
 } | null {
   const run = getRun(runId);
   if (!run) return null;
+  const { mountLabel, relPath } = describeFolder(run.folder);
   return {
     status: run.status,
     stopReason: run.stop_reason,
     iterations: run.iterations,
     maxIterations: run.max_iterations,
+    activeIteration: run.active_iteration,
+    startedAt: run.started_at,
+    mountLabel,
+    relPath,
     spentUSD: run.spent_usd,
   };
 }

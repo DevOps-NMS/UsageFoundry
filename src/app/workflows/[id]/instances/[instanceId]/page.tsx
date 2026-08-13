@@ -7,6 +7,7 @@ import type { WorkflowInstanceDTO } from "@/lib/apiTypes";
 import type { BadgeTone } from "@/lib/format";
 import {
   STATUS_TONE,
+  fmtCycleInFlight,
   fmtCycles,
   fmtDateTime,
   fmtPct,
@@ -68,6 +69,132 @@ const BLOCK_TONE: Record<BlockStatus, BadgeTone> = {
 };
 
 type BlockDTO = WorkflowInstanceDTO["blocks"][number];
+type NodeDTO = WorkflowInstanceDTO["nodes"][number];
+
+/** Where the run is working. Absolute when its mount has since been removed. */
+function folderLabel(run: NonNullable<NodeDTO["run"]>): string {
+  return run.mountLabel ? `${run.mountLabel} / ${run.relPath || "."}` : run.relPath;
+}
+
+/**
+ * The rows of a run table, for both of the tables on this page.
+ *
+ * Two tables rather than one because the runs a block decided on were started
+ * with nobody approving them, and separating them is the whole of what this
+ * page can say about that — but a run is a run, so there is one row and one
+ * header, and only the heading and the caption differ.
+ */
+function RunRows({
+  nodes,
+  nodeName,
+}: {
+  nodes: NodeDTO[];
+  nodeName: Map<string, string>;
+}) {
+  return (
+    <tbody>
+      {nodes.map((n) => {
+        const waits = n.waitsFor.map((from) => nodeName.get(from) ?? from);
+        // Reads the run's own `fmtCycleInFlight`, in that function's argument
+        // shape rather than a second copy of its rules: what counts as a cycle
+        // in flight is one definition, and the DTO here is simply camelCase.
+        const inFlight = n.run
+          ? fmtCycleInFlight({
+              status: n.run.status,
+              max_iterations: n.run.maxIterations,
+              active_iteration: n.run.activeIteration,
+            })
+          : null;
+        return (
+          <Tr key={n.nodeId}>
+            <Td className="align-top">
+              {n.run ? (
+                <Badge tone={STATUS_TONE[n.run.status]}>{n.run.status}</Badge>
+              ) : (
+                <Badge tone="neutral">gone</Badge>
+              )}
+            </Td>
+            <Td className="align-top">
+              <Link
+                href={`/runs/${n.runId}`}
+                className="block font-medium text-ink hover:text-accent"
+              >
+                {n.nodeName}
+              </Link>
+              <div className="mt-0.5 text-ink-muted">
+                {n.emittedBy
+                  ? `started by ${nodeName.get(n.emittedBy) ?? n.emittedBy}`
+                  : waits.length === 0
+                    ? "started immediately"
+                    : `after ${waits.join(", ")}`}
+              </div>
+              {n.run && (
+                // Under the name because a block a model wrote chose this
+                // folder itself, within the mount the operator fixed — it is
+                // not readable off the saved graph.
+                <div
+                  className="mono mt-0.5 max-w-[56ch] truncate text-ink-muted"
+                  title={folderLabel(n.run)}
+                >
+                  {folderLabel(n.run)}
+                </div>
+              )}
+              {inFlight && <div className="mt-0.5 text-accent">{inFlight}</div>}
+              {n.run?.stopReason && (
+                <div className="mt-0.5 max-w-[56ch] text-ink-muted">
+                  {n.run.stopReason}
+                </div>
+              )}
+              {!n.run && (
+                <div className="mt-0.5 text-ink-muted">
+                  The run row is no longer there.
+                </div>
+              )}
+            </Td>
+            <Td num className="whitespace-nowrap align-top text-ink-muted">
+              {n.run ? fmtCycles(n.run.iterations, n.run.maxIterations) : "—"}
+            </Td>
+            <Td num className="whitespace-nowrap align-top">
+              {n.run ? fmtUSD(n.run.spentUSD) : "—"}
+            </Td>
+            <Td num className="whitespace-nowrap align-top text-ink-muted">
+              {n.run?.startedAt ? fmtDateTime(n.run.startedAt) : "—"}
+            </Td>
+          </Tr>
+        );
+      })}
+    </tbody>
+  );
+}
+
+function RunTableHead() {
+  return (
+    <thead>
+      <tr>
+        <Th scope="col" className="w-[116px]">
+          Status
+        </Th>
+        <Th scope="col" className="w-full">
+          Run
+        </Th>
+        <Th
+          scope="col"
+          num
+          className="w-[104px]"
+          title="Work cycles that finished, against the run's cap"
+        >
+          Cycles
+        </Th>
+        <Th scope="col" num className="w-[96px]">
+          Spent
+        </Th>
+        <Th scope="col" num className="w-[128px]">
+          Started
+        </Th>
+      </tr>
+    </thead>
+  );
+}
 
 /**
  * The one line under a block's name.
@@ -186,6 +313,24 @@ export default function WorkflowInstancePage() {
     for (const n of instance?.nodes ?? []) map.set(n.nodeId, n.nodeName);
     for (const b of instance?.blocks ?? []) map.set(b.nodeId, b.nodeName);
     return map;
+  }, [instance]);
+
+  /**
+   * The graph's own runs, and the ones a block decided on.
+   *
+   * A boolean per node, so every run lands in exactly one table — a run missing
+   * from both would be an unattended agent this page has no other mention of.
+   * Emitted runs keep their `position` order, which is the order the block
+   * emitted them in.
+   */
+  const { savedRuns, emittedRuns } = useMemo(() => {
+    const savedRuns: NodeDTO[] = [];
+    const emittedRuns: NodeDTO[] = [];
+    for (const n of instance?.nodes ?? []) {
+      if (n.emittedBy) emittedRuns.push(n);
+      else savedRuns.push(n);
+    }
+    return { savedRuns, emittedRuns };
   }, [instance]);
 
   if (!loaded) {
@@ -458,11 +603,16 @@ export default function WorkflowInstancePage() {
         </>
       )}
 
+      {/* Whichever table holds the runs leads. A workflow that is one
+          orchestrator block has no saved-graph run at all, and an empty primary
+          card above the runs the operator came for is the wrong emphasis. */}
       <CardTitle className="mt-8">Blocks</CardTitle>
-      <Card emphasis="primary">
-        {instance.nodes.length === 0 ? (
+      <Card emphasis={savedRuns.length > 0 ? "primary" : "quiet"}>
+        {savedRuns.length === 0 ? (
           <Empty>
-            <div className="text-ink-muted">No runs were created.</div>
+            <div className="text-ink-muted">
+              No block of the saved graph became a run.
+            </div>
           </Empty>
         ) : (
           <TableWrap>
@@ -470,79 +620,39 @@ export default function WorkflowInstancePage() {
               <caption className="sr-only">
                 Each block of the workflow and the run it created
               </caption>
-              <thead>
-                <tr>
-                  <Th scope="col" className="w-[116px]">
-                    Status
-                  </Th>
-                  <Th scope="col" className="w-full">
-                    Block
-                  </Th>
-                  <Th scope="col" num className="w-[104px]">
-                    Cycles
-                  </Th>
-                  <Th scope="col" num className="w-[96px]">
-                    Spent
-                  </Th>
-                </tr>
-              </thead>
-              <tbody>
-                {instance.nodes.map((n) => {
-                  const waits = n.waitsFor.map(
-                    (from) => nodeName.get(from) ?? from,
-                  );
-                  return (
-                    <Tr key={n.nodeId}>
-                      <Td className="align-top">
-                        {n.run ? (
-                          <Badge tone={STATUS_TONE[n.run.status]}>
-                            {n.run.status}
-                          </Badge>
-                        ) : (
-                          <Badge tone="neutral">gone</Badge>
-                        )}
-                      </Td>
-                      <Td className="align-top">
-                        <Link
-                          href={`/runs/${n.runId}`}
-                          className="block font-medium text-ink hover:text-accent"
-                        >
-                          {n.nodeName}
-                        </Link>
-                        <div className="mt-0.5 text-ink-muted">
-                          {n.emittedBy
-                            ? `started by ${nodeName.get(n.emittedBy) ?? n.emittedBy}`
-                            : waits.length === 0
-                              ? "started immediately"
-                              : `after ${waits.join(", ")}`}
-                        </div>
-                        {n.run?.stopReason && (
-                          <div className="mt-0.5 max-w-[56ch] text-ink-muted">
-                            {n.run.stopReason}
-                          </div>
-                        )}
-                        {!n.run && (
-                          <div className="mt-0.5 text-ink-muted">
-                            The run row is no longer there.
-                          </div>
-                        )}
-                      </Td>
-                      <Td num className="whitespace-nowrap align-top text-ink-muted">
-                        {n.run
-                          ? fmtCycles(n.run.iterations, n.run.maxIterations)
-                          : "—"}
-                      </Td>
-                      <Td num className="whitespace-nowrap align-top">
-                        {n.run ? fmtUSD(n.run.spentUSD) : "—"}
-                      </Td>
-                    </Tr>
-                  );
-                })}
-              </tbody>
+              <RunTableHead />
+              <RunRows nodes={savedRuns} nodeName={nodeName} />
             </Table>
           </TableWrap>
         )}
       </Card>
+
+      {/* Only when there are any: a graph with no orchestrator block never
+          reaches this, and an empty section under that heading would suggest
+          one could have. */}
+      {emittedRuns.length > 0 && (
+        <>
+          <CardTitle className="mt-8">Runs a block started</CardTitle>
+          <Card emphasis={savedRuns.length > 0 ? "default" : "primary"}>
+            <TableWrap>
+              <Table>
+                <caption className="sr-only">
+                  Runs an orchestrator block decided on, and where each has got to
+                </caption>
+                <RunTableHead />
+                <RunRows nodes={emittedRuns} nodeName={nodeName} />
+              </Table>
+            </TableWrap>
+            {/* One line, and it leads with what is not already said a card
+                up: these count against the same limit and the same Stop. */}
+            <Hint>
+              Counted against this workflow&rsquo;s limit and ended by Stop all,
+              like every other block — started with no approval, under the
+              guards and fan-out cap the saved workflow fixed
+            </Hint>
+          </Card>
+        </>
+      )}
     </>
   );
 }

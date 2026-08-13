@@ -652,10 +652,21 @@ export interface WorkflowInstanceNodeDTO {
     stopReason: string | null;
     iterations: number;
     maxIterations: number;
+    /** The cycle open right now. See `fmtCycleInFlight` — never added to the count. */
+    activeIteration: number | null;
+    startedAt: number | null;
+    /** Null for a mount that has since been removed; `relPath` is then absolute. */
+    mountLabel: string | null;
+    relPath: string;
     spentUSD: number;
   } | null;
   /** Node ids this block was told to start after, from the instance's graph. */
   waitsFor: string[];
+  /**
+   * The orchestrator block that decided on this run, or null for a block of the
+   * saved graph. Nobody approved the runs this names — see the orchestrator
+   * block invariant — so the page lists them apart from the graph's own.
+   */
   emittedBy: string | null;
 }
 
