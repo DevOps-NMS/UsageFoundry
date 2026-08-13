@@ -1000,7 +1000,12 @@ or one thing stopped all of them.
 
 Stopping is terminal. There is no pause-and-resume for an instance: a stopped
 one cannot be un-stopped, and starting the workflow again is a fresh press of
-Run with fresh runs.
+Run with fresh runs. That holds one block at a time too — the run page of a
+halted block offers no *Try again* or *Resume*, and asking for one anyway is
+refused with the workflow's name. Picking one block back up would have it
+working, and spending, under an instance the page reads as stopped, where the
+workflow's own budget guard can no longer reach it; and reopening the *stopped*
+block in front of a chain would have woken the blocked ones behind it too.
 
 ### On a schedule
 
@@ -1962,15 +1967,21 @@ through before trusting this unattended:
   # one `queued` and one `waiting`, then press Stop all.
   ```
 
-  Four things to watch, none of which the unit test can see. That the signalled
+  Five things to watch, none of which the unit test can see. That the signalled
   child actually dies and its run lands `stopped` rather than `failed` — a
   SIGTERM'd child closes with a null code that reads as `-1`, and the `cancelled`
   check ahead of the exit-code test is what keeps a deliberate stop from being
   filed as a crash. That a killed cycle's spend arrives in `spent_usd_est` and
   not in `spent_usd`. That the block which was `waiting` reads `blocked` with a
   reason naming the workflow, and that nothing was promoted into `running` on the
-  way out. And that a stopped run's uncommitted work is still in its checkout
-  afterwards, offered by the run page's Commit under that run's own branch.
+  way out. That a stopped run's uncommitted work is still in its checkout
+  afterwards, offered by the run page's Commit under that run's own branch. And
+  that neither halted block can be restarted from its own run page: no *Try
+  again* on the one that was waiting, no *Resume* on the one that was stopped,
+  and `POST /api/runs/<id>/reopen` against either answers 400 naming the
+  workflow. That last one is unit tested against the database — `stopInstance`,
+  then `reopenRun` and `reviveBlockedDependents` — but the page's own gate is
+  only typechecked.
 - **A workflow-wide budget tripping against real spend.**
   `evaluateInstanceBudget` is unit tested over the cap unreached, reached
   exactly, reached only once a block's in-flight cycle is counted, reached on

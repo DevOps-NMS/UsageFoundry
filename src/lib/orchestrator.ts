@@ -2520,6 +2520,41 @@ export function blockWaitingRun(id: string, reason: string): boolean {
 }
 
 /**
+ * Runs belonging to a workflow run somebody halted, and the workflow's name.
+ *
+ * One condition rather than one per caller, because the two that read it — the
+ * refusal in `reopenRun` and the candidate set in `reviveBlockedDependents` —
+ * have to mean the same thing by "halted", or a run refused on its own page is
+ * woken anyway by reopening the run in front of it.
+ *
+ * `stopping` is the whole test, and covers a halt that has finished: `stopped`
+ * is derived at read time from whether any member is still live, so the stored
+ * row says `stopping` for the rest of its life (see `WorkflowInstanceStatus`).
+ * `failed` is deliberately not here — that instance was rolled back as it was
+ * created, no member of it ever ran, and nothing was halted.
+ */
+const HALTED_MEMBERS =
+  `SELECT w.run_id AS runId, i.workflow_name AS workflowName
+     FROM workflow_instance_runs w
+     JOIN workflow_instances i ON i.id = w.instance_id
+    WHERE i.status = 'stopping'`;
+
+/**
+ * The halted workflow this run was taken down with, or null for every other
+ * run — one started outside a workflow, or a member of an instance still going.
+ *
+ * Here rather than beside `guardedInstanceOf` in `workflows.ts`, which does the
+ * same join for the budget guard: that module already imports this one, and one
+ * indexed lookup is not worth a cycle between them.
+ */
+export function haltedWorkflowOf(runId: string): string | null {
+  const row = db()
+    .prepare(`SELECT workflowName FROM (${HALTED_MEMBERS}) WHERE runId = ?`)
+    .get(runId) as { workflowName: string } | undefined;
+  return row?.workflowName ?? null;
+}
+
+/**
  * Put every run blocked behind `roots` back to `waiting`, so the next release
  * pass decides it again on what is true now.
  *
@@ -2530,9 +2565,16 @@ export function blockWaitingRun(id: string, reason: string): boolean {
  * worst this can do is rewrite a stale reason, and the row never skips the
  * admission that plans its workspace.
  *
- * `work_dir IS NULL` is the whole safety condition and `revivableDependents`
- * says why: a run refused by its own guard is `blocked` with a checkout already
- * allocated, and must not be sent back through `admitWaiting`.
+ * `work_dir IS NULL` is one half of the safety condition and
+ * `revivableDependents` says why: a run refused by its own guard is `blocked`
+ * with a checkout already allocated, and must not be sent back through
+ * `admitWaiting`. Membership of a halted workflow is the other half, and it is
+ * here rather than in the pure function for the same reason the first one is —
+ * this is a fact about the row, not about the shape of the graph. `stopInstance`
+ * writes `blocked` onto exactly the members this would otherwise select, and a
+ * workflow run is halted whole: waking one member would put an agent back to
+ * work under an instance the page reports as stopped, where the instance budget
+ * guard — which acts only on a `started` instance — could no longer stop it.
  */
 export function reviveBlockedDependents(roots: readonly string[]): number {
   if (roots.length === 0) return 0;
@@ -2540,7 +2582,8 @@ export function reviveBlockedDependents(roots: readonly string[]): number {
   const candidates = (
     db()
       .prepare(
-        "SELECT id FROM runs WHERE status='blocked' AND work_dir IS NULL AND iterations = 0",
+        "SELECT id FROM runs WHERE status='blocked' AND work_dir IS NULL AND iterations = 0" +
+          ` AND id NOT IN (SELECT runId FROM (${HALTED_MEMBERS}))`,
       )
       .all() as Array<{ id: string }>
   ).map((r) => r.id);
@@ -4762,6 +4805,21 @@ export function reopenRun(
     return {
       ok: false,
       reason: `This run is ${run.status}, so there is nothing here to pick up.`,
+    };
+  }
+
+  // A member of a halted workflow is not picked up one run at a time. A halt is
+  // terminal for the whole instance by design — `stopInstance` has no resume —
+  // and the guard that bounds a workflow's spending acts only on an instance
+  // that is `started`, so a run restarted from here would work, and spend, under
+  // a workflow the instance page reports as stopped with nothing able to stop it
+  // again. Refused after the status gate rather than before it, so a member that
+  // was never pickable in the first place still gets the answer about itself.
+  const haltedWith = haltedWorkflowOf(id);
+  if (haltedWith) {
+    return {
+      ok: false,
+      reason: `This run was stopped with all of workflow “${haltedWith}”, and stopping a workflow run is final. Start that workflow again rather than picking one of its runs back up.`,
     };
   }
 
