@@ -35,6 +35,13 @@ fs.symlinkSync(path.join(ws, "nested"), nestedAlias);
 
 process.env.WORKSPACE_ROOTS = `Main=${ws}|Alias=${alias}|Nested=${ws}/nested|NestedAlias=${nestedAlias}`;
 process.env.DATA_DIR = path.join(tmp, "data");
+process.env.CLAUDE_HOME = path.join(tmp, "claude");
+// The reopen case below is the one test here that reaches the database, and
+// `reopenRun` ends in `promoteQueued`. Its fixture keeps the folder occupied so
+// nothing is promotable, and this is the second lock on the same door: a
+// `claude` that does not exist makes a regression that gets as far as a spawn a
+// failed test rather than a billed one.
+process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
 
 // `require`, not `import`: imports are hoisted above the environment setup
 // above, and the module reads WORKSPACE_ROOTS once at load.
@@ -46,6 +53,7 @@ const {
   releasableRuns,
   resolveIsolation,
   revivableDependents,
+  getRun,
   githubEnv,
   isTransientApiError,
   isUsageLimit,
@@ -54,16 +62,21 @@ const {
   permissionDenials,
   refusalResumeAt,
   reopenPrompt,
+  reopenRun,
   selectPromotable,
   MAX_PAUSES_PER_RUN,
   MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
 
 const { normalizePolicy } = require("./budget") as typeof import("./budget");
+const { db } = require("./db") as typeof import("./db");
 
 const clash = (a: string, b: string) => overlaps(conflictKey(a), conflictKey(b));
 
-after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+after(() => {
+  (globalThis as { __ufDb?: { close(): void } }).__ufDb?.close();
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
 
 describe("folder collision", () => {
   it("treats a folder as its own occupant", () => {
@@ -1197,5 +1210,112 @@ describe("permissionDenials", () => {
     for (const raw of [undefined, null, "nope", [], [{}], [{ tool_name: "" }]]) {
       assert.deepEqual(permissionDenials(raw), []);
     }
+  });
+});
+
+/**
+ * Covers which `blocked` rows `reopenRun` picks up, and what each becomes.
+ *
+ * `blocked` splits two ways and the split is silent: the dependency kind never
+ * reached a workspace and rejoins at `waiting`, where `admitWaiting` plans one;
+ * the guard kind was refused by its own budget *after* `ensureWorktree` had
+ * already given it a checkout, so it rejoins the queue. Refusing the second was
+ * exactly backwards — raising the limit is the fix for such a run, and taking a
+ * budget is why this function has the shape it does — and it left the operator
+ * retyping the prompt and the guards into the new-run form, with the run's
+ * branch orphaned in a slot a later run can take.
+ *
+ * The two ways of getting this wrong are the reason it is worth a test: sending
+ * the guard kind back to `waiting` allocates a second checkout slot on top of
+ * the first, and both readings typecheck and throw nothing. So the assertion is
+ * the status *and* `work_dir`, never just the `ok`.
+ *
+ * Unlike everything above it this one is not a pure function, and it earns the
+ * database on `haltedMembers.test.ts`'s terms: what it pins is a state
+ * transition, and `reopenRun` is where that transition is decided. The rows are
+ * inserted rather than built through `createRun`, which would drag in a git
+ * probe and a real spawn.
+ */
+describe("picking up a blocked run", () => {
+  /** Room for the reopen, so nothing but the status gate can be what refuses. */
+  const RAISED: Partial<BudgetPolicy> = {
+    maxIterations: 5,
+    maxDurationMinutes: 60,
+  };
+  const BUDGET_BLOB = '{"maxIterations":1,"permissionMode":"acceptEdits"}';
+  let seq = 0;
+
+  function insertRun(fields: {
+    status: string;
+    workDir: string | null;
+    folder?: string;
+  }): string {
+    const id = `reopen-${++seq}`;
+    db()
+      .prepare(
+        `INSERT INTO runs (id, folder, prompt, status, budget, max_iterations,
+                           iterations, created_at, finished_at, stop_reason, work_dir)
+         VALUES (?, ?, 'do the thing', ?, ?, 1, 0, ?, ?, 'refused', ?)`,
+      )
+      .run(
+        id,
+        fields.folder ?? `${ws}/RepoOne`,
+        fields.status,
+        BUDGET_BLOB,
+        Date.now() + seq,
+        Date.now() + seq,
+        fields.workDir,
+      );
+    return id;
+  }
+
+  it("re-queues one its own guard refused, keeping the workspace it has", () => {
+    // What `startRun` writes when the pre-cycle guard refuses cycle 1: blocked,
+    // nothing spent, and a `work_dir` because `ensureWorktree` ran before it.
+    const refused = insertRun({ status: "blocked", workDir: `${ws}/RepoOne` });
+    // A run already in that folder, so `promoteQueued` at the end of the reopen
+    // has nothing to start. The subject here is the row, not the spawn.
+    insertRun({ status: "running", workDir: `${ws}/RepoOne` });
+
+    const outcome = reopenRun(refused, RAISED);
+
+    assert.equal(
+      outcome.ok,
+      true,
+      outcome.ok ? "" : `refused: ${outcome.reason}`,
+    );
+    const row = getRun(refused)!;
+    assert.equal(row.status, "queued", "it has a workspace, so it joins the queue");
+    assert.equal(
+      row.work_dir,
+      `${ws}/RepoOne`,
+      "the workspace it was refused with must survive — re-planning one through " +
+        "`admitWaiting` would allocate a second checkout slot and orphan the first",
+    );
+    assert.equal(row.max_iterations, 5, "the raised budget is what it carries back");
+    assert.equal(row.stop_reason, null);
+    assert.equal(row.finished_at, null);
+  });
+
+  it("still sends one blocked behind a dependency back to waiting", () => {
+    // The other half of the split, and the control: this row never reached a
+    // workspace, so it must not be queued with a null `work_dir`.
+    const dependency = insertRun({ status: "stopped", workDir: `${ws}/Other` });
+    const dependent = insertRun({ status: "blocked", workDir: null });
+    db()
+      .prepare(
+        "INSERT INTO run_deps (run_id, depends_on, edge, continue_branch, created_at)" +
+          " VALUES (?, ?, 'on-success', 0, ?)",
+      )
+      .run(dependent, dependency, Date.now());
+
+    assert.equal(reopenRun(dependent, RAISED).ok, true);
+
+    // Asked again and re-blocked inside the same call, because the run in front
+    // of it is still terminal having run no cycle. What matters is that it went
+    // through the admission that plans a workspace rather than round it.
+    const row = getRun(dependent)!;
+    assert.notEqual(row.status, "queued");
+    assert.equal(row.work_dir, null);
   });
 });
