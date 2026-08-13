@@ -680,6 +680,24 @@ export interface WorkflowInstanceBlockDTO {
   costUSD: number;
   /** How many runs this block started. 0 is a real answer, not "not yet". */
   emitted: number;
+  /**
+   * Whether the turn ever called `emit_runs`. The two ways a block starts
+   * nothing read alike without it: one decided there was nothing worth doing,
+   * the other never reached a decision.
+   */
+  decided: boolean;
+  /**
+   * What the turn replied, verbatim — the block's own account of what it
+   * emitted and what it left out. Null on a turn that failed or said nothing.
+   */
+  reply: string | null;
+  /**
+   * What this app recorded about the turn: an `emit_runs` it refused, a tool
+   * call the CLI declined, an instance guard it could not read. Separate from
+   * `reply` because one is the model's voice and one is ours, and separate from
+   * `error` because neither is the turn failing.
+   */
+  notes: string[];
   /** Branches a merge block put onto their target. 0 on every other kind. */
   branchesLanded: number;
   /**

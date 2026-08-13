@@ -13,6 +13,7 @@ import {
   fmtUSD,
   pollFailureMessage,
 } from "@/lib/format";
+import { Markdown } from "@/components/Markdown";
 import { Meter } from "@/components/Meter";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
@@ -65,6 +66,39 @@ const BLOCK_TONE: Record<BlockStatus, BadgeTone> = {
   failed: "danger",
   blocked: "neutral",
 };
+
+type BlockDTO = WorkflowInstanceDTO["blocks"][number];
+
+/**
+ * The one line under a block's name.
+ *
+ * A deciding block that started nothing is what this exists to separate. Zero
+ * runs is three different endings — it called emit_runs and named nothing, it
+ * never called it, or it failed before it got there — and all three stop the
+ * branch of the graph behind them, so "which of the three" is the operator's
+ * whole question. The block's own reply sits under this and answers *why*;
+ * this says *what*.
+ */
+function blockSummary(b: BlockDTO, waits: string[]): string {
+  const ran = b.status === "emitted" || b.status === "failed";
+  if (b.kind === "merge") {
+    const branches = b.branchesLanded + b.branchesFailed;
+    if (branches > 0) return `landed ${b.branchesLanded} of ${branches} branch(es)`;
+    // Only for a merge that finished: one that failed with nothing queued has
+    // not established that there was nothing to land, and its error says more.
+    if (b.status === "emitted") return "no branches to land";
+  } else if (ran) {
+    if (b.emitted > 0) return `started ${b.emitted} run(s)`;
+    if (b.kind === "orchestrator") {
+      if (b.decided) return "decided there was nothing to start";
+      return b.status === "failed"
+        ? "failed without emitting anything"
+        : "ended without emitting anything";
+    }
+  }
+  if (b.kind === "run" && b.status !== "waiting") return "never started";
+  return waits.length === 0 ? "decides immediately" : `after ${waits.join(", ")}`;
+}
 
 /**
  * One press of Run: every block, and what became of the run it created.
@@ -372,22 +406,24 @@ export default function WorkflowInstancePage() {
                         <Td className="align-top">
                           <div className="font-medium text-ink">{b.nodeName}</div>
                           <div className="mt-0.5 text-ink-muted">
-                            {b.kind === "merge" &&
-                            b.branchesLanded + b.branchesFailed > 0
-                              ? `landed ${b.branchesLanded} of ${
-                                  b.branchesLanded + b.branchesFailed
-                                } branch(es)`
-                              : b.status === "emitted"
-                                ? `started ${b.emitted} run(s)`
-                                : b.kind === "run" && b.status !== "waiting"
-                                  ? "never started"
-                                  : waits.length === 0
-                                    ? "decides immediately"
-                                    : `after ${waits.join(", ")}`}
+                            {blockSummary(b, waits)}
                           </div>
                           {b.error && (
                             <div className="mt-0.5 max-w-[56ch] text-ink-muted">
                               {b.error}
+                            </div>
+                          )}
+                          {/* This app's account before the block's own, because
+                              a refused emission explains a reply that says it
+                              gave up, and the reply read first does not. */}
+                          {b.notes.map((note, i) => (
+                            <div key={i} className="mt-0.5 max-w-[56ch] text-warn">
+                              {note}
+                            </div>
+                          ))}
+                          {b.reply && (
+                            <div className="mt-2 max-w-[80ch] rounded-sm border-l-[3px] border-line-strong bg-inset px-3 py-2">
+                              <Markdown text={b.reply} />
                             </div>
                           )}
                         </Td>

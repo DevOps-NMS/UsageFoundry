@@ -713,6 +713,24 @@ function migrate(db: Database.Database) {
   // keep in step. A plain column for `emitted_by`'s reason: it must keep reading
   // true after the batch has been pruned.
   addColumn(db, "workflow_instance_blocks", "merge_batch_id", "TEXT");
+
+  // What an orchestrator turn said, and what this app refused it — the two
+  // halves of "why did this block start nothing", neither of which was recorded
+  // anywhere.
+  //
+  // The turn's own system prompt asks it to reply with what it emitted and what
+  // it deliberately left out, and that reply was read off stdout and dropped on
+  // the floor: a block that spent money and started no runs left a row saying
+  // `emitted`, zero runs, no error and no sentence, which is bit-for-bit what a
+  // block that decided there was nothing to do leaves. `reply` is the model's
+  // own voice, verbatim; `notes` is this app's — an emit_runs call it refused,
+  // a tool call the CLI declined, an instance guard it could not read. Kept
+  // apart on purpose, and apart from `error`, which means the turn *failed*:
+  // "it said there was nothing worth doing" and "it tried and we said no" are
+  // different answers to the operator's question and only one of them is about
+  // the model.
+  addColumn(db, "workflow_instance_blocks", "reply", "TEXT");
+  addColumn(db, "workflow_instance_blocks", "notes", "TEXT");
 }
 
 /**

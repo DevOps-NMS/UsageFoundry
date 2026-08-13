@@ -1728,6 +1728,16 @@ export interface WorkflowInstanceBlock {
   tokens: number;
   /** How many runs it started. 0 is an answer, not "not yet". */
   emitted: number;
+  /**
+   * Whether the turn ever called `emit_runs`. What separates the two ways a
+   * block starts nothing: one decided there was nothing worth doing, the other
+   * never got as far as deciding. Both read `emitted: 0`.
+   */
+  decided: boolean;
+  /** What the turn replied, verbatim. Null on a turn that failed or said nothing. */
+  reply: string | null;
+  /** This app's own record of the turn — a refusal, a denial. Never the model's. */
+  notes: string[];
   /** Branches a merge block put onto their target. 0 on every other kind. */
   branchesLanded: number;
   /**
@@ -1896,7 +1906,7 @@ export function blocksOf(instanceId: string): WorkflowInstanceBlock[] {
       `SELECT node_id AS nodeId, node_name AS nodeName, position, kind, status,
               started_at AS startedAt, finished_at AS finishedAt,
               cost_usd AS costUSD, tokens, emitted_specs AS specs, error,
-              merge_batch_id AS batchId,
+              merge_batch_id AS batchId, reply, notes,
               -- Read back off the queue's own rows rather than counted into the
               -- block as it went: those rows carry git's answer for each branch,
               -- and a copy on the block would be a second thing to keep in step
@@ -1911,20 +1921,31 @@ export function blocksOf(instanceId: string): WorkflowInstanceBlock[] {
         WHERE instance_id = ? ORDER BY position`,
     )
     .all(instanceId) as Array<
-    Omit<WorkflowInstanceBlock, "emitted"> & {
+    Omit<WorkflowInstanceBlock, "emitted" | "decided" | "notes"> & {
       specs: string | null;
       batchId: string | null;
+      notes: string | null;
     }
   >;
-  return rows.map(({ specs, batchId, ...row }) => ({
+  return rows.map(({ specs, batchId, notes, ...row }) => ({
     ...row,
     emitted: parseSpecs(specs).length,
+    // The column itself, not its contents: `[]` is a turn that called the tool
+    // and named nothing, which is a decision, and null is a turn that never
+    // reached one.
+    decided: specs !== null,
+    notes: splitNotes(notes),
     // A block with no batch has no branches either way, and the correlated
     // counts above answer 0 for it — but only because `merge_batch_id` is null
     // and nothing matches. Stated rather than relied on.
     branchesLanded: batchId ? row.branchesLanded : 0,
     branchesFailed: batchId ? row.branchesFailed : 0,
   }));
+}
+
+/** Stored notes as lines. One per fact, in the order they happened. */
+function splitNotes(raw: string | null): string[] {
+  return raw ? raw.split("\n").filter((line) => line.trim() !== "") : [];
 }
 
 /** Stored specs as a list. Unreadable and absent both read as "emitted none". */
@@ -3079,6 +3100,7 @@ interface BlockRow {
   cost_usd: number;
   emitted_specs: string | null;
   error: string | null;
+  notes: string | null;
 }
 
 function getBlock(instanceId: string, nodeId: string): BlockRow | null {
@@ -3089,6 +3111,25 @@ function getBlock(instanceId: string, nodeId: string): BlockRow | null {
       )
       .get(instanceId, nodeId) as BlockRow | undefined) ?? null
   );
+}
+
+/**
+ * Add one line to what this app recorded about a turn.
+ *
+ * Appended rather than set, because these arrive one at a time from three places
+ * across the life of a turn — the guard before it spawns, each `emit_runs` this
+ * app refuses while it runs, `settleBlock` when it ends — and the operator is
+ * reading them to find out why nothing started. A note that overwrote the last
+ * one would answer that question with whichever refusal happened to be last.
+ */
+function noteBlock(instanceId: string, nodeId: string, line: string): void {
+  db()
+    .prepare(
+      "UPDATE workflow_instance_blocks" +
+        " SET notes = TRIM(COALESCE(notes || char(10), '') || ?)" +
+        " WHERE instance_id=? AND node_id=?",
+    )
+    .run(line, instanceId, nodeId);
 }
 
 /**
@@ -3335,7 +3376,8 @@ function claimBlock(instanceId: string, nodeId: string): boolean {
   return (
     db()
       .prepare(
-        "UPDATE workflow_instance_blocks SET status='thinking', started_at=?, error=NULL" +
+        "UPDATE workflow_instance_blocks SET status='thinking', started_at=?," +
+          " error=NULL, reply=NULL, notes=NULL" +
           " WHERE instance_id=? AND node_id=? AND status='waiting'",
       )
       .run(Date.now(), instanceId, nodeId).changes === 1
@@ -3383,16 +3425,16 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
     // install means the provider's percentage was not readable this minute, and
     // halting every fraction-guarded workflow over an unreachable host is worse
     // than the guard being unenforceable for one block boundary.
-    db()
-      .prepare(
-        "UPDATE workflow_instance_blocks SET error = TRIM(COALESCE(error, '') || ' ' || ?)" +
-          " WHERE instance_id=? AND node_id=?",
-      )
-      .run(
-        `Its workflow has a limit that could not be read here: ${guard.verdict.reason}`,
-        instanceId,
-        nodeId,
-      );
+    //
+    // A note rather than an error, because it is neither the turn failing nor
+    // anything the turn said — and because `error` is what `settleBlock` writes
+    // when the turn ends, which is where this used to go and where it was wiped
+    // by every turn that did not itself fail.
+    noteBlock(
+      instanceId,
+      nodeId,
+      `Its workflow has a limit that could not be read here: ${guard.verdict.reason}`,
+    );
   }
 
   // Re-read after the awaits: a halt may have closed the door while the
@@ -3445,16 +3487,75 @@ function safeFolder(node: WorkflowNode): string | undefined {
   }
 }
 
+/** What one settled orchestrator turn leaves on its row. */
+export interface BlockSettlement {
+  status: Extract<BlockStatus, "emitted" | "failed">;
+  /** The model's own words. */
+  reply: string | null;
+  /** This app's, one per line. */
+  notes: string[];
+  /** Set only when the turn itself failed. */
+  error: string | null;
+}
+
 /**
- * Record what a turn cost, then start what it asked for.
+ * What a finished turn is recorded as.
  *
- * The emission is honoured even when the turn itself came back `failed`: the
- * specs were accepted by `emit_runs` while the child was alive, which is a
- * decision it made deliberately, and a CLI that errored on its way out afterwards
- * says nothing about them. The one thing that does withdraw them is the
- * instance no longer being `started` — a halt closed the door, and a block that
- * started runs into a stopping workflow is the member the halt would then have
- * to chase.
+ * Pure and unit-tested because every way of being wrong here is silent, and the
+ * one this app shipped with was the worst of them: the turn's reply was read off
+ * stdout, handed to this function's caller and dropped. A block that spent money
+ * and started nothing left `emitted`, zero runs and no sentence — identical, on
+ * the page, to a block that decided there was nothing to do, and identical again
+ * to one whose every `emit_runs` call this app refused. All three end the branch
+ * of the graph behind them, and only one of them is the model's fault.
+ *
+ * So the three voices stay three fields. `reply` is what the turn said, which is
+ * the answer to "why did it start nothing" whenever the turn had a reason;
+ * `notes` is what this app did to it, which is the answer whenever it did not;
+ * `error` is the turn failing, which is neither. Folding any two together loses
+ * exactly the distinction the operator is reading for.
+ *
+ * `failed` is reserved for a turn that failed **and** emitted nothing: specs
+ * accepted while the child was alive are a decision it took deliberately, and a
+ * CLI that errored on its way out afterwards says nothing about them — but a
+ * block recorded `failed` blocks what is behind it, so a turn whose runs are
+ * about to start must not be.
+ */
+export function blockSettlement(
+  result: TurnResult,
+  emitted: number,
+  priorNotes: readonly string[],
+): BlockSettlement {
+  const notes = [...priorNotes];
+
+  // The chat surfaces these for the reason a block needs them more: it runs
+  // with no allowlist, so a denial is the CLI declining on its own — and "I was
+  // not allowed to look" reads exactly like "there was nothing to find" to
+  // someone reading a block that emitted nothing.
+  const denied = [...new Set(result.denials ?? [])];
+  if (denied.length > 0) {
+    notes.push(
+      `The CLI declined these tool calls: ${denied.join(", ")}. Nothing here ` +
+        "restricts its tools, so that was its own decision.",
+    );
+  }
+
+  return {
+    status: result.status === "failed" && emitted === 0 ? "failed" : "emitted",
+    reply: result.text?.trim() || null,
+    notes,
+    error: result.error ?? null,
+  };
+}
+
+/**
+ * Record what a turn said and cost, then start what it asked for.
+ *
+ * The emission is honoured even when the turn itself came back `failed` — see
+ * `blockSettlement`, which decides that. The one thing that does withdraw the
+ * specs is the instance no longer being `started`: a halt closed the door, and a
+ * block that started runs into a stopping workflow is the member the halt would
+ * then have to chase.
  *
  * Latched on `status='thinking'`, so a settle arriving after a halt already
  * wrote the block off changes nothing — the same shape `finishTurn` uses on a
@@ -3466,20 +3567,29 @@ function settleBlock(
   nodeId: string,
   result: TurnResult,
 ): void {
-  const specs = parseSpecs(getBlock(instanceId, nodeId)?.emitted_specs ?? null);
+  const row = getBlock(instanceId, nodeId);
+  const specs = parseSpecs(row?.emitted_specs ?? null);
+  // Read back and written whole rather than left alone, because everything
+  // recorded during the turn lives in this column: a refused emission, and the
+  // guard `startBlockTurn` could not read. This used to write `error` flat,
+  // which wiped that guard note on every turn that did not itself fail.
+  const settlement = blockSettlement(result, specs.length, splitNotes(row?.notes ?? null));
   const settled =
     db()
       .prepare(
         `UPDATE workflow_instance_blocks
             SET status=?, finished_at=?, error=?, session_id=COALESCE(?, session_id),
+                reply=?, notes=?,
                 cost_usd = cost_usd + ?, tokens = tokens + ?
           WHERE instance_id=? AND node_id=? AND status='thinking'`,
       )
       .run(
-        result.status === "failed" && specs.length === 0 ? "failed" : "emitted",
+        settlement.status,
         Date.now(),
-        result.error ?? null,
+        settlement.error,
         result.sessionId ?? null,
+        settlement.reply,
+        settlement.notes.join("\n") || null,
         result.costUSD ?? 0,
         result.tokens ?? 0,
         instanceId,
@@ -3968,6 +4078,11 @@ export function emitBlockRuns(
     return { ok: false, reason: "This block's turn has already ended." };
   }
   if (block.emitted_specs !== null) {
+    noteBlock(
+      instanceId,
+      nodeId,
+      "It called emit_runs a second time and was refused — a block emits once.",
+    );
     return {
       ok: false,
       reason:
@@ -3992,7 +4107,16 @@ export function emitBlockRuns(
       }
     },
   });
-  if (!plan.ok) return { ok: false, reason: plan.reason };
+  if (!plan.ok) {
+    // The one refusal that most needs recording. Everything above is a turn
+    // arriving too late or twice; this is a turn that decided what to run and
+    // had it rejected — a fan-out over the cap, a folder outside the block's
+    // mount, a loop among the specs. The model is told why and may well give up
+    // without saying so, and then this is the only trace that it ever meant to
+    // start anything at all.
+    noteBlock(instanceId, nodeId, `It tried to emit runs and was refused: ${plan.reason}`);
+    return { ok: false, reason: plan.reason };
+  }
 
   // Guarded on `thinking` again: the halt between the read above and here would
   // otherwise have its written-off block quietly re-armed with an emission.

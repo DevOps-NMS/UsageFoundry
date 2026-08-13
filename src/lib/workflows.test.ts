@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
+  blockSettlement,
   haltPlan,
   mergeBlockOutcome,
   normalizeWorkflowInput,
@@ -20,6 +21,7 @@ import {
   type WorkflowKnowledge,
 } from "./workflows";
 import type { RunStatus } from "./orchestrator";
+import type { TurnResult } from "./chat";
 
 /**
  * The three decisions a workflow makes with nothing spawned yet: whether the
@@ -1180,6 +1182,86 @@ describe("planEmission — which specs become runs", () => {
       refused([spec("a", { dependsOn: [{ id: "a", edge: "on-finish" }] })]),
       /start after itself|loop/,
     );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* What a finished turn leaves behind                                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The evidence a deciding block leaves, which is the only thing standing
+ * between the operator and a graph that ended for no visible reason.
+ *
+ * Every failure here is silent and each one costs the same thing: an
+ * orchestrator block that starts nothing stops every block behind it, so a row
+ * saying `emitted`, zero runs and nothing else is a whole workflow that ran,
+ * billed, and ended with no account of why. Three different endings arrive at
+ * that row — the turn said there was nothing worth doing, this app refused the
+ * runs it asked for, or the turn failed — and telling them apart is the whole
+ * job of the three fields this returns. Dropping the reply, folding a refusal
+ * into the failure, or recording `failed` on a turn whose runs are about to
+ * start all typecheck and all look identical on the page.
+ */
+describe("blockSettlement — what a finished turn is recorded as", () => {
+  const settled = (result: TurnResult, emitted = 0, notes: string[] = []) =>
+    blockSettlement(result, emitted, notes);
+
+  it("keeps the turn's reply, which is its account of what it did not start", () => {
+    const out = settled({ status: "idle", text: "Nothing to do: the tests pass." });
+    assert.equal(out.status, "emitted");
+    assert.equal(out.reply, "Nothing to do: the tests pass.");
+    assert.equal(out.error, null);
+  });
+
+  it("has no reply for a turn that said nothing", () => {
+    // Null rather than "", so the page can leave the panel out entirely instead
+    // of drawing an empty one that reads as an answer.
+    assert.equal(settled({ status: "idle", text: "   " }).reply, null);
+    assert.equal(settled({ status: "idle" }).reply, null);
+  });
+
+  it("records a failed turn as failed, with the failure and no reply", () => {
+    // `parseTurnOutput` puts the text in `error` when the turn failed, so a
+    // reply here would be the same sentence twice under two different headings.
+    const out = settled({ status: "failed", error: "The CLI exited 1." });
+    assert.equal(out.status, "failed");
+    assert.equal(out.error, "The CLI exited 1.");
+    assert.equal(out.reply, null);
+  });
+
+  it("does not record a failed turn that emitted as failed", () => {
+    // The specs were accepted while the child was alive and are about to become
+    // runs. `failed` blocks every node behind this one, which would strand the
+    // very runs this turn started.
+    const out = settled({ status: "failed", error: "It exited 1 afterwards." }, 2);
+    assert.equal(out.status, "emitted");
+    assert.equal(out.error, "It exited 1 afterwards.", "the failure is still recorded");
+  });
+
+  it("carries forward what was recorded while the turn was running", () => {
+    // The refusals and the unreadable guard are written to the row as they
+    // happen, and this write used to replace them with the turn's own error —
+    // which is null on a turn that succeeded, so they vanished.
+    const out = settled({ status: "idle", text: "I gave up." }, 0, [
+      "It tried to emit runs and was refused: over the cap",
+    ]);
+    assert.deepEqual(out.notes, ["It tried to emit runs and was refused: over the cap"]);
+    assert.equal(out.reply, "I gave up.");
+  });
+
+  it("records tool calls the CLI declined, deduplicated", () => {
+    // "I was not allowed to look" reads exactly like "there was nothing to
+    // find" on a block that emitted nothing, and only one is worth acting on.
+    const out = settled({ status: "idle", denials: ["Bash", "Bash", "WebFetch"] });
+    assert.equal(out.notes.length, 1);
+    assert.match(out.notes[0], /Bash, WebFetch/);
+  });
+
+  it("has no notes when nothing happened worth recording", () => {
+    // Empty rather than a reassuring line: the page draws every note, and a
+    // standing "no problems" would train the eye past the ones that matter.
+    assert.deepEqual(settled({ status: "idle", text: "Started one." }, 1).notes, []);
   });
 });
 

@@ -683,6 +683,20 @@ happen — started anyway, it spends a work cycle finding that out — so it is
 `blocked` instead, with a reason naming the block that decided there was nothing
 to do. The same is true if the turn fails.
 
+**So the instance page says what it decided and why.** A block that starts
+nothing ends that whole branch of the graph, and until you know which of the
+several ways it did that, a workflow that ran, billed and stopped is
+indistinguishable from one that never had anything to do. The row carries three
+separate things. Its **reply** — the turn is asked to say what it emitted and
+what it deliberately left out, and that answer is rendered under the block.
+What **this tool** did to it, in its own line: an `emit_runs` call refused
+because a folder was outside the block's workspace or the fan-out was over the
+cap, a tool call the CLI declined on its own, a workflow limit that could not be
+read at that moment. And the **status line**, which separates the endings that
+otherwise read alike — *decided there was nothing to start* means it called the
+emit tool and named nothing, *ended without emitting anything* means it never
+called it at all, and those are different problems.
+
 **Its own spend is its own.** A deciding turn's cost is bounded by Settings →
 *Chat turn budget*, exactly as a chat turn's is; it lands on the block, never on
 a run's spend and never on the dashboard meters. It **is** counted against the
@@ -2020,6 +2034,18 @@ through before trusting this unattended:
   leaves no run created afterwards — the guarded UPDATEs are what should refuse
   a late emission, and a run appearing after the page says *stopped* is the
   failure this whole ordering exists to prevent.
+
+  Seventh, added after the first thing an operator hit was that a block ran,
+  started nothing and left no account of it: that the block's **reply** is on
+  the instance page, and that a refused `emit_runs` shows up there as its own
+  line. `blockSettlement` is unit tested — the reply kept, a failed turn's text
+  recorded as the failure rather than twice, a turn that emitted before failing
+  *not* written off as `failed`, notes taken during the turn surviving the
+  settle, denials deduplicated — and the two places that write a note during a
+  turn have not executed. Worth checking against a real turn that the reply is
+  non-empty (the CLI's `result` field, read by `parseTurnOutput`), and that a
+  block given a folder outside its workspace ends with both the refusal line and
+  whatever the model said about giving up.
 - **Stopping a chat turn, in either of its two forms.** `staleTurn` is unit
   tested and the rest typechecks, but no real CLI child has been signalled by
   `cancelChatTurn` and no sweep has fired against a live row. Two things to
