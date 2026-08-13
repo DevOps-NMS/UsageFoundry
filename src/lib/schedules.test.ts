@@ -1,0 +1,398 @@
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import {
+  decideSchedule,
+  describeSchedule,
+  FIRE_GRACE_MS,
+  nextOccurrence,
+  normalizeScheduleInput,
+  scheduleRefusal,
+  type ScheduleContext,
+  type ScheduleSpec,
+} from "./schedules";
+
+/**
+ * The decision a schedule makes, and only that.
+ *
+ * It clears the same bar every other test here does — a pure function whose
+ * failure modes are silent and expensive — and it clears it from both sides at
+ * once, which is unusual. A schedule that fires a window twice bills twice, with
+ * nobody present to notice; a schedule that never fires is bit-for-bit what a
+ * working schedule looks like between occurrences, so the failure is invisible
+ * until somebody asks why last week's work never happened.
+ *
+ * The zone cases are here for a third reason: the container runs in UTC and the
+ * operator does not, so every wall-clock instant this computes is computed in a
+ * zone the server is not in, and the two days a year that arithmetic is hard are
+ * the two days nothing else in the app would catch.
+ */
+
+const BERLIN = "Europe/Berlin";
+
+/** Everything a context needs but the parts a case is actually about. */
+function ctx(over: Partial<ScheduleContext> & { spec: ScheduleSpec }): ScheduleContext {
+  return {
+    timeZone: BERLIN,
+    paused: false,
+    lastFireAt: null,
+    liveCount: 0,
+    now: 0,
+    ...over,
+  };
+}
+
+const DAILY_0230: ScheduleSpec = { kind: "daily", minutes: 150 };
+const DAILY_0900: ScheduleSpec = { kind: "daily", minutes: 540 };
+
+/** 09:00 Berlin is 07:00Z in summer. */
+const JUL_1_0900 = Date.UTC(2026, 6, 1, 7, 0);
+const JUL_2_0900 = Date.UTC(2026, 6, 2, 7, 0);
+
+describe("nextOccurrence", () => {
+  it("reads a daily time in the schedule's zone, not the server's", () => {
+    // Berlin is UTC+2 on this date, so 09:00 local is 07:00Z. A schedule stored
+    // in the server's zone would answer 09:00Z, which is two hours out — and
+    // one hour out for half the year, which is the version that hides.
+    assert.equal(
+      nextOccurrence(DAILY_0900, BERLIN, Date.UTC(2026, 6, 1, 6, 0)),
+      JUL_1_0900,
+    );
+    // Strictly after: the occurrence just acted on is not the next one, which
+    // is what stops one window being decided twice.
+    assert.equal(nextOccurrence(DAILY_0900, BERLIN, JUL_1_0900), JUL_2_0900);
+  });
+
+  it("puts a weekly occurrence on the named weekday", () => {
+    // 2026-07-01 is a Wednesday; the next Monday is the 6th.
+    const monday: ScheduleSpec = { kind: "weekly", weekday: 1, minutes: 540 };
+    const at = nextOccurrence(monday, BERLIN, JUL_1_0900);
+    assert.equal(at, Date.UTC(2026, 6, 6, 7, 0));
+    assert.equal(nextOccurrence(monday, BERLIN, at), Date.UTC(2026, 6, 13, 7, 0));
+  });
+
+  it("steps every-N-hours off its anchor", () => {
+    const spec: ScheduleSpec = { kind: "everyHours", hours: 6, anchorAt: 1_000 };
+    assert.equal(nextOccurrence(spec, BERLIN, 1_000), 1_000 + 6 * 3_600_000);
+    assert.equal(nextOccurrence(spec, BERLIN, 1_001), 1_000 + 6 * 3_600_000);
+    assert.equal(
+      nextOccurrence(spec, BERLIN, 1_000 + 6 * 3_600_000),
+      1_000 + 12 * 3_600_000,
+    );
+  });
+});
+
+describe("nextOccurrence across a DST boundary", () => {
+  /** Every occurrence in `[from, to)`, walked the way the tick walks it. */
+  function walk(spec: ScheduleSpec, from: number, to: number): number[] {
+    const out: number[] = [];
+    let at = nextOccurrence(spec, BERLIN, from);
+    while (at < to) {
+      out.push(at);
+      at = nextOccurrence(spec, BERLIN, at);
+    }
+    return out;
+  }
+
+  function localOf(ts: number): string {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: BERLIN,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(ts));
+  }
+
+  it("fires 02:30 once a day through the spring-forward gap", () => {
+    // Berlin goes 02:00 → 03:00 on 2026-03-29, so local 02:30 does not exist
+    // that day. The two-pass solve lands an hour to one side of the gap, which
+    // is the answer a schedule wants: the day still gets exactly one
+    // occurrence, within an hour of the time asked for, still strictly between
+    // its neighbours. Returning nothing would silently skip a day once a year —
+    // a schedule that stops for a day and starts again is indistinguishable
+    // from one that works.
+    const days = walk(
+      DAILY_0230,
+      Date.UTC(2026, 2, 27, 0, 0),
+      Date.UTC(2026, 3, 1, 0, 0),
+    );
+    assert.deepEqual(days.map(localOf), [
+      "27/03/2026, 02:30",
+      "28/03/2026, 02:30",
+      "29/03/2026, 03:30",
+      "30/03/2026, 02:30",
+      "31/03/2026, 02:30",
+    ]);
+    for (let i = 1; i < days.length; i++) assert.ok(days[i] > days[i - 1]);
+    // The gap day is 23 hours after its predecessor, not 24 — the clocks moved,
+    // and the schedule moved with them rather than drifting against UTC.
+    assert.equal(days[2] - days[1], 24 * 3_600_000);
+    assert.equal(days[3] - days[2], 23 * 3_600_000);
+  });
+
+  it("fires 02:30 once on the day it happens twice", () => {
+    // Berlin goes 03:00 → 02:00 on 2026-10-25, so local 02:30 comes round
+    // twice. Firing on both would bill a whole graph twice, unattended.
+    const days = walk(
+      DAILY_0230,
+      Date.UTC(2026, 9, 23, 0, 0),
+      Date.UTC(2026, 9, 28, 0, 0),
+    );
+    assert.deepEqual(days.map(localOf), [
+      "23/10/2026, 02:30",
+      "24/10/2026, 02:30",
+      "25/10/2026, 02:30",
+      "26/10/2026, 02:30",
+      "27/10/2026, 02:30",
+    ]);
+    assert.equal(new Set(days).size, days.length);
+    assert.equal(days[2] - days[1], 25 * 3_600_000);
+  });
+
+  it("leaves every-N-hours alone at the boundary", () => {
+    // An interval, not a wall-clock time: the whole reason the two kinds are
+    // separate is that this one must not move when the clocks do.
+    const spec: ScheduleSpec = {
+      kind: "everyHours",
+      hours: 6,
+      anchorAt: Date.UTC(2026, 2, 28, 0, 0),
+    };
+    const steps = [
+      nextOccurrence(spec, BERLIN, Date.UTC(2026, 2, 28, 22, 0)),
+    ];
+    for (let i = 0; i < 3; i++) {
+      steps.push(nextOccurrence(spec, BERLIN, steps[steps.length - 1]));
+    }
+    for (let i = 1; i < steps.length; i++) {
+      assert.equal(steps[i] - steps[i - 1], 6 * 3_600_000);
+    }
+  });
+});
+
+describe("decideSchedule", () => {
+  it("does nothing between occurrences", () => {
+    const d = decideSchedule(
+      ctx({
+        spec: DAILY_0900,
+        lastFireAt: JUL_1_0900,
+        now: Date.UTC(2026, 6, 1, 12, 0),
+      }),
+    );
+    assert.equal(d.action.kind, "idle");
+    assert.deepEqual(d.missed, []);
+    assert.equal(d.cursorAt, JUL_1_0900);
+    assert.equal(d.nextFireAt, JUL_2_0900);
+  });
+
+  it("fires the window it is in", () => {
+    const d = decideSchedule(
+      ctx({ spec: DAILY_0900, lastFireAt: JUL_1_0900, now: JUL_2_0900 + 5_000 }),
+    );
+    assert.deepEqual(d.action, { kind: "fire", fireAt: JUL_2_0900 });
+    assert.deepEqual(d.missed, []);
+    assert.equal(d.cursorAt, JUL_2_0900);
+    assert.equal(d.nextFireAt, Date.UTC(2026, 6, 3, 7, 0));
+  });
+
+  it("still fires a tick that ran late, up to the grace", () => {
+    const inside = decideSchedule(
+      ctx({
+        spec: DAILY_0900,
+        lastFireAt: JUL_1_0900,
+        now: JUL_2_0900 + FIRE_GRACE_MS,
+      }),
+    );
+    assert.equal(inside.action.kind, "fire");
+  });
+
+  it("records a window the process was not there for, and does not make it up", () => {
+    // The container was down over 09:00. A server coming back up must not start
+    // unattended agents because of something that should have happened hours
+    // ago — the queued-run rule and the queued-merge rule from a third
+    // direction. The cursor still moves past it, so the next tick does not
+    // rediscover it and the page can say what was lost.
+    const d = decideSchedule(
+      ctx({
+        spec: DAILY_0900,
+        lastFireAt: JUL_1_0900,
+        now: JUL_2_0900 + FIRE_GRACE_MS + 1,
+      }),
+    );
+    assert.equal(d.action.kind, "idle");
+    assert.deepEqual(d.missed, [JUL_2_0900]);
+    assert.equal(d.cursorAt, JUL_2_0900);
+  });
+
+  it("fires only the newest of several passed windows", () => {
+    const jul3 = Date.UTC(2026, 6, 3, 7, 0);
+    const d = decideSchedule(
+      ctx({ spec: DAILY_0900, lastFireAt: JUL_1_0900, now: jul3 + 1_000 }),
+    );
+    assert.deepEqual(d.action, { kind: "fire", fireAt: jul3 });
+    assert.deepEqual(d.missed, [JUL_2_0900]);
+    assert.equal(d.cursorAt, jul3);
+  });
+
+  it("skips into a workflow that is still running, and says so", () => {
+    // `startWorkflow` refuses a second instance while the first still has live
+    // members. A schedule that fired into that refusal every hour would be
+    // fifty identical failures in the record, so the decision is taken here and
+    // the reason names the count.
+    const d = decideSchedule(
+      ctx({
+        spec: DAILY_0900,
+        lastFireAt: JUL_1_0900,
+        now: JUL_2_0900 + 5_000,
+        liveCount: 3,
+      }),
+    );
+    assert.equal(d.action.kind, "skip");
+    if (d.action.kind !== "skip") return;
+    assert.equal(d.action.code, "overlap");
+    assert.equal(d.action.fireAt, JUL_2_0900);
+    assert.match(d.action.reason, /^3 run\(s\) and block\(s\)/);
+    // Skipped, never queued: the cursor moves past the window, so the next
+    // occurrence is the next chance rather than this one again in 30 seconds.
+    assert.equal(d.cursorAt, JUL_2_0900);
+    assert.equal(d.nextFireAt, Date.UTC(2026, 6, 3, 7, 0));
+  });
+
+  it("starts nothing while paused, and still says when it would", () => {
+    const d = decideSchedule(
+      ctx({
+        spec: DAILY_0900,
+        lastFireAt: JUL_1_0900,
+        paused: true,
+        now: JUL_2_0900 + 5_000,
+      }),
+    );
+    assert.deepEqual(d.action, { kind: "paused" });
+    // Nothing is missed by a schedule somebody switched off, and the cursor is
+    // left where it was — `pauseSchedule` moves it on resume instead.
+    assert.deepEqual(d.missed, []);
+    assert.equal(d.cursorAt, JUL_1_0900);
+    assert.equal(d.nextFireAt, Date.UTC(2026, 6, 3, 7, 0));
+  });
+
+  it("does not fire the occurrence a brand-new schedule just missed", () => {
+    // `putSchedule` stamps the cursor at creation, so a schedule saved at 09:05
+    // for "daily at 09:00" waits for tomorrow. Saved five minutes earlier it
+    // would have run today, which is a press of Run nobody made.
+    const d = decideSchedule(
+      ctx({
+        spec: DAILY_0900,
+        lastFireAt: JUL_1_0900 + 5 * 60_000,
+        now: JUL_1_0900 + 5 * 60_000,
+      }),
+    );
+    assert.equal(d.action.kind, "idle");
+    assert.deepEqual(d.missed, []);
+    assert.equal(d.nextFireAt, JUL_2_0900);
+  });
+
+  it("treats a row with no cursor as starting from now", () => {
+    const d = decideSchedule(
+      ctx({ spec: DAILY_0900, lastFireAt: null, now: Date.UTC(2026, 6, 1, 12, 0) }),
+    );
+    assert.equal(d.action.kind, "idle");
+    assert.deepEqual(d.missed, []);
+    assert.equal(d.cursorAt, null);
+    assert.equal(d.nextFireAt, JUL_2_0900);
+  });
+});
+
+describe("scheduleRefusal", () => {
+  const off = {
+    maxInstanceCostUSD: null,
+    maxSessionFraction: null,
+    maxWeeklyFraction: null,
+  };
+
+  it("refuses a workflow that bounds a press of Run with nothing", () => {
+    const reason = scheduleRefusal({ name: "Nightly", instanceBudget: off });
+    assert.ok(reason);
+    assert.match(reason, /Nightly/);
+  });
+
+  it("accepts any one of the three limits", () => {
+    for (const budget of [
+      { ...off, maxInstanceCostUSD: 5 },
+      { ...off, maxSessionFraction: 0.5 },
+      { ...off, maxWeeklyFraction: 0.5 },
+    ]) {
+      assert.equal(scheduleRefusal({ name: "Nightly", instanceBudget: budget }), null);
+    }
+  });
+});
+
+describe("normalizeScheduleInput", () => {
+  const NOW = 1_700_000_000_000;
+
+  it("refuses a zone this build does not know", () => {
+    // Refused rather than falling back to the server's, which is what
+    // `/api/usage` does: a calendar bucket an hour out is in front of the
+    // operator, and a schedule an hour out is an hour out for months.
+    const r = normalizeScheduleInput(
+      { kind: "daily", minutes: 540, timeZone: "Mars/Olympus_Mons" },
+      NOW,
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.error, /not a timezone/);
+  });
+
+  it("refuses a schedule with no zone at all", () => {
+    const r = normalizeScheduleInput({ kind: "daily", minutes: 540 }, NOW);
+    assert.equal(r.ok, false);
+  });
+
+  it("anchors every-N-hours on the instant it was saved", () => {
+    const r = normalizeScheduleInput(
+      { kind: "everyHours", hours: 6, timeZone: BERLIN },
+      NOW,
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.deepEqual(r.value.spec, { kind: "everyHours", hours: 6, anchorAt: NOW });
+  });
+
+  it("refuses the values that would make a recurrence meaningless", () => {
+    const bad: unknown[] = [
+      { kind: "everyHours", hours: 0, timeZone: BERLIN },
+      { kind: "everyHours", hours: 169, timeZone: BERLIN },
+      { kind: "daily", minutes: 1440, timeZone: BERLIN },
+      { kind: "daily", minutes: -1, timeZone: BERLIN },
+      { kind: "weekly", weekday: 7, minutes: 540, timeZone: BERLIN },
+      { kind: "0 0 * * 1", timeZone: BERLIN },
+      { timeZone: BERLIN },
+    ];
+    for (const raw of bad) {
+      assert.equal(normalizeScheduleInput(raw, NOW).ok, false, JSON.stringify(raw));
+    }
+  });
+});
+
+describe("describeSchedule", () => {
+  it("says the rule and the zone it is read in", () => {
+    assert.equal(
+      describeSchedule(DAILY_0900, BERLIN),
+      "Every day at 09:00 (Europe/Berlin)",
+    );
+    assert.equal(
+      describeSchedule({ kind: "weekly", weekday: 1, minutes: 90 }, BERLIN),
+      "Every Monday at 01:30 (Europe/Berlin)",
+    );
+    // No zone on an interval: it does not have a wall-clock time to read.
+    assert.equal(
+      describeSchedule({ kind: "everyHours", hours: 1, anchorAt: 0 }, BERLIN),
+      "Every hour",
+    );
+    assert.equal(
+      describeSchedule({ kind: "everyHours", hours: 6, anchorAt: 0 }, BERLIN),
+      "Every 6 hours",
+    );
+  });
+});

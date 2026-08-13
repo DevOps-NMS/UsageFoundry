@@ -676,7 +676,7 @@ function zoneFormatter(timeZone: string): Intl.DateTimeFormat {
   return f;
 }
 
-interface ZonedParts {
+export interface ZonedParts {
   year: number;
   month: number;
   day: number;
@@ -685,7 +685,7 @@ interface ZonedParts {
   second: number;
 }
 
-function zonedParts(ts: number, timeZone: string): ZonedParts {
+export function zonedParts(ts: number, timeZone: string): ZonedParts {
   const parts = zoneFormatter(timeZone).formatToParts(new Date(ts));
   const get = (type: string) =>
     Number(parts.find((p) => p.type === type)?.value ?? 0);
@@ -703,7 +703,7 @@ function zonedParts(ts: number, timeZone: string): ZonedParts {
 }
 
 /** Milliseconds `timeZone` is ahead of UTC at `ts`. */
-function zoneOffset(ts: number, timeZone: string): number {
+export function zoneOffset(ts: number, timeZone: string): number {
   const p = zonedParts(ts, timeZone);
   return (
     Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - ts
@@ -814,6 +814,25 @@ function spanLimit(weeklyLimit: number | null, spanMs: number): number | null {
 }
 
 /**
+ * Whether this build's ICU knows `name` as a zone.
+ *
+ * Split out of `resolveTimeZone` because the two callers want opposite things
+ * from an unknown name. A calendar bucket falls back to the server's zone — a
+ * day cut an hour out is a display error the operator can see and correct. A
+ * *schedule* refuses, because nobody is watching when it fires and an hour out
+ * is an hour out for the life of the schedule.
+ */
+export function isTimeZone(name: string): boolean {
+  if (!name || name.length > 64) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: name });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A timezone name from the wire, or the server's own when it is absent or not
  * a zone this build's ICU knows.
  *
@@ -823,14 +842,8 @@ function spanLimit(weeklyLimit: number | null, spanMs: number): number | null {
  * that is not one.
  */
 export function resolveTimeZone(requested: string | null | undefined): string {
-  const fallback = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  if (!requested || requested.length > 64) return fallback;
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: requested });
-    return requested;
-  } catch {
-    return fallback;
-  }
+  if (requested && isTimeZone(requested)) return requested;
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 /**

@@ -546,6 +546,56 @@ export interface InstanceBudgetDTO {
   maxWeeklyFraction: number | null;
 }
 
+/**
+ * How often a workflow starts itself.
+ *
+ * Three plain choices rather than a cron expression, so that the page can render
+ * the rule back in words *and* state the instant it next means — an operator who
+ * cannot verify a schedule at a glance will not leave an unattended agent behind
+ * it. The mirror of `ScheduleSpec` in `schedules.ts`.
+ */
+export type ScheduleSpecDTO =
+  | { kind: "everyHours"; hours: number; anchorAt: number }
+  | { kind: "daily"; minutes: number }
+  | { kind: "weekly"; weekday: number; minutes: number };
+
+/** What the last fire decision came to. See `ScheduleOutcomeCode`. */
+export type ScheduleOutcomeCodeDTO =
+  | "started"
+  | "overlap"
+  | "unbudgeted"
+  | "refused"
+  | "missed";
+
+/**
+ * A workflow's schedule, and the evidence an operator needs to trust it.
+ *
+ * `nextFireAt` is an absolute instant rather than "in about an hour", and
+ * `lastCode`/`lastReason`/`streak` are what it last did — a schedule whose
+ * skips are invisible is one that looks like it is working while it does
+ * nothing.
+ */
+export interface WorkflowScheduleDTO {
+  spec: ScheduleSpecDTO;
+  /** The IANA zone the wall-clock times in `spec` are read in. */
+  timeZone: string;
+  paused: boolean;
+  /** The recurrence in words, zone included. */
+  description: string;
+  nextFireAt: number;
+  lastCode: ScheduleOutcomeCodeDTO | null;
+  lastReason: string | null;
+  lastAt: number | null;
+  /** The occurrence `lastCode` is about, which is not when it was recorded. */
+  lastFireAt: number | null;
+  lastInstanceId: string | null;
+  /** Consecutive outcomes with the same code, collapsed into one state. */
+  streak: number;
+  streakSince: number | null;
+  /** Why it cannot fire as things stand — a cleared budget — or null. */
+  refusal: string | null;
+}
+
 export interface WorkflowDTO {
   id: string;
   name: string;
@@ -558,6 +608,8 @@ export interface WorkflowDTO {
   liveRunCount?: number;
   /** When it was last started, or null if it never has been. */
   lastRunAt?: number | null;
+  /** Null when nothing starts this workflow but a person. */
+  schedule?: WorkflowScheduleDTO | null;
 }
 
 /**

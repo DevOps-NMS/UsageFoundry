@@ -71,6 +71,16 @@ export async function register() {
       // reconciler, so what that one finds live is only the runs.
       reconcileBlocksOnBoot();
       reconcileHaltsOnBoot();
+
+      // And the schedules, which are the one thing here that would otherwise
+      // start an agent *because* the server restarted. Every fire time that
+      // passed while this process was not running is recorded as missed and the
+      // cursor jumps to now — the queued-run rule and the queued-merge rule
+      // arrived at from a third direction. It also starts the timer, gated on
+      // the same claim as everything above: two servers firing one schedule is
+      // one window pressed twice.
+      const { reconcileSchedulesOnBoot } = await import("./lib/schedules");
+      reconcileSchedulesOnBoot();
     } else {
       console.warn(
         "[usagefoundry] Another server process already holds this data " +

@@ -3,7 +3,9 @@ import type {
   WorkflowInstanceBlockDTO,
   WorkflowInstanceDTO,
   WorkflowInstanceNodeDTO,
+  WorkflowScheduleDTO,
 } from "@/lib/apiTypes";
+import { getSchedule, scheduleView, type ScheduleView } from "@/lib/schedules";
 import {
   lastRunAt,
   liveBlocksOf,
@@ -21,7 +23,26 @@ import {
  * never imports a module that opens SQLite.
  */
 
+export function scheduleDTO(view: ScheduleView): WorkflowScheduleDTO {
+  return {
+    spec: view.spec,
+    timeZone: view.timeZone,
+    paused: view.paused,
+    description: view.description,
+    nextFireAt: view.nextFireAt,
+    lastCode: view.lastCode,
+    lastReason: view.lastReason,
+    lastAt: view.lastAt,
+    lastFireAt: view.lastFireAt,
+    lastInstanceId: view.lastInstanceId,
+    streak: view.streak,
+    streakSince: view.streakSince,
+    refusal: view.refusal,
+  };
+}
+
 export function workflowDTO(workflow: Workflow): WorkflowDTO {
+  const schedule = getSchedule(workflow.id);
   return {
     id: workflow.id,
     name: workflow.name,
@@ -32,6 +53,7 @@ export function workflowDTO(workflow: Workflow): WorkflowDTO {
     updatedAt: workflow.updatedAt,
     liveRunCount: liveRunsOf(workflow.id).length + liveBlocksOf(workflow.id),
     lastRunAt: lastRunAt(workflow.id),
+    schedule: schedule ? scheduleDTO(scheduleView(schedule, workflow)) : null,
   };
 }
 

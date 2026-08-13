@@ -361,6 +361,58 @@ function migrate(db: Database.Database) {
       PRIMARY KEY (instance_id, node_id)
     );
 
+    -- When a saved workflow starts itself.
+    --
+    -- The one row in this database that starts a billed agent with nobody
+    -- present at all: every other route into createRun has a person pressing
+    -- something. What bounds it is written down in CLAUDE.md; what this table
+    -- has to carry is the evidence, because an operator who cannot see what a
+    -- schedule last did will not leave it switched on.
+    --
+    -- workflow_id is UNIQUE: one schedule per workflow, which is what lets the
+    -- page state a single next fire time as an absolute instant. Two schedules
+    -- on one graph would fire into each other's startWorkflow refusal for ever
+    -- and there is no reading of that page that says so at a glance.
+    --
+    -- cursor_at is the last *occurrence* this schedule has decided about —
+    -- started, skipped, or recorded as missed — and is not the same fact as
+    -- last_fire_at, which is what the page shows. A boot advances the cursor
+    -- to the moment of the boot without firing anything, which is what makes
+    -- "a missed window is not made up" true rather than merely intended.
+    --
+    -- streak/streak_since collapse consecutive identical outcomes into one
+    -- state. An hourly schedule firing into an instance that never finishes
+    -- would otherwise be fifty rows saying the same thing, which is a log
+    -- nobody reads rather than a fact anybody acts on. The streak keys on
+    -- last_code and not on last_reason: the sentence carries a count that
+    -- moves, and a streak that broke every time the count changed would not
+    -- collapse the one case it exists for.
+    CREATE TABLE IF NOT EXISTS workflow_schedules (
+      id               TEXT PRIMARY KEY,
+      workflow_id      TEXT NOT NULL UNIQUE REFERENCES workflows(id) ON DELETE CASCADE,
+      -- The recurrence, as JSON. See ScheduleSpec in schedules.ts.
+      spec             TEXT NOT NULL,
+      -- The IANA zone the wall-clock times in spec are read in. Stored rather
+      -- than assumed: the container runs in UTC and the operator does not, and a
+      -- schedule stored in the server's zone fires an hour out twice a year.
+      time_zone        TEXT NOT NULL,
+      paused           INTEGER NOT NULL DEFAULT 0,
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL,
+      cursor_at        INTEGER,
+      -- 'started' | 'overlap' | 'unbudgeted' | 'refused' | 'missed'.
+      last_code        TEXT,
+      last_reason      TEXT,
+      last_at          INTEGER,
+      last_fire_at     INTEGER,
+      -- Plain column rather than a foreign key, the shape
+      -- workflow_instance_runs.run_id already has: a record of what this
+      -- schedule started, which must keep reading true after the row has gone.
+      last_instance_id TEXT,
+      streak           INTEGER NOT NULL DEFAULT 0,
+      streak_since     INTEGER
+    );
+
     -- The orchestrator chat: a conversation that proposes runs.
     --
     -- Its own three tables rather than columns anywhere else, because a chat is
