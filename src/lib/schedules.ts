@@ -773,6 +773,13 @@ async function tickSchedules(): Promise<void> {
         );
       }
     }
+  } catch (err) {
+    // Reading the table, or writing the record above, failed. Caught rather
+    // than left to propagate because this runs as `void tickSchedules()`: a
+    // throw out of it is an unhandled rejection, and Node ends the process on
+    // one — taking the server and every run in flight with it, which is a far
+    // worse outcome than a tick that did nothing. The next tick retries.
+    console.error("[usagefoundry] Schedule tick failed:", err);
   } finally {
     timer.running = false;
   }
@@ -898,11 +905,16 @@ export interface ScheduleView extends WorkflowSchedule {
   /** The recurrence in words. */
   description: string;
   /**
-   * The absolute instant it fires next. Always answered, including while
-   * paused, because "what would resuming this mean" is the question the pause
-   * control raises.
+   * The absolute instant it fires next. Answered while paused too, because
+   * "what would resuming this mean" is the question the pause control raises.
+   *
+   * Null only when it cannot be worked out at all — which in practice means
+   * this build's ICU has stopped recognising a zone `normalizeScheduleInput`
+   * accepted, a base image away. Null rather than a plausible number, the same
+   * rule a window with no ceiling follows: a schedule whose next fire is
+   * unknown must not display an instant.
    */
-  nextFireAt: number;
+  nextFireAt: number | null;
   /** Why this schedule cannot fire as things stand, or null. */
   refusal: string | null;
 }
@@ -912,16 +924,29 @@ export function scheduleView(
   workflow: Workflow,
   now = Date.now(),
 ): ScheduleView {
-  return {
-    ...schedule,
-    description: describeSchedule(schedule.spec, schedule.timeZone),
+  let nextFireAt: number | null = null;
+  let unreadable: string | null = null;
+  try {
     // From `now` rather than from the cursor: a paused schedule's cursor is as
     // old as the pause, and a "next fire" in the past is not a next fire.
-    nextFireAt: nextOccurrence(
+    nextFireAt = nextOccurrence(
       schedule.spec,
       schedule.timeZone,
       Math.max(now, schedule.cursorAt ?? now),
-    ),
-    refusal: scheduleRefusal(workflow),
+    );
+  } catch (err) {
+    // Reported rather than thrown: this is read by the workflows list, and a
+    // 500 there would leave the operator unable to open the page the Remove
+    // button is on.
+    unreadable = `This schedule's next start cannot be worked out: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+  }
+
+  return {
+    ...schedule,
+    description: describeSchedule(schedule.spec, schedule.timeZone),
+    nextFireAt,
+    refusal: unreadable ?? scheduleRefusal(workflow),
   };
 }

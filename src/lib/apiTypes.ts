@@ -582,7 +582,8 @@ export interface WorkflowScheduleDTO {
   paused: boolean;
   /** The recurrence in words, zone included. */
   description: string;
-  nextFireAt: number;
+  /** Null when it cannot be worked out — never a plausible stand-in instant. */
+  nextFireAt: number | null;
   lastCode: ScheduleOutcomeCodeDTO | null;
   lastReason: string | null;
   lastAt: number | null;

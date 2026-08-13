@@ -130,7 +130,9 @@ export default function WorkflowsPage() {
                           {w.schedule.description}
                           {w.schedule.paused
                             ? " · paused"
-                            : ` · next ${fmtDateTime(w.schedule.nextFireAt)}`}
+                            : w.schedule.nextFireAt === null
+                              ? " · next start unknown"
+                              : ` · next ${fmtDateTime(w.schedule.nextFireAt)}`}
                         </div>
                       )}
                     </Td>

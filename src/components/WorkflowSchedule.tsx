@@ -182,11 +182,18 @@ export function WorkflowSchedule({
                     operator cannot verify at a glance is one they will not
                     trust with an unattended agent. */}
                 <div className="mt-1 text-sm text-ink-muted">
-                  {schedule.paused ? "Would next start " : "Next starts "}
-                  <span className="mono text-ink">
-                    {fmtDateTime(schedule.nextFireAt)}
-                  </span>{" "}
-                  ({fmtRelative(schedule.nextFireAt)})
+                  {schedule.nextFireAt === null ? (
+                    // Never a stand-in instant: the refusal below says why.
+                    <span className="text-warn">Next start unknown</span>
+                  ) : (
+                    <>
+                      {schedule.paused ? "Would next start " : "Next starts "}
+                      <span className="mono text-ink">
+                        {fmtDateTime(schedule.nextFireAt)}
+                      </span>{" "}
+                      ({fmtRelative(schedule.nextFireAt)})
+                    </>
+                  )}
                 </div>
               </div>
               <ButtonRow>
