@@ -21,6 +21,7 @@ import {
   pollFailureMessage,
   type BadgeTone,
 } from "@/lib/format";
+import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
@@ -529,24 +530,27 @@ export default function Branches() {
    * what the run page's field defaults to as well. `purge` echoes the branch
    * name back, which is what the API compares against the row before it deletes
    * anything.
+   *
+   * Through `jsonRequest` rather than a bare `fetch` for the reason the two
+   * reads above have a `catch`: a rejection out of this handler rendered
+   * nothing, re-enabled the button and left the table as it was, which is
+   * exactly what a press that did nothing looks like — and one of these three
+   * destroys committed work, so a second press is a real hazard.
    */
   async function act(b: BranchSummaryDTO, action: "delete" | "commit" | "purge") {
     setBusy(b.runId);
     setNote(null);
     setError(null);
     try {
-      const res = await fetch(`/api/runs/${b.runId}/land`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action, confirmBranch: b.branch }),
-      });
-      const json = (await res.json().catch(() => ({}))) as {
-        message?: string;
-        error?: string;
-      };
-      if (res.ok) setNote(json.message ?? "Done.");
-      else setError(json.error ?? "That did not work.");
+      const res = await jsonRequest<{ message?: string }>(
+        `/api/runs/${b.runId}/land`,
+        { method: "POST", body: { action, confirmBranch: b.branch } },
+      );
+      if (res.ok) setNote(res.data.message ?? "Done.");
+      else setError(actionFailureMessage(res, "That did not work."));
       setArmedPurge(null);
+      // Re-read either way: a request that never came back may still have been
+      // carried out, and the table is where the operator finds out.
       await load();
     } finally {
       setBusy(null);
@@ -564,20 +568,19 @@ export default function Branches() {
     setNote(null);
     setError(null);
     try {
-      const res = await fetch("/api/branches/queue", {
+      const res = await jsonRequest<{ queued?: number }>("/api/branches/queue", {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ runIds: selected, strategy, autoResolve }),
+        body: { runIds: selected, strategy, autoResolve },
       });
-      const json = (await res.json().catch(() => ({}))) as {
-        queued?: number;
-        error?: string;
-      };
+      // The selection survives every failure, transport included: it is the
+      // merge order, and clearing it after a press that may not have gone
+      // through is a set of branches the operator has to pick out again.
       if (res.ok) {
-        setNote(`Queued ${json.queued} branch${json.queued === 1 ? "" : "es"}.`);
+        const { queued } = res.data;
+        setNote(`Queued ${queued} branch${queued === 1 ? "" : "es"}.`);
         setSelected([]);
       } else {
-        setError(json.error ?? "Could not queue those.");
+        setError(actionFailureMessage(res, "Could not queue those."));
       }
       await loadQueue();
     } finally {
@@ -588,12 +591,16 @@ export default function Branches() {
   async function cancelQueue() {
     if (!queue?.batchId) return;
     setQueueBusy(true);
+    setNote(null);
+    setError(null);
     try {
-      await fetch("/api/branches/queue", {
+      const res = await jsonRequest<{ cancelled?: number }>("/api/branches/queue", {
         method: "DELETE",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ batchId: queue.batchId }),
+        body: { batchId: queue.batchId },
       });
+      // The answer used to be dropped whole, so a cancel that failed left the
+      // queue panel standing with every row still in it and nothing said.
+      if (!res.ok) setError(actionFailureMessage(res, "Could not cancel that."));
       await loadQueue();
     } finally {
       setQueueBusy(false);
