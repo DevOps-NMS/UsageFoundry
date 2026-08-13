@@ -121,6 +121,18 @@ export default function WorkflowsPage() {
                           </Badge>
                         </div>
                       )}
+                      {/* On the list rather than only on the detail page:
+                          which of these graphs start themselves is the one
+                          thing about this page a reader cannot infer, and
+                          "next" is an instant so it can be checked. */}
+                      {w.schedule && (
+                        <div className="mt-1 text-ink-muted">
+                          {w.schedule.description}
+                          {w.schedule.paused
+                            ? " · paused"
+                            : ` · next ${fmtDateTime(w.schedule.nextFireAt)}`}
+                        </div>
+                      )}
                     </Td>
                     <Td num className="align-top text-ink-muted">
                       {w.nodes.length}

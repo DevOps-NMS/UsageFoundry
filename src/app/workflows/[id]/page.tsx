@@ -14,6 +14,7 @@ import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
+import { WorkflowSchedule } from "@/components/WorkflowSchedule";
 
 const POLL_MS = 10_000;
 
@@ -285,6 +286,15 @@ export default function WorkflowPage() {
           </li>
         </ul>
       </Card>
+
+      {/* Directly under the limits it depends on, and above the blocks, for the
+          reason those limits are above them: this is the control that presses
+          Run, and what it may spend is the sentence immediately before it. */}
+      <WorkflowSchedule
+        workflowId={id}
+        schedule={workflow.schedule ?? null}
+        onChanged={load}
+      />
 
       <CardTitle className="mt-8">Blocks</CardTitle>
       <Card emphasis="primary">
