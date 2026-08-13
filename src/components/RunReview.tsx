@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { RunDTO, RunReviewDTO } from "@/lib/apiTypes";
-import { fmtDateTime, fmtUSD } from "@/lib/format";
+import { fmtDateTime, fmtUSD, pollFailureMessage } from "@/lib/format";
+import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
@@ -67,13 +68,22 @@ function ReviewBody({ review }: { review: RunReviewDTO }) {
 export function RunReview({ run }: { run: RunDTO }) {
   const [reviews, setReviews] = useState<RunReviewDTO[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
 
+  // The land card's failure, in a card that spends money the same way: this
+  // poll only runs while a review is in flight, so a read dropped on the floor
+  // left "Reading the diff" on screen after the review had finished or failed.
   const load = useCallback(async () => {
-    const res = await fetch(`/api/runs/${run.id}/review`, { cache: "no-store" });
-    if (!res.ok) return;
-    const json = (await res.json()) as { reviews: RunReviewDTO[] };
-    setReviews(json.reviews);
+    const res = await jsonRequest<{ reviews: RunReviewDTO[] }>(
+      `/api/runs/${run.id}/review`,
+    );
+    if (!res.ok) {
+      setReadError(pollFailureMessage(res.status, res.error));
+      return;
+    }
+    setReviews(res.data.reviews);
+    setReadError(null);
   }, [run.id]);
 
   useEffect(() => {
@@ -92,9 +102,10 @@ export function RunReview({ run }: { run: RunDTO }) {
     setStarting(true);
     setError(null);
     try {
-      const res = await fetch(`/api/runs/${run.id}/review`, { method: "POST" });
-      const json = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) setError(json.error ?? "Could not start a review.");
+      const res = await jsonRequest(`/api/runs/${run.id}/review`, {
+        method: "POST",
+      });
+      if (!res.ok) setError(actionFailureMessage(res, "Could not start a review."));
       await load();
     } finally {
       setStarting(false);
@@ -120,7 +131,10 @@ export function RunReview({ run }: { run: RunDTO }) {
         </Button>
       </CardTitle>
 
-      {error && <Notice tone="danger">{error}</Notice>}
+      <div role="alert">
+        {readError && <Notice tone="danger">{readError}</Notice>}
+        {error && <Notice tone="danger">{error}</Notice>}
+      </div>
 
       {/* Beside the button whether or not a review already exists: "Review
           again" spends exactly as much as the first one did. */}

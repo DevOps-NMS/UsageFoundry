@@ -7,7 +7,8 @@ import type {
   RunDTO,
   RunReviewDTO,
 } from "@/lib/apiTypes";
-import { fmtDateTime, fmtUSD } from "@/lib/format";
+import { fmtDateTime, fmtUSD, pollFailureMessage } from "@/lib/format";
+import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
@@ -177,18 +178,29 @@ export function RunLand({ run }: { run: RunDTO }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
 
+  /**
+   * A failed read used to be dropped on the floor — `if (!res.ok) return`, and
+   * no `catch` around a `fetch` that rejects when the container restarts. The
+   * only state this poll runs in is `running`, so what it froze on was a
+   * conflict resolution rendered as in flight for ever, after it had finished
+   * or failed, with nothing to clear it but a reload.
+   */
   const load = useCallback(async () => {
-    const res = await fetch(`/api/runs/${run.id}/land`, { cache: "no-store" });
-    if (!res.ok) return;
-    const json = (await res.json()) as {
+    const res = await jsonRequest<{
       state: LandStateDTO | null;
       defaultStrategy: "merge" | "squash";
       resolution: RunReviewDTO | null;
-    };
-    setState(json.state);
-    setStrategy(json.defaultStrategy);
-    setResolution(json.resolution);
+    }>(`/api/runs/${run.id}/land`);
+    if (!res.ok) {
+      setReadError(pollFailureMessage(res.status, res.error));
+      return;
+    }
+    setState(res.data.state);
+    setStrategy(res.data.defaultStrategy);
+    setResolution(res.data.resolution);
+    setReadError(null);
   }, [run.id]);
 
   useEffect(() => {
@@ -209,27 +221,25 @@ export function RunLand({ run }: { run: RunDTO }) {
     setError(null);
     setNote(null);
     try {
-      const res = await fetch(`/api/runs/${run.id}/land`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          action,
-          strategy,
-          // Omitted rather than sent empty, so an untouched box means "use the
-          // task" and a cleared one is refused.
-          message: message || undefined,
-          confirmBranch: state?.branch,
-        }),
-      });
-      const json = (await res.json().catch(() => ({}))) as {
-        message?: string;
-        error?: string;
-      };
+      const res = await jsonRequest<{ message?: string }>(
+        `/api/runs/${run.id}/land`,
+        {
+          method: "POST",
+          body: {
+            action,
+            strategy,
+            // Omitted rather than sent empty, so an untouched box means "use
+            // the task" and a cleared one is refused.
+            message: message || undefined,
+            confirmBranch: state?.branch,
+          },
+        },
+      );
       if (res.ok) {
-        setNote(json.message ?? null);
+        setNote(res.data.message ?? null);
         setMessage("");
       } else {
-        setError(json.error ?? "That did not work.");
+        setError(actionFailureMessage(res, "That did not work."));
       }
       setConfirmPurge(false);
       await load();
@@ -238,7 +248,20 @@ export function RunLand({ run }: { run: RunDTO }) {
     }
   }
 
-  if (!state) return null;
+  // A run with no branch renders nothing at all here, so a first read that
+  // never arrived would look exactly like one — and on this card the read is
+  // also the only thing that ever reports a resolution finishing.
+  if (!state) {
+    if (!readError) return null;
+    return (
+      <Card emphasis="quiet" className="mt-6">
+        <CardTitle>Land this work</CardTitle>
+        <div role="alert">
+          <Notice tone="danger">{readError}</Notice>
+        </div>
+      </Card>
+    );
+  }
 
   const canLand = state.blocked === null;
   const settled = !["running", "queued", "paused"].includes(state.runStatus);
@@ -299,6 +322,18 @@ export function RunLand({ run }: { run: RunDTO }) {
           commit sits, not what it was told to land into
         </Hint>
       )}
+
+      {/* Everything below is as of the last read that worked, and while a
+          resolution runs that is re-read every three seconds. Said here rather
+          than left implied: the spinner beside a resolution is drawn from this
+          same answer, so a stale card shows work in flight that may be over. */}
+      <div role="alert">
+        {readError && (
+          <Notice tone="danger" className="mt-3">
+            {readError}
+          </Notice>
+        )}
+      </div>
 
       {/* What just happened, announced: landing writes into a directory the
           operator is working in, and it is the one outcome on this page they
