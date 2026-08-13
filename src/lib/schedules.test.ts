@@ -359,6 +359,40 @@ describe("normalizeScheduleInput", () => {
     assert.deepEqual(r.value.spec, { kind: "everyHours", hours: 6, anchorAt: NOW });
   });
 
+  it("refuses a time that is missing, rather than reading it as midnight", () => {
+    // What a cleared `<input type="time">` actually arrives as. `minutesOf("")`
+    // is `NaN`, JSON has no NaN so `JSON.stringify` emits `null`, and
+    // `Number(null)` is `0` — so the range check below saw a legal 00:00 and
+    // the graph started at midnight every day, unattended, until somebody
+    // noticed. The same coercion `planUsage.ts`'s `num()` refuses for the same
+    // reason: "there is no reading" and "the reading is zero" are different
+    // facts, and only one of them is a time somebody chose.
+    const missing: unknown[] = [
+      { kind: "daily", minutes: null, timeZone: BERLIN },
+      { kind: "daily", timeZone: BERLIN },
+      { kind: "weekly", weekday: 1, minutes: null, timeZone: BERLIN },
+      { kind: "weekly", weekday: 1, timeZone: BERLIN },
+      // The wire itself, rather than a hand-written null: this is the value the
+      // form put on it, round-tripped through the serialiser that loses the NaN.
+      JSON.parse(JSON.stringify({ kind: "daily", minutes: NaN, timeZone: BERLIN })),
+    ];
+    for (const raw of missing) {
+      const r = normalizeScheduleInput(raw, NOW);
+      assert.equal(r.ok, false, JSON.stringify(raw));
+      if (r.ok) continue;
+      assert.match(r.error, /time of day/);
+    }
+  });
+
+  it("still accepts a midnight somebody typed", () => {
+    // The other half of the refusal above: 00:00 is a legal time, and a fix
+    // that reached it by narrowing the range would have taken it away.
+    const r = normalizeScheduleInput({ kind: "daily", minutes: 0, timeZone: BERLIN }, NOW);
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.deepEqual(r.value.spec, { kind: "daily", minutes: 0 });
+  });
+
   it("refuses the values that would make a recurrence meaningless", () => {
     const bad: unknown[] = [
       { kind: "everyHours", hours: 0, timeZone: BERLIN },

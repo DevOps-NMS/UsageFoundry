@@ -179,7 +179,23 @@ export function normalizeScheduleInput(
   }
 
   if (kind === "daily" || kind === "weekly") {
-    const minutes = Math.trunc(Number(o.minutes));
+    // The absence is caught **before** any coercion, and that ordering is the
+    // whole fix: a cleared `<input type="time">` reaches `save()` as `NaN`, JSON
+    // has no NaN so `JSON.stringify` emits `null`, and `Number(null)` is `0` —
+    // so the range check below is written against a NaN it can never see, and
+    // read a missing time as a deliberate midnight. The schedule then started
+    // the graph at 00:00 every day with nobody present. Refused by name the way
+    // a missing zone is, and for the reason `planUsage.ts`'s `num()` refuses to
+    // coerce: "there is no reading" and "the reading is zero" are different
+    // facts. A number is required rather than coerced from a string, because a
+    // string is exactly what carries the empty case back in.
+    if (typeof o.minutes !== "number") {
+      return {
+        ok: false,
+        error: "A daily or weekly schedule needs the time of day it starts at.",
+      };
+    }
+    const minutes = Math.trunc(o.minutes);
     if (!Number.isFinite(minutes) || minutes < 0 || minutes >= MINUTES_IN_DAY) {
       return { ok: false, error: "The time of day has to be between 00:00 and 23:59." };
     }
