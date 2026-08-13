@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import {
   blockSettlement,
+  emittedFolderRefusal,
   haltPlan,
   mergeBlockOutcome,
   normalizeWorkflowInput,
@@ -42,8 +44,10 @@ import type { TurnResult } from "./chat";
  * destroys the record of work that landed, with nothing on the page afterwards
  * to say it ever happened.
  *
- * Nothing here opens the database or touches the filesystem. `folderRefusal` is
- * the one check that does, and it is left to the routes for that reason.
+ * Nothing here opens the database or touches the filesystem. Resolving a folder
+ * against a mount is the one step that would, and it is injected — so the
+ * decision built on top of it is pinned here while the syscall itself stays
+ * with the routes.
  */
 
 const KNOWN: WorkflowKnowledge = {
@@ -1182,6 +1186,128 @@ describe("planEmission — which specs become runs", () => {
       refused([spec("a", { dependsOn: [{ id: "a", edge: "on-finish" }] })]),
       /start after itself|loop/,
     );
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* …and where those runs may work                                    */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * The bound the block's own prompt promises, which for a while nothing
+   * enforced: the folder check read the *mount* and never `node.folder`, so a
+   * block saved on `projectA` could emit a run in `projectB` — or in `""`, the
+   * mount root, which `conflictKey`/`overlaps` treats as containing every other
+   * folder and so blocks every other run in the tree. Silent in the worst way
+   * available here: an unattended, file-writing agent in a repository nobody
+   * pointed it at, started from a graph that names one folder and a prompt that
+   * says so in words.
+   *
+   * `resolve` is injected, so this needs no filesystem — the same reason
+   * `EmissionLimits.folderRefusal` is a function rather than a call.
+   */
+  const MOUNT = "/w";
+  /** Folders the mount does not have, for the two "not there" cases. */
+  const MISSING = new Set(["gone", "vanished"]);
+  /** A symlink inside the block's folder pointing at a sibling's insides. */
+  const LINKS: Record<string, string> = { "projectA/vendor": "/w/projectB/src" };
+
+  /** Stands in for `resolveWorkspaceFolder` against the block's own mount. */
+  function resolveInFakeMount(folder: string): string {
+    const abs = path.posix.resolve(MOUNT, folder);
+    if (abs !== MOUNT && !abs.startsWith(`${MOUNT}/`)) {
+      throw new Error(`Folder is outside the "work" mount: ${folder}`);
+    }
+    const rel = path.posix.relative(MOUNT, abs);
+    if (MISSING.has(rel)) {
+      throw new Error(`No such folder in the "work" mount: ${folder}`);
+    }
+    // Resolved, as `resolveInMount` returns it: a link inside the block's
+    // folder that points at a sibling reads as the sibling.
+    return LINKS[rel] ?? abs;
+  }
+
+  /** The whole folder check one block would supply, with the syscall stubbed. */
+  const bounded = (blockFolder: string): Partial<EmissionLimits> => ({
+    folderRefusal: (folder) =>
+      emittedFolderRefusal(blockFolder, folder, resolveInFakeMount),
+  });
+
+  it("refuses a sibling of the block's own folder, naming that folder", () => {
+    // The regression. Accepted before the block's folder was checked at all,
+    // and what it starts is an agent writing files in another repository.
+    const reason = refused([spec("a", { folder: "projectB" })], bounded("projectA"));
+    assert.match(reason, /“A” names a folder that cannot be used/);
+    assert.match(reason, /outside “projectA”/);
+    assert.match(reason, /projectB/);
+  });
+
+  it("accepts the block's own folder and anything under it", () => {
+    const specs = emitted(
+      [spec("a", { folder: "projectA" }), spec("b", { folder: "projectA/api" })],
+      bounded("projectA"),
+    );
+    assert.deepEqual(
+      specs.map((s) => s.folder),
+      ["projectA", "projectA/api"],
+    );
+  });
+
+  it("refuses the mount root from a block that is not on it", () => {
+    // `""` is a real answer on a node and stays one here — but it is the one
+    // folder that overlaps every other, so a block held to `projectA` reaching
+    // for it is the escape that costs the most.
+    const reason = refused([spec("a", { folder: "" })], bounded("projectA"));
+    assert.match(reason, /outside “projectA”/);
+  });
+
+  it("refuses a folder that only lexically looks inside the block's", () => {
+    // Two ways to read as inside and not be: climbing back out, and a symlink
+    // the mount check resolves. Containment is decided on the resolved path
+    // for the second one, which is why the first is not the whole test.
+    assert.match(
+      refused([spec("a", { folder: "projectA/../projectB" })], bounded("projectA")),
+      /outside “projectA”/,
+    );
+    assert.match(
+      refused([spec("a", { folder: "projectA/vendor" })], bounded("projectA")),
+      /outside “projectA”/,
+    );
+  });
+
+  it("takes the whole mount as the bound when the block sits on the root", () => {
+    // What that block's own prompt says, so it is what it gets: `folder: ""`
+    // names no narrower bound, and refusing a sibling there would be refusing
+    // the block the operator saved.
+    const specs = emitted(
+      [spec("a", { folder: "projectB" }), spec("b", { folder: "" })],
+      bounded(""),
+    );
+    assert.deepEqual(
+      specs.map((s) => s.folder),
+      ["projectB", ""],
+    );
+  });
+
+  it("passes the mount refusal through, from either block", () => {
+    // The containment guarantee is unchanged and still first: a folder outside
+    // the mount is refused in the same words whatever the block's own folder.
+    assert.match(
+      refused([spec("a", { folder: "../elsewhere" })], bounded("projectA")),
+      /outside the "work" mount/,
+    );
+    assert.match(
+      refused([spec("a", { folder: "gone" })], bounded("")),
+      /No such folder in the "work" mount/,
+    );
+  });
+
+  it("refuses everything when the block's own folder has gone", () => {
+    // Nothing can be shown to be inside a folder that is not there, and the
+    // turn still runs — `safeFolder` lets it — so this is reachable. Refusing
+    // is the direction that cannot start an agent somewhere unintended.
+    const reason = refused([spec("a", { folder: "projectA" })], bounded("vanished"));
+    assert.match(reason, /“vanished”/);
+    assert.match(reason, /cannot be found any more/);
   });
 });
 

@@ -524,11 +524,19 @@ export default function RunDetail({
   // back. `work_dir` is what separates it from a run its own guard refused,
   // which is `blocked` too and already holds a checkout.
   const blockedBeforeStart = run.status === "blocked" && run.work_dir === null;
-  const resumable =
+  const pickupable =
     run.status === "failed" ||
     run.status === "stopped" ||
     run.status === "completed" ||
     blockedBeforeStart;
+  // Except when a whole workflow was halted on top of it. `reopenRun` refuses a
+  // member of a stopped instance — a halt is terminal for the instance, and the
+  // guard that bounds its spending is inert once it leaves `started` — so the
+  // button's only possible answer is that refusal. Said in words where the
+  // button would have been, because a control that is silently absent is a dead
+  // end on the page whose whole job is getting the run moving again.
+  const haltedWith = pickupable ? (run.haltedWorkflow ?? null) : null;
+  const resumable = pickupable && !haltedWith;
   // What blank sends, which is the one thing this form's copy has to get right.
   // A `completed` run that used up its cycle cap never reported anything, and
   // is continued rather than pushed back on — same branch as `reopenPrompt`.
@@ -597,6 +605,12 @@ export default function RunDetail({
             {run.stop_reason && (
               <p className="mt-1 max-w-[70ch] text-xs text-ink-muted">
                 {run.stop_reason}
+              </p>
+            )}
+            {haltedWith && (
+              <p className="mt-1 max-w-[70ch] text-xs text-ink-muted">
+                Stopping a workflow run is final, so this run cannot be picked
+                up on its own — start “{haltedWith}” again to do this work.
               </p>
             )}
           </div>
