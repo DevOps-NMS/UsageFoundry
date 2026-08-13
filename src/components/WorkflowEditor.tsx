@@ -963,8 +963,9 @@ function LinkPanel({
         </Select>
       </Field>
 
+      {/* No `label` on the Field: the Toggle carries its own, and a second one
+          above it would leave the switch with two names and no clear one. */}
       <Field
-        label="Branch"
         hint={`${toName} commits onto ${fromName}'s branch instead of cutting its own`}
       >
         <Toggle
