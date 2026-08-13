@@ -49,6 +49,7 @@ const {
   githubEnv,
   isTransientApiError,
   isUsageLimit,
+  matchesCopyGlobs,
   needsLiveSpendTelemetry,
   nextPrompt,
   permissionDenials,
@@ -1197,5 +1198,54 @@ describe("permissionDenials", () => {
     for (const raw of [undefined, null, "nope", [], [{}], [{ tool_name: "" }]]) {
       assert.deepEqual(permissionDenials(raw), []);
     }
+  });
+});
+
+describe("matchesCopyGlobs", () => {
+  // Every one of these is a file `seedWorktree` either copies into a fresh
+  // checkout or leaves out, and both mistakes surface inside a tool call: an
+  // agent whose first command wants an env file that is not there, or a secret
+  // the operator named in an exclusion sitting in a worktree anyway.
+
+  it("reads * as any run of characters", () => {
+    assert.equal(matchesCopyGlobs(".env.local", [".env.*"]), true);
+    assert.equal(matchesCopyGlobs(".env", [".env.*"]), false);
+    assert.equal(matchesCopyGlobs("env.local", [".env.*"]), false);
+  });
+
+  it("reads ? as exactly one character, not as a quantifier", () => {
+    // The whole of the defect: `?` used to reach the regex unescaped and
+    // untranslated, making the preceding token optional — so each of these
+    // three answered the opposite of what was asked.
+    assert.equal(matchesCopyGlobs(".env", [".env?"]), false);
+    assert.equal(matchesCopyGlobs(".envx", [".env?"]), true);
+    assert.equal(matchesCopyGlobs(".en", [".env?"]), false);
+  });
+
+  it("reads ? the same way inside a negation", () => {
+    // Where it is most expensive: a wrong answer here copies a file the
+    // operator wrote an exclusion for, or withholds one they did not.
+    const globs = [".env.*", "!.env?.local"];
+    assert.equal(matchesCopyGlobs(".envx.local", globs), false);
+    assert.equal(matchesCopyGlobs(".env.local", globs), true);
+  });
+
+  it("keeps every other regex metacharacter literal", () => {
+    assert.equal(matchesCopyGlobs("aXc", ["a.c"]), false);
+    assert.equal(matchesCopyGlobs("a.c", ["a.c"]), true);
+    assert.equal(matchesCopyGlobs("ab", ["a+b"]), false);
+    assert.equal(matchesCopyGlobs("a+b", ["a+b"]), true);
+    assert.equal(matchesCopyGlobs("a", ["(a|b)"]), false);
+    assert.equal(matchesCopyGlobs("(a|b)", ["(a|b)"]), true);
+  });
+
+  it("lets a later pattern overrule an earlier one, in both directions", () => {
+    const globs = [".env", ".env.*", "!.env.example"];
+    assert.equal(matchesCopyGlobs(".env", globs), true);
+    assert.equal(matchesCopyGlobs(".env.local", globs), true);
+    assert.equal(matchesCopyGlobs(".env.example", globs), false);
+    assert.equal(matchesCopyGlobs("package.json", globs), false);
+    // A re-inclusion after an exclusion wins, because later patterns win.
+    assert.equal(matchesCopyGlobs(".env.example", [...globs, ".env.example"]), true);
   });
 });

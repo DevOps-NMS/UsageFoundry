@@ -1401,15 +1401,21 @@ async function requireBranch(
 }
 
 /** Match a filename against the settings glob list; later patterns win. */
-function matchesCopyGlobs(name: string, globs: string[]): boolean {
+export function matchesCopyGlobs(name: string, globs: string[]): boolean {
   let hit = false;
   for (const raw of globs) {
     const negate = raw.startsWith("!");
     const pattern = negate ? raw.slice(1) : raw;
-    const re = new RegExp(
-      `^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`,
+    // `?` is a glob wildcard and has to be *translated*, not merely escaped:
+    // left alone it reached the regex meaning "the previous token is optional",
+    // so `.env?` matched `.env` and rejected `.envx` — the opposite of both.
+    // Both wildcards are decided in the same pass that escapes everything else,
+    // because a second sweep rewriting `\?` would also catch a literal
+    // backslash standing in front of one.
+    const source = pattern.replace(/[.+^${}()|[\]\\?*]/g, (c) =>
+      c === "*" ? ".*" : c === "?" ? "." : `\\${c}`,
     );
-    if (re.test(name)) hit = !negate;
+    if (new RegExp(`^${source}$`).test(name)) hit = !negate;
   }
   return hit;
 }
