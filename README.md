@@ -894,7 +894,68 @@ Stopping is terminal. There is no pause-and-resume for an instance: a stopped
 one cannot be un-stopped, and starting the workflow again is a fresh press of
 Run with fresh runs.
 
-There is no scheduling. A workflow runs when someone presses Run.
+### On a schedule
+
+A workflow can press its own Run. **This is the only thing in the app that
+starts a billed agent with nobody present** — the run form, the chat's approval
+gate and the Run button all have somebody there at the moment the spend begins —
+so it is worth being clear about what does and does not change.
+
+What does not change: **guards**. A schedule calls exactly the same
+`startWorkflow` the button does, so every block still runs under the template it
+names or under the untemplated guards in Settings, the workflow's own limits
+still bound the whole graph, and *Stop all* still halts it. There is no field on
+the schedule form, no argument on the API and no column in the database that
+could set a permission mode, a budget or an isolation choice. The schedule
+decides *when*; a person already decided *what* and *how much*.
+
+**A workflow with no limits of its own cannot be scheduled.** If *Limits for the
+whole workflow* is empty — no spending limit, no 5-hour guard, no weekly
+guard — the schedule form refuses with a sentence, and so does every fire if you
+clear those limits afterwards. This is deliberately a refusal rather than a
+warning: a warning is read once, when the schedule is created, and the spend it
+is about happens every night for the next month. Any one of the three is enough.
+The two window guards are the ones that bound *repetition* rather than one press,
+since a graph that would start into an already-spent window is refused at the
+door.
+
+**How often.** Three choices, and no cron expression:
+
+| | Reads as | DST |
+|---|---|---|
+| Every day at a time | `Every day at 09:00 (Europe/Berlin)` | follows the clocks |
+| Every week on a day | `Every Monday at 07:30 (Europe/Berlin)` | follows the clocks |
+| Every N hours | `Every 6 hours`, counted from when you saved it | fixed interval — unaffected |
+
+The card states the **next fire time as an absolute instant**, not "in about an
+hour". A schedule you cannot verify at a glance is one you will not leave an
+unattended agent behind.
+
+**Timezones.** The container runs in UTC and you do not, so the zone is stored
+with the schedule and shown beside the time. The form fills it in from your
+browser. A zone name the server's ICU does not recognise is **refused** rather
+than quietly replaced with the server's — elsewhere in this app an unknown zone
+falls back, because a calendar chart cut an hour out is a mistake you can see,
+where a schedule an hour out is an hour out for months. On the spring-forward day
+a time inside the gap (02:30 where the clocks go 02:00 → 03:00) fires an hour
+later that day rather than not at all; on the fall-back day a time that comes
+round twice fires once.
+
+**A missed window is not made up.** If the container was down at the fire time,
+the restart records it as missed and starts nothing — the same rule a queued run
+and a queued merge already follow, that a server coming back up must not start
+unattended work because of something that should have happened hours ago. The
+card says what was missed and when.
+
+**An overlap is skipped, not queued.** A workflow that is still running when its
+next occurrence comes round is skipped with a reason, and the occurrence after
+that is the next chance. Repeated skips read as one state with a count —
+`skipped ×14 since 03:00` — rather than fourteen rows saying the same thing.
+
+**Pause and remove.** *Pause* stops it firing and keeps everything else; the card
+still says when it would fire if resumed, and the paused stretch records no
+missed windows. *Remove* deletes the schedule and touches neither the workflow
+nor anything it has already started.
 
 ---
 
@@ -1296,9 +1357,11 @@ src/lib/
                    and the shared spawn a workflow's deciding block reuses
   workflows.ts     saved graphs of run blocks — form input, never a run; and
                    the blocks that decide what to run, which are not
+  schedules.ts     when a saved workflow presses its own Run — the one place
+                   an agent starts with nobody present
   workspace.ts     the folder walk, shared by the picker and the chat's tools
   db.ts            SQLite (runs, events, reviews, chats, proposals, workflows,
-                   settings)
+                   schedules, settings)
 src/app/api/       usage · account · runs · branches · calibrate · settings ·
                    folders · chat · mcp · workflows
 ```
@@ -1699,6 +1762,19 @@ through before trusting this unattended:
   same run could not reach `gh`, so the issue it was written from was never read
   either — what is here follows the task text's summary of it. Run the three
   commands and open one finished run's page before trusting any of it.
+- **Every part of a workflow schedule that is not the decision function.**
+  `decideSchedule`, `nextOccurrence`, `normalizeScheduleInput` and
+  `scheduleRefusal` are unit-tested — including a missed window, an overlap
+  refusal, a paused schedule and both DST boundaries in Europe/Berlin — and
+  `npm run typecheck`, `npm test` and `npm run build` all pass. What has **not**
+  happened is a clock reaching a fire time: no schedule has ever actually
+  started a workflow, no browser has rendered the schedule card or its form, and
+  `reconcileSchedulesOnBoot` has not been watched closing out a real missed
+  window across a container restart. The run it was written in has no Docker, so
+  the restart path in particular is reasoning plus a unit test and nothing else.
+  Before trusting it unattended: set a schedule a few minutes out on a cheap
+  workflow, watch it fire once, then stop the container over the next occurrence
+  and confirm the card says *missed* and that nothing started on boot.
 - **The Usage by period card in a browser.** The rollup behind it was exercised
   against 9,200 real turns (see *Verified*) and `npm run typecheck` and
   `npm test` both pass, but no browser has rendered it: the sandbox it was
