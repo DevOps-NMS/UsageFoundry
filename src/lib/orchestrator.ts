@@ -2359,6 +2359,61 @@ export function dependenciesOf(
 }
 
 /**
+ * Everything downstream of `roots` that is blocked and could be woken.
+ *
+ * The counterpart to `releasableRuns`, and it exists because that function's
+ * verdict is written once and never revisited: `releasePass` selects
+ * `WHERE status = 'waiting'`, so the moment a row becomes `blocked` it is
+ * invisible to every later pass. That is right while the dependency stays
+ * settled and wrong the moment it does not — and `reopenRun` exists precisely
+ * to unsettle one. Measured: a four-block workflow lost its last block when
+ * block three stopped at its spending limit; the operator raised the limit,
+ * reopened it, and it completed, but the block behind it stayed blocked with a
+ * sentence about a stop that had since been undone, and no route back — a
+ * `blocked` row is not `REOPENABLE` either.
+ *
+ * Transitive, because the cascade that blocked them was: block three's failure
+ * blocked four, and four blocked five with a reason naming four. Waking only
+ * the direct dependents would leave the tail of every chain longer than two
+ * exactly as stuck as before.
+ *
+ * Membership is decided structurally rather than by reading `stop_reason` back,
+ * which is prose and the wrong kind of evidence — the same reason `splitPatches`
+ * matches on position and the merge-tree parser trusts the stage records over
+ * the messages. A caller passes only rows that never reached a workspace; a run
+ * refused by its *own* guard before its first cycle is `blocked` too, and it has
+ * a `work_dir`, so re-planning one through `admitWaiting` would allocate a
+ * second checkout slot and orphan the first.
+ */
+export function revivableDependents(
+  roots: readonly string[],
+  candidates: readonly string[],
+  links: readonly DependencyLink[],
+): string[] {
+  const dependents = new Map<string, string[]>();
+  for (const link of links) {
+    const list = dependents.get(link.dependsOn);
+    if (list) list.push(link.runId);
+    else dependents.set(link.dependsOn, [link.runId]);
+  }
+
+  const eligible = new Set(candidates);
+  const woken = new Set<string>();
+  const frontier = [...roots];
+
+  while (frontier.length > 0) {
+    const id = frontier.pop() as string;
+    for (const next of dependents.get(id) ?? []) {
+      if (!eligible.has(next) || woken.has(next)) continue;
+      woken.add(next);
+      frontier.push(next);
+    }
+  }
+
+  return [...woken];
+}
+
+/**
  * Queue every waiting run whose dependencies have settled, and end every one
  * whose dependencies can no longer settle in its favour.
  *
@@ -2462,6 +2517,62 @@ export function blockWaitingRun(id: string, reason: string): boolean {
     payload: { status: "blocked", stop_reason: reason },
   });
   return true;
+}
+
+/**
+ * Put every run blocked behind `roots` back to `waiting`, so the next release
+ * pass decides it again on what is true now.
+ *
+ * Deliberately not a release: this reopens the *question*, and `releasePass`
+ * still answers it. A dependency that is now satisfied admits the run; one that
+ * is still terminal re-blocks it within the same call, with a sentence about
+ * the current ending rather than the one that has since been undone. So the
+ * worst this can do is rewrite a stale reason, and the row never skips the
+ * admission that plans its workspace.
+ *
+ * `work_dir IS NULL` is the whole safety condition and `revivableDependents`
+ * says why: a run refused by its own guard is `blocked` with a checkout already
+ * allocated, and must not be sent back through `admitWaiting`.
+ */
+export function reviveBlockedDependents(roots: readonly string[]): number {
+  if (roots.length === 0) return 0;
+
+  const candidates = (
+    db()
+      .prepare(
+        "SELECT id FROM runs WHERE status='blocked' AND work_dir IS NULL AND iterations = 0",
+      )
+      .all() as Array<{ id: string }>
+  ).map((r) => r.id);
+  if (candidates.length === 0) return 0;
+
+  const links = db()
+    .prepare("SELECT run_id AS runId, depends_on AS dependsOn, edge FROM run_deps")
+    .all() as DependencyLink[];
+
+  const woken = revivableDependents(roots, candidates, links);
+  let n = 0;
+  for (const id of woken) {
+    const done = db()
+      .prepare(
+        "UPDATE runs SET status='waiting', finished_at=NULL, stop_reason=NULL" +
+          " WHERE id=? AND status='blocked'",
+      )
+      .run(id);
+    if (done.changes !== 1) continue;
+    n += 1;
+    emit({
+      runId: id,
+      ts: Date.now(),
+      kind: "status",
+      payload: {
+        status: "waiting",
+        message:
+          "Waiting again: a run it depends on was picked up, so what blocked it is being decided afresh.",
+      },
+    });
+  }
+  return n;
 }
 
 /**
@@ -4639,7 +4750,15 @@ export function reopenRun(
 ): ReopenOutcome {
   const run = getRun(id);
   if (!run) return { ok: false, reason: "No such run." };
-  if (!REOPENABLE.includes(run.status)) {
+
+  // A run blocked behind a dependency is picked up by going back to `waiting`,
+  // not by joining the queue: it never ran, so there is no session to continue
+  // and — more to the point — no workspace, and `admitWaiting` is what plans
+  // one. The two kinds of `blocked` are told apart by `work_dir`, never by the
+  // reason text: this kind never reached a checkout, where a run refused by its
+  // own guard before its first cycle already holds one.
+  const waitingAgain = run.status === "blocked" && run.work_dir === null;
+  if (!waitingAgain && !REOPENABLE.includes(run.status)) {
     return {
       ok: false,
       reason: `This run is ${run.status}, so there is nothing here to pick up.`,
@@ -4709,11 +4828,18 @@ export function reopenRun(
 
   const flip = db()
     .prepare(
-      "UPDATE runs SET status='queued', budget=?, max_iterations=?, follow_up=?," +
-        " started_at=NULL, finished_at=NULL, exit_code=NULL, stop_reason=NULL," +
-        " resume_at=NULL WHERE id=? AND status IN ('failed','stopped','completed')",
+      `UPDATE runs SET status=?, budget=?, max_iterations=?, follow_up=?,
+         started_at=NULL, finished_at=NULL, exit_code=NULL, stop_reason=NULL,
+         resume_at=NULL WHERE id=? AND status=?`,
     )
-    .run(blob, policy.maxIterations ?? 0, firstPrompt || null, id);
+    .run(
+      waitingAgain ? "waiting" : "queued",
+      blob,
+      policy.maxIterations ?? 0,
+      firstPrompt || null,
+      id,
+      run.status,
+    );
   if (flip.changes !== 1) {
     return { ok: false, reason: "This run changed state before it could be picked up." };
   }
@@ -4722,17 +4848,34 @@ export function reopenRun(
     runId: id,
     ts: Date.now(),
     kind: "status",
-    payload: {
-      status: "queued",
-      message: !run.session_id
-        ? note
-          ? "Picked up again. It never reported a session to resume, so it starts from the original task with your note added to it."
-          : "Picked up again. It never reported a session to resume, so it starts from the original task."
-        : note
-          ? "Picked up again — your note goes to the session it left off in."
-          : "Picked up again — it continues the session it left off in.",
-    },
+    payload: waitingAgain
+      ? {
+          status: "waiting",
+          message:
+            "Picked up again. It never started, so it goes back to waiting on the runs ahead of it — it starts by itself if they have since succeeded, and says so again if they have not.",
+        }
+      : {
+          status: "queued",
+          message: !run.session_id
+            ? note
+              ? "Picked up again. It never reported a session to resume, so it starts from the original task with your note added to it."
+              : "Picked up again. It never reported a session to resume, so it starts from the original task."
+            : note
+              ? "Picked up again — your note goes to the session it left off in."
+              : "Picked up again — it continues the session it left off in.",
+        },
   });
+
+  // Whatever this run's own ending blocked is asked again too, transitively:
+  // the reason those rows carry is a sentence about an ending that is now being
+  // undone, and nothing else would ever revisit it.
+  reviveBlockedDependents([id]);
+
+  if (waitingAgain) {
+    // Decides this row and everything just woken behind it, in one pass and on
+    // what is true now — admitting what can start and re-blocking what cannot.
+    releaseDependents();
+  }
 
   // Outside any claim of its own: a queued row holds nothing, and
   // `promoteQueued` is what decides whether its folder is free.

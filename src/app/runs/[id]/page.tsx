@@ -518,10 +518,17 @@ export default function RunDetail({
   // Finished, but with somewhere to carry on from — including `completed`: the
   // agent's judgement that a task is done is not the operator's, and seeing
   // what it built is usually what shows up the next thing to ask for.
+  // Blocked before it ever got a workspace — its dependency ended in a way that
+  // could not satisfy the edge. That verdict is not revisited on its own, so if
+  // the dependency has since been picked up and succeeded, this is the only way
+  // back. `work_dir` is what separates it from a run its own guard refused,
+  // which is `blocked` too and already holds a checkout.
+  const blockedBeforeStart = run.status === "blocked" && run.work_dir === null;
   const resumable =
     run.status === "failed" ||
     run.status === "stopped" ||
-    run.status === "completed";
+    run.status === "completed" ||
+    blockedBeforeStart;
   // What blank sends, which is the one thing this form's copy has to get right.
   // A `completed` run that used up its cycle cap never reported anything, and
   // is continued rather than pushed back on — same branch as `reopenPrompt`.
@@ -605,7 +612,11 @@ export default function RunDetail({
                 className="transition-colors duration-150"
                 onClick={openReopen}
               >
-                {saidDone ? "Ask for more" : "Resume"}
+                {blockedBeforeStart
+                  ? "Try again"
+                  : saidDone
+                    ? "Ask for more"
+                    : "Resume"}
               </Button>
             )}
             {active && (
@@ -692,11 +703,13 @@ export default function RunDetail({
         {reopenOpen && (
           <div className="mt-4 border-t border-line pt-4">
             <h3 className="mb-2.5 text-xs font-semibold text-ink">
-              {!run.session_id
-                ? "Start this run again from its original task"
-                : saidDone
-                  ? "Send this run back into the same session"
-                  : "Carry on from where this run stopped"}
+              {blockedBeforeStart
+                ? "Put this run back behind the ones it waits on"
+                : !run.session_id
+                  ? "Start this run again from its original task"
+                  : saidDone
+                    ? "Send this run back into the same session"
+                    : "Carry on from where this run stopped"}
             </h3>
 
             <Field label="What else needs doing?" htmlFor="re-note">
@@ -707,11 +720,13 @@ export default function RunDetail({
                 placeholder="The retry logic is missing a test for the timeout path."
               />
               <Hint>
-                {!run.session_id
-                  ? "This run never reported a session to resume, so it starts the original task again with this added to the end"
-                  : saidDone
-                    ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails"
-                    : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue"}
+                {blockedBeforeStart
+                  ? "It starts by itself if the runs ahead of it have since succeeded, and says so again if they have not"
+                  : !run.session_id
+                    ? "This run never reported a session to resume, so it starts the original task again with this added to the end"
+                    : saidDone
+                      ? "Sent verbatim as the next turn of the same conversation. Blank asks it to re-check the original task, run the tests and fix what fails"
+                      : "Sent verbatim as the next turn of the same conversation. Blank just tells it to continue"}
               </Hint>
             </Field>
 

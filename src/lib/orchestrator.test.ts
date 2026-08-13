@@ -45,6 +45,7 @@ const {
   overlaps,
   releasableRuns,
   resolveIsolation,
+  revivableDependents,
   githubEnv,
   isTransientApiError,
   isUsageLimit,
@@ -321,6 +322,61 @@ describe("dependencies", () => {
       [link("a", "b"), link("b", "a")],
     );
     assert.deepEqual(decision, { release: [], block: [] });
+  });
+
+  /**
+   * The other half of the same decision: which blocked runs a reopen wakes.
+   *
+   * `releasableRuns` writes its verdict once and `releasePass` never looks at a
+   * `blocked` row again, so without this a chain dies permanently the first time
+   * any link overruns its budget — which is a $35 limit on a four-block workflow,
+   * i.e. routinely. Both ways of being wrong are silent: waking too little leaves
+   * the tail of the chain stuck with a reason describing an ending that has since
+   * been undone, and waking a run that already holds a checkout sends it back
+   * through `admitWaiting` to be given a second one.
+   */
+  const sorted = (ids: string[]) => [...ids].sort();
+
+  it("wakes the whole chain behind a reopened run, not just the next link", () => {
+    // b was blocked by a; c was blocked by b in the same cascade. Reopening a
+    // has to reach both, or every chain longer than two stays broken.
+    assert.deepEqual(
+      sorted(revivableDependents(["a"], ["b", "c"], [link("b", "a"), link("c", "b")])),
+      ["b", "c"],
+    );
+  });
+
+  it("wakes nothing that is not blocked", () => {
+    // c is running, or completed, or anything else: only the ids the caller
+    // offers as candidates are eligible, and the walk stops rather than
+    // continuing through them.
+    assert.deepEqual(
+      revivableDependents(["a"], ["b"], [link("b", "a"), link("c", "b")]),
+      ["b"],
+    );
+  });
+
+  it("leaves a run that depends on something else entirely alone", () => {
+    assert.deepEqual(revivableDependents(["a"], ["c"], [link("c", "x")]), []);
+  });
+
+  it("never wakes the run being reopened", () => {
+    // It is mid-reopen and about to be queued; putting it back to `waiting`
+    // would strand it behind its own edge.
+    assert.deepEqual(revivableDependents(["a"], ["a", "b"], [link("b", "a")]), ["b"]);
+  });
+
+  it("terminates on a cycle among blocked rows", () => {
+    // Admission refuses a loop, so this should be unreachable — but this walk
+    // runs against whatever is in the table, and a hang here is a wedged reopen.
+    assert.deepEqual(
+      sorted(revivableDependents(["a"], ["b", "c"], [link("b", "a"), link("c", "b"), link("b", "c")])),
+      ["b", "c"],
+    );
+  });
+
+  it("wakes nothing when there is nothing blocked", () => {
+    assert.deepEqual(revivableDependents(["a"], [], [link("b", "a")]), []);
   });
 });
 
