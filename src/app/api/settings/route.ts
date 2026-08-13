@@ -1,20 +1,23 @@
 import { NextResponse } from "next/server";
+// Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
+// rewrites the path alias at runtime, so a module a test loads has to import
+// the way src/lib and the chat route already do.
 import {
   getSettings,
   PERMISSION_MODES,
   saveSettings,
   type Settings,
-} from "@/lib/settings";
-import { normalizePolicy } from "@/lib/budget";
+} from "../../../lib/settings";
+import { normalizePolicy } from "../../../lib/budget";
 import {
   hasAdminKey,
   hasGithubToken,
   WORKSPACE_MOUNTS,
   WORKSPACE_ROOT,
   CLAUDE_HOME,
-} from "@/lib/config";
-import { FIVE_HOURS_MS } from "@/lib/windows";
-import { invalidatePlanUsage } from "@/lib/planUsage";
+} from "../../../lib/config";
+import { FIVE_HOURS_MS } from "../../../lib/windows";
+import { invalidatePlanUsage } from "../../../lib/planUsage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -159,6 +162,15 @@ export async function PUT(req: Request) {
   if ("isolationPreamble" in body) {
     const v = String(body.isolationPreamble ?? "").trim();
     if (v) patch.isolationPreamble = v;
+  }
+
+  if ("continuedWorkPrompt" in body) {
+    // Blank keeps whatever is stored, the same rule the three prompts around it
+    // take: what is generated beside this guidance is facts — the branch, the
+    // predecessor, the two commands — so emptying it would leave a continuing
+    // agent told where the work is and nothing about not undoing it.
+    const v = String(body.continuedWorkPrompt ?? "").trim();
+    if (v) patch.continuedWorkPrompt = v;
   }
 
   if ("donePushbackPrompt" in body) {
