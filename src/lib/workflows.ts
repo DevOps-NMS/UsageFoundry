@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { db } from "./db";
 import {
   composeTask,
@@ -983,7 +984,7 @@ export interface RunSpec {
   title: string;
   /** The whole brief for the agent, appended to the block's standing prompt. */
   task: string;
-  /** Path within the *block's* mount. `""` is the mount root. */
+  /** Path within the *block's* own folder. `""` is the mount root. */
   folder: string;
   /** Siblings in this same emission that must settle first. */
   dependsOn: Array<{ id: string; edge: DependencyEdge }>;
@@ -1019,9 +1020,9 @@ const MAX_SPEC_TITLE = 80;
  * file: it is the step where text a model wrote becomes N processes with write
  * access to a directory, with **no person between the two**. Every branch here
  * is silent when it is wrong — a spec past the cap is an agent the operator
- * never agreed to, a folder outside the mount is an agent in a repository this
- * block was never pointed at, and a loop among the specs is a set of runs that
- * would sit `waiting` for each other for ever.
+ * never agreed to, a folder outside the block's own is an agent in a repository
+ * this block was never pointed at, and a loop among the specs is a set of runs
+ * that would sit `waiting` for each other for ever.
  *
  * The cap is checked before anything else about the specs, because it is the
  * one refusal the model can act on by emitting fewer.
@@ -4040,6 +4041,61 @@ export type EmissionOutcome =
   | { ok: false; reason: string };
 
 /**
+ * Why an emitted folder cannot be used by this block, or null when it can.
+ *
+ * Two bounds, not one, and the second is the one a person actually set. The
+ * mount is the containment guarantee — `resolveInMount`, twice, before and after
+ * the symlink is resolved — and it is deliberately no narrower than a mount,
+ * because widening or narrowing it would change what every other caller of
+ * `resolveWorkspaceFolder` is permitted to touch. But a mount holds every
+ * repository on it, and what the operator saved on this block was a *folder*.
+ * This is the one place that knows which block is asking, so it is the only
+ * place that check can be made — and it is the same bound `blockSystemPrompt`
+ * promises the model in words, which until now nothing enforced.
+ *
+ * A block saved on the mount root (`folder === ""`) is bounded by its mount and
+ * nothing narrower, which is what its own prompt tells it.
+ *
+ * `resolve` is injected for the reason `EmissionLimits.folderRefusal` is: it is
+ * a syscall, and the decision it feeds has to stay testable without one.
+ * Containment is decided on the *resolved* paths, so a symlink inside the
+ * block's folder that points at a sibling is refused rather than read as inside.
+ */
+export function emittedFolderRefusal(
+  blockFolder: string,
+  folder: string,
+  resolve: (folder: string) => string,
+): string | null {
+  let resolved: string;
+  try {
+    resolved = resolve(folder);
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  if (blockFolder === "") return null;
+
+  let root: string;
+  try {
+    root = resolve(blockFolder);
+  } catch {
+    // The block's own folder has gone since the graph was saved. Nothing can be
+    // shown to be inside it, so nothing is — refusing is the direction that
+    // cannot start an agent in a repository nobody pointed it at.
+    return `This block works in “${blockFolder}”, which cannot be found any more, so no folder can be shown to be inside it.`;
+  }
+
+  // The `resolveInMount` idiom, applied one level in. Compared exactly rather
+  // than case-folded, unlike `overlaps`: over-refusing costs a sentence the
+  // model can act on, where case-folding on a case-sensitive filesystem would
+  // accept a genuinely different sibling directory.
+  const rel = path.relative(root, resolved);
+  if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) return null;
+  const named = folder === "" ? "The workspace root" : `Folder “${folder}”`;
+  return `${named} is outside “${blockFolder}”, which is where this block works.`;
+}
+
+/**
  * The one tool an orchestrator block has that writes anything.
  *
  * It **records** the specs rather than creating the runs, and they are created
@@ -4094,24 +4150,21 @@ export function emitBlockRuns(
   const plan = planEmission(raw, {
     blockName: node.name,
     fanOut: node.fanOut,
-    folderRefusal: (folder) => {
-      try {
-        // Against **this block's own mount** and no other, which is what makes
-        // "a folder inside the block's mount" mean something: containment is
-        // decided per mount by `resolveInMount`, twice, before and after the
-        // symlink is resolved.
-        resolveWorkspaceFolder(folder, node.mountId);
-        return null;
-      } catch (err) {
-        return err instanceof Error ? err.message : String(err);
-      }
-    },
+    // Against **this block's own mount** and no other, which is what makes "a
+    // folder inside the block's mount" mean something: containment is decided
+    // per mount by `resolveInMount`, twice, before and after the symlink is
+    // resolved. And then against the block's own folder, which is the bound the
+    // operator actually set and the one its prompt states.
+    folderRefusal: (folder) =>
+      emittedFolderRefusal(node.folder, folder, (f) =>
+        resolveWorkspaceFolder(f, node.mountId),
+      ),
   });
   if (!plan.ok) {
     // The one refusal that most needs recording. Everything above is a turn
     // arriving too late or twice; this is a turn that decided what to run and
     // had it rejected — a fan-out over the cap, a folder outside the block's
-    // mount, a loop among the specs. The model is told why and may well give up
+    // own, a loop among the specs. The model is told why and may well give up
     // without saying so, and then this is the only trace that it ever meant to
     // start anything at all.
     noteBlock(instanceId, nodeId, `It tried to emit runs and was refused: ${plan.reason}`);
@@ -4154,7 +4207,24 @@ function blockSystemPrompt(
   const guards = template
     ? `the “${template.name}” template`
     : "the operator's default guard set in Settings";
-  const where = node.folder === "" ? "the whole workspace" : node.folder;
+  // Exactly the bound `emittedFolderRefusal` enforces for this block and no
+  // other. A block saved on a folder is held to that folder, the workspace root
+  // included — so "" is a refusal there rather than the bad idea it is for a
+  // block whose own folder really is the root.
+  const folderBounds =
+    node.folder === ""
+      ? [
+          `- Every run works in the “${node.mountId}” workspace, anywhere in it.`,
+          "  A folder outside it is refused. Call list_folders and use a path",
+          '  exactly as it gives one; "" is the workspace root, which blocks every',
+          "  other run in the tree and is almost never what you want.",
+        ]
+      : [
+          `- Every run works in the “${node.mountId}” workspace, at or under`,
+          `  ${node.folder}. A folder outside that one is refused, and so is "" —`,
+          "  that is the workspace root, which is outside it. Call list_folders",
+          "  and use a path exactly as it gives one.",
+        ];
   return [
     "You are an orchestrator block inside UsageFoundry, a tool that runs",
     "unattended Claude Code agents against folders on this machine. You are one",
@@ -4169,10 +4239,7 @@ function blockSystemPrompt(
     "The bounds you are working inside, none of which you can change:",
     `- At most ${node.fanOut} run(s). emit_runs refuses more, and the limit was`,
     "  set when the workflow was saved.",
-    `- Every run works in the “${node.mountId}” workspace, at or under ${where}.`,
-    "  A folder outside it is refused. Call list_folders and use a path exactly",
-    "  as it gives one; \"\" is the workspace root, which blocks every other run",
-    "  in the tree and is almost never what you want.",
+    ...folderBounds,
     `- Every run gets its guards — budget, work-cycle limit, permission mode,`,
     `  whether it works in a checkout of its own — from ${guards}. There is no`,
     "  argument on emit_runs that touches any of them, deliberately.",
