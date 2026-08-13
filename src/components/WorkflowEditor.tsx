@@ -14,6 +14,7 @@ import type {
 } from "@/lib/apiTypes";
 import {
   MAX_FAN_OUT,
+  MAX_LOOP_PASSES,
   MAX_WORKFLOW_NAME,
   MAX_WORKFLOW_NODES,
 } from "@/lib/apiTypes";
@@ -65,6 +66,10 @@ interface BlockDraft {
   promptOverride: string;
   /** Orchestrator blocks only. Held as a string, as every number field here is. */
   fanOut: string;
+  /** Loop blocks only. */
+  maxPasses: string;
+  /** Loop blocks only; "" is off, the rule every budget field here follows. */
+  maxLoopCostUSD: string;
   waitsFor: Array<{
     from: string;
     edge: WorkflowEdgeDTO["edge"];
@@ -79,6 +84,7 @@ const CONDITIONS: Array<{ id: "" | WorkflowEdgeDTO["edge"]; label: string }> = [
 ];
 
 const DEFAULT_FAN_OUT = "3";
+const DEFAULT_MAX_PASSES = "3";
 
 function emptyBlock(id: string, mountId: string): BlockDraft {
   return {
@@ -91,6 +97,8 @@ function emptyBlock(id: string, mountId: string): BlockDraft {
     task: "",
     promptOverride: "",
     fanOut: DEFAULT_FAN_OUT,
+    maxPasses: DEFAULT_MAX_PASSES,
+    maxLoopCostUSD: "",
     waitsFor: [],
   };
 }
@@ -106,6 +114,8 @@ function toDrafts(workflow: WorkflowDTO): BlockDraft[] {
     task: n.task,
     promptOverride: n.promptOverride ?? "",
     fanOut: n.fanOut?.toString() ?? DEFAULT_FAN_OUT,
+    maxPasses: n.maxPasses?.toString() ?? DEFAULT_MAX_PASSES,
+    maxLoopCostUSD: n.maxLoopCostUSD?.toString() ?? "",
     waitsFor: workflow.edges
       .filter((e) => e.to === n.id)
       .map((e) => ({
@@ -133,6 +143,13 @@ function toGraph(blocks: BlockDraft[]): {
     // orchestrator block rather than defaulting it. A blank field goes over as
     // `NaN`, which is exactly the refusal the operator needs to see.
     fanOut: b.kind === "orchestrator" ? Number(b.fanOut) : null,
+    // The same, for the cap that stops a loop repeating for ever. The spending
+    // cap beside it is optional, so "" goes over as "" and reads as off.
+    maxPasses: b.kind === "loop" ? Number(b.maxPasses) : null,
+    maxLoopCostUSD:
+      b.kind === "loop" && b.maxLoopCostUSD !== ""
+        ? Number(b.maxLoopCostUSD)
+        : null,
   }));
   const edges: WorkflowEdgeDTO[] = blocks.flatMap((b) =>
     b.waitsFor.map((w) => ({
@@ -605,6 +622,7 @@ export function WorkflowEditor({
                   >
                     <option value="run">Runs a task</option>
                     <option value="orchestrator">Decides what to run</option>
+                    <option value="loop">Repeats a task</option>
                   </Select>
                 </Field>
               </div>
@@ -632,8 +650,64 @@ export function WorkflowEditor({
                 </Field>
               )}
 
+              {block.kind === "loop" && (
+                <div className="grid gap-x-4 sm:grid-cols-2">
+                  <Field
+                    label="Most passes"
+                    htmlFor={`${block.id}-passes`}
+                    hint="A pass is a whole run, with its own work cycles and its own spend"
+                  >
+                    <Input
+                      id={`${block.id}-passes`}
+                      type="number"
+                      min={1}
+                      max={MAX_LOOP_PASSES}
+                      className="tabular-nums"
+                      value={block.maxPasses}
+                      onChange={(e) =>
+                        update(block.id, { maxPasses: e.target.value })
+                      }
+                    />
+                    <Hint tone="warn">
+                      It repeats until the agent reports the work complete, a
+                      pass does not complete, or this number is reached
+                    </Hint>
+                  </Field>
+
+                  <Field
+                    label="Spending limit across passes"
+                    htmlFor={`${block.id}-loopcost`}
+                    hint="Blank for no limit — the passes stop at the number above"
+                  >
+                    <Input
+                      id={`${block.id}-loopcost`}
+                      type="number"
+                      min={0}
+                      step="0.5"
+                      placeholder="off"
+                      unit="USD"
+                      className="tabular-nums"
+                      value={block.maxLoopCostUSD}
+                      onChange={(e) =>
+                        update(block.id, { maxLoopCostUSD: e.target.value })
+                      }
+                    />
+                    <Hint>
+                      Checked between passes, and it never widens the
+                      workflow&rsquo;s own limit above
+                    </Hint>
+                  </Field>
+                </div>
+              )}
+
               <Field
-                label={block.kind === "orchestrator" ? "Guards for the runs it starts" : "Guards"}
+                label={
+                  block.kind === "orchestrator"
+                    ? "Guards for the runs it starts"
+                    : block.kind === "loop"
+                      ? "Guards for each pass"
+                      : "Guards"
+                }
                 htmlFor={`${block.id}-template`}
                 hint={
                   missingTemplate
@@ -701,7 +775,9 @@ export function WorkflowEditor({
                         : undefined
                   }
                   hintTone={
-                    block.kind === "run" && block.folder === "" ? "warn" : "neutral"
+                    block.kind !== "orchestrator" && block.folder === ""
+                      ? "warn"
+                      : "neutral"
                   }
                 >
                   <Select
@@ -724,8 +800,19 @@ export function WorkflowEditor({
               </div>
 
               <Field
-                label={block.kind === "orchestrator" ? "What to decide" : "Task"}
+                label={
+                  block.kind === "orchestrator"
+                    ? "What to decide"
+                    : block.kind === "loop"
+                      ? "Task to repeat"
+                      : "Task"
+                }
                 htmlFor={`${block.id}-task`}
+                hint={
+                  block.kind === "loop"
+                    ? "Every pass gets this same text — ask for DONE when the work is complete, which is what ends the loop"
+                    : undefined
+                }
               >
                 <Textarea
                   id={`${block.id}-task`}
@@ -743,7 +830,9 @@ export function WorkflowEditor({
                 label={
                   block.kind === "orchestrator"
                     ? "Standing instructions for the runs it starts"
-                    : "Standing instructions"
+                    : block.kind === "loop"
+                      ? "Standing instructions for every pass"
+                      : "Standing instructions"
                 }
                 htmlFor={`${block.id}-prompt`}
                 hint="Replaces the template's own prompt"
@@ -762,7 +851,9 @@ export function WorkflowEditor({
                 <p className="text-xs text-ink-muted">
                   {block.kind === "orchestrator"
                     ? "Decides as soon as the workflow starts."
-                    : "Starts as soon as its folder is free."}
+                    : block.kind === "loop"
+                      ? "Starts its first pass as soon as its folder is free."
+                      : "Starts as soon as its folder is free."}
                 </p>
               ) : (
                 <fieldset className="border-0 p-0">
@@ -797,9 +888,13 @@ export function WorkflowEditor({
                             </option>
                           ))}
                         </Select>
+                        {/* A hand-over needs a branch at both ends. A loop has
+                            one — its passes share a ref, and a successor carries
+                            on from the last pass — where an orchestrator block
+                            has none, so it is the only kind excluded. */}
                         {link &&
-                          block.kind === "run" &&
-                          other.kind === "run" && (
+                          block.kind !== "orchestrator" &&
+                          other.kind !== "orchestrator" && (
                           <label className="flex min-h-[var(--control-h)] cursor-pointer items-center gap-1.5 text-xs text-ink-muted">
                             <input
                               type="checkbox"

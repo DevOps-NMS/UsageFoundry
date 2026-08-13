@@ -30,25 +30,35 @@ const CAUSE_LABEL: Record<"operator" | "guard", string> = {
 };
 
 type BlockStatus = WorkflowInstanceDTO["blocks"][number]["status"];
+type BlockKind = WorkflowInstanceDTO["blocks"][number]["kind"];
 
 /**
  * What a block's status is called on the page.
  *
  * `emitted` is deliberately not "completed": a block that decided there was
  * nothing to start is emitted with zero runs, and the row beside this says how
- * many — so the word has to leave room for none rather than imply work.
+ * many — so the word has to leave room for none rather than imply work. It is
+ * also the status a loop settles in, where the same reasoning gives a different
+ * word: "repeated" leaves room for a loop that took one pass and stopped.
  */
 const BLOCK_LABEL: Record<BlockStatus, string> = {
   waiting: "waiting",
   thinking: "deciding",
+  looping: "repeating",
   emitted: "decided",
   failed: "failed",
   blocked: "blocked",
 };
 
+function blockLabel(kind: BlockKind, status: BlockStatus): string {
+  if (kind === "loop" && status === "emitted") return "repeated";
+  return BLOCK_LABEL[status];
+}
+
 const BLOCK_TONE: Record<BlockStatus, BadgeTone> = {
   waiting: "neutral",
   thinking: "accent",
+  looping: "accent",
   emitted: "ok",
   failed: "danger",
   blocked: "neutral",
@@ -326,7 +336,8 @@ export default function WorkflowInstancePage() {
             <TableWrap>
               <Table>
                 <caption className="sr-only">
-                  Blocks that decide what to run, and blocks waiting on one
+                  Blocks that decide what to run, blocks that repeat one, and
+                  blocks waiting on either
                 </caption>
                 <thead>
                   <tr>
@@ -353,19 +364,26 @@ export default function WorkflowInstancePage() {
                       <Tr key={b.nodeId}>
                         <Td className="align-top">
                           <Badge tone={BLOCK_TONE[b.status]}>
-                            {BLOCK_LABEL[b.status]}
+                            {blockLabel(b.kind, b.status)}
                           </Badge>
                         </Td>
                         <Td className="align-top">
                           <div className="font-medium text-ink">{b.nodeName}</div>
                           <div className="mt-0.5 text-ink-muted">
-                            {b.status === "emitted"
-                              ? `started ${b.emitted} run(s)`
-                              : b.kind === "run" && b.status !== "waiting"
-                                ? "never started"
-                                : waits.length === 0
-                                  ? "decides immediately"
-                                  : `after ${waits.join(", ")}`}
+                            {/* A pass is not a work cycle: it is a whole run,
+                                with its own cycles and its own spend. The two
+                                must never share a word. */}
+                            {b.kind === "loop" && b.status !== "waiting"
+                              ? `${b.emitted} pass(es)`
+                              : b.status === "emitted"
+                                ? `started ${b.emitted} run(s)`
+                                : b.kind === "run" && b.status !== "waiting"
+                                  ? "never started"
+                                  : waits.length === 0
+                                    ? b.kind === "loop"
+                                      ? "starts immediately"
+                                      : "decides immediately"
+                                    : `after ${waits.join(", ")}`}
                           </div>
                           {b.error && (
                             <div className="mt-0.5 max-w-[56ch] text-ink-muted">
@@ -376,8 +394,10 @@ export default function WorkflowInstancePage() {
                         <Td num className="whitespace-nowrap align-top text-ink-muted">
                           {b.startedAt === null ? "—" : fmtDateTime(b.startedAt)}
                         </Td>
+                        {/* A loop block spends nothing of its own — every pass
+                            is a run, and its cost is on that run's row. */}
                         <Td num className="whitespace-nowrap align-top">
-                          {b.kind === "run" ? "—" : fmtUSD(b.costUSD)}
+                          {b.kind === "orchestrator" ? fmtUSD(b.costUSD) : "—"}
                         </Td>
                       </Tr>
                     );
@@ -393,6 +413,12 @@ export default function WorkflowInstancePage() {
             <Hint>
               A deciding block&rsquo;s own spend is counted against this
               workflow&rsquo;s limit and never against a run
+            </Hint>
+            <Hint>
+              A repeating block starts one run per pass, each carrying on the
+              previous pass&rsquo;s branch — it stops when the agent reports the
+              work complete, a pass does not complete, or one of its caps is
+              reached
             </Hint>
           </Card>
         </>

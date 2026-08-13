@@ -532,7 +532,11 @@ export async function landState(runId: string): Promise<LandState | null> {
   };
   return {
     ...state,
-    blocked: landRefusal({ ...state, pendingCount: pending?.count ?? 0 }),
+    blocked: landRefusal({
+      ...state,
+      pendingCount: pending?.count ?? 0,
+      loopBlock: loopStillRepeating(state.chain),
+    }),
   };
 }
 
@@ -714,6 +718,46 @@ export function chainBlocker(
 }
 
 /**
+ * A workflow loop block that is still repeating on this chain's branch, by name.
+ *
+ * `chainBlocker` answers "can another run that already exists still commit to
+ * this ref", and a loop block is the one thing in this app that can commit to it
+ * through a run that *does not exist yet*. Between the moment a pass reaches a
+ * terminal status and the moment the next one is created there is no unsettled
+ * member on the branch at all, so every door here — landing, deleting, purging,
+ * paying for a conflict resolution — would read the chain as finished and act on
+ * a ref that is about to move.
+ *
+ * Read straight off the tables rather than through `workflows.ts`, which imports
+ * `mergeQueue.ts`, which imports this file. A loop block that has settled, or an
+ * instance that was halted, leaves no `looping` row, so this is silent for every
+ * branch that is not a live loop's — which is all of them on most installs.
+ */
+function loopStillRepeating(chain: readonly ChainMember[]): string | null {
+  if (chain.length === 0) return null;
+  const row = db()
+    .prepare(
+      `SELECT b.node_name AS name
+         FROM workflow_instance_runs w
+         JOIN workflow_instance_blocks b
+           ON b.instance_id = w.instance_id AND b.node_id = w.emitted_by
+        WHERE b.status = 'looping'
+          AND w.run_id IN (${chain.map(() => "?").join(",")})
+        LIMIT 1`,
+    )
+    .get(...chain.map((m) => m.runId)) as { name: string } | undefined;
+  return row?.name ?? null;
+}
+
+/** The sentence every door that would move or destroy the branch shares. */
+function loopRefusal(blockName: string, doing: string): string {
+  return (
+    `The workflow block “${blockName}” repeats on this branch and has another ` +
+    `pass to decide on, so ${doing}. Stop that run of the workflow first.`
+  );
+}
+
+/**
  * Why this branch cannot be landed right now, or null when it can.
  *
  * Pure, and separated from everything that touches a filesystem, because this
@@ -736,6 +780,12 @@ export function landRefusal(s: {
   checkout: CheckoutState | null;
   /** Every run on this branch, oldest first. See `ChainMember`. */
   chain: readonly ChainMember[];
+  /**
+   * A loop block still repeating on this branch, by name. See
+   * `loopStillRepeating` — the run that would commit next does not exist yet, so
+   * `chain` cannot see it.
+   */
+  loopBlock?: string | null;
 }): string | null {
   if (!s.branchExists) return "This branch no longer exists.";
   if (!s.target) return "There is no recorded branch for this work to land into.";
@@ -744,6 +794,16 @@ export function landRefusal(s: {
     return (
       "This run is still active. It can commit again at any moment, so anything " +
       "landed now would be half its work."
+    );
+  }
+
+  // Before the chain tests rather than inside them: a loop on its first pass is
+  // a chain of one, so the whole block below is skipped and the branch would
+  // read as a finished run's.
+  if (s.loopBlock) {
+    return loopRefusal(
+      s.loopBlock,
+      "anything landed now would be what it has done so far rather than all of it",
     );
   }
 
@@ -1087,6 +1147,18 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
     return {
       ok: false,
       reason: `Run ${short(sibling.runId)} is ${sibling.status} on this same branch, so a resolution paid for now would be resolving against a moving branch.`,
+    };
+  }
+  // And the run that is not there yet — a loop's next pass. Same sentence, and
+  // it matters most here of the four: this door is the one that spends money.
+  const repeating = loopStillRepeating(state.chain);
+  if (repeating) {
+    return {
+      ok: false,
+      reason: loopRefusal(
+        repeating,
+        "a resolution paid for now would be resolving against a moving branch",
+      ),
     };
   }
   if (state.preview.outcome !== "conflict") {
@@ -1598,6 +1670,16 @@ export async function deleteBranch(runId: string): Promise<LandOutcome> {
       reason: `Run ${short(heir.runId)} is ${heir.status} and set to carry this branch on. Deleting it now would take its starting point away.`,
     };
   }
+  const repeating = loopStillRepeating(state.chain);
+  if (repeating) {
+    return {
+      ok: false,
+      reason: loopRefusal(
+        repeating,
+        "deleting it now would take the next pass's starting point away",
+      ),
+    };
+  }
 
   const repoRoot = repoPathFor(run.repo_root);
   if (!repoRoot) {
@@ -1716,6 +1798,8 @@ export function purgeRefusal(s: {
   confirmBranch: string;
   /** Every run on this branch, oldest first. See `ChainMember`. */
   chain: readonly ChainMember[];
+  /** A loop block still repeating on it. See `loopStillRepeating`. */
+  loopBlock?: string | null;
 }): string | null {
   if (!s.branch) return "This run has no branch.";
   if (!s.branchExists) return `${s.branch} is already gone.`;
@@ -1731,6 +1815,12 @@ export function purgeRefusal(s: {
     return (
       `Run ${short(busy.runId)} is ${busy.status} and set to carry this branch on. ` +
       "Stop that run first — purging now would take the branch out from under it."
+    );
+  }
+  if (s.loopBlock) {
+    return loopRefusal(
+      s.loopBlock,
+      "purging now would take the branch out from under the next pass",
     );
   }
   if (s.confirmBranch !== s.branch) {
@@ -1764,13 +1854,15 @@ export async function purgeBranch(
   const branch = run.worktree_branch;
   const exists = await git(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
 
+  const chain = branchChain(run);
   const refusal = purgeRefusal({
     runId: run.id,
     runStatus: run.status,
     branch,
     branchExists: exists.ok,
     confirmBranch,
-    chain: branchChain(run),
+    chain,
+    loopBlock: loopStillRepeating(chain),
   });
   if (refusal) return { ok: false, reason: refusal };
 

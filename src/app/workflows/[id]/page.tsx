@@ -328,6 +328,17 @@ export default function WorkflowPage() {
                           with no approval
                         </div>
                       )}
+                      {n.kind === "loop" && (
+                        // Same reasoning: a block that repeats is a run per
+                        // pass, and the number of passes is what the operator
+                        // is agreeing to when they press Run.
+                        <div className="mt-0.5 text-warn">
+                          Repeats until done — up to {n.maxPasses} pass(es), one
+                          run each
+                          {n.maxLoopCostUSD !== null &&
+                            `, or $${n.maxLoopCostUSD} across them`}
+                        </div>
+                      )}
                       <div className="mono mt-0.5 text-ink-muted">
                         {n.mountId} / {n.folder || "."}
                       </div>
