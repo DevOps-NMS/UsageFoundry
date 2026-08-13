@@ -1924,12 +1924,29 @@ through before trusting this unattended:
   `normalizeWorkflowInput` is tested over both caps, a missing or fractional or
   oversized pass cap, a blank/zero/negative spend cap reading as off, both caps
   staying null on the other two kinds, and a loop whose guards do not isolate.
-  `npm run typecheck` and `npm test` pass. Everything around them typechecks and
-  has never executed: no pass has been created, no branch has been carried from
-  one pass to the next, and no `looping` row has been read by `land.ts`. Same
-  sandbox limitation as the entries above, and Docker is unavailable here as
-  well. What a human should run, against a scratch `DATA_DIR`, `CLAUDE_HOME` and
-  workspace:
+  `npm run typecheck` and `npm test` pass.
+
+  The wiring around them was driven once by hand, in a throwaway script rather
+  than a committed test — against a real SQLite database, a real `git init`
+  workspace and a concurrency cap that kept every pass `queued` so nothing
+  spawned. That run confirmed: pass 1 created with the block reading *repeating*;
+  pass 2 created on the **same branch**, continuing pass 1, with the chain's own
+  base rather than the predecessor's tip; a second run continuing pass 1 refused
+  at admission; the branches page showing **one** row for the branch, owned by
+  the last pass; Land, Delete and Purge all refused by name while the block reads
+  *repeating*; the loop settling on `reported_done`, on the pass cap, on the
+  spend cap (reading `spent_usd` + `spent_usd_est`) and on a pass that ended
+  `failed`, each with its own sentence; *Stop all* writing the block `failed` and
+  no further pass appearing; and a restart closing a repeating block out. An
+  earlier run of the same script, with the cap off, also exercised the real
+  spawn path end to end — a pass failing, `releaseDependents` firing, and the
+  loop settling with a named reason rather than repeating on top of it.
+
+  What that does **not** cover is everything above the library: no page has
+  rendered a loop block, no browser has saved one, and no `claude` child has
+  ever worked a pass. Same sandbox limitation as the entries above — Next's edge
+  runtime cannot execute here — and Docker is unavailable as well. What a human
+  should run, against a scratch `DATA_DIR`, `CLAUDE_HOME` and workspace:
 
   ```bash
   docker compose up --build          # or: npm run dev, where the edge runtime works
@@ -1939,18 +1956,17 @@ through before trusting this unattended:
   # DONE only when a multi-step job is finished. Press Run.
   ```
 
-  Six things to watch, none of which the unit tests can see. That pass 2 is
-  created on the *same branch* as pass 1 and its first `git log` shows pass 1's
-  commits — the whole point of the chain, and the failure is silent because a
-  fresh branch also looks like a working run. That the run page for pass 2 shows
-  it continuing pass 1, and that admission never refuses a second run continuing
-  the same predecessor. That the branches page shows **one** row for the loop,
-  not one per pass, with one Land button. That Land, Delete and Purge are all
-  refused by name while the block still reads *repeating*, including in the
-  moment between two passes. That the loop stops on the `DONE` reply rather than
-  after the first pass — the reading that is wrong here is `completed`, and it
-  is wrong in the direction that looks like a working feature. And that *Stop
-  all* while a pass is in flight leaves no further pass created afterwards.
+  Four things to watch, none of which the script above could see. That pass 2's
+  first `git log` really shows pass 1's **commits** — the branch and the base
+  were checked, but no agent has committed to one, and a chain that carries the
+  ref without the work is silent. That the loop stops on a real `DONE` reply
+  from a real CLI rather than after the first pass; the reading that is wrong
+  here is `completed`, and it is wrong in the direction that looks like a
+  working feature. That the editor saves both caps and refuses a missing pass
+  cap with a sentence, and that the instance page reads *repeating* → *repeated*
+  with the pass count rather than "started N run(s)". And that *Stop all* while
+  a pass is genuinely in flight kills that child, since the script only ever
+  stopped a queued one.
 
 - **Stopping a chat turn, in either of its two forms.** `staleTurn` is unit
   tested and the rest typechecks, but no real CLI child has been signalled by
