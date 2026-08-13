@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type {
   ConflictFileDTO,
   LandStateDTO,
+  MergeStrategyDTO,
   RunDTO,
   RunReviewDTO,
 } from "@/lib/apiTypes";
@@ -170,7 +171,12 @@ function PendingWork({
 export function RunLand({ run }: { run: RunDTO }) {
   const [state, setState] = useState<LandStateDTO | null>(null);
   const [resolution, setResolution] = useState<RunReviewDTO | null>(null);
-  const [strategy, setStrategy] = useState<"merge" | "squash">("merge");
+  // Two separate facts, deliberately not one: what the operator picked, which
+  // is null until they pick something, and what the server would do if they
+  // never did. Held together in one variable, every re-read of the card
+  // overwrote the first with the second.
+  const [strategy, setStrategy] = useState<MergeStrategyDTO | null>(null);
+  const [defaultStrategy, setDefaultStrategy] = useState<MergeStrategyDTO>("merge");
   const [message, setMessage] = useState("");
   // Armed by a first press. A purge is the one action here that destroys
   // committed work, so it takes two.
@@ -179,6 +185,13 @@ export function RunLand({ run }: { run: RunDTO }) {
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
+
+  // What pressing Land will do. The select renders this, `act` sends it, and the
+  // sentence above the button describes it, so the value on screen and the value
+  // on the wire are one expression rather than three that have to agree — a
+  // default that filled the gap in one of them and not the others would land a
+  // strategy nobody read.
+  const effectiveStrategy = strategy ?? defaultStrategy;
 
   /**
    * A failed read used to be dropped on the floor — `if (!res.ok) return`, and
@@ -190,7 +203,7 @@ export function RunLand({ run }: { run: RunDTO }) {
   const load = useCallback(async () => {
     const res = await jsonRequest<{
       state: LandStateDTO | null;
-      defaultStrategy: "merge" | "squash";
+      defaultStrategy: MergeStrategyDTO;
       resolution: RunReviewDTO | null;
     }>(`/api/runs/${run.id}/land`);
     if (!res.ok) {
@@ -198,7 +211,12 @@ export function RunLand({ run }: { run: RunDTO }) {
       return;
     }
     setState(res.data.state);
-    setStrategy(res.data.defaultStrategy);
+    // The server's answer fills the gap while the operator has not chosen, and
+    // never replaces a choice they have made. `act` re-reads the card after
+    // every press, so writing this over `strategy` discarded a Squash picked
+    // before Commit — which is the order this card asks for — and the next
+    // press of Land put every commit on the target instead of one.
+    setDefaultStrategy(res.data.defaultStrategy);
     setResolution(res.data.resolution);
     setReadError(null);
   }, [run.id]);
@@ -227,7 +245,7 @@ export function RunLand({ run }: { run: RunDTO }) {
           method: "POST",
           body: {
             action,
-            strategy,
+            strategy: effectiveStrategy,
             // Omitted rather than sent empty, so an untouched box means "use
             // the task" and a cleared one is refused.
             message: message || undefined,
@@ -480,7 +498,7 @@ export function RunLand({ run }: { run: RunDTO }) {
               Merges into <span className="mono">{state.target}</span> in your own
               checkout, which has to be clean and standing on it. A conflict is
               rolled back.
-              {strategy === "squash" && (
+              {effectiveStrategy === "squash" && (
                 <>
                   {" "}
                   A squash rewrites the commits, so git can never afterwards see
@@ -502,8 +520,8 @@ export function RunLand({ run }: { run: RunDTO }) {
               <>
                 <select
                   className="w-auto rounded-sm border border-line bg-inset px-2.5 py-2 text-sm text-ink transition-colors duration-150"
-                  value={strategy}
-                  onChange={(e) => setStrategy(e.target.value as "merge" | "squash")}
+                  value={effectiveStrategy}
+                  onChange={(e) => setStrategy(e.target.value as MergeStrategyDTO)}
                   aria-label="How to land it"
                 >
                   <option value="merge">Merge, keeping its commits</option>
