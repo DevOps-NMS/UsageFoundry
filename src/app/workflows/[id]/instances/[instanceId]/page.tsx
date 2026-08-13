@@ -37,6 +37,10 @@ type BlockStatus = WorkflowInstanceDTO["blocks"][number]["status"];
  * `emitted` is deliberately not "completed": a block that decided there was
  * nothing to start is emitted with zero runs, and the row beside this says how
  * many — so the word has to leave room for none rather than imply work.
+ *
+ * Per kind as well as per status, because the column holds one lifecycle for
+ * every kind of block — see `BlockStatus`, which says why it is one vocabulary
+ * and not three — and "deciding" is the wrong word for a merge in flight.
  */
 const BLOCK_LABEL: Record<BlockStatus, string> = {
   waiting: "waiting",
@@ -45,6 +49,14 @@ const BLOCK_LABEL: Record<BlockStatus, string> = {
   failed: "failed",
   blocked: "blocked",
 };
+
+const MERGE_LABEL: Partial<Record<BlockStatus, string>> = {
+  thinking: "merging",
+  emitted: "landed",
+};
+
+const blockLabel = (b: { kind: string; status: BlockStatus }) =>
+  (b.kind === "merge" ? MERGE_LABEL[b.status] : null) ?? BLOCK_LABEL[b.status];
 
 const BLOCK_TONE: Record<BlockStatus, BadgeTone> = {
   waiting: "neutral",
@@ -326,7 +338,8 @@ export default function WorkflowInstancePage() {
             <TableWrap>
               <Table>
                 <caption className="sr-only">
-                  Blocks that decide what to run, and blocks waiting on one
+                  Blocks that decide what to run, blocks that land branches, and
+                  blocks waiting on one
                 </caption>
                 <thead>
                   <tr>
@@ -353,19 +366,24 @@ export default function WorkflowInstancePage() {
                       <Tr key={b.nodeId}>
                         <Td className="align-top">
                           <Badge tone={BLOCK_TONE[b.status]}>
-                            {BLOCK_LABEL[b.status]}
+                            {blockLabel(b)}
                           </Badge>
                         </Td>
                         <Td className="align-top">
                           <div className="font-medium text-ink">{b.nodeName}</div>
                           <div className="mt-0.5 text-ink-muted">
-                            {b.status === "emitted"
-                              ? `started ${b.emitted} run(s)`
-                              : b.kind === "run" && b.status !== "waiting"
-                                ? "never started"
-                                : waits.length === 0
-                                  ? "decides immediately"
-                                  : `after ${waits.join(", ")}`}
+                            {b.kind === "merge" &&
+                            b.branchesLanded + b.branchesFailed > 0
+                              ? `landed ${b.branchesLanded} of ${
+                                  b.branchesLanded + b.branchesFailed
+                                } branch(es)`
+                              : b.status === "emitted"
+                                ? `started ${b.emitted} run(s)`
+                                : b.kind === "run" && b.status !== "waiting"
+                                  ? "never started"
+                                  : waits.length === 0
+                                    ? "decides immediately"
+                                    : `after ${waits.join(", ")}`}
                           </div>
                           {b.error && (
                             <div className="mt-0.5 max-w-[56ch] text-ink-muted">
@@ -394,6 +412,12 @@ export default function WorkflowInstancePage() {
               A deciding block&rsquo;s own spend is counted against this
               workflow&rsquo;s limit and never against a run
             </Hint>
+            {instance.blocks.some((b) => b.kind === "merge") && (
+              <Hint>
+                A merge block&rsquo;s branches are in the merge queue on
+                Branches, one row each, with git&rsquo;s own answer for every one
+              </Hint>
+            )}
           </Card>
         </>
       )}

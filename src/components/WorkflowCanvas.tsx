@@ -63,6 +63,7 @@ export type CanvasSelection =
 export const KIND_LABEL: Record<WorkflowNodeKind, string> = {
   run: "Runs a task",
   orchestrator: "Decides what to run",
+  merge: "Lands the branches",
 };
 
 /**
@@ -74,11 +75,14 @@ export const KIND_LABEL: Record<WorkflowNodeKind, string> = {
  *
  * An orchestrator block wears the warn tint permanently, which is what the tint
  * is for — it starts runs with no approval, and that is a standing fact about
- * the block rather than a conditional alarm.
+ * the block rather than a conditional alarm. A merge block wears the accent one
+ * for the milder version of the same fact: it is the only block that writes into
+ * the operator's own checkout.
  */
 const CARD_REST: Record<WorkflowNodeKind, string> = {
   run: "border-line shadow-e1",
   orchestrator: "border-warn-line shadow-e1",
+  merge: "border-accent-line shadow-e1",
 };
 const CARD_SELECTED = "border-accent shadow-e2";
 
@@ -624,17 +628,26 @@ export function WorkflowCanvas({
                   </button>
 
                   <div className="mono truncate text-ink-muted">
-                    {block.mountId || "—"} / {block.folder || "."}
+                    {block.kind === "merge"
+                      ? "every branch in front of it"
+                      : `${block.mountId || "—"} / ${block.folder || "."}`}
                   </div>
                   <div className="mt-0.5 flex-1 overflow-hidden text-xs leading-snug text-ink-faint">
                     <span className="line-clamp-2">
-                      {block.task.trim() || "No task yet"}
+                      {block.kind === "merge"
+                        ? "Puts each branch onto the target its run recorded."
+                        : block.task.trim() || "No task yet"}
                     </span>
                   </div>
 
                   <div className="mt-1 flex items-center justify-between gap-2">
                     {block.kind === "orchestrator" ? (
                       <Badge tone="warn">up to {block.fanOut || "?"}</Badge>
+                    ) : block.kind === "merge" ? (
+                      <Badge tone={block.mergeAutoResolve ? "warn" : "accent"}>
+                        {block.mergeStrategy}
+                        {block.mergeAutoResolve ? " · AI resolve" : ""}
+                      </Badge>
                     ) : (
                       <span />
                     )}

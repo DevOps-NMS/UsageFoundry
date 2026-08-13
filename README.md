@@ -614,9 +614,11 @@ they follow have settled. It is the answer to "the same four steps, in the same
 order, every time" — the thing templates cannot do, because a template is one
 run and this is the shape of several.
 
-A block can also be an **orchestrator block**, which decides what to run instead
-of being told, and whose runs then start without an approval. That is a real
-trade and it has [its own section](#a-block-that-decides-what-to-run) below.
+There are two other kinds. An **orchestrator block** decides what to run instead
+of being told, and its runs start without an approval — a real trade, with [its
+own section](#a-block-that-decides-what-to-run) below. A **merge block** lands
+the branches the blocks in front of it left behind, optionally paying Claude to
+reconcile a conflict; it too has [a section](#a-block-that-lands-the-work).
 
 ### What a block holds, and what it does not
 
@@ -689,6 +691,66 @@ workflow's own limit below, because it is money that press of Run spent.
 Everything it starts belongs to the instance: the workflow-wide limits below
 cover those runs, *Stop all* takes them down, and they appear on the instance
 page saying which block started them.
+
+### A block that lands the work
+
+An isolated run works on a branch, which is what lets several of them share a
+repository — and it means a graph that builds something finishes with the work
+sitting on N branches and nothing on `main`. A **merge block** is the step that
+ends that. It holds no task and starts no agent: when the workflow reaches it, it
+takes every branch its predecessors left and puts each one onto the target that
+branch's own run recorded when it cut it.
+
+**The target is never named here.** A run records where it branched from, and
+that is where it goes back to — so a graph that runs against three repositories
+lands each branch in its own, with nothing in the block saying anything about
+`main`. It is the same rule the *Land* button on a run page follows.
+
+It goes through the **merge queue** — the same one the Branches page uses when
+you tick several branches and press *Queue* — so it inherits every protection
+that queue already has and adds none of its own:
+
+- **One merge at a time**, for the whole process. Each landing changes the base
+  for the one behind it, so nothing is decided in advance: each branch is
+  re-previewed against git at *its* turn.
+- **A conflict costs your checkout nothing.** It is reconciled on the run's own
+  branch in a throwaway checkout, and a failed merge is aborted before the queue
+  moves on.
+- **Your own checkout must be clean and on the target branch.** This is the
+  honest cost of an unattended merge and it is not weakened for a workflow:
+  landing onto the wrong branch is the one mistake here with no undo. A dirty
+  tree, or a HEAD on the wrong branch, refuses every branch in that repository
+  and the block reports it. Leave the repositories a workflow merges into alone
+  while it runs, or it will tell you it could not.
+
+Every branch it queues gets a row on the Branches page with git's own answer for
+it, and the block's own line says how many of them landed.
+
+**Letting Claude resolve a conflict is a switch on the block**, off by default.
+Saving the graph with it on *is* the authorisation — the same reason ticking the
+box when you queue branches by hand is, and the reason it is not a setting:
+configuration that can change under a graph already running is not authorisation.
+With it off, a conflicting branch is reported and left exactly as it was. With it
+on, a conflict is reconciled on the run's branch by an agent that may edit files
+and may not run git, and the merge is only committed after the app has checked
+that no conflict marker survived. That spend lands on the block, counts against
+the workflow's own limit below, and never against a run or a dashboard meter.
+
+**A branch with nothing to land is not a failure.** A run that completed and
+committed nothing, and a branch already on its target, both leave you with
+exactly what you asked for, so the block succeeds and says which branches it
+skipped. What *does* fail it is a predecessor that should have had a branch and
+has none — isolation having degraded at run time, which is the case where saying
+nothing would leave you believing work landed.
+
+What follows a merge block follows it on its condition, as everywhere else:
+*only if it completes* waits for every branch to land, *once it finishes* runs
+either way. A merge block that never ran satisfies neither.
+
+Two things it is not. It has no checkout of its own, so it cannot be at either
+end of a branch hand-over. And it needs at least one block in front of it that
+runs something whose guards isolate — both refused when you save the graph, not
+discovered an hour in.
 
 ### Limits for the whole workflow
 
@@ -819,9 +881,11 @@ that caused it, so both moments check the same things: a name, at least one
 block, a task on every block, a template that exists, a workspace that is
 mounted and a folder that resolves inside it, a condition on every link, no
 block waiting for itself, no loop, no branch hand-over between blocks whose
-guards do not isolate — nor one touching an orchestrator block, which has no
-checkout and so no branch — and a fan-out cap on every orchestrator block. Every
-refusal names the block it is about.
+guards do not isolate — nor one touching an orchestrator or merge block, neither
+of which has a checkout and so neither of which has a branch — a fan-out cap on
+every orchestrator block, and, on every merge block, a strategy and at least one
+predecessor that runs something whose guards leave a branch. Every refusal names
+the block it is about.
 
 The workflow-wide limits are the one exception, and only in one direction: a
 fraction guard with no ceiling behind it saves fine and is refused at Run. A
@@ -837,13 +901,14 @@ That pass has no `await` in it, and that is a correctness requirement rather
 than a style: the folder claim that keeps two agents out of one directory is
 only atomic within one event-loop turn.
 
-A graph with an orchestrator block in it is created in stages instead, for the
-obvious reason: the blocks behind one cannot name runs that a model has not
-decided on yet. Those blocks are created when the decision arrives, and until
-then they hold nothing at all — no folder, no checkout, no place in the queue —
-so they cost exactly as much as a `waiting` run does, which is nothing. The
-instance page lists them the whole time, so a block that is pending and a block
-that quietly vanished never look alike.
+A graph with an orchestrator or merge block in it is created in stages instead,
+for the obvious reason: the blocks behind one cannot name runs that a model has
+not decided on yet, or that a merge block will never create at all. Those blocks
+are created when the block in front of them finishes, and until then they hold
+nothing at all — no folder, no checkout, no place in the queue — so they cost
+exactly as much as a `waiting` run does, which is nothing. The instance page
+lists them the whole time, so a block that is pending and a block that quietly
+vanished never look alike.
 
 It is **all or nothing**. Everything checkable is checked before anything is
 created, so a failure part-way through should be unreachable; if one happens

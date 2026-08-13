@@ -338,12 +338,33 @@ export default function WorkflowPage() {
                           with no approval
                         </div>
                       )}
-                      <div className="mono mt-0.5 text-ink-muted">
-                        {n.mountId} / {n.folder || "."}
-                      </div>
-                      <div className="mt-1 max-w-[56ch] truncate text-ink-muted" title={n.task}>
-                        {n.task}
-                      </div>
+                      {n.kind === "merge" && (
+                        // Same reasoning: this is the one block that writes into
+                        // the operator's own checkout, and the one that can bill
+                        // for a resolution nobody is watching.
+                        <div
+                          className={`mt-0.5 ${n.mergeAutoResolve ? "text-warn" : "text-accent"}`}
+                        >
+                          Lands every branch in front of it
+                          {n.mergeStrategy === "squash" ? ", squashed" : ""}
+                          {n.mergeAutoResolve
+                            ? " — a conflict is resolved by Claude, and billed"
+                            : " — a conflicting branch is left alone"}
+                        </div>
+                      )}
+                      {n.kind !== "merge" && (
+                        <>
+                          <div className="mono mt-0.5 text-ink-muted">
+                            {n.mountId} / {n.folder || "."}
+                          </div>
+                          <div
+                            className="mt-1 max-w-[56ch] truncate text-ink-muted"
+                            title={n.task}
+                          >
+                            {n.task}
+                          </div>
+                        </>
+                      )}
                     </Td>
                     <Td className="align-top">
                       <Badge tone={guards.missing ? "danger" : "neutral"}>

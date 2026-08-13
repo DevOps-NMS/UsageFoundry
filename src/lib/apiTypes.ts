@@ -480,9 +480,15 @@ export const MAX_FAN_OUT = 10;
  * was written. `orchestrator` is a short agent turn that decides, at the moment
  * the workflow reaches it, which runs to create next — and those runs start
  * without an approval step, because the approval happened when a person saved a
- * graph naming this block's folder, its guard set and its fan-out cap.
+ * graph naming this block's folder, its guard set and its fan-out cap. `merge`
+ * spawns no agent of its own: it lands the branches the blocks in front of it
+ * left behind, through the same queue the Branches page uses, and its one
+ * optional expense is paying a model to reconcile a conflict.
  */
-export type WorkflowNodeKind = "run" | "orchestrator";
+export type WorkflowNodeKind = "run" | "orchestrator" | "merge";
+
+/** How a branch is put onto its target. `settings.landStrategy`'s vocabulary. */
+export type MergeStrategyDTO = "merge" | "squash";
 
 /**
  * One block of work in a workflow.
@@ -519,6 +525,20 @@ export interface WorkflowNodeDTO {
    * press of Run, so it is refused at save the way the `no_terminus` pair is.
    */
   fanOut: number | null;
+  /**
+   * How a merge block lands each branch. Null on every other kind, and never
+   * null on a merge one: it is recorded on the graph rather than read from
+   * `settings.landStrategy` at Run, so a saved workflow cannot change what it
+   * does to a repository because a setting moved underneath it.
+   */
+  mergeStrategy: MergeStrategyDTO | null;
+  /**
+   * Whether a merge block may pay a model to resolve a conflict. False on every
+   * other kind. On the graph rather than in settings for `merge_queue`'s
+   * reason: automatic spend has to be authorised where it can be read back, and
+   * saving the workflow with this on *is* that authorisation.
+   */
+  mergeAutoResolve: boolean;
 }
 
 export interface WorkflowEdgeDTO {
@@ -642,10 +662,11 @@ export interface WorkflowInstanceNodeDTO {
 /**
  * One block of an instance that never became a run.
  *
- * Either an orchestrator turn — with its own spend, which is never a run's — or
- * a block that was never created because the orchestrator block in front of it
- * had nothing to hand it. Both are here for the same reason: a block that simply
- * disappears from the instance is indistinguishable from one still waiting.
+ * An orchestrator turn — with its own spend, which is never a run's — a merge
+ * block, or a block that was never created because the block in front of it had
+ * nothing to hand it. All three are here for the same reason: a block that
+ * simply disappears from the instance is indistinguishable from one still
+ * waiting.
  */
 export interface WorkflowInstanceBlockDTO {
   nodeId: string;
@@ -659,6 +680,15 @@ export interface WorkflowInstanceBlockDTO {
   costUSD: number;
   /** How many runs this block started. 0 is a real answer, not "not yet". */
   emitted: number;
+  /** Branches a merge block put onto their target. 0 on every other kind. */
+  branchesLanded: number;
+  /**
+   * Branches a merge block could not land — including the ones it never
+   * attempted because the checkout stopped the whole repository. Counted apart
+   * from `branchesLanded` rather than subtracted from it, because a block that
+   * landed three of four is not the same fact as one that landed three of three.
+   */
+  branchesFailed: number;
   error: string | null;
   waitsFor: string[];
 }

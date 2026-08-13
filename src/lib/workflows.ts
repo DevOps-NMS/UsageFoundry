@@ -30,7 +30,14 @@ import {
   type DependencyState,
   type RunStatus,
 } from "./orchestrator";
-import { cancelQueuedFor } from "./mergeQueue";
+import {
+  batchRows,
+  cancelQueuedFor,
+  enqueue,
+  isQueueActive,
+  type QueueRow,
+} from "./mergeQueue";
+import { landState, type LandStrategy } from "./land";
 import {
   INSTANCE_ENFORCEABLE_CODES,
   evaluateInstanceBudget,
@@ -96,6 +103,24 @@ import {
  * `planProposal` and `planNode` resolve them. The orchestrator *chat* still
  * proposes and still starts nothing; this is a different thing with a different
  * gate in front of it.
+ *
+ * **And a node can land what the nodes in front of it built.** A merge block
+ * spawns no agent and holds no task: it takes the branches its predecessors' runs
+ * left behind and puts each one onto the target that run recorded when it cut its
+ * branch — never a target named here, for the reason `landState` never assumes
+ * one. It goes through `mergeQueue.enqueue`, so it inherits every protection the
+ * Branches page has and adds none of its own: one merge in flight, each item
+ * re-previewed against git at *its* turn, a conflict reconciled on the run's own
+ * branch in a throwaway checkout, and the operator's own checkout refusing the
+ * whole repository if it is dirty or standing on the wrong branch. That last one
+ * is the honest cost of an unattended merge and is not weakened here — landing
+ * onto the wrong branch is the one mistake in this app with no undo.
+ *
+ * Its one expense is optional and is authorised the same way an orchestrator
+ * block's runs are: `mergeAutoResolve` on the saved graph is a person agreeing,
+ * once, that a conflict may be reconciled by a model. It is on the node rather
+ * than in settings for `merge_queue.auto_resolve`'s reason — configuration that
+ * could change under a graph already running is not authorisation.
  */
 
 /* ------------------------------------------------------------------ */
@@ -113,16 +138,21 @@ export interface WorkflowNode {
   /** What the operator calls this step. Shown wherever a node is named. */
   name: string;
   /**
-   * A fixed run, or a turn that decides what runs to start. See
-   * `WorkflowNodeKind` and the orchestrator-block note above.
+   * A fixed run, a turn that decides what runs to start, or a merge of what the
+   * blocks in front of it built. See `WorkflowNodeKind` and the two notes above.
    */
   kind: WorkflowNodeKind;
   /** The template supplying every guard, or null for `chatDefaultGuards`. */
   templateId: string | null;
+  /**
+   * The workspace this block works in. `""` on a merge block, which works in
+   * whichever repository each branch it lands came from — recorded on the run
+   * that cut the branch, and never named here.
+   */
   mountId: string;
   /** Path within the mount. `""` is the mount root, and is a real answer. */
   folder: string;
-  /** What this block is asked to do, or to decide. */
+  /** What this block is asked to do, or to decide. `""` on a merge block. */
   task: string;
   /**
    * Standing instructions this node's task is appended to, replacing the
@@ -145,6 +175,28 @@ export interface WorkflowNode {
    * is an unbounded number of billed agents from one press of Run.
    */
   fanOut: number | null;
+  /**
+   * How a merge block puts each branch onto its target. Null on every other
+   * kind, never null on a merge one.
+   *
+   * Recorded on the graph rather than read from `settings.landStrategy` when the
+   * block runs, which is the treatment the mount and folder already get and for
+   * the same reason: a workflow is saved once and run for months, and a setting
+   * edited in between would silently change what a saved graph does to a
+   * repository with nothing in the graph changing.
+   */
+  mergeStrategy: LandStrategy | null;
+  /**
+   * Whether a merge block may pay a model to reconcile a conflict. False on
+   * every other kind.
+   *
+   * The one thing a merge block can spend, and it is authorised here for
+   * `merge_queue.auto_resolve`'s reason: queueing with the box ticked is the
+   * authorisation, recorded next to the work it authorises rather than read from
+   * configuration that could have changed since. Saving a graph with this on is
+   * the same act, one level up.
+   */
+  mergeAutoResolve: boolean;
 }
 
 /** "Start `to` after `from` has settled." */
@@ -212,6 +264,15 @@ export type WorkflowNormalization =
 
 /** Node ids travel in messages and are React keys; keep them readable. */
 const NODE_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * The kinds a block may be, as a value rather than three literal comparisons.
+ *
+ * One list, so adding a kind cannot leave the wire gate accepting a value the
+ * scheduler has no branch for — the `as const` makes every reader exhaustive
+ * against `WorkflowNodeKind` at the same time.
+ */
+const NODE_KINDS = ["run", "orchestrator", "merge"] as const satisfies readonly WorkflowNodeKind[];
 
 const MAX_NODE_NAME = 60;
 
@@ -378,16 +439,20 @@ export function normalizeWorkflowInput(
     // blocks existed says nothing here, and the other reading would turn a saved
     // workflow into one that starts agents nobody wrote.
     const rawKind = String(n.kind ?? "run");
-    if (rawKind !== "run" && rawKind !== "orchestrator") {
+    if (!(NODE_KINDS as readonly string[]).includes(rawKind)) {
       return {
         ok: false,
-        error: `“${nodeName}” is neither a run block nor an orchestrator block: ${rawKind}.`,
+        error: `“${nodeName}” is not a kind of block this app has: ${rawKind}.`,
       };
     }
     const kind = rawKind as WorkflowNodeKind;
 
-    const task = String(n.task ?? "").trim();
-    if (!task) {
+    // A merge block is told nothing. What it lands is whatever the blocks in
+    // front of it left on a branch, and where each branch belongs was recorded
+    // when its run cut it — so there is no task here for a person to write and
+    // an empty one is the right answer rather than a missing one.
+    const task = kind === "merge" ? "" : String(n.task ?? "").trim();
+    if (kind !== "merge" && !task) {
       return {
         ok: false,
         error:
@@ -428,11 +493,37 @@ export function normalizeWorkflowInput(
       fanOut = raw;
     }
 
+    // How a merge block lands, and whether it may pay for a resolution.
+    //
+    // The strategy is required rather than defaulted to `settings.landStrategy`
+    // — see `WorkflowNode.mergeStrategy` — and the editor pre-fills the picker
+    // from that setting so the graph records what the operator was shown.
+    // `=== true` for the reason `continueBranch` is read that way: it authorises
+    // billed spend, so a string off the wire must fail safe.
+    let mergeStrategy: LandStrategy | null = null;
+    let mergeAutoResolve = false;
+    if (kind === "merge") {
+      const raw = String(n.mergeStrategy ?? "");
+      if (raw !== "merge" && raw !== "squash") {
+        return {
+          ok: false,
+          error: `“${nodeName}” needs to say how it lands a branch: merge or squash.`,
+        };
+      }
+      mergeStrategy = raw;
+      mergeAutoResolve = n.mergeAutoResolve === true;
+    }
+
     // Null is "no template — use the guards in Settings", which is a real
     // answer rather than a missing one. Anything else has to exist now: a
     // graph naming a template nobody can find is one that can be saved and
     // never started.
+    //
+    // A merge block names none and can name none: guards decide what an agent
+    // may do, this block starts no agent, and the one child it can cause —
+    // `resolveConflicts`' — runs under that function's own fixed mode.
     const templateId =
+      kind === "merge" ||
       n.templateId === null ||
       n.templateId === undefined ||
       String(n.templateId) === ""
@@ -448,21 +539,28 @@ export function normalizeWorkflowInput(
       };
     }
 
-    const mountId = String(n.mountId ?? "");
-    if (!mountId) {
-      return {
-        ok: false,
-        error: `“${nodeName}” names no workspace, so there is nowhere to start it.`,
-      };
-    }
-    if (!known.mountIds.includes(mountId)) {
-      return {
-        ok: false,
-        error: `“${nodeName}” names a workspace that is not mounted: ${mountId}.`,
-      };
+    // A merge block works in whichever repository each branch came from, so it
+    // names no workspace at all rather than one it would never read. Requiring
+    // one would make a block refusable — at save and at every Run — over a mount
+    // that decides nothing about it.
+    const mountId = kind === "merge" ? "" : String(n.mountId ?? "");
+    if (kind !== "merge") {
+      if (!mountId) {
+        return {
+          ok: false,
+          error: `“${nodeName}” names no workspace, so there is nowhere to start it.`,
+        };
+      }
+      if (!known.mountIds.includes(mountId)) {
+        return {
+          ok: false,
+          error: `“${nodeName}” names a workspace that is not mounted: ${mountId}.`,
+        };
+      }
     }
 
-    const promptOverride = String(n.promptOverride ?? "").trim();
+    const promptOverride =
+      kind === "merge" ? "" : String(n.promptOverride ?? "").trim();
 
     nodes.push({
       id,
@@ -473,10 +571,12 @@ export function normalizeWorkflowInput(
       // The empty string is the mount root — the one selection that blocks
       // every other run in the tree — so it is kept rather than collapsed into
       // "no folder", exactly as a template's is.
-      folder: String(n.folder ?? ""),
+      folder: kind === "merge" ? "" : String(n.folder ?? ""),
       task,
       promptOverride: promptOverride || null,
       fanOut,
+      mergeStrategy,
+      mergeAutoResolve,
     });
     byId.set(id, nodes[nodes.length - 1]);
   }
@@ -485,6 +585,20 @@ export function normalizeWorkflowInput(
   const seenPairs = new Set<string>();
   /** The one dependency each node takes its branch from, by node id. */
   const branchFrom = new Map<string, string>();
+
+  /**
+   * Whether this node's runs get a checkout of their own — so whether there is
+   * ever a branch to hand over, carry on, or land.
+   *
+   * Read off the guards rather than off the node, because that is where the
+   * answer lives: a node names a template or names none and takes
+   * `chatDefaultGuards`. It holds for an orchestrator block too — the runs it
+   * emits take that same guard set, which is the whole of `guardsFor`'s point.
+   */
+  const isolated = (node: WorkflowNode) =>
+    node.templateId === null
+      ? known.defaultIsolate
+      : (known.templates.get(node.templateId)?.isolate ?? false);
 
   for (const [index, entry] of rawEdges.entries()) {
     const e = (entry ?? {}) as Record<string, unknown>;
@@ -536,20 +650,24 @@ export function normalizeWorkflowInput(
     // safe.
     const continueBranch = e.continueBranch === true;
     if (continueBranch) {
-      // An orchestrator block has no checkout and no branch: it decides what to
-      // do and spends nothing on disk. Refused by name at either end rather
+      // Only a run block has a checkout of its own. An orchestrator block
+      // decides and spends nothing on disk; a merge block writes into somebody
+      // else's checkout and cuts no branch. Refused by name at either end rather
       // than left to the isolation test below, which would say "its guards work
-      // directly in the folder" — true of nothing here and misleading about
-      // what would have to change.
+      // directly in the folder" — true of neither and misleading about what
+      // would have to change.
       for (const node of [source, target]) {
-        if (node.kind === "orchestrator") {
-          return {
-            ok: false,
-            error:
-              `“${node.name}” decides what to run rather than working in a ` +
-              "checkout, so it has no branch to hand over or carry on.",
-          };
-        }
+        if (node.kind === "run") continue;
+        return {
+          ok: false,
+          error:
+            node.kind === "orchestrator"
+              ? `“${node.name}” decides what to run rather than working in a ` +
+                "checkout, so it has no branch to hand over or carry on."
+              : `“${node.name}” lands other blocks' branches rather than ` +
+                "working in a checkout of its own, so it has no branch to hand " +
+                "over or carry on.",
+        };
       }
 
       const rival = branchFrom.get(to);
@@ -567,10 +685,6 @@ export function normalizeWorkflowInput(
       // branch to hand over and the successor has to be able to hold one.
       // Refused here rather than left to `admitDependencies`, which would throw
       // half way through creating the graph.
-      const isolated = (node: WorkflowNode) =>
-        node.templateId === null
-          ? known.defaultIsolate
-          : (known.templates.get(node.templateId)?.isolate ?? false);
       if (!isolated(source)) {
         return {
           ok: false,
@@ -613,6 +727,46 @@ export function normalizeWorkflowInput(
       };
     }
     continued.add(from);
+  }
+
+  // A merge block lands what is in front of it, so what is in front of it has to
+  // exist and has to have left a branch.
+  //
+  // Both halves are refused at *save* rather than at Run, which is this file's
+  // standing rule and bites in the usual way: a merge block with nothing to land
+  // is a block that reaches the front of the graph and can only report that it
+  // was pointless, and a merge block behind runs that work directly in the
+  // operator's folder is one that will find every predecessor branchless an hour
+  // in. Both are answerable now, from the guards a person already chose.
+  //
+  // A merge block *may* sit behind another merge block — that is sequencing, and
+  // it contributes no branches — so the requirement is one predecessor that
+  // produces runs, not one predecessor.
+  for (const node of nodes) {
+    if (node.kind !== "merge") continue;
+    const sources = edges
+      .filter((e) => e.to === node.id)
+      .map((e) => byId.get(e.from)!);
+    const producers = sources.filter((s) => s.kind !== "merge");
+    if (producers.length === 0) {
+      return {
+        ok: false,
+        error:
+          `“${node.name}” has no block in front of it whose work it could ` +
+          "land. A merge block lands the branches its predecessors left, so it " +
+          "needs at least one predecessor that runs something.",
+      };
+    }
+    const bare = producers.find((s) => !isolated(s));
+    if (bare) {
+      return {
+        ok: false,
+        error:
+          `“${bare.name}” leaves no branch for “${node.name}” to land — its ` +
+          "guards work directly in the folder rather than in a checkout of " +
+          "their own.",
+      };
+    }
   }
 
   // The same loop detector the run graph uses, given the node ids in place of
@@ -685,6 +839,9 @@ export function currentKnowledge(): WorkflowKnowledge {
  */
 export function folderRefusal(graph: WorkflowGraph): string | null {
   for (const node of graph.nodes) {
+    // A merge block names no workspace: it works in whichever repository each
+    // branch it lands came from, which `landRun` reads off that branch's own run.
+    if (node.kind === "merge") continue;
     try {
       resolveWorkspaceFolder(node.folder, node.mountId);
     } catch (err) {
@@ -1032,7 +1189,18 @@ export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan
 /* What the instance does next — pure                                  */
 /* ------------------------------------------------------------------ */
 
-/** Where one non-run block of an instance has got to. */
+/**
+ * Where one non-run block of an instance has got to.
+ *
+ * A lifecycle rather than an orchestrator's vocabulary, which is why a merge
+ * block reuses it verbatim instead of adding two statuses of its own: `thinking`
+ * is "a child of this block is in flight", `emitted` is "it finished and did its
+ * thing". Every liveness query, every halt and every boot reconciler keys on
+ * those two words, and a fourth and fifth would be five more places to remember
+ * — one of them missed being a merge running under an instance the page says is
+ * stopped. The page says "merging" and "merged" for a merge block; the column
+ * says what the machinery reads.
+ */
 export type BlockStatus =
   | "waiting"
   | "thinking"
@@ -1067,9 +1235,27 @@ export interface InstanceCreation {
   }>;
 }
 
+/** One merge block that may now run, with the runs whose branches it lands. */
+export interface InstanceMerge {
+  nodeId: string;
+  /**
+   * The runs its satisfied edges resolved to, in the order the graph declared
+   * them — which becomes the queue's `position`, so two presses of Run on one
+   * graph land the same branches in the same order.
+   *
+   * Taken from the same `dependsOn` a run block would have been created with,
+   * rather than re-derived from the edges: which runs an orchestrator block
+   * turned out to emit is a fact only `edgeVerdict` has, and a second reading of
+   * it is a second chance to land a different set.
+   */
+  runIds: string[];
+}
+
 export interface InstanceStep {
   /** Orchestrator blocks whose turn may start now. */
   spawn: string[];
+  /** Merge blocks whose branches may now be queued. */
+  merge: InstanceMerge[];
   /** Run blocks that may now be created. */
   create: InstanceCreation[];
   /** Nodes that can never start, each with the sentence naming what stopped it. */
@@ -1136,7 +1322,7 @@ export function planInstanceStep(
     live.set(node.id, state.get(node.id) ?? { run: null, block: null });
   }
 
-  const step: InstanceStep = { spawn: [], create: [], block: [] };
+  const step: InstanceStep = { spawn: [], merge: [], create: [], block: [] };
   const decided = new Set<string>();
 
   for (;;) {
@@ -1176,6 +1362,14 @@ export function planInstanceStep(
         continue;
       } else if (node.kind === "orchestrator") {
         step.spawn.push(node.id);
+      } else if (node.kind === "merge") {
+        // Deduplicated, because two edges can resolve to one run: a diamond
+        // whose branches meet again at the merge block. Queueing a branch twice
+        // is refused by `enqueue` anyway, which would refuse the *whole* merge.
+        step.merge.push({
+          nodeId: node.id,
+          runIds: [...new Set(dependsOn.map((d) => d.runId))],
+        });
       } else {
         step.create.push({ nodeId: node.id, dependsOn });
       }
@@ -1190,11 +1384,13 @@ export function planInstanceStep(
 /**
  * What one edge says, and — when it says "go ahead" — which runs it resolves to.
  *
- * The two kinds of predecessor answer differently and the difference is the
- * whole point of an orchestrator block: a run block is one run, decided when the
- * graph was written, where an orchestrator block is however many runs it turned
- * out to emit. A successor of the second waits for *all* of them, which is
+ * The three kinds of predecessor answer differently. A run block is one run,
+ * decided when the graph was written; an orchestrator block is however many runs
+ * it turned out to emit, and a successor waits for *all* of them, which is
  * `admitDependencies`' fan-in rule applied to a fan-in nobody could write down.
+ * A merge block resolves to **no runs at all** — it created none — so it can
+ * only sequence what follows it, which is exactly what a block set to run "after
+ * the work has landed" is asking for.
  */
 function edgeVerdict(
   from: WorkflowNode,
@@ -1202,6 +1398,37 @@ function edgeVerdict(
   edge: WorkflowEdge,
   dependsOn: InstanceCreation["dependsOn"],
 ): EdgeVerdict {
+  if (from.kind === "merge") {
+    const block = state.block;
+    if (!block || block.status === "waiting" || block.status === "thinking") {
+      return PENDING;
+    }
+    if (block.status === "blocked") {
+      return {
+        kind: "blocked",
+        reason: `“${from.name}” never ran: ${block.error ?? "no reason recorded."}`,
+      };
+    }
+    // A merge block that failed still *finished*, having tried, which is what
+    // separates it from one that never ran — the same distinction
+    // `edgeSatisfied` draws between a run that did a cycle and a run that did
+    // not. So `on-finish` is satisfied by it and `on-success` is not, and the
+    // condition on the edge decides rather than one blanket rule: "review it
+    // whether or not it landed" and "only once it is on main" are both things a
+    // person writes, and there is no defensible default between them.
+    if (block.status === "failed" && edge.edge === "on-success") {
+      return {
+        kind: "blocked",
+        reason: `“${from.name}” did not land everything it was given: ${block.error ?? "the merge failed."}`,
+      };
+    }
+    // Nothing is pushed onto `dependsOn`: a merge block created no run, so a
+    // successor of it depends on no run through this edge. A successor with no
+    // other predecessor is created with an empty dependency list, which is an
+    // ordinary queued run — "start once the work has landed".
+    return SATISFIED;
+  }
+
   if (from.kind === "run") {
     if (!state.run) {
       // Not created yet. Still `waiting` means it is behind a decision that has
@@ -1501,6 +1728,15 @@ export interface WorkflowInstanceBlock {
   tokens: number;
   /** How many runs it started. 0 is an answer, not "not yet". */
   emitted: number;
+  /** Branches a merge block put onto their target. 0 on every other kind. */
+  branchesLanded: number;
+  /**
+   * Branches a merge block did not land, including the ones the queue never
+   * attempted because the checkout stopped that repository. Counted apart from
+   * `branchesLanded` rather than subtracted, because "landed three of four" and
+   * "landed three of three" are different facts and only one needs attention.
+   */
+  branchesFailed: number;
   error: string | null;
 }
 
@@ -1659,16 +1895,35 @@ export function blocksOf(instanceId: string): WorkflowInstanceBlock[] {
     .prepare(
       `SELECT node_id AS nodeId, node_name AS nodeName, position, kind, status,
               started_at AS startedAt, finished_at AS finishedAt,
-              cost_usd AS costUSD, tokens, emitted_specs AS specs, error
-         FROM workflow_instance_blocks
+              cost_usd AS costUSD, tokens, emitted_specs AS specs, error,
+              merge_batch_id AS batchId,
+              -- Read back off the queue's own rows rather than counted into the
+              -- block as it went: those rows carry git's answer for each branch,
+              -- and a copy on the block would be a second thing to keep in step
+              -- with a worker that re-decides every item at its own turn.
+              (SELECT COUNT(*) FROM merge_queue q
+                WHERE q.batch_id = b.merge_batch_id AND q.status = 'landed')
+                AS branchesLanded,
+              (SELECT COUNT(*) FROM merge_queue q
+                WHERE q.batch_id = b.merge_batch_id AND q.status <> 'landed')
+                AS branchesFailed
+         FROM workflow_instance_blocks b
         WHERE instance_id = ? ORDER BY position`,
     )
     .all(instanceId) as Array<
-    Omit<WorkflowInstanceBlock, "emitted"> & { specs: string | null }
+    Omit<WorkflowInstanceBlock, "emitted"> & {
+      specs: string | null;
+      batchId: string | null;
+    }
   >;
-  return rows.map(({ specs, ...row }) => ({
+  return rows.map(({ specs, batchId, ...row }) => ({
     ...row,
     emitted: parseSpecs(specs).length,
+    // A block with no batch has no branches either way, and the correlated
+    // counts above answer 0 for it — but only because `merge_batch_id` is null
+    // and nothing matches. Stated rather than relied on.
+    branchesLanded: batchId ? row.branchesLanded : 0,
+    branchesFailed: batchId ? row.branchesFailed : 0,
   }));
 }
 
@@ -1947,9 +2202,14 @@ export function startWorkflow(
   // for the runs it will *emit*, which take their guards from that same
   // template, and finding that out an hour into the graph would mean a turn
   // billed for a decision nothing can act on.
+  //
+  // A merge block is the one kind that is not, and there is nothing left to
+  // plan: it names no template, no mount, no folder and no task, so every
+  // refusal `planNode` has is about a field it does not hold.
   const defaults = chatGuards();
   const plans = new Map<string, Omit<CreateRunInput, "dependsOn">>();
   for (const node of graph.nodes) {
+    if (node.kind === "merge") continue;
     const plan = planNode(
       node,
       node.templateId ? getTemplate(node.templateId) : null,
@@ -2024,18 +2284,18 @@ export function startWorkflow(
      VALUES (?, ?, ?, ?, ?, 'waiting')`,
   );
 
-  // Which nodes cannot be created yet: every node with an orchestrator block
-  // somewhere behind it. Its dependency edges will name runs that do not exist —
-  // a model has not decided on them — so it is created when they do, by
-  // `advanceInstances`. Everything else is created here, in the one synchronous
-  // pass, exactly as before.
+  // Which nodes cannot be created yet: every node with a block that is not a run
+  // somewhere behind it. Its dependency edges name runs that do not exist — a
+  // model has not decided on them, or a merge block will create none at all — so
+  // it is created when they do, by `advanceInstances`. Everything else is
+  // created here, in the one synchronous pass, exactly as before.
   const deferred = deferredNodes(graph);
 
   const runIds = new Map<string, string>();
   try {
     for (const [position, nodeId] of order.entries()) {
       const node = byId.get(nodeId)!;
-      if (node.kind === "orchestrator" || deferred.has(nodeId)) {
+      if (node.kind !== "run" || deferred.has(nodeId)) {
         addBlock.run(instanceId, nodeId, node.name, position, node.kind);
         continue;
       }
@@ -2118,13 +2378,15 @@ function recordMember(instanceId: string, node: WorkflowInstanceNode): void {
 }
 
 /**
- * Nodes that cannot be created until an orchestrator block has decided.
+ * Nodes that cannot be created until a block in front of them has finished.
  *
- * Everything reachable *from* an orchestrator block, transitively. A node here
- * has at least one dependency that is not a run yet and may turn out to be
- * several, so there is nothing for `createRun` to name — and admitting it as
- * `waiting` with no edges would release it immediately, which is a run started
- * ahead of the decision that was supposed to shape it.
+ * Everything reachable *from* a block that is not a run, transitively. A node
+ * here has at least one dependency that is not a run — an orchestrator block's
+ * decision that may turn out to be several runs, or a merge block that creates
+ * none at all — so there is nothing for `createRun` to name, and admitting it as
+ * `waiting` with no edges would release it immediately: a run started ahead of
+ * the decision that was supposed to shape it, or ahead of the merge it was meant
+ * to follow.
  *
  * Costing nothing is what makes the deferral safe: a node that has not been
  * created holds no folder, no checkout slot and no place in the queue, which is
@@ -2142,7 +2404,7 @@ function deferredNodes(graph: WorkflowGraph): Set<string> {
 
   const deferred = new Set<string>();
   const queue = graph.nodes
-    .filter((n) => n.kind === "orchestrator")
+    .filter((n) => n.kind !== "run")
     .flatMap((n) => out.get(n.id) ?? []);
   while (queue.length > 0) {
     const id = queue.shift()!;
@@ -2534,20 +2796,38 @@ function walkMembers(
  */
 function haltBlocks(instanceId: string, cause: string): number {
   const now = Date.now();
+  // The wording is per kind and the statement is not: what a block was doing is
+  // what the operator needs to read, but *which* blocks come down is one rule,
+  // and two statements per status would be two chances to add a kind to one and
+  // not the other.
   const halted =
     db()
       .prepare(
-        "UPDATE workflow_instance_blocks SET status='blocked', finished_at=?, error=?" +
+        "UPDATE workflow_instance_blocks SET status='blocked', finished_at=?," +
+          " error = CASE kind WHEN 'merge' THEN ? ELSE ? END" +
           " WHERE instance_id=? AND status='waiting'",
       )
-      .run(now, `${cause} before it started deciding.`, instanceId).changes +
+      .run(
+        now,
+        `${cause} before it landed anything.`,
+        `${cause} before it started deciding.`,
+        instanceId,
+      ).changes +
     db()
       .prepare(
-        "UPDATE workflow_instance_blocks SET status='failed', finished_at=?, error=?" +
+        "UPDATE workflow_instance_blocks SET status='failed', finished_at=?," +
+          " error = CASE kind WHEN 'merge' THEN ? ELSE ? END" +
           " WHERE instance_id=? AND status='thinking'",
       )
-      .run(now, `${cause} while it was deciding what to start.`, instanceId)
-      .changes;
+      .run(
+        now,
+        // The merges already queued are cancelled by `walkMembers` a moment
+        // later; one in flight is left to finish, exactly as `cancelBatch` has
+        // it, so the batch's own rows stay the record of which branches landed.
+        `${cause} while it was landing branches.`,
+        `${cause} while it was deciding what to start.`,
+        instanceId,
+      ).changes;
 
   for (const [key, child] of blockTurns) {
     if (!key.startsWith(`${instanceId}:`)) continue;
@@ -2913,6 +3193,22 @@ function advanceInstance(instanceId: string): void {
       });
     });
   }
+
+  // The same shape for the merges, and the same claim: `startMergeBlock` reads
+  // git and awaits the queue, so two advance passes arriving together would
+  // otherwise both queue the same branches — which `enqueue` refuses as a whole
+  // rather than half.
+  for (const merge of step.merge) {
+    if (!claimBlock(instanceId, merge.nodeId)) continue;
+    void startMergeBlock(instanceId, merge.nodeId, merge.runIds).catch((err) => {
+      finishMergeBlock(instanceId, merge.nodeId, {
+        ok: false,
+        note: `This block could not start merging: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      });
+    });
+  }
 }
 
 /** Every node of an instance, in the terms `planInstanceStep` reads. */
@@ -3061,7 +3357,7 @@ function claimBlock(instanceId: string, nodeId: string): boolean {
 async function startBlockTurn(instanceId: string, nodeId: string): Promise<void> {
   const instance = getInstance(instanceId);
   const node = instance?.graph.nodes.find((n) => n.id === nodeId);
-  if (!instance || !node || node.fanOut === null) {
+  if (!instance || !node || node.kind !== "orchestrator" || node.fanOut === null) {
     settleBlock(instanceId, nodeId, {
       status: "failed",
       error: "This block is no longer in the workflow this run was started from.",
@@ -3195,6 +3491,356 @@ function settleBlock(
   if (instance?.status === "started" && specs.length > 0) {
     createEmitted(instanceId, nodeId, specs);
   }
+
+  promoteQueued();
+  advanceInstances();
+}
+
+/* ------------------------------------------------------------------ */
+/* Merge blocks: landing what the blocks in front of them built         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How long a merge block waits for its own branches, before it stops waiting.
+ *
+ * A bound rather than a patience: the merge worker is one sequential loop for
+ * the whole process, so this block's rows can sit behind somebody else's batch,
+ * and a conflict resolution alone is allowed twelve minutes. What makes a
+ * ceiling necessary anyway is what a block stuck `thinking` costs — the instance
+ * never reaches `stopped`, and a second press of Run on that workflow is refused
+ * for ever. Timing out leaves the queue working: the rows are still the record
+ * of each branch, and the block says it stopped watching rather than claiming
+ * they failed.
+ */
+const MERGE_BRANCH_BUDGET_MS = 15 * 60_000;
+const MERGE_BLOCK_TIMEOUT_MS = 60 * 60_000;
+/** The rows are written by the worker, not by us, so this is a poll. */
+const MERGE_POLL_MS = 2_000;
+
+/** What became of one branch a merge block was handed. */
+export interface BranchOutcome {
+  /** The branch, or the run's short id when it never had one to name. */
+  branch: string;
+  /**
+   * `landed` — it is on its target. `skipped` — there was nothing to put there,
+   * which is not a failure. `failed` — there was, and it did not get there.
+   */
+  result: "landed" | "skipped" | "failed";
+  reason: string | null;
+}
+
+/** How many branches a summary names before it starts counting them instead. */
+const MAX_NAMED_BRANCHES = 4;
+
+/**
+ * Whether a merge block succeeded, and the sentence that says what happened.
+ *
+ * Pure and unit-tested, for `landRefusal`'s reason one level up: this decides
+ * whether the blocks *behind* a merge start, and both ways of being wrong are
+ * silent. Read as failed, a chain that landed cleanly stops with nothing left to
+ * do; read as succeeded, a follow-up run starts on a target that never received
+ * the work it was written against.
+ *
+ * **A branch with nothing to land is a success.** A run that completed and
+ * committed nothing, and a branch already on its target, both leave the operator
+ * with exactly what they asked for — the work is where it belongs — so calling
+ * either a failure would stop a graph over a merge that had no work to do. What
+ * is *not* a success is a predecessor that should have had a branch and has
+ * none: that is the isolation this block was saved against having quietly
+ * degraded, and reporting it as fine is the "a run that looks like it did
+ * nothing" failure this app keeps meeting.
+ *
+ * The note is null only when every branch landed and none was skipped — silence
+ * means the plain thing happened, and anything else is written down.
+ */
+export function mergeBlockOutcome(branches: readonly BranchOutcome[]): {
+  ok: boolean;
+  note: string | null;
+} {
+  if (branches.length === 0) {
+    return { ok: true, note: "There was no branch to land." };
+  }
+
+  const failed = branches.filter((b) => b.result === "failed");
+  const skipped = branches.filter((b) => b.result === "skipped");
+  const landed = branches.filter((b) => b.result === "landed");
+
+  if (failed.length > 0) {
+    const named = failed
+      .slice(0, MAX_NAMED_BRANCHES)
+      .map((b) => `${b.branch} — ${b.reason ?? "no reason recorded"}`);
+    const rest = failed.length - named.length;
+    return {
+      ok: false,
+      note:
+        `Landed ${landed.length} of ${branches.length - skipped.length} branch(es). ` +
+        named.join("; ") +
+        (rest > 0 ? `; and ${rest} more` : "") +
+        ".",
+    };
+  }
+
+  if (skipped.length === 0) return { ok: true, note: null };
+  const named = skipped
+    .slice(0, MAX_NAMED_BRANCHES)
+    .map((b) => `${b.branch} — ${b.reason ?? "nothing to land"}`);
+  const rest = skipped.length - named.length;
+  return {
+    ok: true,
+    note:
+      `Landed ${landed.length} branch(es); ${skipped.length} had nothing to land: ` +
+      named.join("; ") +
+      (rest > 0 ? `; and ${rest} more` : "") +
+      ".",
+  };
+}
+
+/**
+ * Land the branches the blocks in front of this one left behind.
+ *
+ * Everything that decides whether a branch may be landed is
+ * `mergeQueue`/`land.ts`'s and is deliberately not restated here: one merge in
+ * flight for the whole process, every item re-previewed against git at its own
+ * turn, a conflict reconciled on the run's own branch in a throwaway checkout,
+ * and a dirty operator checkout — or one standing on the wrong branch — refusing
+ * every branch in that repository. This function's whole job is choosing *which*
+ * runs go into the queue and reading back what happened.
+ *
+ * The two awaits before the queue matter and are ordered the way `startBlockTurn`
+ * orders its own: the instance is re-read after them, because a halt may have
+ * closed the door while git was being asked, and queueing into a stopping
+ * workflow is a write into somebody's checkout for a workflow being taken down.
+ */
+async function startMergeBlock(
+  instanceId: string,
+  nodeId: string,
+  runIds: readonly string[],
+): Promise<void> {
+  const instance = getInstance(instanceId);
+  const node = instance?.graph.nodes.find((n) => n.id === nodeId);
+  if (!instance || !node || node.kind !== "merge" || !node.mergeStrategy) {
+    finishMergeBlock(instanceId, nodeId, {
+      ok: false,
+      note: "This block is no longer in the workflow this run was started from.",
+    });
+    return;
+  }
+
+  // The workflow-wide guard, at this kind of block boundary — but only when the
+  // block can actually spend. A merge with no resolution authorised costs
+  // nothing, and halting a graph at a free step would leave the work it already
+  // paid for unlanded for the sake of a limit this block cannot move. The blocks
+  // *behind* it are still checked at their own cycle boundary, so nothing
+  // escapes the guard by standing behind a merge.
+  let guardNote: string | null = null;
+  if (node.mergeAutoResolve) {
+    const guard = enforceInstanceBudgetForBlock(
+      instanceId,
+      await currentSnapshot(),
+    );
+    if (guard?.kind === "halted") return;
+    if (guard?.kind === "unenforceable") {
+      // Logged rather than acted on, the same answer `startBlockTurn` gives.
+      guardNote = `Its workflow has a limit that could not be read here: ${guard.verdict.reason}`;
+    }
+  }
+
+  const candidates: BranchOutcome[] = [];
+  const queueable: string[] = [];
+  for (const runId of runIds) {
+    const verdict = await branchVerdict(runId);
+    if (verdict.result === "queue") queueable.push(runId);
+    else candidates.push(verdict.outcome);
+  }
+
+  const fresh = getInstance(instanceId);
+  if (!fresh || fresh.status !== "started") {
+    upsertBlock(
+      instanceId,
+      node,
+      "blocked",
+      "The workflow was stopped before this block could land anything.",
+    );
+    return;
+  }
+
+  if (queueable.length === 0) {
+    finishMergeBlock(instanceId, nodeId, {
+      ...withNote(mergeBlockOutcome(candidates), guardNote),
+    });
+    return;
+  }
+
+  const queued = enqueue(queueable, {
+    strategy: node.mergeStrategy,
+    autoResolve: node.mergeAutoResolve,
+  });
+  if (!queued.ok) {
+    finishMergeBlock(instanceId, nodeId, {
+      ok: false,
+      note: `Its branches could not be queued: ${queued.reason}`,
+    });
+    return;
+  }
+
+  // Recorded before the wait, so a restart or a halt leaves the block pointing
+  // at the rows that say what happened to each branch.
+  db()
+    .prepare(
+      "UPDATE workflow_instance_blocks SET merge_batch_id=?" +
+        " WHERE instance_id=? AND node_id=? AND status='thinking'",
+    )
+    .run(queued.batchId, instanceId, nodeId);
+
+  const rows = await awaitBatch(queued.batchId, instanceId, nodeId, queueable.length);
+  for (const row of rows) {
+    candidates.push({
+      branch: branchLabel(row.run_id),
+      result: row.status === "landed" ? "landed" : "failed",
+      reason:
+        row.status === "landed"
+          ? null
+          : // A row still active is the deadline having passed, not a verdict —
+            // but it is a branch that is not on its target, which is the only
+            // question a successor's condition asks.
+            isQueueActive(row.status)
+            ? "still in the merge queue when this block stopped waiting"
+            : (row.message ?? row.status),
+    });
+  }
+
+  finishMergeBlock(instanceId, nodeId, {
+    ...withNote(mergeBlockOutcome(candidates), guardNote),
+    costUSD: rows.reduce((sum, r) => sum + r.resolve_cost, 0),
+  });
+}
+
+/** A note the block has to carry regardless of how the merge itself went. */
+function withNote(
+  outcome: { ok: boolean; note: string | null },
+  extra: string | null,
+): { ok: boolean; note: string | null } {
+  if (!extra) return outcome;
+  return {
+    ok: outcome.ok,
+    note: outcome.note ? `${outcome.note} ${extra}` : extra,
+  };
+}
+
+/**
+ * Whether one predecessor run has a branch worth queueing.
+ *
+ * Two answers, carrying three things that can be true of a finished run, and
+ * only one of them is the block's problem. `queue` is a branch with commits on
+ * it. `settled` is the other two, already in the words the report uses:
+ * `skipped` is a branch with nothing on it, or one already on its target —
+ * the work is where the operator wanted it, so there is nothing to do and
+ * nothing wrong. `failed` is a run that was supposed to leave a branch and did
+ * not: `normalizeWorkflowInput` refuses a merge block whose predecessors' guards
+ * do not isolate, so reaching this means the isolation *degraded* at run time —
+ * `resolveIsolation` falls back to working in the folder when a folder turns out
+ * not to be a repository — and that is exactly the case where saying nothing
+ * leaves an operator believing work landed that never did.
+ */
+async function branchVerdict(
+  runId: string,
+): Promise<{ result: "queue" } | { result: "settled"; outcome: BranchOutcome }> {
+  const label = branchLabel(runId);
+  const skip = (reason: string) => ({
+    result: "settled" as const,
+    outcome: { branch: label, result: "skipped" as const, reason },
+  });
+  const fail = (reason: string) => ({
+    result: "settled" as const,
+    outcome: { branch: label, result: "failed" as const, reason },
+  });
+
+  let state: Awaited<ReturnType<typeof landState>>;
+  try {
+    state = await landState(runId);
+  } catch (err) {
+    return fail(
+      `its branch could not be read: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  if (!state) {
+    return fail(
+      "it worked directly in the folder rather than on a branch of its own, so " +
+        "there is no branch to land",
+    );
+  }
+  if (!state.branchExists) return fail("its branch no longer exists");
+  if (state.merged || state.landedUnchanged) {
+    return skip(`already on ${state.target ?? "its target"}`);
+  }
+  if (state.ahead === 0) return skip("it left no commits of its own");
+  return { result: "queue" };
+}
+
+/** How a branch is named in a report, falling back to the run's short id. */
+function branchLabel(runId: string): string {
+  return getRun(runId)?.worktree_branch ?? runId.slice(0, 8);
+}
+
+/**
+ * Wait for one batch to drain, or stop waiting.
+ *
+ * Three ways out and each is a different fact. Every row terminal is the merge
+ * having finished. The block no longer `thinking` is a halt, which has already
+ * written the row and whose answer wins — `finishMergeBlock`'s guarded UPDATE
+ * would refuse ours anyway, and returning here saves reading git for a workflow
+ * being taken down. The deadline is the third, and it does not cancel anything:
+ * the queue goes on working and its rows go on being the record.
+ */
+async function awaitBatch(
+  batchId: string,
+  instanceId: string,
+  nodeId: string,
+  branches: number,
+): Promise<QueueRow[]> {
+  const deadline =
+    Date.now() +
+    Math.min(MERGE_BLOCK_TIMEOUT_MS, MERGE_BRANCH_BUDGET_MS * (branches + 1));
+
+  for (;;) {
+    const rows = batchRows(batchId);
+    if (!rows.some((r) => isQueueActive(r.status))) return rows;
+    if (getBlock(instanceId, nodeId)?.status !== "thinking") return rows;
+    if (Date.now() >= deadline) return rows;
+    await new Promise((resolve) => setTimeout(resolve, MERGE_POLL_MS).unref?.());
+  }
+}
+
+/**
+ * Record what a merge block did.
+ *
+ * `settleBlock`'s shape and its latch: guarded on `status='thinking'`, so a halt
+ * that wrote the block off while the queue was draining keeps its own wording.
+ * `emitted` for a success and `failed` for anything else, reusing the vocabulary
+ * every liveness query and every reconciler already reads — see `BlockStatus`.
+ */
+function finishMergeBlock(
+  instanceId: string,
+  nodeId: string,
+  result: { ok: boolean; note: string | null; costUSD?: number },
+): void {
+  const settled =
+    db()
+      .prepare(
+        `UPDATE workflow_instance_blocks
+            SET status=?, finished_at=?, error=?, cost_usd = cost_usd + ?
+          WHERE instance_id=? AND node_id=? AND status='thinking'`,
+      )
+      .run(
+        result.ok ? "emitted" : "failed",
+        Date.now(),
+        result.note,
+        result.costUSD ?? 0,
+        instanceId,
+        nodeId,
+      ).changes > 0;
+  if (!settled) return;
 
   promoteQueued();
   advanceInstances();
@@ -3454,10 +4100,18 @@ export function reconcileBlocksOnBoot(): void {
   const thinking = db()
     .prepare(
       "UPDATE workflow_instance_blocks SET status='failed', finished_at=?," +
-        " error='The server restarted while this block was deciding what to start.'" +
+        " error = CASE kind WHEN 'merge' THEN ? ELSE ? END" +
         " WHERE status='thinking'",
     )
-    .run(now).changes;
+    .run(
+      now,
+      // `reconcileMergeQueueOnBoot` has already cancelled this batch's queued
+      // rows and failed whatever was mid-merge, for the reason a queued run is
+      // never resumed: a server coming back up must not merge into a checkout
+      // somebody works in. So the block really is finished, however far it got.
+      "The server restarted while this block was landing branches. Its queued merges were cancelled — check the branches before queueing them again.",
+      "The server restarted while this block was deciding what to start.",
+    ).changes;
   const waiting = db()
     .prepare(
       "UPDATE workflow_instance_blocks SET status='blocked', finished_at=?," +

@@ -44,6 +44,8 @@ function block(id: string, over: Partial<BlockDraft> = {}): BlockDraft {
     task: "do the thing",
     promptOverride: "",
     fanOut: "3",
+    mergeStrategy: "merge",
+    mergeAutoResolve: false,
     ...over,
   };
 }

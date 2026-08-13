@@ -3,11 +3,13 @@ import { describe, it } from "node:test";
 
 import {
   haltPlan,
+  mergeBlockOutcome,
   normalizeWorkflowInput,
   planEmission,
   planInstanceStep,
   topologicalOrder,
   type BlockStatus,
+  type BranchOutcome,
   type EmissionLimits,
   type HaltCause,
   type HaltMember,
@@ -68,6 +70,11 @@ function node(id: string, extra: Record<string, unknown> = {}) {
 /** An orchestrator block, with the cap a saved graph must carry. */
 function decider(id: string, extra: Record<string, unknown> = {}) {
   return node(id, { kind: "orchestrator", fanOut: 3, ...extra });
+}
+
+/** A merge block, with the strategy a saved graph must carry. */
+function merger(id: string, extra: Record<string, unknown> = {}) {
+  return node(id, { kind: "merge", mergeStrategy: "merge", ...extra });
 }
 
 function edge(
@@ -535,6 +542,248 @@ describe("normalizeWorkflowInput — continuing a branch", () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* Merge blocks                                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A merge block writes into the operator's own checkout and can bill for a
+ * conflict resolution, so what it may be saved as is worth the same care as an
+ * orchestrator block's fan-out cap — and for the same reason, which is that both
+ * refusals are only available at *save*.
+ *
+ * The two that matter most are the ones a graph cannot recover from later. A
+ * merge block with nothing in front of it that runs anything is a block that
+ * reaches the front of the graph and can only report that it was pointless; one
+ * behind runs whose guards work directly in the folder finds every predecessor
+ * branchless an hour in, having already spent the work. Both are answerable from
+ * the guards a person has already chosen, which is exactly the case this file's
+ * "refuse at save what instantiation refuses" rule exists for.
+ */
+describe("normalizeWorkflowInput — merge blocks", () => {
+  it("needs a block in front of it that runs something", () => {
+    assert.match(
+      error(graph([merger("land")])),
+      /no block in front of it whose work it could land/,
+    );
+  });
+
+  it("does not count another merge block as something to land", () => {
+    // Sequencing one merge behind another is legal — it contributes no
+    // branches, which is the whole point — but it cannot be the *only* thing in
+    // front of one, or the second block has nothing to do.
+    assert.match(
+      error(graph([node("a"), merger("one"), merger("two")], [
+        edge("a", "one"),
+        edge("one", "two"),
+      ])),
+      /no block in front of it whose work it could land/,
+    );
+  });
+
+  it("accepts a merge block behind a merge block when a run also feeds it", () => {
+    const g = value(
+      graph([node("a"), node("b"), merger("one"), merger("two")], [
+        edge("a", "one"),
+        edge("one", "two"),
+        edge("b", "two"),
+      ]),
+    );
+    assert.equal(g.graph.nodes.length, 4);
+  });
+
+  it("refuses a predecessor whose guards leave no branch", () => {
+    assert.match(
+      error(
+        graph([node("a", { templateId: "t-flat" }), merger("land")], [
+          edge("a", "land"),
+        ]),
+      ),
+      /leaves no branch for “LAND” to land/,
+    );
+  });
+
+  it("takes an untemplated predecessor's isolation from the settings guards", () => {
+    const flat: WorkflowKnowledge = { ...KNOWN, defaultIsolate: false };
+    const res = normalizeWorkflowInput(
+      graph([node("a", { templateId: null }), merger("land")], [
+        edge("a", "land"),
+      ]),
+      flat,
+    );
+    assert.ok(!res.ok, "expected a refusal");
+    assert.match(res.error, /leaves no branch/);
+  });
+
+  it("requires a strategy, so the graph records what the operator was shown", () => {
+    assert.match(
+      error(
+        graph([node("a"), merger("land", { mergeStrategy: "" })], [
+          edge("a", "land"),
+        ]),
+      ),
+      /how it lands a branch/,
+    );
+  });
+
+  it("refuses a merge block at either end of a branch hand-over", () => {
+    // It has no checkout of its own: it writes into somebody else's and cuts
+    // nothing. Named rather than left to the isolation test, which would say
+    // something true of neither end.
+    const asSource = error(
+      graph([node("a"), merger("land"), node("b")], [
+        edge("a", "land"),
+        edge("land", "b", { continueBranch: true }),
+      ]),
+    );
+    assert.match(asSource, /lands other blocks' branches/);
+    const asTarget = error(
+      graph([node("a"), merger("land")], [
+        edge("a", "land", { continueBranch: true }),
+      ]),
+    );
+    assert.match(asTarget, /lands other blocks' branches/);
+  });
+
+  it("holds no task, template, workspace, folder or prompt", () => {
+    // Every one of them decides something about an agent, and this block starts
+    // none. Dropped rather than refused, because the editor sends whatever the
+    // block was carrying before the kind was switched.
+    const g = value(
+      graph(
+        [
+          node("a"),
+          merger("land", {
+            task: "merge everything please",
+            templateId: "t-iso",
+            mountId: "work",
+            folder: "repo",
+            promptOverride: "be careful",
+          }),
+        ],
+        [edge("a", "land")],
+      ),
+    );
+    const land = g.graph.nodes[1];
+    assert.equal(land.task, "");
+    assert.equal(land.templateId, null);
+    assert.equal(land.mountId, "");
+    assert.equal(land.folder, "");
+    assert.equal(land.promptOverride, null);
+    assert.equal(land.fanOut, null);
+  });
+
+  it("authorises a resolution only on a literal true", () => {
+    // It is billed spend with nobody watching, so a string off the wire fails
+    // safe — the reading `continueBranch` and `auto_resolve` both take.
+    const on = value(
+      graph([node("a"), merger("land", { mergeAutoResolve: true })], [
+        edge("a", "land"),
+      ]),
+    );
+    assert.equal(on.graph.nodes[1].mergeAutoResolve, true);
+
+    for (const wire of ["true", 1, "yes", null, undefined]) {
+      const off = value(
+        graph([node("a"), merger("land", { mergeAutoResolve: wire })], [
+          edge("a", "land"),
+        ]),
+      );
+      assert.equal(
+        off.graph.nodes[1].mergeAutoResolve,
+        false,
+        `${JSON.stringify(wire)} must not authorise spend`,
+      );
+    }
+  });
+
+  it("carries no merge settings on a block that is not one", () => {
+    const g = value(
+      graph([node("a", { mergeStrategy: "squash", mergeAutoResolve: true })]),
+    );
+    assert.equal(g.graph.nodes[0].mergeStrategy, null);
+    assert.equal(g.graph.nodes[0].mergeAutoResolve, false);
+  });
+});
+
+/**
+ * What a merge block reports, and therefore whether the blocks behind it start.
+ *
+ * Both ways of being wrong are silent. Read as failed, a chain that landed
+ * cleanly stops with nothing left to do; read as succeeded, a follow-up run
+ * starts on a target that never received the work it was written against.
+ *
+ * The distinction that carries the weight is skipped-versus-failed. A branch
+ * with nothing on it and a branch already on its target both leave the operator
+ * with what they asked for, so stopping a graph over either would refuse work
+ * for the sake of a merge that had none to do — while a predecessor that should
+ * have had a branch and has none is isolation having degraded at run time, which
+ * is the one case where saying nothing leaves someone believing work landed.
+ */
+describe("mergeBlockOutcome — what a merge block reports", () => {
+  const landed = (branch: string): BranchOutcome => ({
+    branch,
+    result: "landed",
+    reason: null,
+  });
+
+  it("says nothing when every branch landed", () => {
+    const out = mergeBlockOutcome([landed("uf/a"), landed("uf/b")]);
+    assert.equal(out.ok, true);
+    assert.equal(out.note, null, "silence means the plain thing happened");
+  });
+
+  it("succeeds with a note when a branch had nothing to land", () => {
+    const out = mergeBlockOutcome([
+      landed("uf/a"),
+      { branch: "uf/b", result: "skipped", reason: "it left no commits of its own" },
+    ]);
+    assert.equal(out.ok, true, "nothing to land is not a failure");
+    assert.match(out.note ?? "", /uf\/b — it left no commits/);
+  });
+
+  it("fails when a branch that should have landed did not", () => {
+    const out = mergeBlockOutcome([
+      landed("uf/a"),
+      { branch: "uf/b", result: "failed", reason: "it conflicts" },
+    ]);
+    assert.equal(out.ok, false);
+    assert.match(out.note ?? "", /Landed 1 of 2/);
+    assert.match(out.note ?? "", /uf\/b — it conflicts/);
+  });
+
+  it("counts the skipped branches out of the denominator", () => {
+    // "Landed 1 of 2" is about the branches that had work on them. Counting a
+    // branch with nothing on it as one this block failed to land would report a
+    // shortfall that does not exist.
+    const out = mergeBlockOutcome([
+      landed("uf/a"),
+      { branch: "uf/b", result: "skipped", reason: "already on main" },
+      { branch: "uf/c", result: "failed", reason: "it conflicts" },
+    ]);
+    assert.equal(out.ok, false);
+    assert.match(out.note ?? "", /Landed 1 of 2/);
+  });
+
+  it("names a few failures and counts the rest", () => {
+    const out = mergeBlockOutcome(
+      Array.from({ length: 7 }, (_, i) => ({
+        branch: `uf/${i}`,
+        result: "failed" as const,
+        reason: "it conflicts",
+      })),
+    );
+    assert.equal(out.ok, false);
+    assert.match(out.note ?? "", /and 3 more/);
+  });
+
+  it("treats no branches at all as nothing to do", () => {
+    const out = mergeBlockOutcome([]);
+    assert.equal(out.ok, true);
+    assert.match(out.note ?? "", /no branch to land/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* Halting                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -980,6 +1229,8 @@ const FAN: WorkflowGraph = {
       task: "Decide",
       promptOverride: null,
       fanOut: 3,
+      mergeStrategy: null,
+      mergeAutoResolve: false,
     },
     {
       id: "review",
@@ -991,6 +1242,8 @@ const FAN: WorkflowGraph = {
       task: "Review",
       promptOverride: null,
       fanOut: null,
+      mergeStrategy: null,
+      mergeAutoResolve: false,
     },
   ],
   edges: [edge("pick", "review", { edge: "on-finish" })],
@@ -1104,6 +1357,8 @@ describe("planInstanceStep — what an instance may do next", () => {
           task: "Land",
           promptOverride: null,
           fanOut: null,
+          mergeStrategy: null,
+          mergeAutoResolve: false,
         },
       ],
       edges: [...FAN.edges, edge("review", "land", { edge: "on-success" })],
@@ -1153,6 +1408,8 @@ describe("planInstanceStep — what an instance may do next", () => {
           task: "Land",
           promptOverride: null,
           fanOut: null,
+          mergeStrategy: null,
+          mergeAutoResolve: false,
         },
       ],
       edges: [...FAN.edges, edge("review", "land", { edge: "on-success" })],
@@ -1206,6 +1463,8 @@ describe("planInstanceStep — what an instance may do next", () => {
           task: "Build",
           promptOverride: null,
           fanOut: null,
+          mergeStrategy: null,
+          mergeAutoResolve: false,
         },
         FAN.nodes[0],
       ],
@@ -1229,5 +1488,220 @@ describe("planInstanceStep — what an instance may do next", () => {
     );
     assert.deepEqual(dead.spawn, []);
     assert.match(dead.block[0].reason, /“Build”, which ended failed/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Merge blocks in the schedule                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Which runs a merge block is handed, and what an edge out of one means.
+ *
+ * The first is the whole reason `runIds` comes off `edgeVerdict`'s own
+ * `dependsOn` rather than being re-derived from the graph: which runs an
+ * orchestrator block turned out to emit is a fact only that pass holds, and a
+ * second reading of it is a second chance to land a different set of branches
+ * than the one the graph waited for.
+ *
+ * The second is the edge condition doing real work. A merge block creates no
+ * run, so nothing about `edgeSatisfied` applies to it — but "review it whether
+ * or not it landed" and "only once it is on main" are both things a person
+ * writes, and reading a failed merge as satisfying either would start a run on a
+ * target that never received the work.
+ */
+function mergeNode(id: string, name: string) {
+  return {
+    id,
+    name,
+    kind: "merge" as const,
+    templateId: null,
+    mountId: "",
+    folder: "",
+    task: "",
+    promptOverride: null,
+    fanOut: null,
+    mergeStrategy: "merge" as const,
+    mergeAutoResolve: false,
+  };
+}
+
+describe("planInstanceStep — merge blocks", () => {
+  /** Two run blocks feeding one merge block, with a run block behind it. */
+  const LAND: WorkflowGraph = {
+    nodes: [
+      { ...FAN.nodes[1], id: "left", name: "Left" },
+      { ...FAN.nodes[1], id: "right", name: "Right" },
+      mergeNode("land", "Land it"),
+      { ...FAN.nodes[1], id: "after", name: "After" },
+    ],
+    edges: [
+      edge("left", "land"),
+      edge("right", "land"),
+      edge("land", "after"),
+    ],
+  };
+
+  it("hands a merge block every branch its satisfied edges resolved to", () => {
+    const step = stepOf(
+      {
+        left: ran("r-left", "completed"),
+        right: ran("r-right", "completed"),
+        land: decided("waiting"),
+      },
+      LAND,
+    );
+    assert.deepEqual(step.merge, [
+      { nodeId: "land", runIds: ["r-left", "r-right"] },
+    ]);
+    assert.deepEqual(step.spawn, [], "a merge block spawns no agent");
+    assert.deepEqual(step.create, [], "and it is never created as a run");
+  });
+
+  it("waits for every predecessor before landing anything", () => {
+    // Landing half the work and then landing the rest is two merges into a base
+    // that moved in between, which is the case the queue exists to re-decide —
+    // but the block was written as one step and has to behave as one.
+    const step = stepOf(
+      {
+        left: ran("r-left", "completed"),
+        right: ran("r-right", "running", 0),
+        land: decided("waiting"),
+      },
+      LAND,
+    );
+    assert.deepEqual(step.merge, []);
+  });
+
+  it("takes every run an orchestrator block emitted", () => {
+    const g: WorkflowGraph = {
+      nodes: [FAN.nodes[0], mergeNode("land", "Land it")],
+      edges: [edge("pick", "land", { edge: "on-success" })],
+    };
+    const step = stepOf(
+      {
+        pick: decided("emitted", [
+          ["r-1", "completed"],
+          ["r-2", "completed"],
+        ]),
+        land: decided("waiting"),
+      },
+      g,
+    );
+    assert.deepEqual(step.merge, [
+      { nodeId: "land", runIds: ["r-1", "r-2"] },
+    ]);
+  });
+
+  it("names a run once when two edges resolve to it", () => {
+    // The diamond: two paths out of one run meet again at the merge block.
+    // `enqueue` refuses a run that is already queued and refuses the *whole*
+    // batch when it does, so a duplicate here is a merge that never happens.
+    const diamond: WorkflowGraph = {
+      nodes: [
+        { ...FAN.nodes[1], id: "build", name: "Build" },
+        mergeNode("land", "Land it"),
+      ],
+      edges: [
+        edge("build", "land", { edge: "on-success" }),
+        // A second edge cannot be written in the editor — `normalizeWorkflowInput`
+        // refuses a repeated pair — so this is the shape an orchestrator block
+        // emitting one run into two paths produces.
+        { from: "build", to: "land", edge: "on-finish", continueBranch: false },
+      ],
+    };
+    const step = stepOf(
+      { build: ran("r-build", "completed"), land: decided("waiting") },
+      diamond,
+    );
+    assert.deepEqual(step.merge, [{ nodeId: "land", runIds: ["r-build"] }]);
+  });
+
+  it("releases what is behind it with no dependency on a run", () => {
+    // A merge block created nothing, so a successor of it depends on no run
+    // through that edge — it is an ordinary queued run meaning "once the work
+    // has landed".
+    const step = stepOf(
+      {
+        left: ran("r-left", "completed"),
+        right: ran("r-right", "completed"),
+        land: decided("emitted"),
+      },
+      LAND,
+    );
+    assert.deepEqual(step.create, [{ nodeId: "after", dependsOn: [] }]);
+  });
+
+  it("stops an on-success successor when the merge did not land everything", () => {
+    const step = stepOf(
+      {
+        left: ran("r-left", "completed"),
+        right: ran("r-right", "completed"),
+        land: decided("failed", [], "Landed 1 of 2 branch(es)."),
+      },
+      LAND,
+    );
+    assert.deepEqual(step.create, []);
+    assert.match(step.block[0].reason, /did not land everything/);
+  });
+
+  it("releases an on-finish successor of a failed merge", () => {
+    const g: WorkflowGraph = {
+      ...LAND,
+      edges: [
+        edge("left", "land"),
+        edge("right", "land"),
+        edge("land", "after", { edge: "on-finish" }),
+      ],
+    };
+    const step = stepOf(
+      {
+        left: ran("r-left", "completed"),
+        right: ran("r-right", "completed"),
+        land: decided("failed", [], "Landed 1 of 2 branch(es)."),
+      },
+      g,
+    );
+    assert.deepEqual(step.create, [{ nodeId: "after", dependsOn: [] }]);
+  });
+
+  it("blocks behind a merge that never ran, whatever the condition", () => {
+    // `blocked` is "nothing happened", which satisfies nothing — the same
+    // distinction `edgeSatisfied` draws between a run that did a cycle and one
+    // that did not.
+    for (const condition of ["on-success", "on-finish"] as const) {
+      const g: WorkflowGraph = {
+        ...LAND,
+        edges: [
+          edge("left", "land"),
+          edge("right", "land"),
+          edge("land", "after", { edge: condition }),
+        ],
+      };
+      const step = stepOf(
+        {
+          left: ran("r-left", "completed"),
+          right: ran("r-right", "completed"),
+          land: decided("blocked", [], "The workflow was stopped."),
+        },
+        g,
+      );
+      assert.deepEqual(step.create, [], condition);
+      assert.match(step.block[0].reason, /never ran/);
+    }
+  });
+
+  it("holds a successor while the merge is still running", () => {
+    const step = stepOf(
+      {
+        left: ran("r-left", "completed"),
+        right: ran("r-right", "completed"),
+        land: decided("thinking"),
+      },
+      LAND,
+    );
+    assert.deepEqual(step.create, []);
+    assert.deepEqual(step.merge, [], "and it does not claim it twice");
+    assert.deepEqual(step.block, []);
   });
 });

@@ -703,6 +703,16 @@ function migrate(db: Database.Database) {
   // the run_id beside it already has: this is a record of where a run came
   // from, and it must keep reading true after the block's row has gone.
   addColumn(db, "workflow_instance_runs", "emitted_by", "TEXT");
+
+  // The merge batch a merge block queued, or null for every other kind.
+  //
+  // The block's own row records that it merged and whether that worked; this
+  // records *which branches*, by pointing at the rows the queue already writes
+  // per branch. Kept rather than copied into the block, because those rows carry
+  // git's own answer for each one and a second copy would be a second thing to
+  // keep in step. A plain column for `emitted_by`'s reason: it must keep reading
+  // true after the batch has been pruned.
+  addColumn(db, "workflow_instance_blocks", "merge_batch_id", "TEXT");
 }
 
 /**

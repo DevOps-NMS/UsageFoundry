@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import type {
+  MergeStrategyDTO,
   RunTemplateDTO,
   SettingsDTO,
   WorkflowDTO,
@@ -130,6 +131,17 @@ const CONDITIONS: Array<{ id: LinkDraft["edge"]; label: string }> = [
   { id: "on-finish", label: "Once it finishes, either way" },
 ];
 
+/**
+ * How a merge block lands, before anyone picks.
+ *
+ * `merge` rather than `settings.landStrategy`: what the graph records has to be
+ * what the operator was shown, and this editor does not read settings. Of the
+ * two, this is also the one git can still see afterwards — a squash rewrites the
+ * commits, so the branch is never an ancestor of its target and `deleteBranch`
+ * has to fall back to `-D`.
+ */
+const DEFAULT_MERGE_STRATEGY: MergeStrategyDTO = "merge";
+
 function emptyBlock(id: string, mountId: string, kind: WorkflowNodeKind): BlockDraft {
   return {
     id,
@@ -141,6 +153,8 @@ function emptyBlock(id: string, mountId: string, kind: WorkflowNodeKind): BlockD
     task: "",
     promptOverride: "",
     fanOut: DEFAULT_FAN_OUT,
+    mergeStrategy: DEFAULT_MERGE_STRATEGY,
+    mergeAutoResolve: false,
   };
 }
 
@@ -155,6 +169,8 @@ function toBlocks(workflow: WorkflowDTO): BlockDraft[] {
     task: n.task,
     promptOverride: n.promptOverride ?? "",
     fanOut: n.fanOut?.toString() ?? DEFAULT_FAN_OUT,
+    mergeStrategy: n.mergeStrategy ?? DEFAULT_MERGE_STRATEGY,
+    mergeAutoResolve: n.mergeAutoResolve ?? false,
   }));
 }
 
@@ -749,6 +765,11 @@ function BlockPanel({
   const missingTemplate =
     block.templateId !== "" && templateName(block.templateId) === null;
   const orchestrator = block.kind === "orchestrator";
+  // A merge block holds none of the fields below the kind picker: no guards,
+  // because it starts no agent; no workspace or folder, because it works in
+  // whichever repository each branch came from; and no task, because what it
+  // lands is whatever the blocks in front of it left behind.
+  const merge = block.kind === "merge";
 
   return (
     <>
@@ -797,6 +818,48 @@ function BlockPanel({
         </Field>
       )}
 
+      {merge && (
+        <>
+          <Field label="How to land" htmlFor={`${block.id}-strategy`}>
+            <Select
+              id={`${block.id}-strategy`}
+              value={block.mergeStrategy}
+              onChange={(e) =>
+                onChange({ mergeStrategy: e.target.value as MergeStrategyDTO })
+              }
+            >
+              <option value="merge">Merge commit</option>
+              <option value="squash">Squash</option>
+            </Select>
+            <Hint>
+              Each branch goes onto the target its own run recorded, not one
+              named here
+            </Hint>
+          </Field>
+
+          <Field label="Conflicts">
+            <Toggle
+              id={`${block.id}-autoresolve`}
+              checked={block.mergeAutoResolve}
+              onChange={(next) => onChange({ mergeAutoResolve: next })}
+              label="Let Claude resolve a conflict"
+            />
+            <Hint tone={block.mergeAutoResolve ? "warn" : "neutral"}>
+              {block.mergeAutoResolve
+                ? "Saving this is the authorisation — a conflict is reconciled on the run's own branch, and it is billed"
+                : "A conflicting branch is reported and left alone"}
+            </Hint>
+          </Field>
+
+          <Hint tone="warn">
+            Your own checkout must be clean and on the target branch, or this
+            block refuses that repository
+          </Hint>
+        </>
+      )}
+
+      {!merge && (
+        <>
       <Field
         label={orchestrator ? "Guards for the runs it starts" : "Guards"}
         htmlFor={`${block.id}-template`}
@@ -907,6 +970,8 @@ function BlockPanel({
           className="min-h-[64px]"
         />
       </Field>
+        </>
+      )}
 
       <ButtonRow className="mt-4 border-t border-line pt-3.5">
         <Button variant="ghost" size="compact" onClick={onRemove}>

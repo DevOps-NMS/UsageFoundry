@@ -70,6 +70,16 @@ export interface QueueRow {
 /** Statuses that mean this row still expects the worker to touch it. */
 const ACTIVE: QueueStatus[] = ["queued", "landing", "resolving"];
 
+/**
+ * Whether the worker still owes this row an answer.
+ *
+ * Exported so a caller waiting on a batch — a workflow's merge block — asks this
+ * rather than keeping its own list of which statuses are terminal. A second copy
+ * of that list is a caller that stops waiting one status too early, or never.
+ */
+export const isQueueActive = (status: QueueStatus): boolean =>
+  ACTIVE.includes(status);
+
 /** How long the worker waits for one conflict resolution to settle. */
 const RESOLVE_TIMEOUT_MS = 12 * 60_000;
 /** How often it looks. The row is written by a child process, not by us. */

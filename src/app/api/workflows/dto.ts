@@ -93,6 +93,8 @@ export function instanceDTO(instance: WorkflowInstance): WorkflowInstanceDTO {
     finishedAt: b.finishedAt,
     costUSD: b.costUSD,
     emitted: b.emitted,
+    branchesLanded: b.branchesLanded,
+    branchesFailed: b.branchesFailed,
     error: b.error,
     waitsFor: waits.get(b.nodeId) ?? [],
   }));
