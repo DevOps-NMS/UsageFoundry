@@ -71,6 +71,49 @@ in **[docs/install.md](docs/install.md)**.
 
 ---
 
+## Back up the database
+
+Everything this app knows about itself — every run and its event log, what each
+one cost, your ceilings and guards, your templates, specialists, workflows and
+schedules — is one SQLite file in one Docker volume. There is no second copy.
+`docker compose down -v` destroys it in one command, and saved workflows and
+schedules exist nowhere else: not in git, not in a file, not in an export.
+
+Take a snapshot, safely, while runs are working:
+
+```bash
+docker compose exec usagefoundry node scripts/backup-db.mjs /backups
+```
+
+It writes `./backups/usagefoundry-<timestamp>.db` on the host — a bind mount, so
+it survives the command that destroys the volume. Put it in cron, keeping the
+last 14:
+
+```cron
+15 3 * * * cd /path/to/UsageFoundry && docker compose exec -T usagefoundry node scripts/backup-db.mjs /backups --keep 14 >> backups/backup.log 2>&1
+```
+
+**Nothing runs it for you.** Restore, onto a fresh container and a fresh volume:
+
+```bash
+docker compose down
+docker compose run --rm --entrypoint node usagefoundry \
+  scripts/restore-db.mjs /backups/usagefoundry-20260814T031500Z.db
+docker compose up -d
+```
+
+**`cp` is not a backup here, and neither is `docker cp`.** The database is in WAL
+mode, so a copy of `usagefoundry.db` is missing every transaction since the last
+checkpoint — it opens cleanly, passes `integrity_check`, and is silently short of
+the newest runs. Measured against a live writer: 25 runs in the copy, 386 in a
+snapshot taken at the same instant, both files reporting `ok`. The command above
+uses SQLite's own `VACUUM INTO`, which is consistent by construction.
+
+Why, in full, and what a restore refuses to do:
+**[docs/backup-and-restore.md](docs/backup-and-restore.md)**.
+
+---
+
 ## Read this before you trust a number
 
 Your 5-hour and weekly limits are **shared across every Claude surface**, but
@@ -296,6 +339,7 @@ the list above as its honest boundary until it does.
 | | |
 |---|---|
 | **[Installation and setup](docs/install.md)** | Docker, signing in, environment, multiple workspaces, GitHub access |
+| **[Backup and restore](docs/backup-and-restore.md)** | The one file that has no second copy, how to snapshot it safely, and how to put it back |
 | **[Limits and accuracy](docs/limits-and-accuracy.md)** | What the two views measure, what they cannot see, and how exact each figure is |
 | **[Runs](docs/runs.md)** | The run loop, budget policy, pausing and resuming, two runs on one project |
 | **[Workflows](docs/workflows.md)** | Graphs of blocks, orchestrator and merge blocks, whole-graph budgets, schedules |

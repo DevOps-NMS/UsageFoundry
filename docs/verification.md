@@ -386,6 +386,26 @@ Built and exercised against real transcripts:
   `/workflows/<id>` and `/workflows/<id>/edit` all answered 200, and the
   canvas — the palette, the empty state and the selection panel — is in the
   server-rendered HTML of `/workflows/new`.
+- **Backup and restore, end to end against a live writer**, on a real database
+  written by `migrate()` rather than an imitation of it. A background process
+  committed a row every 20ms and, from the two-second mark, held a second
+  connection's write transaction open with ten rows that were never committed.
+  Taken at that instant: `cp` of `usagefoundry.db` gave **25 runs**,
+  `scripts/backup-db.mjs` gave **386** — the same 386 the live database held —
+  and *both files passed `integrity_check`*, which is the whole argument for
+  this existing. None of the uncommitted rows are in the snapshot. Restored into
+  an empty directory standing in for a fresh volume, the file matched the
+  quiesced source object for object out of `sqlite_master` and row for row in
+  every table. The refusals were driven too: a restore under a heartbeating
+  `server.lock` was refused and wrote nothing, a restore over an existing
+  database moved it and its `-wal` aside as `.superseded-<stamp>` rather than
+  deleting either, a SQLite file with no `runs` table was refused by name, a
+  file that is not a database at all was refused as one, `--keep 2` deleted only
+  files matching this script's own name pattern, and a second backup to an
+  existing path was refused rather than overwriting it. Six of those are the
+  unit tests in `backupRestore.test.ts`; replacing `VACUUM INTO` with
+  `fs.copyFileSync` in the script fails them, which is what says they are
+  measuring the mechanism rather than the file's existence.
 
 ## Not yet verified by hand
 
@@ -861,6 +881,34 @@ through before trusting this unattended:
   `on-success` dependent's first `git log` shows its predecessor's commits, since
   the stub committed nothing. Run a two-block workflow with a branch hand-over
   and read the second run's opening prompt.
+- **Backup and restore inside Docker.** Everything above was driven against real
+  databases and the real scripts, but never through the container — Docker is
+  not available where this was written, so what has *not* been exercised is the
+  packaging: that the runner image carries `scripts/` and can resolve
+  `better-sqlite3` out of the standalone bundle, that `sqlite3` is on the PATH,
+  that `/backups` is writable by the uid compose runs as (Docker creates a
+  missing bind source owned by root, which the repository's shipped `./backups`
+  is there to avoid), and that a restore through `docker compose run` reaches a
+  volume the app is not holding. `deployment.test.ts` pins the Dockerfile and
+  the compose file against each other, which is as far as a test here can get.
+  The four commands that check it for real:
+
+  ```bash
+  docker compose up -d --build
+  docker compose exec usagefoundry which sqlite3
+  docker compose exec usagefoundry node scripts/backup-db.mjs /backups
+  ls -la backups/
+  # then, with the app stopped:
+  docker compose down
+  docker compose run --rm --entrypoint node usagefoundry \
+    scripts/restore-db.mjs /backups/usagefoundry-<stamp>.db
+  docker compose up -d
+  ```
+
+  Worth doing the destructive half at least once on an install you do not mind
+  losing: `docker compose down -v` between the backup and the restore is the
+  case the whole path exists for, and it is the only way to find out that the
+  fresh volume's permissions are right.
 - **The rollback path.** It is written to be unreachable — the graph, the
   templates, the mounts, every folder and both ends of every branch hand-over are
   checked before the first `createRun` — and nothing contrived reached it in
@@ -884,6 +932,9 @@ against a real database because what it pins is in the SQL rather than in any
 function; and that the image leaves the data volume writable by whatever uid
 compose runs the container as, which is otherwise checked by nothing here and
 fails only on Linux, only under a non-1000 `UF_UID`, and only by refusing every
-data route. `npm run typecheck`
+data route. A third is the backup round trip, which is neither of those either:
+it drives the two shipped scripts against a real database with a write
+transaction open, because a snapshot that quietly omits the newest runs opens
+cleanly and passes every other check there is. `npm run typecheck`
 plus a `docker compose up --build` smoke test is still the real verification
 loop, and the list above records what was checked by hand.

@@ -124,6 +124,11 @@ Double quotes, so `$(id -u)` is expanded by your shell rather than inside the
 container. If you do not mind losing run history and settings, `docker compose
 down -v` and starting again does the same thing by destroying the volume.
 
+That volume is the only copy of every run, every cost, every template, workflow
+and schedule, and nothing backs it up on its own — take a snapshot before you
+try either of the commands above, and put one in cron afterwards:
+**[Backup and restore](backup-and-restore.md)**.
+
 ## Multiple workspaces
 
 Up to four host directories can be mounted, and the New run form picks one
