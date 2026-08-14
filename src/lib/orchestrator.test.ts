@@ -63,8 +63,11 @@ const {
   revivableDependents,
   getRun,
   githubEnv,
+  isRateLimited,
   isTransientApiError,
   isUsageLimit,
+  maxRetriesFor,
+  transientBackoffMs,
   matchesCopyGlobs,
   needsLiveSpendTelemetry,
   nextPrompt,
@@ -79,6 +82,7 @@ const {
   toolResultFailures,
   worktreeSlug,
   MAX_PAUSES_PER_RUN,
+  MAX_RATE_LIMIT_RETRIES,
   MAX_RESUMES_PER_SWEEP,
   MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
@@ -965,6 +969,191 @@ describe("transient API failure classification", () => {
 });
 
 /**
+ * A rate limit is a transient failure, and it is not the same transient
+ * failure.
+ *
+ * At one run a 429 is a burst and 5/20/60 seconds is generous. At twenty-five
+ * concurrent runs against one account it is the provider describing this app's
+ * own steady-state request rate — so it lasts as long as the fleet keeps
+ * asking, the three fast retries become three twenty-five-wide waves into the
+ * condition that caused it, and the whole fleet is `failed` inside ninety
+ * seconds with every dependent chain `blocked` behind it.
+ */
+describe("rate limits, apart from the rest", () => {
+  it("recognises the two shapes a rate limit arrives in", () => {
+    assert.equal(isRateLimited("API Error: 429 Too Many Requests"), true);
+    assert.equal(
+      isRateLimited('{"type":"error","error":{"type":"rate_limit_error"}}'),
+      true,
+    );
+    assert.equal(isRateLimited(""), false);
+    assert.equal(isRateLimited("API Error: 529 overloaded_error"), false);
+  });
+
+  it("is a strict subset of the transient set, so it widens nothing", () => {
+    // The classification was never what was wrong, and `isTransientApiError` is
+    // pinned against sentences read out of the shipped binary. Everything this
+    // matches was already retried; all this decides is which ladder and which
+    // sentence. Anything it matched that the wider predicate did not would be a
+    // new retry nobody argued for.
+    for (const text of [
+      "API Error: 429 Too Many Requests",
+      '{"type":"error","error":{"type":"rate_limit_error"}}',
+    ]) {
+      assert.equal(isRateLimited(text) && isTransientApiError(text), true, text);
+    }
+  });
+
+  it("is asked after the wall and before the general blip", () => {
+    // A wall can arrive as a 429 and no backoff refills an allowance, so
+    // `isUsageLimit` still wins. And the general predicate matches every 429
+    // too, so asking it first would file every rate limit under the ladder
+    // written for a dropped socket.
+    assert.equal(refusalKind("API Error: 429 You've hit your weekly limit"), "allowance");
+    assert.equal(refusalKind("API Error: 429 Too Many Requests"), "rate-limit");
+    assert.equal(refusalKind("API Error: 503 Service Unavailable"), "transient");
+  });
+
+  it("outlasts more than the ninety seconds that killed the fleet", () => {
+    // The acceptance test from the issue: a sustained rate limit must not end
+    // every run inside two minutes. Measured at the floor of the spread, since
+    // that is the shortest the ladder can ever be.
+    const floor = Array.from({ length: MAX_RATE_LIMIT_RETRIES }, (_, attempt) =>
+      transientBackoffMs({ attempt, kind: "rate-limit", random: () => 0 }),
+    ).reduce((a, b) => a + b, 0);
+    assert.equal(
+      floor >= 10 * 60_000,
+      true,
+      `the rate-limit ladder tolerates only ${Math.round(floor / 1000)}s`,
+    );
+
+    // And the ladder written for a dropped socket is untouched: that fault
+    // really does clear in seconds, and minutes of backoff for it would hold a
+    // folder and a live session for nothing.
+    const transientFloor = Array.from(
+      { length: MAX_TRANSIENT_RETRIES },
+      (_, attempt) =>
+        transientBackoffMs({ attempt, kind: "transient", random: () => 0 }),
+    ).reduce((a, b) => a + b, 0);
+    assert.equal(transientFloor, 85_000);
+  });
+
+  it("ends a rate-limited run with a different sentence from a dead upstream", () => {
+    // The operator's response is the opposite in the two cases — wait, versus
+    // reduce how many runs share this account — so the two endings must not
+    // collapse into one `cause`.
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "rate-limit",
+        pauseCount: 0,
+        transientRetries: MAX_RATE_LIMIT_RETRIES,
+      }),
+      { action: "fail", cause: "rate-limited" },
+    );
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "transient",
+        pauseCount: 0,
+        transientRetries: MAX_TRANSIENT_RETRIES,
+      }),
+      { action: "fail", cause: "retries-spent" },
+    );
+  });
+
+  it("climbs its own ladder, not the other one", () => {
+    for (let attempt = 0; attempt < MAX_RATE_LIMIT_RETRIES; attempt++) {
+      assert.deepEqual(
+        refusalDisposition({ kind: "rate-limit", pauseCount: 0, transientRetries: attempt }),
+        { action: "retry", attempt, kind: "rate-limit" },
+      );
+    }
+    assert.equal(maxRetriesFor("rate-limit"), MAX_RATE_LIMIT_RETRIES);
+    assert.equal(maxRetriesFor("transient"), MAX_TRANSIENT_RETRIES);
+  });
+});
+
+/**
+ * The retry schedule, which was `TRANSIENT_BACKOFF_MS[transientRetries]`.
+ *
+ * A constant lookup on a per-run counter that starts at 0 for every run, so
+ * twenty-five runs meeting one failure at one instant retried at exactly the
+ * same three instants — each wave twenty-five simultaneous spawns, which is the
+ * condition a rate limit is describing in the first place.
+ */
+describe("the retry backoff schedule", () => {
+  const noJitter = () => 0;
+  const allJitter = () => 1;
+
+  for (const kind of ["transient", "rate-limit"] as const) {
+    describe(kind, () => {
+      it("grows, and keeps growing once the spread is on it", () => {
+        for (let attempt = 1; attempt < maxRetriesFor(kind); attempt++) {
+          const lower = transientBackoffMs({
+            attempt: attempt - 1,
+            kind,
+            random: allJitter,
+          });
+          const upper = transientBackoffMs({ attempt, kind, random: noJitter });
+          assert.equal(
+            upper > lower,
+            true,
+            `rung ${attempt} at the bottom of its band (${upper}ms) must still ` +
+              `exceed rung ${attempt - 1} at the top of its (${lower}ms) — the ` +
+              "second failure in a row waiting longer is not a thing to be true " +
+              "on average",
+          );
+        }
+      });
+
+      it("never comes back sooner than the rung it was written as", () => {
+        // Jitter may only ever delay. The rung is what keeps a retry from
+        // being a hot loop, and a spread that could shorten it would undo that
+        // silently.
+        for (let attempt = 0; attempt < maxRetriesFor(kind); attempt++) {
+          const floor = transientBackoffMs({ attempt, kind, random: noJitter });
+          for (const random of [noJitter, allJitter, () => 0.5]) {
+            assert.equal(transientBackoffMs({ attempt, kind, random }) >= floor, true);
+          }
+        }
+      });
+
+      it("gives two runs at the same attempt two different delays", () => {
+        // The regression, at its smallest: the same attempt index and two
+        // randomness sources have to disagree, because the attempt index is
+        // exactly what twenty-five runs share.
+        assert.notEqual(
+          transientBackoffMs({ attempt: 0, kind, random: () => 0.1 }),
+          transientBackoffMs({ attempt: 0, kind, random: () => 0.9 }),
+        );
+      });
+
+      it("spreads twenty-five runs meeting one failure at one instant", () => {
+        // The same shape the parked fleet is pinned at, one path over: distinct
+        // is not enough on its own, the band has to be wide enough that the
+        // waves stop being waves.
+        let state = 20250814;
+        const random = () => {
+          state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+          return state / 4_294_967_296;
+        };
+        const delays = Array.from({ length: 25 }, () =>
+          transientBackoffMs({ attempt: 0, kind, random }),
+        );
+        assert.equal(new Set(delays).size >= 24, true);
+
+        const base = transientBackoffMs({ attempt: 0, kind, random: noJitter });
+        const spread = Math.max(...delays) - Math.min(...delays);
+        assert.equal(
+          spread >= base * 0.4,
+          true,
+          `twenty-five delays span ${spread}ms against a ${base}ms rung`,
+        );
+      });
+    });
+  }
+});
+
+/**
  * What the loop does about a refused work cycle.
  *
  * Pinned here rather than left inline for the reason `releasableRuns` and
@@ -1028,7 +1217,7 @@ describe("what a refused work cycle does next", () => {
     for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
       assert.deepEqual(
         refusalDisposition({ kind: "transient", pauseCount: 0, transientRetries: attempt }),
-        { action: "retry", attempt },
+        { action: "retry", attempt, kind: "transient" },
       );
     }
     assert.deepEqual(
@@ -1061,7 +1250,7 @@ describe("what a refused work cycle does next", () => {
         pauseCount: MAX_PAUSES_PER_RUN,
         transientRetries: 0,
       }),
-      { action: "retry", attempt: 0 },
+      { action: "retry", attempt: 0, kind: "transient" },
     );
     assert.deepEqual(
       refusalDisposition({

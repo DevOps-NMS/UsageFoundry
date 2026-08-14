@@ -797,10 +797,34 @@ export function isTransientApiError(text: string): boolean {
   );
 }
 
-/** Which of the three things a refused work cycle actually was. */
+/**
+ * Whether a transient failure is the provider refusing this app's request rate.
+ *
+ * A **strict subset** of `isTransientApiError`, and deliberately nothing more:
+ * both patterns here already match there, so this widens nothing about what is
+ * retried at all. All it decides is which ladder and which sentence, and that
+ * distinction is the whole of why it exists. A dropped connection is a blip
+ * that clears in seconds whatever this app does; a 429 at twenty-five
+ * concurrent runs against one account is the provider describing *this app's
+ * own steady-state request rate*, so it persists for exactly as long as the
+ * fleet keeps asking — and the three fast retries written for a dropped socket
+ * then become three synchronised twenty-five-wide waves into the condition
+ * that caused it, followed by the whole fleet `failed` inside ninety seconds.
+ *
+ * `isTransientApiError` is untouched: it is unit-tested against sentences read
+ * out of the shipped binary, and the classification was never what was wrong.
+ */
+export function isRateLimited(text: string): boolean {
+  if (!text) return false;
+  return /\bAPI Error:\s*429\b/i.test(text) || /\brate_limit_error\b/i.test(text);
+}
+
+/** Which of the four things a refused work cycle actually was. */
 export type RefusalKind =
   /** The subscription allowance is used up. It refills on its own. */
   | "allowance"
+  /** The provider is refusing this app's request rate. Its own ladder. */
+  | "rate-limit"
   /** A transport or upstream fault that clears by itself in seconds. */
   | "transient"
   /** Neither: the CLI refused the request for a reason of its own. */
@@ -809,18 +833,22 @@ export type RefusalKind =
 /**
  * Name the refusal, once, so every decision below reads the same answer.
  *
- * The two classifiers were called inline and in this order, with `retryable`
+ * The classifiers were called inline and in this order, with `retryable`
  * carrying a `!limited` of its own to keep them apart. Naming the answer is
- * what lets the decision beside it be pure and tested: the two predicates are
- * regex matches over sentences read out of the shipped binary, and the thing
- * that goes wrong is not the matching but what is done with it.
+ * what lets the decision beside it be pure and tested: the predicates are regex
+ * matches over sentences read out of the shipped binary, and the thing that
+ * goes wrong is not the matching but what is done with it.
  *
- * The order is load-bearing and unchanged: a wall is tested first, because no
- * backoff refills an allowance and `isTransientApiError` would otherwise claim
- * a 429 the provider meant as a wall.
+ * The order is load-bearing. A wall is tested first, because no backoff refills
+ * an allowance and `isTransientApiError` would otherwise claim a 429 the
+ * provider meant as a wall. A rate limit is tested before the general transient
+ * case for the narrower reason that it *is* one — the wider predicate matches
+ * every 429 too, so asking it first would file every rate limit under the
+ * ladder written for a dropped socket.
  */
 export function refusalKind(refusal: string): RefusalKind {
   if (isUsageLimit(refusal)) return "allowance";
+  if (isRateLimited(refusal)) return "rate-limit";
   if (isTransientApiError(refusal)) return "transient";
   return "other";
 }
@@ -948,6 +976,37 @@ export const MAX_PAUSES_PER_RUN = 3;
 const TRANSIENT_BACKOFF_MS = [5_000, 20_000, 60_000];
 
 /**
+ * How long a run waits before re-spawning after the provider refused its rate.
+ *
+ * Minutes, where the ladder above is seconds, and the difference is what the
+ * two faults are. A dropped socket clears in seconds whatever this app does. A
+ * 429 at twenty-five concurrent runs against one account *is* this app's own
+ * request rate, so it lasts as long as the fleet keeps asking — and 5/20/60
+ * seconds against it is three twenty-five-wide waves into the condition that
+ * produced it, then the whole fleet `failed` inside ninety seconds with every
+ * dependent chain `blocked` behind it.
+ *
+ * The wait is the back-pressure, and it is the only lever this path has: a run
+ * that is sleeping is a run that is not asking. Ordinary jitter spreads the
+ * waves on top of it, so twenty-five runs stop arriving as one.
+ *
+ * ~17 minutes of tolerance at the floor of the spread and ~26 at its ceiling.
+ * That bounds the tolerance; it does not promise the fleet survives, and the
+ * stop reason at the end says so and names the lever that actually fixes it —
+ * `maxConcurrentRuns`, which is the N this whole failure is proportional to.
+ * The run's own wall clock still bounds the ladder from the other side: a retry
+ * re-enters the loop at the top, so `evaluateBudget` reads `maxDurationMinutes`
+ * before every one of these re-spawns.
+ */
+const RATE_LIMIT_BACKOFF_MS = [30_000, 2 * 60_000, 5 * 60_000, 10 * 60_000];
+
+/** Which ladder a retryable refusal climbs. */
+const RETRY_LADDERS: Record<"transient" | "rate-limit", readonly number[]> = {
+  transient: TRANSIENT_BACKOFF_MS,
+  "rate-limit": RATE_LIMIT_BACKOFF_MS,
+};
+
+/**
  * How many transient failures **in a row** one run may retry.
  *
  * Counted consecutively and reset by any cycle that gets through, so a long
@@ -958,22 +1017,59 @@ const TRANSIENT_BACKOFF_MS = [5_000, 20_000, 60_000];
  */
 export const MAX_TRANSIENT_RETRIES = TRANSIENT_BACKOFF_MS.length;
 
+/** The same count for a rate limit, whose ladder is its own. */
+export const MAX_RATE_LIMIT_RETRIES = RATE_LIMIT_BACKOFF_MS.length;
+
+/** How many retries in a row a refusal of this kind is allowed. */
+export function maxRetriesFor(kind: "transient" | "rate-limit"): number {
+  return RETRY_LADDERS[kind].length;
+}
+
+/**
+ * How long to wait before re-spawning, for one attempt of one kind.
+ *
+ * A pure function of the attempt index and a randomness source, which is the
+ * whole point: it was `TRANSIENT_BACKOFF_MS[transientRetries]`, a constant
+ * lookup, so twenty-five runs meeting one failure at one instant retried at
+ * exactly t+5s, t+25s and t+85s together — each wave twenty-five simultaneous
+ * spawns, which is the condition a rate limit is describing.
+ *
+ * Jitter is the shared `jitterMs`, so this and `refusalResumeAt` spread the
+ * same way for the same reason: additive only, and half the rung wide. Half is
+ * what keeps the ladder *strictly* climbing — every rung's floor stays above
+ * the one below it at the top of its band, so "the second failure in a row
+ * waits longer" is true of every pair rather than true on average. No floor is
+ * passed: this wait is slept in-process rather than served by the 60-second
+ * sweeper, so any spread at all is real.
+ */
+export function transientBackoffMs(o: {
+  attempt: number;
+  kind: "transient" | "rate-limit";
+  random?: () => number;
+}): number {
+  const ladder = RETRY_LADDERS[o.kind];
+  const base = ladder[Math.min(Math.max(o.attempt, 0), ladder.length - 1)];
+  return base + jitterMs(base, o.random ?? Math.random);
+}
+
 /** Why a refused run is being ended rather than retried or parked. */
 export type RefusalCause =
   /** A wall, met as often as one run may wait one out. */
   | "pauses-spent"
   /** Transport faults in a row, with the ladder spent. */
   | "retries-spent"
+  /** The provider refusing this app's request rate, with its ladder spent. */
+  | "rate-limited"
   /** Not a wall and not a blip — nothing here would clear. */
   | "other";
 
 /** What the loop does about a work cycle the provider refused. */
 export type RefusalPlan =
   /** Sleep the ladder's entry for `attempt` and re-spawn into the same session. */
-  | { action: "retry"; attempt: number }
+  | { action: "retry"; attempt: number; kind: "transient" | "rate-limit" }
   /** Park and wait the window out. */
   | { action: "park" }
-  /** End the run, and say which of the three endings it was. */
+  /** End the run, and say which of the four endings it was. */
   | { action: "fail"; cause: RefusalCause };
 
 /**
@@ -1015,10 +1111,17 @@ export function refusalDisposition(o: {
       ? { action: "park" }
       : { action: "fail", cause: "pauses-spent" };
   }
-  if (o.kind === "transient") {
-    return o.transientRetries < MAX_TRANSIENT_RETRIES
-      ? { action: "retry", attempt: o.transientRetries }
-      : { action: "fail", cause: "retries-spent" };
+  if (o.kind === "transient" || o.kind === "rate-limit") {
+    return o.transientRetries < maxRetriesFor(o.kind)
+      ? { action: "retry", attempt: o.transientRetries, kind: o.kind }
+      : {
+          action: "fail",
+          // Two endings, not one. "The upstream is down" and "we were rate
+          // limited and gave up" call for opposite responses — wait, versus
+          // reduce how many runs share this account — and a single sentence
+          // about "a transient API error" tells the operator neither.
+          cause: o.kind === "rate-limit" ? "rate-limited" : "retries-spent",
+        };
   }
   return { action: "fail", cause: "other" };
 }
@@ -4940,7 +5043,9 @@ export async function startRun(id: string): Promise<void> {
           transientRetries,
         });
         const retrying = plan.action === "retry";
-        const backoff = retrying ? TRANSIENT_BACKOFF_MS[plan.attempt] : 0;
+        // Jittered, so twenty-five runs meeting one failure at one instant do
+        // not re-spawn as one wave — see `transientBackoffMs`.
+        const backoff = plan.action === "retry" ? transientBackoffMs(plan) : 0;
 
         emit({
           runId: id,
@@ -4950,11 +5055,12 @@ export async function startRun(id: string): Promise<void> {
             // The log line renders `message`, and this event had none — so the
             // one entry that says why a run died read `✗ undefined`, with the
             // actual sentence only on the row's stop reason.
-            message: retrying
-              ? `${refusal} — retrying in ${Math.round(backoff / 1000)}s (${
-                  transientRetries + 1
-                } of ${MAX_TRANSIENT_RETRIES}).`
-              : refusal,
+            message:
+              plan.action === "retry"
+                ? `${refusal} — retrying in ${Math.round(backoff / 1000)}s (${
+                    transientRetries + 1
+                  } of ${maxRetriesFor(plan.kind)}).`
+                : refusal,
             apiError: refusal,
             exitCode: res.exitCode,
             usageLimit: limited,
@@ -5014,7 +5120,19 @@ export async function startRun(id: string): Promise<void> {
                 `Claude Code hit a transient API error on ${
                   MAX_TRANSIENT_RETRIES + 1
                 } attempts in a row: ${refusal}`
-              : `Claude Code refused the request: ${refusal}`;
+              : plan.cause === "rate-limited"
+                ? // A different sentence from the one above, because the
+                  // operator's response is the opposite. An upstream that is
+                  // down clears on its own and waiting is right; a rate limit
+                  // at this concurrency is the account describing how much of
+                  // it this app is using, and waiting changes nothing that
+                  // lowering the cap would not change faster.
+                  `Claude Code was rate limited on ${
+                    MAX_RATE_LIMIT_RETRIES + 1
+                  } attempts in a row, over ${Math.round(
+                    RATE_LIMIT_BACKOFF_MS.reduce((a, b) => a + b, 0) / 60_000,
+                  )} minutes or more of backing off. This is the account refusing this app's own request rate rather than being unreachable, so lower the concurrent-run limit rather than waiting: ${refusal}`
+                : `Claude Code refused the request: ${refusal}`;
         finalStatus = "failed";
         break;
       }
