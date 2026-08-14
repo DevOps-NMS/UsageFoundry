@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type {
+  AgentDTO,
+  AmbientAgentDTO,
   ChatDTO,
   ChatListEntryDTO,
   ChatMessageDTO,
@@ -11,6 +13,7 @@ import type {
 } from "@/lib/apiTypes";
 import { chatRequest } from "@/lib/chatRequest";
 import {
+  describeAmbientAgents,
   fmtDateTime,
   fmtDuration,
   fmtRelative,
@@ -53,6 +56,57 @@ const NEAR_BOTTOM_PX = 48;
 
 /** About ten lines. Past that the composer scrolls rather than eating the thread. */
 const COMPOSER_MAX_PX = 208;
+
+/**
+ * How many saved agents the mention list offers at once.
+ *
+ * A completion list is read at a glance or not at all, and this one sits over
+ * the conversation. Past a handful the answer is a narrower query, not a
+ * taller popover.
+ */
+const MENTION_LIMIT = 6;
+
+/** Complete class strings per state, never interpolated — the kit's rule. */
+const MENTION_ROW: Record<"active" | "idle", string> = {
+  active: "bg-selection",
+  idle: "bg-transparent",
+};
+
+/** Where an `@`-mention starts in the draft, and what has been typed after it. */
+interface MentionToken {
+  /** Index of the `@` itself, so an insertion replaces the whole token. */
+  start: number;
+  query: string;
+}
+
+/**
+ * The `@`-mention under the caret, or null.
+ *
+ * **What this is, before what it does.** The chat's child is `claude -p`, so
+ * there is no interactive `@` on the wire and nothing here completes into the
+ * model's own context: a mention is *text the operator writes*, and what it
+ * does is tell the orchestrator which saved agent to propose the work under.
+ * The orchestrator reads it, calls `list_agents`, and passes an `agentId` to
+ * `propose_run` — where the agent is refused by name if it has gone. This app
+ * never parses the mention back out of the message, which is why a name with a
+ * space in it is inserted as it stands rather than quoted into a syntax nobody
+ * else here speaks: the only reader is a model that has the list.
+ *
+ * Pure, and it only ever looks left from the caret. Two rules bound it, and
+ * both exist to stop ordinary prose opening a list over the conversation: the
+ * `@` has to open a word, so `user@host` is an address rather than a mention;
+ * and a mention is one word, so the first space closes it instead of reading
+ * the rest of a paragraph as a very long agent name.
+ */
+function mentionAt(text: string, caret: number): MentionToken | null {
+  const upto = text.slice(0, caret);
+  const start = upto.lastIndexOf("@");
+  if (start === -1) return null;
+  if (start > 0 && !/\s/.test(upto[start - 1])) return null;
+  const query = upto.slice(start + 1);
+  if (/\s/.test(query)) return null;
+  return { start, query };
+}
 
 const PROPOSAL_TONE = {
   pending: "accent",
@@ -135,6 +189,25 @@ export default function ChatPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [atBottom, setAtBottom] = useState(true);
   const [unseen, setUnseen] = useState(0);
+  // The registry the composer completes from, and the definitions on disk this
+  // app did not write — off one payload, so no surface here can describe the
+  // set differently from the run form or the workflow canvas. A failed read
+  // leaves the list empty and costs the completion, never the message: the
+  // mention is text either way, and the orchestrator resolves it server-side.
+  const [agents, setAgents] = useState<AgentDTO[]>([]);
+  const [ambient, setAmbient] = useState<AmbientAgentDTO[]>([]);
+  const [mention, setMention] = useState<MentionToken | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  /**
+   * The token offset Esc dismissed, so the list stays shut while it is typed.
+   *
+   * An offset rather than a boolean: a mention the operator dismissed must not
+   * reopen on the next keystroke, and one they open later somewhere else must
+   * not inherit that decision.
+   */
+  const [mentionClosed, setMentionClosed] = useState<number | null>(null);
+  /** Where the caret goes after an insertion, applied once the draft has it. */
+  const [caretTo, setCaretTo] = useState<number | null>(null);
 
   const threadRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -190,6 +263,25 @@ export default function ChatPage() {
   useEffect(() => {
     void load(null);
   }, [load]);
+
+  // Once, and deliberately not on the poll: the registry changes when somebody
+  // edits it on another page, which is not something this composer has to track
+  // between keystrokes. A failure is swallowed for the reason stated where the
+  // state is declared — it costs a completion, and the door still decides.
+  useEffect(() => {
+    let live = true;
+    fetch("/api/agents", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d: { agents?: AgentDTO[]; ambient?: AmbientAgentDTO[] }) => {
+        if (!live) return;
+        setAgents(d.agents ?? []);
+        setAmbient(d.ambient ?? []);
+      })
+      .catch(() => void 0);
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // Both halves come back from this one request — the thread route answers with
   // the list too — so the list stays current on the thread's own period and
@@ -268,6 +360,66 @@ export default function ChatPage() {
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
   }, [draft]);
+
+  // After the insertion, not with it: the caret is a property of the DOM node
+  // and the draft it belongs to has to be rendered first, or the position lands
+  // in the text as it was before the name went in.
+  useEffect(() => {
+    if (caretTo === null) return;
+    const el = composerRef.current;
+    if (el) {
+      el.focus();
+      el.setSelectionRange(caretTo, caretTo);
+    }
+    setCaretTo(null);
+  }, [caretTo]);
+
+  /* ---------------------------------------------------------------- */
+  /* The mention list                                                  */
+  /* ---------------------------------------------------------------- */
+
+  const ambientLine = useMemo(() => describeAmbientAgents(ambient), [ambient]);
+
+  // An unusable agent is listed rather than hidden, marked, for the reason the
+  // run form's picker lists one: it is a row the operator saved, and a registry
+  // that quietly stops showing it is a registry that disagrees with the page
+  // they saved it on. Mentioning one costs a refusal with a sentence naming the
+  // fix, which is a better answer than an agent that appears not to exist.
+  const matches = useMemo(() => {
+    if (!mention || mentionClosed === mention.start) return [];
+    const query = mention.query.toLowerCase();
+    return agents
+      .filter((a) => a.name.toLowerCase().includes(query))
+      .slice(0, MENTION_LIMIT);
+  }, [agents, mention, mentionClosed]);
+
+  const mentionOpen = matches.length > 0;
+  // Clamped rather than reset on every filter: the list narrows as the operator
+  // types, and an index left past its end would highlight nothing while Tab
+  // still had something to insert.
+  const active = Math.min(mentionIndex, matches.length - 1);
+
+  /** Read the token under the caret. Called wherever the caret can have moved. */
+  const readMention = (value: string, caret: number | null) => {
+    const token = caret === null ? null : mentionAt(value, caret);
+    if (mention?.start === token?.start && mention?.query === token?.query) return;
+    setMention(token);
+    setMentionIndex(0);
+  };
+
+  const insertMention = (name: string) => {
+    const el = composerRef.current;
+    if (!el || !mention) return;
+    const caret = el.selectionStart ?? draft.length;
+    const before = draft.slice(0, mention.start);
+    // The trailing space closes the token, which is what hides the list without
+    // a second piece of state deciding when it is finished.
+    const inserted = `@${name} `;
+    setDraft(before + inserted + draft.slice(caret));
+    setMention(null);
+    setMentionClosed(null);
+    setCaretTo(before.length + inserted.length);
+  };
 
   const send = async () => {
     const message = draft.trim();
@@ -514,10 +666,63 @@ export default function ChatPage() {
               thread above it is the only thing that scrolls, so the composer
               stays where the hand expects it however long the conversation
               gets. */}
-          <div className="mt-4 border-t border-line pt-4">
+          <div className="relative mt-4 border-t border-line pt-4">
+            {mentionOpen && (
+              // Above the composer, because the composer is at the foot of the
+              // pane. `mousedown` rather than `click` on a row, with the
+              // default prevented: a click would blur the textarea first, and
+              // the insertion needs the caret it is about to move.
+              <div className="absolute bottom-full left-0 z-10 mb-1 w-80 max-w-full overflow-hidden rounded-lg border border-line bg-surface shadow-e2">
+                <ul id="agent-mentions" role="listbox" aria-label="Saved agents" className="py-1">
+                  {matches.map((a, i) => (
+                    <li
+                      key={a.id}
+                      id={`agent-mention-${a.id}`}
+                      role="option"
+                      aria-selected={i === active}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        insertMention(a.name);
+                      }}
+                      onMouseEnter={() => setMentionIndex(i)}
+                      className={`cursor-pointer px-2.5 py-1.5 ${
+                        MENTION_ROW[i === active ? "active" : "idle"]
+                      }`}
+                    >
+                      <span className="block truncate text-xs font-medium text-ink">
+                        {a.name}
+                        {!a.usable && (
+                          <span className="ml-1.5 font-normal text-danger">
+                            incomplete
+                          </span>
+                        )}
+                      </span>
+                      <span className="block truncate text-2xs text-ink-muted">
+                        {a.description}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {/* Enter is named here because it is the one thing about this
+                    list that would otherwise be found out by losing a message:
+                    it sends, exactly as it does with the list shut. */}
+                <div className="border-t border-line px-2.5 py-1.5 text-2xs text-ink-faint">
+                  Tab inserts · Enter still sends
+                  {ambientLine && <span className="mt-0.5 block">{ambientLine}</span>}
+                </div>
+              </div>
+            )}
             <textarea
               ref={composerRef}
               aria-label="Message the orchestrator"
+              aria-autocomplete="list"
+              aria-expanded={mentionOpen}
+              aria-controls={mentionOpen ? "agent-mentions" : undefined}
+              aria-activedescendant={
+                mentionOpen && matches[active]
+                  ? `agent-mention-${matches[active].id}`
+                  : undefined
+              }
               // No focus ring of its own. @layer base draws one halo for every
               // focusable thing in the app, and the `outline-none` plus 3px
               // box-shadow that used to be here was the second treatment that
@@ -526,8 +731,62 @@ export default function ChatPage() {
               rows={3}
               placeholder="Ask the orchestrator to look at something and propose runs…"
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                readMention(e.target.value, e.target.selectionStart);
+              }}
+              // Caret moves that are not edits — a click, Home, an arrow key —
+              // change which token is under it, so the list has to be read
+              // there too or it survives the caret leaving the mention.
+              onSelect={(e) =>
+                readMention(
+                  e.currentTarget.value,
+                  e.currentTarget.selectionStart,
+                )
+              }
+              // Not on blur alone: a row's `mousedown` prevents the blur, so
+              // this only fires when focus really has left the composer.
+              onBlur={() => setMention(null)}
               onKeyDown={(e) => {
+                // The mention list gets the keys nothing else here claims, and
+                // **never Enter or ⌘↩**. That is the whole rule: this composer
+                // sends on Enter, so a list that accepted a completion with it
+                // would swallow the send whenever the operator happened to be
+                // at the end of a name — which is exactly when they are most
+                // likely to be finished. Tab inserts instead, the popover says
+                // so, and the send chords fall through untouched below.
+                //
+                // Skipped entirely mid-composition: an IME owns the keyboard
+                // while a candidate is up, and a layer that took Tab or the
+                // arrows from it would break the candidate list rather than
+                // this one.
+                if (mentionOpen && !e.nativeEvent.isComposing) {
+                  if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    setMentionIndex((active + 1) % matches.length);
+                    return;
+                  }
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setMentionIndex((active - 1 + matches.length) % matches.length);
+                    return;
+                  }
+                  if (e.key === "Tab" && !e.shiftKey) {
+                    e.preventDefault();
+                    insertMention(matches[active].name);
+                    return;
+                  }
+                  if (e.key === "Escape") {
+                    // Dismissed for this token only, so typing more of the
+                    // name does not reopen what was just shut. Consumed,
+                    // because closing the list is what Esc means here — the
+                    // shell binds it to nothing and there is no dialog under
+                    // this to fall through to.
+                    e.preventDefault();
+                    setMentionClosed(mention?.start ?? null);
+                    return;
+                  }
+                }
                 // Two ways to send and one of them is the platform's. ⌘↩ is the
                 // commit chord this app already uses on the run form, and the
                 // shell's keyboard layer deliberately binds it to nothing so a
@@ -886,6 +1145,23 @@ function Proposal({
                 {missing ? "template deleted" : proposal.guardsLabel}
               </span>
             </span>
+            {/* Outside the guard mark and never inside it. `--agents` offers a
+                role to the delegating model: it carries no tool list and no
+                permission mode, so a phrase under the shield would claim this
+                bounds something. What it says is who does part of the work. */}
+            {(proposal.agentName || proposal.agentMissing) && (
+              <span
+                className={`inline-flex min-w-0 max-w-full items-center gap-1 ${
+                  GUARD_TONE[proposal.agentMissing ? "missing" : "set"]
+                }`}
+              >
+                <span className="truncate">
+                  {proposal.agentName
+                    ? `as ${proposal.agentName}`
+                    : "specialist deleted"}
+                </span>
+              </span>
+            )}
             {proposal.promptRewritten && <span>prompt rewritten</span>}
           </div>
         )}
@@ -914,6 +1190,19 @@ function Proposal({
           <p className="mt-2 text-2xs leading-normal font-medium text-danger">
             The template this names has been deleted, so approving it will be
             refused.
+          </p>
+        )}
+
+        {/* Said in full rather than left to the mark above, because the two
+            ways of being unusable read differently and only one of them is
+            about deletion: an agent missing its description or its prompt is
+            dropped by Claude Code without a word, so a run started with it
+            looks exactly like a run that was never given one. */}
+        {proposal.agentMissing && !workflow && (
+          <p className="mt-2 text-2xs leading-normal font-medium text-danger">
+            {proposal.agentName
+              ? `The “${proposal.agentName}” agent is missing its description or its prompt, so approving this will be refused.`
+              : "The specialist this names has been deleted, so approving it will be refused."}
           </p>
         )}
       </div>
@@ -975,6 +1264,17 @@ function ProposedGraph({ proposal }: { proposal: ChatProposalDTO }) {
                 {" · "}
                 {b.guardsLabel}
               </span>
+              {/* Its own clause, outside the guard one, for the reason the run
+                  card's is: an agent decides who does part of the work and
+                  never what the block may do. */}
+              {b.agentLabel && (
+                <span
+                  className={b.agentLabel === "agent deleted" ? "text-danger" : ""}
+                >
+                  {" · as "}
+                  {b.agentLabel}
+                </span>
+              )}
               {b.fanOut !== null && (
                 <span className="text-warn"> · up to {b.fanOut} run(s), no approval</span>
               )}
