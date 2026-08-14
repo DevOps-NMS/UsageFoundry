@@ -439,6 +439,37 @@ through before trusting this unattended:
   narrow width, a fourteen-row daily table, and a meter reading 798% of a
   pro-rated day, which is a real figure from those transcripts and clamps to a
   full bar.
+- **Everything about the multi-repository sweep that needs Docker or a second
+  repository.** Four changes landed together (#77, #76, #70, #67);
+  `npm run typecheck` and `npm test` pass and each carries a regression test that
+  was watched failing before the fix. What has **not** happened:
+  - `docker compose config` and `docker compose up` with a fifth workspace slot
+    in `.env`. The refusal is unit-tested from the app's side and
+    `deployment.test.ts` pins `MOUNTED_WORKSPACE_SLOTS` against the volume lines,
+    but no compose has interpolated `UF_UNMOUNTED_WORKSPACES`. Run
+    `cp .env.example .env`, fill `UF_WORKSPACE`, add `UF_WORKSPACE_5_NAME=Extra`,
+    then `docker compose config | grep UF_UNMOUNTED_WORKSPACES` (it should carry
+    the name) and `docker compose up` (the container should exit naming it).
+    Then unset it and confirm a four-slot install boots exactly as before, and
+    that the `docker-compose.override.yml` recipe in `docs/install.md` — which
+    clears that variable — really does mount a fifth slot.
+  - A nested seed pattern reaching a real checkout. `planSeedCopies` is pure and
+    tested against a fabricated tree; no `git worktree add` has been followed by
+    a copy of `apps/web/.env`. Start an isolated run on a monorepo with
+    `apps/web/.env` gitignored, confirm the file arrives and the log names it,
+    then remove the pattern and confirm the log says *nothing seeded* and counts
+    the gitignored files it did not match — rather than the old silence.
+  - A per-repository GitHub token authenticating. The selection is pure and
+    tested; no `git push` has been attempted with one. With two throwaway
+    repositories and two fine-grained tokens, confirm a run in A can push to A
+    and cannot push to B, and that with `UF_GITHUB_TOKEN` blank a repository no
+    entry names gets no credential at all.
+  - Two repositories' branches landing at once. The selector is driven against a
+    real database and the ordering within one repository is pinned, but no two
+    `landRun` calls have overlapped. Queue a conflicting branch with auto-resolve
+    on in one repository and a clean branch in another, and confirm the second
+    lands while the first is still resolving — and that two branches in *one*
+    repository still land strictly one after the other.
 - Whether `claude -p` flushes its `result` event on `SIGINT`. If it does, an
   interrupted cycle keeps its measured cost and the transcript reconciliation
   becomes a fallback rather than the norm.
