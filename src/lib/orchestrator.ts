@@ -4947,6 +4947,91 @@ function stopSweeper(): void {
   timers.sweep = null;
 }
 
+/* ------------------------------------------------------------------ */
+/* Deciding a parked run's fate — pure, and tested                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Which parked runs this tick decides about.
+ *
+ * A null `resume_at` is due immediately, and that is not a corner case: the
+ * column is a hint about when to look again rather than a promise, so its
+ * absence means "on the next sweep" and never "not yet".
+ *
+ * Separated from the sweep below because it is what buys the scan: nothing due
+ * means no `currentSnapshot()`, and a filter that read a null as "not yet"
+ * would leave those runs parked for ever with the sweeper reporting nothing at
+ * all — the same silence a working sweeper produces between windows.
+ */
+export function duePausedRuns<T extends { resume_at: number | null }>(
+  runs: readonly T[],
+  now: number,
+): T[] {
+  return runs.filter((r) => r.resume_at === null || now >= r.resume_at);
+}
+
+/** What the sweeper should do with one parked run. */
+export type PausedRunPlan =
+  /** Its guard cleared and nothing is in the folder: rejoin the queue. */
+  | { action: "resume" }
+  /** Its guard cleared, but a run started while it waited holds the folder. */
+  | { action: "hold"; reason: string; heldBy: string }
+  /** Still refused, by the one refusal that clears on its own. */
+  | { action: "park"; resumeAt: number }
+  /** Refused by something that can never clear: end it. */
+  | { action: "end"; reason: string };
+
+/**
+ * Why a parked run whose window has cleared is still parked.
+ *
+ * A constant, and that is load-bearing rather than terse: the sweeper's UPDATE
+ * is guarded on `stop_reason IS NOT ?`, so a sentence that varied with the run
+ * in the folder, or with the clock, would rewrite the row and write a log line
+ * every 60 seconds for every parked run. The holder's id travels in the log
+ * payload instead, where it is recorded once. `run_events` has no retention.
+ */
+const FOLDER_TAKEN_REASON =
+  "Its 5-hour window has cleared. Waiting for the folder, which a " +
+  "run started while it waited now holds.";
+
+/**
+ * What to do with one parked run, given the verdict its own guard just
+ * returned and whichever run is in its folder.
+ *
+ * Pure, and separated from the writes below for the same reason
+ * `selectPromotable` and `releasableRuns` are: every way of being wrong here is
+ * silent, lands on disk and throws nothing. Reading a `stop` as a `pause` parks
+ * a run for ever that was out of wall clock; reading a `pause` as a `stop`
+ * kills a fleet that only had to wait; and resuming into an occupied folder is
+ * the two-agents-in-one-working-tree collision the folder claim exists to
+ * prevent, arriving through the one door that is allowed to un-park a run.
+ *
+ * Occupancy is consulted only where the guard already said yes — a refusal is a
+ * fact about this run's own budget, so nothing about who holds the folder may
+ * change the answer to it.
+ */
+export function planPausedRun(
+  verdict: BudgetVerdict,
+  heldBy: string | null,
+): PausedRunPlan {
+  if (verdict.allowed) {
+    // Stay `paused` rather than joining the queue: `paused` is what the restart
+    // grace keys on, and `resume_at` is already in the past, so the next sweep
+    // re-checks and flips the moment the folder is free.
+    if (heldBy !== null) {
+      return { action: "hold", reason: FOLDER_TAKEN_REASON, heldBy };
+    }
+    return { action: "resume" };
+  }
+
+  if (verdict.disposition === "pause") return { action: "park", resumeAt: verdict.resumeAt };
+
+  // A guard that never clears — the clock, this run's own spend, the weekly
+  // window — has caught up with a parked run. End it rather than leave it
+  // holding a folder indefinitely for a resume that can never happen.
+  return { action: "end", reason: verdict.reason };
+}
+
 /**
  * Reconsider every parked run.
  *
@@ -4957,8 +5042,12 @@ function stopSweeper(): void {
  * this app cannot see, with a change to the reserved headroom, and with the
  * operator's own terminal work opening a fresh 5-hour block. The guard that
  * parked a run is the guard that clears it.
+ *
+ * Exported for the same reason the decision above is extracted: without a way
+ * in, the branch that re-queues through `promoteQueued` rather than through
+ * `startRun` cannot be pinned at all.
  */
-async function sweepPaused(): Promise<void> {
+export async function sweepPaused(): Promise<void> {
   if (timers.sweeping) return;
   timers.sweeping = true;
   try {
@@ -4970,9 +5059,7 @@ async function sweepPaused(): Promise<void> {
       return;
     }
 
-    const due = paused.filter(
-      (r) => r.resume_at === null || Date.now() >= r.resume_at,
-    );
+    const due = duePausedRuns(paused, Date.now());
     if (due.length === 0) return; // nothing to decide, so no scan
 
     const snapshot = await currentSnapshot();
@@ -4995,73 +5082,79 @@ async function sweepPaused(): Promise<void> {
         now,
       );
 
-      if (verdict.allowed) {
-        // Its window cleared, but a run admitted while it waited is in the
-        // folder now. Stay `paused` rather than joining the queue: `paused` is
-        // what the restart grace keys on, and `resume_at` is already in the
-        // past, so the next sweep re-checks and flips the moment it is free.
-        const holder = occupantOf(workDirOf(run), run.id, ["running"]);
-        if (holder) {
-          const waiting =
-            "Its 5-hour window has cleared. Waiting for the folder, which a " +
-            "run started while it waited now holds.";
+      // Only where the guard said yes, for the reason `planPausedRun` gives:
+      // occupancy cannot change a refusal, so asking would be a query per
+      // refused run per minute for an answer nothing reads. `running` alone,
+      // because a parked run yields its folder and a queued one is not in it.
+      const heldBy = verdict.allowed
+        ? occupantOf(workDirOf(run), run.id, ["running"])
+        : null;
+      const plan = planPausedRun(verdict, heldBy?.id ?? null);
+
+      switch (plan.action) {
+        case "hold": {
           // Idempotent so the reason is corrected once rather than rewritten,
           // and logged once rather than every 60 seconds.
           const noted = db()
             .prepare(
               "UPDATE runs SET stop_reason=? WHERE id=? AND status='paused' AND stop_reason IS NOT ?",
             )
-            .run(waiting, run.id, waiting);
-          if (noted.changes === 1) log(run.id, waiting, { waitingFor: holder.id });
-          continue;
+            .run(plan.reason, run.id, plan.reason);
+          if (noted.changes === 1) {
+            log(run.id, plan.reason, { waitingFor: plan.heldBy });
+          }
+          break;
         }
 
-        // Re-queue rather than start directly: `promoteQueued` owns FIFO order,
-        // folder reservation and the concurrency cap, and re-implementing any
-        // of that here is how a folder claim gets broken. Ordering by
-        // `created_at` means a resumed run keeps its original place in line.
-        const flip = db()
-          .prepare(
-            "UPDATE runs SET status='queued', resume_at=NULL WHERE id=? AND status='paused'",
-          )
-          .run(run.id);
-        if (flip.changes === 1) {
-          freed = true;
-          emit({
-            runId: run.id,
-            ts: now,
-            kind: "status",
-            payload: {
-              status: "queued",
-              message: "The 5-hour window cleared; rejoining the queue.",
-            },
+        case "resume": {
+          // Re-queue rather than start directly: `promoteQueued` owns FIFO
+          // order, folder reservation and the concurrency cap, and
+          // re-implementing any of that here is how a folder claim gets broken.
+          // Ordering by `created_at` means a resumed run keeps its place in
+          // line. `AND status='paused'` is what lets a concurrent stop win.
+          const flip = db()
+            .prepare(
+              "UPDATE runs SET status='queued', resume_at=NULL WHERE id=? AND status='paused'",
+            )
+            .run(run.id);
+          if (flip.changes === 1) {
+            freed = true;
+            emit({
+              runId: run.id,
+              ts: now,
+              kind: "status",
+              payload: {
+                status: "queued",
+                message: "The 5-hour window cleared; rejoining the queue.",
+              },
+            });
+          }
+          break;
+        }
+
+        case "park": {
+          // Re-derived from the current snapshot, not carried over: the window
+          // that will clear this run is not necessarily the one that closed it.
+          db()
+            .prepare(
+              "UPDATE runs SET resume_at = ? WHERE id = ? AND status='paused'",
+            )
+            .run(plan.resumeAt, run.id);
+          break;
+        }
+
+        case "end": {
+          setStatus(run.id, "stopped", {
+            finished_at: now,
+            stop_reason: plan.reason,
+            resume_at: null,
           });
+          // A parked run that ends here is a settled dependency like any other.
+          releaseDependents();
+          freed = true;
+          break;
         }
-        continue;
       }
-
-      if (verdict.disposition === "pause") {
-        // Re-derived from the current snapshot, not carried over: the window
-        // that will clear this run is not necessarily the one that closed it.
-        db()
-          .prepare(
-            "UPDATE runs SET resume_at = ? WHERE id = ? AND status='paused'",
-          )
-          .run(verdict.resumeAt, run.id);
-        continue;
-      }
-
-      // A guard that never clears — the clock, this run's own spend, the weekly
-      // window — has caught up with a parked run. End it rather than leave it
-      // holding a folder indefinitely for a resume that can never happen.
-      setStatus(run.id, "stopped", {
-        finished_at: now,
-        stop_reason: verdict.reason,
-        resume_at: null,
-      });
-      // A parked run that ends here is a settled dependency like any other.
-      releaseDependents();
-      freed = true;
     }
 
     if (freed) promoteQueued();
