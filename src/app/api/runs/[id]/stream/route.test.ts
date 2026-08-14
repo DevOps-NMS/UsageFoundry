@@ -16,6 +16,13 @@ import { after, describe, it } from "node:test";
  * record of what an unattended agent did, and a duplicated block is
  * indistinguishable from an agent that genuinely did the same thing twice.
  *
+ * The connection's own teardown earns a place here on the same grounds. A
+ * connection that dies by a failed `enqueue` rather than by `abort` leaves
+ * nothing behind that anything reports: the bus has `setMaxListeners(0)`, so
+ * Node never warns about the listener, and a leaked 15-second interval is
+ * indistinguishable from a healthy one until the process is profiled. Both
+ * accumulate per reconnect, and `EventSource` reconnects on its own.
+ *
  * The environment has to be configured before the modules load: `config.ts`
  * reads DATA_DIR once at import.
  */
@@ -139,6 +146,95 @@ class Connection {
   }
 }
 
+/**
+ * The bus every connection subscribes to, reached the way the orchestrator's
+ * own module state is: `globalThis.__ufBus`. Only the count is wanted, and a
+ * leaked listener is exactly what a count is the evidence for.
+ */
+const bus = (globalThis as unknown as {
+  __ufBus: { listenerCount(name: string): number };
+}).__ufBus;
+
+/**
+ * Drive the route's `start(controller)` by hand, against a controller whose
+ * `enqueue` throws — the socket-reset case, which no in-process client can
+ * produce, since a `ReadableStream` a test holds a reader on never errors.
+ *
+ * The route builds its own stream, so the way in is the global constructor:
+ * capture the underlying source and hand `super()` nothing, so the real stream
+ * never runs `start` and the test owns the only call to it.
+ *
+ * `clearInterval` stays patched past the return, because the clearing under
+ * test happens at `abort` — after this function is done. The caller restores
+ * it; everything else goes back before the return.
+ */
+async function startWithDeadSocket(runId: string): Promise<{
+  abort: AbortController;
+  heartbeat: NodeJS.Timeout;
+  cleared: unknown[];
+  restore: () => void;
+}> {
+  const RealReadableStream = globalThis.ReadableStream;
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+
+  const captured: UnderlyingSource<Uint8Array>[] = [];
+  let heartbeat: NodeJS.Timeout | null = null;
+  const cleared: unknown[] = [];
+
+  class Capturing<R> extends RealReadableStream<R> {
+    constructor(src?: UnderlyingSource<R>) {
+      super();
+      captured.push(src as UnderlyingSource<Uint8Array>);
+    }
+  }
+
+  const abort = new AbortController();
+  try {
+    globalThis.ReadableStream = Capturing as unknown as typeof ReadableStream;
+    globalThis.setInterval = ((fn: () => void, ms: number) => {
+      heartbeat = realSetInterval(fn, ms);
+      return heartbeat;
+    }) as unknown as typeof setInterval;
+    globalThis.clearInterval = ((handle: NodeJS.Timeout) => {
+      cleared.push(handle);
+      realClearInterval(handle);
+    }) as unknown as typeof clearInterval;
+
+    const res = await GET(
+      new Request(`http://localhost/api/runs/${runId}/stream`, {
+        signal: abort.signal,
+      }),
+      { params: Promise.resolve({ id: runId }) },
+    );
+    assert.equal(res.status, 200);
+    const source = captured[0];
+    assert.ok(source?.start, "the route's stream source was not captured");
+
+    source.start({
+      enqueue() {
+        throw new TypeError("Invalid state: Controller is already closed");
+      },
+      close() {},
+      error() {},
+      desiredSize: 1,
+    } as unknown as ReadableStreamDefaultController<Uint8Array>);
+  } finally {
+    globalThis.ReadableStream = RealReadableStream;
+    globalThis.setInterval = realSetInterval;
+  }
+
+  assert.ok(heartbeat, "the route started no heartbeat");
+  return {
+    abort,
+    heartbeat,
+    cleared,
+    restore: () => {
+      globalThis.clearInterval = realClearInterval;
+    },
+  };
+}
+
 /** The id SQLite gave the newest row for this run. */
 function newestRowId(runId: string): number {
   const events = runEvents(runId).events;
@@ -253,5 +349,100 @@ describe("a fresh connection", () => {
     } finally {
       conn.close();
     }
+  });
+
+  it("stops at the byte budget and counts what that dropped too", async () => {
+    const runId = newRun();
+    // Far under REPLAY_LIMIT, so the row cap contributes nothing and the whole
+    // notice is the byte cap's doing. Half a megabyte each is the shape of a
+    // `tool` event that read a large file, not an invented one.
+    const total = 12;
+    const blob = "x".repeat(512 * 1024);
+    const insert = db().prepare(
+      "INSERT INTO run_events (run_id, ts, kind, payload) VALUES (?, ?, ?, ?)",
+    );
+    db().transaction(() => {
+      for (let i = 0; i < total; i++) {
+        insert.run(runId, Date.now(), "tool", JSON.stringify({ message: `e${i}`, blob }));
+      }
+    })();
+
+    const conn = await Connection.open(runId, null);
+    try {
+      const replayed = await conn.replay();
+      const notice = replayed[0];
+      assert.match(
+        String(notice.data.payload.message),
+        /earlier events not shown/,
+        "a replay cut by the byte budget must say so, exactly as a row-capped one does",
+      );
+      const events = replayed.slice(1);
+      const dropped = Number(
+        String(notice.data.payload.message).replace(/[^0-9]/g, ""),
+      );
+      assert.ok(dropped > 0, "12 events of 512 KiB must not all fit the budget");
+      assert.equal(events.length + dropped, total, "nothing goes missing uncounted");
+      assert.deepEqual(
+        events.map((f) => f.data.payload.message),
+        Array.from({ length: events.length }, (_, i) => `e${total - events.length + i}`),
+        "the budget keeps the newest events, the same rule the row cap follows",
+      );
+    } finally {
+      conn.close();
+    }
+  });
+});
+
+describe("a connection whose socket is already gone", () => {
+  it("still unsubscribes and clears its heartbeat when abort arrives", async () => {
+    const runId = newRun();
+    const before = bus.listenerCount(runId);
+
+    const { abort, heartbeat, cleared, restore } = await startWithDeadSocket(runId);
+    try {
+      // Every `enqueue` in `start` threw. The subscription happened anyway,
+      // which is the whole hazard: it is live and nothing has removed it.
+      assert.equal(
+        bus.listenerCount(runId),
+        before + 1,
+        "the failed replay must not have stopped the tail being subscribed",
+      );
+      assert.equal(
+        heartbeat.hasRef(),
+        false,
+        "a connection's heartbeat must not hold the event loop open",
+      );
+
+      abort.abort();
+
+      assert.equal(
+        bus.listenerCount(runId),
+        before,
+        "abort must unsubscribe even when the stream died by a failed enqueue",
+      );
+      assert.deepEqual(
+        cleared,
+        [heartbeat],
+        "the heartbeat must be cleared exactly once",
+      );
+
+      // Idempotence is now the cleanup flag's own job, not a side effect of
+      // the flag the error path sets.
+      abort.abort();
+      assert.equal(cleared.length, 1);
+    } finally {
+      restore();
+    }
+  });
+
+  it("leaves the bus where it found it across repeated connections", async () => {
+    const runId = newRun();
+    const before = bus.listenerCount(runId);
+    for (let i = 0; i < 5; i++) {
+      const { abort, restore } = await startWithDeadSocket(runId);
+      abort.abort();
+      restore();
+    }
+    assert.equal(bus.listenerCount(runId), before);
   });
 });
