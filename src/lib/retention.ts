@@ -374,7 +374,7 @@ export async function sweepCheckouts(now = Date.now()): Promise<{
         heldByActiveRun: held.has(row.worktree_path),
         // Assumed for the cheap pass, then measured below. Assuming the
         // *permissive* value here is safe only because the same function is
-        // asked again with the real ones before anything is removed.
+        // asked again with every field's real value before anything is removed.
         clean: true,
         branchSettled: true,
         chained: chained.has(row.id),
@@ -396,18 +396,30 @@ export async function sweepCheckouts(now = Date.now()): Promise<{
     const status = await git(row.worktree_path, ["status", "--porcelain"]);
     const clean = status.ok && status.stdout === "";
 
+    const branchSettled = clean ? await branchIsSettled(repoRoot, row) : false;
+
+    // Occupancy is re-read here rather than reused from the set above, and that
+    // is the whole reason the second call passes real values for every field
+    // instead of only the two git supplies. The set was read before the first
+    // `await`, and this loop spends seconds in git across its candidates —
+    // `createRun` claims a slot synchronously in one of those gaps, taking a
+    // checkout `allocateSlotPath` found clean, which is exactly the profile of
+    // a candidate here. Removing one under a run that has just claimed it costs
+    // that run its working tree.
+    const heldNow = activeRuns().some(
+      (r) => r.worktree_path === row.worktree_path,
+    );
+
     const verdict = planCheckoutReclaim(
       {
         slotPath: row.worktree_path,
         runId: row.id,
         status: row.status,
         finishedAt: row.finished_at,
-        heldByActiveRun: false,
+        heldByActiveRun: heldNow,
         clean,
-        branchSettled: clean
-          ? await branchIsSettled(repoRoot, row)
-          : false,
-        chained: false,
+        branchSettled,
+        chained: chained.has(row.id),
       },
       now,
       cutoff,
@@ -521,9 +533,10 @@ export function expiredTranscripts(
     keepSessions: ReadonlySet<string>;
   },
 ): TranscriptFile[] {
-  if (o.cutoff === null) return [];
+  const { cutoff } = o;
+  if (cutoff === null) return [];
   return files.filter(
-    (f) => f.mtimeMs < o.cutoff! && !o.keepSessions.has(f.sessionId),
+    (f) => f.mtimeMs < cutoff && !o.keepSessions.has(f.sessionId),
   );
 }
 
