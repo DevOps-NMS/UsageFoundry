@@ -1209,10 +1209,36 @@ export interface BranchSummaryDTO {
   prompt: string;
 }
 
+export interface DirtySlotDTO {
+  /** Directory name inside the store — what the operator has to go and find. */
+  name: string;
+  /** Uncommitted paths in it, or null when its status could not be read. */
+  uncommitted: number | null;
+}
+
+export interface CheckoutStoreDTO {
+  repoRoot: string;
+  repoLabel: string;
+  store: string;
+  ceiling: number;
+  /** Slots a queued, running or paused run holds. */
+  heldByRuns: number;
+  /** Existing checkouts nothing holds that cannot be reused, lowest slot first. */
+  dirty: DirtySlotDTO[];
+  /** Slot numbers still allocatable, or null when the probe cap stopped the walk. */
+  free: number | null;
+}
+
 export interface BranchInventoryDTO {
   branches: BranchSummaryDTO[];
   /** Branches the per-request cap left out. */
   notShown: number;
+  /**
+   * Checkout-slot pressure per repository. An isolated run on a repository with
+   * no slot left is refused rather than moved into the operator's own checkout,
+   * so this is the reading that says a refusal is coming.
+   */
+  checkouts: CheckoutStoreDTO[];
   /** `settings.landStrategy`, so the queue form can default to it. */
   defaultStrategy: "merge" | "squash";
 }

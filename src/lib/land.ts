@@ -12,6 +12,7 @@ import {
   type ReviewRow,
 } from "./review";
 import {
+  MAX_WORKTREE_SLOTS,
   activeRuns,
   auxWorktreePath,
   conflictKey,
@@ -20,8 +21,10 @@ import {
   getRun,
   listRuns,
   overlaps,
+  repoSlug,
   resolveWorkspaceFolder,
   workDirOf,
+  worktreeStore,
   type RunRow,
 } from "./orchestrator";
 
@@ -1864,16 +1867,161 @@ export interface BranchSummary {
   prompt: string;
 }
 
+/** A checkout the allocator will not reuse, and what is in the way. */
+export interface DirtySlot {
+  /** Directory name inside the store — what the operator has to go and find. */
+  name: string;
+  /** Uncommitted paths in it, or null when its status could not be read. */
+  uncommitted: number | null;
+}
+
+/** One repository's checkout slots, so exhaustion is visible before it bites. */
+export interface CheckoutStoreSummary {
+  repoRoot: string;
+  repoLabel: string;
+  store: string;
+  /** `MAX_WORKTREE_SLOTS`. */
+  ceiling: number;
+  /** Slots a queued, running or paused run holds. */
+  heldByRuns: number;
+  /** Existing checkouts nothing holds that cannot be reused, lowest slot first. */
+  dirty: DirtySlot[];
+  /**
+   * Slot numbers still allocatable, or null when the probe cap stopped the walk
+   * — "not counted", never a claim that there are none left.
+   */
+  free: number | null;
+}
+
 export interface BranchInventory {
   branches: BranchSummary[];
   /** Branches that were not examined, because the list is capped. */
   notShown: number;
+  /** Slot pressure per repository — see `checkoutStores`. */
+  checkouts: CheckoutStoreSummary[];
 }
 
 /** Branches examined per request. Each costs a `rev-list --count`. */
 const MAX_INVENTORY = 60;
 /** Checkouts whose status is read per request. Each is another git process. */
 const MAX_PENDING_PROBES = 20;
+/** Checkout slots whose status is read per request. Each is another git process. */
+const MAX_SLOT_PROBES = 48;
+
+/**
+ * What each repository's checkout store holds, and how much of it is left.
+ *
+ * The gap this fills: running out of slots is now a refusal — an isolated run
+ * on a repository with none left does not start at all — and until this there
+ * was nowhere an operator could see that coming. The number that matters is not
+ * the branches on this page but the *slots* behind them, since a slot holding
+ * uncommitted work is retired until somebody deals with it (`slotIsDirty`, and
+ * the comment above it says why that is right) while nothing reclaims one.
+ *
+ * Read by directory listing rather than by walking 1…64: a slot number with no
+ * directory is free and costs nothing to establish, so the cost is one `git
+ * status` per checkout that actually exists, capped like every other probe on
+ * this page. The one thing this cannot see is a directory left under this
+ * repository's slot name by an older build of this app that named slots the
+ * lossy way — `allocateSlotPath` skips such a directory, so `free` is an upper
+ * bound there rather than a count. `worktreeSlug` is what made that near
+ * impossible; see its own note.
+ */
+export async function checkoutStores(
+  repoRoots: readonly string[],
+): Promise<CheckoutStoreSummary[]> {
+  const held = new Set(
+    activeRuns()
+      .map((r) => r.worktree_path)
+      .filter((p): p is string => !!p),
+  );
+
+  const stores: CheckoutStoreSummary[] = [];
+  let probes = 0;
+
+  for (const repoRoot of repoRoots) {
+    const store = worktreeStore(repoRoot);
+    if (!store) continue;
+
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(store);
+    } catch {
+      // No store yet, or one that cannot be read. Either way this cannot say
+      // anything true about how many slots are left, and a row claiming all of
+      // them are free is the sentence a refusal would contradict.
+      continue;
+    }
+
+    const slug = repoSlug(repoRoot);
+    const slotNumber = (name: string): number | null => {
+      if (!name.startsWith(`${slug}-`)) return null;
+      const tail = name.slice(slug.length + 1);
+      if (!/^\d+$/.test(tail)) return null;
+      const n = Number(tail);
+      return n >= 1 && n <= MAX_WORKTREE_SLOTS ? n : null;
+    };
+
+    // The union of what is on disk and what a live run has been given, because
+    // the two do not have to agree: a slot is claimed at admission and the
+    // checkout is created when the run starts, so a queued run holds a slot
+    // number with no directory behind it yet. Counting directories alone would
+    // report that number free while the allocator is already skipping it. The
+    // run pass runs second so a held slot that also exists reads as held.
+    const occupied = new Map<number, "held" | "onDisk">();
+    for (const name of entries) {
+      const n = slotNumber(name);
+      if (n !== null) occupied.set(n, "onDisk");
+    }
+    for (const heldPath of held) {
+      if (path.dirname(heldPath) !== store) continue;
+      const n = slotNumber(path.basename(heldPath));
+      if (n !== null) occupied.set(n, "held");
+    }
+
+    let heldByRuns = 0;
+    let capped = false;
+    const dirty: DirtySlot[] = [];
+
+    for (const n of [...occupied.keys()].sort((a, b) => a - b)) {
+      if (occupied.get(n) === "held") {
+        heldByRuns++;
+        continue;
+      }
+      const name = `${slug}-${n}`;
+      const slotPath = path.join(store, name);
+      if (probes >= MAX_SLOT_PROBES) {
+        capped = true;
+        continue;
+      }
+      probes++;
+      const status = await git(slotPath, ["status", "--porcelain", "-z"], {
+        trim: false,
+      });
+      // Unreadable counts as dirty, exactly as `slotIsDirty` counts it. The
+      // allocator will skip this slot, so listing it as free would say the
+      // opposite of what the next run on this repository is refused for.
+      if (!status.ok) {
+        dirty.push({ name, uncommitted: null });
+        continue;
+      }
+      const uncommitted = parseStatusZ(status.stdout).length;
+      if (uncommitted > 0) dirty.push({ name, uncommitted });
+    }
+
+    stores.push({
+      repoRoot,
+      repoLabel: describeFolder(repoRoot).relPath || repoRoot,
+      store,
+      ceiling: MAX_WORKTREE_SLOTS,
+      heldByRuns,
+      dirty,
+      free: capped ? null : MAX_WORKTREE_SLOTS - heldByRuns - dirty.length,
+    });
+  }
+
+  return stores;
+}
 
 /**
  * One row per branch, not one per run that has held it.
@@ -1944,11 +2092,13 @@ export async function branchInventory(): Promise<BranchInventory> {
   }
 
   const branches: BranchSummary[] = [];
+  const roots: string[] = [];
   let probes = 0;
 
   for (const [rawRoot, runs] of byRepo) {
     const repoRoot = repoPathFor(rawRoot);
     if (!repoRoot) continue;
+    roots.push(repoRoot);
 
     // One call for the whole repository. Only a branch some checkout still
     // holds can have uncommitted work of its own to report.
@@ -2029,5 +2179,9 @@ export async function branchInventory(): Promise<BranchInventory> {
   }
 
   branches.sort((a, b) => b.createdAt - a.createdAt);
-  return { branches, notShown: candidates.length - examined.length };
+  return {
+    branches,
+    notShown: candidates.length - examined.length,
+    checkouts: await checkoutStores(roots),
+  };
 }

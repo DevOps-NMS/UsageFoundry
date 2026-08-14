@@ -12,6 +12,7 @@ import Link from "next/link";
 import type {
   BranchInventoryDTO,
   BranchSummaryDTO,
+  CheckoutStoreDTO,
   MergeQueueBatchDTO,
   MergeQueueDTO,
   MergeQueueItemDTO,
@@ -416,6 +417,99 @@ function QueuePanel({
   );
 }
 
+/**
+ * Checkout slots, which is what decides whether the next isolated run starts.
+ *
+ * A run that asks for its own checkout and cannot have one is **refused** — it
+ * is not quietly moved into your own checkout, which is what it used to do —
+ * so the number that matters on this page is not the branch count but the slots
+ * behind it. A checkout holding uncommitted work is retired until somebody
+ * deals with it and nothing reclaims one on its own, so this is a figure that
+ * only goes one way.
+ *
+ * Shown only when there is something to act on: every slot free or in use is
+ * the healthy state and needs no row. One retired checkout brings the table up,
+ * which is a long way before the last slot goes.
+ */
+function CheckoutStores({ stores }: { stores: CheckoutStoreDTO[] }) {
+  const notable = stores.filter(
+    (s) => s.dirty.length > 0 || s.free === 0 || s.free === null,
+  );
+  if (notable.length === 0) return null;
+  const exhausted = notable.filter((s) => s.free === 0);
+
+  return (
+    <Card>
+      <CardTitle>Checkout slots</CardTitle>
+      {exhausted.length > 0 && (
+        <Notice tone="danger">
+          <strong>
+            {exhausted.length === 1
+              ? `${exhausted[0].repoLabel} has no checkout left.`
+              : `${exhausted.length} repositories have no checkout left.`}
+          </strong>{" "}
+          An isolated run there is refused rather than started in your own
+          checkout. Commit or purge what the checkouts below hold to free them.
+        </Notice>
+      )}
+      <TableWrap>
+        <Table>
+          <thead>
+            <Tr>
+              <Th>Repository</Th>
+              <Th num>Free</Th>
+              <Th num>In use</Th>
+              <Th>Holding uncommitted work</Th>
+            </Tr>
+          </thead>
+          <tbody>
+            {notable.map((s) => (
+              <Tr key={s.repoRoot}>
+                <Td>
+                  <div className="font-medium text-ink">{s.repoLabel}</div>
+                  <div className="mono mt-0.5 text-xs text-ink-muted">
+                    {s.store}
+                  </div>
+                </Td>
+                <Td num>
+                  {s.free === null ? (
+                    // Not zero. The probe cap stopped the walk, so this says
+                    // nothing about how many are left.
+                    <span className="text-ink-muted">not counted</span>
+                  ) : (
+                    <span className={s.free === 0 ? "font-medium text-danger" : ""}>
+                      {s.free} of {s.ceiling}
+                    </span>
+                  )}
+                </Td>
+                <Td num>{s.heldByRuns}</Td>
+                <Td>
+                  {s.dirty.length === 0 ? (
+                    <span className="text-ink-muted">none</span>
+                  ) : (
+                    <ul className="space-y-0.5">
+                      {s.dirty.map((d) => (
+                        <li key={d.name} className="text-xs">
+                          <span className="mono">{d.name}</span>{" "}
+                          <span className="text-ink-muted">
+                            {d.uncommitted === null
+                              ? "— could not be read"
+                              : `— ${d.uncommitted} path${d.uncommitted === 1 ? "" : "s"}`}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Td>
+              </Tr>
+            ))}
+          </tbody>
+        </Table>
+      </TableWrap>
+    </Card>
+  );
+}
+
 function SkeletonBar({ className = "" }: { className?: string }) {
   return <div className={`h-3 rounded-full bg-line ${className}`} />;
 }
@@ -694,6 +788,8 @@ export default function Branches() {
           the most recent 60.
         </Notice>
       )}
+
+      {data && <CheckoutStores stores={data.checkouts ?? []} />}
 
       <Card>
         <CardTitle>
