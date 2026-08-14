@@ -27,7 +27,8 @@ import {
  *
  * - **A tool list.** `--agents` accepts one; this refuses it at the door. See
  *   `TOOLS_REFUSAL` below — it is the capability decision, and it is the whole
- *   reason this record can be reached by the surfaces runs 2-5 will build.
+ *   reason this record can safely be reached from a run, a template, the
+ *   settings default, a chat proposal and a workflow block.
  * - **A permission mode.** There are exactly two routes to `--permission-mode`
  *   in this app (the run form and a template), and `reopenRun` already refuses
  *   to become a third. An agent is not the fourth: it names no mode, no column
@@ -126,10 +127,11 @@ const BUILT_IN_AGENTS = [
  * A tool list is capability, and capability in this app comes from a guard set a
  * person wrote — the permission mode, `ISOLATED_GIT_TOOLS`, `PROCESS_KILLERS` —
  * reached through exactly two routes and re-narrowed at every one of them. An
- * agent record is a *third* kind of thing that would carry it, and the surfaces
- * runs 2-5 build put it within reach of a model: a chat proposal and a workflow
- * block both name saved records, and `planProposal`'s rule is that prompt text
- * is the one half of a run a model may write. A tool list is the other half.
+ * agent record is a *third* kind of thing that would carry it, and it is within
+ * reach of a model: a chat proposal, a proposed graph, a workflow block and an
+ * emitted spec all name saved records, and `planProposal`'s rule is that prompt
+ * text is the one half of a run a model may write. A tool list is the other
+ * half.
  *
  * There is also a concrete failure it would risk. `PROCESS_KILLERS` is a
  * `--disallowedTools` entry, and CLAUDE.md records that deny beats
