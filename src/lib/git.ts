@@ -7,10 +7,13 @@ import { GIT_BIN } from "./config";
  * Extracted from `orchestrator.ts` when reviewing and landing a run's branch
  * became things the app does too: three modules now shell out to git, and the
  * scrubbing below is the whole reason it is safe to. Arguments go as an array
- * and never through a shell, and the environment is stripped of this app's
- * secrets because git runs repository-controlled code — `core.fsmonitor` is a
- * command git executes, `worktree add` fires `post-checkout`, and `merge` fires
- * `pre-merge-commit`/`commit-msg`. Terminal prompting is disabled because these
+ * and never through a shell; the config the calls carry turns off the two ways
+ * a repository gets git to run a command of its choosing (`core.fsmonitor` and
+ * hooks — `worktree add` fires `post-checkout`, `merge` fires
+ * `pre-merge-commit`/`commit-msg`); and the environment is stripped of this
+ * app's configuration anyway, because the drivers reached through
+ * `.gitattributes` are repository-controlled too and `diff.ts` disables those
+ * per call rather than here. Terminal prompting is disabled because these
  * children have no stdin; a credential prompt would otherwise hang until a
  * timeout.
  */
@@ -23,16 +26,54 @@ export interface GitResult {
   code: number | null;
 }
 
-function gitEnv(): NodeJS.ProcessEnv {
+/**
+ * Environment for the git this app runs on its own behalf.
+ *
+ * The exclusion list is `childEnv`'s in `orchestrator.ts`, deliberately the
+ * same one rather than a shorter one: a git child is the *only* child here that
+ * executes code written by something other than this app — a hook, a
+ * `core.fsmonitor`, a `textconv` — and it does so with no permission mode, no
+ * tool lists and no line in `run_events`. It had the shortest exclusion list of
+ * the three, which was the wrong way round. `DATA_DIR` is the one that bites:
+ * `serverLock.ts` names it as the variable withholding exists to protect, and
+ * nothing git does needs to know where this app's database is.
+ *
+ * `CLAUDE_CONFIG_DIR` and `HOME` still pass through, as they do for the agent —
+ * git reads `HOME` for its own configuration, and an allowlist here would fail
+ * in ways that are tedious to diagnose from inside a container.
+ */
+export function gitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   for (const k of Object.keys(env)) {
-    if (k.startsWith("ANTHROPIC_") || k.startsWith("UF_")) delete env[k];
+    if (
+      k.startsWith("ANTHROPIC_") ||
+      k.startsWith("UF_") ||
+      k.startsWith("OTEL_") ||
+      k === "CLAUDE_CODE_ENABLE_TELEMETRY" ||
+      k === "DATA_DIR"
+    ) {
+      delete env[k];
+    }
   }
   return env;
 }
 
 /**
  * `core.fsmonitor` is a command git runs, so it is cleared on every call.
+ *
+ * `core.hooksPath` is cleared for exactly that reason and is the larger half of
+ * it: a hook is a repository-controlled command that git runs, `worktree add`
+ * and `checkout` fire `post-checkout`, and `merge`/`commit` fire four more —
+ * inside the operator's own checkout, at a moment the operator triggered. An
+ * agent can write `.git/hooks/post-checkout` in any repository it works in, and
+ * a run started afterwards would execute it as this server's git child, outside
+ * the CLI's permission model entirely. `/dev/null` is not a directory, so git
+ * finds no hook there and carries on; verified against 2.39, including that it
+ * outranks a `core.hooksPath` the repository sets in its own `.git/config`.
+ *
+ * This is the git *this app* runs, and nothing here reaches the agent's own:
+ * `buildArgs` passes no config at all, so a repository's `pre-commit` still runs
+ * for the run that was asked to commit. That is part of the work.
  *
  * `safe.directory` is waived for the same reason the image waives it: a
  * bind-mounted repository carries the host's uid, which need not be this
@@ -41,9 +82,11 @@ function gitEnv(): NodeJS.ProcessEnv {
  * repositories reached by surprise on a shared host; every path that gets here
  * has already been proved to sit inside a configured mount by `resolveInMount`.
  */
-const gitArgs = (args: string[]) => [
+export const gitArgs = (args: string[]) => [
   "-c",
   "core.fsmonitor=",
+  "-c",
+  "core.hooksPath=/dev/null",
   "-c",
   "safe.directory=*",
   ...args,

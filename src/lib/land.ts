@@ -1531,7 +1531,8 @@ export async function commitPending(
     { timeoutMs: 120_000 },
   );
   if (!commit.ok) {
-    // Left staged rather than reset. A `pre-commit` hook is the likely refusal
+    // Left staged rather than reset. This app's own git runs with hooks off, so
+    // the refusal is git's own — a signing key it cannot reach, a locked index —
     // and re-running is the likely next move; the agent may also have staged
     // part of this itself, and unstaging that would be this app undoing work it
     // did not do.
