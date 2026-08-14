@@ -774,7 +774,7 @@ export default function RunDetail({
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_21rem] lg:items-start">
         <Card
           emphasis={active ? "primary" : "default"}
-          className={`border-l-[3px] ${STATE_ACCENT[state.tone]} lg:col-start-2 lg:row-start-1 lg:sticky lg:top-0 lg:self-start lg:max-h-[calc(100dvh-var(--toolbar-h)-1.5rem)] lg:overflow-y-auto`}
+          className={`border-l-[3px] ${STATE_ACCENT[state.tone]} lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100dvh-var(--toolbar-h)-2rem)] lg:overflow-y-auto`}
         >
           {/* Announced, because it is the one thing on the page that changes
               on its own and matters. The detail below it is not: while the

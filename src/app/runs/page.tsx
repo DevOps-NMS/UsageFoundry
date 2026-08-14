@@ -171,10 +171,13 @@ type ListKind = "active" | "history";
  * arrives — told the operator "no runs finished in the last 24 hours" before
  * anything had been read, then replaced it with a table.
  */
-function SkeletonRows({ kind }: { kind: ListKind }) {
+function SkeletonRows() {
   return (
     <>
       {["a", "b", "c"].map((key) => (
+        // Six cells, which is what both shapes have: a placeholder row one cell
+        // short of its header is a column that jumps sideways when the poll
+        // answers, which is the thing this exists to prevent.
         <Tr key={key}>
           <Td aria-hidden="true">
             <SkeletonBar className="w-16" />
@@ -192,11 +195,9 @@ function SkeletonRows({ kind }: { kind: ListKind }) {
           <Td aria-hidden="true">
             <SkeletonBar className="ml-auto w-10" />
           </Td>
-          {kind === "history" && (
-            <Td aria-hidden="true">
-              <SkeletonBar className="ml-auto w-16" />
-            </Td>
-          )}
+          <Td aria-hidden="true">
+            <SkeletonBar className="ml-auto w-16" />
+          </Td>
         </Tr>
       ))}
     </>
@@ -276,7 +277,7 @@ function RunList({
         </thead>
         <tbody>
           {loading ? (
-            <SkeletonRows kind={kind} />
+            <SkeletonRows />
           ) : (
             runs.map((r) => {
               const detail = kind === "active" ? waitingDetail(r, now) : null;
