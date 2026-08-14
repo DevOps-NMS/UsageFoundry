@@ -14,6 +14,7 @@ import {
   pollFailureMessage,
   shortPath,
 } from "@/lib/format";
+import { RestartClosed } from "@/components/RestartClosed";
 import { StatusMark } from "@/components/StatusMark";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -531,6 +532,11 @@ export default function RunsPage() {
         {pollError && <Notice tone="danger">{pollError}</Notice>}
         {actionError && <Notice tone="danger">{actionError}</Notice>}
       </div>
+
+      {/* Above the tables rather than in them: what it is about is a set of
+          rows spread across both, and the operator's question is "did a restart
+          just eat my afternoon", not "which run is this". */}
+      <RestartClosed onReopened={() => void loadRuns()} />
 
       <div className="mb-8">
         <CardTitle>

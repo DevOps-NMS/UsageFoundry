@@ -861,6 +861,31 @@ through before trusting this unattended:
   `on-success` dependent's first `git log` shows its predecessor's commits, since
   the stub committed nothing. Run a two-block workflow with a branch hand-over
   and read the second run's opening prompt.
+- **Everything about the server lock that needs two live processes.** The
+  decisions are pure and unit-tested — `lockVerdict`, `heartbeatVerdict`,
+  `ownershipRefusal` — and `dataDirClaim.test.ts` drives the real `claimDataDir`
+  and the real `heartbeat` against a temporary data directory. What has **not**
+  been run is two servers sharing one `DATA_DIR`: that a non-owner boots,
+  serves every page, answers 503 on `/api/health`, shows the banner and refuses
+  Start, Run, Approve and Land; and that a `SIGSTOP`/`SIGCONT` on the owner for
+  longer than `STALE_MS` ends with the stalled process reporting the loss and
+  refusing to write rather than restamping the lock. Both need Docker, or two
+  terminals and a shared directory.
+- **`STALE_MS` against a measured stall.** It is now derived from
+  `GIT_SYNC_TIMEOUT_MS` rather than chosen, and a unit test pins that it exceeds
+  one synchronous git call — but the multiplier (six) is reasoned from how many
+  git children one admission can make, not measured against a profile of a busy
+  server. Nothing has been timed under 25 concurrent runs.
+- **The shutdown reconciling its cycles under Docker.** `shutdown.test.ts`
+  drives a real run to `running` against a stubbed child, calls the real
+  `shutdownRuns`, and asserts the estimate landed and the active-cycle columns
+  cleared — but with a fake `spawn`, so what it cannot show is a real
+  `docker compose restart`: whether `stop_grace_period: 30s` is enough for the
+  ladder plus a transcript scan on a large history, and whether a real Claude
+  Code handling `SIGINT` prints its `result` event (which would make the cycle's
+  cost measured rather than estimated). Run `docker compose up -d`, start a run,
+  `docker compose restart`, and read `spent_usd_est`, `active_iteration` and
+  `status` out of the database.
 - **The rollback path.** It is written to be unreachable — the graph, the
   templates, the mounts, every folder and both ends of every branch hand-over are
   checked before the first `createRun` — and nothing contrived reached it in

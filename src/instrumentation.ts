@@ -17,7 +17,7 @@ export async function register() {
     if (g.__ufReconciled) return;
     g.__ufReconciled = true;
 
-    const { reconcileOnBoot, killAllAgents } = await import("./lib/orchestrator");
+    const { reconcileOnBoot, shutdownRuns } = await import("./lib/orchestrator");
 
     // Every reconciler below reads "this row says running, therefore the
     // process that owned it died with my predecessor". That inference is only
@@ -116,18 +116,41 @@ export async function register() {
     // on its own — without this, quitting the dev server would leave a real,
     // billed agent running. Under Docker the container cgroup already handles
     // it and this is redundant.
+    //
+    // It is `await`ed now, and that is the change: this used to be
+    // `killAllAgents(sig)` and `process.exit(0)` on the next line, so not one
+    // of the suspended `startRun` frames ever resumed and nothing after
+    // `await runIteration(...)` ever ran. Every in-flight cycle's spend went
+    // with it — `reconcileKilledCycle` exists for exactly that and was
+    // unreachable from here — along with the two columns saying a cycle is open.
+    // `shutdownRuns` is bounded (`SHUTDOWN_GRACE_MS`) and returns as soon as
+    // nothing is left in flight, so an idle server still exits at once.
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
       process.once(sig, () => {
-        const n = killAllAgents(sig);
-        if (n > 0) {
-          console.warn(`[usagefoundry] Signalled ${n} running agent(s) on ${sig}.`);
-        }
-        // Hand the directory back explicitly. Without this the next boot — which
-        // for `restart: unless-stopped` is immediate — finds a lock that is
-        // still inside its stale window and has to watch a dead pid for four
-        // seconds before it may reconcile anything.
-        releaseDataDir();
-        process.exit(0);
+        void (async () => {
+          try {
+            const { closed, recovered } = await shutdownRuns(sig);
+            if (closed > 0) {
+              console.warn(
+                `[usagefoundry] Stopped ${closed} run(s) on ${sig}; recovered the ` +
+                  `spend of ${recovered} interrupted work cycle(s). They are on the ` +
+                  "runs page, and can be picked up together.",
+              );
+            }
+          } catch (err) {
+            // A shutdown that cannot account for its cycles still has to be a
+            // shutdown. Reported rather than swallowed, because the alternative
+            // is a container that hangs until Docker's grace period kills it.
+            console.error("[usagefoundry] Shutdown reconciliation failed:", err);
+          } finally {
+            // Hand the directory back explicitly. Without this the next boot —
+            // which for `restart: unless-stopped` is immediate — finds a lock
+            // that is still inside its stale window and has to watch a dead pid
+            // for four seconds before it may reconcile anything.
+            releaseDataDir();
+            process.exit(0);
+          }
+        })();
       });
     }
   }

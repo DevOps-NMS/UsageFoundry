@@ -100,6 +100,17 @@ services:
       # above, and a fresh volume has to be writable by whatever that is.
       - usagefoundry-data:/data
 
+    # Long enough for the shutdown to account for the work cycles it is killing.
+    #
+    # On SIGTERM the server interrupts every live run, waits out
+    # SHUTDOWN_GRACE_MS (10s — the kill ladder's own SIGINT/SIGTERM/SIGKILL
+    # steps end at 8s) and reconciles each interrupted cycle's spend from the
+    # transcripts. Docker's default is 10s, which would SIGKILL the process at
+    # the exact moment the last agent died and throw away the accounting this
+    # exists to recover. Not much longer either: `restart: unless-stopped` means
+    # this is also how long a routine restart takes.
+    stop_grace_period: 30s
+
     restart: unless-stopped
 
 volumes:

@@ -851,6 +851,24 @@ function migrate(db: Database.Database) {
   // the model.
   addColumn(db, "workflow_instance_blocks", "reply", "TEXT");
   addColumn(db, "workflow_instance_blocks", "notes", "TEXT");
+
+  // Whether this run was closed out because the server went down under it,
+  // rather than for any reason of its own.
+  //
+  // A flag rather than a reading of `stop_reason`, which is prose: it is
+  // user-visible copy and the one thing in this codebase that must never
+  // become a parse — `reported_done` exists as its own column for exactly that
+  // reason one table over. And it has to be a *fact about the ending* rather
+  // than a status, because a restart now produces two of them: a run the
+  // shutdown handler stopped cleanly, and a run `reconcileOnBoot` failed
+  // because the process never got that far.
+  //
+  // What reads it is the one thing an operator could not do before — see that
+  // twenty-five runs are sitting recoverable, and pick them all up, without
+  // opening twenty-five pages. `reopenRun` clears it, so the count is what is
+  // still outstanding rather than a history of every restart this install has
+  // ever had.
+  addColumn(db, "runs", "restart_closed", "INTEGER NOT NULL DEFAULT 0");
 }
 
 /**

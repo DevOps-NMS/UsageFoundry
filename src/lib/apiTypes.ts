@@ -428,6 +428,12 @@ export interface RunDTO {
    */
   reported_done?: number;
   /**
+   * 1 when this run ended because the server went down under it, rather than
+   * for any reason of its own. Cleared when it is picked up again, so it says
+   * "still waiting to be picked up" rather than "was interrupted once".
+   */
+  restart_closed?: number;
+  /**
    * Spend reconciled from transcripts for work cycles killed before Claude Code
    * reported theirs. Shown beside `spent_usd`, never folded into it.
    */

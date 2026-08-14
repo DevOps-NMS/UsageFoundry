@@ -183,6 +183,11 @@ export interface RunRow {
    * the ordinary run. Read through `parseRunAgent`, never parsed at a call site.
    */
   agent: string | null;
+  /**
+   * 1 when this run ended because the server went down under it, rather than
+   * for any reason of its own. Cleared when it is picked up again.
+   */
+  restart_closed: number;
 }
 
 /** Where the agent runs. Older rows predate `work_dir` and never isolated. */
@@ -243,7 +248,7 @@ const procs = ((globalThis as unknown as {
  * would be a lie in the one place the operator most needs the truth.
  */
 interface Interrupt {
-  kind: "operator" | "guard";
+  kind: "operator" | "guard" | "shutdown";
   reason: string;
   code?: BudgetStopCode;
   /** True only for a live-resume step-aside; the run parks rather than ends. */
@@ -2210,6 +2215,12 @@ export function promoteQueued(): void {
   // will promote them itself. Asked here rather than captured at boot, because
   // the answer moves — the heartbeat clears it if the directory changes hands.
   if (!mayWriteDataDir()) return;
+
+  // The process is going down and the shutdown is waiting out its children.
+  // Every run that settles during that wait reaches its `finally` and arrives
+  // here, so without this a `docker compose restart` spawns a fresh billed
+  // agent for each one, seconds before the process exits.
+  if (shutdown.active) return;
 
   const cap = getSettings().maxConcurrentRuns;
   for (const id of selectPromotable(activeRuns(), cap)) {
@@ -5723,9 +5734,13 @@ export function reopenRun(
 
   const flip = db()
     .prepare(
+      // `restart_closed=0`: this run is no longer sitting recoverable, so it
+      // leaves the count the restart notice offers to pick up. Cleared here
+      // rather than when it next ends, because what that count answers is "how
+      // many runs is the restart still holding up", not "how many did it touch".
       `UPDATE runs SET status=?, budget=?, max_iterations=?, follow_up=?,
          started_at=NULL, finished_at=NULL, exit_code=NULL, stop_reason=NULL,
-         resume_at=NULL WHERE id=? AND status=?`,
+         resume_at=NULL, restart_closed=0 WHERE id=? AND status=?`,
     )
     .run(
       waitingAgain ? "waiting" : "queued",
@@ -5785,6 +5800,10 @@ export function reopenRun(
  * terminal's foreground process group, so Ctrl-C during `npm run dev` no longer
  * reaches them and would otherwise leave a real, billed agent running. Under
  * Docker the container cgroup handles it and this is redundant.
+ *
+ * The last step of `shutdownRuns` rather than the whole of it: the ladder in
+ * `interruptRun` gets there first with `SIGINT`, and this is the sweep for
+ * anything that outlived it.
  */
 export function killAllAgents(sig: NodeJS.Signals = "SIGTERM"): number {
   let n = 0;
@@ -5793,6 +5812,246 @@ export function killAllAgents(sig: NodeJS.Signals = "SIGTERM"): number {
     n += 1;
   }
   return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* Shutdown                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How long the shutdown waits for its children to die and its loops to settle.
+ *
+ * Chosen against `interruptRun`'s own ladder, which is what does the signalling
+ * here: `SIGINT` at once, `SIGTERM` at 3s, `SIGKILL` at 8s. Ten seconds is the
+ * first moment after that last step at which a child can be said not to be
+ * coming back. It is a ceiling and not a wait — the loop below returns as soon
+ * as nothing is left in flight, which is the ordinary case, since a CLI that
+ * handles `SIGINT` exits in about a second.
+ *
+ * `docker-compose.yml` sets `stop_grace_period` above this. Docker's default is
+ * 10s and would `SIGKILL` the server at the exact moment the last agent died,
+ * which is the accounting this whole path exists to recover.
+ */
+export const SHUTDOWN_GRACE_MS = 10_000;
+
+/** How often the wait below re-asks. Cheap: one map size and one COUNT. */
+const SHUTDOWN_POLL_MS = 100;
+
+/**
+ * True while the process is going down, so nothing new is started.
+ *
+ * `globalThis` for the reason every other long-lived flag here is. Read by
+ * `promoteQueued`, which is the one route to a spawn: without it a run settling
+ * during the grace below would reach its `finally`, call `promoteQueued`, and
+ * start a fresh billed agent on the way out of the door.
+ */
+const shutdown = ((globalThis as unknown as { __ufShutdown?: { active: boolean } })
+  .__ufShutdown ??= { active: false });
+
+export const isShuttingDown = (): boolean => shutdown.active;
+
+/**
+ * Rows whose cycle was in flight when everything stopped.
+ *
+ * `active_started_at` is what makes this answerable from outside `startRun`'s
+ * frame, which is the whole reason that column exists — it is the cycle's own
+ * lower bound, and a run between cycles has it null.
+ */
+function cyclesInFlight(): RunRow[] {
+  return db()
+    .prepare(
+      "SELECT * FROM runs WHERE status = 'running' AND active_started_at IS NOT NULL",
+    )
+    .all() as RunRow[];
+}
+
+/**
+ * Recover what the interrupted cycles spent, and stop claiming they are open.
+ *
+ * The mechanism is `reconcileKilledCycle`, which already existed and was
+ * reachable from exactly one place: inside `startRun`'s loop, after
+ * `runIteration` returns. A `process.exit(0)` on the next line after
+ * `killAllAgents` meant no suspended frame ever resumed, so a routine
+ * `docker compose up --build` discarded every in-flight cycle's measured spend
+ * — invisible afterwards to `RunProgress.spentGuardUSD`, to `maxRunCostUSD` and
+ * to the instance budget, so a run picked up later could overshoot its own cost
+ * limit by a full cycle with nothing saying why.
+ *
+ * The loops are given their chance first and this is the mop-up, which is also
+ * what keeps the two from double-counting: the loop's own post-cycle UPDATE
+ * clears `active_started_at` in the same statement that writes the estimate, so
+ * a row it has settled is not selected here, and the UPDATE below is guarded on
+ * the same column for the interleaving where it settles in between.
+ *
+ * A cycle whose estimate cannot be recovered says so in the run's own log,
+ * because a run whose spend is understated and a run that spent nothing are
+ * indistinguishable on every page in this app.
+ */
+export async function reconcileInterruptedCycles(): Promise<number> {
+  let recovered = 0;
+
+  for (const run of cyclesInFlight()) {
+    const est = await reconcileKilledCycle(run.session_id, run.active_started_at!);
+
+    // Relative, and guarded on the column the loop clears: whichever of the two
+    // writes lands second is a no-op rather than a second charge.
+    const wrote = db()
+      .prepare(
+        "UPDATE runs SET spent_usd_est = spent_usd_est + ?," +
+          " spent_tokens_est = spent_tokens_est + ?," +
+          " active_iteration = NULL, active_started_at = NULL" +
+          " WHERE id = ? AND active_started_at IS NOT NULL",
+      )
+      .run(est?.costUSD ?? 0, est?.tokens ?? 0, run.id);
+    if (wrote.changes !== 1) continue;
+
+    if (est) {
+      recovered += 1;
+      log(
+        run.id,
+        `The server shut down during work cycle ${run.active_iteration ?? "?"}. ` +
+          `Claude Code never reported what it cost, so $${est.costUSD.toFixed(2)} ` +
+          "is reconciled from this session's transcripts rather than measured.",
+      );
+    } else {
+      log(
+        run.id,
+        `The server shut down during work cycle ${run.active_iteration ?? "?"} and ` +
+          "no transcript records for it could be read, so whatever that cycle " +
+          "spent is missing from this run's total.",
+      );
+    }
+  }
+
+  return recovered;
+}
+
+/**
+ * Take the server down without throwing away what its agents were doing.
+ *
+ * The handler this replaces was synchronous end to end — `killAllAgents(sig)`,
+ * `releaseDataDir()`, `process.exit(0)` — so twenty-five suspended `startRun`
+ * frames never resumed and nothing after `await runIteration(...)` ever ran.
+ * Three things were lost every time, and each already had a mechanism written
+ * for it: the cycle's spend (`reconcileKilledCycle`), the two columns saying a
+ * cycle is in flight, and any account of the ending better than "the server
+ * restarted" discovered at the next boot.
+ *
+ * The order is the whole of it.
+ *
+ *  1. **Nothing new starts.** The flag is set before anything is signalled,
+ *     because a run that settles during the wait reaches its `finally` and
+ *     calls `promoteQueued`.
+ *  2. **Every live run is interrupted rather than merely signalled**, through
+ *     the same single kill path an operator's Stop uses. That buys the `SIGINT`
+ *     first — a CLI that handles it may still print `result`, which is the
+ *     difference between this cycle's cost being measured and being estimated —
+ *     and it is what stops the loop spawning the *next* cycle when its child
+ *     dies, which a bare kill would not have done now that the process lingers.
+ *     It also gives the run an ending that names the shutdown, instead of
+ *     `Claude Code exited with code -1`.
+ *  3. **The loops are given their grace**, bounded, and return early the moment
+ *     nothing is left in flight.
+ *  4. **Whatever they did not finish is mopped up**, then anything still alive
+ *     is killed outright.
+ *
+ * Deliberately does *not* touch `reconcileOnBoot`'s rule that a restart never
+ * resumes anything. This is about accounting for the cycle and making the
+ * recovery tractable; a run stopped here is picked up by a person, as before.
+ */
+export async function shutdownRuns(
+  sig: NodeJS.Signals,
+): Promise<{ signalled: number; closed: number; recovered: number }> {
+  shutdown.active = true;
+
+  const live = [...procs.keys()];
+  const pending = db()
+    .prepare("SELECT id FROM runs WHERE status = 'running'")
+    .all() as { id: string }[];
+
+  // Every `running` row, not only the ones holding a child: a run in its
+  // pre-cycle transcript scan has no process to signal and is very much about
+  // to spawn one, and `interruptRun` is what its next checkpoint reads.
+  const markRestartClosed = db().prepare(
+    "UPDATE runs SET restart_closed = 1 WHERE id = ?",
+  );
+  for (const { id } of pending) {
+    interruptRun(id, {
+      kind: "shutdown",
+      reason: `The server shut down (${sig}) while this run was working. Its work is on disk; pick it up to carry on.`,
+      pause: false,
+      at: Date.now(),
+    });
+    markRestartClosed.run(id);
+  }
+
+  // Waits for the children to go *and* for the loops behind them to write what
+  // the cycle cost — that write is the whole point, and it happens a tick after
+  // the child exits, not with it. Bounded by the runs that actually had a child
+  // rather than by every row claiming a cycle: a row left over from a crash has
+  // no loop coming for it, and waiting the full grace out for one would make
+  // every shutdown as slow as the worst one. The mop-up below covers it.
+  const signalled = new Set(live);
+  const stillSettling = () =>
+    procs.size > 0 || cyclesInFlight().some((r) => signalled.has(r.id));
+
+  const until = Date.now() + SHUTDOWN_GRACE_MS;
+  while (Date.now() < until && stillSettling()) {
+    await new Promise((r) => setTimeout(r, SHUTDOWN_POLL_MS));
+  }
+
+  const recovered = await reconcileInterruptedCycles();
+
+  // Nothing may outlive this process: an agent detached from the terminal's
+  // foreground group survives a Ctrl-C on its own, and under Docker a child
+  // that ignored the ladder is one the container teardown would kill anyway.
+  killAllAgents("SIGKILL");
+
+  return { signalled: live.length, closed: pending.length, recovered };
+}
+
+/**
+ * Runs a restart closed out and nobody has picked up yet.
+ *
+ * Two endings produce them and the operator's question covers both: a run the
+ * shutdown handler stopped cleanly, and a run `reconcileOnBoot` failed because
+ * the process never got that far. Read off the column rather than the reason
+ * text for `reported_done`'s reason — a stop reason is prose, written to be
+ * read by a person, and parsing it is how it silently stops matching.
+ */
+export function restartClosedRuns(): RunRow[] {
+  return db()
+    .prepare("SELECT * FROM runs WHERE restart_closed = 1 ORDER BY created_at")
+    .all() as RunRow[];
+}
+
+/**
+ * Pick every one of them up, under the guards each already carried.
+ *
+ * The budget is the run's own stored policy rather than something re-entered at
+ * the door, which is the one place this departs from `reopenRun`'s usual
+ * argument for taking one: that function asks for a budget because the usual
+ * reason a run needs picking up is that its own limits ended it, and re-queuing
+ * under those reproduces the stop. A run closed out by a restart was ended by
+ * nothing of its own, so the limits it was started under are still the ones the
+ * operator chose. `reopenRun` still checks the carried-forward guards at the
+ * door, so one that really had used up its cycles is refused by name and
+ * reported here rather than silently skipped.
+ */
+export function reopenRestartClosed(): {
+  reopened: number;
+  refused: { id: string; reason: string }[];
+} {
+  const refused: { id: string; reason: string }[] = [];
+  let reopened = 0;
+
+  for (const run of restartClosedRuns()) {
+    const outcome = reopenRun(run.id, JSON.parse(run.budget) as unknown);
+    if (outcome.ok) reopened += 1;
+    else refused.push({ id: run.id, reason: outcome.reason });
+  }
+
+  return { reopened, refused };
 }
 
 /**
@@ -5848,6 +6107,19 @@ export function isRunning(id: string): boolean {
  * row to release.
  */
 export function reconcileOnBoot(): void {
+  // No cycle is in flight at a boot, on any path: this process has just
+  // started, and a non-null pair here names a cycle that died with the previous
+  // one. The shutdown handler clears them for the runs it reached; this covers
+  // the rest — a `SIGKILL`, an OOM, a host that lost power — where nothing ran
+  // at all. Before the early return below, because a row can be left claiming
+  // an open cycle without being one this pass would otherwise touch.
+  db()
+    .prepare(
+      "UPDATE runs SET active_iteration = NULL, active_started_at = NULL" +
+        " WHERE active_iteration IS NOT NULL OR active_started_at IS NOT NULL",
+    )
+    .run();
+
   const orphaned = db()
     .prepare("SELECT * FROM runs WHERE status = 'waiting'")
     .all() as RunRow[];
@@ -5860,6 +6132,14 @@ export function reconcileOnBoot(): void {
   const graceMs = getSettings().resumeGraceHours * 3_600_000;
 
   for (const run of orphaned) {
+    // Deliberately *not* flagged `restart_closed`, unlike every other row this
+    // pass closes. That flag offers a one-press pick-up, and `reopenRun` puts a
+    // `stopped` row back in the *queue* rather than back to `waiting` — so a run
+    // that never started, whose dependency this same boot has just closed out,
+    // would be started on work that never happened. Which is exactly what
+    // `releasableRuns` and the paragraph above exist to prevent. Its reason says
+    // to start it again if it is still wanted, and that stays a decision about
+    // one run.
     setStatus(run.id, "stopped", {
       finished_at: Date.now(),
       stop_reason:
@@ -5884,6 +6164,7 @@ export function reconcileOnBoot(): void {
           "restarted, and has been waiting too long to pick up on its own. " +
           "Start it again if it is still wanted.",
         resume_at: null,
+        restart_closed: 1,
       });
       closed += 1;
       continue;
@@ -5893,6 +6174,7 @@ export function reconcileOnBoot(): void {
       setStatus(run.id, "stopped", {
         finished_at: Date.now(),
         stop_reason: "The server restarted before this run started. Start it again.",
+        restart_closed: 1,
       });
       closed += 1;
       continue;
@@ -5906,6 +6188,7 @@ export function reconcileOnBoot(): void {
     setStatus(run.id, "failed", {
       finished_at: Date.now(),
       stop_reason: `The server restarted while this run was in progress.${resume}`,
+      restart_closed: 1,
     });
     closed += 1;
   }
