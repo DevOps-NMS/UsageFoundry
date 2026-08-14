@@ -96,6 +96,20 @@ const SIZE: Record<
  */
 const MIN_VISIBLE_PX = 3;
 
+/**
+ * The fill's own motion, off the kit's tokens rather than the 200ms/ease-out
+ * this used to hardcode.
+ *
+ * `--motion-slow` is the step globals.css defines as "something travelling a
+ * distance the eye must follow (a meter)", and a hardcoded duration is a second
+ * place that has to be remembered when that step moves. Width is the one
+ * property animated here, which is also why this is not `ui-transition`: that
+ * utility deliberately omits width, because a *control* must not resize between
+ * its states — a level indicator is not a control, and its width is the reading.
+ */
+const FILL_MOTION =
+  "transition-[width] duration-[var(--motion-slow)] ease-standard";
+
 export function Meter({
   label,
   fraction,
@@ -182,13 +196,13 @@ export function Meter({
             out below the first and clipped away by overflow-hidden. */}
         {hasUpper && (
           <div
-            className="hatched absolute inset-y-0 left-0 rounded-full transition-[width] duration-200 ease-out"
+            className={`hatched absolute inset-y-0 left-0 rounded-full ${FILL_MOTION}`}
             data-unknown="true"
             style={{ width: `${upperClamped * 100}%` }}
           />
         )}
         <div
-          className={`absolute inset-y-0 left-0 rounded-full transition-[width] duration-200 ease-out ${
+          className={`absolute inset-y-0 left-0 rounded-full ${FILL_MOTION} ${
             known ? SEVERITY_FILL[severityFor(fraction)] : "hatched"
           }`}
           data-sev={known ? severityFor(fraction) : undefined}
