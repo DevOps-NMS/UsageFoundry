@@ -89,11 +89,15 @@ const STATE_ACCENT: Record<StateTone, string> = {
   danger: "border-l-danger",
 };
 
-/** How this run's guards are enforced, in the words the run form uses. */
+/**
+ * When this run's limits are acted on — in the run form's own words, verbatim.
+ * An operator who chose "Stop, then resume" on that form should read it back
+ * here rather than a synonym they have to map onto what they picked.
+ */
 const ENFORCEMENT: Record<EnforcementModeDTO, string> = {
-  "between-cycles": "between cycles",
-  live: "mid-cycle",
-  "live-resume": "mid-cycle, parks",
+  "between-cycles": "Between cycles",
+  live: "Stop mid-cycle",
+  "live-resume": "Stop, then resume",
 };
 
 interface RunState {
@@ -1015,7 +1019,7 @@ export default function RunDetail({
                 ))}
               </div>
             )}
-            <ListGroup footnote="A run steps aside or stops when a window passes its percentage. Blank means that guard is off.">
+            <ListGroup footnote="A window guard steps this run aside when that window passes its percentage.">
               <ListRow label="5-hour window">
                 <GuardValue>
                   {run.budget.maxSessionFraction === null
@@ -1030,7 +1034,7 @@ export default function RunDetail({
                     : fmtPct(run.budget.maxWeeklyFraction)}
                 </GuardValue>
               </ListRow>
-              <ListRow label="Checked">
+              <ListRow label="When a limit is acted on">
                 <GuardValue>{ENFORCEMENT[run.budget.enforcement]}</GuardValue>
               </ListRow>
               <ListRow label="After DONE">
