@@ -501,6 +501,7 @@ export interface RunAgentSpendDTO {
   costGuardUSD: number;
   tokens: number;
   entryCount: number;
+  /** Everything outside `(main thread)` — a historical name, see `AgentSpend`. */
   delegatedCostUSD: number;
   delegatedCostGuardUSD: number;
   rows: AgentSpendRowDTO[];
@@ -510,9 +511,12 @@ export interface RunAgentSpendDTO {
   /**
    * True when Settings excludes sub-agent turns from the dashboard totals.
    *
-   * This card counts them regardless — it exists to say what the delegated work
-   * cost, and a card that silently answered $0 because of a setting about the
-   * *meters* would be the worst of both. Carried so the card can say so.
+   * This card counts them regardless — it exists to say what the work outside
+   * the main thread cost, and a card that silently answered $0 because of a
+   * setting about the *meters* would be the worst of both. Carried so the card
+   * can say so. That setting keys on the transcript's own `isSidechain`, which
+   * is a genuinely delegated turn and is a different question from which agent
+   * name a turn carries — so it is untouched by the move to `--agent`.
    */
   excludedFromTotals: boolean;
 }

@@ -53,10 +53,24 @@ export function RunAgentCost({
   /** Re-read when the run stops, so a finished run settles on its final split. */
   active,
   now,
+  /**
+   * The agent this run was started as, by name, or null for the ordinary run.
+   *
+   * Read for one sentence at the foot of the card and by nothing else — the
+   * rows, the share and the meter are the transcript's own answer and this must
+   * never move a figure. What it buys is that the two readings `--agent` makes
+   * possible stop looking like faults: a single row under the agent's name with
+   * `(main thread)` empty, and a lone `(main thread)` row on a run whose page
+   * says it is the reviewer, are the same card telling the truth about what
+   * Claude Code wrote. Which of the two it writes is unmeasured, so the sentence
+   * states the run's agent and claims nothing about where its turns landed.
+   */
+  startedAs = null,
 }: {
   runId: string;
   active: boolean;
   now: number;
+  startedAs?: string | null;
 }) {
   const [spend, setSpend] = useState<RunAgentSpendDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -196,6 +210,8 @@ export function RunAgentCost({
         turn lands in a row and the rows add up to the total. A third reading
         beside the two above, never added to either — they measure the same work
         through Claude Code&rsquo;s own reporting.
+        {startedAs &&
+          ` Started as ${startedAs}, so these rows may sit entirely under that name or entirely under (main thread) — which Claude Code writes is its own bookkeeping.`}
         {spend?.excludedFromTotals &&
           " Sub-agent turns are excluded from the dashboard totals in Settings; they are counted here."}
         {spend ? ` Read up to ${fmtRelative(spend.to, now)}.` : ""}

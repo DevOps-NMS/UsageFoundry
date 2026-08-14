@@ -311,8 +311,11 @@ export function describeAmbientAgents(
 /**
  * The chip beside an agent bucket, or null for a bucket that gets none.
  *
- * Two rows get no chip and each for its own reason. `(main thread)` is not an
- * agent at all and the label already says so, and an `unknown` name is the
+ * Two rows get no chip and each for its own reason. `(main thread)` is the
+ * bucket for a turn carrying no agent name at all, so there is no name to look
+ * up — which is a narrower claim than "not an agent" since a session started as
+ * one may or may not name itself on its own turns, and the card's footnote is
+ * where that is said. An `unknown` name is the
  * *ordinary* case rather than a fault — a CLI built-in, a repository's own
  * `.claude/agents`, an agent since deleted — so chipping it would put a mark on
  * most of the column and say nothing. What "unmarked" means is stated once, in

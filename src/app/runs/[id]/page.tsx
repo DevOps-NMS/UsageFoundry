@@ -1092,9 +1092,23 @@ export default function RunDetail({
               above say what the run spent and neither can say this: only the
               transcript records which agent produced a turn, which is why this
               is the same source the dashboard meters come from rather than a
-              fourth one. Its own poll and its own route — see the component. */}
+              fourth one. Its own poll and its own route — see the component.
+
+              `startedAs` changes nothing about the arithmetic and only what the
+              card is allowed to say. Under `--agent` this split has two readings
+              an operator would otherwise take for a bug: every row under the
+              agent's name and nothing in `(main thread)`, or the reverse, on a
+              page whose section above says the run is the reviewer. Which one
+              the CLI writes is unmeasured and no branch here depends on it, so
+              the card names the run's agent and lets the rows say what they
+              say. */}
           <Section title="Agent work">
-            <RunAgentCost runId={run.id} active={active} now={nowTick} />
+            <RunAgentCost
+              runId={run.id}
+              active={active}
+              now={nowTick}
+              startedAs={run.agent?.name ?? null}
+            />
           </Section>
 
           {/* A separate measurement, deliberately not folded into the figures

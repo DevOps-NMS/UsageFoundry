@@ -24,6 +24,14 @@ import { fmtPct, fmtUSD } from "./format";
  * with no speaker labels. It is what the reader has to be able to tell apart —
  * a report that silently interleaves two voices is worse than one that omits
  * the second.
+ *
+ * That is the turn a session **delegated**, which since the move to `--agent` is
+ * a different thing from the agent a session **is**. Nothing here reads the
+ * run's own agent: the split is `parent_tool_use_id` and only that, so a run
+ * started as the reviewer still sets its own words as `agent` and only what it
+ * hands off as `subagent`. Whether a `--agent` session delegates at all is
+ * unmeasured; if it never does, this voice goes quiet rather than wrong, and it
+ * still covers the ambient definitions that reach every child regardless.
  */
 export type LogVoice = "agent" | "subagent" | "tool" | "cycle" | "system";
 
