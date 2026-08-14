@@ -119,9 +119,22 @@ turn's spend arrives on the run's own `result` event like any other.
 
 ### Defining one
 
-**There is no page for this yet.** The registry is read by four surfaces and
-written by none of them, so every picker below is empty until you create a row
-by hand:
+**Agents** in the sidebar (⌘5). The table lists what is saved, *New agent* opens
+a form with the four fields an agent has — name, description, prompt, model — and
+picking a row edits it. Delete asks first, and says what it costs: the prompt
+goes with it, a run already in flight keeps its own copy, and anything that
+*names* the agent refuses to start rather than quietly starting without one.
+
+There is nothing else on that form, and the absence is the design: no permission
+mode, no budget, no folder, no isolation choice, no tool list. What the agent may
+do comes from the guard set on the run it is delegated inside, and a control here
+would be a second place deciding it.
+
+The same page lists what your own `~/.claude/agents/` holds, which is in play
+whatever you save here and cannot be picked — see below. A saved name that a file
+on disk also uses is marked *name clash* rather than refused.
+
+The routes are still there, and are what the page uses:
 
 ```bash
 curl -sX POST localhost:3000/api/agents \
@@ -260,9 +273,9 @@ The three flags this rests on (`--agents`, `--agent`, `--forward-subagent-text`)
 were read off the pinned CLI's own help, and every refusal above is unit tested
 at each door that can name a specialist — but **no `claude` child has ever been
 spawned with `--agents` from this app or by hand**, and no browser has rendered
-the run form's *Specialist* row, the Settings default, the canvas inspector, the
-chat's `@` popover, the *Agent work* card or the dashboard's marks. Everything
-here follows from that one gap:
+the Agents page, the run form's *Specialist* row, the Settings default, the
+canvas inspector, the chat's `@` popover, the *Agent work* card or the
+dashboard's marks. Everything here follows from that one gap:
 
 - **The five silent drops the whole module is shaped around** — no `description`,
   no `prompt`, a `model` of JSON `null`, an empty name, and a `--agents` value
@@ -282,9 +295,12 @@ here follows from that one gap:
   that the forwarded text is set apart under the specialist's name rather than
   folded into the run's own report, and that a sub-agent writing `DONE` on a line
   of its own does not end the run.
-- **`/api/agents` against a running server.** No request has created, edited or
-  deleted a row over HTTP — which matters more than usual here, because those
-  routes are the only way to define a specialist at all.
+- **`/api/agents` against a running server.** The routes are unit tested against
+  a throwaway database — a create, an edit, a delete and every refusal, including
+  the duplicate name — but no request has reached a *running* server, and no
+  browser has sent one. The Agents page is what sends them now, so a create that
+  works in the suite and not in the container would leave every picker in this
+  app empty exactly as before.
 
 The [verification log](docs/verification.md) does not cover specialists yet; read
 the list above as its honest boundary until it does.
