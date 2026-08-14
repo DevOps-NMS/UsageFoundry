@@ -13,17 +13,38 @@ export const metadata: Metadata = {
   description:
     "Usage-aware orchestration for Claude Code — track limits, run work against a folder, stop at a budget.",
   // public/icon.svg was in the repository and referenced by nothing: Next only
-  // auto-detects an icon in app/, so every tab showed the default globe.
-  icons: { icon: "/icon.svg", apple: "/icon.svg" },
+  // auto-detects an icon in app/, so every tab showed the default globe. The
+  // Apple entry is a PNG rather than the same SVG: Safari does not read an SVG
+  // apple-touch-icon, and "Add to Dock" would fall back to a screenshot of the
+  // page. See scripts/make-icons.py.
+  icons: { icon: "/icon.svg", apple: "/apple-touch-icon.png" },
+  // What makes Safari 17+ "Add to Dock" open a real window rather than a tab,
+  // and what names it in the Dock. `default` for the status bar rather than
+  // `black-translucent`, which puts the page *under* the iOS status bar — a
+  // deliberate layout decision this app has no reason to take and no way to
+  // check here.
+  appleWebApp: {
+    capable: true,
+    title: "UsageFoundry",
+    statusBarStyle: "default",
+  },
+  // `appleWebApp.capable` emits the *standardised* `mobile-web-app-capable`
+  // and nothing else — Next made that swap because Chromium deprecated its
+  // handling of the Apple-prefixed name. WebKit did not: this is the spelling
+  // Safari reads, and without it "Add to Dock" opens a tab in a frame rather
+  // than a window. Both are declared because each browser ignores the other's.
+  other: { "apple-mobile-web-app-capable": "yes" },
 };
 
 export const viewport: Viewport = {
   // Both entries, because the app follows the OS when no theme is stored and
   // a single colour would leave the browser chrome fighting the page in one
-  // of the two. The values are --bg from globals.css.
+  // of the two. The values are --bg from globals.css — they were the previous
+  // palette's and had been left behind by the retune, so the title bar of an
+  // installed window was a visibly different grey from the window under it.
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f6f8fa" },
-    { media: "(prefers-color-scheme: dark)", color: "#0d1013" },
+    { media: "(prefers-color-scheme: light)", color: "#f0f0f3" },
+    { media: "(prefers-color-scheme: dark)", color: "#1e1e20" },
   ],
 };
 
