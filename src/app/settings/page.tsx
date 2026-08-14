@@ -10,7 +10,7 @@ import {
 import type { BudgetPolicyDTO, RunGuardsDTO, SettingsDTO } from "@/lib/apiTypes";
 import { fmtTokens, fmtUSD } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
-import { Button, ButtonRow } from "@/components/ui/Button";
+import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Field, Input, Select, Switch, Textarea } from "@/components/ui/Field";
 import { Hint, type HintTone } from "@/components/ui/Hint";
@@ -21,6 +21,7 @@ import {
   type SegmentedOption,
 } from "@/components/ui/SegmentedControl";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
+import { isPlainCommandChord } from "@/components/shell/shortcuts";
 
 interface CalibrateResponse {
   ok: boolean;
@@ -162,6 +163,42 @@ const EDITABLE_PATHS = [
  * bare utility, and is inert on a field that is not last.
  */
 const FLUSH = "last:mb-0";
+
+/**
+ * The display modes in which this app owns ⌘S.
+ *
+ * In a tab that chord is the browser's (Save Page As…), and a page that takes
+ * it is a page that broke the browser. An installed window has no such command,
+ * so the chord is free and Save is the only thing it could sensibly mean.
+ * `window-controls-overlay` is listed as well as `standalone` because the
+ * manifest puts it first in `display_override`, and a window in that mode is
+ * not guaranteed to report the other one.
+ */
+const STANDALONE_QUERIES = [
+  "(display-mode: standalone)",
+  "(display-mode: window-controls-overlay)",
+];
+
+/**
+ * Whether the app has the whole window rather than a tab.
+ *
+ * False on the server and on the first client paint, then corrected — the same
+ * arrangement the theme and the sidebar use, and it costs nothing here because
+ * what it decides is a keyboard binding and a glyph rather than any geometry.
+ * The listener stays subscribed because Window Controls Overlay can be turned
+ * off while the app is running.
+ */
+function useStandalone(): boolean {
+  const [standalone, setStandalone] = useState(false);
+  useEffect(() => {
+    const lists = STANDALONE_QUERIES.map((q) => window.matchMedia(q));
+    const read = () => setStandalone(lists.some((l) => l.matches));
+    read();
+    lists.forEach((l) => l.addEventListener("change", read));
+    return () => lists.forEach((l) => l.removeEventListener("change", read));
+  }, []);
+  return standalone;
+}
 
 function at(obj: unknown, path: string): unknown {
   return path
@@ -475,6 +512,7 @@ export default function SettingsPage() {
   const [calError, setCalError] = useState<string | null>(null);
   /** Non-null only while the globs field is being edited. */
   const [copyGlobsText, setCopyGlobsText] = useState<string | null>(null);
+  const standalone = useStandalone();
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -599,6 +637,51 @@ export default function SettingsPage() {
     }
   }
 
+  // Both refusals the PUT can answer with, checked here as well so the first
+  // the operator hears of one is not a failed save. The server still decides.
+  //
+  // Computed above the loading branch because ⌘S is bound from an effect, and
+  // a chord that saves what the button beside it refuses to save would be a
+  // second, quieter route past the same two checks.
+  const noTerminus =
+    effective !== null &&
+    effective.chatDefaultGuards.budget.maxIterations === null &&
+    effective.chatDefaultGuards.budget.maxDurationMinutes === null;
+  const resetTooFarAhead =
+    effective !== null &&
+    effective.sessionResetOverrideAt !== null &&
+    effective.sessionResetOverrideAt > Date.now() + FIVE_HOURS_MS;
+  const blocked = noTerminus
+    ? "The default guard set has neither a work-cycle limit nor a time limit."
+    : resetTooFarAhead
+      ? "The 5-hour reset override is more than five hours from now."
+      : null;
+
+  /**
+   * ⌘S, and only where this app owns it.
+   *
+   * Deliberately not routed through the shell's one listener: that layer refuses
+   * every chord over a text field, and half of what this page holds is text —
+   * a save shortcut that stops working in the prompt you are editing is the
+   * failure it would exist to prevent. ⌘S types no character, so the reason
+   * that rule exists does not apply to it.
+   */
+  useEffect(() => {
+    if (!standalone) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (!isPlainCommandChord(e) || e.key.toLowerCase() !== "s") return;
+      // Prevented whether or not this save goes through: in an installed window
+      // the chord is ours, and letting it fall through to the platform's own
+      // "save this page" on a form that simply has nothing to commit is worse
+      // than doing nothing.
+      e.preventDefault();
+      if (busy || !dirty || blocked !== null) return;
+      void save();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [standalone, busy, dirty, blocked, save]);
+
   if (!s || !savedS || !effective) {
     return (
       <>
@@ -633,20 +716,6 @@ export default function SettingsPage() {
     : [];
 
   const modeNote = permissionNote(guards.permissionMode, guards.isolate);
-
-  // Both refusals the PUT can answer with, checked here as well so the first
-  // the operator hears of one is not a failed save. The server still decides.
-  const noTerminus =
-    guards.budget.maxIterations === null &&
-    guards.budget.maxDurationMinutes === null;
-  const resetTooFarAhead =
-    effective.sessionResetOverrideAt !== null &&
-    effective.sessionResetOverrideAt > Date.now() + FIVE_HOURS_MS;
-  const blocked = noTerminus
-    ? "The default guard set has neither a work-cycle limit nor a time limit."
-    : resetTooFarAhead
-      ? "The 5-hour reset override is more than five hours from now."
-      : null;
 
   const applySuggestion = () => {
     if (!cal?.suggestion) return;
@@ -1675,9 +1744,11 @@ export default function SettingsPage() {
         </FormField>
       </Section>
 
-      {/* Sticky, because one Save commits every field on a page five sections
-          long — the button must not be somewhere you have to hunt for after
-          editing something at the top.
+      {/* The pane's footer, not a form's button row: the default action at the
+          trailing edge with Discard to its left, which is where a Mac window
+          puts them. Sticky, because one Save commits every field on a page five
+          sections long and the button must not be somewhere you have to hunt
+          for after editing something at the top.
 
           The negative margin must match the shell's gutter at each breakpoint,
           or the bar is wider than the page and scrolls it sideways.
@@ -1693,21 +1764,11 @@ export default function SettingsPage() {
           a line: a bar that gains a button the moment a field changes moves the
           only control the operator is reaching for. */}
       <div className="sticky bottom-0 z-10 -mx-4 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
-        <ButtonRow>
-          <Button
-            onClick={() => void save()}
-            disabled={busy || !dirty || blocked !== null}
-            aria-busy={busy || undefined}
-          >
-            {busy ? "Saving…" : "Save"}
-          </Button>
-          <Button variant="ghost" onClick={discard} disabled={busy || !dirty}>
-            Discard
-          </Button>
+        <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
           <p
             role="status"
             aria-atomic="true"
-            className={`min-h-5 flex-1 basis-full text-xs leading-5 sm:basis-auto ${
+            className={`mr-auto min-h-5 basis-full text-xs leading-5 sm:basis-auto ${
               saveError
                 ? "font-medium text-danger"
                 : blocked
@@ -1731,7 +1792,26 @@ export default function SettingsPage() {
                       ? "Saved"
                       : "Everything here is saved"}
           </p>
-        </ButtonRow>
+          <Button variant="secondary" onClick={discard} disabled={busy || !dirty}>
+            Discard
+          </Button>
+          {/* The chord is only offered where this app owns it — see
+              STANDALONE_QUERIES. In a tab there is no glyph and no binding,
+              because ⌘S is the browser's there. */}
+          <Button
+            onClick={() => void save()}
+            busy={busy}
+            disabled={!dirty || blocked !== null}
+            aria-keyshortcuts={standalone ? "Meta+S" : undefined}
+          >
+            Save
+            {standalone && (
+              <span aria-hidden="true" className="text-xs opacity-70">
+                ⌘S
+              </span>
+            )}
+          </Button>
+        </div>
       </div>
     </>
   );
