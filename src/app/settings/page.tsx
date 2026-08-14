@@ -11,10 +11,12 @@ import {
   Input,
   Select,
   Subsection,
+  Switch,
   Textarea,
   Toggle,
 } from "@/components/ui/Field";
 import { Hint, type HintTone } from "@/components/ui/Hint";
+import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 
@@ -1481,34 +1483,50 @@ export default function SettingsPage() {
         title="Unattended runs"
         lede="What happens while nobody is watching — mid-cycle checks, leftover processes, and a restart."
       >
-        <FormField
-          label="Live limit check"
-          unit="seconds"
-          htmlFor="livechk"
-          edited={isEdited("liveGuardIntervalSeconds")}
-        >
-          <Input
-            id="livechk"
-            type="number"
-            min={15}
-            className="tabular-nums sm:max-w-56"
-            value={effective.liveGuardIntervalSeconds}
-            onChange={(e) =>
-              patch({ liveGuardIntervalSeconds: Number(e.target.value) })
-            }
-          />
-          <Hint>
-            How often a run set to stop mid-cycle re-reads usage. It cannot beat
-            one model turn however low this goes, because usage comes from
-            transcripts written as each turn completes
-          </Hint>
-        </FormField>
+        {/* The reference conversion for the grouped list. Four settings that
+            each read "this, and here is the control for it" — which is a list,
+            not four stacked forms with a label above every control.
 
-        <FormField edited={isEdited("killProcessGroup")}>
-          <Toggle
-            id="killgroup"
-            checked={effective.killProcessGroup}
-            onChange={(v) => patch({ killProcessGroup: v })}
+            Nothing else on this page has moved. The rest is still FormField,
+            and a later run converts it; keeping one group as the example is
+            what makes the diff readable against the four sections it did not
+            touch. The edited rail is unchanged and still lands in the card's
+            gutter: ListRow is the positioned ancestor and the group does not
+            clip its overflow, which is why it can. */}
+        <ListGroup>
+          <ListRow
+            htmlFor="livechk"
+            label={
+              <>
+                Live limit check
+                <span className="font-normal text-ink-faint"> (seconds)</span>
+                {isEdited("liveGuardIntervalSeconds") && (
+                  <span className="sr-only"> — edited, not saved</span>
+                )}
+              </>
+            }
+            description="How often a run set to stop mid-cycle re-reads usage. It cannot beat one model turn however low this goes, because usage comes from transcripts written as each turn completes"
+          >
+            <EditedRail on={isEdited("liveGuardIntervalSeconds")} />
+            {/* The width is on a wrapper, never on the control: Input already
+                states `w-full`, and two width utilities on one element resolve
+                by stylesheet order rather than class order. */}
+            <div className="w-24">
+              <Input
+                id="livechk"
+                type="number"
+                min={15}
+                className="tabular-nums"
+                value={effective.liveGuardIntervalSeconds}
+                onChange={(e) =>
+                  patch({ liveGuardIntervalSeconds: Number(e.target.value) })
+                }
+              />
+            </div>
+          </ListRow>
+
+          <ListRow
+            htmlFor="killgroup"
             label={
               <>
                 Stopping a run also stops everything it started
@@ -1517,40 +1535,46 @@ export default function SettingsPage() {
                 )}
               </>
             }
-          />
-          <Hint>
-            Builds, test runners and servers the agent launched otherwise hold
-            the working directory open and keep writing into a folder the next
-            run is about to use
-          </Hint>
-        </FormField>
+            description="Builds, test runners and servers the agent launched otherwise hold the working directory open and keep writing into a folder the next run is about to use"
+          >
+            <EditedRail on={isEdited("killProcessGroup")} />
+            <Switch
+              id="killgroup"
+              checked={effective.killProcessGroup}
+              onChange={(v) => patch({ killProcessGroup: v })}
+            />
+          </ListRow>
 
-        <FormField
-          label="Restart grace"
-          unit="hours"
-          htmlFor="grace"
-          edited={isEdited("resumeGraceHours")}
-        >
-          <Input
-            id="grace"
-            type="number"
-            min={1}
-            className="tabular-nums sm:max-w-56"
-            value={effective.resumeGraceHours}
-            onChange={(e) => patch({ resumeGraceHours: Number(e.target.value) })}
-          />
-          <Hint>
-            A parked run older than this is closed out at boot rather than
-            picked up, so a forgotten run cannot wake up days later and start
-            spending
-          </Hint>
-        </FormField>
+          <ListRow
+            htmlFor="grace"
+            label={
+              <>
+                Restart grace
+                <span className="font-normal text-ink-faint"> (hours)</span>
+                {isEdited("resumeGraceHours") && (
+                  <span className="sr-only"> — edited, not saved</span>
+                )}
+              </>
+            }
+            description="A parked run older than this is closed out at boot rather than picked up, so a forgotten run cannot wake up days later and start spending"
+          >
+            <EditedRail on={isEdited("resumeGraceHours")} />
+            <div className="w-24">
+              <Input
+                id="grace"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                value={effective.resumeGraceHours}
+                onChange={(e) =>
+                  patch({ resumeGraceHours: Number(e.target.value) })
+                }
+              />
+            </div>
+          </ListRow>
 
-        <FormField edited={isEdited("telemetryForRuns")} className={FLUSH}>
-          <Toggle
-            id="telemetry"
-            checked={effective.telemetryForRuns}
-            onChange={(v) => patch({ telemetryForRuns: v })}
+          <ListRow
+            htmlFor="telemetry"
             label={
               <>
                 Let agents report per-request cost over OpenTelemetry
@@ -1559,14 +1583,24 @@ export default function SettingsPage() {
                 )}
               </>
             }
-          />
-          <Hint>
-            The only record of what a work cycle killed mid-flight actually
-            cost. Off by default because it changes the child process&rsquo;s
-            behaviour, and it never feeds the meters. One exception: a run whose
-            own spending limit needs it switches it on for itself
-          </Hint>
-        </FormField>
+            description={
+              <>
+                The only record of what a work cycle killed mid-flight actually
+                cost. Off by default because it changes the child
+                process&rsquo;s behaviour, and it never feeds the meters. One
+                exception: a run whose own spending limit needs it switches it
+                on for itself
+              </>
+            }
+          >
+            <EditedRail on={isEdited("telemetryForRuns")} />
+            <Switch
+              id="telemetry"
+              checked={effective.telemetryForRuns}
+              onChange={(v) => patch({ telemetryForRuns: v })}
+            />
+          </ListRow>
+        </ListGroup>
       </Section>
 
       {/* Sticky, because one Save commits every field on a page five sections

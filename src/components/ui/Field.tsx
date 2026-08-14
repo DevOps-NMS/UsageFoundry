@@ -61,7 +61,13 @@ interface FieldControlState {
   disabled: boolean;
 }
 
-const FieldControlContext = createContext<FieldControlState | null>(null);
+/**
+ * Exported for `ui/List`, which is the other thing in the kit that stands
+ * around a control and knows the description it should be pointing at. It
+ * provides this rather than carrying its own copy, so `Input`, `Select` and
+ * `Switch` behave identically in a grouped row and in a Field.
+ */
+export const FieldControlContext = createContext<FieldControlState | null>(null);
 
 interface ControlBits {
   disabled: boolean | undefined;
@@ -338,12 +344,99 @@ export function LimitField({
 }
 
 /**
- * A boolean. Replaces the sentence-long two-option <select>s the settings page
- * used for every flag — the label carries the meaning, the switch carries the
- * state, and the explanation goes in a Hint underneath.
+ * Both halves of a switch's appearance in one entry per state, for the reason
+ * every other map in the kit is shaped this way: the track colour and the knob
+ * position are the same statement, and split across a shared string and a
+ * conditional one the winner would be Tailwind's sort order.
  *
- * The whole row is the hit target, not the 20px pill: the label points at the
- * switch, so the 36px row is what the pointer has to find.
+ * The knob stays white in the off state on macOS; here it is `--fg-faint`,
+ * which is the one deliberate divergence. `--bg-inset` is a very light grey in
+ * the light scheme — a white knob on it is a white knob on white, and the state
+ * this control exists to report would be unreadable at rest.
+ */
+const SWITCH: Record<"on" | "off", { track: string; knob: string }> = {
+  on: {
+    track:
+      "border-transparent bg-tint enabled:hover:brightness-110 enabled:active:brightness-95",
+    knob: "left-[18px] bg-white",
+  },
+  off: {
+    track:
+      "border-line-strong bg-inset enabled:hover:border-ink-faint enabled:active:brightness-95",
+    knob: "left-0.5 bg-ink-faint",
+  },
+};
+
+/**
+ * The macOS switch: a 38×22 pill with an 18px knob, sized so the travel is
+ * legible rather than a hint.
+ *
+ * The button *is* the track, so the focus halo from @layer base hugs the pill
+ * instead of a padded box around it; the hit target comes from an `::after`
+ * overlay stretched to --control-h, which the pointer hits and the layout never
+ * sees. A padded button would have given the ring a 32px box to draw round.
+ *
+ * It reads `Field`'s context for `aria-describedby` and `disabled`, so a switch
+ * in a Field or a ListRow is wired to the hint beside it without the page
+ * naming an id.
+ */
+export function Switch({
+  id,
+  checked,
+  onChange,
+  disabled,
+  label,
+  className = "",
+}: {
+  id?: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  disabled?: boolean;
+  /** Only where nothing else names the control — a ListRow's label already does. */
+  label?: string;
+  className?: string;
+}) {
+  const bits = useControlBits({ disabled });
+  const off = bits.disabled === true;
+  const state = SWITCH[checked ? "on" : "off"];
+  return (
+    <button
+      id={id}
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      aria-describedby={bits.describedBy}
+      disabled={off}
+      onClick={() => onChange(!checked)}
+      className={
+        "ui-transition relative h-[22px] w-[38px] shrink-0 cursor-pointer rounded-full border " +
+        "disabled:cursor-not-allowed disabled:opacity-50 " +
+        // The pointer target, not the box: inset vertically past the pill to
+        // --control-h and no wider, so a row of controls keeps its spacing.
+        "after:absolute after:-inset-y-[5px] after:inset-x-0 after:content-[''] " +
+        `${state.track} ${className}`
+      }
+    >
+      {/* `left`, not a transform: the knob is the one thing in the kit that is
+          *meant* to travel, and the distance it travels is the state. */}
+      <span
+        className={`absolute top-0.5 h-[18px] w-[18px] rounded-full shadow-e1 transition-all duration-[var(--motion-fast)] ease-standard ${state.knob}`}
+      />
+    </button>
+  );
+}
+
+/**
+ * A boolean with its label beside it. Replaces the sentence-long two-option
+ * <select>s the settings page used for every flag — the label carries the
+ * meaning, the switch carries the state, and the explanation goes in a Hint
+ * underneath.
+ *
+ * The whole row is the hit target: the label points at the switch, so the 36px
+ * row is what the pointer has to find. `ListRow` is the same arrangement with
+ * the control on the *right*, which is what a grouped list wants; this one puts
+ * it first because a stack of Fields has nothing to align a right edge against.
  */
 export function Toggle({
   id,
@@ -367,29 +460,7 @@ export function Toggle({
         off ? "cursor-not-allowed text-ink-faint" : "cursor-pointer text-ink"
       }`}
     >
-      <button
-        id={id}
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        aria-describedby={bits.describedBy}
-        disabled={off}
-        onClick={() => onChange(!checked)}
-        className={`ui-transition relative h-5 w-9 shrink-0 cursor-pointer rounded-full border
-          disabled:cursor-not-allowed disabled:opacity-50 ${
-            checked
-              ? "border-accent bg-accent enabled:hover:brightness-110"
-              : "border-line-strong bg-inset enabled:hover:border-ink-faint"
-          }`}
-      >
-        {/* `left`, not a transform: the knob is the one thing in the kit that is
-            *meant* to travel, and the distance it travels is the state. */}
-        <span
-          className={`absolute top-0.5 h-3.5 w-3.5 rounded-full transition-all duration-[var(--motion-fast)] ease-standard ${
-            checked ? "left-4 bg-white" : "left-0.5 bg-ink-faint"
-          }`}
-        />
-      </button>
+      <Switch id={id} checked={checked} onChange={onChange} disabled={disabled} />
       {label}
     </label>
   );
