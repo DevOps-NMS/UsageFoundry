@@ -15,16 +15,31 @@ services:
     image: usagefoundry:${UF_IMAGE_TAG:-latest}
     container_name: ${UF_CONTAINER_NAME:-usagefoundry}
 
-    # The container writes to two bind mounts — your ~/.claude (credentials and
-    # new transcripts) and your workspaces (the agent's edits, plus the
-    # .uf-worktrees checkouts) — so it has to run as a uid that owns them.
+    # The *server* runs as root and every child it spawns — the work cycle, the
+    # reviewer, the chat, an orchestrator block's turn, and the git this app runs
+    # itself — is dropped to UF_AGENT_UID:UF_AGENT_GID below, which is still your
+    # own uid. Nothing about your files changes: the processes that touch the
+    # bind mounts are the same uid they always were.
     #
-    # macOS Docker Desktop remaps bind-mount ownership onto the container user,
-    # so 1000 is right there whatever your host uid is. Linux preserves the host
-    # uid, and a mismatch is silent in the worst way: git refuses every
-    # repository, `claude /login` cannot persist its credentials, and runs fail
-    # on the first write. Set UF_UID=$(id -u) / UF_GID=$(id -g) in .env there.
-    user: "${UF_UID:-1000}:${UF_GID:-1000}"
+    # What changes is that they are no longer the *server's* uid, which is what
+    # makes three of this app's defences mean anything. `/proc/<server>/environ`
+    # is mode 0400 owned by the server, so `childEnv` stripping UF_AUTH_TOKEN,
+    # ANTHROPIC_ADMIN_KEY and UF_GITHUB_TOKEN from an agent's environment is now
+    # enforced rather than advised; /data is root-owned 0700, so an agent cannot
+    # rewrite a budget, a status or a permission mode straight in the database;
+    # and the MCP capability file's 0600 excludes something. Shared, all three
+    # were decorative — one `tr '\0' '\n' < /proc/7/environ` handed back every
+    # secret the container holds. See docs/security.md for what it still does
+    # *not* buy.
+    #
+    # Root here is the supervisor, not the agents: it is one process, running
+    # code from this repository, against twenty-five unattended children whose
+    # prompts come out of repositories nobody here reviewed. It has to be this
+    # way round — the child must own the workspace, because an isolated run is
+    # ordered to commit into your own .git, and the server must be able to read
+    # ~/.claude/.credentials.json, which the CLI keeps 0600 owned by that same
+    # uid. Both cannot be it.
+    user: "0:0"
 
     # Bound to loopback on purpose. This container holds Claude credentials and
     # can run an agent with write access to mounted code — publishing it on
@@ -54,6 +69,22 @@ services:
       CLAUDE_HOME: /home/node/.claude
       CLAUDE_CONFIG_DIR: /home/node/.claude
       DATA_DIR: /data
+      # The uid every spawned child is dropped to — the same UF_UID/UF_GID the
+      # `user:` line above used to carry, so an existing .env needs no edit and
+      # the processes that write your files are the uid they always were. The
+      # two names are separate because they now mean different things: UF_UID is
+      # "the uid that owns my bind mounts", and this is "who the agents are",
+      # which is the same answer for a reason (they have to write those mounts)
+      # and not the same question.
+      #
+      # Clearing these switches the split off: everything runs as root, which is
+      # strictly worse than the arrangement this replaced. Set them, or set
+      # `user:` back to "${UF_UID:-1000}:${UF_GID:-1000}" and take the shared-uid
+      # behaviour whole — the server refuses to boot if it is asked to drop a
+      # child while holding no privilege to do it, rather than starting without
+      # the boundary and saying nothing.
+      UF_AGENT_UID: "${UF_UID:-1000}"
+      UF_AGENT_GID: "${UF_GID:-1000}"
 
     volumes:
       # Credentials + transcripts. Read-write because Claude Code writes new
@@ -89,8 +120,8 @@ services:
       # instances do not share one database — but it also means its root
       # ownership and mode are copied from /data *in the image* when Docker
       # first creates it, not taken from the host. That is why the Dockerfile
-      # marks that directory world-writable: this container runs as UF_UID
-      # above, and a fresh volume has to be writable by whatever that is.
+      # marks that directory world-writable: a fresh volume has to be writable
+      # by whatever uid ends up creating the database in it.
       - usagefoundry-data:/data
 
     restart: unless-stopped

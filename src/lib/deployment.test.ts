@@ -94,11 +94,33 @@ describe("the image and compose agree on the data volume", () => {
     );
   });
 
-  it("still runs the container as a configurable uid", () => {
-    // The other half of the pair. If `user:` ever stops being parameterised the
-    // test above is guarding nothing — but removing it reintroduces the
-    // bind-mount ownership failure the README describes, so it must not happen
-    // quietly either.
-    assert.match(compose, /^\s*user:\s*"\$\{UF_UID:-1000\}:\$\{UF_GID:-1000\}"\s*$/m);
+  it("still hands the operator's uid to whatever writes their files", () => {
+    // The other half of the pair, and it moved: `user:` used to carry
+    // `${UF_UID}` for the whole container, and now carries root for the server
+    // while `UF_AGENT_UID`/`UF_AGENT_GID` carry the operator's uid to every
+    // child. Both halves are asserted because dropping either one is silent in
+    // its own direction — no root, and the server cannot switch uids at all
+    // (`privsep.ts` throws, which is the loud case); no agent uid, and every
+    // child runs as root, which is worse than the shared arrangement this
+    // replaced. Parameterised, because an unparameterised agent uid
+    // reintroduces the bind-mount ownership failure the README describes.
+    assert.match(compose, /^\s*user:\s*"0:0"\s*$/m);
+    assert.match(compose, /^\s*UF_AGENT_UID:\s*"\$\{UF_UID:-1000\}"\s*$/m);
+    assert.match(compose, /^\s*UF_AGENT_GID:\s*"\$\{UF_GID:-1000\}"\s*$/m);
+  });
+
+  it("does not drop the server's own uid in the image", () => {
+    // A `USER` line in the runner stage would take the privilege the server
+    // needs to drop its children, and compose's `user:` would not put it back.
+    // The failure is `privsep.ts` throwing at boot — loud, but a build-time
+    // assertion is cheaper than finding out from a container that will not
+    // start.
+    const runner = dockerfile.slice(dockerfile.lastIndexOf("FROM "));
+    assert.doesNotMatch(
+      runner,
+      /^\s*USER\s+(?!root\b|0\b)/m,
+      "the runner stage drops to a non-root USER, so the server cannot spawn " +
+        "children as another uid.",
+    );
   });
 });

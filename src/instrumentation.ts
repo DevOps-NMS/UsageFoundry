@@ -19,6 +19,16 @@ export async function register() {
 
     const { reconcileOnBoot, killAllAgents } = await import("./lib/orchestrator");
 
+    // Which arrangement this install is in, said once, before anything spawns.
+    // The unseparated case is a *silent* absence of a boundary — the app looks
+    // and behaves identically — and an operator who has pinned `user:` back to
+    // their own uid, or who runs this outside the container, has no other way
+    // to find out that `/proc`, `DATA_DIR` and the capability file are reachable
+    // by every agent. A misconfiguration throws instead, out of this same call,
+    // so it stops the boot rather than the first run.
+    const { describeSeparation } = await import("./lib/privsep");
+    console.warn(`[usagefoundry] ${describeSeparation()}`);
+
     // Every reconciler below reads "this row says running, therefore the
     // process that owned it died with my predecessor". That inference is only
     // available to the server that owns this data directory, and it stopped

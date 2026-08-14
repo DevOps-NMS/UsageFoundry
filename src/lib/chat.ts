@@ -17,6 +17,7 @@ import {
 import { db } from "./db";
 import { chatGuards, getSettings, type RunGuards } from "./settings";
 import { assistRefusal } from "./review";
+import { childCredentials } from "./privsep";
 import {
   createRun,
   dependencyCycle,
@@ -1622,6 +1623,10 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
     const child = spawn(CLAUDE_BIN, args, {
       cwd: o.cwd && fs.existsSync(o.cwd) ? o.cwd : chatCwd(),
       env: chatEnv(),
+      // Dropped like every other child, and this is the one that most needs it:
+      // it runs `bypassPermissions` with no allowlist, so the only thing between
+      // it and the server's own files is that it is not the server's uid.
+      ...childCredentials(),
       stdio: ["ignore", "pipe", "pipe"],
       detached: settings.killProcessGroup && process.platform !== "win32",
     });

@@ -165,7 +165,18 @@ RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.cl
  && chown -R node:node /data /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
  && chmod 0777 /data
 
-USER node
+# No `USER node`. The server runs as root and drops every child it spawns to
+# `UF_AGENT_UID`/`UF_AGENT_GID` — see `src/lib/privsep.ts`, which argues out why
+# the split has to be this way round rather than the other. In one sentence: the
+# child must be the uid that owns the bind mounts, because an isolated run is
+# ordered to commit into the operator's own `.git`, and the server must be able
+# to read `~/.claude/.credentials.json`, which the CLI keeps at 0600 owned by
+# that same uid — so the two cannot both be it, and the privileged half is the
+# one this app wrote rather than the unattended agents reading repository
+# content nobody here reviewed.
+#
+# Nothing about the image assumes it: with `UF_AGENT_UID` unset the app runs
+# exactly as it did before, one uid for everything, and says so in its boot log.
 EXPOSE 3000
 
 # tini reaps the claude child processes the orchestrator spawns; without an

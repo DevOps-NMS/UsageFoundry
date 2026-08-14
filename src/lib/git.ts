@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { GIT_BIN } from "./config";
+import { childCredentials } from "./privsep";
 
 /**
  * The one way this app runs git.
@@ -103,6 +104,7 @@ export function gitSync(cwd: string, args: string[]): GitResult {
   const res = spawnSync(GIT_BIN, gitArgs(args), {
     cwd,
     env: gitEnv(),
+    ...childCredentials(),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 20_000,
@@ -144,6 +146,7 @@ export function git(
     const child = spawn(GIT_BIN, gitArgs(args), {
       cwd,
       env: gitEnv(),
+      ...childCredentials(),
       stdio: ["ignore", "pipe", "pipe"],
     });
 

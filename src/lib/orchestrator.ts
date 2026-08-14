@@ -13,6 +13,7 @@ import {
   type WorkspaceMount,
 } from "./config";
 import { git, gitSync } from "./git";
+import { childCredentials, chownForChild } from "./privsep";
 import { db } from "./db";
 import { getSettings, limitConfig, type PermissionMode } from "./settings";
 import {
@@ -1247,7 +1248,15 @@ export function prepareWorktreeStore(repoRoot: string): string {
   if (storeStat && !storeStat.isDirectory()) {
     throw new Error(`Refusing to use ${store}: it is not a directory.`);
   }
-  if (!storeStat) fs.mkdirSync(store, { recursive: true });
+  if (!storeStat) {
+    fs.mkdirSync(store, { recursive: true });
+    // Created by the server, used by the child: under privilege separation this
+    // process is root and everything it writes into a bind mount lands
+    // root-owned, so a checkout store left alone would refuse the very
+    // `worktree add` it exists for. Only on the creating pass — a store an
+    // earlier release made already belongs to the right uid.
+    chownForChild(store);
+  }
 
   const realStore = fs.realpathSync(store);
   const { mountId } = describeFolder(repoRoot);
@@ -1557,6 +1566,10 @@ function seedWorktree(repoRoot: string, slotPath: string): string[] {
     if (fs.existsSync(target)) continue;
     try {
       fs.copyFileSync(path.join(repoRoot, e.name), target);
+      // The copy is the server's, the checkout is the child's. An `.env` the
+      // agent cannot rewrite is worse than one it never had, because it reads
+      // as a configured worktree right up until the first write.
+      chownForChild(target);
       copied.push(e.name);
     } catch {
       /* a file we cannot read is not worth failing the run over */
@@ -3596,6 +3609,10 @@ function runIteration(
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {
       cwd,
       env: childEnv({ ...telemetryEnv(runId, telemetryRequired), ...githubEnv() }),
+      // The uid `childEnv`'s strip only means something against: same process,
+      // one step down, so `/proc/<server>/environ` and `/data` stop being
+      // readable by the thing whose prompt came out of a repository.
+      ...childCredentials(),
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, so a kill reaches the builds, test runners and
       // servers the agent started. Those are what actually hold the working

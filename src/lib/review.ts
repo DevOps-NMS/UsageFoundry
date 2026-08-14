@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { CLAUDE_BIN } from "./config";
 import { db } from "./db";
 import { git } from "./git";
+import { childCredentials } from "./privsep";
 import { diffAsText, runDiff, type RunDiff } from "./diff";
 import { agentsArgs, type AgentDefinition } from "./agents";
 import { getSettings } from "./settings";
@@ -471,6 +472,9 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
     const child = spawn(CLAUDE_BIN, args, {
       cwd,
       env: reviewEnv(),
+      // Dropped like every other child. A reviewer cannot write, but it reads a
+      // diff out of a repository and is no more trusted than the run it reviews.
+      ...childCredentials(),
       stdio: ["ignore", "pipe", "pipe"],
       detached: getSettings().killProcessGroup && process.platform !== "win32",
     });

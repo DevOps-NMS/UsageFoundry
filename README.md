@@ -302,7 +302,7 @@ the list above as its honest boundary until it does.
 | **[The orchestrator chat](docs/orchestrator-chat.md)** | A conversation that proposes work; nothing starts without approval |
 | **[Reviewing and landing](docs/review-and-land.md)** | Diffs, AI review, conflict resolution, the merge queue |
 | **[Architecture](docs/architecture.md)** | Module map and how transcripts are parsed |
-| **[Security](docs/security.md)** | What the container holds, and what is scoped away from whom |
+| **[Security](docs/security.md)** | Which uid runs the server and which runs the agents, what the container holds, and what an agent can still reach |
 | **[Verification log](docs/verification.md)** | What has been checked by hand — **and what has not** |
 
 That last one is not boilerplate. It carries an explicit *"Not yet verified"*
