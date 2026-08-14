@@ -21,8 +21,17 @@ import type { UsageSnapshot, WindowState } from "./windows";
  *   the agent when one trips. That trades the in-flight cycle's work — and its
  *   self-reported cost — for a tighter bound: one model turn plus one check
  *   interval plus the kill, rather than a whole cycle. It is still not a hard
- *   cap, because usage is read from transcripts Claude Code flushes as each
- *   turn completes.
+ *   cap, and the staleness that makes it one is worth stating in full rather
+ *   than as "transcripts are flushed as each turn completes", which describes
+ *   the *fallback* source. The window fractions prefer the provider's own
+ *   percentage (`planUsage.ts`), which is cached: five minutes in the ordinary
+ *   case, and up to an hour while requests are being refused. What keeps that
+ *   from being the guard's real resolution is that `guardFraction` also takes
+ *   the derived reading, recomputed from the transcripts on every check, and
+ *   uses whichever is worse — so locally observed spend inside a refresh
+ *   interval still moves the number a run is stopped on, wherever a ceiling is
+ *   configured for it to be measured against. A verdict reached on a reading
+ *   older than `STALE_PLAN_READING_MS` says so in as many words.
  * - `live-resume` is `live`, except that the one rule which comes back on its
  *   own — the 5-hour window — parks the run instead of ending it.
  *
@@ -197,7 +206,54 @@ export const LIVE_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
  */
 export const RESUME_MARGIN_MS = 60_000;
 
+/**
+ * How old the provider's own percentage may be before a verdict reached on it
+ * says how old it was.
+ *
+ * The same 5 minutes as `planUsage.REFRESH_MS`, written out here rather than
+ * imported: that module reads the filesystem and this one is pure and
+ * synchronous, and one number restated with the reason beside it is cheaper
+ * than an import that drags `node:fs` into every caller of this file. Past
+ * this the reading has aged beyond the point where the source itself would
+ * still call it current, which is exactly when the difference between "the
+ * window is at 61%" and "the window was at 61% fifty-eight minutes ago" starts
+ * to matter — a distinction neither the guard nor the run log could make.
+ *
+ * It is a *disclosure* threshold and deliberately not a refusal one. Discarding
+ * a stale reading would leave the guard with nothing to read, and a percentage
+ * that is behind reality is still a floor under it; what is unsafe is acting on
+ * one while believing it is fresh.
+ */
+export const STALE_PLAN_READING_MS = 300_000;
+
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+
+/**
+ * How old the provider reading behind a window's fraction is, or null.
+ *
+ * Null covers both "this window's fraction is derived, so there is no cached
+ * reading behind it" and "the provider never answered" — in neither case is
+ * there an age to disclose. `fractionMetric` is what says which of the two
+ * sources the number came from, so it is what this reads.
+ */
+export function planReadingAgeMs(
+  snapshot: UsageSnapshot,
+  window: WindowState,
+  now: number,
+): number | null {
+  const plan = snapshot.plan ?? null;
+  if (plan === null || window.fractionMetric !== "plan") return null;
+  return Math.max(0, now - plan.fetchedAt);
+}
+
+/** What a verdict adds when the reading it was reached on had aged. */
+function stalenessNote(ageMs: number | null): string {
+  if (ageMs === null || ageMs < STALE_PLAN_READING_MS) return "";
+  const minutes = Math.round(ageMs / 60_000);
+  return ` The provider's own reading was ${minutes} ${
+    minutes === 1 ? "minute" : "minutes"
+  } old when this was decided.`;
+}
 
 /**
  * Where one window stands against one fraction threshold.
@@ -394,7 +450,8 @@ export function evaluateBudget(
     if (weekly.state === "over") {
       return block(
         "weekly_fraction",
-        `Weekly window is at ${pct(weekly.at)}, at or past the ${pct(policy.maxWeeklyFraction)} guard.`,
+        `Weekly window is at ${pct(weekly.at)}, at or past the ${pct(policy.maxWeeklyFraction)} guard.` +
+          stalenessNote(planReadingAgeMs(snapshot, snapshot.weekly, now)),
       );
     }
   }
@@ -411,6 +468,7 @@ export function evaluateBudget(
     if (session.state === "over") {
       const at = pct(session.at);
       const guard = pct(policy.maxSessionFraction);
+      const aged = stalenessNote(planReadingAgeMs(snapshot, snapshot.session, now));
       // A full 5-hour window is the one tripped guard that comes back on its
       // own, so it is the one a run can wait out. Every check above measures
       // something that only moves one way — cycles used, wall clock, this run's
@@ -420,13 +478,14 @@ export function evaluateBudget(
       if (policy.enforcement === "live-resume") {
         return park(
           `5-hour window is at ${at}, at or past the ${guard} guard. ` +
-            "Waiting for the next 5-hour window.",
+            "Waiting for the next 5-hour window." +
+            aged,
           snapshot.session.endsAt + RESUME_MARGIN_MS,
         );
       }
       return block(
         "session_fraction",
-        `5-hour window is at ${at}, at or past the ${guard} guard.`,
+        `5-hour window is at ${at}, at or past the ${guard} guard.` + aged,
       );
     }
   }

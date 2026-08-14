@@ -24,6 +24,7 @@ import {
   RESUME_MARGIN_MS,
   evaluateBudget,
   normalizePolicy,
+  planReadingAgeMs,
 } from "./budget";
 import { scanUsage, type UsageEntry } from "./transcripts";
 import { totalTokens } from "./pricing";
@@ -4333,6 +4334,15 @@ export async function startRun(id: string): Promise<void> {
           meters: verdict.meters,
           weeklyFraction: snapshot.weekly.fraction,
           sessionFraction: snapshot.session.fraction,
+          // How old the provider's percentage was, when that is what the two
+          // fractions above came from. It is cached for five minutes and
+          // served for up to an hour under a refusal, so without this a
+          // verdict reached on an hour-old reading is indistinguishable in
+          // the log from one reached a second after the window moved. Null is
+          // "the reading was derived here, from transcripts", which has no age
+          // to report — not "the reading was fresh".
+          weeklyPlanAgeMs: planReadingAgeMs(snapshot, snapshot.weekly, Date.now()),
+          sessionPlanAgeMs: planReadingAgeMs(snapshot, snapshot.session, Date.now()),
         },
       });
 

@@ -247,10 +247,14 @@ export interface WindowState {
    * what could have been. The dashboard renders the gap rather than letting
    * the two silently disagree.
    *
-   * On the provider's own figure the same split still applies, for a different
-   * reason: the weekly meter reports the all-model window it is labelled with,
+   * On the provider's own figure the same split still applies, for two further
+   * reasons. The weekly meter reports the all-model window it is labelled with,
    * while this takes the worst of that and every model-scoped weekly wall,
-   * because being cut off by the Opus week is being cut off.
+   * because being cut off by the Opus week is being cut off. And the provider's
+   * percentage is *cached* — five minutes in the ordinary case, up to an hour
+   * while requests are being refused — so the derived reading, which is
+   * recomputed on every guard, is taken as well and the worst of the three
+   * wins. The provider's figure can only be raised by that, never lowered.
    */
   guardFraction: number | null;
   /**
@@ -653,11 +657,25 @@ export function buildSnapshot(
       planFraction,
       fraction: planFraction,
       fractionMetric: "plan",
-      // The unpriced-model fallback has nothing to say about a first-party
-      // figure: it exists because our price table can fail to place a model,
-      // and the provider's own accounting cannot. Only another of the
-      // provider's own walls can raise this.
-      guardFraction: Math.max(planFraction, planGuard ?? 0),
+      // The worst of every reading of this window, and the third operand is
+      // the one that is easy to leave out. The provider's percentage is
+      // *cached* — `planUsage.ts` refreshes it at most every five minutes and
+      // keeps serving the last good one for up to an hour while requests are
+      // being refused — so with several runs sharing one account every cycle
+      // that starts inside a refresh interval is authorised by the identical
+      // frozen number, and the window can be walked from under the guard to
+      // over it without the guard ever seeing a figure that moved. The derived
+      // reading is recomputed from the transcripts on every single guard, so it
+      // is the only evidence here that is current, and taking the maximum is
+      // what lets it *raise* the guard without ever lowering it. It does carry
+      // the unpriced-model markup, which is a deliberate over-estimate — that
+      // is the safe direction for the number a run is stopped on, and it stays
+      // out of `fraction`, which is what the meter shows.
+      guardFraction: Math.max(
+        planFraction,
+        planGuard ?? 0,
+        derived.guardFraction ?? 0,
+      ),
       // Nothing to describe: the provider names a percentage, not a ceiling.
       limit: null,
       limitMetric: "plan",

@@ -9,6 +9,7 @@ import {
   instanceBudgetIsOff,
   normalizeInstanceBudget,
   normalizePolicy,
+  planReadingAgeMs,
   readWindowGuard,
 } from "./budget";
 import { pctField, pctSubmit } from "./format";
@@ -74,6 +75,28 @@ function snapshot(sessionFraction: number | null, weeklyFraction: number | null)
     byEffort: [],
     totalCostUSD: 0,
   } as unknown as UsageSnapshot;
+}
+
+/**
+ * The same snapshot, but with the 5-hour reading coming from the provider and
+ * carrying the instant it was read.
+ *
+ * That reading is cached — five minutes in the ordinary case, up to an hour
+ * while requests are being refused — so a verdict reached on it can be an hour
+ * behind the window it describes, and nothing in the verdict or the run log
+ * used to say so.
+ */
+function planSnapshot(sessionFraction: number, fetchedAt: number): UsageSnapshot {
+  const snap = snapshot(sessionFraction, null);
+  return {
+    ...snap,
+    session: {
+      ...snap.session,
+      fractionMetric: "plan",
+      planFraction: sessionFraction,
+    },
+    plan: { session: null, weekly: null, scopedWeekly: [], fetchedAt },
+  };
 }
 
 const base: BudgetPolicy = {
@@ -286,6 +309,54 @@ describe("evaluateBudget", () => {
     );
     assert.equal(v.allowed, false);
     assert.equal(v.allowed === false && v.code, "no_ceiling");
+  });
+
+  /**
+   * A guard acting on a percentage that may be an hour old must say how old it
+   * was. The reading is the provider's, it is cached, and the two sentences
+   * "the window is at 90%" and "the window was at 90% fifty-eight minutes ago"
+   * are the same string without this — which is the whole of why an operator
+   * reading a stop reason could not tell a live decision from a frozen one.
+   */
+  it("names the age of a stale provider reading in the verdict it decided", () => {
+    const now = 4_000_000;
+    const stale = evaluateBudget(
+      { ...base, maxSessionFraction: 0.8 },
+      planSnapshot(0.9, now - 58 * 60_000),
+      noProgress,
+      now,
+    );
+    assert.equal(stale.allowed, false);
+    assert.equal(stale.allowed === false && stale.code, "session_fraction");
+    assert.match(
+      stale.allowed === false ? stale.reason : "",
+      /58 minutes old/,
+      "a verdict reached on an hour-old reading has to disclose its age",
+    );
+
+    // Inside the source's own refresh cadence there is nothing to disclose: the
+    // reading is as current as that source ever is, and a note on every verdict
+    // would stop being read.
+    const fresh = evaluateBudget(
+      { ...base, maxSessionFraction: 0.8 },
+      planSnapshot(0.9, now - 60_000),
+      noProgress,
+      now,
+    );
+    assert.equal(fresh.allowed, false);
+    assert.doesNotMatch(
+      fresh.allowed === false ? fresh.reason : "",
+      /old when this was decided/,
+    );
+  });
+
+  it("reports no age for a reading that was derived here", () => {
+    // A derived reading is recomputed on every check, so it has no age to
+    // disclose — and null must not be read as "fresh provider reading", which
+    // is a different sentence about a different source.
+    const snap = snapshot(0.9, null);
+    assert.equal(planReadingAgeMs(snap, snap.session, 10_000_000), null);
+    assert.equal(planReadingAgeMs(planSnapshot(0.9, 9_000_000), planSnapshot(0.9, 9_000_000).session, 10_000_000), 1_000_000);
   });
 
   it("guards on reconciled spend, not just what the CLI reported", () => {
