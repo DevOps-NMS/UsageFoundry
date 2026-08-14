@@ -394,6 +394,25 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **The work-cycle deadline against a real `claude`.** What *is* pinned is the
+  mechanism: `src/lib/cycleDeadline.test.ts` drives `runIteration` against a real
+  child that prints nothing and never exits, and asserts that the promise settles,
+  that the child was signalled rather than left to its own way out, and that the
+  reason reaches the run log — with a control that keeps a child printing every
+  100ms alive past the same deadline, which is what says the clock is silence
+  rather than wall time. Both were watched to fail with the watchdog disabled.
+  What has **not** happened is any of it against Claude Code itself: no real
+  `claude` has been observed hanging, so whether one that does is reaped by
+  `SIGINT` (and still prints its `result` event, which is the difference between
+  the cycle's cost being measured and being reconciled) or only by the `SIGKILL`
+  eight seconds later is unknown, and the 120-minute default has been reasoned
+  about rather than measured against a real workload's quiet stretches. Docker is
+  not available in the environment this was written in, so the container path is
+  unrun: `docker compose up --build`, then start a run whose task blocks — a task
+  that runs `sleep 100000` inside a tool call is the shape it was written for —
+  with **Silent cycle limit** set to five minutes, and confirm the run ends
+  `failed` naming the deadline, that its folder frees, and that a queued run
+  behind it starts.
 - **A failed tool result reaching the run page.** `toolResultFailures` is unit-
   tested and `npm run typecheck` passes, and the `user`/`tool_result` shape it
   reads was taken from real transcripts written by the pinned CLI (2.1.226) —
