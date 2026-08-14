@@ -847,6 +847,20 @@ export interface PeriodSeries {
    * Null when no weekly ceiling is configured and every bucket reads unknown.
    */
   limitBasis: "weekly" | "prorated" | null;
+  /**
+   * The instant before which this history may be incomplete, or null.
+   *
+   * Transcripts are pruned on their own horizon (`retention.ts`), and this card
+   * offers twelve months against a default of thirty days — so a bucket that
+   * starts before the cutoff covers files that are no longer there. Making the
+   * horizon a year would defeat the retention, so the card says so instead.
+   *
+   * An argument rather than a read, `buildSnapshot`'s agent-origin rule and for
+   * its reason: this module knows nothing about SQLite or the settings table,
+   * and the orchestrator's own callers pass nothing and get null — which is
+   * "nobody asked", never "complete".
+   */
+  completeFrom: number | null;
   /** Newest first. */
   buckets: PeriodBucket[];
 }
@@ -1056,6 +1070,7 @@ export function buildPeriods(
   limits: LimitConfig,
   now = Date.now(),
   timeZone = "UTC",
+  completeFrom: number | null = null,
 ): PeriodSeries {
   const count = PERIOD_COUNT[granularity];
   const bounds = periodBoundaries(
@@ -1120,6 +1135,13 @@ export function buildPeriods(
         ? "weekly"
         : "prorated"
       : null,
+    // Reported only where it falls inside what is on screen. A cutoff older
+    // than every bucket shown says nothing about them, and a sentence that is
+    // permanently there is one the eye learns to skip.
+    completeFrom:
+      completeFrom !== null && recorded.some((b) => b.startsAt < completeFrom)
+        ? completeFrom
+        : null,
     buckets: recorded.reverse(),
   };
 }

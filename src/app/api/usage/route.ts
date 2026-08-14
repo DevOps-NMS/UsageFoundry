@@ -11,6 +11,7 @@ import { getSettings, limitConfig } from "@/lib/settings";
 import { readAccountProfile } from "@/lib/account";
 import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
+import { retentionCutoff } from "@/lib/retention";
 import { PROJECTS_DIR } from "@/lib/config";
 
 export const runtime = "nodejs";
@@ -59,10 +60,18 @@ export async function GET(req: Request) {
     const timeZone = resolveTimeZone(
       new URL(req.url).searchParams.get("tz"),
     );
+    // The transcript horizon, carried onto the card rather than enforced
+    // against it. This offers twelve months and the shipped horizon is thirty
+    // days, so a longer history than the retention would need the retention to
+    // be a year — which would defeat it. `buildPeriods` already drops buckets
+    // that closed before the first entry, so pruning makes the history
+    // *shorter* rather than wrong; this is the sentence for the one bucket the
+    // cutoff falls inside. Read from the same setting `sweepTranscripts` reads.
+    const completeFrom = retentionCutoff(settings.transcriptRetentionDays, now);
     const periods = {
-      day: buildPeriods(entries, "day", limits, now, timeZone),
-      week: buildPeriods(entries, "week", limits, now, timeZone),
-      month: buildPeriods(entries, "month", limits, now, timeZone),
+      day: buildPeriods(entries, "day", limits, now, timeZone, completeFrom),
+      week: buildPeriods(entries, "week", limits, now, timeZone, completeFrom),
+      month: buildPeriods(entries, "month", limits, now, timeZone, completeFrom),
     };
 
     // Bounded by the snapshot's own window so the card describes the same five

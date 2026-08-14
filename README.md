@@ -99,6 +99,7 @@ rather than with your settings. What each one is bounded by is on
 |---|---|---|---|
 | Run logs (`run_events`, telemetry) | the `usagefoundry-data` named volume | tool calls, replies, agent stderr | 30 days after a run finishes |
 | Isolated checkouts (`.uf-worktrees`) | **your workspace**, beside your own code | one per concurrent run per repository | 7 days after the run finishes |
+| Session transcripts | **`~/.claude/projects`**, beside your credentials | one file per session, growing as it runs | 30 days after the file was last written |
 
 The horizons are per store because the media are. Blank means *keep for ever*,
 which is what shipped before this existed. **A run that has not finished is
@@ -122,6 +123,25 @@ a checkout an active run holds, or one with uncommitted work in it, or one whose
 branch still carries commits its target does not have, is never touched. What
 you lose by reclaiming is the installed dependency tree the next run in that
 slot would have reused, which is why the horizon is a week rather than a day.
+
+Transcripts are on your home directory, and they are measured: **233 MB in four
+days** at well under 25 concurrent runs, at a mean of 0.62 MB and a p90 of 1.58
+MB per session. At 25 runs — roughly 1,800 sessions a day — that is **1–3 GB a
+day, 30–85 GB a month**, unbounded, on the filesystem that also holds
+`~/.claude/.credentials.json`. Provision for a month of it at your own
+concurrency, or shorten the horizon. Two consequences of pruning are worth
+knowing before you do:
+
+- **A pruned transcript ends any chance of resuming that conversation.** The
+  sweep never takes one belonging to a run that has not finished, or to any
+  chat. For a *finished* run it clears the stored session id along with the
+  file, so reopening that run starts a fresh session and is told, in its first
+  prompt, which branch the earlier attempt's commits are on — the same restart
+  this app already does when a session id was never recorded.
+- **It shortens the dashboard's calendar history.** That card offers twelve
+  months and the horizon is thirty days, so buckets older than the cutoff are
+  priced from files that are gone. The card says which ones rather than
+  quietly understating them, and periods with nothing left in them drop off it.
 
 **Backing it up.** The `usagefoundry-data` volume holds the only copy of every
 run's history, every template, every workflow and your settings. Nothing here

@@ -868,6 +868,23 @@ through before trusting this unattended:
   run. The cheapest way to exercise it is to delete a mount from
   `WORKSPACE_ROOTS` between the pre-flight and the pass, which is not a thing an
   operator can do; short of that, read it rather than trust it.
+- **That a transcript's filename is its session id.** The retention sweep takes
+  the session id from the file's basename, which is how the pinned CLI (2.1.226)
+  names one — checked against every `.jsonl` in a real `~/.claude/projects`, not
+  read from a specification, and it is the id the file's own first record
+  carries. What has *not* been exercised is a CLI that names one differently:
+  the mtime horizon is what actually protects a session in use, so a basename
+  that stopped matching would cost the extra protection for a session a live run
+  or a chat still holds, not correctness of the age test. Before trusting the
+  sweep on a moved pin, list the tree and compare a handful of basenames against
+  `sessionId` in each file's first line.
+- **A pruned transcript's run being reopened.** `sweepTranscripts` clears
+  `runs.session_id` on the terminal runs whose file it removed, so the pick-up
+  takes the documented restart path — `nextPrompt` with `priorWorkNotice` — and
+  both halves are unit-tested separately. What has not happened is the whole
+  sequence against a real CLI: prune, press **Try again**, and confirm the first
+  cycle opens with the task and the branch notice rather than failing on a
+  `--resume` into a session that is gone.
 - **The backup, restore and `VACUUM` commands in `README.md`.** Written against
   the compose file and the Dockerfile rather than executed — Docker was not
   available where they were added. Two things in them are the ones to check

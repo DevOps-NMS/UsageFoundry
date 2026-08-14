@@ -168,6 +168,7 @@ const EDITABLE_PATHS = [
   "telemetryForRuns",
   "eventRetentionDays",
   "checkoutRetentionDays",
+  "transcriptRetentionDays",
 ] as const;
 
 /**
@@ -543,7 +544,7 @@ function StorageFigures({
   }
   if (!report) return <Empty>Measuring…</Empty>;
 
-  const { database, checkouts, lastSweep } = report;
+  const { database, checkouts, transcripts, lastSweep } = report;
   return (
     <ListGroup
       label="On disk now"
@@ -556,9 +557,12 @@ function StorageFigures({
           {lastSweep && (
             <>
               . Last swept {ago(lastSweep.at)} — {lastSweep.events.toLocaleString()}{" "}
-              log rows, {lastSweep.telemetry.toLocaleString()} telemetry rows and{" "}
+              log rows, {lastSweep.telemetry.toLocaleString()} telemetry rows,{" "}
               {lastSweep.checkouts} checkout
-              {lastSweep.checkouts === 1 ? "" : "s"} discarded
+              {lastSweep.checkouts === 1 ? "" : "s"} and{" "}
+              {lastSweep.transcripts.toLocaleString()} transcript
+              {lastSweep.transcripts === 1 ? "" : "s"} (
+              {fmtBytes(lastSweep.transcriptBytes)}) discarded
             </>
           )}
         </>
@@ -588,6 +592,16 @@ function StorageFigures({
           </span>
         </ListRow>
       ))}
+
+      <ListRow
+        label="Transcripts"
+        description={`${transcripts.path} — ${transcripts.files.toLocaleString()} session${transcripts.files === 1 ? "" : "s"}`}
+      >
+        <span className="tabular-nums text-sm">
+          {transcripts.partial ? "≥ " : ""}
+          {fmtBytes(transcripts.bytes)}
+        </span>
+      </ListRow>
     </ListGroup>
   );
 }
@@ -1915,6 +1929,30 @@ export default function SettingsPage() {
                 onChange={(e) =>
                   patch({
                     checkoutRetentionDays:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="trret"
+            edited={isEdited("transcriptRetentionDays")}
+            label="Keep session transcripts for"
+            description="Claude Code writes one per session into your home directory, and nothing else prunes them. Pruning one ends any chance of resuming that conversation, and shortens the calendar history on the dashboard — which says which of its buckets are affected"
+          >
+            <div className="w-32">
+              <Input
+                id="trret"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="days"
+                value={numOrEmpty(effective.transcriptRetentionDays)}
+                onChange={(e) =>
+                  patch({
+                    transcriptRetentionDays:
                       e.target.value === "" ? null : Number(e.target.value),
                   })
                 }

@@ -283,6 +283,16 @@ export async function PUT(req: Request) {
     patch.checkoutRetentionDays = n === null ? null : Math.max(1, Math.floor(n));
   }
 
+  if ("transcriptRetentionDays" in body) {
+    // Same reading again, and the same floor — but this one also decides how
+    // far back the dashboard's calendar history is complete, which the period
+    // card states from this very number. It is not clamped up to that history:
+    // making the horizon a year would defeat the retention, so the card says
+    // what is incomplete instead.
+    const n = optionalNumber(body.transcriptRetentionDays);
+    patch.transcriptRetentionDays = n === null ? null : Math.max(1, Math.floor(n));
+  }
+
   if ("chatTurnBudgetUSD" in body) {
     // Blank means "no cap", the same reading every switchable budget rule here
     // takes. It is the one guard on a chat turn other than the clock, so an

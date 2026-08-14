@@ -367,6 +367,25 @@ async function runScan(): Promise<ScanResult> {
   };
 }
 
+/**
+ * Forget files that are no longer on disk, without touching the rest.
+ *
+ * The retention sweep's counterpart, and deliberately not
+ * `invalidateTranscriptCache` below: that one drops every offset and makes the
+ * next scan re-read the whole tree from byte 0, which is the expensive pass this
+ * cache exists to avoid. A removed file would otherwise keep its parsed entries
+ * for the life of the process — `runScan` re-derives the file list every time,
+ * so nothing would ever revisit them — and the dashboard would go on showing
+ * spend from transcripts that are gone until the next restart, disagreeing with
+ * the very cutoff the period card had just been told about.
+ */
+export function forgetTranscriptFiles(files: readonly string[]): void {
+  for (const file of files) {
+    cache.delete(file);
+    inflight.delete(file);
+  }
+}
+
 /** Drop cached offsets so the next scan re-reads every file from byte 0. */
 export function invalidateTranscriptCache(): void {
   cache.clear();

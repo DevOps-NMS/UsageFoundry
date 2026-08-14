@@ -151,6 +151,12 @@ export interface PeriodSeriesDTO {
    * loud. Null when no weekly ceiling is set at all.
    */
   limitBasis: "weekly" | "prorated" | null;
+  /**
+   * Epoch ms before which this history may be incomplete — the transcript
+   * retention horizon, when a bucket on screen starts before it. Null when
+   * nothing shown is affected, which includes retention being switched off.
+   */
+  completeFrom: number | null;
   /** Newest first. Shorter than the granularity's span when history is. */
   buckets: PeriodBucketDTO[];
 }
@@ -1274,6 +1280,8 @@ export interface SettingsDTO {
   eventRetentionDays: number | null;
   /** How long an idle isolated checkout is kept. Null keeps it for ever. */
   checkoutRetentionDays: number | null;
+  /** How long a session transcript is kept. Null keeps it for ever. */
+  transcriptRetentionDays: number | null;
   /** What a chat proposal runs under when it names no template. */
   chatDefaultGuards: RunGuardsDTO;
 }
@@ -1305,11 +1313,19 @@ export interface StorageReportDTO {
     /** The walk hit its budget: `bytes` is a floor, never a total. */
     partial: boolean;
   }>;
+  transcripts: {
+    path: string;
+    files: number;
+    bytes: number;
+    partial: boolean;
+  };
   lastSweep: {
     at: number;
     events: number;
     telemetry: number;
     checkouts: number;
+    transcripts: number;
+    transcriptBytes: number;
   } | null;
 }
 

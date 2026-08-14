@@ -22,8 +22,12 @@ process.env.CLAUDE_CONFIG_DIR = path.join(tmp, "claude");
 process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
 
 // `require`, not `import`: imports are hoisted above the environment above.
-const { planCheckoutReclaim, reclaimableCheckouts, retentionCutoff } =
-  require("./retention") as typeof import("./retention");
+const {
+  expiredTranscripts,
+  planCheckoutReclaim,
+  reclaimableCheckouts,
+  retentionCutoff,
+} = require("./retention") as typeof import("./retention");
 
 /**
  * Covers the pure half of the retention design — what a store is allowed to
@@ -225,5 +229,77 @@ describe("reclaimableCheckouts", () => {
       CUTOFF,
     );
     assert.deepEqual(removable, ["/ws/.uf-worktrees/a-1", "/ws/.uf-worktrees/b-1"]);
+  });
+});
+
+/**
+ * Given a horizon and a set of file mtimes, exactly which transcripts go.
+ *
+ * `~/.claude/projects` is the third store and the one on the operator's own
+ * home directory — beside `.credentials.json`, which is why a full disk there
+ * presents as an authentication failure rather than as a disk failure. Nothing
+ * in this app, its Dockerfile or its compose file ever pruned it: 233 MB in
+ * four days, measured well under the concurrency this is judged at.
+ *
+ * The clause that earns the test is not the age one. It is that a session
+ * something may still resume into is never a candidate however old its file is
+ * — a live run's, or any chat thread's, since an operator can type into one at
+ * any time and there is no terminal state to key on. Getting that wrong is
+ * silent: the file is gone, and the failure arrives later as a work cycle that
+ * could not resume a session nobody can now find.
+ */
+describe("expiredTranscripts", () => {
+  const file = (over: Partial<Parameters<typeof expiredTranscripts>[0][number]>) => ({
+    path: `/home/node/.claude/projects/-workspace/${over.sessionId ?? "s"}.jsonl`,
+    sessionId: "s",
+    mtimeMs: AT - 60 * DAY,
+    bytes: 1_000,
+    ...over,
+  });
+
+  const paths = (files: Parameters<typeof expiredTranscripts>[0], keep: string[] = []) =>
+    expiredTranscripts(files, {
+      now: AT,
+      cutoff: retentionCutoff(30, AT),
+      keepSessions: new Set(keep),
+    }).map((f) => f.sessionId);
+
+  it("takes what is past the horizon and leaves what is inside it", () => {
+    assert.deepEqual(
+      paths([
+        file({ sessionId: "old", mtimeMs: AT - 60 * DAY }),
+        file({ sessionId: "recent", mtimeMs: AT - 2 * DAY }),
+        file({ sessionId: "edge", mtimeMs: AT - 29 * DAY }),
+      ]),
+      ["old"],
+    );
+  });
+
+  it("never takes a session something may still resume into", () => {
+    // The one clause that cannot be derived from a file's age. A run's
+    // transcript is written as it works, so a live run's file is recent — but a
+    // *parked* run's is not, and it is exactly the one that will be resumed.
+    assert.deepEqual(
+      paths(
+        [
+          file({ sessionId: "parked-run", mtimeMs: AT - 90 * DAY }),
+          file({ sessionId: "old-chat", mtimeMs: AT - 90 * DAY }),
+          file({ sessionId: "nobody", mtimeMs: AT - 90 * DAY }),
+        ],
+        ["parked-run", "old-chat"],
+      ),
+      ["nobody"],
+    );
+  });
+
+  it("takes nothing when the horizon is blank", () => {
+    assert.deepEqual(
+      expiredTranscripts([file({ sessionId: "ancient", mtimeMs: 0 })], {
+        now: AT,
+        cutoff: null,
+        keepSessions: new Set(),
+      }),
+      [],
+    );
   });
 });

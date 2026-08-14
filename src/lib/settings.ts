@@ -288,6 +288,30 @@ export interface Settings {
    */
   checkoutRetentionDays: number | null;
   /**
+   * How long a session transcript is kept, in days. Null keeps it always.
+   *
+   * The third horizon, on the mount that also holds `.credentials.json`.
+   * Claude Code writes one `.jsonl` per session into `~/.claude/projects` and
+   * nothing in this app, its Dockerfile or its compose file ever pruned them or
+   * configured the CLI to — 233 MB in four days was measured well under the
+   * concurrency this is judged at. A full disk there does not announce itself:
+   * a work cycle fails inside the CLI with a non-zero exit, and a credential
+   * rewrite that runs out of space presents as an authentication failure.
+   *
+   * Two things follow from pruning, and both are handled rather than absorbed.
+   * A removed transcript takes its session with it, so the sweep clears
+   * `runs.session_id` on the terminal runs it belonged to — `--resume` against
+   * a file that is gone fails a pick-up outright, where a null session id is
+   * already this app's documented restart. And it shortens the dashboard's own
+   * calendar history, which `PeriodSeries.completeFrom` carries onto the card
+   * rather than letting the buckets quietly understate.
+   *
+   * 30 days rather than longer because the store is the operator's home
+   * directory; longer than the checkout horizon because a transcript is the
+   * only thing `--resume` can continue and it cannot be rebuilt.
+   */
+  transcriptRetentionDays: number | null;
+  /**
    * What an agent may do when a chat proposal names no template.
    *
    * The chat used to be able to propose only against a saved template, which
@@ -449,6 +473,7 @@ const DEFAULTS: Settings = {
   chatTurnBudgetUSD: 2,
   eventRetentionDays: 30,
   checkoutRetentionDays: 7,
+  transcriptRetentionDays: 30,
   chatDefaultGuards: DEFAULT_CHAT_GUARDS,
 };
 

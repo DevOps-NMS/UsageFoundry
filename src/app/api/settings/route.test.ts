@@ -86,6 +86,7 @@ const PROBES: Record<keyof Settings, Probe> = {
   chatTurnBudgetUSD: { send: 7 },
   eventRetentionDays: { send: 14 },
   checkoutRetentionDays: { send: 3 },
+  transcriptRetentionDays: { send: 45 },
   chatDefaultGuards: {
     send: {
       permissionMode: "plan",

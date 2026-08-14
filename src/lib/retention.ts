@@ -2,7 +2,7 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import { DB_PATH } from "./config";
+import { DB_PATH, PROJECTS_DIR } from "./config";
 import { db, getJSON, setJSON } from "./db";
 import { git } from "./git";
 import {
@@ -14,6 +14,7 @@ import {
   worktreeStores,
 } from "./orchestrator";
 import { getSettings } from "./settings";
+import { forgetTranscriptFiles } from "./transcripts";
 
 /**
  * What this app throws away, and what it promises to keep.
@@ -76,6 +77,10 @@ export interface RetentionSweep {
   telemetry: number;
   /** Isolated checkouts removed from the mounts' stores. */
   checkouts: number;
+  /** Session transcripts removed from `~/.claude/projects`. */
+  transcripts: number;
+  /** Bytes those transcripts held. The one store whose figure is exact. */
+  transcriptBytes: number;
 }
 
 export function lastSweep(): RetentionSweep | null {
@@ -476,6 +481,183 @@ async function branchIsSettled(
 }
 
 /* ------------------------------------------------------------------ */
+/* Session transcripts — the decision, which is pure                   */
+/* ------------------------------------------------------------------ */
+
+export interface TranscriptFile {
+  path: string;
+  /**
+   * The session this transcript is of.
+   *
+   * The file's own basename, which is how the pinned CLI names one — verified
+   * against the shipped layout rather than read from a specification. If that
+   * ever stops being true the sweep does not become unsafe: the mtime horizon
+   * is what actually protects a session in use, and a session id that matches
+   * nothing simply protects nothing extra.
+   */
+  sessionId: string;
+  mtimeMs: number;
+  bytes: number;
+}
+
+/**
+ * Which transcripts are past the horizon and belong to nothing that may resume.
+ *
+ * Pure, for the reason the checkout decision is: it removes files from the
+ * operator's own home directory, and both ways of being wrong throw nothing. A
+ * file taken too early is a session `--resume` can no longer continue; none
+ * taken at all is the store that fills the disk holding `.credentials.json`.
+ *
+ * `keepSessions` is what makes this a database question rather than a file-age
+ * one. It carries every session a live run may still spawn into and every chat
+ * thread, which an operator can send another message to at any time — so the
+ * age of a file is never on its own a reason to remove it.
+ */
+export function expiredTranscripts(
+  files: readonly TranscriptFile[],
+  o: {
+    now: number;
+    cutoff: number | null;
+    keepSessions: ReadonlySet<string>;
+  },
+): TranscriptFile[] {
+  if (o.cutoff === null) return [];
+  return files.filter(
+    (f) => f.mtimeMs < o.cutoff! && !o.keepSessions.has(f.sessionId),
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Session transcripts — the sweep, which is not                       */
+/* ------------------------------------------------------------------ */
+
+/** Files visited per transcript walk. The tree is one file per session. */
+const MAX_TRANSCRIPT_FILES = 20_000;
+
+/** Every `.jsonl` under the projects directory, with what decides about it. */
+async function listTranscripts(root: string): Promise<TranscriptFile[]> {
+  const out: TranscriptFile[] = [];
+
+  const walk = async (dir: string): Promise<void> => {
+    if (out.length >= MAX_TRANSCRIPT_FILES) return;
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // missing or unreadable — treated as empty, as `scanUsage` does
+    }
+    for (const entry of entries) {
+      if (out.length >= MAX_TRANSCRIPT_FILES) return;
+      const full = path.join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith(".jsonl")) continue;
+      try {
+        const stat = await fsp.lstat(full);
+        out.push({
+          path: full,
+          sessionId: entry.name.slice(0, -".jsonl".length),
+          mtimeMs: stat.mtimeMs,
+          bytes: stat.size,
+        });
+      } catch {
+        /* removed between the readdir and the stat */
+      }
+    }
+  };
+
+  await walk(root);
+  return out;
+}
+
+/** Every session id something in this app may still resume into. */
+function resumableSessions(): Set<string> {
+  const keep = new Set<string>();
+  const add = (rows: Array<{ session_id: string | null }>) => {
+    for (const row of rows) if (row.session_id) keep.add(row.session_id);
+  };
+
+  add(
+    db()
+      .prepare(
+        `SELECT session_id FROM runs
+          WHERE session_id IS NOT NULL
+            AND status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(",")})`,
+      )
+      .all(...TERMINAL_STATUSES) as Array<{ session_id: string | null }>,
+  );
+
+  // Every chat, whatever its status and however old. A thread is resumed by the
+  // operator typing into it, which they may do at any time — there is no
+  // terminal state to key on, and the set is one row per conversation.
+  add(
+    db()
+      .prepare("SELECT session_id FROM chat_sessions WHERE session_id IS NOT NULL")
+      .all() as Array<{ session_id: string | null }>,
+  );
+
+  return keep;
+}
+
+/**
+ * Prune transcripts past the horizon, and clear the sessions they were.
+ *
+ * The clearing is the half that is easy to leave out and expensive to. A
+ * terminal run keeps `session_id` for ever and `reopenRun` resumes into it, so
+ * a pruned file would make the first cycle of a pick-up fail on a missing
+ * session — where a **null** session id is already this app's documented
+ * restart, with `nextPrompt` writing the task and `priorWorkNotice` naming the
+ * branch the earlier attempt's commits are on. Clearing turns a silent failure
+ * into the path that already exists.
+ *
+ * The cache is told about exactly the files that went, rather than invalidated:
+ * `runScan` re-derives the file list every pass, so a removed file's parsed
+ * entries would otherwise be held for the life of the process and the dashboard
+ * would keep showing spend from transcripts that are gone.
+ */
+export async function sweepTranscripts(now = Date.now()): Promise<{
+  removed: number;
+  bytes: number;
+}> {
+  const cutoff = retentionCutoff(getSettings().transcriptRetentionDays, now);
+  if (cutoff === null) return { removed: 0, bytes: 0 };
+
+  const expired = expiredTranscripts(await listTranscripts(PROJECTS_DIR), {
+    now,
+    cutoff,
+    keepSessions: resumableSessions(),
+  });
+  if (expired.length === 0) return { removed: 0, bytes: 0 };
+
+  const gone: string[] = [];
+  const sessions: string[] = [];
+  let bytes = 0;
+  for (const file of expired) {
+    try {
+      await fsp.unlink(file.path);
+    } catch {
+      continue; // read-only mount, or already removed — neither is ours to fix
+    }
+    gone.push(file.path);
+    sessions.push(file.sessionId);
+    bytes += file.bytes;
+  }
+
+  const clear = db().prepare(
+    `UPDATE runs SET session_id = NULL
+      WHERE session_id = ?
+        AND status IN (${TERMINAL_STATUSES.map(() => "?").join(",")})`,
+  );
+  for (const sessionId of sessions) clear.run(sessionId, ...TERMINAL_STATUSES);
+
+  forgetTranscriptFiles(gone);
+  return { removed: gone.length, bytes };
+}
+
+/* ------------------------------------------------------------------ */
 /* What each store currently holds                                     */
 /* ------------------------------------------------------------------ */
 
@@ -500,6 +682,13 @@ export interface StorageReport {
     /** The walk hit its budget, so `bytes` is a floor rather than a total. */
     partial: boolean;
   }>;
+  transcripts: {
+    path: string;
+    files: number;
+    bytes: number;
+    /** The walk hit its budget: one file per session, so this is not expected. */
+    partial: boolean;
+  };
   lastSweep: RetentionSweep | null;
 }
 
@@ -606,7 +795,19 @@ export async function storageReport(): Promise<StorageReport> {
       telemetryRows: count("SELECT COUNT(*) AS n FROM otlp_requests"),
     },
     checkouts: await checkoutSizes(),
+    transcripts: await transcriptSize(),
     lastSweep: lastSweep(),
+  };
+}
+
+/** What `~/.claude/projects` holds, from the same walk the sweep uses. */
+async function transcriptSize(): Promise<StorageReport["transcripts"]> {
+  const files = await listTranscripts(PROJECTS_DIR);
+  return {
+    path: PROJECTS_DIR,
+    files: files.length,
+    bytes: files.reduce((sum, f) => sum + f.bytes, 0),
+    partial: files.length >= MAX_TRANSCRIPT_FILES,
   };
 }
 
@@ -636,10 +837,13 @@ export async function runRetentionSweep(
 ): Promise<RetentionSweep> {
   const events = sweepRunEvents(now);
   const checkouts = await sweepCheckouts(now);
+  const transcripts = await sweepTranscripts(now);
   const result: RetentionSweep = {
     at: now,
     ...events,
     checkouts: checkouts.removed,
+    transcripts: transcripts.removed,
+    transcriptBytes: transcripts.bytes,
   };
   setJSON(LAST_SWEEP_KEY, result);
   return result;
