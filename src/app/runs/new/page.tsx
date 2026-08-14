@@ -35,6 +35,7 @@ import {
   SegmentedControl,
   type SegmentedOption,
 } from "@/components/ui/SegmentedControl";
+import { isCommitChord } from "@/components/shell/shortcuts";
 
 /** Everything a template or an earlier run supplies to this form. */
 interface FormSeed {
@@ -516,6 +517,11 @@ export default function NewRunPage() {
   // Belt to the disabled attribute's braces: a second submit can only come from
   // a key repeat inside the same tick, which no re-render has happened for yet.
   const inFlight = useRef(false);
+  // What ⌘↩ submits. The shell's one keyboard listener deliberately binds
+  // nothing to that chord — see `isCommitChord` — so a page's own commit
+  // shortcut keeps working while the task textarea holds focus, which is where
+  // Return is a newline and the operator is standing when they finish.
+  const formRef = useRef<HTMLFormElement>(null);
 
   useEffect(() => {
     // Read from `window` rather than `useSearchParams`, which would force this
@@ -1097,6 +1103,19 @@ export default function NewRunPage() {
     }
   }
 
+  /**
+   * ⌘↩ from anywhere in the pane, including the task textarea.
+   *
+   * `requestSubmit` rather than calling `submit` directly, so the chord and the
+   * button go through one code path — including the `noValidate` form's own
+   * submit event, which is where every guard below hangs.
+   */
+  function onFormKeyDown(e: React.KeyboardEvent<HTMLFormElement>) {
+    if (!isCommitChord(e)) return;
+    e.preventDefault();
+    formRef.current?.requestSubmit();
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (inFlight.current || submitting) return;
@@ -1227,7 +1246,7 @@ export default function NewRunPage() {
 
       {/* Own validation, not the browser's: a native bubble points at one field
           and vanishes, where these stay next to the field and say what to do. */}
-      <form onSubmit={submit} noValidate>
+      <form ref={formRef} onSubmit={submit} onKeyDown={onFormKeyDown} noValidate>
         <Card className="mb-4" emphasis="primary">
           <CardTitle>What to work on</CardTitle>
 
@@ -2084,30 +2103,40 @@ export default function NewRunPage() {
           </div>
         )}
 
-        {/* Sticky for the same reason the settings page's Save is: this is the
-            one button on a page long enough to scroll, and it must not be
-            somewhere you have to hunt for. Opaque and raised, because it spends
-            most of its life lying across a card. */}
-        <div className="sticky bottom-0 z-10 border-t border-line bg-canvas py-3 shadow-bar">
-          <ButtonRow>
-            <Button type="submit" busy={submitting}>
-              Start run
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => router.push("/runs")}
+        {/* The pane's footer, not a form's button row: the default action at
+            the trailing edge with Cancel to its left, which is where a Mac
+            window puts them. Sticky because this page is longer than the pane,
+            and the negative margin has to match the shell's own gutter at each
+            breakpoint or the bar is wider than the page and scrolls it
+            sideways. Opaque and raised, because it spends most of its life
+            lying across a card. */}
+        <div className="sticky bottom-0 z-10 -mx-4 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
+          <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
+            <p
+              role="status"
+              aria-atomic="true"
+              className="mr-auto min-h-5 basis-full text-xs leading-5 text-ink-faint sm:basis-auto"
             >
-              Back to runs
-            </Button>
-            <span className="text-xs text-ink-faint">
               {submitting
                 ? "Asking the orchestrator for a slot…"
                 : occupant || rootOccupant
                   ? `Queues behind the run already working in ${folderLabel}`
                   : `Starts an unattended agent in ${folderLabel}`}
-            </span>
-          </ButtonRow>
+            </p>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => router.push("/runs")}
+            >
+              Cancel
+            </Button>
+            <Button type="submit" busy={submitting} aria-keyshortcuts="Meta+Enter">
+              Start run
+              <span aria-hidden="true" className="text-xs opacity-70">
+                ⌘↩
+              </span>
+            </Button>
+          </div>
         </div>
       </form>
     </>
