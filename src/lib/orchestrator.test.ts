@@ -1031,6 +1031,8 @@ describe("buildArgs", () => {
     model: null,
     permissionMode: "acceptEdits" as const,
     resumeSessionId: null,
+    maxRunCostUSD: null,
+    spentGuardUSD: 0,
   };
 
   it("grants an isolated run the two git commands it is told to use", () => {
@@ -1171,6 +1173,63 @@ describe("buildArgs", () => {
     // The two the CLI gates the flag on. `-p` is `--print`.
     assert.equal(args[0], "-p");
     assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+  });
+
+  /**
+   * The only thing that bounds what *one* work cycle spends.
+   *
+   * `maxRunCostUSD` is read between cycles, so on its own it bounds the number
+   * of cycles that may start past a threshold and not the amount the one
+   * crossing it spends: a run at $34.99 of a $35 limit was authorised for one
+   * more cycle of any size at all, and twenty-five of those multiply it. The
+   * flag is the fix and every way of losing it is silent — a missing argv pair
+   * is not an exit code, not a stream event and not a log line, and the only
+   * evidence is a bill.
+   */
+  it("carries what is left of the run's spending limit into the cycle", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      maxRunCostUSD: 5,
+      spentGuardUSD: 1.25,
+    });
+    const at = args.indexOf("--max-budget-usd");
+    assert.notEqual(at, -1, "a run with a spending limit must cap its own cycle");
+    // The remainder, not the limit: a resumed run's later cycles would
+    // otherwise each be allowed the whole figure over again.
+    assert.equal(args[at + 1], "3.75");
+  });
+
+  it("attaches no ceiling when the run has no spending limit", () => {
+    // Null is "no limit" everywhere in `normalizePolicy`, and a run that opted
+    // out must not acquire one from whatever it has spent so far.
+    assert.equal(
+      buildArgs({ ...base, isolated: true, spentGuardUSD: 12 }).includes(
+        "--max-budget-usd",
+      ),
+      false,
+    );
+  });
+
+  /**
+   * The guard figure, not `runs.spent_usd`.
+   *
+   * `spentGuardUSD` is `spent_usd + spent_usd_est` — the same sum the pre-cycle
+   * check compares — and the estimate half is what a killed cycle cost, which
+   * is real money the CLI never got to report. Deriving the ceiling from the
+   * measured floor alone would hand the child more room than the guard believes
+   * the run has left, which is the display-versus-guard split inverted at the
+   * one door where it costs money. The clamp is what that reads as at the
+   * boundary: never a negative, which the CLI would take as no ceiling at all.
+   */
+  it("never hands over a negative ceiling", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      maxRunCostUSD: 5,
+      spentGuardUSD: 6.5,
+    });
+    assert.equal(args[args.indexOf("--max-budget-usd") + 1], "0");
   });
 
   it("still passes the mode, the model and the session to resume", () => {
