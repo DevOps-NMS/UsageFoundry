@@ -10,6 +10,7 @@ import {
   stopRun,
 } from "@/lib/orchestrator";
 import { telemetryForRun } from "@/lib/otlp";
+import { runAgentDTO } from "@/lib/agents";
 import { normalizePolicy } from "@/lib/budget";
 
 export const runtime = "nodejs";
@@ -49,6 +50,10 @@ export async function GET(req: Request, ctx: Ctx) {
         ...normalizePolicy(rawBudget),
         permissionMode: rawBudget.permissionMode,
       },
+      // The whole definition is on the row, including the agent's own system
+      // prompt; the page needs the name and the description and this route is
+      // polled every three seconds. One reader for both run routes.
+      agent: runAgentDTO(run.agent),
       mountId,
       mountLabel,
       relPath,

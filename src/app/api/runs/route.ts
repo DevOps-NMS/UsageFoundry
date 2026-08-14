@@ -10,6 +10,7 @@ import {
   type RunDependencyInput,
 } from "@/lib/orchestrator";
 import { PERMISSION_MODES, type PermissionMode } from "@/lib/settings";
+import { resolveAgentForRun, runAgentDTO } from "@/lib/agents";
 import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
 
 export const runtime = "nodejs";
@@ -30,6 +31,10 @@ export async function GET() {
         ...normalizePolicy(rawBudget),
         permissionMode: rawBudget.permissionMode,
       },
+      // Read out of the stored blob rather than passed through as one: the
+      // column holds the whole definition, including the agent's system prompt,
+      // and this list is polled. Same treatment `budget` gets one line up.
+      agent: runAgentDTO(r.agent),
       mountId,
       mountLabel,
       relPath,
@@ -126,6 +131,17 @@ export async function POST(req: Request) {
     permissionMode = candidate as PermissionMode;
   }
 
+  // Narrowed against the registry the way the mode above is narrowed against
+  // its four literals, and refused rather than dropped when it names nothing:
+  // the operator started the run that said "and hand the review to the reviewer
+  // agent", and a run silently started without it is bit-for-bit a run that was
+  // never given one. What crosses the wire is an id — a definition would be a
+  // route to an agent nobody saved.
+  const agent = resolveAgentForRun(body.agentId);
+  if (!agent.ok) {
+    return NextResponse.json({ error: agent.error }, { status: 400 });
+  }
+
   const rawBudget = (body.budget ?? {}) as Record<string, unknown>;
 
   // Narrowed for the same reason permissionMode is: this value decides whether
@@ -181,6 +197,7 @@ export async function POST(req: Request) {
       model: body.model ? String(body.model) : null,
       permissionMode,
       isolate: body.isolate === undefined ? undefined : body.isolate !== false,
+      agent: agent.agent,
       budget: policy,
       dependsOn: deps.value,
     });
@@ -193,6 +210,7 @@ export async function POST(req: Request) {
           ...normalizePolicy(storedBudget),
           permissionMode: storedBudget.permissionMode,
         },
+        agent: runAgentDTO(run.agent),
         dependsOn: dependenciesOf([run.id]).get(run.id) ?? [],
         queuePosition: run.status === "queued" ? queuePosition(run.id) : undefined,
       },
