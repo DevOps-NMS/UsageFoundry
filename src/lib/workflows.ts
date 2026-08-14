@@ -25,6 +25,7 @@ import {
   promoteQueued,
   releaseDependents,
   resolveWorkspaceFolder,
+  revivableDependents,
   signalTree,
   stopRun,
   TERMINAL_STATUSES,
@@ -3439,6 +3440,90 @@ function noteBlock(instanceId: string, nodeId: string, line: string): void {
         " WHERE instance_id=? AND node_id=?",
     )
     .run(line, instanceId, nodeId);
+}
+
+/**
+ * Put every deferred node blocked behind `roots` back to `waiting`, so the next
+ * advance pass decides it again on what is true now.
+ *
+ * `reviveBlockedDependents` for the half of a graph that is not runs yet, and it
+ * exists for that function's reason exactly: a `blocked` ledger row is a
+ * sentence about an ending that reopening a run has just undone, and nothing
+ * else in this app would ever revisit it. `planInstanceStep` skips any node
+ * whose row is not `waiting`, and this is the only writer that puts one back —
+ * so without it a node deferred behind an orchestrator or a merge block is
+ * skipped for ever once anything writes it off, the instance reaches the end of
+ * its graph with the tail missing, and the row still names a failure the
+ * operator has since reversed.
+ *
+ * Deliberately not a release, the same way the run half is not: this reopens the
+ * *question*. `advanceInstance` still answers it, creating the node if the
+ * dependency now satisfies its edge and blocking it again — with a sentence
+ * about the current ending — if it does not. So the worst this can do is
+ * rewrite a stale reason.
+ *
+ * The halt exclusion is the membership condition and it is stated positively:
+ * only an instance still `started` is walked. A `stopping` one is left alone,
+ * whose every open block `haltBlocks` has just written off, and so is a `failed`
+ * one, rolled back as it was created. There is no way back into a halted
+ * workflow through a member, and this must not become one.
+ *
+ * Reachability is `revivableDependents` over the graph's own edges rather than
+ * over `run_deps`: a deferred node has no run, so it has no dependency rows yet.
+ * It walks only through the rows it is reviving, for that function's reason. A
+ * root that is an *emitted* run enters the graph at the block that emitted it —
+ * `emitted_by` — because that block's node is what the edges behind it were
+ * drawn from; the emitted run's own `node_id` names no node in the graph.
+ */
+export function reviveBlockedBlocks(roots: readonly string[]): number {
+  if (roots.length === 0) return 0;
+
+  const rows = db()
+    .prepare(
+      `SELECT w.instance_id AS instanceId,
+              COALESCE(w.emitted_by, w.node_id) AS nodeId
+         FROM workflow_instance_runs w
+         JOIN workflow_instances i ON i.id = w.instance_id
+        WHERE i.status = 'started'
+          AND w.run_id IN (${roots.map(() => "?").join(",")})`,
+    )
+    .all(...roots) as Array<{ instanceId: string; nodeId: string }>;
+  if (rows.length === 0) return 0;
+
+  const byInstance = new Map<string, string[]>();
+  for (const row of rows) {
+    const list = byInstance.get(row.instanceId);
+    if (list) list.push(row.nodeId);
+    else byInstance.set(row.instanceId, [row.nodeId]);
+  }
+
+  const reopen = db().prepare(
+    "UPDATE workflow_instance_blocks SET status='waiting', error=NULL, finished_at=NULL" +
+      " WHERE instance_id=? AND node_id=? AND status='blocked'",
+  );
+
+  let revived = 0;
+  for (const [instanceId, nodes] of byInstance) {
+    const instance = getInstance(instanceId);
+    if (!instance) continue;
+
+    const candidates = instance.blocks
+      .filter((b) => b.status === "blocked")
+      .map((b) => b.nodeId);
+    if (candidates.length === 0) continue;
+
+    const links = instance.graph.edges.map((e) => ({
+      runId: e.to,
+      dependsOn: e.from,
+      edge: e.edge,
+    }));
+    for (const nodeId of revivableDependents(nodes, candidates, links)) {
+      // Guarded on `blocked` for `upsertBlock`'s reason: a row that settled
+      // between the read and the write keeps its own answer.
+      revived += reopen.run(instanceId, nodeId).changes;
+    }
+  }
+  return revived;
 }
 
 /**
