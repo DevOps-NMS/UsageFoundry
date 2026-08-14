@@ -19,9 +19,13 @@ import { chatGuards, getSettings, type RunGuards } from "./settings";
 import { assistRefusal } from "./review";
 import {
   createRun,
+  dependencyCycle,
   githubEnv,
   signalTree,
+  topologicalOrder,
   type CreateRunInput,
+  type DependencyEdge,
+  type RunDependencyInput,
 } from "./orchestrator";
 import { getTemplate, type RunTemplate } from "./templates";
 
@@ -68,6 +72,42 @@ export type ChatStatus = "idle" | "thinking" | "failed";
 export type ChatRole = "user" | "assistant" | "system";
 export type ProposalStatus = "pending" | "approved" | "rejected" | "failed";
 
+/**
+ * What a proposal is a proposal *of*.
+ *
+ * `run` is the original and the default, for the reason `WorkflowNode.kind`
+ * defaults to `run`: every row written before this existed says nothing there,
+ * and the other reading would turn a queued run into a graph nobody wrote.
+ *
+ * `workflow` is the second, and what approving one does is deliberately weaker:
+ * it **saves a workflow** and starts nothing. That is what keeps a graph a
+ * person's rather than a model's — a saved workflow is form input exactly as a
+ * template is, and the press of Run that turns it into agents is still the
+ * operator's, on a page that draws the whole graph. The card in the chat is the
+ * first of those two gates and it has to spell out what a canvas would show:
+ * which guard set each block runs under, how many runs a deciding block may
+ * start, and whether a merge block may pay to reconcile a conflict.
+ */
+export type ProposalKind = "run" | "workflow";
+
+/**
+ * "Start this proposal's run after that one's."
+ *
+ * `specId` is the **chat's own label** rather than a proposal id, because the
+ * model writes several proposals in one turn and has to be able to point one at
+ * another before either has an id. It is resolved to a run id at approval —
+ * against a sibling in the same batch, or against a proposal of this chat that
+ * has already become a run — and a label that resolves to neither fails that
+ * one proposal by name rather than starting it with no dependency at all, which
+ * is a run told to wait that does not.
+ */
+export interface ProposalDependency {
+  specId: string;
+  edge: DependencyEdge;
+  /** Carry on that run's branch rather than cutting a new one. */
+  continueBranch: boolean;
+}
+
 export interface ChatRow {
   id: string;
   created_at: number;
@@ -101,6 +141,7 @@ export interface ChatProposalRow {
   id: string;
   chat_id: string;
   created_at: number;
+  kind: ProposalKind;
   /** Null when the proposal runs under `settings.chatDefaultGuards` instead. */
   template_id: string | null;
   title: string;
@@ -109,10 +150,52 @@ export interface ChatProposalRow {
   prompt_override: string | null;
   mount_id: string | null;
   folder: string | null;
+  /** The chat's own label for this proposal, or null when it named none. */
+  spec_id: string | null;
+  /** JSON `ProposalDependency[]`, or null. Read through `proposalDeps`. */
+  depends_on: string | null;
+  /**
+   * A workflow proposal's graph, as `normalizeWorkflowInput` left it. Null on a
+   * run proposal — the two kinds carry different things and neither should be
+   * read off the other's column.
+   */
+  graph: string | null;
   status: ProposalStatus;
   run_id: string | null;
+  /** What a workflow proposal became. Never a run; approving one starts nothing. */
+  workflow_id: string | null;
   decided_at: number | null;
   error: string | null;
+}
+
+/**
+ * The dependencies on a row, or none.
+ *
+ * Never throws: the column is written by this module and read back by it, but a
+ * row hand-edited or written by an older build must not be able to make a chat
+ * page 500. An unreadable list is no dependencies, which is the reading that
+ * *fails safe* in only one direction — the proposal starts immediately instead
+ * of waiting — so it is logged nowhere and shown everywhere: the card carries
+ * what it is waiting for, so a list that silently emptied is visible before the
+ * operator approves it rather than after.
+ */
+export function proposalDeps(
+  row: Pick<ChatProposalRow, "depends_on">,
+): ProposalDependency[] {
+  if (!row.depends_on) return [];
+  try {
+    const parsed = JSON.parse(row.depends_on) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((entry) => {
+      const e = (entry ?? {}) as Record<string, unknown>;
+      const specId = String(e.specId ?? "");
+      const edge = String(e.edge ?? "");
+      if (!specId || (edge !== "on-success" && edge !== "on-finish")) return [];
+      return [{ specId, edge, continueBranch: e.continueBranch === true }];
+    });
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -247,6 +330,7 @@ export function pendingProposals(chatId: string): ChatProposalRow[] {
 }
 
 export interface ProposalInput {
+  kind?: ProposalKind;
   /** Null runs it under the operator's untemplated guard set. */
   templateId: string | null;
   title: string;
@@ -255,6 +339,11 @@ export interface ProposalInput {
   promptOverride: string | null;
   mountId: string | null;
   folder: string | null;
+  /** The chat's own label for this proposal. Null when nothing names it. */
+  specId?: string | null;
+  dependsOn?: readonly ProposalDependency[];
+  /** A workflow proposal's normalized graph, as JSON. Null on a run one. */
+  graph?: string | null;
 }
 
 export function createProposal(
@@ -262,23 +351,28 @@ export function createProposal(
   input: ProposalInput,
 ): ChatProposalRow {
   const id = randomUUID();
+  const deps = input.dependsOn ?? [];
   db()
     .prepare(
       `INSERT INTO chat_proposals
-         (id, chat_id, created_at, template_id, title, task, prompt_override,
-          mount_id, folder, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+         (id, chat_id, created_at, kind, template_id, title, task,
+          prompt_override, mount_id, folder, spec_id, depends_on, graph, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
     )
     .run(
       id,
       chatId,
       Date.now(),
+      input.kind ?? "run",
       input.templateId,
       input.title,
       input.task,
       input.promptOverride,
       input.mountId,
       input.folder,
+      input.specId ?? null,
+      deps.length > 0 ? JSON.stringify(deps) : null,
+      input.graph ?? null,
     );
   return getProposal(id)!;
 }
@@ -483,6 +577,221 @@ export function chatPrompt(
 }
 
 /* ------------------------------------------------------------------ */
+/* The batch — pure                                                    */
+/* ------------------------------------------------------------------ */
+
+/** One proposal as the batch planner reads it. */
+export interface BatchProposal {
+  id: string;
+  /** The chat's own label, or null when nothing can point at this one. */
+  specId: string | null;
+  title: string;
+  dependsOn: readonly ProposalDependency[];
+}
+
+/** What a proposal in this chat that is *not* in the batch already became. */
+export interface SettledProposal {
+  status: ProposalStatus;
+  /** The run it became, or null — pending, rejected, or failed to start. */
+  runId: string | null;
+}
+
+/**
+ * One resolved edge: a run that exists, or one this same pass will create.
+ *
+ * A discriminated union rather than two nullable ids, because the caller has to
+ * do something different with each — substitute a run id it has just minted, or
+ * pass one straight through — and a shape where both can be absent is a shape
+ * where it can forget to check which it has.
+ */
+export type BatchDependency = { edge: DependencyEdge; continueBranch: boolean } & (
+  | { on: "run"; runId: string }
+  | { on: "proposal"; proposalId: string }
+);
+
+export type BatchStep =
+  | { ok: true; id: string; title: string; dependsOn: BatchDependency[] }
+  | { ok: false; id: string; title: string; reason: string };
+
+/**
+ * The order one click on Approve creates its runs in, and what each waits for.
+ *
+ * Pure and unit-tested, for the reason `planProposal` and `releasableRuns` are,
+ * and it inherits both of their failure modes at once. A batch created in the
+ * wrong order is a proposal naming a run that does not exist yet — `createRun`
+ * refuses it as a missing run rather than as the ordering mistake it is, which
+ * puts an artefact of what the page happened to display in front of the
+ * operator as a fact about their work. A dependency silently *dropped* is
+ * worse and is the one this exists for: a run told to wait for another and
+ * started with no dependency at all looks exactly like a run that was never
+ * told, and the two agents then work in the same checkout in the order the
+ * queue felt like.
+ *
+ * So an unresolvable label fails its proposal **by name**, and everything
+ * behind it fails too — the cascade `releasableRuns` runs one level down, for
+ * the same reason: every proposal in a chain gets its own sentence naming the
+ * one in front of it rather than one shared verdict about a label at the head
+ * it never heard of. The rest of the batch still starts; a chain that cannot be
+ * wired is not a reason to refuse unrelated work in the same click.
+ *
+ * What it deliberately does **not** re-decide is anything `admitDependencies`
+ * already decides — at most one branch handed over, both ends isolated, no
+ * rival continuation, no loop against the *live* graph. Those need rows, they
+ * are checked where the edge is actually created, and a second copy here would
+ * be a second set of rules to keep in step.
+ */
+export function planApprovalBatch(
+  batch: readonly BatchProposal[],
+  outside: ReadonlyMap<string, SettledProposal>,
+): BatchStep[] {
+  const bySpec = new Map<string, BatchProposal>();
+  const duplicated = new Set<string>();
+  for (const p of batch) {
+    if (!p.specId) continue;
+    if (bySpec.has(p.specId)) duplicated.add(p.specId);
+    else bySpec.set(p.specId, p);
+  }
+
+  const failed = new Map<string, string>();
+  const resolved = new Map<string, BatchDependency[]>();
+
+  for (const p of batch) {
+    if (p.specId && duplicated.has(p.specId)) {
+      failed.set(
+        p.id,
+        `Two proposals in this batch are labelled “${p.specId}”, so a ` +
+          "dependency naming it names both.",
+      );
+      continue;
+    }
+
+    const links: BatchDependency[] = [];
+    let refusal: string | null = null;
+
+    for (const dep of p.dependsOn) {
+      if (dep.specId === p.specId) {
+        refusal = `“${p.title}” is set to start after itself.`;
+        break;
+      }
+      const sibling = bySpec.get(dep.specId);
+      if (sibling) {
+        links.push({
+          on: "proposal",
+          proposalId: sibling.id,
+          edge: dep.edge,
+          continueBranch: dep.continueBranch,
+        });
+        continue;
+      }
+      const settled = outside.get(dep.specId);
+      if (settled?.runId) {
+        links.push({
+          on: "run",
+          runId: settled.runId,
+          edge: dep.edge,
+          continueBranch: dep.continueBranch,
+        });
+        continue;
+      }
+      // Three different facts, and the operator can act on a different thing in
+      // each: approve the other one too, look at why it did not start, or ask
+      // the chat what it meant. Collapsing them into "unknown dependency" is
+      // the sentence that sends someone to read the database.
+      refusal =
+        settled === undefined
+          ? `“${p.title}” is set to start after “${dep.specId}”, which is not ` +
+            "in this batch and is not a proposal in this chat."
+          : settled.status === "pending"
+            ? `“${p.title}” is set to start after “${dep.specId}”, which is ` +
+              "still waiting for a decision. Approve them together."
+            : `“${p.title}” is set to start after “${dep.specId}”, which was ` +
+              `${settled.status} and never became a run.`;
+      break;
+    }
+
+    if (refusal) failed.set(p.id, refusal);
+    else resolved.set(p.id, links);
+  }
+
+  // A loop among the batch's own edges. `admitDependencies` re-runs the same
+  // check against the live graph at every insert, but it would meet this one as
+  // "no such run to depend on" — the first member names a sibling that has not
+  // been created, because in a loop there is no first member to create.
+  const byId = new Map(batch.map((p) => [p.id, p]));
+  const loop = dependencyCycle(
+    [...resolved].flatMap(([id, links]) =>
+      links
+        .filter((l) => l.on === "proposal")
+        .map((l) => ({
+          runId: id,
+          dependsOn: (l as { proposalId: string }).proposalId,
+          edge: l.edge,
+        })),
+    ),
+  );
+  if (loop) {
+    const named = loop.map((id) => `“${byId.get(id)?.title ?? id}”`).join(" → ");
+    for (const id of loop) {
+      resolved.delete(id);
+      failed.set(
+        id,
+        `These proposals wait for each other in a loop, so none of them could ` +
+          `ever start: ${named}.`,
+      );
+    }
+  }
+
+  // The cascade: a proposal that cannot start is a dependency that will never
+  // exist, so everything behind it cannot start either. A fixed point rather
+  // than one pass, because the run behind the run behind a failure is as stuck
+  // as the first one and deserves to be told so by name.
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const [id, links] of resolved) {
+      const dead = links.find(
+        (l) => l.on === "proposal" && failed.has(l.proposalId),
+      );
+      if (!dead) continue;
+      const blocker = byId.get((dead as { proposalId: string }).proposalId);
+      resolved.delete(id);
+      failed.set(
+        id,
+        `“${byId.get(id)!.title}” is set to start after “${blocker?.title ?? "another proposal"}”, ` +
+          "which is not being started.",
+      );
+      changed = true;
+    }
+  }
+
+  // Every survivor after everything it waits for, so the run a dependency names
+  // exists by the time the dependent is created.
+  const survivors = batch.filter((p) => resolved.has(p.id));
+  const { order } = topologicalOrder({
+    nodes: survivors,
+    edges: [...resolved].flatMap(([id, links]) =>
+      links
+        .filter((l) => l.on === "proposal")
+        .map((l) => ({ from: (l as { proposalId: string }).proposalId, to: id })),
+    ),
+  });
+
+  const steps: BatchStep[] = order.map((id) => ({
+    ok: true as const,
+    id,
+    title: byId.get(id)!.title,
+    dependsOn: resolved.get(id)!,
+  }));
+  // Failures last and in the order they were proposed: the caller only tallies
+  // them, and a stable order is what keeps two identical clicks reporting the
+  // same thing in the same sequence.
+  for (const p of batch) {
+    const reason = failed.get(p.id);
+    if (reason) steps.push({ ok: false, id: p.id, title: p.title, reason });
+  }
+  return steps;
+}
+
+/* ------------------------------------------------------------------ */
 /* Approval                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -499,9 +808,22 @@ export type ApprovalOutcome =
  * batch is this function in a loop for the same reason — one `await` between
  * two approvals of the same folder would let both decide it was free.
  */
-export function approveProposal(id: string): ApprovalOutcome {
+export function approveProposal(
+  id: string,
+  dependsOn: readonly RunDependencyInput[] = [],
+): ApprovalOutcome {
   const proposal = getProposal(id);
   if (!proposal) return { ok: false, reason: "No such proposal." };
+  if (proposal.kind !== "run") {
+    // Reachable only by calling this directly; the route partitions by kind.
+    // Named rather than silently planned as a run, because a workflow proposal
+    // has no task and would fail with "this proposal has no task text" — a
+    // sentence about the wrong thing entirely.
+    return {
+      ok: false,
+      reason: "This proposal is a workflow, not a run.",
+    };
+  }
 
   const plan = planProposal(
     proposal,
@@ -514,7 +836,7 @@ export function approveProposal(id: string): ApprovalOutcome {
   }
 
   try {
-    const run = createRun(plan.input);
+    const run = createRun({ ...plan.input, dependsOn: [...dependsOn] });
     markProposal(id, "approved", { runId: run.id });
     return { ok: true, runId: run.id };
   } catch (err) {
@@ -525,6 +847,102 @@ export function approveProposal(id: string): ApprovalOutcome {
     markProposal(id, "failed", { error: reason });
     return { ok: false, reason };
   }
+}
+
+/** What approving a batch of run proposals came to. */
+export interface BatchOutcome {
+  started: string[];
+  failed: Array<{ title: string; reason: string }>;
+}
+
+/**
+ * Approve several run proposals at once, wiring whatever depends on what.
+ *
+ * Synchronous end to end and with no `await` anywhere in it, for the reason the
+ * route already documents: `createRun`'s folder claim is only atomic inside one
+ * event-loop turn, so two proposals for the same folder must not both get to
+ * decide it is free. That property is now load-bearing twice over — a
+ * dependency also has to name a run that exists, and every one it can name is
+ * created in this same pass.
+ *
+ * A proposal whose own `createRun` throws leaves its dependents naming nothing,
+ * so they are failed here by name rather than left to `createRun` to refuse as
+ * a missing run. That is the same cascade `planApprovalBatch` runs for a label
+ * that never resolved, arriving from the other direction: there it is a
+ * dependency that was never going to exist, here it is one that was going to
+ * and did not.
+ */
+export function approveRunBatch(
+  chatId: string,
+  ids: readonly string[],
+): BatchOutcome {
+  const wanted = new Set(ids);
+  const proposals = listProposals(chatId).filter(
+    (p) => wanted.has(p.id) && p.kind === "run",
+  );
+
+  // Every labelled proposal of this chat that is *not* in the batch, so a
+  // dependency on one approved in an earlier click resolves to its run.
+  const outside = new Map<string, SettledProposal>();
+  for (const p of listProposals(chatId)) {
+    if (wanted.has(p.id) || !p.spec_id) continue;
+    outside.set(p.spec_id, { status: p.status, runId: p.run_id });
+  }
+
+  const steps = planApprovalBatch(
+    proposals.map((p) => ({
+      id: p.id,
+      specId: p.spec_id,
+      title: p.title,
+      dependsOn: proposalDeps(p),
+    })),
+    outside,
+  );
+
+  const started: string[] = [];
+  const failed: Array<{ title: string; reason: string }> = [];
+  /** What each proposal in this pass became, for the ones behind it. */
+  const minted = new Map<string, string>();
+  const stillborn = new Map<string, string>();
+
+  for (const step of steps) {
+    if (!step.ok) {
+      markProposal(step.id, "failed", { error: step.reason });
+      failed.push({ title: step.title, reason: step.reason });
+      continue;
+    }
+
+    const dead = step.dependsOn.find(
+      (d) => d.on === "proposal" && !minted.has(d.proposalId),
+    );
+    if (dead) {
+      const reason =
+        `“${step.title}” is set to start after “${stillborn.get((dead as { proposalId: string }).proposalId) ?? "another proposal"}”, ` +
+        "which could not be started.";
+      markProposal(step.id, "failed", { error: reason });
+      stillborn.set(step.id, step.title);
+      failed.push({ title: step.title, reason });
+      continue;
+    }
+
+    const res = approveProposal(
+      step.id,
+      step.dependsOn.map((d) => ({
+        runId: d.on === "run" ? d.runId : minted.get(d.proposalId)!,
+        edge: d.edge,
+        continueBranch: d.continueBranch,
+      })),
+    );
+    if (res.ok) {
+      minted.set(step.id, res.runId);
+      started.push(res.runId);
+    } else {
+      stillborn.set(step.id, step.title);
+      failed.push({ title: step.title, reason: res.reason });
+    }
+  }
+
+  return { started, failed };
 }
 
 export function rejectProposal(id: string): boolean {
@@ -541,7 +959,21 @@ export interface DecisionTally {
   action: "approve" | "reject";
   started: number;
   rejected: number;
-  failed: Array<{ title: string; reason: string }>;
+  /**
+   * `kind` is what the sentence's verb comes from: a run proposal could not be
+   * *started* and a workflow proposal could not be *saved*, and telling an
+   * operator a workflow "could not be started" describes an attempt this app
+   * never makes.
+   */
+  failed: Array<{ title: string; reason: string; kind?: ProposalKind }>;
+  /**
+   * Workflow proposals approved, which **saved** a workflow and started
+   * nothing. Counted apart from `started` rather than added to it: a sentence
+   * that says "approved and queued 3 runs" about two runs and a saved graph is
+   * a claim that agents are working, which is the one thing this note exists to
+   * report honestly.
+   */
+  saved: number;
   /** Proposals of this chat that are no longer pending. */
   decided: number;
   /** Ids naming no proposal of this chat — another thread's, or gone. */
@@ -564,8 +996,15 @@ export interface DecisionTally {
 export function decisionNote(t: DecisionTally): string {
   const parts = [
     t.started > 0 ? `Approved and queued ${t.started} run(s).` : "",
+    t.saved > 0
+      ? `Saved ${t.saved} workflow(s). Nothing is running — open one and press ` +
+        "Run when you want it to."
+      : "",
     t.rejected > 0 ? `Rejected ${t.rejected} proposal(s).` : "",
-    ...t.failed.map((f) => `Could not start “${f.title}”: ${f.reason}`),
+    ...t.failed.map(
+      (f) =>
+        `Could not ${f.kind === "workflow" ? "save" : "start"} “${f.title}”: ${f.reason}`,
+    ),
     t.decided > 0
       ? `${t.decided} proposal(s) had already been decided and were left alone.`
       : "",
@@ -578,7 +1017,8 @@ export function decisionNote(t: DecisionTally): string {
   // to the clauses above, a batch that did nothing reads as a report of two
   // proposals it declined to touch, which is what "the button appears to have
   // done nothing" looks like from the thread.
-  const acted = t.started > 0 || t.rejected > 0 || t.failed.length > 0;
+  const acted =
+    t.started > 0 || t.saved > 0 || t.rejected > 0 || t.failed.length > 0;
   if (!acted && parts.length > 0) {
     parts.unshift(
       t.action === "approve" ? "Nothing was approved." : "Nothing was rejected.",
@@ -588,16 +1028,33 @@ export function decisionNote(t: DecisionTally): string {
   return parts.join(" ");
 }
 
-function markProposal(
+/**
+ * Record what became of a proposal.
+ *
+ * Exported because a workflow proposal settles onto `workflow_id` and the
+ * function that knows how to build a workflow lives in `workflows.ts`, which
+ * imports this module. One writer either way — a second UPDATE over these
+ * columns is a second place to forget `decided_at`, which is what stops a
+ * decided proposal being offered for decision again.
+ */
+export function markProposal(
   id: string,
   status: ProposalStatus,
-  o: { runId?: string; error?: string },
+  o: { runId?: string; workflowId?: string; error?: string },
 ): void {
   db()
     .prepare(
-      "UPDATE chat_proposals SET status=?, decided_at=?, run_id=?, error=? WHERE id=?",
+      "UPDATE chat_proposals SET status=?, decided_at=?, run_id=?," +
+        " workflow_id=?, error=? WHERE id=?",
     )
-    .run(status, Date.now(), o.runId ?? null, o.error ?? null, id);
+    .run(
+      status,
+      Date.now(),
+      o.runId ?? null,
+      o.workflowId ?? null,
+      o.error ?? null,
+      id,
+    );
 }
 
 /* ------------------------------------------------------------------ */
@@ -1405,9 +1862,10 @@ function systemPrompt(): string {
     "Claude Code agents against folders on this machine. You are talking to its",
     "operator in a chat panel.",
     "",
-    "You cannot start, stop or resume a run. The only thing you can do is call",
-    "propose_run, which records a proposal the operator then approves or rejects",
-    "by hand. Say so plainly rather than implying work has started.",
+    "You cannot start, stop or resume a run, and you cannot press Run on a",
+    "workflow. The two things you can do are propose_run and propose_workflow,",
+    "and both only record a proposal the operator approves or rejects by hand.",
+    "Say so plainly rather than implying work has started.",
     "",
     "You have every tool the CLI offers, and you are trusted with them because",
     "your job is to look, not to build. Use them to gather whatever you need to",
@@ -1425,9 +1883,10 @@ function systemPrompt(): string {
     "",
     "What decides what an agent may do — the budget, the work-cycle limit, the",
     "permission mode, whether it works in its own checkout — is never yours to",
-    "set. It comes from the template a proposal names, or, when it names none,",
-    "from the operator's default guard set in Settings. What is yours is the",
-    "*work*: which folder, which task, and the prompt the agent is given.",
+    "set. It comes from the template a proposal or a workflow block names, or,",
+    "when it names none, from the operator's default guard set in Settings. What",
+    "is yours is the *work*: which folder, which task, the prompt the agent is",
+    "given, and what has to happen before what.",
     "",
     "Reading the state of things:",
     "- list_folders: the mounts and their project folders, which runs are already",
@@ -1444,9 +1903,13 @@ function systemPrompt(): string {
     "- get_usage: how much of the 5-hour and weekly windows is gone. If a window",
     "  is nearly spent, say so — approving ten runs into a full window means ten",
     "  runs that stop on their first guard check.",
-    "- list_proposals: what is already waiting for the operator in this chat.",
+    "- list_proposals: what is already waiting for the operator in this chat,",
+    "  including the id you gave each one.",
+    "- list_workflows: the saved graphs the operator already has. Read it before",
+    "  proposing a new one — the work may already be a workflow, and one running",
+    "  now is worth mentioning rather than duplicating.",
     "",
-    "Proposing:",
+    "Proposing a run:",
     "- One proposal per unit of work, with a short specific title.",
     "- The task text is the whole brief the agent gets. Include the issue number,",
     "  the URL and what done looks like. It is read by an agent that cannot ask",
@@ -1461,6 +1924,43 @@ function systemPrompt(): string {
     "  cannot touch guards: creating one takes the default guard set, and",
     "  updating one keeps the guards it already has. Tell the operator to adjust",
     "  those on the new-run form if they matter.",
+    "",
+    "Ordering runs against each other:",
+    "- Runs on one folder are serialised anyway, and runs in their own checkouts",
+    "  are not. Order them when the *work* has an order — a fix before the test",
+    "  that proves it, a refactor before what builds on it — not to avoid a",
+    "  collision the folder claim already prevents.",
+    "- Give the earlier proposal an `id`, then name it in the later one's",
+    "  `dependsOn`. on-success starts only if it completed; on-finish starts once",
+    "  it is out of the way either way. Neither has a default: pick the one you",
+    "  mean, because on-success ends a chain the operator meant to run regardless",
+    "  and on-finish starts work on top of a run that crashed.",
+    "- continueBranch makes the later run carry on the earlier one's branch, with",
+    "  its commits already there, instead of starting from the target branch with",
+    "  none of that work in sight. Use it for genuine follow-on work; both runs",
+    "  need guards that give them a checkout of their own, and only one run may",
+    "  continue any given run.",
+    "- Say in your reply that they have to be approved in the same click. A",
+    "  dependent approved on its own is failed by name rather than started.",
+    "",
+    "Proposing a workflow:",
+    "- A workflow is a saved graph the operator re-runs with one press of Run.",
+    "  Propose one when the shape is worth keeping — a nightly sweep, a",
+    "  fix/review/land chain, a per-repository routine. A one-off is propose_run.",
+    "- Approving a workflow proposal SAVES it and starts nothing. The operator",
+    "  presses Run themselves. Never say a workflow you proposed is running.",
+    "- Blocks are `run` by default. An `orchestrator` block is a short turn that",
+    "  decides, when the workflow reaches it, which runs to start — and those",
+    "  start with no approval at all, which is why it needs a fanOut cap and why",
+    "  you should propose one only when the work genuinely cannot be written out",
+    "  in advance. A `merge` block lands what the blocks in front of it built.",
+    "- Guards come from each block's template, or the default guard set. You",
+    "  cannot set a budget, a permission mode or an isolation choice anywhere in",
+    "  a graph, and the workflow is saved with no workflow-wide budget — tell the",
+    "  operator to set one in the editor, because a workflow cannot be put on a",
+    "  schedule without it.",
+    "- Say what each block does and, for any orchestrator block, how many runs it",
+    "  may start. That is the number the operator is agreeing to.",
     "",
     "Be brief. When you have proposed, reply with a short list of what you",
     "proposed and what you deliberately left out. The proposals appear in the",

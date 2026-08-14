@@ -2233,6 +2233,80 @@ export function dependencyCycle(links: readonly DependencyLink[]): string[] | nu
 }
 
 /**
+ * The order a set of things has to be created in: every one after what it waits
+ * for.
+ *
+ * Kahn's algorithm, with ties broken by position in `nodes` — the order the
+ * author arranged them in. The determinism is not a nicety: runs are admitted
+ * oldest-first and a queued run reserves its folder against everything younger,
+ * so an unstable order would make two presses of Run on one graph produce two
+ * different queues on the same repository.
+ *
+ * `unplaced` is every node the pass could not reach: a member of a loop, or
+ * anything waiting on one. Nothing downstream of a loop can ever start —
+ * `releasableRuns` reaches a fixed point and leaves those rows asleep for ever
+ * — so a set that produces any is refused rather than created.
+ *
+ * **Here rather than in `workflows.ts`, for `dependencyCycle`'s reason.** Both
+ * answer a question about the same edge vocabulary, and there are now three
+ * callers that create runs in one synchronous pass and need "every one after
+ * what it waits for" to mean exactly one thing: a saved graph, the specs an
+ * orchestrator block emits, and a batch of chat proposals the operator
+ * approves together. Typed against the two fields it reads rather than against
+ * any of those three shapes, which is what lets it be shared at all.
+ *
+ * Defensive about edges naming nodes that are not here: each caller refuses
+ * those separately, and an order that silently mis-sequenced would start an
+ * agent before the work it extends exists.
+ */
+export function topologicalOrder(graph: {
+  nodes: readonly { id: string }[];
+  edges: readonly { from: string; to: string }[];
+}): {
+  order: string[];
+  unplaced: string[];
+} {
+  const known = new Set(graph.nodes.map((n) => n.id));
+  const seen = new Set<string>();
+  const incoming = new Map<string, number>();
+  const outgoing = new Map<string, string[]>();
+  for (const n of graph.nodes) incoming.set(n.id, 0);
+
+  for (const e of graph.edges) {
+    if (!known.has(e.from) || !known.has(e.to) || e.from === e.to) continue;
+    // A repeated pair is one dependency stated twice, not two: counted twice it
+    // would leave its dependent unplaceable and report a healthy graph as a loop.
+    const key = `${e.from} ${e.to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    incoming.set(e.to, (incoming.get(e.to) ?? 0) + 1);
+    const list = outgoing.get(e.from);
+    if (list) list.push(e.to);
+    else outgoing.set(e.from, [e.to]);
+  }
+
+  const order: string[] = [];
+  // Re-scanned each pass rather than kept as a queue, which is what makes the
+  // tie-break the declaration order instead of the order things were released.
+  // A placed node is marked -1, so it can never match again however many
+  // successors are decremented afterwards.
+  for (;;) {
+    const next = graph.nodes.find((n) => incoming.get(n.id) === 0);
+    if (!next) break;
+    order.push(next.id);
+    incoming.set(next.id, -1);
+    for (const to of outgoing.get(next.id) ?? []) {
+      incoming.set(to, (incoming.get(to) ?? 0) - 1);
+    }
+  }
+
+  return {
+    order,
+    unplaced: graph.nodes.filter((n) => !order.includes(n.id)).map((n) => n.id),
+  };
+}
+
+/**
  * Which waiting runs may join the queue now, and which can never start.
  *
  * Pure, and separated from the writes below for the same reason

@@ -6,8 +6,15 @@ import {
   listMessages,
   listProposals,
   pendingProposals,
+  proposalDeps,
   type ChatRow,
 } from "../../../lib/chat";
+import {
+  currentKnowledge,
+  summarizeProposedGraph,
+  type WorkflowGraph,
+  type WorkflowKnowledge,
+} from "../../../lib/workflows";
 import { getTemplate } from "../../../lib/templates";
 import { chatGuards } from "../../../lib/settings";
 import { mountById } from "../../../lib/config";
@@ -16,6 +23,7 @@ import type {
   ChatDTO,
   ChatListEntryDTO,
   ChatProposalDTO,
+  ProposedBlockDTO,
 } from "../../../lib/apiTypes";
 
 /**
@@ -43,8 +51,27 @@ export function chatDTO(chat: ChatRow): ChatDTO {
       role: m.role,
       text: m.text,
     })),
-    proposals: listProposals(chat.id).map(proposalDTO),
+    proposals: proposalDTOs(listProposals(chat.id)),
   };
+}
+
+/**
+ * Every proposal of one thread, with what they all share read once.
+ *
+ * The untemplated guard set and the template/mount knowledge are both database
+ * reads, and the chat page polls this route every few seconds — so they are
+ * taken per request rather than per proposal. `currentKnowledge()` is only read
+ * when a workflow proposal is actually there, which on nearly every thread is
+ * never.
+ */
+function proposalDTOs(
+  rows: ReturnType<typeof listProposals>,
+): ChatProposalDTO[] {
+  const untemplated = defaultGuardsLabel();
+  const known = rows.some((p) => p.kind === "workflow")
+    ? currentKnowledge()
+    : null;
+  return rows.map((p) => proposalDTO(p, untemplated, known));
 }
 
 /**
@@ -68,11 +95,16 @@ export function chatListDTO(): ChatListEntryDTO[] {
   }));
 }
 
-function proposalDTO(p: ReturnType<typeof listProposals>[number]): ChatProposalDTO {
+function proposalDTO(
+  p: ReturnType<typeof listProposals>[number],
+  untemplated: string,
+  known: WorkflowKnowledge | null,
+): ChatProposalDTO {
   const template = p.template_id ? getTemplate(p.template_id) : null;
   return {
     id: p.id,
     createdAt: p.created_at,
+    kind: p.kind,
     templateId: p.template_id,
     templateName: template?.name ?? null,
     guardsSource:
@@ -81,15 +113,49 @@ function proposalDTO(p: ReturnType<typeof listProposals>[number]): ChatProposalD
       ? template.name
       : p.template_id
         ? "template deleted"
-        : defaultGuardsLabel(),
+        : untemplated,
     promptRewritten: p.prompt_override !== null,
     title: p.title,
     task: p.task,
     folderLabel: folderLabel(p.mount_id, p.folder),
+    dependsOn: proposalDeps(p).map((d) => ({
+      label: d.specId,
+      edge: d.edge,
+      continueBranch: d.continueBranch,
+    })),
+    blocks: known ? proposedBlocks(p.graph, known, untemplated) : [],
     status: p.status,
     runId: p.run_id,
+    workflowId: p.workflow_id,
     error: p.error,
   };
+}
+
+/**
+ * A workflow proposal's blocks, or nothing.
+ *
+ * Resolved here rather than on the client for `proposalDTO`'s own reason: the
+ * guards are not on the graph, they are on the templates it names, and a
+ * template deleted between the proposal and the click is the same fact
+ * `guardsSource: "missing"` already carries one level down. A graph that cannot
+ * be read at all yields no blocks rather than throwing — the card then shows
+ * the title and the summary, and approval refuses it by name.
+ */
+function proposedBlocks(
+  raw: string | null,
+  known: WorkflowKnowledge,
+  untemplated: string,
+): ProposedBlockDTO[] {
+  if (!raw) return [];
+  try {
+    return summarizeProposedGraph(
+      JSON.parse(raw) as WorkflowGraph,
+      known,
+      untemplated,
+    );
+  } catch {
+    return [];
+  }
 }
 
 /**

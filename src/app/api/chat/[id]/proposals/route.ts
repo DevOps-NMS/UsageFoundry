@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
 import {
   appendMessage,
-  approveProposal,
+  approveRunBatch,
   decisionNote,
   getChat,
   getProposal,
   pendingProposals,
   rejectProposal,
+  type DecisionTally,
 } from "@/lib/chat";
+import { approveWorkflowProposal } from "@/lib/workflows";
 import { promoteQueued } from "@/lib/orchestrator";
 import { chatDTO } from "../../dto";
 
@@ -30,7 +32,18 @@ type Ctx = { params: Promise<{ id: string }> };
  *
  * Approvals run in one synchronous pass with no `await` between them, because
  * `createRun`'s folder claim is only atomic within an event-loop turn — two
- * proposals for the same folder must not both decide it is free.
+ * proposals for the same folder must not both decide it is free. That property
+ * is load-bearing twice over now that a proposal can name another one: a
+ * dependency has to point at a run that exists, and every run it can point at
+ * is created in this same pass. `approveRunBatch` is where the order comes
+ * from, which is why the run proposals go through it as a batch rather than one
+ * at a time — the page sends what it displayed, and what it displayed is
+ * creation order, not dependency order.
+ *
+ * A workflow proposal is the other kind and settles differently: approving one
+ * **saves a workflow** and starts nothing. It is still an approval — the
+ * operator is agreeing to a graph a model wrote — and the second gate, the one
+ * that turns it into agents, is the press of Run on the workflow page.
  */
 export async function POST(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
@@ -83,6 +96,7 @@ export async function POST(req: Request, ctx: Ctx) {
           started: 0,
           rejected: 0,
           failed: [],
+          saved: 0,
           decided,
           foreign,
         }),
@@ -91,42 +105,67 @@ export async function POST(req: Request, ctx: Ctx) {
     );
   }
 
-  const started: string[] = [];
-  const failed: Array<{ title: string; reason: string }> = [];
-  let rejected = 0;
+  if (action === "reject") {
+    let rejected = 0;
+    for (const pid of targets) if (rejectProposal(pid)) rejected += 1;
+    const note = decisionNote({
+      action,
+      started: 0,
+      rejected,
+      failed: [],
+      saved: 0,
+      decided,
+      foreign,
+    });
+    if (note) appendMessage(id, "system", note);
+    return NextResponse.json({
+      started: [],
+      rejected,
+      failed: [],
+      saved: [],
+      chat: chatDTO(getChat(id)!),
+    });
+  }
+
+  // Both halves are synchronous, so the whole approval is still one event-loop
+  // turn however they interleave. Runs first: a workflow proposal claims no
+  // folder and takes no slot, so nothing it does can change what a run
+  // proposal is admitted into.
+  const batch = approveRunBatch(id, targets);
+  const failed: DecisionTally["failed"] = [...batch.failed];
+  const saved: Array<{ workflowId: string; name: string }> = [];
 
   for (const pid of targets) {
-    if (action === "reject") {
-      if (rejectProposal(pid)) rejected += 1;
-      continue;
-    }
     const proposal = getProposal(pid);
-    const res = approveProposal(pid);
-    if (res.ok) started.push(res.runId);
-    else failed.push({ title: proposal?.title ?? pid, reason: res.reason });
+    if (proposal?.kind !== "workflow") continue;
+    const res = approveWorkflowProposal(pid);
+    if (res.ok) saved.push({ workflowId: res.workflowId, name: res.name });
+    else failed.push({ title: proposal.title, reason: res.reason, kind: "workflow" });
   }
 
   // Runs are admitted or queued by `createRun`; this is what starts whatever
   // the last approval made startable, exactly as `POST /api/runs` relies on.
-  if (started.length > 0) promoteQueued();
+  if (batch.started.length > 0) promoteQueued();
 
   // Recorded in the thread rather than only in the proposal rows, so the
   // conversation reads as what happened: the model proposed, a person decided,
   // and the decision is in the same place as the request.
   const note = decisionNote({
     action,
-    started: started.length,
-    rejected,
+    started: batch.started.length,
+    rejected: 0,
     failed,
+    saved: saved.length,
     decided,
     foreign,
   });
   if (note) appendMessage(id, "system", note);
 
   return NextResponse.json({
-    started,
-    rejected,
+    started: batch.started,
+    rejected: 0,
     failed,
+    saved,
     chat: chatDTO(getChat(id)!),
   });
 }

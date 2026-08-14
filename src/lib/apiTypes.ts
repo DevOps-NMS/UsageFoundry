@@ -1074,9 +1074,38 @@ export interface ChatMessageDTO {
   text: string;
 }
 
+/**
+ * One block of a workflow the chat proposed, as the approval card reads it.
+ *
+ * Guard-shaped facts only. The graph itself is on the row and the canvas will
+ * draw it after approval; what a card has to carry is what a person is
+ * agreeing to — where each block runs, what it may do, how many agents a
+ * deciding block may start, and whether a merge block may spend on a conflict.
+ * An approval gate that does not show those is a gate that gets clicked
+ * through, which is `defaultGuardsLabel`'s reasoning one level up.
+ */
+export interface ProposedBlockDTO {
+  name: string;
+  kind: WorkflowNodeKind;
+  /** The template's name, or the untemplated guard set written out. */
+  guardsLabel: string;
+  /** Where it runs. Null on a merge block, which names no workspace. */
+  folderLabel: string | null;
+  /** How many runs a deciding block may start, with nobody looking. */
+  fanOut: number | null;
+  mergeAutoResolve: boolean;
+  /** The blocks it starts after, by name. */
+  after: string[];
+}
+
 export interface ChatProposalDTO {
   id: string;
   createdAt: number;
+  /**
+   * What approving this does. `run` queues a run; `workflow` **saves** a
+   * workflow and starts nothing — the press of Run is still the operator's.
+   */
+  kind: "run" | "workflow";
   /** Null when the proposal runs under the operator's default guard set. */
   templateId: string | null;
   /** Null when there is no template, or when it has since been deleted. */
@@ -1094,8 +1123,20 @@ export interface ChatProposalDTO {
   task: string;
   /** Where it would run, as a person reads it. Null means "as the template says". */
   folderLabel: string | null;
+  /**
+   * What this run waits for, by the chat's own labels. Empty on nearly every
+   * proposal. Shown rather than only acted on, because a dependency that
+   * silently did not survive approval reads exactly like one that was never
+   * asked for — and the runs then work in the same checkout in whatever order
+   * the queue felt like.
+   */
+  dependsOn: Array<{ label: string; edge: "on-success" | "on-finish"; continueBranch: boolean }>;
+  /** A workflow proposal's blocks. Empty on a run proposal. */
+  blocks: ProposedBlockDTO[];
   status: "pending" | "approved" | "rejected" | "failed";
   runId: string | null;
+  /** The workflow an approved workflow proposal saved. Never a run. */
+  workflowId: string | null;
   error: string | null;
 }
 

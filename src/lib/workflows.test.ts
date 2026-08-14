@@ -10,7 +10,8 @@ import {
   normalizeWorkflowInput,
   planEmission,
   planInstanceStep,
-  topologicalOrder,
+  planWorkflowProposal,
+  summarizeProposedGraph,
   type BlockStatus,
   type BranchOutcome,
   type EmissionLimits,
@@ -22,7 +23,7 @@ import {
   type WorkflowInstanceStatus,
   type WorkflowKnowledge,
 } from "./workflows";
-import type { RunStatus } from "./orchestrator";
+import { topologicalOrder, type RunStatus } from "./orchestrator";
 import type { TurnResult } from "./chat";
 
 /**
@@ -1044,6 +1045,136 @@ function refused(raw: unknown, over: Partial<EmissionLimits> = {}): string {
   assert.ok(!res.ok, "expected a refusal");
   return res.reason;
 }
+
+describe("planWorkflowProposal — a graph a model wrote becomes a saved workflow", () => {
+  const proposal = (nodes: unknown[], edges: unknown[] = []) => ({
+    title: "Nightly sweep",
+    graph: JSON.stringify({ nodes, edges }),
+  });
+
+  it("takes the workflow's name from the title the operator approved", () => {
+    const plan = planWorkflowProposal(proposal([node("a")]), KNOWN);
+    assert.ok(plan.ok);
+    assert.equal(plan.input.name, "Nightly sweep");
+  });
+
+  it("saves no instance budget, because a budget is not a thing a model may set", () => {
+    // Not an oversight and not a default: there is no field on the tool, no
+    // column on the row and no argument here that could carry one. A workflow
+    // with no budget runs by hand and refuses to be scheduled, which is the
+    // cost, and the card says so.
+    const plan = planWorkflowProposal(proposal([node("a")]), KNOWN);
+    assert.ok(plan.ok);
+    assert.deepEqual(plan.input.instanceBudget, {
+      maxInstanceCostUSD: null,
+      maxSessionFraction: null,
+      maxWeeklyFraction: null,
+    });
+  });
+
+  it("refuses the same graphs the save route refuses, in the same words", () => {
+    // The whole point of going through `normalizeWorkflowInput`: a second set
+    // of rules about what a workflow may be would be confidently wrong about
+    // what approval does the day one of them changed.
+    const noCap = planWorkflowProposal(
+      proposal([node("a", { kind: "orchestrator" })]),
+      KNOWN,
+    );
+    assert.ok(!noCap.ok);
+    assert.equal(
+      noCap.reason,
+      error(graph([node("a", { kind: "orchestrator" })])),
+    );
+  });
+
+  it("refuses a template deleted since the proposal was written, rather than falling back", () => {
+    const gone: WorkflowKnowledge = { ...KNOWN, templates: new Map() };
+    const plan = planWorkflowProposal(proposal([node("a")]), gone);
+    assert.ok(!plan.ok);
+    assert.match(plan.reason, /names a template that no longer exists/);
+  });
+
+  it("refuses a proposal carrying no graph, or one that cannot be read", () => {
+    const empty = planWorkflowProposal({ title: "x", graph: null }, KNOWN);
+    assert.ok(!empty.ok);
+    assert.match(empty.reason, /carries no workflow/);
+
+    const broken = planWorkflowProposal({ title: "x", graph: "{oh dear" }, KNOWN);
+    assert.ok(!broken.ok);
+    assert.match(broken.reason, /could not be read/);
+  });
+
+  it("keeps the edges, so an approved graph runs in the order it was proposed in", () => {
+    const plan = planWorkflowProposal(
+      proposal([node("a"), node("b")], [edge("a", "b", { continueBranch: true })]),
+      KNOWN,
+    );
+    assert.ok(plan.ok);
+    assert.deepEqual(plan.input.graph.edges, [
+      { from: "a", to: "b", edge: "on-success", continueBranch: true },
+    ]);
+  });
+});
+
+describe("summarizeProposedGraph — what the approval card has to show", () => {
+  const untemplated = "acceptEdits · own checkout · 1 cycle";
+
+  it("names the template each block's guards come from", () => {
+    const [a] = summarizeProposedGraph(
+      value(graph([node("a")])).graph,
+      KNOWN,
+      untemplated,
+    );
+    assert.equal(a.guardsLabel, "Isolated");
+  });
+
+  it("spells the untemplated guard set out, since there is nothing to go and read", () => {
+    const [a] = summarizeProposedGraph(
+      value(graph([node("a", { templateId: null })])).graph,
+      KNOWN,
+      untemplated,
+    );
+    assert.equal(a.guardsLabel, untemplated);
+  });
+
+  it("carries the fan-out cap, which is the number the operator is agreeing to", () => {
+    // The one figure on the card that bounds agents nobody approves
+    // individually. Absent, the decision moves to a canvas that may never be
+    // opened.
+    const [d] = summarizeProposedGraph(
+      value(graph([decider("d", { fanOut: 4 })])).graph,
+      KNOWN,
+      untemplated,
+    );
+    assert.equal(d.fanOut, 4);
+  });
+
+  it("says a merge block may pay to reconcile, and names no folder for it", () => {
+    const summary = summarizeProposedGraph(
+      value(
+        graph(
+          [node("a"), merger("m", { mergeAutoResolve: true })],
+          [edge("a", "m")],
+        ),
+      ).graph,
+      KNOWN,
+      untemplated,
+    );
+    const m = summary.find((b) => b.kind === "merge")!;
+    assert.equal(m.mergeAutoResolve, true);
+    assert.equal(m.folderLabel, null);
+    assert.deepEqual(m.after, ["A"]);
+  });
+
+  it("reports a template deleted since, the same fact approval will refuse on", () => {
+    const [a] = summarizeProposedGraph(
+      value(graph([node("a")])).graph,
+      { ...KNOWN, templates: new Map() },
+      untemplated,
+    );
+    assert.equal(a.guardsLabel, "template deleted");
+  });
+});
 
 describe("planEmission — which specs become runs", () => {
   it("accepts a plain list and keeps every field the spec may set", () => {

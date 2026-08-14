@@ -5,10 +5,21 @@ import {
   listProposals,
   MAX_PENDING_PROPOSALS,
   pendingProposals,
+  proposalDeps,
   subjectForCapability,
   type CapabilitySubject,
+  type ProposalDependency,
 } from "@/lib/chat";
-import { emitBlockRuns } from "@/lib/workflows";
+import {
+  currentKnowledge,
+  emitBlockRuns,
+  folderRefusal,
+  lastRunAt,
+  listWorkflows,
+  liveBlocksOf,
+  liveRunsOf,
+  normalizeWorkflowInput,
+} from "@/lib/workflows";
 import {
   createTemplate,
   getTemplate,
@@ -19,11 +30,13 @@ import {
 import {
   activeRuns,
   currentSnapshot,
+  DEPENDENCY_EDGES,
   describeFolder,
   getRun,
   listRuns,
   resolveWorkspaceFolder,
   runEvents,
+  type DependencyEdge,
 } from "@/lib/orchestrator";
 import { diffAsText, runDiff } from "@/lib/diff";
 import { chatGuards } from "@/lib/settings";
@@ -39,6 +52,14 @@ import { fmtUSD } from "@/lib/format";
  * think afterwards — and `settings.chatTurnBudgetUSD` is what pays for it.
  */
 const MAX_DIFF_TEXT_BYTES = 60_000;
+
+/**
+ * What a chat may call a proposal, so another one can point at it.
+ *
+ * The same shape a workflow node id and an emitted spec id take, and for the
+ * same reason: it travels in messages and in refusals a person reads.
+ */
+const SPEC_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -75,10 +96,13 @@ export const dynamic = "force-dynamic";
  * absent from a list is not a tool absent from the wire.
  *
  * Note what is absent from both: nothing here stops, resumes or reopens a run,
- * nothing here writes to a folder, and nothing here sets a budget, a permission
- * mode or an isolation choice. A chat's most is a `chat_proposals` row, inert
- * until a person approves it. A block's most is a list of run specs, which start
- * — under the guards the block's *saved* template supplies, in the mount that
+ * nothing here presses Run on a workflow, nothing here writes to a folder, and
+ * nothing here sets a budget, a permission mode or an isolation choice. A chat's
+ * most is a `chat_proposals` row, inert until a person approves it — of a run,
+ * of a run ordered behind another one, or of a whole workflow, and approving
+ * that last one *saves* a graph rather than starting it, so the press of Run
+ * stays the operator's. A block's most is a list of run specs, which start —
+ * under the guards the block's *saved* template supplies, in the mount that
  * block was pointed at, up to the number a person agreed to when they saved the
  * graph.
  */
@@ -164,6 +188,15 @@ const SHARED_TOOLS = [
       "now is a good time to start work, not to decide any run's guards.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
+  {
+    name: "list_workflows",
+    description:
+      "Saved workflows: re-runnable graphs of blocks the operator starts with " +
+      "one press of Run. Read before proposing a new one — the work may " +
+      "already be a workflow, and a graph running right now is worth " +
+      "mentioning rather than duplicating.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
 ];
 
 /** Tools only the orchestrator chat gets. None of them starts anything. */
@@ -247,8 +280,178 @@ const CHAT_TOOLS = [
             "Path within the mount, exactly as list_folders gives it. Required " +
             "when mountId is given; \"\" means the mount root.",
         },
+        id: {
+          type: "string",
+          description:
+            "Your own label for this proposal, so another one can say it runs " +
+            "after it. Only needed when something depends on this. Letters, " +
+            "digits, hyphens, underscores; unique among this chat's undecided " +
+            "proposals.",
+        },
+        dependsOn: {
+          type: "array",
+          description:
+            "Proposals this one starts after — by the id you gave them, in " +
+            "this chat. Use it when two runs would edit the same files, or " +
+            "when one reviews or builds on another. Both must be approved in " +
+            "the same click, or the earlier one must already have started.",
+          items: {
+            type: "object",
+            properties: {
+              id: {
+                type: "string",
+                description: "The id you gave another proposal in this chat.",
+              },
+              edge: {
+                type: "string",
+                enum: ["on-success", "on-finish"],
+                description:
+                  "on-success starts only if that run completed; on-finish " +
+                  "starts once it is out of the way either way.",
+              },
+              continueBranch: {
+                type: "boolean",
+                description:
+                  "Carry on that run's branch instead of cutting a fresh one, " +
+                  "so this agent starts with its commits already there. Only " +
+                  "when both runs work in a checkout of their own, and only " +
+                  "one proposal may continue any given run.",
+              },
+            },
+            required: ["id", "edge"],
+            additionalProperties: false,
+          },
+        },
       },
       required: ["title", "task"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "propose_workflow",
+    description:
+      "Propose a saved workflow — a re-runnable graph of blocks — for the " +
+      "operator to approve. This starts NOTHING and creates no run: approving " +
+      "it saves the workflow, and a person then presses Run on it. Use it for " +
+      "work that repeats or has a shape worth keeping; use propose_run for a " +
+      "one-off. Guards come from each block's template, or the operator's " +
+      "default guard set, and cannot be set here. The workflow is saved with " +
+      "no workflow-wide budget, which the operator adds before scheduling it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "What the workflow is called. Must be unique.",
+        },
+        summary: {
+          type: "string",
+          description:
+            "One line on what the graph does, shown on the approval card.",
+        },
+        blocks: {
+          type: "array",
+          description: "The blocks, in the order they make sense to read.",
+          items: {
+            type: "object",
+            properties: {
+              id: {
+                type: "string",
+                description:
+                  "Your own label, unique in this graph; dependsOn names it. " +
+                  "Letters, digits, hyphens, underscores.",
+              },
+              name: { type: "string", description: "What this step is called." },
+              kind: {
+                type: "string",
+                enum: ["run", "orchestrator", "merge"],
+                description:
+                  "run (default) is a fixed task. orchestrator is a short turn " +
+                  "that decides, when the workflow gets there, which runs to " +
+                  "start next — they start with no approval, so it needs " +
+                  "fanOut. merge lands the branches the blocks in front of it " +
+                  "left, and takes no task, folder or template.",
+              },
+              templateId: {
+                type: "string",
+                description:
+                  "id from list_templates, supplying every guard. Omit for the " +
+                  "operator's default guard set.",
+              },
+              mountId: {
+                type: "string",
+                description: "Mount from list_folders. Omit on a merge block.",
+              },
+              folder: {
+                type: "string",
+                description:
+                  "Path within the mount, exactly as list_folders gives it. " +
+                  "\"\" is the mount root. Omit on a merge block.",
+              },
+              task: {
+                type: "string",
+                description:
+                  "A run block's brief, or an orchestrator block's brief for " +
+                  "what to decide. Omit on a merge block.",
+              },
+              promptOverride: {
+                type: "string",
+                description:
+                  "Standing instructions replacing the template's prompt for " +
+                  "this block. The task is appended below it.",
+              },
+              fanOut: {
+                type: "number",
+                description:
+                  "Required on an orchestrator block: the most runs it may " +
+                  "ever start. Its runs start with nobody looking, so this is " +
+                  "the number the operator is agreeing to. Ignored on any " +
+                  "other kind.",
+              },
+              mergeStrategy: {
+                type: "string",
+                enum: ["merge", "squash"],
+                description: "Required on a merge block, ignored on any other.",
+              },
+              mergeAutoResolve: {
+                type: "boolean",
+                description:
+                  "Let a merge block pay a model to reconcile a conflict. " +
+                  "Costs money on its own, so leave it out unless asked.",
+              },
+              dependsOn: {
+                type: "array",
+                description: "Blocks in this graph that must settle first.",
+                items: {
+                  type: "object",
+                  properties: {
+                    id: { type: "string", description: "An id from this graph." },
+                    edge: {
+                      type: "string",
+                      enum: ["on-success", "on-finish"],
+                      description:
+                        "on-success starts only if that block completed; " +
+                        "on-finish starts once it is out of the way.",
+                    },
+                    continueBranch: {
+                      type: "boolean",
+                      description:
+                        "Carry on that block's branch rather than cutting a " +
+                        "fresh one. Both ends must be run blocks whose guards " +
+                        "give them a checkout of their own.",
+                    },
+                  },
+                  required: ["id", "edge"],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ["id", "name"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["name", "blocks"],
       additionalProperties: false,
     },
   },
@@ -578,6 +781,9 @@ async function callTool(
     case "get_usage":
       return usageReport();
 
+    case "list_workflows":
+      return workflowReport();
+
     case "list_proposals": {
       const proposals = listProposals(chatId!);
       if (proposals.length === 0) {
@@ -587,10 +793,17 @@ async function callTool(
         JSON.stringify(
           proposals.map((p) => ({
             proposalId: p.id,
+            // The chat's own label, which is what a dependsOn names — reported
+            // back because a turn that resumes a conversation has the thread
+            // but not necessarily the labels it used two turns ago.
+            id: p.spec_id,
+            kind: p.kind,
             title: p.title,
             status: p.status,
             templateId: p.template_id,
             runId: p.run_id,
+            workflowId: p.workflow_id,
+            dependsOn: proposalDeps(p).map((d) => `${d.specId} (${d.edge})`),
             error: p.error,
             task: p.task.slice(0, 200),
           })),
@@ -605,6 +818,9 @@ async function callTool(
 
     case "propose_run":
       return proposeRun(args, chatId!);
+
+    case "propose_workflow":
+      return proposeWorkflow(args, chatId!);
 
     case "emit_runs": {
       // Narrowed rather than asserted: `subject.kind` is what decides, and the
@@ -785,6 +1001,176 @@ async function usageReport() {
 }
 
 /**
+ * The saved workflows, as much of each as is worth reading before proposing.
+ *
+ * The blocks are summarised rather than dumped: a graph's node ids, prompt
+ * overrides and edge conditions are what the editor needs and not what a
+ * decision to propose a *new* one turns on. What that decision does turn on is
+ * whether this work already has a workflow, whether one is running right now,
+ * and — for a graph the chat is about to extend or imitate — which guard set
+ * each step uses.
+ *
+ * `liveRuns`/`liveBlocks` are reported for `list_runs`' reason: work already in
+ * flight is worth mentioning rather than duplicating.
+ */
+function workflowReport() {
+  const workflows = listWorkflows();
+  if (workflows.length === 0) {
+    return text(
+      "No workflows are saved. propose_workflow proposes one; the operator " +
+        "approves it, which saves it, and then presses Run themselves.",
+    );
+  }
+  return text(
+    JSON.stringify(
+      workflows.map((w) => {
+        const last = lastRunAt(w.id);
+        return {
+          workflowId: w.id,
+          name: w.name,
+          lastRunAt: last === null ? null : new Date(last).toISOString(),
+          liveRuns: liveRunsOf(w.id).length,
+          liveBlocks: liveBlocksOf(w.id),
+          instanceBudget: w.instanceBudget,
+          blocks: w.graph.nodes.map((n) => ({
+            id: n.id,
+            name: n.name,
+            kind: n.kind,
+            templateId: n.templateId,
+            mountId: n.mountId || null,
+            folder: n.kind === "merge" ? null : n.folder,
+            fanOut: n.fanOut,
+            after: w.graph.edges
+              .filter((e) => e.to === n.id)
+              .map((e) => `${e.from} (${e.edge})`),
+          })),
+        };
+      }),
+      null,
+      1,
+    ),
+  );
+}
+
+/**
+ * Record one workflow proposal, refusing anything that could not be saved.
+ *
+ * The graph goes through the *same* `normalizeWorkflowInput` and the same
+ * `folderRefusal` the save route and the editor's validate route call, with the
+ * same `currentKnowledge()` — a second set of rules about what a workflow may
+ * be would be a second set to keep in step, confidently wrong about what
+ * approval would do the day one of them changed. It is checked here as well as
+ * at approval for `proposeRun`'s reason: a proposal that cannot be approved is
+ * otherwise discovered by a person clicking Approve, which is the wrong moment
+ * and the wrong person.
+ *
+ * The normalized graph is what is stored, so what the card describes and what
+ * approval saves are one object rather than two readings of the model's text.
+ *
+ * There is no `instanceBudget` argument and no column that could carry one:
+ * that is a limit on billed spend, and this route has never let a model set
+ * one. The workflow is saved without it and the card says what that costs —
+ * it can be run by hand and cannot be scheduled until the operator sets one.
+ */
+function proposeWorkflow(args: Record<string, unknown>, chatId: string) {
+  const name = String(args.name ?? "").trim();
+  if (!name) return text("A workflow needs a name.", true);
+
+  const blocks = Array.isArray(args.blocks) ? args.blocks : null;
+  if (!blocks || blocks.length === 0) {
+    return text("A workflow needs at least one block of work.", true);
+  }
+
+  // The tool takes each block's own `dependsOn`, which is the shape `emit_runs`
+  // already uses; a graph is `{nodes, edges}`. Converted here rather than asked
+  // for in edge form, so a model that has written one has written the other.
+  const edges: Array<Record<string, unknown>> = [];
+  for (const entry of blocks) {
+    const b = (entry ?? {}) as Record<string, unknown>;
+    const to = String(b.id ?? "");
+
+    // `""` is the mount root, and `normalizeWorkflowInput` is right to treat it
+    // as a real answer — the editor's picker offers it, and choosing it is a
+    // decision. An *omitted* field is not that decision, and reading one as the
+    // other would silently put a block on the whole workspace, which is the one
+    // selection that blocks every other run in the tree. So it is required
+    // here, exactly as `propose_run` requires a folder beside a mountId.
+    if (String(b.kind ?? "run") !== "merge" && b.folder === undefined) {
+      return text(
+        `“${String(b.name ?? to)}” names no folder. Pass it exactly as ` +
+          'list_folders gives it, or "" if you really mean the whole ' +
+          "workspace, which blocks every other run under it.",
+        true,
+      );
+    }
+
+    for (const raw of Array.isArray(b.dependsOn) ? b.dependsOn : []) {
+      const d = (raw ?? {}) as Record<string, unknown>;
+      edges.push({
+        from: String(d.id ?? ""),
+        to,
+        edge: String(d.edge ?? ""),
+        continueBranch: d.continueBranch === true,
+      });
+    }
+  }
+
+  const known = currentKnowledge();
+  const parsed = normalizeWorkflowInput(
+    { name, graph: { nodes: blocks, edges }, instanceBudget: null },
+    known,
+  );
+  if (!parsed.ok) return text(parsed.error, true);
+
+  const missing = folderRefusal(parsed.value.graph);
+  if (missing) return text(missing, true);
+
+  const pending = pendingProposals(chatId);
+  if (pending.length >= MAX_PENDING_PROPOSALS) {
+    return text(pendingLimitMessage(pending.length), true);
+  }
+
+  const proposal = createProposal(chatId, {
+    kind: "workflow",
+    templateId: null,
+    title: name,
+    task: String(args.summary ?? "").trim() || `A workflow of ${parsed.value.graph.nodes.length} block(s).`,
+    promptOverride: null,
+    mountId: null,
+    folder: null,
+    graph: JSON.stringify(parsed.value.graph),
+  });
+
+  const deciding = parsed.value.graph.nodes.filter(
+    (n) => n.kind === "orchestrator",
+  );
+  return text(
+    `Proposed the workflow “${name}” (id ${proposal.id}) with ` +
+      `${parsed.value.graph.nodes.length} block(s). Approving it **saves** the ` +
+      "workflow; it starts nothing, and the operator presses Run on it " +
+      "themselves." +
+      (deciding.length > 0
+        ? ` ${deciding.length} block(s) decide what to run and may start up to ` +
+          `${deciding.reduce((n, d) => n + (d.fanOut ?? 0), 0)} run(s) between ` +
+          "them with no approval, which the card says."
+        : "") +
+      " It is saved with no workflow-wide budget, so it can be run by hand and " +
+      "cannot be scheduled until the operator sets one.",
+  );
+}
+
+/** One sentence, shared by both proposal tools, because the limit is shared. */
+function pendingLimitMessage(count: number): string {
+  return (
+    `This chat already has ${count} proposals waiting for approval, which is ` +
+    `the limit (${MAX_PENDING_PROPOSALS}). A list that long stops getting read ` +
+    "before it gets approved. Tell the operator what you would propose next " +
+    "and ask them to approve or reject these first, or narrow what you are " +
+    "proposing."
+  );
+}
+
+/**
  * Write a template's name and prompt, and nothing else.
  *
  * The guards are read off the existing row or off `chatGuards()` and written
@@ -928,14 +1314,120 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
 
   const pending = pendingProposals(chatId);
   if (pending.length >= MAX_PENDING_PROPOSALS) {
+    return text(pendingLimitMessage(pending.length), true);
+  }
+
+  // The chat's own label, and what it says this run starts after. Checked here
+  // rather than only at approval for the reason everything else in this
+  // function is: a chain that cannot be wired is otherwise discovered by a
+  // person clicking Approve on a list of twenty, and what they are shown then
+  // is one proposal failing over a label they never saw.
+  const labels = new Map(
+    listProposals(chatId)
+      .filter((p) => p.spec_id)
+      .map((p) => [p.spec_id!, p]),
+  );
+
+  const specId = String(args.id ?? "").trim() || null;
+  if (specId !== null) {
+    if (!SPEC_ID.test(specId)) {
+      return text(
+        `"${specId}" is not a usable id. An id is 1–64 letters, digits, ` +
+          "hyphens or underscores.",
+        true,
+      );
+    }
+    // Only against what is still undecided: a label reused after the first one
+    // has become a run is unambiguous, because a dependency resolves against
+    // the batch first and only then against what already started.
+    if (labels.get(specId)?.status === "pending") {
+      return text(
+        "Another proposal waiting for approval in this chat is already " +
+          `labelled "${specId}". Give this one a different id.`,
+        true,
+      );
+    }
+  }
+
+  const dependsOn: ProposalDependency[] = [];
+  for (const raw of Array.isArray(args.dependsOn) ? args.dependsOn : []) {
+    const d = (raw ?? {}) as Record<string, unknown>;
+    const on = String(d.id ?? "").trim();
+    if (specId !== null && on === specId) {
+      return text("A proposal cannot start after itself.", true);
+    }
+    const target = labels.get(on);
+    if (!target) {
+      return text(
+        `This is set to start after "${on}", which is not a proposal in this ` +
+          "chat. Give the earlier proposal an id and name that one, or call " +
+          "list_proposals for the ids already used.",
+        true,
+      );
+    }
+    if (target.status === "rejected" || target.status === "failed") {
+      return text(
+        `"${on}" was ${target.status} and never became a run, so nothing can ` +
+          "start after it.",
+        true,
+      );
+    }
+    if (dependsOn.some((existing) => existing.specId === on)) {
+      return text(
+        `"${on}" is named twice, so it is unclear which condition applies.`,
+        true,
+      );
+    }
+    const edge = String(d.edge ?? "");
+    if (!(DEPENDENCY_EDGES as readonly string[]).includes(edge)) {
+      return text(
+        `Starting after "${on}" needs a condition: ${DEPENDENCY_EDGES.join(" or ")}.`,
+        true,
+      );
+    }
+    dependsOn.push({
+      specId: on,
+      edge: edge as DependencyEdge,
+      // `=== true` for the reason `POST /api/runs` reads it that way: it
+      // decides which branch a billed agent commits to, so anything else off
+      // the wire must fail safe.
+      continueBranch: d.continueBranch === true,
+    });
+  }
+
+  // Carrying a branch on needs a checkout at both ends, and at most one of
+  // them. `admitDependencies` refuses both of these as well, but it does so
+  // when the operator clicks and in terms of run ids they have never seen —
+  // and the second one is not even a mistake the model can see it made, since
+  // isolation is on a guard set it never chose.
+  const continuing = dependsOn.filter((d) => d.continueBranch);
+  if (continuing.length > 1) {
     return text(
-      `This chat already has ${pending.length} proposals waiting for approval, ` +
-        `which is the limit (${MAX_PENDING_PROPOSALS}). A list that long stops ` +
-        "getting read before it gets approved. Tell the operator what you would " +
-        "propose next and ask them to approve or reject these first, or narrow " +
-        "what you are proposing.",
+      `This is set to carry on the branch of both "${continuing[0].specId}" and ` +
+        `"${continuing[1].specId}". A run can only continue one branch.`,
       true,
     );
+  }
+  if (continuing.length === 1) {
+    const predecessor = labels.get(continuing[0].specId)!;
+    const flat = [
+      { label: "This proposal", guards: template ?? chatGuards() },
+      {
+        label: `"${continuing[0].specId}"`,
+        guards: predecessor.template_id
+          ? (getTemplate(predecessor.template_id) ?? chatGuards())
+          : chatGuards(),
+      },
+    ].find((end) => !end.guards.isolate);
+    if (flat) {
+      return text(
+        `${flat.label} works directly in the folder rather than in a checkout ` +
+          "of its own, so there is no branch to carry on. Both runs need guards " +
+          "that isolate — a template that does, or ask the operator to change " +
+          "the default guard set.",
+        true,
+      );
+    }
   }
 
   const promptOverride = String(args.promptOverride ?? "").trim() || null;
@@ -947,13 +1439,25 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
     promptOverride,
     mountId,
     folder,
+    specId,
+    dependsOn,
   });
 
   const guards = template
     ? `template "${template.name}"${promptOverride ? ", with a prompt you rewrote" : ""}`
     : "the operator's default guard set";
+  const after =
+    dependsOn.length === 0
+      ? ""
+      : ` It starts after ${dependsOn
+          .map(
+            (d) =>
+              `"${d.specId}" (${d.edge}${d.continueBranch ? ", on its branch" : ""})`,
+          )
+          .join(" and ")} — say so, because both have to be approved in the ` +
+        "same click unless the earlier one has already started.";
   return text(
-    `Proposed "${title}" (id ${proposal.id}) under ${guards}. It is waiting ` +
-      "for the operator to approve it; nothing is running.",
+    `Proposed "${title}" (id ${proposal.id}) under ${guards}.${after} It is ` +
+      "waiting for the operator to approve it; nothing is running.",
   );
 }

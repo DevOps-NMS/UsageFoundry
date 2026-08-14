@@ -7,6 +7,7 @@ import type {
   ChatListEntryDTO,
   ChatMessageDTO,
   ChatProposalDTO,
+  ProposedBlockDTO,
 } from "@/lib/apiTypes";
 import { chatRequest } from "@/lib/chatRequest";
 import {
@@ -70,6 +71,13 @@ const PROPOSAL_ROW: Record<"selected" | "idle", string> = {
 const GUARD_TONE: Record<"missing" | "set", string> = {
   missing: "text-danger",
   set: "text-ink-muted",
+};
+
+/** What a proposed block is, in the words the workflow pages already use. */
+const BLOCK_KIND: Record<ProposedBlockDTO["kind"], string> = {
+  run: "run",
+  orchestrator: "decides what to run",
+  merge: "lands branches",
 };
 
 /**
@@ -358,12 +366,33 @@ export default function ChatPage() {
 
   // What the click does, counted, above the button that does it. "Approve"
   // alone is a word; this is the sentence a person needs before pressing it.
+  //
+  // The two kinds are counted apart rather than summed, because approving them
+  // does two different things and only one of them spends money: a run
+  // proposal starts an unattended agent, a workflow proposal *saves a graph*
+  // and starts nothing. A single sentence over both would have to be true of
+  // the stronger one, which would claim four agents are about to work when
+  // three of the four selections were workflows.
+  const chosen = pending.filter((p) => selected.has(p.id));
+  const runCount = chosen.filter((p) => p.kind === "run").length;
+  const graphCount = chosen.length - runCount;
   const approveConsequence =
-    selected.size === 0
-      ? "Approving starts each one as an unattended run under the guards shown on it."
-      : selected.size === 1
-        ? "Approve starts one unattended run that spends real money, under the guards shown on it."
-        : `Approve starts ${selected.size} unattended runs that spend real money, under the guards shown on each.`;
+    chosen.length === 0
+      ? "Approving starts each run under the guards shown on it, and saves each workflow without starting it."
+      : [
+          runCount === 1
+            ? "Approve starts one unattended run that spends real money, under the guards shown on it."
+            : runCount > 1
+              ? `Approve starts ${runCount} unattended runs that spend real money, under the guards shown on each.`
+              : "",
+          graphCount === 1
+            ? "It saves one workflow without starting it — press Run on the workflow itself when you want it."
+            : graphCount > 1
+              ? `It saves ${graphCount} workflows without starting them — press Run on each when you want it.`
+              : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
 
   const toggle = (id: string) => {
     setSelected((prev) => {
@@ -737,6 +766,7 @@ function Proposal({
   checked: boolean;
   onToggle: () => void;
 }) {
+  const workflow = proposal.kind === "workflow";
   const missing = proposal.guardsSource === "missing";
   const folder = proposal.folderLabel ?? "folder from the template";
 
@@ -756,29 +786,60 @@ function Proposal({
         className="mt-0.5 size-4 shrink-0 accent-accent"
       />
       <div className="min-w-0 flex-1">
-        <div className="text-sm leading-snug font-semibold text-ink">{proposal.title}</div>
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1 text-sm leading-snug font-semibold text-ink">
+            {proposal.title}
+          </div>
+          {workflow && <Badge tone="neutral">workflow</Badge>}
+        </div>
         <p className="mt-1 line-clamp-3 text-xs leading-normal text-ink-muted">
           {proposal.task}
         </p>
-        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-ink-muted">
-          <span className="inline-flex min-w-0 max-w-full items-center gap-1" title={folder}>
-            <FolderIcon />
-            <span className="truncate">{folder}</span>
-          </span>
-          <span
-            className={`inline-flex min-w-0 max-w-full items-center gap-1 ${
-              GUARD_TONE[missing ? "missing" : "set"]
-            }`}
-            title={proposal.guardsLabel}
-          >
-            <GuardIcon />
-            <span className="truncate">
-              {missing ? "template deleted" : proposal.guardsLabel}
+
+        {workflow ? (
+          <ProposedGraph proposal={proposal} />
+        ) : (
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-ink-muted">
+            <span className="inline-flex min-w-0 max-w-full items-center gap-1" title={folder}>
+              <FolderIcon />
+              <span className="truncate">{folder}</span>
             </span>
-          </span>
-          {proposal.promptRewritten && <span>prompt rewritten</span>}
-        </div>
-        {missing && (
+            <span
+              className={`inline-flex min-w-0 max-w-full items-center gap-1 ${
+                GUARD_TONE[missing ? "missing" : "set"]
+              }`}
+              title={proposal.guardsLabel}
+            >
+              <GuardIcon />
+              <span className="truncate">
+                {missing ? "template deleted" : proposal.guardsLabel}
+              </span>
+            </span>
+            {proposal.promptRewritten && <span>prompt rewritten</span>}
+          </div>
+        )}
+
+        {/* Shown rather than only acted on: a dependency that did not survive
+            approval reads exactly like one that was never asked for, and the
+            two agents then work in the same checkout in whatever order the
+            queue felt like. It also says the thing the operator has to *do* —
+            tick both, or the later one is failed by name. */}
+        {proposal.dependsOn.length > 0 && (
+          <p className="mt-2 text-2xs leading-normal text-ink-muted">
+            Starts after{" "}
+            {proposal.dependsOn.map((d, i) => (
+              <span key={d.label}>
+                {i > 0 && " and "}
+                <span className="mono">{d.label}</span>
+                {d.edge === "on-success" ? " (only if it succeeds)" : " (either way)"}
+                {d.continueBranch && ", on its branch"}
+              </span>
+            ))}
+            . Approve them together, or this one is not started.
+          </p>
+        )}
+
+        {missing && !workflow && (
           <p className="mt-2 text-2xs leading-normal font-medium text-danger">
             The template this names has been deleted, so approving it will be
             refused.
@@ -789,19 +850,110 @@ function Proposal({
   );
 }
 
+/**
+ * A proposed workflow's blocks, and what approving it does.
+ *
+ * Every guard-shaped fact on one line per block, for the reason the run card
+ * carries a folder and a guard set: this is a graph a *model* wrote, and the
+ * argument that lets an orchestrator block start agents with nobody looking is
+ * that a person fixed its folder, its guard set and its fan-out cap. Approving
+ * this card is where that person does the fixing, so the numbers have to be on
+ * it — a card that said "a workflow of 5 blocks" would move the decision to a
+ * canvas the operator may never open.
+ *
+ * The sentence about saving leads rather than trails, because it is the one
+ * thing that makes approving this different from approving everything else in
+ * this panel.
+ */
+function ProposedGraph({ proposal }: { proposal: ChatProposalDTO }) {
+  const fanOut = proposal.blocks.reduce((n, b) => n + (b.fanOut ?? 0), 0);
+  const paying = proposal.blocks.some((b) => b.mergeAutoResolve);
+
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      <p className="text-2xs leading-normal text-ink-muted">
+        Approving <strong className="font-semibold text-ink">saves</strong> this
+        workflow and starts nothing. You press Run on it yourself, and it has no
+        workflow-wide budget until you set one — so it cannot be scheduled yet.
+      </p>
+
+      {proposal.blocks.length === 0 ? (
+        <Hint tone="danger">
+          This proposal&rsquo;s graph could not be read, so approving it will be
+          refused.
+        </Hint>
+      ) : (
+        <ol className="flex flex-col gap-1 border-l border-line pl-2.5">
+          {/* Keyed by position, which is the stable identity here: this list is
+              a render of a frozen graph on a decided-or-pending row, so it never
+              reorders — and two blocks may legitimately share a name, which the
+              node ids this list does not carry are what keep apart. */}
+          {proposal.blocks.map((b, i) => (
+            <li key={i} className="text-2xs leading-normal text-ink-muted">
+              <span className="font-semibold text-ink">{b.name}</span>
+              <span className="text-ink-muted"> · {BLOCK_KIND[b.kind]}</span>
+              {b.folderLabel && (
+                <>
+                  {" · "}
+                  <span className="mono">{b.folderLabel}</span>
+                </>
+              )}
+              <span
+                className={b.guardsLabel === "template deleted" ? "text-danger" : ""}
+              >
+                {" · "}
+                {b.guardsLabel}
+              </span>
+              {b.fanOut !== null && (
+                <span className="text-warn"> · up to {b.fanOut} run(s), no approval</span>
+              )}
+              {b.mergeAutoResolve && (
+                <span className="text-warn"> · may pay to resolve conflicts</span>
+              )}
+              {b.after.length > 0 && <> · after {b.after.join(", ")}</>}
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {(fanOut > 0 || paying) && (
+        <p className="text-2xs leading-normal font-medium text-warn">
+          {fanOut > 0 &&
+            `Each press of Run may start up to ${fanOut} run(s) that nobody approves individually.`}
+          {fanOut > 0 && paying && " "}
+          {paying && "A merge block may pay a model to reconcile a conflict."}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** What happened to a proposal, and no buttons: it is not a decision any more. */
 function Decided({ proposal }: { proposal: ChatProposalDTO }) {
+  // A workflow proposal settles onto a workflow, never a run, so the link goes
+  // where the thing it made actually is — and where the press of Run it still
+  // needs lives. Reading it off `runId` would leave an approved graph as the
+  // one decided row with nothing to click.
+  const href = proposal.runId
+    ? `/runs/${proposal.runId}`
+    : proposal.workflowId
+      ? `/workflows/${proposal.workflowId}`
+      : null;
+
   return (
     <div className="flex items-start gap-2 py-2 first:pt-0 last:pb-0">
       <Badge tone={PROPOSAL_TONE[proposal.status]}>{proposal.status}</Badge>
       <div className="min-w-0 flex-1">
-        {proposal.runId ? (
+        {href ? (
           <Link
-            href={`/runs/${proposal.runId}`}
+            href={href}
             title={proposal.title}
             className="block truncate text-xs"
           >
             {proposal.title}
+            {proposal.workflowId && (
+              <span className="text-ink-muted"> — saved, not started</span>
+            )}
           </Link>
         ) : (
           <div className="truncate text-xs text-ink-muted" title={proposal.title}>

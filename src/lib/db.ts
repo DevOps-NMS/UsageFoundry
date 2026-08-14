@@ -631,6 +631,34 @@ function migrate(db: Database.Database) {
   // because a nullable column is the one change ALTER does support.
   addColumn(db, "chat_proposals", "prompt_override", "TEXT");
 
+  // What this proposal is a proposal *of*. 'run' is the original and the
+  // default, and it has to be: every row written before a workflow could be
+  // proposed says nothing here, and the other reading would turn a queued run
+  // into a graph nobody wrote. 'workflow' is the second, and approving one
+  // saves a workflow rather than starting anything — see `planWorkflowProposal`.
+  addColumn(db, "chat_proposals", "kind", "TEXT NOT NULL DEFAULT 'run'");
+
+  // The chat's own label for a proposal, and the labels it says this one starts
+  // after. Both null on a proposal that neither names itself nor waits for
+  // anything, which is every proposal made before dependencies existed.
+  //
+  // The label is the chat's, not this app's: the model writes several proposals
+  // in one turn and has to be able to point one at another before either has an
+  // id. It is resolved to a *run* id at approval, against the proposals of this
+  // chat, and a label that resolves to nothing fails that one proposal with a
+  // sentence rather than starting it with no dependency at all — which is the
+  // silent failure `releasableRuns` exists to have none of.
+  addColumn(db, "chat_proposals", "spec_id", "TEXT");
+  addColumn(db, "chat_proposals", "depends_on", "TEXT");
+
+  // The graph a workflow proposal carries, normalized by the same
+  // `normalizeWorkflowInput` the save route runs, and the workflow approving it
+  // created. Null on a run proposal, exactly as `run_id` is null on a workflow
+  // one — the two kinds settle onto different rows and neither should be read
+  // off the other's column.
+  addColumn(db, "chat_proposals", "graph", "TEXT");
+  addColumn(db, "chat_proposals", "workflow_id", "TEXT");
+
   // The order a chat's messages were written in, because `ts` does not decide
   // it: `finishTurn` appends the reply, an error and a denial note inside one
   // synchronous block, so they routinely share a millisecond, and the primary

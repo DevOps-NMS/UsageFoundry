@@ -9,14 +9,20 @@ import { after, describe, it } from "node:test";
 // Types only: an `import` of a *value* from `./chat` is hoisted above the
 // environment set below, which is what the `require` further down exists to
 // avoid. `import type` is erased and loads nothing.
-import type { ChatProposalRow, ChatRow, DecisionTally } from "./chat";
+import type {
+  BatchProposal,
+  ChatProposalRow,
+  ChatRow,
+  DecisionTally,
+  SettledProposal,
+} from "./chat";
 import type { RunTemplate } from "./templates";
 import type { RunGuards } from "./settings";
 
 /**
- * Covers `planProposal`, `chatPrompt`, `decisionNote`, `githubSlug`,
- * `settleOnExit`, `staleTurn` and the turn claim in `sendChatMessage`, and
- * only those.
+ * Covers `planProposal`, `planApprovalBatch`, `chatPrompt`, `decisionNote`,
+ * `githubSlug`, `settleOnExit`, `staleTurn` and the turn claim in
+ * `sendChatMessage`, and only those.
  *
  * Each is the same class of failure the rest of this suite is reserved for —
  * silent, and expensive:
@@ -28,6 +34,14 @@ import type { RunGuards } from "./settings";
  *    from something a person wrote — a template, or the untemplated guard set
  *    in settings. A regression here type-checks perfectly and shows up as an
  *    agent running somewhere nobody chose.
+ *  - `planApprovalBatch` decides the order one click creates its runs in and
+ *    what each one waits for, and both ways of being wrong are silent. Out of
+ *    order, a proposal names a run that does not exist yet and is refused as a
+ *    missing run — an artefact of what the page happened to display, reported
+ *    as a fact about the work. A dependency silently dropped is worse: a run
+ *    told to wait and started immediately is bit-for-bit a run that was never
+ *    told, and the two agents then work in the same checkout in whatever order
+ *    the queue felt like.
  *  - `composeTask` decides what the agent is actually told. It is the one half
  *    of a run the chat may write, and getting the two halves the wrong way
  *    round — or dropping one — is a run that does something adjacent to the
@@ -89,10 +103,14 @@ const {
   chatPrompt,
   composeTask,
   createChat,
+  createProposal,
   decisionNote,
   getChat,
   listMessages,
+  listProposals,
+  proposalDeps,
   parseTurnOutput,
+  planApprovalBatch,
   planProposal,
   sendChatMessage,
   settleOnExit,
@@ -367,12 +385,146 @@ describe("composeTask", () => {
   });
 });
 
+describe("planApprovalBatch", () => {
+  const p = (
+    id: string,
+    dependsOn: BatchProposal["dependsOn"] = [],
+  ): BatchProposal => ({ id, specId: id, title: id, dependsOn });
+
+  const after = (specId: string, continueBranch = false) => ({
+    specId,
+    edge: "on-success" as const,
+    continueBranch,
+  });
+
+  const none = new Map<string, SettledProposal>();
+
+  /** Ids of the steps that will be created, in the order they will be. */
+  const created = (steps: ReturnType<typeof planApprovalBatch>) =>
+    steps.filter((s) => s.ok).map((s) => s.id);
+
+  const refusal = (steps: ReturnType<typeof planApprovalBatch>, id: string) =>
+    steps.find((s) => !s.ok && s.id === id) as
+      | { ok: false; reason: string }
+      | undefined;
+
+  it("creates every proposal after the one it waits for, whatever order it was sent in", () => {
+    // The page sends creation order, which for a chain the chat thought of
+    // backwards is the reverse of what `createRun` needs — and the failure is
+    // not an ordering complaint, it is "no such run to depend on" about a run
+    // that was going to exist one line later.
+    const steps = planApprovalBatch([p("c", [after("b")]), p("b", [after("a")]), p("a")], none);
+    assert.deepEqual(created(steps), ["a", "b", "c"]);
+  });
+
+  it("keeps the sent order when nothing depends on anything", () => {
+    const steps = planApprovalBatch([p("x"), p("y"), p("z")], none);
+    assert.deepEqual(created(steps), ["x", "y", "z"]);
+  });
+
+  it("resolves a label to a sibling in the batch, not to a run", () => {
+    const steps = planApprovalBatch([p("a"), p("b", [after("a")])], none);
+    const b = steps.find((s) => s.ok && s.id === "b") as {
+      ok: true;
+      dependsOn: Array<{ on: string; proposalId?: string }>;
+    };
+    assert.deepEqual(b.dependsOn, [
+      { on: "proposal", proposalId: "a", edge: "on-success", continueBranch: false },
+    ]);
+  });
+
+  it("resolves a label to the run an earlier click already started", () => {
+    const steps = planApprovalBatch(
+      [p("b", [after("a", true)])],
+      new Map([["a", { status: "approved", runId: "run-1" }]]),
+    );
+    const b = steps.find((s) => s.ok) as {
+      ok: true;
+      dependsOn: Array<Record<string, unknown>>;
+    };
+    assert.deepEqual(b.dependsOn, [
+      { on: "run", runId: "run-1", edge: "on-success", continueBranch: true },
+    ]);
+  });
+
+  it("refuses a label still waiting for a decision, and says to approve them together", () => {
+    // The expensive silent alternative: dropping the edge and starting the
+    // dependent anyway, which looks exactly like a run nobody ordered.
+    const steps = planApprovalBatch(
+      [p("b", [after("a")])],
+      new Map([["a", { status: "pending", runId: null }]]),
+    );
+    assert.equal(created(steps).length, 0);
+    assert.match(refusal(steps, "b")!.reason, /still waiting for a decision/);
+  });
+
+  it("tells a label that never became a run apart from one that was never proposed", () => {
+    const failedDep = planApprovalBatch(
+      [p("b", [after("a")])],
+      new Map([["a", { status: "failed", runId: null }]]),
+    );
+    assert.match(refusal(failedDep, "b")!.reason, /was failed and never became a run/);
+
+    const unknown = planApprovalBatch([p("b", [after("ghost")])], none);
+    assert.match(refusal(unknown, "b")!.reason, /not a proposal in this chat/);
+  });
+
+  it("cascades a refusal to everything behind it, naming the one in front", () => {
+    const steps = planApprovalBatch(
+      [p("a", [after("ghost")]), p("b", [after("a")]), p("c", [after("b")])],
+      none,
+    );
+    assert.deepEqual(created(steps), []);
+    assert.match(refusal(steps, "b")!.reason, /“a”/);
+    assert.match(refusal(steps, "c")!.reason, /“b”/);
+  });
+
+  it("starts the rest of the batch when one chain cannot be wired", () => {
+    const steps = planApprovalBatch([p("a", [after("ghost")]), p("solo")], none);
+    assert.deepEqual(created(steps), ["solo"]);
+  });
+
+  it("refuses a loop rather than leaving it to createRun's missing-run error", () => {
+    // In a loop there is no first member to create, so every member would be
+    // refused for naming a run that does not exist — a sentence about the
+    // wrong thing entirely.
+    const steps = planApprovalBatch([p("a", [after("b")]), p("b", [after("a")])], none);
+    assert.deepEqual(created(steps), []);
+    assert.match(refusal(steps, "a")!.reason, /wait for each other in a loop/);
+    assert.match(refusal(steps, "b")!.reason, /wait for each other in a loop/);
+  });
+
+  it("refuses a proposal set to start after itself", () => {
+    const steps = planApprovalBatch([p("a", [after("a")])], none);
+    assert.match(refusal(steps, "a")!.reason, /start after itself/);
+  });
+
+  it("refuses both proposals sharing a label, since an edge naming it names both", () => {
+    const steps = planApprovalBatch(
+      [{ id: "one", specId: "dup", title: "one", dependsOn: [] },
+       { id: "two", specId: "dup", title: "two", dependsOn: [] }],
+      none,
+    );
+    assert.deepEqual(created(steps), []);
+    assert.match(refusal(steps, "one")!.reason, /labelled “dup”/);
+  });
+
+  it("leaves an unlabelled proposal alone", () => {
+    const steps = planApprovalBatch(
+      [{ id: "x", specId: null, title: "x", dependsOn: [] }],
+      none,
+    );
+    assert.deepEqual(created(steps), ["x"]);
+  });
+});
+
 describe("decisionNote", () => {
   const nothing: DecisionTally = {
     action: "approve",
     started: 0,
     rejected: 0,
     failed: [],
+    saved: 0,
     decided: 0,
     foreign: 0,
   };
@@ -558,6 +710,80 @@ describe("githubSlug", () => {
     ]) {
       assert.equal(githubSlug(url), null, url);
     }
+  });
+});
+
+describe("a proposal's label, dependencies and graph survive the round trip", () => {
+  // The one thing in this feature that is neither a pure decision nor a
+  // spawn: `migrate()` adds five columns by ALTER and `proposalDeps` reads one
+  // of them back as JSON. A shape mismatch there does not throw — it returns
+  // an empty list, which is a dependent started immediately instead of after
+  // the run it was told to wait for, and that is bit-for-bit what a proposal
+  // with no dependency looks like from every page in this app.
+  it("reads back what was written, and defaults a bare proposal to a run", () => {
+    const chat = createChat();
+    createProposal(chat.id, {
+      templateId: null,
+      title: "Fix it",
+      task: "Fix the thing.",
+      promptOverride: null,
+      mountId: "work",
+      folder: "repo",
+      specId: "fix",
+    });
+    createProposal(chat.id, {
+      templateId: null,
+      title: "Prove it",
+      task: "Add the test.",
+      promptOverride: null,
+      mountId: "work",
+      folder: "repo",
+      specId: "prove",
+      dependsOn: [{ specId: "fix", edge: "on-success", continueBranch: true }],
+    });
+    createProposal(chat.id, {
+      kind: "workflow",
+      templateId: null,
+      title: "Nightly",
+      task: "A workflow of 1 block.",
+      promptOverride: null,
+      mountId: null,
+      folder: null,
+      graph: JSON.stringify({ nodes: [], edges: [] }),
+    });
+
+    // Looked up by title rather than by position: all three are written inside
+    // one synchronous block, so they share `created_at` and `listProposals`
+    // falls through to the primary key — a random UUID.
+    const rows = listProposals(chat.id);
+    const byTitle = (t: string) => rows.find((p) => p.title === t)!;
+    const fix = byTitle("Fix it");
+    const prove = byTitle("Prove it");
+    const nightly = byTitle("Nightly");
+
+    assert.equal(fix.kind, "run", "a proposal that says nothing is a run");
+    assert.equal(fix.spec_id, "fix");
+    assert.deepEqual(proposalDeps(fix), []);
+
+    assert.deepEqual(proposalDeps(prove), [
+      { specId: "fix", edge: "on-success", continueBranch: true },
+    ]);
+
+    assert.equal(nightly.kind, "workflow");
+    assert.equal(nightly.graph, '{"nodes":[],"edges":[]}');
+    assert.equal(nightly.workflow_id, null);
+  });
+
+  it("reads an unusable dependency list as none rather than throwing", () => {
+    // A row from a build that wrote something else, or a hand edit. The page
+    // must render; the card then shows no dependency, which is the fact the
+    // operator can act on.
+    assert.deepEqual(proposalDeps({ depends_on: "not json" }), []);
+    assert.deepEqual(proposalDeps({ depends_on: '{"specId":"a"}' }), []);
+    assert.deepEqual(
+      proposalDeps({ depends_on: '[{"specId":"a","edge":"whenever"}]' }),
+      [],
+    );
   });
 });
 

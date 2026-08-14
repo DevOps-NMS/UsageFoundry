@@ -1108,6 +1108,39 @@ left switched on by default — there is no setting. The route takes the explici
 list of proposals the page was showing when you clicked, so anything the chat
 added in between is not swept into a decision you did not see.
 
+**It can order runs against each other.** A proposal can carry a short label and
+say it starts after another proposal in the same conversation — *on-success*
+(only if that one completed) or *on-finish* (once it is out of the way either
+way), optionally carrying on that run's branch so the second agent opens with the
+first one's commits already there. Ask for *"fix it, then a separate run that
+adds the regression test on top"* and you get two cards, the second saying what
+it waits for. Approve them in the same click: the batch is created in dependency
+order, and a dependent approved on its own is failed by name rather than started
+with nothing in front of it. That last part is the point — a run told to wait and
+started immediately is indistinguishable from a run that was never told, and both
+agents then work in the same checkout in whatever order the queue felt like.
+
+**It can propose a whole workflow, and approving one saves it.** For work with a
+shape worth keeping — a nightly sweep, a fix/review/land chain, a per-repository
+routine — the chat can write a [workflow](#workflows)
+rather than a handful of runs. The card lists every block with the guard set it
+runs under, where it runs, what it waits for, how many runs any deciding block
+may start and whether any merge block may pay to reconcile a conflict.
+
+Approving it **saves the workflow and starts nothing**. You press Run on it
+yourself, after opening the graph if you want to. That is deliberate, and it is
+the same argument as everywhere else here: an orchestrator block's runs start
+with nobody looking *because you fixed its folder, its guard set and its fan-out
+cap when you saved the graph* — and a graph a model wrote has no such person in
+it. Saving rather than starting puts one back, so two separate decisions of yours
+stand behind every number in it before an agent exists.
+
+One consequence worth knowing: the chat cannot set a **workflow budget**, for the
+same reason it cannot set any other guard, so a workflow it proposed is saved
+without one. It runs by hand exactly as it is; putting it on a
+[schedule](#on-a-schedule) needs a budget, which you add in the
+editor. The card says so.
+
 The one place in this tool where runs *do* start without a click is a workflow's
 [orchestrator block](#a-block-that-decides-what-to-run), and it is not this
 gate switched off — it is the same gate moved. There, you approved a graph that
@@ -1927,6 +1960,22 @@ through before trusting this unattended:
   `MAX_PENDING_PROPOSALS` (25) and `MAX_REMOTES_READ` (25) were reasoned about
   rather than hit. What a chat does when it reaches the proposal cap mid-answer —
   whether it reports the refusal usefully or simply stops — has not been seen.
+- **Ordered proposals and proposed workflows, against a real CLI.**
+  `planApprovalBatch` (the creation order and what each proposal resolves to) and
+  `planWorkflowProposal` / `summarizeProposedGraph` (what a graph becomes and
+  what the card shows) are unit tested, including the cascade behind an
+  unresolvable label, a loop among the proposals, a duplicate label and a
+  template deleted between the proposal and the click. The storage round trip —
+  the five columns `migrate()` adds and the JSON `proposalDeps` reads back — is
+  pinned against a temporary database. What has not happened is a real turn:
+  no CLI has called `propose_workflow` or passed a `dependsOn`, so the shape of
+  the tool schemas is unproven in the one way that matters. Three things to
+  watch. Whether the model reaches for `dependsOn` where the folder claim
+  already serialises the work, which buys a slower queue for nothing; whether it
+  proposes an orchestrator block where two run blocks would have done, since that
+  is the one block whose runs nobody approves individually; and whether a
+  workflow card with eight blocks is still read rather than scrolled past, which
+  is the whole basis for letting a model write a graph at all.
 - **The chat's inspection tools, and proposals with no template.** `get_run`,
   `get_run_diff`, `get_usage`, `list_proposals` and `save_template` answer from
   the same functions the pages already use, and they typecheck — but no real CLI

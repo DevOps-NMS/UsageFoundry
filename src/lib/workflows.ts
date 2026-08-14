@@ -3,6 +3,8 @@ import path from "node:path";
 import { db } from "./db";
 import {
   composeTask,
+  getProposal,
+  markProposal,
   mintCapability,
   revokeCapability,
   runOrchestratorChild,
@@ -26,6 +28,7 @@ import {
   signalTree,
   stopRun,
   TERMINAL_STATUSES,
+  topologicalOrder,
   type CreateRunInput,
   type DependencyEdge,
   type DependencyLink,
@@ -277,82 +280,6 @@ const NODE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const NODE_KINDS = ["run", "orchestrator", "merge"] as const satisfies readonly WorkflowNodeKind[];
 
 const MAX_NODE_NAME = 60;
-
-/* ------------------------------------------------------------------ */
-/* Order — pure, and the reason this file has a test                   */
-/* ------------------------------------------------------------------ */
-
-/**
- * The order the runs are created in: every node after everything it waits for.
- *
- * Kahn's algorithm, with ties broken by the node's position in `nodes` — the
- * order the operator arranged them in. The determinism is not a nicety: runs
- * are admitted oldest-first and a queued run reserves its folder against
- * everything younger, so an unstable order would make two presses of Run on one
- * graph produce two different queues on the same repository.
- *
- * `unplaced` is every node the pass could not reach: a member of a dependency
- * loop, or anything waiting on one. Nothing downstream of a loop can ever start
- * — `releasableRuns` reaches a fixed point and leaves those rows asleep for
- * ever — so a graph that produces any is refused at the door rather than
- * instantiated into runs that will sit `waiting` until someone notices.
- *
- * Defensive about edges naming nodes that are not here: validation refuses
- * those separately, and an order that silently mis-sequenced a graph would
- * start an agent before the work it extends exists.
- *
- * Typed against the two fields it reads rather than against `WorkflowGraph`, so
- * the emitted specs of an orchestrator block go through the *same* ordering as
- * a saved graph. Those come from a model and are created in one pass exactly as
- * a graph is, so "every node after everything it waits for" has to mean one
- * thing here.
- */
-export function topologicalOrder(graph: {
-  nodes: readonly { id: string }[];
-  edges: readonly { from: string; to: string }[];
-}): {
-  order: string[];
-  unplaced: string[];
-} {
-  const known = new Set(graph.nodes.map((n) => n.id));
-  const seen = new Set<string>();
-  const incoming = new Map<string, number>();
-  const outgoing = new Map<string, string[]>();
-  for (const n of graph.nodes) incoming.set(n.id, 0);
-
-  for (const e of graph.edges) {
-    if (!known.has(e.from) || !known.has(e.to) || e.from === e.to) continue;
-    // A repeated pair is one dependency stated twice, not two: counted twice it
-    // would leave its dependent unplaceable and report a healthy graph as a loop.
-    const key = `${e.from} ${e.to}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    incoming.set(e.to, (incoming.get(e.to) ?? 0) + 1);
-    const list = outgoing.get(e.from);
-    if (list) list.push(e.to);
-    else outgoing.set(e.from, [e.to]);
-  }
-
-  const order: string[] = [];
-  // Re-scanned each pass rather than kept as a queue, which is what makes the
-  // tie-break the declaration order instead of the order things were released.
-  // A placed node is marked -1, so it can never match again however many
-  // successors are decremented afterwards.
-  for (;;) {
-    const next = graph.nodes.find((n) => incoming.get(n.id) === 0);
-    if (!next) break;
-    order.push(next.id);
-    incoming.set(next.id, -1);
-    for (const to of outgoing.get(next.id) ?? []) {
-      incoming.set(to, (incoming.get(to) ?? 0) - 1);
-    }
-  }
-
-  return {
-    order,
-    unplaced: graph.nodes.filter((n) => !order.includes(n.id)).map((n) => n.id),
-  };
-}
 
 /* ------------------------------------------------------------------ */
 /* Validation — pure                                                   */
@@ -852,6 +779,168 @@ export function folderRefusal(graph: WorkflowGraph): string | null {
     }
   }
   return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* A workflow the chat wrote                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How a graph the chat proposed reads on the card the operator approves.
+ *
+ * Everything here is a *guard-shaped* fact — where a block runs, what it may
+ * do, how many agents it may start, whether it may spend on a conflict — and it
+ * is assembled here rather than in the page for `defaultGuardsLabel`'s reason:
+ * an approval gate that does not show what is being approved is a gate that
+ * gets clicked through, and the guards are not on the graph, they are on the
+ * templates it names.
+ */
+export interface ProposedBlockSummary {
+  name: string;
+  kind: WorkflowNodeKind;
+  /** The template's name, or what the untemplated guard set permits. */
+  guardsLabel: string;
+  /** Where it runs, as the folder picker words it. Null on a merge block. */
+  folderLabel: string | null;
+  /** How many runs a deciding block may start. Null on every other kind. */
+  fanOut: number | null;
+  /** Whether a merge block may pay a model to reconcile a conflict. */
+  mergeAutoResolve: boolean;
+  /** The blocks it starts after, by name. */
+  after: string[];
+}
+
+export type WorkflowProposalPlan =
+  | { ok: true; input: WorkflowInput }
+  | { ok: false; reason: string };
+
+/**
+ * Turn a proposed graph into the workflow it asks for, or say why not.
+ *
+ * `planProposal` one level up, and the same division of labour: the chat says
+ * what work to do and something a person wrote says what an agent may do. Every
+ * guard in the graph comes from a block's named template or from
+ * `settings.chatDefaultGuards`, exactly as `planNode` resolves them — there is
+ * no permission mode, budget, isolation choice or model anywhere on a node for
+ * a model to reach, which is what makes a graph safe to let one write.
+ *
+ * **Approving it saves a workflow and starts nothing.** That is deliberate and
+ * is the whole reason this is allowed at all: an orchestrator block's runs start
+ * with nobody looking *because a person fixed its folder, its guard set and its
+ * fan-out cap when they saved the graph*, and a graph a model wrote has no such
+ * person in it. Saving rather than starting puts one back — the operator reads
+ * the card, then opens the canvas, then presses Run — so by the time an agent
+ * exists, two separate human decisions stand behind every number in it.
+ *
+ * The instance budget is **not** carried from the proposal, and there is
+ * nothing on the wire that could carry it: it is a limit on billed spend, which
+ * is the one class of value no route here lets a model set. `startWorkflow`
+ * still refuses a fraction guard with no ceiling, and a schedule still refuses a
+ * workflow whose budget sets nothing, so what an approved proposal produces is a
+ * workflow that runs by hand and cannot yet be scheduled. The card says so.
+ *
+ * Re-normalized rather than trusted: the graph was checked when it was
+ * proposed, and the templates and mounts it names can be gone by the time
+ * anyone clicks — the same window `planProposal`'s missing-template refusal
+ * covers, and refused the same way rather than falling back to guards nobody
+ * chose.
+ */
+export function planWorkflowProposal(
+  proposal: { title: string; graph: string | null },
+  known: WorkflowKnowledge,
+): WorkflowProposalPlan {
+  if (!proposal.graph) {
+    return { ok: false, reason: "This proposal carries no workflow to save." };
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(proposal.graph);
+  } catch {
+    return { ok: false, reason: "This proposal's workflow could not be read." };
+  }
+
+  const parsed = normalizeWorkflowInput(
+    // The name is the proposal's title, so what the operator approved and what
+    // appears in the workflow list are the same string.
+    { name: proposal.title, graph: raw, instanceBudget: null },
+    known,
+  );
+  if (!parsed.ok) return { ok: false, reason: parsed.error };
+  return { ok: true, input: parsed.value };
+}
+
+/** What the chat proposed, in the terms the card has to show. */
+export function summarizeProposedGraph(
+  graph: WorkflowGraph,
+  known: WorkflowKnowledge,
+  untemplatedLabel: string,
+): ProposedBlockSummary[] {
+  const names = new Map(graph.nodes.map((n) => [n.id, n.name]));
+  return graph.nodes.map((node) => ({
+    name: node.name,
+    kind: node.kind,
+    guardsLabel:
+      node.kind === "merge"
+        ? "no agent"
+        : node.templateId === null
+          ? untemplatedLabel
+          : (known.templates.get(node.templateId)?.name ?? "template deleted"),
+    folderLabel:
+      node.kind === "merge"
+        ? null
+        : `${mountById(node.mountId)?.label ?? node.mountId}${
+            node.folder ? `/${node.folder}` : " (mount root)"
+          }`,
+    fanOut: node.fanOut,
+    mergeAutoResolve: node.mergeAutoResolve,
+    after: graph.edges
+      .filter((e) => e.to === node.id)
+      .map((e) => names.get(e.from) ?? e.from),
+  }));
+}
+
+export type WorkflowApproval =
+  | { ok: true; workflowId: string; name: string }
+  | { ok: false; reason: string };
+
+/**
+ * Save the workflow a proposal asks for, and record what it became.
+ *
+ * Synchronous like `approveProposal`, though nothing here claims a folder: it
+ * runs inside the same pass, and a route that is synchronous throughout is one
+ * that cannot grow an `await` between two approvals of the same folder later.
+ */
+export function approveWorkflowProposal(id: string): WorkflowApproval {
+  const proposal = getProposal(id);
+  if (!proposal) return { ok: false, reason: "No such proposal." };
+  if (proposal.kind !== "workflow") {
+    return { ok: false, reason: "This proposal is a run, not a workflow." };
+  }
+
+  const plan = planWorkflowProposal(proposal, currentKnowledge());
+  if (!plan.ok) {
+    markProposal(id, "failed", { error: plan.reason });
+    return { ok: false, reason: plan.reason };
+  }
+
+  // The folder check the save route runs, for the reason it runs it there: a
+  // block's folder is what its run will use and nothing asks about it again.
+  const missing = folderRefusal(plan.input.graph);
+  if (missing) {
+    markProposal(id, "failed", { error: missing });
+    return { ok: false, reason: missing };
+  }
+
+  try {
+    const workflow = createWorkflow(plan.input);
+    markProposal(id, "approved", { workflowId: workflow.id });
+    return { ok: true, workflowId: workflow.id, name: workflow.name };
+  } catch (err) {
+    // A duplicate name arrives here as the sentence the form would show.
+    const reason = err instanceof Error ? err.message : String(err);
+    markProposal(id, "failed", { error: reason });
+    return { ok: false, reason };
+  }
 }
 
 /* ------------------------------------------------------------------ */
