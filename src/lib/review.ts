@@ -217,10 +217,20 @@ export interface AssistRequest {
   /**
    * Specialised agents this invocation may delegate to.
    *
-   * Offered, never imposed, and it costs this child none of what makes it the
-   * deliberate third kind of process: a review still runs `--permission-mode
-   * plan` so nothing it delegates can write, and a delegated turn's spend still
-   * lands in `run_reviews` rather than in `runs.spent_usd`.
+   * **The one caller left on the plural flag, and deliberately not moved to the
+   * singular one.** A run and an orchestrator block now *are* the agent they
+   * name (`sessionAgentArgs`); this stays an offer, because a review is not a
+   * run and has no operator-chosen role to take. What it is is fixed by this
+   * module — `--permission-mode plan` so nothing it does can write, its own
+   * prompt, and a cost that lands in `run_reviews` rather than `runs.spent_usd`
+   * — and selecting somebody's saved agent here would replace exactly that.
+   *
+   * Nothing supplies this today: no caller of `startAssist` passes one, so a
+   * review has never been given an agent at all. It is left as a parameter
+   * rather than deleted because the question of whether a reviewer should be
+   * choosable is a real one and this is where it would be answered; what it must
+   * not do is gain a *selected* agent by default, which is why the singular
+   * encoder is not reached from here.
    */
   agents?: AgentDefinition[];
   /**

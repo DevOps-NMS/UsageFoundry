@@ -30,7 +30,7 @@ import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
 import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
-import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents";
+import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
 // The log's own extraction of what a tool call is about, so the parser retains
 // the same line for a call whose result comes back an error. Client-safe and
 // pure; the dependency runs the permitted way round.
@@ -3288,20 +3288,26 @@ export function buildArgs(opts: {
   maxRunCostUSD: number | null;
   spentGuardUSD: number;
   /**
-   * Specialised agents this run's main thread may delegate to.
+   * The agent this run **is**, or null for an ordinary run.
    *
-   * Attached rather than imposed: `--agents` *offers* these to the delegating
-   * model, which is what a sub-agent is. The CLI also has `--agent <name>`,
-   * which replaces the session's own main agent, and that is deliberately not
-   * wired here — it is a different feature answering a different question
-   * (which role does the run itself take, rather than which specialists it may
-   * hand a subtask to), and the description a saved agent carries exists only
-   * for the delegation this flag enables.
+   * This used to be a list, offered to the run's own main thread as specialists
+   * it might delegate to (`--agents` alone). It is now the session's own agent:
+   * `sessionAgentArgs` emits the definition *and* selects it by name, so the
+   * saved prompt is what this run opens with rather than a role it may hand a
+   * subtask to.
    *
-   * They bound nothing. What the run may do is the permission mode and the two
-   * lists below, exactly as before an agent was attached.
+   * **It bounds nothing, and the two measurements that make that true are worth
+   * having in front of anyone editing this function.** The permission mode, the
+   * isolation grant and the deny list below are unchanged by it, and the
+   * appended system prompt still arrives — verified on the pin, because the
+   * failure if it did not would be silent and expensive in both directions: an
+   * isolated run whose preamble stopped arriving finishes `completed` on a
+   * branch with no commits, and a run that never saw `SELF_HOSTING_NOTICE` is
+   * one that has not been told why `pkill` is denied or what to do instead.
+   * `--agent` also survives `--resume`, which is what makes it true of every
+   * cycle rather than only the first.
    */
-  agents?: AgentDefinition[];
+  agent?: AgentDefinition | null;
   /**
    * Forward what a delegated turn says into this run's own stream.
    *
@@ -3318,9 +3324,12 @@ export function buildArgs(opts: {
   if (opts.model) args.push("--model", opts.model);
   if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
   if (opts.forwardSubAgentText) args.push("--forward-subagent-text");
-  // One encoder for all four spawn sites, because every way of getting this
-  // shape wrong is silent — see `agentsFlagValue`.
-  args.push(...agentsArgs(opts.agents ?? []));
+  // One encoder for every spawn site, because every way of getting the shape
+  // wrong is silent when a member is merely offered and fails the spawn outright
+  // when it is selected — see `agentsFlagValue` and `sessionAgentArgs`. This
+  // sits above `--allowedTools` and `--append-system-prompt` rather than below
+  // for no reason but reading order; the CLI takes the flags in any order.
+  args.push(...sessionAgentArgs(opts.agent));
   // Additive: `--allowedTools` names what skips the prompt, and everything else
   // still follows the mode. It is not the allowlist `chat.ts` runs under, where
   // `manual` mode is what makes the same flag exhaustive.
@@ -4500,9 +4509,13 @@ export async function startRun(id: string): Promise<void> {
         maxRunCostUSD: policy.maxRunCostUSD,
         spentGuardUSD: spentGuardBeforeCycle,
         // The run's own frozen copy, so every cycle — including one a restart
-        // picks up hours later — is given exactly the specialist the operator
-        // started it with, whatever has happened to the registry since.
-        agents: runAgentDefinitions(run.agent),
+        // picks up hours later — opens as exactly the agent the operator started
+        // it with, whatever has happened to the registry since. A copy rather
+        // than an id is what makes that true, and it matters more now than it
+        // did while the definition was merely being offered: an agent deleted
+        // between cycle 3 and cycle 4 would leave cycle 4 selecting a name
+        // nothing defines, which the CLI refuses at the spawn.
+        agent: parseRunAgent(run.agent),
         // Off the same `settings` read every prompt on this run comes from, so
         // it is fixed for the segment rather than per cycle. It changes only
         // what reaches the log — it is not a capability, nothing acts on it,

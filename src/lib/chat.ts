@@ -32,8 +32,8 @@ import {
   agentDefinition,
   agentKnowledgeOf,
   agentRefusal,
-  agentsArgs,
   getAgent,
+  sessionAgentArgs,
   type AgentDefinition,
   type RegistryAgent,
 } from "./agents";
@@ -1500,14 +1500,20 @@ export interface OrchestratorChildOptions {
    */
   cwd?: string;
   /**
-   * Specialised agents this turn may delegate to.
+   * The agent this turn **is**, or null.
    *
-   * Offered, never imposed — `buildArgs` says why `--agent` is not the flag
-   * used. Nothing here widens the turn's boundary: its tool surface is still
-   * whatever `/api/mcp` publishes for its subject, and a delegated turn's spend
-   * still lands inside `--max-budget-usd` below.
+   * Selected rather than offered — `sessionAgentArgs` emits the definition and
+   * picks it by name, so the saved prompt is the turn's own. Nothing here widens
+   * the turn's boundary: its tool surface is still whatever `/api/mcp` publishes
+   * for its subject, `--strict-mcp-config` and the capability token are
+   * untouched, and the spend still lands inside `--max-budget-usd` below.
+   *
+   * Only one of this function's two callers ever passes one. A workflow's
+   * orchestrator block hands over the agent its node names, which is the whole
+   * point of that field; `runTurn` withholds one, and the note there is the
+   * reason rather than an omission.
    */
-  agents?: AgentDefinition[];
+  agent?: AgentDefinition | null;
   /** `--max-budget-usd`, the only thing bounding the spend inside the CLI. */
   maxBudgetUSD: number | null;
   timeoutMs: number;
@@ -1604,9 +1610,12 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
       if (fs.existsSync(mount.path)) args.push("--add-dir", mount.path);
     }
 
-    // One encoder for all four spawn sites — every way of getting this shape
-    // wrong is silent, so there is one place that knows it.
-    args.push(...agentsArgs(o.agents ?? []));
+    // One encoder for every spawn site, so there is one place that knows the
+    // shape — silent when a member is only offered, a failed spawn when it is
+    // selected. The appended system prompt above still reaches a session started
+    // this way (measured on the pin), which is what keeps the boundary this
+    // child is bounded by in front of it.
+    args.push(...sessionAgentArgs(o.agent));
 
     if (o.resumeSessionId) args.push("--resume", o.resumeSessionId);
     if (settings.defaultModel) args.push("--model", settings.defaultModel);
@@ -1714,6 +1723,27 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
  * to what an operator actually wants here — it names the specialist the
  * proposed **run** carries, which is a fact about work that is approved before
  * it happens.
+ */
+/**
+ * One chat turn — and the one caller of `runOrchestratorChild` that names no
+ * agent.
+ *
+ * **The withholding is deliberate and the singular flag makes it more so.**
+ * While the flag was `--agents`, the reason was that a member carries a system
+ * prompt of its own and whether `--append-system-prompt` also reached a
+ * delegated turn was not verified — a small doubt about a role this child had no
+ * use for. That doubt is now measured and gone: the appended text does reach a
+ * `--agent` session, alongside the agent's own prompt.
+ *
+ * What replaces it is the stronger half of the old argument. This is the only
+ * child in the app whose boundary is *prose*: `bypassPermissions`, no allowlist,
+ * and `systemPrompt()`'s look-do-not-build paragraph. Selecting an agent here
+ * would make some saved prompt the orchestrator's own role, which is precisely
+ * the thing that paragraph exists to fix — and it is reachable from a registry a
+ * chat proposal can name. There is also still no work here for one to do: a chat
+ * turn looks and proposes, so what an agent would change is how the orchestrator
+ * *thinks*. The `@`-mention in the composer is what an operator actually wants
+ * from this, and it names the agent the proposed *run* will be.
  */
 function runTurn(chat: ChatRow, prompt: string): void {
   const settings = getSettings();

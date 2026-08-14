@@ -3886,10 +3886,14 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
       listAgents(),
     ),
     cwd: safeFolder(node),
-    // Offered to this turn, never imposed: `--agents` hands the delegating
-    // model a role it may use, and everything bounding this child — its tool
-    // surface, its capability token, `--max-budget-usd` — is unchanged.
-    agents: own ? [agentDefinition(own)] : [],
+    // What this deciding turn *is*, not a specialist it may call on: the node's
+    // agent is selected with `--agent`, so the saved prompt is the turn's own.
+    // Everything bounding this child — its tool surface, its capability token,
+    // `--max-budget-usd`, and `blockSystemPrompt` above, which still reaches a
+    // session started this way — is unchanged by it. The runs this block emits
+    // name their own agent per spec, which is the opposite way round from
+    // `promptOverride` and stays that way.
+    agent: own ? agentDefinition(own) : null,
     maxBudgetUSD: settings.chatTurnBudgetUSD,
     timeoutMs: BLOCK_TIMEOUT_MS,
     timedOutMessage: BLOCK_TIMED_OUT,
