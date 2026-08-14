@@ -65,6 +65,7 @@ const {
   reopenPrompt,
   reopenRun,
   selectPromotable,
+  worktreeSlug,
   MAX_PAUSES_PER_RUN,
   MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
@@ -126,6 +127,70 @@ describe("folder collision", () => {
     assert.equal(clash(`${nestedAlias}/Deep`, `${ws}/RepoOne`), false);
     // And the parent mount still contains the aliased nested path.
     assert.equal(clash(ws, `${nestedAlias}/Deep`), true);
+  });
+});
+
+/**
+ * Covers the name a repository's checkouts are stored under. Pure, and it earns
+ * a test for the reason the predicate above does: the whole failure is silent
+ * here and permanent. Two repositories sharing one slug are handed one
+ * directory, and since allocation is deterministic and the other repository's
+ * checkout is clean — so never `taken`, never `dirty` — every isolated run on
+ * the second repository dies at `git worktree add` on the lowest slot, for
+ * ever, with a git error that does not name the cause.
+ */
+describe("checkout slot naming", () => {
+  // The store shares one directory per mount, and `scanWorkspace` descends two
+  // levels, so a mount holding both `acme/web` and `acme-web` is ordinary
+  // rather than contrived: some repositories cloned into an org directory and
+  // some cloned flat.
+  const colliding = [
+    "acme/web",
+    "acme-web",
+    "my project",
+    "my/project",
+    "my-project",
+    "a-/b",
+    "a/-b",
+    "acme/web/api",
+    "acme-web-api",
+  ];
+
+  it("gives every one of them its own name", () => {
+    const seen = new Map<string, string>();
+    for (const rel of colliding) {
+      const slug = worktreeSlug(rel);
+      const clash = seen.get(slug);
+      assert.equal(clash, undefined, `${rel} and ${clash} both slugify to ${slug}`);
+      seen.set(slug, rel);
+    }
+  });
+
+  it("gives them their own slot paths, across every slot number", () => {
+    // What is actually allocated is `<slug>-<slot>`, so an injective slug is
+    // only half of it: the hash is fixed-width and sits immediately before that
+    // suffix, which is what keeps the trailing field readable as the slot and
+    // stops one repository's slot 11 landing on another's slot 1.
+    const seen = new Set<string>();
+    for (const rel of colliding) {
+      for (let slot = 1; slot <= 64; slot++) {
+        const dir = `${worktreeSlug(rel)}-${slot}`;
+        assert.equal(seen.has(dir), false, `${rel} slot ${slot} collides on ${dir}`);
+        seen.add(dir);
+      }
+    }
+  });
+
+  it("stays a path-safe name", () => {
+    for (const rel of [...colliding, "", "Ünicode/Repo", "..", "a".repeat(80)]) {
+      assert.match(worktreeSlug(rel), /^[a-z0-9._-]+$/);
+    }
+  });
+
+  it("is stable across calls", () => {
+    // A slug that moved between processes would orphan every checkout on disk
+    // and every branch's worktree registration on each restart.
+    assert.equal(worktreeSlug("acme/web"), worktreeSlug("acme/web"));
   });
 });
 

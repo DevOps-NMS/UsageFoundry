@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import fs from "node:fs";
 import {
@@ -1073,9 +1073,47 @@ export function resolveIsolation(o: {
   };
 }
 
-/** Path-safe, collision-free name for a directory. Separators become dashes. */
+/** Path-safe, readable name for a directory. Anything else becomes a dash. */
 function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "repo";
+}
+
+/**
+ * The name one repository's checkouts are stored under, unique per repository.
+ *
+ * `slugify` alone is lossy, and the collision that follows is silent and
+ * permanent: the path separator and the substitution character are both `-`, so
+ * `acme/web` and `acme-web` reduce to one slug and `allocateSlotPath` hands both
+ * repositories the same directory. Neither of its two escapes catches it — the
+ * other repository's checkout is a clean tree, so it is never `dirty`, and once
+ * its run is terminal it is not `taken` either — so every isolated run on the
+ * second repository dies at `git worktree add` with `already exists`,
+ * deterministically, on the lowest slot, for ever.
+ *
+ * So the readable part is kept for the operator and a digest of the exact
+ * mount-relative path is appended to carry the identity. Escaping the
+ * substitution character (`-` → `--`, `/` → `-`) was the alternative and it
+ * does not actually work: a run of three dashes has two preimages (`a-/b` and
+ * `a/-b` both encode to `a---b`), and `slugify` also lower-cases and collapses
+ * runs, so `my  project` and `My project` would go on meeting. A digest is over
+ * the string itself, so none of that reaches it, and no later edit to the
+ * readable half can quietly reintroduce a collision.
+ *
+ * It is fixed-width and sits immediately before the caller's own `-<slot>` or
+ * `-<suffix>`, which is what keeps the whole directory name unambiguous: the
+ * trailing field is the slot, the field before it is the identity.
+ */
+export function worktreeSlug(relPath: string): string {
+  // 48 bits, over the path as it stands on disk — case included, since a path
+  // that differs only in case is the same directory on a case-insensitive
+  // filesystem and so cannot be a second repository.
+  const digest = createHash("sha256").update(relPath).digest("hex").slice(0, 12);
+  return `${slugify(relPath)}-${digest}`;
+}
+
+/** `worktreeSlug` for a repository, however it is named inside its mount. */
+function repoSlug(repoRoot: string): string {
+  return worktreeSlug(describeFolder(repoRoot).relPath || path.basename(repoRoot));
 }
 
 /**
@@ -1223,8 +1261,67 @@ export function prepareWorktreeStore(repoRoot: string): string {
  */
 export function auxWorktreePath(repoRoot: string, suffix: string): string {
   const store = prepareWorktreeStore(repoRoot);
-  const slug = slugify(describeFolder(repoRoot).relPath || path.basename(repoRoot));
-  return path.join(store, `${slug}-${slugify(suffix)}`);
+  return path.join(store, `${repoSlug(repoRoot)}-${slugify(suffix)}`);
+}
+
+/**
+ * The git directory a checkout is attached to, realpath'd.
+ *
+ * `--git-common-dir` rather than `--show-toplevel`, which inside a linked
+ * checkout answers with the checkout itself and so can never say who owns it.
+ * The answer is relative when git is run at the top of an ordinary repository,
+ * so it is resolved here rather than asked for with `--path-format=absolute`,
+ * which is git 2.31 and buys nothing this cannot do.
+ */
+function gitCommonDir(dir: string): string | null {
+  const out = gitSync(dir, ["rev-parse", "--git-common-dir"]);
+  if (!out.ok || !out.stdout) return null;
+  try {
+    return fs.realpathSync(path.resolve(dir, out.stdout));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The repository a directory in the store belongs to, when it is not this one.
+ *
+ * `worktreeSlug` is what keeps two repositories out of one directory, so this
+ * should now find nothing. It is here because the cost of being wrong is not a
+ * bad merge but a run that fails at setup on every attempt, and because a
+ * directory in the store can arrive from outside that guarantee: left by hand,
+ * or by a build of this app that named slots the lossy way.
+ *
+ * Null for a path that is not a readable checkout — `slotIsDirty` already
+ * refuses one of those, and answering "foreign" about an unreadable directory
+ * would name an owner this cannot actually see.
+ */
+function foreignSlotOwner(slotPath: string, repoRoot: string): string | null {
+  if (!fs.existsSync(slotPath)) return null;
+  const owner = gitCommonDir(slotPath);
+  if (!owner) return null;
+  const mine = gitCommonDir(repoRoot);
+  if (!mine || owner === mine) return null;
+  return path.basename(owner) === ".git" ? path.dirname(owner) : owner;
+}
+
+/**
+ * `worktree add` failed — say whose directory it hit, when that is why.
+ *
+ * git's own words are `fatal: '<path>' already exists`, which names a path and
+ * not the repository the path belongs to, and the operator reading it is
+ * looking at a run that failed at setup for a reason nothing on the page
+ * explains. Allocation skips such a directory now, so this is the sentence for
+ * a slot that became somebody else's between the two.
+ */
+function checkoutFailure(repoRoot: string, slotPath: string, stderr: string): Error {
+  const owner = foreignSlotOwner(slotPath, repoRoot);
+  if (!owner) return new Error(`Could not create a checkout: ${stderr}`);
+  const name = describeFolder(owner).relPath || owner;
+  return new Error(
+    `Could not create a checkout: ${stderr} — ${path.basename(slotPath)} is a checkout of ${name}, ` +
+      "not of this repository. Remove it once that repository is done with it, then start this run again.",
+  );
 }
 
 /** True when a checkout exists and has work in it that must not be clobbered. */
@@ -1343,7 +1440,7 @@ async function ensureWorktree(run: RunRow): Promise<string> {
     const add = await git(repoRoot, ["worktree", "add", slotPath, branch], {
       timeoutMs: 30 * 60_000,
     });
-    if (!add.ok) throw new Error(`Could not create a checkout: ${add.stderr}`);
+    if (!add.ok) throw checkoutFailure(repoRoot, slotPath, add.stderr);
   } else if (run.iterations > 0 || (run.pause_count ?? 0) > 0) {
     // A resuming run whose checkout has been removed from under it. Creating a
     // fresh one would silently orphan every commit it already made, so name the
@@ -1373,7 +1470,7 @@ async function ensureWorktree(run: RunRow): Promise<string> {
       ["worktree", "add", "-b", branch, slotPath, base],
       { timeoutMs: 30 * 60_000 },
     );
-    if (!add.ok) throw new Error(`Could not create a checkout: ${add.stderr}`);
+    if (!add.ok) throw checkoutFailure(repoRoot, slotPath, add.stderr);
   }
 
   const copied = seedWorktree(repoRoot, slotPath);
@@ -1600,8 +1697,9 @@ function allocateSlotPath(repoRoot: string): string | null {
   // folder listing is built for `org/repo` layouts, so two repos called `api`
   // in one workspace is ordinary — and since the store is shared per mount and
   // allocation is deterministic, a basename collision would hand them the same
-  // directory and break isolation for the second one permanently.
-  const slug = slugify(describeFolder(repoRoot).relPath || path.basename(repoRoot));
+  // directory and break isolation for the second one permanently. That is also
+  // why the name carries a digest rather than a slug: see `worktreeSlug`.
+  const slug = repoSlug(repoRoot);
   const taken = new Set(
     activeRuns()
       .map((r) => r.worktree_path)
@@ -1613,7 +1711,13 @@ function allocateSlotPath(repoRoot: string): string | null {
     // Skip a slot left dirty by an earlier run: reusing it would either destroy
     // that work or fail at setup. Taking the next number keeps the new run
     // moving and leaves the old one recoverable.
-    if (!taken.has(candidate) && !slotIsDirty(candidate)) return candidate;
+    if (taken.has(candidate) || slotIsDirty(candidate)) continue;
+    // And skip a checkout of a *different* repository, which neither test above
+    // can see — it is clean, and nothing holds it — but which `worktree add`
+    // refuses outright. Returning it would mean a run that fails at setup with
+    // a git error about a path, where taking the next number costs nothing.
+    if (foreignSlotOwner(candidate, repoRoot)) continue;
+    return candidate;
   }
   return null;
 }
