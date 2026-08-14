@@ -119,9 +119,12 @@ services:
       # bind mount, so `docker compose -p <project>` namespaces it and two
       # instances do not share one database — but it also means its root
       # ownership and mode are copied from /data *in the image* when Docker
-      # first creates it, not taken from the host. That is why the Dockerfile
-      # marks that directory world-writable: a fresh volume has to be writable
-      # by whatever uid ends up creating the database in it.
+      # first creates it, not taken from the host. The image ships that
+      # directory root-owned 0700, which is the whole of what keeps an agent out
+      # of the database, the settings the guards read and the server lock. A
+      # volume created by an earlier release is `node:node 0777` and stays that
+      # way through any number of image pulls, so `docker-entrypoint.sh`
+      # reclaims it on every boot.
       - usagefoundry-data:/data
 
     restart: unless-stopped

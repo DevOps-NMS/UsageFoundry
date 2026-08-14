@@ -77,7 +77,7 @@ Settings shows whether a token is configured.
 | `UF_AUTH_TOKEN` | Shared secret for the UI. Blank disables auth — only acceptable on loopback. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
 | `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only. |
-| `UF_UID` / `UF_GID` | **Linux only.** The uid the container runs as; must own the mounts. Default 1000. |
+| `UF_UID` / `UF_GID` | **Linux only.** The uid every spawned agent runs as; must own the mounts. The server itself runs as root and drops to this. Default 1000. |
 
 Compose also mounts `~/.claude` **read-write** — Claude Code writes new session
 transcripts there as runs execute, so a read-only mount breaks runs.
@@ -99,30 +99,26 @@ echo "UF_GID=$(id -g)" >> .env
 Run compose as yourself, not under `sudo`: `$HOME` comes from your shell, and
 `sudo` would point the credential mount at root's home.
 
-**The database volume is handled in the image, not here.** `/data` is a named
-volume rather than a bind mount, so it does not carry your host's ownership the
-way the other two mounts do: Docker copies the ownership and mode of `/data`
-*in the image* onto the volume root the first time it creates it. That used to
-be uid 1000, mode 0755 — unwritable by the uid you have just set, which meant
-the app could not create its SQLite file and every data route failed. The image
-now marks that one directory world-writable, so a fresh volume works under any
-`UF_UID`. Nothing to configure.
+**The database volume is handled in the image, not here, and it is deliberately
+not yours.** `/data` is a named volume rather than a bind mount, so it does not
+carry your host's ownership the way the other two mounts do: Docker copies the
+ownership and mode of `/data` *in the image* onto the volume root the first time
+it creates it. The image ships it root-owned, mode `0700`, and the server — which
+is the only thing in the container running as root — creates the database there.
+Every agent is dropped to the `UF_UID`/`UF_GID` you have just set, so none of
+them can read or write it. That is the point: the database holds the settings
+every guard reads, the budget and status on every run, and the lock that decides
+whether a second writer exists. Nothing to configure.
 
-**Changing `UF_UID` on an install that already has data** is the one case that
-still needs a hand. Docker only initialises a volume once, so an existing
-`usagefoundry-data` keeps the files uid 1000 wrote, and the new uid cannot write
-them. Hand the volume over once:
+It used to be world-writable, because the whole container ran as your uid and a
+fresh volume had to be writable by whatever that was. If your install predates
+that change, the existing volume is still `node:node 0777` — Docker initialises
+a volume once and never again — and the container's entrypoint reclaims it on
+every boot. Nothing to do, and no `chown` to run: `UF_UID` no longer has
+anything to do with who owns `/data`.
 
-```bash
-docker compose down
-docker compose run --rm --user 0:0 --entrypoint sh usagefoundry \
-  -c "chown -R $(id -u):$(id -g) /data"
-docker compose up -d
-```
-
-Double quotes, so `$(id -u)` is expanded by your shell rather than inside the
-container. If you do not mind losing run history and settings, `docker compose
-down -v` and starting again does the same thing by destroying the volume.
+If you would rather start clean, `docker compose down -v` destroys the volume
+along with your run history and settings.
 
 ## Multiple workspaces
 

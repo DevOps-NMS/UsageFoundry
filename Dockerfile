@@ -142,28 +142,37 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 
 # /data is the one path here whose permissions are the *image's* problem rather
-# than the host's, because it is a named volume. Docker initialises a fresh
+# than the host's, because it is a named volume: Docker initialises a fresh
 # volume from the directory sitting at its mount point and copies that
-# directory's ownership and mode onto the volume root — so the chown below,
-# plus the default 0755, hands the volume to uid 1000 and to nobody else.
-# Compose then runs the container as `${UF_UID}`, which Linux operators are told
-# to set to their own uid, and the first thing the app does is create
-# /data/usagefoundry.db. That is EACCES on every data route, for an operator who
-# has just followed the instruction meant to prevent permission problems.
+# directory's ownership and mode onto the volume root.
 #
-# 0777 on this one directory is the fix that needs nothing from the operator.
-# The two alternatives do not work here: a chown to a build-arg uid makes the
-# image uid-specific (and stale the moment the uid changes), and an entrypoint
-# chown has no root process to run as, because compose's `user:` applies before
-# the entrypoint. The bind mounts need none of this — they carry the host's
-# ownership, which is the uid `UF_UID` names.
+# It belongs to root and to nobody else. What is in it is the settings every
+# guard reads, the budget and status on every run, the whole record of what
+# happened, and the lock `serverLock.ts` uses to decide whether a second writer
+# exists — so an agent that can write this directory sets
+# `chatDefaultGuards.permissionMode` to `bypassPermissions`, or rewrites a
+# budget, with no HTTP request and no token. That is every approval gate in this
+# app bypassed at once, and the lock meant to catch a second writer edited by
+# the thing it is guarding against.
 #
-# Only a *fresh* volume takes this mode; one created under the old arrangement
-# keeps uid 1000's files, and README's "On Linux, set UF_UID and UF_GID" states
-# the one-off chown for that case.
+# It was 0777 because the whole container ran as an arbitrary `${UF_UID}` and a
+# fresh volume had to be writable by whatever that was. The server is root now
+# (see the `USER` note below), so it needs no such grant, and the mode is what
+# excludes the children — which are dropped to that same `${UF_UID}`. The
+# alternatives still do not work: a chown to a build-arg uid makes the image
+# uid-specific and stale the moment the uid changes. What *has* changed is that
+# an entrypoint chown is possible at last, because the container is no longer
+# started as an unprivileged user — which is `docker-entrypoint.sh`, and it is
+# not optional: only a *fresh* volume takes the mode below, so every existing
+# install would otherwise upgrade into the same open directory it had before.
+#
+# The other four are the bind mounts' mount points and still belong to `node`
+# (uid 1000): the host's own ownership covers them the moment compose mounts
+# over them, and 1000 is the default the children are dropped to.
 RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.claude \
- && chown -R node:node /data /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
- && chmod 0777 /data
+ && chown -R node:node /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
+ && chown root:root /data \
+ && chmod 0700 /data
 
 # No `USER node`. The server runs as root and drops every child it spawns to
 # `UF_AGENT_UID`/`UF_AGENT_GID` — see `src/lib/privsep.ts`, which argues out why
@@ -179,7 +188,12 @@ RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.cl
 # exactly as it did before, one uid for everything, and says so in its boot log.
 EXPOSE 3000
 
+COPY docker-entrypoint.sh /usr/local/bin/uf-entrypoint
+RUN chmod 0755 /usr/local/bin/uf-entrypoint
+
 # tini reaps the claude child processes the orchestrator spawns; without an
 # init, killed agent processes linger as zombies for the container's lifetime.
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# It stays PID 1 — the entrypoint below `exec`s the server, so there is no extra
+# shell left in the process tree and signals reach node unchanged.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/uf-entrypoint"]
 CMD ["node", "server.js"]

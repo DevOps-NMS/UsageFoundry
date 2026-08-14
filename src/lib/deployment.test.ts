@@ -4,26 +4,36 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 /**
- * Covers one agreement between `Dockerfile` and `docker-compose.yml`: that the
- * directory compose points `DATA_DIR` at is writable by whatever uid compose
- * runs the container as.
+ * Covers the agreement between `Dockerfile` and `docker-compose.yml` about who
+ * may write the data directory, and who may not.
  *
  * It is not a pure function, and it earns its place on the same grounds the
  * rest of this suite does — a failure that is silent, expensive, and invisible
  * to every other check here. `/data` is a *named volume*, so Docker copies the
  * ownership and mode of the image's directory onto the volume root when it
- * first creates it. Left at `chown node:node` and the default 0755, that hands
- * the database to uid 1000 alone, while compose's `user: "${UF_UID:-1000}…"`
- * runs the container as the uid Linux operators are told to set to their own.
- * The app then cannot create its SQLite file and every data route fails —
- * after the operator followed the instruction meant to prevent exactly that.
+ * first creates it, and nothing afterwards revisits that decision.
  *
- * Nothing else notices: it typechecks, it builds, it passes on macOS (where
- * Docker Desktop's remapping makes 1000 right whatever the host uid is), and it
- * is one Dockerfile edit away from coming back. Docker is not available in the
- * environment this repo's tests run in, so this pins the two halves against
- * each other rather than the behaviour; README's "Not yet verified by hand"
- * carries the command that checks the behaviour itself.
+ * **This file used to assert the opposite of what it asserts now, and the
+ * inversion is deliberate.** The old rule was that `/data` must be
+ * world-writable, because compose ran the *whole* container — server and
+ * agents alike — as `${UF_UID:-1000}`, and a fresh volume left at `chown
+ * node:node` plus the default 0755 belonged to uid 1000 alone: the app could
+ * not create its SQLite file under any other uid, and every data route failed
+ * for an operator who had just followed the instruction meant to prevent
+ * permission problems. That reasoning was sound and its conclusion is now
+ * wrong, because the premise moved. The server runs as root and drops its
+ * children to `UF_AGENT_UID`, so it needs no grant to create the database —
+ * while a world-writable `/data` hands twenty-five unattended agents the
+ * settings every guard reads, the budget and status on every run, and the lock
+ * `serverLock.ts` uses to decide whether a second writer exists. An agent that
+ * can write that file sets `chatDefaultGuards.permissionMode` to
+ * `bypassPermissions` with no HTTP request and no token.
+ *
+ * Nothing else notices either way: it typechecks, it builds, and both
+ * arrangements start a container. Docker is not available in the environment
+ * this repo's tests run in, so this pins the two halves against each other
+ * rather than the behaviour; `docs/verification.md`'s "Not yet verified by
+ * hand" carries the commands that check the behaviour itself.
  */
 
 function repoRoot(): string {
@@ -65,23 +75,47 @@ function chmodGrants(): { mode: number; target: string }[] {
 }
 
 describe("the image and compose agree on the data volume", () => {
-  it("gives DATA_DIR a mode any uid can write", () => {
+  it("keeps DATA_DIR away from every uid but the server's", () => {
     const dataDir = composeDataDir();
     const grant = chmodGrants().find((g) => g.target === dataDir);
 
     assert.ok(
       grant,
       `Dockerfile never chmods ${dataDir}. A fresh named volume takes that ` +
-        `directory's mode, so without this the container cannot create its ` +
-        `database under any UF_UID other than 1000.`,
+        `directory's mode, and the image's default 0755 leaves it readable by ` +
+        `every agent this app spawns.`,
     );
-    // 0o002 — the other-write bit. Ownership is uid 1000's either way, so this
-    // is the only bit that makes an arbitrary uid able to create the file.
+    // Group as well as other. The children are dropped to UF_AGENT_GID, which
+    // an operator may well set to a group the server is also in, so a 0770 here
+    // would read as tightened and grant exactly what it was tightened against.
     assert.equal(
-      grant.mode & 0o002,
-      0o002,
-      `${dataDir} is chmod ${grant.mode.toString(8)} in the image; a uid other ` +
-        `than 1000 cannot create a file in it.`,
+      grant.mode & 0o077,
+      0,
+      `${dataDir} is chmod ${grant.mode.toString(8)} in the image. The database, ` +
+        `the settings every guard reads and the server lock are in it, and an ` +
+        `agent that can write them bypasses every approval gate in this app.`,
+    );
+  });
+
+  it("reclaims a volume created before that mode existed", () => {
+    // Only a *fresh* volume takes the image's mode, so the assertion above
+    // covers new installs and nothing else: an existing `usagefoundry-data` is
+    // `node:node 0777` from the old arrangement and no image pull changes it.
+    // Without the entrypoint every deployment that already has data would
+    // upgrade into the same open directory, under a Dockerfile stating
+    // otherwise — which is worse than the original defect, because it now reads
+    // as fixed.
+    const dataDir = composeDataDir();
+    const entrypoint = fs.readFileSync(
+      path.join(root, "docker-entrypoint.sh"),
+      "utf8",
+    );
+    assert.match(entrypoint, new RegExp(`chown\\s+0:0\\s+${dataDir}\\b`));
+    assert.match(entrypoint, new RegExp(`chmod\\s+0700\\s+${dataDir}\\b`));
+    assert.match(
+      dockerfile,
+      /^ENTRYPOINT .*uf-entrypoint/m,
+      "the image no longer runs the entrypoint that reclaims the volume.",
     );
   });
 
