@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import type {
@@ -10,9 +11,11 @@ import type {
 } from "@/lib/apiTypes";
 import { fmtDateTime, fmtPct, fmtUSD, pollFailureMessage } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
-import { Button, ButtonRow } from "@/components/ui/Button";
+import { Button, ButtonLink, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
+import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
+import { Sheet } from "@/components/ui/Sheet";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 import { WorkflowSchedule } from "@/components/WorkflowSchedule";
 
@@ -22,6 +25,22 @@ const CONDITION_LABEL: Record<"on-success" | "on-finish", string> = {
   "on-success": "only if it completes",
   "on-finish": "once it finishes",
 };
+
+/**
+ * A limit's value at the right edge of its row.
+ *
+ * "No limit" is dimmed and a configured one is not, because the difference
+ * between them is the whole reason this list is on the page a press of Run
+ * happens from — and a row of three identically-weighted sentences does not
+ * carry it.
+ */
+function LimitValue({ set, children }: { set: boolean; children: ReactNode }) {
+  return (
+    <span className={`text-sm ${set ? "text-ink" : "text-ink-faint"}`}>
+      {children}
+    </span>
+  );
+}
 
 export default function WorkflowPage() {
   const params = useParams<{ id: string }>();
@@ -195,12 +214,12 @@ export default function WorkflowPage() {
             >
               Run
             </Button>
-            <Link
-              href={`/workflows/${id}/edit`}
-              className="ui-transition inline-flex min-h-[var(--control-h-lg)] items-center rounded-sm border border-line-strong bg-inset px-3.5 py-1.5 text-sm font-medium text-ink no-underline hover:border-ink-faint hover:bg-surface hover:no-underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-            >
+            {/* `ButtonLink`, not a hand-rolled anchor: this one wore --bg-inset,
+                which is the recess a text field sits in, so it read as the same
+                object as an input at a glance. A bezeled control is --bezel. */}
+            <ButtonLink href={`/workflows/${id}/edit`} variant="secondary">
               Edit
-            </Link>
+            </ButtonLink>
             <Button
               variant="secondary"
               onClick={() =>
@@ -231,31 +250,22 @@ export default function WorkflowPage() {
         )}
       </div>
 
-      {confirmDelete && (
-        <Notice tone="danger" live>
-          <div className="mb-2">
-            Deleting “{workflow.name}” removes the graph and the record of what
-            it started. The runs themselves are untouched.
-          </div>
-          <ButtonRow>
-            <Button
-              variant="danger"
-              size="compact"
-              onClick={() => act("delete", `/api/workflows/${id}`, "DELETE")}
-              busy={busy === "delete"}
-            >
-              Delete workflow
-            </Button>
-            <Button
-              variant="ghost"
-              size="compact"
-              onClick={() => setConfirmDelete(false)}
-            >
-              Cancel
-            </Button>
-          </ButtonRow>
-        </Notice>
-      )}
+      {/* A sheet rather than a panel under the toolbar, for the reason the
+          branch purge is one: the browser gives the top layer, the inert page
+          behind it and the focus trap, and a destructive sheet opens with
+          Cancel focused so one Return is not a confirmation. */}
+      <Sheet
+        open={confirmDelete}
+        onDismiss={() => setConfirmDelete(false)}
+        title={`Delete “${workflow.name}”?`}
+        confirmLabel="Delete workflow"
+        confirmVariant="danger"
+        busy={busy === "delete"}
+        onConfirm={() => act("delete", `/api/workflows/${id}`, "DELETE")}
+      >
+        This removes the graph and the record of what it started. The runs
+        themselves are untouched.
+      </Sheet>
 
       {(workflow.liveRunCount ?? 0) > 0 && (
         <Notice tone="info">
@@ -268,23 +278,32 @@ export default function WorkflowPage() {
           all of them, and because Run is the next thing pressed. */}
       <CardTitle>Limits for the whole workflow</CardTitle>
       <Card emphasis="quiet">
-        <ul className="m-0 list-none space-y-1 p-0 text-sm text-ink-muted">
-          <li>
-            {workflow.instanceBudget.maxInstanceCostUSD === null
-              ? "No spending limit across the blocks"
-              : `Stops after ${fmtUSD(workflow.instanceBudget.maxInstanceCostUSD)} across the blocks`}
-          </li>
-          <li>
-            {workflow.instanceBudget.maxSessionFraction === null
-              ? "No 5-hour window guard"
-              : `Stops at ${fmtPct(workflow.instanceBudget.maxSessionFraction)} of the 5-hour window`}
-          </li>
-          <li>
-            {workflow.instanceBudget.maxWeeklyFraction === null
-              ? "No weekly window guard"
-              : `Stops at ${fmtPct(workflow.instanceBudget.maxWeeklyFraction)} of the weekly window`}
-          </li>
-        </ul>
+        {/* Three rows of a grouped list rather than three sentences in a
+            bulleted block: the value is what is being checked, so it belongs at
+            the right edge where the eye can run down it. */}
+        <ListGroup>
+          <ListRow label="Spending across the blocks">
+            <LimitValue set={workflow.instanceBudget.maxInstanceCostUSD !== null}>
+              {workflow.instanceBudget.maxInstanceCostUSD === null
+                ? "No limit"
+                : `Stops after ${fmtUSD(workflow.instanceBudget.maxInstanceCostUSD)}`}
+            </LimitValue>
+          </ListRow>
+          <ListRow label="5-hour window">
+            <LimitValue set={workflow.instanceBudget.maxSessionFraction !== null}>
+              {workflow.instanceBudget.maxSessionFraction === null
+                ? "No guard"
+                : `Stops at ${fmtPct(workflow.instanceBudget.maxSessionFraction)}`}
+            </LimitValue>
+          </ListRow>
+          <ListRow label="Weekly window">
+            <LimitValue set={workflow.instanceBudget.maxWeeklyFraction !== null}>
+              {workflow.instanceBudget.maxWeeklyFraction === null
+                ? "No guard"
+                : `Stops at ${fmtPct(workflow.instanceBudget.maxWeeklyFraction)}`}
+            </LimitValue>
+          </ListRow>
+        </ListGroup>
       </Card>
 
       {/* Directly under the limits it depends on, and above the blocks, for the

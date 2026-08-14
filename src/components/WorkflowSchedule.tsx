@@ -11,19 +11,27 @@ import { fmtDateTime, fmtRelative, type BadgeTone } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
-import { Field, Input, Select } from "@/components/ui/Field";
+import { Input, Select } from "@/components/ui/Field";
+import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
+import { Sheet } from "@/components/ui/Sheet";
 
 /**
  * When this workflow starts itself.
  *
  * The one card in this app describing something that spends money with nobody
  * looking, so it is built round the two things an operator has to be able to
- * check at a glance: the **next fire time as an absolute instant**, and **what
- * it last did**. A schedule whose skips are invisible looks exactly like a
- * schedule that is working, which is why the outcome line is on the card rather
- * than in a log — and why a run of identical skips reads as one state with a
- * count rather than as the newest of fifty.
+ * check at a glance: **the recurrence in words and the next fire time as an
+ * absolute instant, side by side**, and **what it last did**. Those two are
+ * adjacent rows of one grouped box rather than a sentence and a caption,
+ * because "every day at 09:00" and "next starts 15 Aug 2026, 09:00" only verify
+ * each other when they are read together — a relative "in about an hour" is
+ * exactly the form that cannot be checked.
+ *
+ * A schedule whose skips are invisible looks exactly like a schedule that is
+ * working, which is why the outcome is a row here rather than a line in a log —
+ * and why a run of identical skips reads as one state with a count rather than
+ * as the newest of fifty.
  */
 
 const WEEKDAYS = [
@@ -195,69 +203,44 @@ export function WorkflowSchedule({
 
         {schedule && !editing && (
           <>
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-medium text-ink">
-                    {schedule.description}
-                  </span>
-                  {schedule.paused && <Badge tone="warn">paused</Badge>}
-                </div>
-                {/* The absolute instant, not "in about an hour": a schedule an
-                    operator cannot verify at a glance is one they will not
-                    trust with an unattended agent. */}
-                <div className="mt-1 text-sm text-ink-muted">
-                  {schedule.nextFireAt === null ? (
-                    // Never a stand-in instant: the refusal below says why.
-                    <span className="text-warn">Next start unknown</span>
-                  ) : (
-                    <>
-                      {schedule.paused ? "Would next start " : "Next starts "}
-                      <span className="mono text-ink">
-                        {fmtDateTime(schedule.nextFireAt)}
-                      </span>{" "}
-                      ({fmtRelative(schedule.nextFireAt)})
-                    </>
-                  )}
-                </div>
-              </div>
-              <ButtonRow>
-                <Button
-                  variant="secondary"
-                  size="compact"
-                  onClick={() => send("PATCH", { paused: !schedule.paused })}
-                  disabled={busy}
-                >
-                  {schedule.paused ? "Resume" : "Pause"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="compact"
-                  onClick={openEditor}
-                  disabled={busy}
-                >
-                  Change
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="compact"
-                  onClick={() => setConfirmDelete(true)}
-                  disabled={busy || confirmDelete}
-                >
-                  Remove
-                </Button>
-              </ButtonRow>
-            </div>
+            <ListGroup>
+              <ListRow
+                label="Repeats"
+                description={
+                  schedule.spec.kind === "everyHours"
+                    ? "counted from when it was saved, so it does not move when the clocks do"
+                    : `read in ${schedule.timeZone}`
+                }
+              >
+                <span className="text-sm text-ink">{schedule.description}</span>
+                {schedule.paused && <Badge tone="warn">paused</Badge>}
+              </ListRow>
 
-            {schedule.refusal && (
-              <Notice tone="danger">
-                {schedule.refusal} Until then this schedule starts nothing.
-              </Notice>
-            )}
+              {/* The absolute instant, not "in about an hour": a schedule an
+                  operator cannot verify at a glance is one they will not trust
+                  with an unattended agent. The relative form is beside it
+                  rather than instead of it. */}
+              <ListRow label={schedule.paused ? "Would next start" : "Next start"}>
+                {schedule.nextFireAt === null ? (
+                  // Never a stand-in instant: the refusal below says why.
+                  <span className="text-sm text-warn">unknown</span>
+                ) : (
+                  <>
+                    <span className="mono text-ink">
+                      {fmtDateTime(schedule.nextFireAt)}
+                    </span>
+                    <span className="text-xs text-ink-muted">
+                      {fmtRelative(schedule.nextFireAt)}
+                    </span>
+                  </>
+                )}
+              </ListRow>
 
-            {schedule.lastCode && (
-              <div className="mt-4 border-t border-line pt-3 text-sm text-ink-muted">
-                <div className="flex flex-wrap items-baseline gap-2">
+              {schedule.lastCode && (
+                <ListRow
+                  label="Last occurrence"
+                  description={schedule.lastReason ?? undefined}
+                >
                   <Badge tone={OUTCOME[schedule.lastCode].tone}>
                     {OUTCOME[schedule.lastCode].label}
                   </Badge>
@@ -269,51 +252,56 @@ export function WorkflowSchedule({
                   {/* Fifty identical rows are a log nobody reads; one row with
                       a count is a fact somebody acts on. */}
                   {schedule.streak > 1 && schedule.streakSince !== null && (
-                    <span>
+                    <span className="text-xs tabular-nums text-ink-muted">
                       ×{schedule.streak} since {fmtDateTime(schedule.streakSince)}
                     </span>
                   )}
-                </div>
-                {schedule.lastReason && (
-                  <div className="mt-1 max-w-[80ch]">{schedule.lastReason}</div>
-                )}
-                {schedule.lastCode === "started" && schedule.lastInstanceId && (
-                  <div className="mt-1">
-                    <Link
-                      href={`/workflows/${workflowId}/instances/${schedule.lastInstanceId}`}
-                    >
-                      What it started
-                    </Link>
-                  </div>
-                )}
+                </ListRow>
+              )}
+            </ListGroup>
+
+            {schedule.lastCode === "started" && schedule.lastInstanceId && (
+              <div className="mt-2 text-sm">
+                <Link
+                  href={`/workflows/${workflowId}/instances/${schedule.lastInstanceId}`}
+                >
+                  What it started
+                </Link>
               </div>
             )}
 
-            {confirmDelete && (
-              <Notice tone="danger" live>
-                <div className="mb-2">
-                  Removing the schedule leaves the workflow, and anything it has
-                  already started, untouched.
-                </div>
-                <ButtonRow>
-                  <Button
-                    variant="danger"
-                    size="compact"
-                    onClick={() => send("DELETE")}
-                    busy={busy}
-                  >
-                    Remove schedule
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="compact"
-                    onClick={() => setConfirmDelete(false)}
-                  >
-                    Cancel
-                  </Button>
-                </ButtonRow>
+            {schedule.refusal && (
+              <Notice tone="danger" className="mt-4">
+                {schedule.refusal} Until then this schedule starts nothing.
               </Notice>
             )}
+
+            <ButtonRow className="mt-4">
+              <Button
+                variant="secondary"
+                size="compact"
+                onClick={() => send("PATCH", { paused: !schedule.paused })}
+                disabled={busy}
+              >
+                {schedule.paused ? "Resume" : "Pause"}
+              </Button>
+              <Button
+                variant="secondary"
+                size="compact"
+                onClick={openEditor}
+                disabled={busy}
+              >
+                Change
+              </Button>
+              <Button
+                variant="ghost"
+                size="compact"
+                onClick={() => setConfirmDelete(true)}
+                disabled={busy}
+              >
+                Remove
+              </Button>
+            </ButtonRow>
           </>
         )}
 
@@ -325,90 +313,115 @@ export function WorkflowSchedule({
               limits still stop the whole graph — nothing here changes either.
             </Notice>
 
-            <Field label="How often" htmlFor="sched-kind">
-              <Select
-                id="sched-kind"
-                value={draft.kind}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    kind: e.target.value as ScheduleSpecDTO["kind"],
-                  })
-                }
-              >
-                <option value="daily">Every day at a time</option>
-                <option value="weekly">Every week on a day</option>
-                <option value="everyHours">Every N hours</option>
-              </Select>
-            </Field>
+            <ListGroup>
+              <ListRow label="How often" htmlFor="sched-kind">
+                <div className="w-52">
+                  <Select
+                    id="sched-kind"
+                    value={draft.kind}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        kind: e.target.value as ScheduleSpecDTO["kind"],
+                      })
+                    }
+                  >
+                    <option value="daily">Every day at a time</option>
+                    <option value="weekly">Every week on a day</option>
+                    <option value="everyHours">Every N hours</option>
+                  </Select>
+                </div>
+              </ListRow>
 
-            {draft.kind === "weekly" && (
-              <Field label="Day" htmlFor="sched-weekday">
-                <Select
-                  id="sched-weekday"
-                  value={String(draft.weekday)}
-                  onChange={(e) =>
-                    setDraft({ ...draft, weekday: Number(e.target.value) })
+              {draft.kind === "weekly" && (
+                <ListRow label="Day" htmlFor="sched-weekday">
+                  <div className="w-40">
+                    <Select
+                      id="sched-weekday"
+                      value={String(draft.weekday)}
+                      onChange={(e) =>
+                        setDraft({ ...draft, weekday: Number(e.target.value) })
+                      }
+                    >
+                      {WEEKDAYS.map((day, i) => (
+                        <option key={day} value={i}>
+                          {day}
+                        </option>
+                      ))}
+                    </Select>
+                  </div>
+                </ListRow>
+              )}
+
+              {draft.kind !== "everyHours" && (
+                <ListRow
+                  label="Time"
+                  htmlFor="sched-time"
+                  // The message rides the row's own description, which is what
+                  // reaches the control as aria-describedby — a `Field`'s error
+                  // slot has nothing to align a right edge against in a row.
+                  description={
+                    timeError ? (
+                      <span className="text-danger">{timeError}</span>
+                    ) : undefined
                   }
                 >
-                  {WEEKDAYS.map((day, i) => (
-                    <option key={day} value={i}>
-                      {day}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
-            )}
+                  <div className="w-32">
+                    <Input
+                      id="sched-time"
+                      type="time"
+                      aria-invalid={timeError !== null || undefined}
+                      value={draft.time}
+                      onChange={(e) => setDraft({ ...draft, time: e.target.value })}
+                    />
+                  </div>
+                </ListRow>
+              )}
 
-            {draft.kind !== "everyHours" && (
-              <Field label="Time" htmlFor="sched-time" error={timeError}>
-                <Input
-                  id="sched-time"
-                  type="time"
-                  value={draft.time}
-                  onChange={(e) => setDraft({ ...draft, time: e.target.value })}
-                />
-              </Field>
-            )}
+              {draft.kind === "everyHours" && (
+                <ListRow
+                  label="Interval"
+                  htmlFor="sched-hours"
+                  description="counted from the moment you save, so it does not move when the clocks do"
+                >
+                  <div className="w-36">
+                    <Input
+                      id="sched-hours"
+                      type="number"
+                      min={1}
+                      max={168}
+                      className="tabular-nums"
+                      value={draft.hours}
+                      unit="hours"
+                      onChange={(e) =>
+                        setDraft({ ...draft, hours: Number(e.target.value) })
+                      }
+                    />
+                  </div>
+                </ListRow>
+              )}
 
-            {draft.kind === "everyHours" && (
-              <Field
-                label="Interval"
-                htmlFor="sched-hours"
-                hint="counted from the moment you save, so it does not move when the clocks do"
-              >
-                <Input
-                  id="sched-hours"
-                  type="number"
-                  min={1}
-                  max={168}
-                  value={draft.hours}
-                  unit="hours"
-                  onChange={(e) =>
-                    setDraft({ ...draft, hours: Number(e.target.value) })
-                  }
-                />
-              </Field>
-            )}
+              {draft.kind !== "everyHours" && (
+                <ListRow
+                  label="Timezone"
+                  htmlFor="sched-tz"
+                  description="an IANA name — the server runs in UTC and reads this time in the zone you name"
+                >
+                  <div className="w-52">
+                    <Input
+                      id="sched-tz"
+                      value={draft.timeZone}
+                      onChange={(e) =>
+                        setDraft({ ...draft, timeZone: e.target.value })
+                      }
+                    />
+                  </div>
+                </ListRow>
+              )}
+            </ListGroup>
 
-            {draft.kind !== "everyHours" && (
-              <Field
-                label="Timezone"
-                htmlFor="sched-tz"
-                hint="an IANA name — the server runs in UTC and reads this time in the zone you name"
-              >
-                <Input
-                  id="sched-tz"
-                  value={draft.timeZone}
-                  onChange={(e) =>
-                    setDraft({ ...draft, timeZone: e.target.value })
-                  }
-                />
-              </Field>
-            )}
-
-            <ButtonRow>
-              {/* Disabled only alongside the field error that says why — a
+            <ButtonRow className="mt-4">
+              {/* Disabled only alongside the row message that says why — a
                   Save that is off with nothing explaining it is a dead end. */}
               <Button
                 onClick={save}
@@ -430,6 +443,22 @@ export function WorkflowSchedule({
             </ButtonRow>
           </div>
         )}
+
+        {/* A sheet rather than a panel under the card, for the reason the
+            branch purge is one: the confirmation is the whole interaction, and
+            a sheet is what makes the pane behind it inert while it is open. */}
+        <Sheet
+          open={confirmDelete}
+          onDismiss={() => setConfirmDelete(false)}
+          title="Remove this schedule?"
+          confirmLabel="Remove schedule"
+          confirmVariant="danger"
+          busy={busy}
+          onConfirm={() => send("DELETE")}
+        >
+          Nothing will start this workflow but you. The workflow itself, and
+          anything the schedule has already started, are untouched.
+        </Sheet>
       </Card>
     </>
   );

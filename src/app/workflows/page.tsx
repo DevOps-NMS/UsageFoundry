@@ -5,6 +5,7 @@ import Link from "next/link";
 import type { WorkflowDTO } from "@/lib/apiTypes";
 import { fmtDateTime, pollFailureMessage } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
+import { ButtonLink } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
@@ -57,12 +58,13 @@ export default function WorkflowsPage() {
             waiting for the blocks it was told to follow.
           </p>
         </div>
-        <Link
-          href="/workflows/new"
-          className="rounded-sm border border-transparent bg-accent px-3.5 py-2 text-sm font-medium text-white no-underline transition-[filter] duration-150 hover:brightness-110 hover:no-underline"
-        >
+        {/* `ButtonLink`, not a hand-rolled anchor: this one was drawn in
+            --accent with a white label, and --accent is the *text* blue — the
+            fill a label sits on is --tint, which is a different colour in dark
+            mode for exactly that reason. */}
+        <ButtonLink href="/workflows/new" variant="primary">
           New workflow
-        </Link>
+        </ButtonLink>
       </div>
 
       <div role="alert">

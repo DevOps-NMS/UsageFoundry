@@ -17,10 +17,12 @@ import {
 import { Markdown } from "@/components/Markdown";
 import { Meter } from "@/components/Meter";
 import { Badge } from "@/components/ui/Badge";
-import { Button, ButtonRow } from "@/components/ui/Button";
+import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
+import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
+import { Sheet } from "@/components/ui/Sheet";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 
 const POLL_MS = 10_000;
@@ -397,35 +399,23 @@ export default function WorkflowInstancePage() {
         )}
       </div>
 
-      {confirmStop && (
-        <Notice tone="danger" live>
-          <div className="mb-2">
-            Ends {instance.liveRunCount} unfinished block(s). A block working now
-            is interrupted mid-cycle, so what that cycle spent is estimated
-            rather than measured. Committed work stays on its branch; anything
-            uncommitted stays in the checkout, to commit from the run page.
-            Finished blocks are untouched.
-          </div>
-          <ButtonRow>
-            <Button
-              variant="danger"
-              size="compact"
-              onClick={stopAll}
-              busy={stopping}
-            >
-              Stop all blocks
-            </Button>
-            <Button
-              variant="ghost"
-              size="compact"
-              onClick={() => setConfirmStop(false)}
-              disabled={stopping}
-            >
-              Cancel
-            </Button>
-          </ButtonRow>
-        </Notice>
-      )}
+      {/* A sheet: the pane behind it goes inert, and Cancel takes the focus, so
+          one Return on the control that ends unattended agents mid-cycle is not
+          a confirmation. */}
+      <Sheet
+        open={confirmStop}
+        onDismiss={() => setConfirmStop(false)}
+        title={`Stop ${instance.liveRunCount} unfinished block(s)?`}
+        confirmLabel="Stop all blocks"
+        confirmVariant="danger"
+        busy={stopping}
+        onConfirm={stopAll}
+      >
+        A block working now is interrupted mid-cycle, so what that cycle spent is
+        estimated rather than measured. Committed work stays on its branch;
+        anything uncommitted stays in the checkout, to commit from the run page.
+        Finished blocks are untouched.
+      </Sheet>
 
       {instance.status === "failed" && (
         <Notice tone="danger">
@@ -483,18 +473,26 @@ export default function WorkflowInstancePage() {
           }
         />
 
-        <ul className="m-0 mt-4 list-none space-y-1 p-0 text-sm text-ink-muted">
-          <li>
-            {budget.maxSessionFraction === null
-              ? "No 5-hour window guard"
-              : `Stops the workflow at ${fmtPct(budget.maxSessionFraction)} of the 5-hour window`}
-          </li>
-          <li>
-            {budget.maxWeeklyFraction === null
-              ? "No weekly window guard"
-              : `Stops the workflow at ${fmtPct(budget.maxWeeklyFraction)} of the weekly window`}
-          </li>
-        </ul>
+        <ListGroup className="mt-4">
+          <ListRow label="5-hour window">
+            <span
+              className={`text-sm ${budget.maxSessionFraction === null ? "text-ink-faint" : "text-ink"}`}
+            >
+              {budget.maxSessionFraction === null
+                ? "No guard"
+                : `Stops the workflow at ${fmtPct(budget.maxSessionFraction)}`}
+            </span>
+          </ListRow>
+          <ListRow label="Weekly window">
+            <span
+              className={`text-sm ${budget.maxWeeklyFraction === null ? "text-ink-faint" : "text-ink"}`}
+            >
+              {budget.maxWeeklyFraction === null
+                ? "No guard"
+                : `Stops the workflow at ${fmtPct(budget.maxWeeklyFraction)}`}
+            </span>
+          </ListRow>
+        </ListGroup>
 
         <Hint>
           {noLimits
