@@ -35,6 +35,10 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const [quickOpen, setQuickOpen] = useState(false);
 
+  // There is nowhere to go from the login screen: every pane bounces straight
+  // back to it, and the quick-open sheet is not rendered there at all.
+  const chromeless = pathname === "/login";
+
   /**
    * The app's one keyboard listener.
    *
@@ -49,6 +53,7 @@ export function AppShell({ children }: { children: ReactNode }) {
    * sheet.
    */
   useEffect(() => {
+    if (chromeless) return;
     function onKeyDown(e: KeyboardEvent) {
       // Nothing is intercepted while someone is typing. ⌘↩ is the documented
       // exception and this layer binds it to nothing, which is the point: a
@@ -69,7 +74,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [router]);
+  }, [router, chromeless]);
 
   function toggleSidebar() {
     const next = !readCollapsed();
@@ -77,10 +82,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     setCollapsed(next);
   }
 
-  // The login page is the one screen with nothing to navigate to: no session,
-  // no panes, and a single field. It keeps `main` so the skip link still has
-  // its target.
-  if (pathname === "/login") {
+  // The login page keeps `main` so the skip link still has its target, and
+  // nothing else — there is no session behind it to navigate with.
+  if (chromeless) {
     return <main id="main">{children}</main>;
   }
 

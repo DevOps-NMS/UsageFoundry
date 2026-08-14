@@ -149,6 +149,19 @@ export function QuickOpen({
   const index = Math.min(highlight, Math.max(items.length - 1, 0));
   const chosen = items[index];
 
+  // Grouped for display, and each item keeps its index in the flat list —
+  // that index is what the arrows move and what `aria-activedescendant`
+  // names, so a per-group counter would point at the wrong row.
+  const groups = useMemo(() => {
+    const ordered: Array<{ name: string; items: Array<{ item: QuickItem; i: number }> }> = [];
+    items.forEach((item, i) => {
+      const last = ordered[ordered.length - 1];
+      if (last?.name === item.group) last.items.push({ item, i });
+      else ordered.push({ name: item.group, items: [{ item, i }] });
+    });
+    return ordered;
+  }, [items]);
+
   function go(item: QuickItem | undefined) {
     if (!item) return;
     onDismiss();
@@ -201,49 +214,57 @@ export function QuickOpen({
         </Notice>
       )}
 
-      <ul
+      {/* A listbox may only contain options and groups, which rules out the
+          <ul>/<li> this would otherwise be: a `listitem` between the listbox
+          and its options is exactly the nesting screen readers stop announcing
+          a position in. The heading is aria-hidden because the group already
+          carries the same word as its label. */}
+      <div
         id={listId}
         role="listbox"
         aria-label="Results"
-        className="mt-3 max-h-[min(50vh,20rem)] space-y-0.5 overflow-y-auto"
+        className="mt-3 max-h-[min(50vh,20rem)] overflow-y-auto"
       >
-        {items.map((item, i) => {
-          const state: ItemState = i === index ? "highlighted" : "plain";
-          const first = i === 0 || items[i - 1].group !== item.group;
-          return (
-            <li key={item.key}>
-              {first && (
-                <div className="px-2 pt-2 pb-1 text-xs font-medium text-ink-faint">
-                  {item.group}
+        {groups.map((group) => (
+          <div key={group.name} role="group" aria-label={group.name}>
+            <div
+              aria-hidden
+              className="px-2 pt-2 pb-1 text-xs font-medium text-ink-faint"
+            >
+              {group.name}
+            </div>
+            {group.items.map(({ item, i }) => {
+              const state: ItemState = i === index ? "highlighted" : "plain";
+              return (
+                <div
+                  key={item.key}
+                  id={`${listId}-${i}`}
+                  role="option"
+                  aria-selected={i === index}
+                  onClick={() => go(item)}
+                  onMouseMove={() => setHighlight(i)}
+                  className={
+                    "ui-transition mt-0.5 flex min-h-[var(--control-h)] cursor-pointer " +
+                    `items-center gap-2 rounded-[6px] px-2 text-sm ${ITEM[state]}`
+                  }
+                >
+                  <span className="truncate">{item.label}</span>
+                  {item.detail && (
+                    <span className={`ml-auto truncate text-xs ${DETAIL[state]}`}>
+                      {item.detail}
+                    </span>
+                  )}
                 </div>
-              )}
-              <div
-                id={`${listId}-${i}`}
-                role="option"
-                aria-selected={i === index}
-                onClick={() => go(item)}
-                onMouseMove={() => setHighlight(i)}
-                className={
-                  "ui-transition flex min-h-[var(--control-h)] cursor-pointer " +
-                  `items-center gap-2 rounded-[6px] px-2 text-sm ${ITEM[state]}`
-                }
-              >
-                <span className="truncate">{item.label}</span>
-                {item.detail && (
-                  <span className={`ml-auto truncate text-xs ${DETAIL[state]}`}>
-                    {item.detail}
-                  </span>
-                )}
-              </div>
-            </li>
-          );
-        })}
+              );
+            })}
+          </div>
+        ))}
         {items.length === 0 && (
-          <li className="px-2 py-3 text-sm text-ink-faint">
+          <p className="px-2 py-3 text-sm text-ink-faint">
             Nothing matches “{query.trim()}”
-          </li>
+          </p>
         )}
-      </ul>
+      </div>
 
       <p className="mt-3 flex items-center gap-1.5 px-1 text-xs text-ink-faint">
         <Icon name="search" size="sm" />
