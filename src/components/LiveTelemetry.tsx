@@ -8,7 +8,23 @@ import type { TelemetryWindowDTO } from "../lib/apiTypes";
 import { STATUS_TONE, fmtRelative, fmtTokens, fmtUSD } from "../lib/format";
 import { Badge } from "./ui/Badge";
 import { Card, CardTitle, Stat } from "./ui/Card";
-import { Table, TableWrap, Td, Th, Tr } from "./ui/Table";
+import { Table, Td, Th, Tr } from "./ui/Table";
+
+/**
+ * The same Finder-style list view the period card and the dashboard draw: a
+ * bordered box owning its own scroll region, with the header stuck to the top
+ * of it. Restated here rather than shared, for the reason given beside the copy
+ * in `UsagePeriods` — a module holding two class strings would be a fourth file
+ * for three call sites.
+ *
+ * No height cap: this list is already capped at the heaviest few runs by
+ * `telemetryWindow`, so it has nothing to scroll past. The sticky header costs
+ * nothing until that cap moves.
+ */
+const LIST_VIEW = "overflow-auto rounded-sm border border-line";
+
+const STICKY_HEAD =
+  "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
 
 /**
  * What runs have spent inside the dashboard's 5-hour window, as Claude Code
@@ -58,21 +74,31 @@ export function LiveTelemetry({
         </div>
       </div>
 
-      <TableWrap>
+      <div className={LIST_VIEW}>
         <Table>
+          <caption className="sr-only">
+            Each run&rsquo;s own first-party cost inside this window, heaviest
+            first
+          </caption>
           <thead>
             <tr>
-              <Th>Run</Th>
-              <Th>Status</Th>
-              <Th num>Cost</Th>
-              <Th num>Requests</Th>
-              <Th num>Last request</Th>
+              <Th className={STICKY_HEAD}>Run</Th>
+              <Th className={STICKY_HEAD}>Status</Th>
+              <Th num className={STICKY_HEAD}>
+                Cost
+              </Th>
+              <Th num className={STICKY_HEAD}>
+                Requests
+              </Th>
+              <Th num className={STICKY_HEAD}>
+                Last request
+              </Th>
             </tr>
           </thead>
           <tbody>
             {telemetry.runs.map((r) => (
               <Tr key={r.runId}>
-                <Td className="mono">
+                <Td className="mono whitespace-nowrap">
                   <Link href={`/runs/${r.runId}`}>{r.runId.slice(0, 8)}</Link>
                 </Td>
                 <Td>
@@ -87,12 +113,14 @@ export function LiveTelemetry({
                 </Td>
                 <Td num>{fmtUSD(r.costUSD)}</Td>
                 <Td num>{r.requests}</Td>
-                <Td num>{fmtRelative(r.lastAt, now)}</Td>
+                <Td num className="whitespace-nowrap">
+                  {fmtRelative(r.lastAt, now)}
+                </Td>
               </Tr>
             ))}
           </tbody>
         </Table>
-      </TableWrap>
+      </div>
 
       {/* The total above is over every run in the window; this table is not.
           Same rule as a shortened diff: what was left out is counted, not
