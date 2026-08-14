@@ -27,10 +27,17 @@ export async function register() {
     // live database, and it closed out three runs whose agents were mid-cycle
     // and went on working for another minute. So the claim gates all four,
     // rather than each of them re-deriving it.
-    const { claimDataDir, releaseDataDir } = await import("./lib/serverLock");
-    const owned = await claimDataDir();
+    const { claimDataDir, ownsDataDir, releaseDataDir } = await import(
+      "./lib/serverLock"
+    );
+    await claimDataDir();
 
-    if (owned) {
+    // `ownsDataDir()` rather than the boolean `claimDataDir` just returned.
+    // They agree here — nothing can take the directory in the microtask between
+    // them — and the point is that ownership is a thing this app *asks*, at the
+    // moment it acts on it, everywhere. A captured boot-time answer was how the
+    // heartbeat came to restamp a lock that had changed hands.
+    if (ownsDataDir()) {
       reconcileOnBoot();
 
       // Same problem, different table: a review is a child process too, and a

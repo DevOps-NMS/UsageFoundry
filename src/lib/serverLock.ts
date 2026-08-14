@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { DATA_DIR } from "./config";
+import { GIT_SYNC_TIMEOUT_MS } from "./git";
 
 /**
  * Which process owns this data directory.
@@ -47,13 +48,35 @@ export const HEARTBEAT_MS = 1_000;
 /**
  * Silence after which the owner is presumed gone.
  *
- * Generous relative to the heartbeat because the alternative error is the
- * expensive one: `buildSnapshot` re-aggregates the whole transcript history
- * synchronously, so a busy server can miss several beats while very much
- * alive, and treating that as death is how a stranger gets permission to close
- * out live runs.
+ * Derived from the worst-case synchronous block rather than chosen against an
+ * assumption, because the previous figure — 15 s — was **shorter than a single
+ * git call**. `gitSync` is a `spawnSync` with `GIT_SYNC_TIMEOUT_MS` on it, and
+ * one `git status --porcelain` on a large checkout with `core.fsmonitor`
+ * cleared can reach that ceiling, so one admission-path call was sufficient to
+ * miss the window with no other load at all. One admission makes several of
+ * them in one uninterrupted stretch — `probeIsolation`'s `rev-parse`s, then a
+ * `status` per candidate checkout slot — which is why the window has to be a
+ * multiple of git's own ceiling rather than a fraction of it.
+ *
+ * A longer window costs very little, and that is a fact about `lockVerdict`
+ * rather than optimism. Staleness is the *last* question it asks, and the only
+ * case it decides is "the lock's pid is alive and has stopped beating": no lock
+ * is claimed outright, a dead pid goes to the four-second observation, and our
+ * own pid — the container restart, where the server reliably lands where its
+ * predecessor was — is claimed outright. And a live pid that has stopped
+ * beating is a *stalled owner*, which is precisely the one that must not be
+ * claimed: taking it runs the six boot reconcilers over runs whose agents are
+ * still working and still billing. What the longer window does cost is an owner
+ * that died and whose pid a live process has since taken, which then holds the
+ * directory for up to this long. Bounded, rare, and the cheaper mistake.
+ *
+ * It is no longer the only defence either, which is the other half of why the
+ * exact figure matters less than it did: `heartbeatVerdict` means an owner that
+ * loses the directory anyway finds out within a beat and stands down, rather
+ * than restamping the file over the new owner's and leaving two processes both
+ * believing they hold it for ever.
  */
-export const STALE_MS = 15_000;
+export const STALE_MS = GIT_SYNC_TIMEOUT_MS * 6;
 
 /** How long a fresh lock with no live pid behind it is watched before claiming. */
 export const OBSERVE_MS = 4_000;
@@ -137,6 +160,35 @@ export function lockVerdict(
 export function stillBeating(before: ServerLock, after: ServerLock | null): boolean {
   if (!after) return false;
   return after.ownerId !== before.ownerId || after.heartbeatAt > before.heartbeatAt;
+}
+
+/**
+ * Is the lock we are about to restamp still ours?
+ *
+ * The owner never asked. `beat()` wrote the file unconditionally and compared
+ * nothing, so after a stall past `STALE_MS` the sequence was: a second process
+ * reads a stale lock, claims it, runs all six boot reconcilers over runs whose
+ * agents are alive; then this process's loop resumes and overwrites that lock
+ * with its own `ownerId`, never noticing it had changed hands. **Both then hold
+ * the directory, permanently**, and the folder claim's guarantee — one event
+ * loop deciding a folder is free — is void from that moment on.
+ *
+ * Pure, and separated for `lockVerdict`'s reason: it is a decision about
+ * whether to go on writing to somebody else's database, and getting it wrong in
+ * the permissive direction announces itself nowhere.
+ *
+ * A **missing** lock is `beat`, not `lost`, and the asymmetry is deliberate:
+ * the owner releases by unlinking, so absence is nobody holding the directory,
+ * and re-stamping it there takes back something no other process has claimed. A
+ * different `ownerId` is the only evidence that it changed hands, which is the
+ * same test `releaseDataDir` already makes before it deletes the file.
+ */
+export function heartbeatVerdict(
+  lock: ServerLock | null,
+  ownerId: string,
+): "beat" | "lost" {
+  if (!lock) return "beat";
+  return lock.ownerId === ownerId ? "beat" : "lost";
 }
 
 /**
@@ -271,7 +323,7 @@ export async function claimDataDir(): Promise<boolean> {
   writeLock(Date.now());
   state.ownership = "owned";
   state.holder = null;
-  state.timer ??= setInterval(beat, HEARTBEAT_MS);
+  state.timer ??= setInterval(heartbeat, HEARTBEAT_MS);
   state.timer.unref?.();
   return true;
 }
@@ -359,31 +411,67 @@ export function requireDataDir(): void {
 }
 
 /**
- * A heartbeat that cannot be written stops, loudly, rather than retrying every
- * second into a log nobody can read. The lock then goes stale on its own and
- * the next process to boot takes the directory — which is the right outcome for
- * a server that can no longer write to its own data directory, and it is said
- * out loud rather than inferred later from runs that were closed out.
+ * Restamp the lock — or find out it is not ours any more and stand down.
  *
- * It gives up ownership at the same moment, and that is the whole point of
- * saying so here rather than leaving it implied: from now on another process
- * may claim the directory, so this one carrying on writing is the two-writer
- * case, reached by a route that has nothing to do with how many servers were
- * started.
+ * The interval's own callback, and exported because the fault it now covers has
+ * no other way of being observed: a lock silently changing hands under a
+ * working server leaves nothing to inspect afterwards, so the only evidence is
+ * this function's answer.
+ *
+ * Two ways ownership ends here, and both refuse every write from that moment
+ * on, because `mayWriteDataDir` is read at the write rather than at boot.
+ *
+ * **The directory changed hands.** See `heartbeatVerdict`. Writing over it
+ * unconditionally, which is what this did, left two processes both believing
+ * they held it, permanently.
+ *
+ * **The lock cannot be written at all.** It stops rather than retrying every
+ * second into a log nobody can read; the file then goes stale on its own and
+ * the next process to boot takes the directory, which is the right outcome for
+ * a server that can no longer write to its own data directory. Giving ownership
+ * up at that moment is the point of saying it here rather than leaving it
+ * implied: from now on another process may claim the directory, so this one
+ * carrying on writing is the two-writer case reached by a route that has
+ * nothing to do with how many servers were started.
  */
-function beat(): void {
+export function heartbeat(): void {
+  // Asked every beat, before the write. One `readFileSync` a second, against a
+  // fault whose whole shape is that nothing else would ever notice it.
+  const held = readLock();
+  if (heartbeatVerdict(held, state.ownerId) === "lost") {
+    standDown("lost", held);
+    // `error`, not `warn`. From here this server serves pages and refuses
+    // everything else — and the runs it had in flight belong to whoever took
+    // the directory, which has already closed them out.
+    console.error(
+      `[usagefoundry] Lost this data directory to ${
+        held ? `process ${held.pid}` : "another process"
+      } — this server was unresponsive for longer than the ${
+        STALE_MS / 1000
+      }s stale window and another server claimed it. Refusing every write from ` +
+        "now on. Stop one of the two servers and restart the other.",
+    );
+    return;
+  }
+
   try {
     writeLock(Date.now());
   } catch (err) {
-    if (state.timer) clearInterval(state.timer);
-    state.timer = undefined;
-    state.ownership = "lost";
-    state.holder = null;
+    standDown("lost", null);
     console.warn(
       `[usagefoundry] Could not update ${lockPath()}: ${(err as Error).message}. ` +
-        "Another server starting from now on will treat this data directory as free.",
+        "Another server starting from now on will treat this data directory as " +
+        "free, so this one has stopped writing too.",
     );
   }
+}
+
+/** Give up the claim and the timer together — never one without the other. */
+function standDown(to: DataDirOwnership, holder: ServerLock | null): void {
+  if (state.timer) clearInterval(state.timer);
+  state.timer = undefined;
+  state.ownership = to;
+  state.holder = holder;
 }
 
 /**

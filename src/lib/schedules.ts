@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { instanceBudgetIsOff, type InstanceBudgetPolicy } from "./budget";
 import { db } from "./db";
+import { mayWriteDataDir } from "./serverLock";
 import { currentSnapshot } from "./orchestrator";
 import { isTimeZone, zonedParts, zoneOffset } from "./windows";
 import {
@@ -792,6 +793,16 @@ function stopScheduler(): void {
 }
 
 async function tickSchedules(): Promise<void> {
+  // Asked here rather than only at the boot that started this timer, because
+  // ownership moves: a server that stalls past `STALE_MS` loses the directory
+  // to a second process, and the two would then press Run for the same window.
+  // The timer stops rather than skipping a tick — the schedules belong to
+  // whoever owns the directory, and this process will never own it again.
+  if (!mayWriteDataDir()) {
+    stopScheduler();
+    return;
+  }
+
   // A tick that spawns a graph takes longer than the interval; stacking them
   // would press Run twice for one window.
   if (timer.running) return;

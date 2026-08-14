@@ -93,11 +93,25 @@ export const gitArgs = (args: string[]) => [
 ];
 
 /**
+ * The longest one synchronous git call may hold the event loop.
+ *
+ * Named rather than inlined because it is read from outside this module:
+ * `serverLock.ts` derives `STALE_MS` from it, since a `spawnSync` is a hold on
+ * the one event loop that also beats the lock's heartbeat, and a heartbeat
+ * window shorter than a single git call is a window a working server can miss
+ * with no other load at all.
+ */
+export const GIT_SYNC_TIMEOUT_MS = 20_000;
+
+/**
  * Synchronous git, for the admission decision only.
  *
  * `createRun` runs from entry to INSERT with no `await`, and that is what makes
  * its folder claim atomic — so the calls it makes have to be synchronous. These
- * are single-digit milliseconds. Everything else uses `git()` below.
+ * are single-digit milliseconds for the `rev-parse`s, and are emphatically not
+ * for `status --porcelain` on a large checkout with `core.fsmonitor` cleared,
+ * which is what the ceiling above is really about. Everything else uses `git()`
+ * below.
  */
 export function gitSync(cwd: string, args: string[]): GitResult {
   const res = spawnSync(GIT_BIN, gitArgs(args), {
@@ -105,7 +119,7 @@ export function gitSync(cwd: string, args: string[]): GitResult {
     env: gitEnv(),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    timeout: 20_000,
+    timeout: GIT_SYNC_TIMEOUT_MS,
   });
 
   return {

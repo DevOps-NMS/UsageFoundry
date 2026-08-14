@@ -50,7 +50,7 @@ assert.equal(
     "run against the real database",
 );
 
-const { claimDataDir, ownsDataDir, releaseDataDir } =
+const { claimDataDir, heartbeat, ownsDataDir, parseLock, releaseDataDir } =
   require("./serverLock") as typeof import("./serverLock");
 const { createRun, getRun } = require("./orchestrator") as typeof import("./orchestrator");
 const { db } = require("./db") as typeof import("./db");
@@ -150,5 +150,44 @@ describe("a process that does not own the data directory", () => {
     assert.equal(getRun(run.id)?.id, run.id, "the run must exist after an owned admission");
 
     await settle();
+  });
+});
+
+describe("an owner that loses the directory while it is up", () => {
+  it("stands down at the next beat instead of restamping the stranger's lock", () => {
+    // Reached by a stall rather than by a second server being started: one
+    // `gitSync` can hold the event loop to git's own ceiling, so the heartbeat
+    // simply does not fire, the lock goes stale, and another process claims it.
+    // The old `beat()` wrote over that claim with no comparison at all, leaving
+    // two processes both believing they held the directory for ever — and with
+    // it the folder claim's one guarantee, that a single event loop decides
+    // whether a folder is free.
+    assert.equal(ownsDataDir(), true, "this case starts from owning it");
+
+    const stranger = {
+      pid: process.ppid,
+      ownerId: "the-other-server",
+      startedAt: Date.now(),
+      heartbeatAt: Date.now(),
+    };
+    fs.writeFileSync(lockPath(), JSON.stringify(stranger));
+
+    heartbeat();
+
+    assert.equal(ownsDataDir(), false, "the beat must notice the directory is gone");
+    assert.equal(
+      parseLock(fs.readFileSync(lockPath(), "utf8"))?.ownerId,
+      stranger.ownerId,
+      "the beat must not stamp its own claim back over the new owner's",
+    );
+
+    // And the gate every writer reads — including the one the six boot
+    // reconcilers sit behind — now answers no. That is the whole of what this
+    // process can still do about it: whoever took the directory has already
+    // closed out the runs, and the damage from here on would be this server
+    // going on writing to a database it does not own.
+    const before = spawnCount;
+    assert.throws(() => createRun(task), /lost its claim on the data directory/);
+    assert.equal(spawnCount, before);
   });
 });
