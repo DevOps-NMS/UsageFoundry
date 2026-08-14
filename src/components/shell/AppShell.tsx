@@ -69,6 +69,9 @@ export function AppShell({ children }: { children: ReactNode }) {
       const pane = PANES.find((p) => p.shortcut === e.key);
       if (pane) {
         e.preventDefault();
+        // The sheet is modal, so it would otherwise stay lying over whichever
+        // pane just arrived underneath it.
+        setQuickOpen(false);
         router.push(pane.href);
       }
     }

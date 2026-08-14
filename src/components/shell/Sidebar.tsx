@@ -9,6 +9,9 @@ import { PANES, activePane } from "@/components/shell/panes";
 export const SIDEBAR_STORAGE_KEY = "uf.sidebar";
 export const SIDEBAR_COLLAPSED = "collapsed";
 
+/** What the toolbar's collapse button says it controls. */
+export const SIDEBAR_ID = "uf-sidebar";
+
 /**
  * Whether the rail is showing, read off the element the pre-paint script wrote.
  *
@@ -65,7 +68,10 @@ export function Sidebar() {
   const active = activePane(pathname);
 
   return (
-    <div className="flex h-full w-[var(--sidebar-w)] shrink-0 flex-col border-r border-line bg-inset">
+    <div
+      id={SIDEBAR_ID}
+      className="flex h-full w-[var(--sidebar-w)] shrink-0 flex-col border-r border-line bg-inset"
+    >
       <div
         className="app-drag flex shrink-0 items-center gap-2 overflow-hidden px-3"
         style={{

@@ -4,18 +4,21 @@ import { usePathname } from "next/navigation";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Icon } from "@/components/ui/Icon";
+import { SIDEBAR_ID } from "@/components/shell/Sidebar";
 import { toolbarAction, toolbarTitle } from "@/components/shell/panes";
 
 /**
  * The strip at the top of the content pane: what you are looking at, and the
- * one thing this pane exists to let you start.
+ * one place this pane can send you next.
  *
  * Its height is a *floor*, not a height. In an installed window with Window
  * Controls Overlay the browser hands the page the whole title bar and states
- * where it is in `env(titlebar-area-*)`; the strip takes that area so the
- * window's own buttons never land on top of the title. In an ordinary tab
- * every one of those values is zero and the `max()`/`min()` fall through to
- * the plain layout, which is the only configuration this could be checked in.
+ * where its own buttons are in `env(titlebar-area-*)`; the strip keeps clear
+ * of them on both sides, because they are on the left on macOS and on the
+ * right everywhere else. In an ordinary tab every one of those values falls
+ * back to a figure that makes each `max()` pick the plain padding, so nothing
+ * here branches on which case it is in — which matters, because the tab is
+ * the only case that could be checked from this container.
  *
  * The empty part of the strip drags the window; every control on it says
  * `app-no-drag`, because a drag region swallows the pointer press.
@@ -34,15 +37,20 @@ export function Toolbar({
 
   return (
     <header
-      className="app-drag flex shrink-0 items-center gap-3 border-b border-line bg-canvas pr-3"
+      className="app-drag flex shrink-0 items-center gap-3 border-b border-line bg-canvas"
       style={{
         height: "max(var(--toolbar-h), env(titlebar-area-height, 0px))",
         // The traffic lights are measured from the *window's* left edge, and
         // the sidebar has already absorbed that much of it. What is left over
-        // is what this strip has to keep clear — usually nothing, and 22px
-        // when the sidebar is a 56px rail.
+        // is what this strip has to keep clear — nothing on macOS with the
+        // list open, 22px when it is a 56px rail.
         paddingLeft:
           "max(0.75rem, calc(env(titlebar-area-x, 0px) - var(--sidebar-w)))",
+        // And the same sum from the other end, which is where Windows and
+        // Linux put the window's buttons. The fallbacks are chosen so the
+        // subtraction is exactly zero when the browser answers nothing.
+        paddingRight:
+          "max(0.75rem, calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)))",
       }}
     >
       <Button
@@ -50,6 +58,7 @@ export function Toolbar({
         size="compact"
         onClick={onToggleSidebar}
         aria-expanded={!sidebarCollapsed}
+        aria-controls={SIDEBAR_ID}
         aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
         className="app-no-drag"
       >
