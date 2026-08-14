@@ -2,7 +2,10 @@ import type { ChatDTO } from "./apiTypes";
 import { jsonRequest } from "./jsonRequest";
 
 /**
- * One mutating request from the chat page — sending a turn, deciding proposals.
+ * One mutating request from the chat page — sending a turn, deciding proposals,
+ * stopping a turn that is not going to finish. The body is optional because the
+ * cancel route reads none; the method stays POST either way, since `jsonRequest`
+ * would otherwise infer GET from the absent body and that route answers 405.
  *
  * It is a module of its own for one reason: `busy` on that page gates the
  * composer, Approve, Reject and Select-all together, nothing else on the page
@@ -24,7 +27,7 @@ export type ChatRequestResult =
 
 export async function chatRequest(
   url: string,
-  body: unknown,
+  body?: unknown,
 ): Promise<ChatRequestResult> {
   const result = await jsonRequest<{ chat?: ChatDTO }>(url, {
     method: "POST",

@@ -83,6 +83,46 @@ test("a refusal with no message of its own leaves the sentence to the caller", a
   );
 });
 
+test("a bodyless call still POSTs — Stop's route answers 405 to a GET", async () => {
+  let seen: { method?: string; body?: unknown } | undefined;
+  await withFetch(
+    async (_url, init) => {
+      seen = { method: init?.method, body: init?.body };
+      return new Response(JSON.stringify({ chat: { id: "c1" } }), { status: 200 });
+    },
+    async () => {
+      await chatRequest("/api/chat/c1/cancel");
+    },
+  );
+  assert.equal(seen?.method, "POST");
+  assert.equal(seen?.body, undefined);
+});
+
+test("Stop's shape releases the flag when the fetch rejects", async () => {
+  // The handler itself is under `src/app`, which `tsconfig.test.json` does not
+  // compile, so what is driven here is its shape: the flag that disables the
+  // composer, Send, Stop, Select-all, Reject and Approve is set, the request is
+  // made, and the `finally` is the only thing that clears it. Stop held a bare
+  // `fetch` with no `try` and so never reached that line — every control on the
+  // page disabled until a reload, with nothing on screen saying why.
+  let busy = false;
+  let sendError: string | null = null;
+  await withFetch(
+    () => Promise.reject(new TypeError("fetch failed")),
+    async () => {
+      busy = true;
+      try {
+        const result = await chatRequest("/api/chat/c1/cancel");
+        if (!result.ok) sendError = result.error ?? "The turn could not be stopped.";
+      } finally {
+        busy = false;
+      }
+    },
+  );
+  assert.equal(busy, false, "the page comes back without a reload");
+  assert.equal(sendError, "fetch failed", "and says why the press did nothing");
+});
+
 test("a successful request carries the chat back", async () => {
   await withFetch(
     async () => new Response(JSON.stringify({ chat: { id: "c1" } }), { status: 200 }),

@@ -307,14 +307,15 @@ export default function ChatPage() {
     if (!chatId || busy) return;
     setBusy(true);
     setSendError(null);
-    const res = await fetch(`/api/chat/${chatId}/cancel`, { method: "POST" });
-    const data = (await res.json().catch(() => ({}))) as {
-      chat?: ChatDTO;
-      error?: string;
-    };
-    if (!res.ok) setSendError(data.error ?? "The turn could not be stopped.");
-    else if (data.chat) setChat(data.chat);
-    setBusy(false);
+    try {
+      const result = await chatRequest(`/api/chat/${chatId}/cancel`);
+      if (!result.ok) setSendError(result.error ?? "The turn could not be stopped.");
+      else if (result.chat) setChat(result.chat);
+    } finally {
+      // `send`'s reasoning, and this handler is the one that most needs it: a
+      // turn worth stopping is one where something has already gone wrong.
+      setBusy(false);
+    }
   };
 
   const decide = async (action: "approve" | "reject", ids: string[]) => {
