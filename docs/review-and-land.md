@@ -73,7 +73,9 @@ Branches page in the order you want them landed and they go through one at a
 time, each re-previewed against git at its own turn rather than against whatever
 the page showed when you queued them — because every landing changes the base for
 the one behind it. Every check above still applies to every one of them, taken
-fresh.
+fresh. Queue a second set — the next repository's branches, say — while the first
+is still going and it waits its turn: batches drain whole, oldest first, so
+nothing you queue later lands between two branches you had already put in order.
 
 Two failures are told apart deliberately. A branch that cannot be landed is
 reported and the queue carries on to the next. A problem with your *checkout* —
