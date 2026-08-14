@@ -75,6 +75,7 @@ const PROBES: Record<keyof Settings, Probe> = {
   forwardSubAgentText: { send: false },
   maxConcurrentRuns: { send: 3 },
   isolationCopyGlobs: { send: [".env.local"] },
+  isolationCopyGlobsByRepo: { send: { "acme/web": ["apps/web/.env"] } },
   isolationPreamble: { send: "CHANGED preamble" },
   continuedWorkPrompt: { send: "CHANGED continued work" },
   telemetryForRuns: { send: true },

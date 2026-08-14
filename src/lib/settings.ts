@@ -161,6 +161,22 @@ export interface Settings {
    * agent, and copying them would be slow and stale.
    */
   isolationCopyGlobs: string[];
+  /**
+   * Per-repository overrides for the list above, keyed by folder.
+   *
+   * One list is correct for one repository and cannot be correct for fifteen: a
+   * Next.js app's `.env.local`, an Azure Functions app's `local.settings.json`
+   * and a Rails app's `config/master.key` would all have to be in it, and every
+   * repository would then be seeded from every pattern. A key here *replaces*
+   * the global list for the folders it covers rather than adding to it, which
+   * is also the only way to say "this repository copies nothing".
+   *
+   * The key is a folder written absolute (`/workspace/acme/web`) or relative to
+   * any mount (`acme/web`); the longest match wins, so a key on a parent is a
+   * default for the tree under it. Empty by default, which is what keeps an
+   * existing install's behaviour exactly what it was.
+   */
+  isolationCopyGlobsByRepo: Record<string, string[]>;
   /** Prepended to the first prompt of an isolated run. */
   isolationPreamble: string;
   /**
@@ -399,6 +415,7 @@ const DEFAULTS: Settings = {
   forwardSubAgentText: true,
   maxConcurrentRuns: null,
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
+  isolationCopyGlobsByRepo: {},
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,
   continuedWorkPrompt: DEFAULT_CONTINUED_WORK_PROMPT,
   telemetryForRuns: false,

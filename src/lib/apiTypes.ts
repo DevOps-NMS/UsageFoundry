@@ -1258,6 +1258,8 @@ export interface SettingsDTO {
   /** Null means no limit. */
   maxConcurrentRuns: number | null;
   isolationCopyGlobs: string[];
+  /** Folders whose seeding list replaces the one above. */
+  isolationCopyGlobsByRepo: Record<string, string[]>;
   isolationPreamble: string;
   /** What a run is told when it picks up the branch the run before it had. */
   continuedWorkPrompt: string;

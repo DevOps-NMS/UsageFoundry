@@ -65,7 +65,10 @@ const {
   githubEnv,
   isTransientApiError,
   isUsageLimit,
+  copyGlobsFor,
   matchesCopyGlobs,
+  planSeedCopies,
+  seedReport,
   needsLiveSpendTelemetry,
   nextPrompt,
   permissionDenials,
@@ -1685,6 +1688,188 @@ describe("matchesCopyGlobs", () => {
     assert.equal(matchesCopyGlobs("package.json", globs), false);
     // A re-inclusion after an exclusion wins, because later patterns win.
     assert.equal(matchesCopyGlobs(".env.example", [...globs, ".env.example"]), true);
+  });
+
+  it("matches a path below the root only when the pattern names one", () => {
+    // The half that could not be expressed at all: the walk read one directory
+    // and matched a bare filename, so a monorepo's `apps/web/.env` was
+    // unreachable whatever the operator typed.
+    assert.equal(matchesCopyGlobs("apps/web/.env", ["apps/web/.env"]), true);
+    assert.equal(matchesCopyGlobs("apps/web/.env", ["apps/*/.env"]), true);
+    assert.equal(matchesCopyGlobs("apps/web/.env.local", ["apps/web/.env.*"]), true);
+    // And the half that must not change with it: a bare filename still means a
+    // file at the root. Reading `.env` as "any .env anywhere" would silently
+    // widen every install's existing list.
+    assert.equal(matchesCopyGlobs("apps/web/.env", [".env"]), false);
+    assert.equal(matchesCopyGlobs("apps/web/.env", ["*"]), false);
+  });
+
+  it("refuses a pattern that climbs out of the repository", () => {
+    // This walks the operator's own checkout and copies into an agent's, so a
+    // pattern is not a place to resolve `..` from.
+    assert.equal(matchesCopyGlobs(".env", ["../.env"]), false);
+    assert.equal(matchesCopyGlobs("x/.env", ["x/../.env"]), false);
+    assert.equal(matchesCopyGlobs(".env", ["/.env"]), false);
+  });
+});
+
+/**
+ * Which paths a seeding pass copies, given a repository and a list.
+ *
+ * The traversal is half the decision and it used to be a single `readdirSync`
+ * of the repository root, so it is injected here rather than left on the disk:
+ * both ways of getting this wrong are a checkout that starts without its
+ * configuration, and the agent finds out inside a tool call, one billed cycle
+ * later.
+ */
+describe("planSeedCopies", () => {
+  type Tree = Record<string, { files?: string[]; dirs?: string[] }>;
+
+  function readerFor(tree: Tree, opened?: string[]) {
+    return (rel: string) => {
+      opened?.push(rel);
+      const node = tree[rel] ?? {};
+      return [
+        ...(node.files ?? []).map((name) => ({ name, isFile: true, isDirectory: false })),
+        ...(node.dirs ?? []).map((name) => ({ name, isFile: false, isDirectory: true })),
+      ];
+    };
+  }
+
+  const monorepo: Tree = {
+    "": { files: [".env.example", "package.json"], dirs: ["apps", "node_modules", ".git"] },
+    apps: { dirs: ["web", "api"] },
+    "apps/web": { files: [".env", ".env.example"] },
+    "apps/api": { files: ["local.settings.json"] },
+  };
+
+  it("reaches a file below the root when a pattern names it", () => {
+    assert.deepEqual(
+      planSeedCopies(["apps/web/.env"], readerFor(monorepo)),
+      ["apps/web/.env"],
+    );
+  });
+
+  it("still honours an exclusion at depth, later pattern winning", () => {
+    assert.deepEqual(
+      planSeedCopies(["apps/*/.env*", "!apps/web/.env.example"], readerFor(monorepo)),
+      ["apps/web/.env"],
+    );
+  });
+
+  it("opens only the directories a pattern's own segments ask for", () => {
+    // The property that keeps this affordable before every isolated checkout:
+    // the default list costs exactly one readdir and no repository is walked
+    // whole. `node_modules` and `.git` are never opened because no pattern
+    // names them.
+    const opened: string[] = [];
+    assert.deepEqual(
+      planSeedCopies([".env", ".env.*", "!.env.example"], readerFor(monorepo, opened)),
+      [],
+    );
+    assert.deepEqual(opened, [""]);
+
+    const openedDeep: string[] = [];
+    planSeedCopies(["apps/web/.env"], readerFor(monorepo, openedDeep));
+    assert.deepEqual(openedDeep, ["", "apps", "apps/web"]);
+  });
+
+  it("copies nothing for a repository whose list is empty", () => {
+    assert.deepEqual(planSeedCopies([], readerFor(monorepo)), []);
+  });
+
+  it("bounds a wildcard directory segment rather than trusting the tree", () => {
+    // A pattern with a wildcard directory segment is the one shape whose walk
+    // is not bounded by the pattern itself, against a repository this app did
+    // not write.
+    const wide: Tree = {
+      "": { dirs: Array.from({ length: 500 }, (_, i) => `d${i}`) },
+    };
+    for (let i = 0; i < 500; i++) wide[`d${i}`] = { files: [".env"] };
+
+    const opened: string[] = [];
+    const copied = planSeedCopies(["*/.env"], readerFor(wide, opened));
+    assert.ok(opened.length <= 200, `opened ${opened.length} directories`);
+    assert.ok(copied.length > 0 && copied.length < 500);
+  });
+});
+
+describe("copyGlobsFor", () => {
+  const mounts = [
+    { id: "work", label: "Work", path: "/workspace" },
+    { id: "notes", label: "Notes", path: "/workspace2" },
+  ];
+  const globalList = [".env", ".env.*", "!.env.example"];
+
+  it("falls back to the install-wide list when nothing names the folder", () => {
+    const picked = copyGlobsFor("/workspace/acme/web", globalList, {}, mounts);
+    assert.deepEqual(picked, { globs: globalList, key: null });
+  });
+
+  it("lets two repositories be seeded differently from one setting", () => {
+    // The whole of the finding: one list has to be simultaneously correct for
+    // every repository, so a monorepo and an Azure Functions app end up seeding
+    // each other's patterns.
+    const byRepo = {
+      "acme/web": ["apps/web/.env.local"],
+      "acme/api": ["local.settings.json"],
+    };
+    assert.deepEqual(copyGlobsFor("/workspace/acme/web", globalList, byRepo, mounts).globs, [
+      "apps/web/.env.local",
+    ]);
+    assert.deepEqual(copyGlobsFor("/workspace/acme/api", globalList, byRepo, mounts).globs, [
+      "local.settings.json",
+    ]);
+  });
+
+  it("takes a key absolute as well as relative to a mount", () => {
+    const byRepo = { "/workspace2/scratch": ["config/local.yml"] };
+    assert.deepEqual(copyGlobsFor("/workspace2/scratch", globalList, byRepo, mounts).globs, [
+      "config/local.yml",
+    ]);
+  });
+
+  it("prefers the longest key, so a parent is a default and not a verdict", () => {
+    const byRepo = { acme: ["shared.env"], "acme/web": ["apps/web/.env"] };
+    assert.equal(copyGlobsFor("/workspace/acme/api", globalList, byRepo, mounts).key, "acme");
+    assert.equal(
+      copyGlobsFor("/workspace/acme/web", globalList, byRepo, mounts).key,
+      "acme/web",
+    );
+  });
+
+  it("honours an empty list as an answer rather than an absence", () => {
+    // "This repository copies nothing" is the one thing the global list cannot
+    // say, and falling back here would hand it every pattern instead.
+    const picked = copyGlobsFor("/workspace/acme/web", globalList, { "acme/web": [] }, mounts);
+    assert.deepEqual(picked, { globs: [], key: "acme/web" });
+  });
+});
+
+describe("seedReport", () => {
+  const globs = [".env", ".env.*"];
+
+  it("names what it copied", () => {
+    assert.equal(seedReport([".env", "apps/web/.env"], [], globs), " (copied .env, apps/web/.env)");
+  });
+
+  it("tells a repository with nothing to seed from a list that matched nothing", () => {
+    // These were the same line — the `(copied …)` clause simply absent — so a
+    // checkout that needed configuration and got none looked exactly like one
+    // that needed none. The second costs a billed cycle, and an agent under
+    // `acceptEdits` may commit a placeholder config onto the branch.
+    assert.equal(seedReport([], [], globs), " (nothing to seed)");
+
+    const missed = seedReport([], ["apps/web/.env.local"], globs);
+    assert.match(missed, /nothing seeded/);
+    assert.match(missed, /apps\/web\/\.env\.local/);
+    assert.match(missed, /matched none of \.env, \.env\.\*/);
+  });
+
+  it("counts the rest rather than listing every ignored file", () => {
+    const many = ["a", "b", "c", "d", "e"];
+    const line = seedReport([], many, globs);
+    assert.match(line, /5 gitignored files here — a, b, c and 2 more/);
   });
 });
 

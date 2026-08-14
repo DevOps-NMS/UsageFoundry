@@ -237,6 +237,11 @@ Two consequences worth knowing before you rely on it:
   Your `.env` files are copied across (configurable in Settings) so the first
   command does not fail on a missing variable; everything else the agent installs
   itself. Checkouts are reused between runs, so that cost is paid once per slot.
+  A pattern can name a path as well as a filename — `apps/web/.env.local` — and
+  a repository can have its own list under **Per-repository overrides**, which
+  replaces the global one for that folder and everything under it. When nothing
+  is copied the run log says which of the two happened: nothing to seed, or a
+  list that matched none of the gitignored files that are there.
 - Work the agent leaves **uncommitted** stays in the worktree and never reaches
   your branch. That is why the isolated-run preamble tells it to commit as it
   goes — keep that instruction if you edit the wording.

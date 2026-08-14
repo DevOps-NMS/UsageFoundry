@@ -150,6 +150,7 @@ const EDITABLE_PATHS = [
   "defaultPermissionMode",
   "maxConcurrentRuns",
   "isolationCopyGlobs",
+  "isolationCopyGlobsByRepo",
   "landStrategy",
   "continuationPrompt",
   "donePushbackPrompt",
@@ -354,6 +355,31 @@ function parseGlobs(text: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * One `folder: pattern, pattern` line per repository.
+ *
+ * A line with a folder and nothing after the colon is kept as an empty list,
+ * because "copy nothing into this repository's checkouts" is the one thing the
+ * global list cannot express and the reason this field exists.
+ */
+function parseGlobsByRepo(text: string): Record<string, string[]> {
+  const map: Record<string, string[]> = {};
+  for (const line of text.split("\n")) {
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    const folder = line.slice(0, colon).trim().replace(/\/+$/, "");
+    if (!folder) continue;
+    map[folder] = parseGlobs(line.slice(colon + 1));
+  }
+  return map;
+}
+
+function formatGlobsByRepo(map: Record<string, string[]>): string {
+  return Object.entries(map)
+    .map(([folder, globs]) => `${folder}: ${globs.join(", ")}`)
+    .join("\n");
+}
+
 function Section({
   id,
   title,
@@ -522,6 +548,8 @@ export default function SettingsPage() {
   const [calError, setCalError] = useState<string | null>(null);
   /** Non-null only while the globs field is being edited. */
   const [copyGlobsText, setCopyGlobsText] = useState<string | null>(null);
+  /** The same, for the per-repository overrides beneath it. */
+  const [copyGlobsByRepoText, setCopyGlobsByRepoText] = useState<string | null>(null);
   // The registry, and the definitions this app did not write. Both are needed
   // for one row: the picker offers the first, and the sentence beside it has to
   // declare the second, because `--agents` merges with what the CLI finds on
@@ -578,15 +606,17 @@ export default function SettingsPage() {
   // the dirty check, the per-field marks and the PUT body — reads this one
   // derived value, or a pattern typed and not blurred would be dropped by a
   // Save that reported success.
-  const effective = useMemo(
-    () =>
-      s === null
-        ? null
-        : copyGlobsText === null
-          ? s
-          : { ...s, isolationCopyGlobs: parseGlobs(copyGlobsText) },
-    [s, copyGlobsText],
-  );
+  const effective = useMemo(() => {
+    if (s === null) return null;
+    let out = s;
+    if (copyGlobsText !== null) {
+      out = { ...out, isolationCopyGlobs: parseGlobs(copyGlobsText) };
+    }
+    if (copyGlobsByRepoText !== null) {
+      out = { ...out, isolationCopyGlobsByRepo: parseGlobsByRepo(copyGlobsByRepoText) };
+    }
+    return out;
+  }, [s, copyGlobsText, copyGlobsByRepoText]);
 
   const changed = useMemo(() => {
     if (!effective || !savedS) return new Set<string>();
@@ -1456,8 +1486,10 @@ export default function SettingsPage() {
               <>
                 A fresh checkout holds committed work only, so a gitignored
                 config file has to be copied in — prefix a pattern with{" "}
-                <span className="mono">!</span> to exclude it. Dependencies are
-                not copied; the agent installs them
+                <span className="mono">!</span> to exclude it, and write a path
+                (<span className="mono">apps/web/.env</span>) to reach one below
+                the repository root. Dependencies are not copied; the agent
+                installs them
               </>
             }
           >
@@ -1473,6 +1505,41 @@ export default function SettingsPage() {
                   if (copyGlobsText === null) return;
                   patch({ isolationCopyGlobs: parseGlobs(copyGlobsText) });
                   setCopyGlobsText(null);
+                }}
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="copyglobsbyrepo"
+            edited={isEdited("isolationCopyGlobsByRepo")}
+            label="Per-repository overrides"
+            description={
+              <>
+                One <span className="mono">folder: patterns</span> line per
+                repository, replacing the list above for that folder and
+                everything under it. The folder is written as the picker shows
+                it (<span className="mono">acme/web</span>) or absolute. A line
+                with no patterns copies nothing
+              </>
+            }
+          >
+            <div className="w-72">
+              <Textarea
+                id="copyglobsbyrepo"
+                rows={3}
+                placeholder={"acme/web: apps/web/.env.local\nacme/api: local.settings.json"}
+                value={
+                  copyGlobsByRepoText ??
+                  formatGlobsByRepo(effective.isolationCopyGlobsByRepo)
+                }
+                onChange={(e) => setCopyGlobsByRepoText(e.target.value)}
+                onBlur={() => {
+                  if (copyGlobsByRepoText === null) return;
+                  patch({
+                    isolationCopyGlobsByRepo: parseGlobsByRepo(copyGlobsByRepoText),
+                  });
+                  setCopyGlobsByRepoText(null);
                 }}
               />
             </div>

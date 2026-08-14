@@ -182,6 +182,25 @@ export async function PUT(req: Request) {
     patch.isolationCopyGlobs = list;
   }
 
+  if ("isolationCopyGlobsByRepo" in body) {
+    const raw = body.isolationCopyGlobsByRepo;
+    const map: Record<string, string[]> = {};
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+        const folder = key.trim().replace(/\/+$/, "");
+        if (!folder) continue;
+        const globs = (Array.isArray(value) ? value : String(value ?? "").split(/[\n,]/))
+          .map((g) => String(g).trim())
+          .filter(Boolean);
+        // An entry with no patterns is kept: "this repository copies nothing"
+        // is a real answer, and the only way to say it — dropping it would
+        // silently hand that repository the install-wide list back.
+        map[folder] = globs;
+      }
+    }
+    patch.isolationCopyGlobsByRepo = map;
+  }
+
   if ("isolationPreamble" in body) {
     const v = String(body.isolationPreamble ?? "").trim();
     if (v) patch.isolationPreamble = v;

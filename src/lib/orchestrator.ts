@@ -1479,14 +1479,30 @@ async function ensureWorktree(run: RunRow): Promise<string> {
     if (!add.ok) throw checkoutFailure(repoRoot, slotPath, add.stderr);
   }
 
-  const copied = seedWorktree(repoRoot, slotPath);
+  const settings = getSettings();
+  const seeding = copyGlobsFor(
+    repoRoot,
+    settings.isolationCopyGlobs,
+    settings.isolationCopyGlobsByRepo,
+    WORKSPACE_MOUNTS,
+  );
+  const copied = seedWorktree(repoRoot, slotPath, seeding.globs);
+  // Only asked when nothing was copied: it is a git spawn, and the question it
+  // answers — "did this repository have something to seed?" — has no reader
+  // once something was seeded.
+  const unseeded = copied.length === 0 ? await unseededIgnoredFiles(repoRoot) : [];
   log(
     run.id,
     (continuing
       ? `Working in an isolated checkout, carrying on run ${shortId(run.continues_run!)}'s branch ${branch}`
       : `Working in an isolated checkout on branch ${branch}`) +
-      (copied.length ? ` (copied ${copied.join(", ")})` : ""),
-    { worktree: slotPath, branch, ...(continuing ? { continuesRun: run.continues_run } : {}) },
+      seedReport(copied, unseeded, seeding.globs),
+    {
+      worktree: slotPath,
+      branch,
+      ...(seeding.key !== null ? { seedingKey: seeding.key } : {}),
+      ...(continuing ? { continuesRun: run.continues_run } : {}),
+    },
   );
 
   return slotPath;
@@ -1513,56 +1529,278 @@ async function requireBranch(
   );
 }
 
-/** Match a filename against the settings glob list; later patterns win. */
-export function matchesCopyGlobs(name: string, globs: string[]): boolean {
+/** One path segment of a pattern, as a regex; `*` and `?` never cross a `/`. */
+function segmentMatcher(segment: string): RegExp {
+  // `?` is a glob wildcard and has to be *translated*, not merely escaped:
+  // left alone it reached the regex meaning "the previous token is optional",
+  // so `.env?` matched `.env` and rejected `.envx` — the opposite of both.
+  // Both wildcards are decided in the same pass that escapes everything else,
+  // because a second sweep rewriting `\?` would also catch a literal
+  // backslash standing in front of one.
+  const source = segment.replace(/[.+^${}()|[\]\\?*]/g, (c) =>
+    c === "*" ? "[^/]*" : c === "?" ? "[^/]" : `\\${c}`,
+  );
+  return new RegExp(`^${source}$`);
+}
+
+/**
+ * A copy pattern split into segments, or `null` if it cannot be honoured.
+ *
+ * `..` and a leading `/` are refused rather than resolved: this walks the
+ * operator's own checkout and copies into an agent's, and a pattern that climbs
+ * out of the repository is either a typo or the one thing a seeding list must
+ * not be able to express. Refusing costs the pattern; resolving it costs the
+ * containment argument every other path in this file makes.
+ */
+function parseCopyGlob(raw: string): { negate: boolean; segments: string[] } | null {
+  const negate = raw.startsWith("!");
+  const pattern = negate ? raw.slice(1) : raw;
+  if (!pattern || pattern.startsWith("/")) return null;
+
+  const segments = pattern.split("/");
+  if (segments.some((s) => s === "" || s === "." || s === "..")) return null;
+  return { negate, segments };
+}
+
+/**
+ * Match a repository-relative path against the settings glob list; later
+ * patterns win.
+ *
+ * A pattern with no `/` still matches a top-level filename and nothing else —
+ * segment counts must agree — so `.env` does not suddenly reach
+ * `apps/web/.env`, which would silently widen every existing install's list.
+ * Naming that file takes writing the path out.
+ */
+export function matchesCopyGlobs(relPath: string, globs: string[]): boolean {
+  const parts = relPath.split("/");
   let hit = false;
   for (const raw of globs) {
-    const negate = raw.startsWith("!");
-    const pattern = negate ? raw.slice(1) : raw;
-    // `?` is a glob wildcard and has to be *translated*, not merely escaped:
-    // left alone it reached the regex meaning "the previous token is optional",
-    // so `.env?` matched `.env` and rejected `.envx` — the opposite of both.
-    // Both wildcards are decided in the same pass that escapes everything else,
-    // because a second sweep rewriting `\?` would also catch a literal
-    // backslash standing in front of one.
-    const source = pattern.replace(/[.+^${}()|[\]\\?*]/g, (c) =>
-      c === "*" ? ".*" : c === "?" ? "." : `\\${c}`,
-    );
-    if (new RegExp(`^${source}$`).test(name)) hit = !negate;
+    const parsed = parseCopyGlob(raw);
+    if (!parsed || parsed.segments.length !== parts.length) continue;
+    if (parsed.segments.every((s, i) => segmentMatcher(s).test(parts[i]))) {
+      hit = !parsed.negate;
+    }
   }
   return hit;
 }
 
 /**
- * Copy the gitignored files an agent needs to run anything at all.
+ * A repository as this walk needs to see it: one directory's entries.
  *
- * Top level only, and only files. A checkout carries committed work, so the
- * environment file that every command depends on is exactly what is missing;
- * dependency trees and build output are left for the agent to regenerate.
+ * An argument rather than a `readdirSync` inside `planSeedCopies`, for
+ * `normalizeWorkflowInput`'s reason — the decision is which paths get copied,
+ * every way of getting it wrong is a checkout that silently starts without its
+ * configuration, and a decision that reads the disk cannot be pinned.
  */
-function seedWorktree(repoRoot: string, slotPath: string): string[] {
-  const globs = getSettings().isolationCopyGlobs;
+export interface SeedDirEntry {
+  name: string;
+  isFile: boolean;
+  isDirectory: boolean;
+}
+
+/**
+ * How many directories one seeding pass may open.
+ *
+ * The walk is driven by the patterns rather than by the tree — it descends only
+ * where a pattern's own segments say to — so a list of literal paths costs one
+ * `readdir` per directory named. A wildcard *directory* segment (`apps/=*=/.env`)
+ * is what makes that unbounded in principle, and this is what bounds it in
+ * practice: it runs before every isolated checkout, against a repository this
+ * app did not write.
+ */
+const MAX_SEED_DIRS = 200;
+
+/**
+ * Which paths a glob list selects from a repository, relative to its root.
+ *
+ * Paths, not filenames. The walk used to be one `readdirSync` of the repository
+ * root with `isFile()`, so `apps/web/.env` could not be named by any pattern at
+ * all — the setting's name says globs and what it matched was a bare filename in
+ * one directory. A monorepo's isolated checkout therefore started without its
+ * configuration whatever the operator typed, and the only signal was the
+ * *absence* of a clause in one log line.
+ *
+ * It descends only into directories some pattern's next segment matches, so the
+ * default list still costs exactly one `readdir` and no repository is ever
+ * walked whole. Symlinks are neither files nor directories to `readdir`'s own
+ * lstat semantics, so they are skipped here as they were before — a link is a
+ * way out of the tree, and this copies into a checkout an agent then owns.
+ */
+export function planSeedCopies(
+  globs: string[],
+  readDir: (relDir: string) => SeedDirEntry[],
+): string[] {
+  const parsed = globs.map(parseCopyGlob).filter((p) => p !== null);
+  // A negated pattern excludes; it never justifies opening a directory.
+  const descend = parsed.filter((p) => !p.negate);
   const copied: string[] = [];
 
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(repoRoot, { withFileTypes: true });
-  } catch {
-    return copied;
+  let opened = 0;
+  const queue: { rel: string; depth: number }[] = [{ rel: "", depth: 0 }];
+  while (queue.length > 0) {
+    const { rel, depth } = queue.shift()!;
+    if (opened >= MAX_SEED_DIRS) break;
+    opened += 1;
+
+    for (const entry of readDir(rel)) {
+      const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isFile) {
+        if (matchesCopyGlobs(relPath, globs)) copied.push(relPath);
+        continue;
+      }
+      if (!entry.isDirectory) continue;
+      const worthOpening = descend.some(
+        (p) => p.segments.length > depth + 1 && segmentMatcher(p.segments[depth]).test(entry.name),
+      );
+      if (worthOpening) queue.push({ rel: relPath, depth: depth + 1 });
+    }
   }
 
-  for (const e of entries) {
-    if (!e.isFile() || !matchesCopyGlobs(e.name, globs)) continue;
-    const target = path.join(slotPath, e.name);
+  // Sorted so the log line reads the same twice, whatever order the filesystem
+  // handed the entries back in.
+  return copied.sort();
+}
+
+/**
+ * The seeding list for one repository: its own if the operator wrote one, the
+ * install-wide list otherwise.
+ *
+ * One global list is correct for one repository and cannot be correct for
+ * fifteen — a Next.js app's `.env.local`, an Azure Functions app's
+ * `local.settings.json` and a Rails app's `config/master.key` have to be
+ * described at once, and every repository then gets every pattern. A key here
+ * *replaces* the global list rather than adding to it, which is what lets one
+ * repository be told to copy nothing at all.
+ *
+ * A key is a folder, written either absolute as the container sees it
+ * (`/workspace/acme/web`) or relative to any mount (`acme/web`), because both
+ * are what the operator is looking at when they write it. The longest match
+ * wins, so a key on a parent directory is a default for everything under it and
+ * a key on the repository itself still overrides that.
+ *
+ * Mounts are an argument for `matchesCopyGlobs`' reason.
+ */
+export function copyGlobsFor(
+  repoRoot: string,
+  globs: string[],
+  byRepo: Record<string, string[]>,
+  mounts: WorkspaceMount[],
+): { globs: string[]; key: string | null } {
+  const target = segmentsOf(path.resolve(repoRoot));
+  let best: { key: string; depth: number } | null = null;
+
+  for (const key of Object.keys(byRepo)) {
+    const candidates = key.startsWith("/")
+      ? [key]
+      : mounts.map((m) => path.join(m.path, key));
+    for (const candidate of candidates) {
+      const segments = segmentsOf(path.resolve(candidate));
+      // Case-folded segment-wise, `overlaps`' comparison: this is a folder
+      // identity test on a path an operator typed, and macOS is
+      // case-insensitive.
+      if (segments.length > target.length) continue;
+      if (!segments.every((s, i) => s.toLowerCase() === target[i].toLowerCase())) continue;
+      if (!best || segments.length > best.depth) best = { key, depth: segments.length };
+    }
+  }
+
+  return best ? { globs: byRepo[best.key], key: best.key } : { globs, key: null };
+}
+
+/**
+ * Copy the gitignored files an agent needs to run anything at all.
+ *
+ * Only files, and only where a pattern names them. A checkout carries committed
+ * work, so the environment file that every command depends on is exactly what is
+ * missing; dependency trees and build output are left for the agent to
+ * regenerate.
+ */
+function seedWorktree(repoRoot: string, slotPath: string, globs: string[]): string[] {
+  const copied: string[] = [];
+
+  const planned = planSeedCopies(globs, (relDir) => {
+    try {
+      return fs
+        .readdirSync(path.join(repoRoot, relDir), { withFileTypes: true })
+        .map((e) => ({ name: e.name, isFile: e.isFile(), isDirectory: e.isDirectory() }));
+    } catch {
+      return [];
+    }
+  });
+
+  for (const rel of planned) {
+    const target = path.join(slotPath, rel);
     if (fs.existsSync(target)) continue;
     try {
-      fs.copyFileSync(path.join(repoRoot, e.name), target);
-      copied.push(e.name);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(path.join(repoRoot, rel), target);
+      copied.push(rel);
     } catch {
       /* a file we cannot read is not worth failing the run over */
     }
   }
   return copied;
+}
+
+/** How many unseeded gitignored paths the log line names before counting. */
+const SEED_REPORT_NAMED = 3;
+
+/**
+ * Gitignored files the repository has and no pattern reached.
+ *
+ * Only ever asked when nothing was copied, and only to tell two things apart
+ * that used to read identically: a repository that needs no seeding, and a
+ * repository that needed it and got none. Both were the same log line with the
+ * `(copied …)` clause missing, and the second one costs a billed cycle that
+ * fails on a file the operator believes is there — or worse, an agent under
+ * `acceptEdits` writing a placeholder config and committing it onto the branch.
+ *
+ * `--directory` is what keeps this cheap: a wholly-ignored tree comes back as
+ * one entry ending in `/` rather than every file under it, so `node_modules` is
+ * one line. Those are dropped — a directory is not something a pattern here
+ * copies — and what is left is the ignored *files*, at whatever depth, which is
+ * exactly the vocabulary a pattern can now name.
+ */
+async function unseededIgnoredFiles(repoRoot: string): Promise<string[]> {
+  const listed = await git(repoRoot, [
+    "ls-files",
+    "--others",
+    "--ignored",
+    "--exclude-standard",
+    "--directory",
+    "--no-empty-directory",
+  ]);
+  if (!listed.ok) return [];
+  return listed.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !l.endsWith("/"))
+    .sort();
+}
+
+/**
+ * The clause the checkout's log line ends with.
+ *
+ * Three outcomes, and the distinction between the last two is the whole point —
+ * it is the same one `regionsRead: false` makes in `land.ts` and `notShown`
+ * makes on the branch inventory. "Nothing to seed" is a fact about the
+ * repository; "nothing matched" is a fact about the list, and only one of them
+ * is something the operator can fix.
+ */
+export function seedReport(
+  copied: string[],
+  unseeded: string[],
+  globs: string[],
+): string {
+  if (copied.length > 0) return ` (copied ${copied.join(", ")})`;
+  if (unseeded.length === 0) return " (nothing to seed)";
+
+  const named = unseeded.slice(0, SEED_REPORT_NAMED).join(", ");
+  const rest = unseeded.length - SEED_REPORT_NAMED;
+  return (
+    ` (nothing seeded: ${unseeded.length} gitignored file${unseeded.length === 1 ? "" : "s"} here — ` +
+    `${named}${rest > 0 ? ` and ${rest} more` : ""} — matched none of ${globs.join(", ")})`
+  );
 }
 
 /**
