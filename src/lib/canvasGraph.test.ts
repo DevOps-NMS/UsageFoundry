@@ -8,6 +8,7 @@ import {
   freeSpot,
   layoutBounds,
   resolveLayout,
+  resolveLinkRelease,
   type BlockDraft,
   type CanvasDraft,
   type LinkDraft,
@@ -201,4 +202,80 @@ test("a block added without a pointer lands clear of the others", () => {
 test("an empty canvas still offers somewhere to put the first block", () => {
   const spot = freeSpot(new Map());
   assert.ok(spot.x >= 0 && spot.y >= 0);
+});
+
+/* ------------------------------------------------------------------ */
+/* The Link handle                                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Three gestures reach one control, and telling them apart is the whole of what
+ * this decides. Getting it wrong is silent in the direction that matters: the
+ * handle relabels itself **Link here**, the operator clicks it, the banner
+ * changes to name a different block and no edge is drawn — a canvas that reads
+ * as working and cannot connect two blocks by the one button labelled for it.
+ * Nothing throws and the graph that is saved is simply smaller than the one on
+ * screen.
+ */
+
+test("clicking Link here completes the link the other block armed", () => {
+  // Armed from a, pressed and released on b's own handle. The direction is the
+  // whole point: b starts after a, not the other way round.
+  assert.deepEqual(resolveLinkRelease("b", "a", "b"), {
+    kind: "connect",
+    from: "a",
+    to: "b",
+  });
+});
+
+test("dragging out of a handle links from that handle's block", () => {
+  // Even with another block armed: the pointer left this handle, so this block
+  // is the source and the armed one is abandoned.
+  assert.deepEqual(resolveLinkRelease("b", "a", "c"), {
+    kind: "connect",
+    from: "b",
+    to: "c",
+  });
+  assert.deepEqual(resolveLinkRelease("b", null, "c"), {
+    kind: "connect",
+    from: "b",
+    to: "c",
+  });
+});
+
+test("clicking a handle with nothing armed arms it", () => {
+  assert.deepEqual(resolveLinkRelease("a", null, "a"), {
+    kind: "arm",
+    from: "a",
+  });
+});
+
+test("clicking the armed block's own handle disarms it", () => {
+  // The same handle reads "Cancel" while it is armed, and that is what it does.
+  assert.deepEqual(resolveLinkRelease("a", "a", "a"), { kind: "disarm" });
+});
+
+test("a drag that arrives nowhere leaves the handle armed", () => {
+  // Released over bare canvas: nothing is connected and nothing is lost, so the
+  // link can still be finished with a click on the target.
+  assert.deepEqual(resolveLinkRelease("b", null, null), {
+    kind: "arm",
+    from: "b",
+  });
+  assert.deepEqual(resolveLinkRelease("b", "a", null), {
+    kind: "arm",
+    from: "b",
+  });
+});
+
+test("no gesture on a handle ever links a block to itself", () => {
+  // The server refuses a self-edge, but it can only answer about a graph it was
+  // sent, and one drawn on the canvas is one the operator has to undo by hand.
+  for (const armed of [null, "a", "b"]) {
+    for (const over of [null, "a", "b"]) {
+      const gesture = resolveLinkRelease("a", armed, over);
+      if (gesture.kind !== "connect") continue;
+      assert.notEqual(gesture.from, gesture.to, `armed=${armed} over=${over}`);
+    }
+  }
 });
