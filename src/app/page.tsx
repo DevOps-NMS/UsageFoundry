@@ -1,15 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent, ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import Link from "next/link";
 import { LiveTelemetry } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
+import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
-import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
-import { UsagePeriods } from "@/components/UsagePeriods";
+import { SegmentedControl } from "@/components/ui/SegmentedControl";
+import { Table, Td, Th, Tr } from "@/components/ui/Table";
+import { PERIOD_OPTIONS, UsagePeriods } from "@/components/UsagePeriods";
 import type {
   PeriodGranularityDTO,
   PlanUsageDTO,
@@ -74,9 +76,49 @@ function ceilingDetail(
   return "Set a ceiling in Settings to see a percentage.";
 }
 
-/** Fixed order, so the tab strip and its keyboard navigation cannot disagree. */
+/** Fixed order, so the picker and the map it indexes cannot disagree. */
 const DIMENSIONS = ["model", "project", "effort", "agent", "skill"] as const;
 type Dimension = (typeof DIMENSIONS)[number];
+
+/** One name per slice, read by the picker and by the table's own column head. */
+const DIMENSION_LABEL: Record<Dimension, string> = {
+  model: "Model",
+  project: "Project",
+  effort: "Effort",
+  agent: "Sub-agent",
+  skill: "Skill",
+};
+
+const DIMENSION_OPTIONS = DIMENSIONS.map((value) => ({
+  value,
+  label: DIMENSION_LABEL[value],
+}));
+
+/**
+ * A Finder-style list view: a bordered, rounded box that owns its own scroll
+ * region, with the column heads stuck to the top of it — rather than a
+ * full-width web table running to the card's edges and scrolling the page.
+ *
+ * The height cap is what gives the sticky head something to stick inside, which
+ * is also why `TableWrap` cannot be used here: a scroll container with no
+ * height constraint never scrolls vertically, so a head stuck to its top never
+ * moves. `overflow-auto` because these tables still overflow sideways on a
+ * narrow window, which is the job `TableWrap` was doing.
+ *
+ * Repeated in `UsagePeriods` and `LiveTelemetry` rather than shared: those two
+ * are unit-tested against the plain CommonJS `tsconfig.test.json` emits, where
+ * a path alias does not resolve, so a shared module would have to be reachable
+ * relatively from both — a fourth file holding two class strings.
+ */
+const LIST_VIEW = "max-h-80 overflow-auto rounded-sm border border-line";
+
+/**
+ * `bg-surface` because the rows scroll under it, and the inset shadow because a
+ * `border-b` on a sticky cell is not reliably painted under `border-collapse` —
+ * the two are the same hairline in the same place wherever both do render.
+ */
+const STICKY_HEAD =
+  "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
 
 /** Poll cadence: the second one applies while a run is still working. */
 const POLL_IDLE_MS = 10_000;
@@ -85,6 +127,19 @@ const POLL_WORKING_MS = 5_000;
 /** Both tables cut their tail. What is cut is counted rather than dropped. */
 const MAX_BREAKDOWN_ROWS = 12;
 const MAX_BLOCK_ROWS = 15;
+
+/**
+ * The figure at the right of a grouped row.
+ *
+ * Tabular for the reason every figure on this page is: the whole card re-renders
+ * every ten seconds, and a proportional digit set moves the right edge of the
+ * column each time a 1 becomes an 8.
+ */
+function ListValue({ children }: { children: ReactNode }) {
+  return (
+    <span className="text-sm font-medium tabular-nums text-ink">{children}</span>
+  );
+}
 
 /** Middot between metadata items, hidden from assistive tech as pure ornament. */
 function Sep() {
@@ -125,31 +180,32 @@ function PageHeader({ children }: { children: ReactNode }) {
 function DashboardSkeleton() {
   return (
     <div aria-busy="true">
-      <section className="mb-4 grid gap-4 md:grid-cols-2 lg:grid-cols-5">
-        <Card emphasis="primary" className="lg:col-span-3">
-          <div className="h-3 w-40 rounded-sm bg-inset" />
-          <div className="mt-4 h-7 w-32 rounded-sm bg-inset" />
-          <div className="mt-2 h-3 w-48 rounded-sm bg-inset" />
-          <div className="mt-5 h-3 w-full rounded-full bg-inset" />
-          <div className="mt-3 h-3 w-3/4 rounded-sm bg-inset" />
-        </Card>
-        <Card className="lg:col-span-2">
+      {/* One lead card holding both windows, then a grouped list — the shape
+          the loaded page has, so the first response settles into it. */}
+      <Card emphasis="primary" className="mb-4">
+        <div className="h-3 w-40 rounded-sm bg-inset" />
+        <div className="mt-4 h-7 w-32 rounded-sm bg-inset" />
+        <div className="mt-2 h-3 w-48 rounded-sm bg-inset" />
+        <div className="mt-5 h-3 w-full rounded-full bg-inset" />
+        <div className="mt-3 h-3 w-3/4 rounded-sm bg-inset" />
+        <div className="mt-5 border-t border-line pt-4">
           <div className="h-3 w-28 rounded-sm bg-inset" />
           <div className="mt-4 h-6 w-24 rounded-sm bg-inset" />
           <div className="mt-2 h-3 w-40 rounded-sm bg-inset" />
           <div className="mt-5 h-2 w-full rounded-full bg-inset" />
-          <div className="mt-3 h-3 w-2/3 rounded-sm bg-inset" />
-        </Card>
-      </section>
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        {[0, 1, 2, 3].map((i) => (
-          <Card key={i} emphasis="quiet">
-            <div className="h-3 w-24 rounded-sm bg-inset" />
-            <div className="mt-4 h-5 w-20 rounded-sm bg-inset" />
-            <div className="mt-2 h-3 w-32 rounded-sm bg-inset" />
-          </Card>
-        ))}
-      </section>
+        </div>
+      </Card>
+      <Card emphasis="quiet">
+        <div className="mb-3 h-3 w-32 rounded-sm bg-inset" />
+        <div className="divide-y divide-line rounded-lg border border-line bg-grouped">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="flex items-center justify-between px-3.5 py-3">
+              <div className="h-3 w-40 rounded-sm bg-inset" />
+              <div className="h-3 w-16 rounded-sm bg-inset" />
+            </div>
+          ))}
+        </div>
+      </Card>
     </div>
   );
 }
@@ -210,7 +266,6 @@ export default function Dashboard() {
   const [pollError, setPollError] = useState<string | null>(null);
   const [dimension, setDimension] = useState<Dimension>("model");
   const [granularity, setGranularity] = useState<PeriodGranularityDTO>("week");
-  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   /**
    * A run in flight is the one time this page has something new to say every
@@ -264,7 +319,7 @@ export default function Dashboard() {
   }, [working]);
 
   /**
-   * Five separate cards became one switchable table. They were identical in
+   * Five separate cards became one switchable list. They were identical in
    * shape — a label, a cost, a share of the window — so five of them side by
    * side spent a screen of vertical space saying "there are five ways to slice
    * this" rather than showing any one slice well.
@@ -274,12 +329,10 @@ export default function Dashboard() {
     const s = data.snapshot;
     return {
       model: {
-        label: "Model",
         rows: s.byModel.map((m) => ({ label: m.model, cost: m.agg.costUSD })),
         hint: undefined as string | undefined,
       },
       project: {
-        label: "Project",
         rows: s.byProject.map((p) => ({
           label: shortPath(p.project),
           cost: p.agg.costUSD,
@@ -287,45 +340,24 @@ export default function Dashboard() {
         hint: undefined,
       },
       effort: {
-        label: "Effort",
         rows: s.byEffort.map((r) => ({ label: r.effort, cost: r.agg.costUSD })),
         hint: "Reasoning effort is usually the largest single cost lever.",
       },
       agent: {
-        label: "Sub-agent",
         rows: s.byAgent.map((r) => ({ label: r.agent, cost: r.agg.costUSD })),
         hint: data.meta.includeSidechains
           ? "Sub-agent turns bill separately from the main thread."
           : "Sub-agent turns are excluded from totals in Settings, so only main-thread work appears here.",
       },
       skill: {
-        label: "Skill",
         rows: s.bySkill.map((r) => ({ label: r.skill, cost: r.agg.costUSD })),
         hint: undefined,
       },
     } satisfies Record<
       Dimension,
-      { label: string; rows: Array<{ label: string; cost: number }>; hint?: string }
+      { rows: Array<{ label: string; cost: number }>; hint?: string }
     >;
   }, [data]);
-
-  /**
-   * Roving tabindex plus arrow keys, because the strip already claims
-   * `role="tablist"` and a tablist that answers only to Tab is a promise to a
-   * screen reader that the page does not keep.
-   */
-  const onTabKey = useCallback((e: KeyboardEvent<HTMLButtonElement>, i: number) => {
-    const last = DIMENSIONS.length - 1;
-    let next: number;
-    if (e.key === "ArrowRight") next = i === last ? 0 : i + 1;
-    else if (e.key === "ArrowLeft") next = i === 0 ? last : i - 1;
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = last;
-    else return;
-    e.preventDefault();
-    setDimension(DIMENSIONS[next]);
-    tabRefs.current[next]?.focus();
-  }, []);
 
   // The banner is a live region so a page that has quietly stopped refreshing
   // announces itself. The figures deliberately are not: a polite region over
@@ -420,109 +452,136 @@ export default function Dashboard() {
       {header}
       {banner}
 
-      {/* The subject of the page, and the only thing on it sized to be read
-          from across a room. The session window leads: it is the one allowance
-          that refills on its own, so it is the one an operator can act on in
-          the next few minutes. */}
-      <section className="mb-4 grid gap-4 md:grid-cols-2 lg:grid-cols-5">
-        <Card emphasis="primary" className="lg:col-span-3">
-          <CardTitle>
-            5-hour session window
-            {s.session.agg.entryCount > 0 && <Badge tone="accent">active</Badge>}
-          </CardTitle>
+      {/* The one `primary` card on the screen, and the only thing on it sized
+          to be read from across a room. Both windows live in it because they
+          are one subject — what may be spent — and two co-equal cards side by
+          side said neither of them leads. Inside it the session leads: it is
+          the allowance that refills on its own, so it is the one an operator
+          can act on in the next few minutes, and the week sits under the same
+          hairline a grouped list uses. */}
+      <Card emphasis="primary" className="mb-4">
+        <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
+          <div>
+            <CardTitle className="mb-1">
+              5-hour session window
+              {s.session.agg.entryCount > 0 && (
+                <Badge tone="accent">active</Badge>
+              )}
+            </CardTitle>
+            <Stat size="large">{fmtUSD(s.session.costUSD)}</Stat>
+            <StatSub>
+              <span className="tabular-nums">
+                {fmtTokens(s.session.tokens)} tokens ·{" "}
+                {s.session.agg.entryCount.toLocaleString()} turns
+              </span>
+            </StatSub>
+          </div>
+          {/* Relative first because that is the decision — whether to start
+              something now or wait. The clock time is the confirmation, and
+              the exact instant is on the title for anyone reconciling with
+              `/usage`. */}
+          <div
+            className="text-right"
+            title={new Date(s.session.endsAt).toLocaleString()}
+          >
+            <div className="text-sm font-medium tabular-nums text-ink">
+              Resets {fmtRelative(s.session.endsAt, s.now)}
+            </div>
+            <div className="mt-0.5 text-xs tabular-nums text-ink-muted">
+              {fmtDateTime(s.session.endsAt)}
+            </div>
+          </div>
+        </div>
 
+        <Meter
+          size="hero"
+          label="Session consumed"
+          fraction={s.session.fraction}
+          upperFraction={s.session.guardFraction}
+          detail={ceilingDetail(
+            s.session,
+            s.session.fractionMetric === "tokens"
+              ? meta.configuredCeilings.sessionTokens
+              : meta.configuredCeilings.sessionCost,
+            meta.reservedHeadroomFraction,
+            s.plan,
+            s.now,
+          )}
+        />
+
+        {/* One block, so the footnotes read as a group belonging to the meter
+            rather than as three unrelated remarks stacked under it. */}
+        <div className="mt-3 space-y-1 text-xs text-ink-muted">
+          {s.session.tokenFraction !== null &&
+            s.session.fractionMetric === "cost" && (
+              <div className="tabular-nums">
+                Against the raw-token ceiling: {fmtPct(s.session.tokenFraction)}
+              </div>
+            )}
+          {/* Three different provenances for one clock, and they are worth
+              telling apart: the provider's own instant, a pinned one, and a
+              derived one that can sit minutes off `/usage`. Saying nothing
+              makes the third read as a bug rather than as the estimate it
+              is — and makes the first read as an estimate when it is not. */}
+          {s.plan?.session?.resetsAt ? (
+            <div>
+              Reset instant reported by Anthropic, so it matches{" "}
+              <span className="mono">/usage</span> exactly.
+            </div>
+          ) : meta.sessionResetOverrideAt !== null &&
+            meta.sessionResetOverrideAt > s.now ? (
+            <div>
+              Window start taken from a{" "}
+              <Link href="/settings">manual reset</Link>, not from the
+              transcripts — usage before{" "}
+              <span className="tabular-nums">
+                {new Date(s.session.startsAt).toLocaleString()}
+              </span>{" "}
+              is excluded from this card and from the budget guard.
+            </div>
+          ) : (
+            <div>
+              Reset time derived from your own turns, so it can sit minutes off
+              what <span className="mono">/usage</span> reports.{" "}
+              <Link href="/settings">Pin it</Link> if they disagree.
+            </div>
+          )}
+        </div>
+
+        <div className="mt-5 border-t border-line pt-4">
           <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
             <div>
-              <Stat size="large">{fmtUSD(s.session.costUSD)}</Stat>
+              <CardTitle className="mb-1">{s.weekly.label}</CardTitle>
+              <Stat>{fmtUSD(s.weekly.costUSD)}</Stat>
               <StatSub>
                 <span className="tabular-nums">
-                  {fmtTokens(s.session.tokens)} tokens ·{" "}
-                  {s.session.agg.entryCount.toLocaleString()} turns
+                  {fmtTokens(s.weekly.tokens)} tokens ·{" "}
+                  {s.weekly.agg.entryCount.toLocaleString()} turns
                 </span>
               </StatSub>
             </div>
-            {/* Relative first because that is the decision — whether to start
-                something now or wait. The clock time is the confirmation, and
-                the exact instant is on the title for anyone reconciling with
-                `/usage`. */}
-            <div
-              className="text-right"
-              title={new Date(s.session.endsAt).toLocaleString()}
-            >
-              <div className="text-sm font-medium tabular-nums text-ink">
-                Resets {fmtRelative(s.session.endsAt, s.now)}
-              </div>
-              <div className="mt-0.5 text-xs tabular-nums text-ink-muted">
-                {fmtDateTime(s.session.endsAt)}
-              </div>
+            {/* Where the session card puts its reset, so the eye finds both in
+                one place. Without an anchor this window has no reset instant at
+                all, and the sentence under the meter is what explains that —
+                the rail only says which of the two kinds of window it is. */}
+            <div className="text-right">
+              {weeklyResets ? (
+                // Days out, so the absolute date rather than `fmtRelative`,
+                // which would render this as "in 137h 12m".
+                <div
+                  className="text-sm font-medium tabular-nums text-ink"
+                  title={new Date(s.weekly.endsAt).toLocaleString()}
+                >
+                  Resets {fmtDateTime(s.weekly.endsAt)}
+                </div>
+              ) : (
+                <div className="text-sm font-medium text-ink">
+                  Trailing total
+                </div>
+              )}
             </div>
           </div>
 
-          <Meter
-            size="hero"
-            label="Session consumed"
-            fraction={s.session.fraction}
-            upperFraction={s.session.guardFraction}
-            detail={ceilingDetail(
-              s.session,
-              s.session.fractionMetric === "tokens"
-                ? meta.configuredCeilings.sessionTokens
-                : meta.configuredCeilings.sessionCost,
-              meta.reservedHeadroomFraction,
-              s.plan,
-              s.now,
-            )}
-          />
-
-          {/* One block, so the footnotes read as a group belonging to the meter
-              rather than as three unrelated remarks stacked under it. */}
-          <div className="mt-3 space-y-1 text-xs text-ink-muted">
-            {s.session.tokenFraction !== null &&
-              s.session.fractionMetric === "cost" && (
-                <div className="tabular-nums">
-                  Against the raw-token ceiling: {fmtPct(s.session.tokenFraction)}
-                </div>
-              )}
-            {/* Three different provenances for one clock, and they are worth
-                telling apart: the provider's own instant, a pinned one, and a
-                derived one that can sit minutes off `/usage`. Saying nothing
-                makes the third read as a bug rather than as the estimate it
-                is — and makes the first read as an estimate when it is not. */}
-            {s.plan?.session?.resetsAt ? (
-              <div>
-                Reset instant reported by Anthropic, so it matches{" "}
-                <span className="mono">/usage</span> exactly.
-              </div>
-            ) : meta.sessionResetOverrideAt !== null &&
-              meta.sessionResetOverrideAt > s.now ? (
-              <div>
-                Window start taken from a{" "}
-                <Link href="/settings">manual reset</Link>, not from the
-                transcripts — usage before{" "}
-                <span className="tabular-nums">
-                  {new Date(s.session.startsAt).toLocaleString()}
-                </span>{" "}
-                is excluded from this card and from the budget guard.
-              </div>
-            ) : (
-              <div>
-                Reset time derived from your own turns, so it can sit minutes off
-                what <span className="mono">/usage</span> reports.{" "}
-                <Link href="/settings">Pin it</Link> if they disagree.
-              </div>
-            )}
-          </div>
-        </Card>
-
-        <Card className="lg:col-span-2">
-          <CardTitle>{s.weekly.label}</CardTitle>
-          <Stat>{fmtUSD(s.weekly.costUSD)}</Stat>
-          <StatSub>
-            <span className="tabular-nums">
-              {fmtTokens(s.weekly.tokens)} tokens ·{" "}
-              {s.weekly.agg.entryCount.toLocaleString()} turns
-            </span>
-          </StatSub>
           <Meter
             label="Weekly consumed"
             fraction={s.weekly.fraction}
@@ -537,6 +596,7 @@ export default function Dashboard() {
               s.now,
             )}
           />
+
           <div className="mt-3 space-y-1 text-xs text-ink-muted">
             {s.weekly.tokenFraction !== null &&
               s.weekly.fractionMetric === "cost" && (
@@ -544,27 +604,15 @@ export default function Dashboard() {
                   Against the raw-token ceiling: {fmtPct(s.weekly.tokenFraction)}
                 </div>
               )}
-            {/* Without an anchor this window has no reset instant at all — the
-                total decays as old turns age out. An operator waiting for it to
-                clear the way the 5-hour one does is waiting for nothing. */}
-            <div>
-              {weeklyResets ? (
-                // Days out, so the absolute date rather than `fmtRelative`,
-                // which would render this as "in 137h 12m".
-                <span
-                  className="tabular-nums"
-                  title={new Date(s.weekly.endsAt).toLocaleString()}
-                >
-                  Resets {fmtDateTime(s.weekly.endsAt)}.
-                </span>
-              ) : (
-                <>
-                  A trailing total: it falls as old turns age out rather than
-                  resetting. Pick a <Link href="/settings">weekly reset</Link>{" "}
-                  day to measure against a fixed week instead.
-                </>
-              )}
-            </div>
+            {/* An operator waiting for this one to clear the way the 5-hour one
+                does is waiting for nothing, so say what it is instead. */}
+            {!weeklyResets && (
+              <div>
+                It falls as old turns age out rather than resetting. Pick a{" "}
+                <Link href="/settings">weekly reset</Link> day to measure against
+                a fixed week instead.
+              </div>
+            )}
             {/* A wall that binds without ever reaching this meter: the weekly
                 allowance is split per model family on some plans, so Opus can
                 be full while the all-model window reads a quarter. The guard
@@ -581,8 +629,8 @@ export default function Dashboard() {
               </div>
             )}
           </div>
-        </Card>
-      </section>
+        </div>
+      </Card>
 
       {/* Under the meters, not above them: each of these explains something the
           reader has just looked at — a hatched bar, a span past the fill, a
@@ -672,59 +720,78 @@ export default function Dashboard() {
           page's telemetry card follows. */}
       {telemetry && <LiveTelemetry telemetry={telemetry} now={s.now} />}
 
-      <section className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Card emphasis="quiet">
-          <CardTitle>Burn rate</CardTitle>
-          <Stat>{fmtUSD(s.burnCostPerHour)}</Stat>
-          <StatSub>per hour · trailing 60 minutes</StatSub>
-        </Card>
+      {/* Four equally-weighted bordered boxes said these four readings were as
+          important as the meters above them, which none of them is. As a
+          grouped list they read as what they are: derived figures about the
+          window the card above measures. */}
+      <Card emphasis="quiet" className="mb-4">
+        <CardTitle>Rate and totals</CardTitle>
+        <ListGroup>
+          {/* The unit rides in the description rather than beside the figure,
+              so the values stay one column of comparable numbers — a dollar
+              figure, a duration, a percentage, a dollar figure. */}
+          <ListRow label="Burn rate" description="Per hour, trailing 60 minutes">
+            <ListValue>{fmtUSD(s.burnCostPerHour)}</ListValue>
+          </ListRow>
 
-        <Card emphasis="quiet">
-          <CardTitle>Projected exhaustion</CardTitle>
-          <Stat>
-            {s.projectedExhaustionAt
-              ? fmtDuration(Math.max(0, s.projectedExhaustionAt - s.now))
-              : "—"}
-          </Stat>
-          <StatSub>
-            {s.projectedExhaustionAt ? (
-              <span
-                className="tabular-nums"
-                title={new Date(s.projectedExhaustionAt).toLocaleString()}
-              >
-                at this burn rate, around {fmtDateTime(s.projectedExhaustionAt)}
-              </span>
-            ) : noConfiguredCeilings ? (
-              "needs a configured ceiling"
-            ) : (
-              "not projected to run out"
-            )}
-          </StatSub>
-        </Card>
+          <ListRow
+            label="Projected exhaustion"
+            description={
+              s.projectedExhaustionAt ? (
+                <span
+                  className="tabular-nums"
+                  title={new Date(s.projectedExhaustionAt).toLocaleString()}
+                >
+                  At this burn rate, around{" "}
+                  {fmtDateTime(s.projectedExhaustionAt)}
+                </span>
+              ) : noConfiguredCeilings ? (
+                "Needs a configured ceiling"
+              ) : (
+                "Not projected to run out"
+              )
+            }
+          >
+            <ListValue>
+              {s.projectedExhaustionAt
+                ? fmtDuration(Math.max(0, s.projectedExhaustionAt - s.now))
+                : "—"}
+            </ListValue>
+          </ListRow>
 
-        <Card emphasis="quiet">
-          <CardTitle>Cache reads</CardTitle>
-          <Stat>{fmtPct(cacheShare)}</Stat>
-          <StatSub>
-            of tokens · they bill at 0.1×, which is why the dollar figures
-            track work and the token counts do not
-          </StatSub>
-        </Card>
+          <ListRow
+            label="Cache reads"
+            description="Share of all tokens, billed at 0.1× — which is why the dollar figures track work and the token counts do not"
+          >
+            <ListValue>{fmtPct(cacheShare)}</ListValue>
+          </ListRow>
 
-        <Card emphasis="quiet">
-          <CardTitle>Lifetime recorded</CardTitle>
-          <Stat>{fmtUSD(s.totalCostUSD)}</Stat>
-          <StatSub>equivalent API cost, all local transcripts</StatSub>
-        </Card>
-      </section>
+          <ListRow
+            label="Lifetime recorded"
+            description="Equivalent API cost, all local transcripts"
+          >
+            <ListValue>{fmtUSD(s.totalCostUSD)}</ListValue>
+          </ListRow>
+        </ListGroup>
+      </Card>
 
       {/* History, so it sits below everything that describes right now. The
           meters answer whether a run can start; this answers what the last
           fortnight cost. */}
       <UsagePeriods
         series={periods[granularity]}
-        granularity={granularity}
-        onGranularityChange={setGranularity}
+        // The picker is rendered here rather than inside the card because that
+        // component is unit-tested against the plain CommonJS emits, where the
+        // path alias `SegmentedControl` reaches `Icon` through does not
+        // resolve. The page already owns which granularity is selected.
+        control={
+          <SegmentedControl
+            options={PERIOD_OPTIONS}
+            value={granularity}
+            onChange={setGranularity}
+            label="Period length"
+          />
+        }
         reservedHeadroomFraction={meta.reservedHeadroomFraction}
       />
 
@@ -733,82 +800,60 @@ export default function Dashboard() {
           <CardTitle className="mb-0">
             Where it went — {s.weekly.label.toLowerCase()}
           </CardTitle>
-          <div
-            className="flex flex-wrap gap-1"
-            role="tablist"
-            aria-label="Breakdown dimension"
-          >
-            {DIMENSIONS.map((d, i) => (
-              <button
-                key={d}
-                ref={(el) => {
-                  tabRefs.current[i] = el;
-                }}
-                type="button"
-                role="tab"
-                id={`breakdown-tab-${d}`}
-                aria-selected={dimension === d}
-                aria-controls="breakdown-panel"
-                tabIndex={dimension === d ? 0 : -1}
-                onKeyDown={(e) => onTabKey(e, i)}
-                onClick={() => setDimension(d)}
-                // 32px tall in both states, and bordered in both, so selecting
-                // one does not nudge the strip. Full class strings either side:
-                // Tailwind scans source as text and emits nothing for an
-                // interpolated fragment.
-                className={`inline-flex h-8 cursor-pointer items-center rounded-full border px-3 text-xs font-medium ${
-                  dimension === d
-                    ? "border-accent bg-accent-dim text-ink"
-                    : "border-line bg-inset text-ink-muted hover:border-line-strong hover:text-ink"
-                }`}
-              >
-                {breakdowns[d].label}
-              </button>
-            ))}
-          </div>
+          {/* Was a hand-rolled pill strip claiming `role="tablist"`. The kit's
+              segmented control is the native idiom for one choice from a short
+              fixed set, and it owns the roving tabindex and the arrow keys that
+              used to be written out here. */}
+          <SegmentedControl
+            options={DIMENSION_OPTIONS}
+            value={dimension}
+            onChange={setDimension}
+            label="Breakdown dimension"
+          />
         </div>
 
-        <div
-          id="breakdown-panel"
-          role="tabpanel"
-          aria-labelledby={`breakdown-tab-${dimension}`}
-          // The panel holds nothing focusable, so it takes focus itself — else
-          // a keyboard user arrows through the strip and can never reach what
-          // the strip is switching.
-          tabIndex={0}
-        >
-          {current.rows.length === 0 ? (
-            <Empty>No usage in this window.</Empty>
-          ) : (
-            <TableWrap>
-              <Table>
-                <thead>
-                  <tr>
-                    <Th>{current.label}</Th>
-                    <Th num>Cost</Th>
-                    <Th num>Share</Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {/* Every turn lands in some bucket — including explicit
-                      "(main thread)" / "(no skill)" rows — so the column adds to
-                      100% instead of quietly omitting a remainder. */}
-                  {current.rows.slice(0, MAX_BREAKDOWN_ROWS).map((r) => (
-                    <Tr key={r.label}>
-                      <Td className="mono">{r.label}</Td>
-                      <Td num>{fmtUSD(r.cost)}</Td>
-                      <Td num>
-                        {s.weekly.costUSD > 0
-                          ? fmtPct(r.cost / s.weekly.costUSD)
-                          : "—"}
-                      </Td>
-                    </Tr>
-                  ))}
-                </tbody>
-              </Table>
-            </TableWrap>
-          )}
-        </div>
+        {/* No tabpanel role and no tabindex: a radiogroup is not a tablist, and
+            a focusable region with nothing focusable inside it is a dead tab
+            stop. The list names itself with a caption instead. */}
+        {current.rows.length === 0 ? (
+          <Empty>No usage in this window.</Empty>
+        ) : (
+          <div className={LIST_VIEW}>
+            <Table>
+              <caption className="sr-only">
+                Cost by {DIMENSION_LABEL[dimension].toLowerCase()} over{" "}
+                {s.weekly.label.toLowerCase()}, highest first
+              </caption>
+              <thead>
+                <tr>
+                  <Th className={STICKY_HEAD}>{DIMENSION_LABEL[dimension]}</Th>
+                  <Th num className={STICKY_HEAD}>
+                    Cost
+                  </Th>
+                  <Th num className={STICKY_HEAD}>
+                    Share
+                  </Th>
+                </tr>
+              </thead>
+              <tbody>
+                {/* Every turn lands in some bucket — including explicit
+                    "(main thread)" / "(no skill)" rows — so the column adds to
+                    100% instead of quietly omitting a remainder. */}
+                {current.rows.slice(0, MAX_BREAKDOWN_ROWS).map((r) => (
+                  <Tr key={r.label}>
+                    <Td className="mono">{r.label}</Td>
+                    <Td num>{fmtUSD(r.cost)}</Td>
+                    <Td num>
+                      {s.weekly.costUSD > 0
+                        ? fmtPct(r.cost / s.weekly.costUSD)
+                        : "—"}
+                    </Td>
+                  </Tr>
+                ))}
+              </tbody>
+            </Table>
+          </div>
+        )}
 
         {/* Rows are cost-descending, so the tail really is the cheap end — but
             a list that stops at twelve with nothing said reads as the whole
@@ -827,15 +872,24 @@ export default function Dashboard() {
 
       <Card emphasis="quiet">
         <CardTitle>Recent 5-hour blocks</CardTitle>
-        <TableWrap>
+        <div className={LIST_VIEW}>
           <Table>
+            <caption className="sr-only">
+              Each recorded 5-hour window, newest first
+            </caption>
             <thead>
               <tr>
-                <Th>Started</Th>
-                <Th num>Tokens</Th>
-                <Th num>Cost</Th>
-                <Th num>Turns</Th>
-                <Th>Models</Th>
+                <Th className={STICKY_HEAD}>Started</Th>
+                <Th num className={STICKY_HEAD}>
+                  Tokens
+                </Th>
+                <Th num className={STICKY_HEAD}>
+                  Cost
+                </Th>
+                <Th num className={STICKY_HEAD}>
+                  Turns
+                </Th>
+                <Th className={STICKY_HEAD}>Models</Th>
               </tr>
             </thead>
             <tbody>
@@ -870,7 +924,7 @@ export default function Dashboard() {
               ))}
             </tbody>
           </Table>
-        </TableWrap>
+        </div>
         {blocksOmitted > 0 && (
           <div className="mt-2 text-xs tabular-nums text-ink-muted">
             {blocksOmitted} older{" "}

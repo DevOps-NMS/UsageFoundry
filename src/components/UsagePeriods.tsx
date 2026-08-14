@@ -1,7 +1,6 @@
 "use client";
 
-import { useCallback, useRef } from "react";
-import type { KeyboardEvent } from "react";
+import type { ReactNode } from "react";
 import Link from "next/link";
 // Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
 // rewrites the path alias at runtime, so a tested component has to import the
@@ -19,7 +18,7 @@ import {
 import { Meter } from "./Meter";
 import { Badge } from "./ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "./ui/Card";
-import { Table, TableWrap, Td, Th, Tr } from "./ui/Table";
+import { Table, Td, Th, Tr } from "./ui/Table";
 
 /**
  * Spend per calendar day, week or month, with each period's share of the
@@ -40,14 +39,21 @@ import { Table, TableWrap, Td, Th, Tr } from "./ui/Table";
  * drift from the arithmetic.
  */
 
-/** Fixed order, so the tab strip and its keyboard navigation cannot disagree. */
-const GRANULARITIES: PeriodGranularityDTO[] = ["day", "week", "month"];
-
-const TAB_LABEL: Record<PeriodGranularityDTO, string> = {
-  day: "Daily",
-  week: "Weekly",
-  month: "Monthly",
-};
+/**
+ * What the page's picker offers, in a fixed order.
+ *
+ * The picker itself is rendered by the page and handed in as `control` — see
+ * the prop — but the vocabulary belongs to the card that reads it, so the two
+ * cannot come to disagree about what a bucket is called.
+ */
+export const PERIOD_OPTIONS: ReadonlyArray<{
+  value: PeriodGranularityDTO;
+  label: string;
+}> = [
+  { value: "day", label: "Daily" },
+  { value: "week", label: "Weekly" },
+  { value: "month", label: "Monthly" },
+];
 
 /** What one bucket is called in a sentence about it. */
 const NOUN: Record<PeriodGranularityDTO, string> = {
@@ -75,6 +81,30 @@ const HEADING: Record<PeriodGranularityDTO, string> = {
   week: "Week",
   month: "Month",
 };
+
+/**
+ * A Finder-style list view: a bordered, rounded box that owns its own scroll
+ * region, rather than a full-width web table bleeding to the card's edges.
+ *
+ * The height cap is what gives the sticky header something to stick inside.
+ * `overflow-auto` rather than `overflow-y-auto`, because these tables also
+ * overflow sideways on a narrow window — which is what `TableWrap` used to do,
+ * and it cannot be used here: a scroll container with no height constraint
+ * never scrolls vertically, so a header sticking to its top never moves.
+ *
+ * Stated here, in `LiveTelemetry` and in the dashboard page separately: the
+ * three files that draw a list view are the three the run may touch, and a
+ * shared module for them would be a fourth.
+ */
+const LIST_VIEW = "mt-4 max-h-80 overflow-auto rounded-sm border border-line";
+
+/**
+ * `bg-surface` because the rows scroll under it, and the inset shadow because a
+ * `border-b` on a sticky cell is not reliably painted under `border-collapse` —
+ * the two are the same hairline in the same place wherever both do render.
+ */
+const STICKY_HEAD =
+  "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
 
 /**
  * Name the ceiling the percentages are measured against, and say when it is a
@@ -106,74 +136,33 @@ function ceilingDetail(
 
 export function UsagePeriods({
   series,
-  granularity,
-  onGranularityChange,
+  control,
   reservedHeadroomFraction,
 }: {
   series: PeriodSeriesDTO;
-  granularity: PeriodGranularityDTO;
-  onGranularityChange: (g: PeriodGranularityDTO) => void;
+  /**
+   * The granularity picker, drawn beside the title.
+   *
+   * It is handed in rather than built here because the kit's
+   * `SegmentedControl` reaches `Icon` through a path alias, and this component
+   * is unit-tested by `node --test` against the plain CommonJS
+   * `tsconfig.test.json` emits — where nothing rewrites that alias. The page
+   * already owns the selected granularity, so it renders the control too.
+   */
+  control?: ReactNode;
+  /**
+   * Retained so `UsagePeriods.test.tsx` still compiles; both are unread now
+   * that the picker is the page's. `series.granularity` is the same value and
+   * arrives with the data it describes.
+   */
+  granularity?: PeriodGranularityDTO;
+  onGranularityChange?: (g: PeriodGranularityDTO) => void;
   reservedHeadroomFraction: number;
 }) {
-  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
-
-  /**
-   * Roving tabindex plus arrow keys, because the strip already claims
-   * `role="tablist"` and a tablist that answers only to Tab is a promise to a
-   * screen reader that the page does not keep.
-   */
-  const onTabKey = useCallback(
-    (e: KeyboardEvent<HTMLButtonElement>, i: number) => {
-      const last = GRANULARITIES.length - 1;
-      let next: number;
-      if (e.key === "ArrowRight") next = i === last ? 0 : i + 1;
-      else if (e.key === "ArrowLeft") next = i === 0 ? last : i - 1;
-      else if (e.key === "Home") next = 0;
-      else if (e.key === "End") next = last;
-      else return;
-      e.preventDefault();
-      onGranularityChange(GRANULARITIES[next]);
-      tabRefs.current[next]?.focus();
-    },
-    [onGranularityChange],
-  );
-
-  const strip = (
-    <div className="flex flex-wrap gap-1" role="tablist" aria-label="Period length">
-      {GRANULARITIES.map((g, i) => (
-        <button
-          key={g}
-          ref={(el) => {
-            tabRefs.current[i] = el;
-          }}
-          type="button"
-          role="tab"
-          id={`period-tab-${g}`}
-          aria-selected={granularity === g}
-          aria-controls="period-panel"
-          tabIndex={granularity === g ? 0 : -1}
-          onKeyDown={(e) => onTabKey(e, i)}
-          onClick={() => onGranularityChange(g)}
-          // 32px tall in both states, and bordered in both, so selecting one
-          // does not nudge the strip. Full class strings either side: Tailwind
-          // scans source as text and emits nothing for an interpolated
-          // fragment.
-          className={`inline-flex h-8 cursor-pointer items-center rounded-full border px-3 text-xs font-medium ${
-            granularity === g
-              ? "border-accent bg-accent-dim text-ink"
-              : "border-line bg-inset text-ink-muted hover:border-line-strong hover:text-ink"
-          }`}
-        >
-          {TAB_LABEL[g]}
-        </button>
-      ))}
-    </div>
-  );
-
   const title = (
     <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
       <CardTitle className="mb-0">Usage by period</CardTitle>
-      {strip}
+      {control}
     </div>
   );
 
@@ -198,107 +187,106 @@ export function UsagePeriods({
       {title}
 
       {/* The direct answer, above the history: what this period has cost and
-          what share of the ceiling that is. */}
-      <div
-        id="period-panel"
-        role="tabpanel"
-        aria-labelledby={`period-tab-${granularity}`}
-        // The panel holds nothing focusable, so it takes focus itself — else a
-        // keyboard user arrows through the strip and can never reach what the
-        // strip is switching.
-        tabIndex={0}
-      >
-        <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
-          <div>
-            <Stat>{fmtUSD(current.costUSD)}</Stat>
-            <StatSub>
-              <span className="tabular-nums">
-                {fmtTokens(current.tokens)} tokens ·{" "}
-                {current.entryCount.toLocaleString()} turns
-              </span>
-            </StatSub>
-          </div>
-          <div className="text-right text-sm font-medium tabular-nums text-ink">
-            {fmtPeriodLabel(
-              series.granularity,
-              current.startsAt,
-              current.endsAt,
-            )}
-            <div className="mt-0.5 text-xs font-normal text-ink-muted">
-              {THIS_PERIOD[series.granularity]}, so far
-            </div>
-          </div>
+          what share of the ceiling that is. It used to sit inside a
+          `role="tabpanel"` div carrying its own tabindex, because the picker
+          above claimed to be a tablist; the picker is a radiogroup now, so the
+          panel is gone with it — a focusable region holding nothing focusable
+          is a dead tab stop, and the list names itself with a caption. */}
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
+        <div>
+          <Stat>{fmtUSD(current.costUSD)}</Stat>
+          <StatSub>
+            <span className="tabular-nums">
+              {fmtTokens(current.tokens)} tokens ·{" "}
+              {current.entryCount.toLocaleString()} turns
+            </span>
+          </StatSub>
         </div>
-
-        <Meter
-          label={`${HEADING[series.granularity]} consumed`}
-          fraction={current.fraction}
-          upperFraction={current.guardFraction}
-          unknownHint="no weekly ceiling set"
-          detail={ceilingDetail(
-            series,
-            current.limit,
-            current.fractionMetric,
-            spanDays,
-            reservedHeadroomFraction,
+        <div className="text-right text-sm font-medium tabular-nums text-ink">
+          {fmtPeriodLabel(
+            series.granularity,
+            current.startsAt,
+            current.endsAt,
           )}
-        />
-
-        <div className="mt-4">
-          <TableWrap>
-            <Table>
-              <thead>
-                <tr>
-                  <Th>{HEADING[series.granularity]}</Th>
-                  <Th num>Cost</Th>
-                  <Th num>Tokens</Th>
-                  <Th num>Turns</Th>
-                  <Th num>Used</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {series.buckets.map((b) => {
-                  // Only meaningful when it exceeds the known reading; equal
-                  // values are the normal, fully-priced case. Same rule the
-                  // meter's hatched band follows.
-                  const hasUpper =
-                    b.fraction !== null &&
-                    b.guardFraction !== null &&
-                    b.guardFraction > b.fraction;
-                  return (
-                    <Tr key={b.key}>
-                      <Td className="whitespace-nowrap tabular-nums">
-                        {fmtPeriodLabel(
-                          series.granularity,
-                          b.startsAt,
-                          b.endsAt,
-                        )}
-                        {b.isCurrent && (
-                          <>
-                            {" "}
-                            <Badge tone="ok">so far</Badge>
-                          </>
-                        )}
-                      </Td>
-                      <Td num>{fmtUSD(b.costUSD)}</Td>
-                      <Td num>{fmtTokens(b.tokens)}</Td>
-                      <Td num>{b.entryCount.toLocaleString()}</Td>
-                      <Td num className="whitespace-nowrap">
-                        {fmtPct(b.fraction)}
-                        {hasUpper && (
-                          <span className="text-ink-muted">
-                            {" "}
-                            – {fmtPct(b.guardFraction)}
-                          </span>
-                        )}
-                      </Td>
-                    </Tr>
-                  );
-                })}
-              </tbody>
-            </Table>
-          </TableWrap>
+          <div className="mt-0.5 text-xs font-normal text-ink-muted">
+            {THIS_PERIOD[series.granularity]}, so far
+          </div>
         </div>
+      </div>
+
+      <Meter
+        label={`${HEADING[series.granularity]} consumed`}
+        fraction={current.fraction}
+        upperFraction={current.guardFraction}
+        unknownHint="no weekly ceiling set"
+        detail={ceilingDetail(
+          series,
+          current.limit,
+          current.fractionMetric,
+          spanDays,
+          reservedHeadroomFraction,
+        )}
+      />
+
+      <div className={LIST_VIEW}>
+        <Table>
+          <caption className="sr-only">
+            Spend per calendar {noun}, newest first
+          </caption>
+          <thead>
+            <tr>
+              <Th className={STICKY_HEAD}>{HEADING[series.granularity]}</Th>
+              <Th num className={STICKY_HEAD}>
+                Cost
+              </Th>
+              <Th num className={STICKY_HEAD}>
+                Tokens
+              </Th>
+              <Th num className={STICKY_HEAD}>
+                Turns
+              </Th>
+              <Th num className={STICKY_HEAD}>
+                Used
+              </Th>
+            </tr>
+          </thead>
+          <tbody>
+            {series.buckets.map((b) => {
+              // Only meaningful when it exceeds the known reading; equal
+              // values are the normal, fully-priced case. Same rule the
+              // meter's hatched band follows.
+              const hasUpper =
+                b.fraction !== null &&
+                b.guardFraction !== null &&
+                b.guardFraction > b.fraction;
+              return (
+                <Tr key={b.key}>
+                  <Td className="whitespace-nowrap tabular-nums">
+                    {fmtPeriodLabel(series.granularity, b.startsAt, b.endsAt)}
+                    {b.isCurrent && (
+                      <>
+                        {" "}
+                        <Badge tone="ok">so far</Badge>
+                      </>
+                    )}
+                  </Td>
+                  <Td num>{fmtUSD(b.costUSD)}</Td>
+                  <Td num>{fmtTokens(b.tokens)}</Td>
+                  <Td num>{b.entryCount.toLocaleString()}</Td>
+                  <Td num className="whitespace-nowrap">
+                    {fmtPct(b.fraction)}
+                    {hasUpper && (
+                      <span className="text-ink-muted">
+                        {" "}
+                        – {fmtPct(b.guardFraction)}
+                      </span>
+                    )}
+                  </Td>
+                </Tr>
+              );
+            })}
+          </tbody>
+        </Table>
       </div>
 
       {/* The meter's own detail already handles the no-ceiling case and the
