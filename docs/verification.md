@@ -868,6 +868,15 @@ through before trusting this unattended:
   run. The cheapest way to exercise it is to delete a mount from
   `WORKSPACE_ROOTS` between the pre-flight and the pass, which is not a thing an
   operator can do; short of that, read it rather than trust it.
+- **The backup, restore and `VACUUM` commands in `README.md`.** Written against
+  the compose file and the Dockerfile rather than executed — Docker was not
+  available where they were added. Two things in them are the ones to check
+  first: that `docker volume ls -q | grep usagefoundry-data` names exactly one
+  volume on the reader's machine (compose namespaces it with the project name,
+  and a second instance started under `docker compose -p` would give two), and
+  that the `alpine` + `apk add sqlite` container leaves the database file's
+  ownership alone — the image itself carries no `sqlite3`, which is why the
+  command reaches for one rather than using the app's own container.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

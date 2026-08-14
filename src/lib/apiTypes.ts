@@ -1270,8 +1270,34 @@ export interface SettingsDTO {
   killProcessGroup: boolean;
   /** Hard ceiling on one orchestrator-chat turn. Null means no cap. */
   chatTurnBudgetUSD: number | null;
+  /** How long a settled run's event log is kept. Null keeps it for ever. */
+  eventRetentionDays: number | null;
   /** What a chat proposal runs under when it names no template. */
   chatDefaultGuards: RunGuardsDTO;
+}
+
+/**
+ * What each append-only store holds right now.
+ *
+ * Its own payload rather than a block on `SettingsDTO` because the two answer
+ * different questions — the settings are the horizons, this is what is on disk
+ * inside them — and because measuring it walks directories, which a form's own
+ * read must not.
+ */
+export interface StorageReportDTO {
+  database: {
+    path: string;
+    bytes: number;
+    /** The write-ahead log and its index, which are the same store. */
+    walBytes: number;
+    runEvents: number;
+    telemetryRows: number;
+  };
+  lastSweep: {
+    at: number;
+    events: number;
+    telemetry: number;
+  } | null;
 }
 
 /** What an agent may do, as against what it is asked to do. */

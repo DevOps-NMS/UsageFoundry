@@ -89,6 +89,27 @@ export function fmtTokens(n: number): string {
   return String(Math.round(n));
 }
 
+/**
+ * Bytes on disk, in the units `du -h` uses.
+ *
+ * Powers of 1024 and the `KB`/`MB`/`GB` spelling, because the number an
+ * operator checks this against is `du -sh` or `df -h` and a decimal megabyte
+ * would disagree with both by 5% at exactly the moment somebody is deciding
+ * whether a store is the reason their disk is full.
+ */
+export function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "—";
+  if (n < 1024) return `${Math.round(n)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = n / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
 export function fmtUSD(n: number): string {
   if (!Number.isFinite(n)) return "—";
   if (n === 0) return "$0.00";

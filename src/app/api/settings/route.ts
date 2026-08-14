@@ -264,6 +264,17 @@ export async function PUT(req: Request) {
     };
   }
 
+  if ("eventRetentionDays" in body) {
+    // Blank means "keep for ever", the reading every switchable rule here
+    // takes, and a typed fraction is floored to a whole day rather than
+    // refused: the sweep runs four times a day, so half a day is not a horizon
+    // it can express. Floored at 1 for the same reason `maxConcurrentRuns` is —
+    // a typed 0 would otherwise read as "delete a finished run's log the moment
+    // it finishes", which is a retention policy nobody asked for.
+    const n = optionalNumber(body.eventRetentionDays);
+    patch.eventRetentionDays = n === null ? null : Math.max(1, Math.floor(n));
+  }
+
   if ("chatTurnBudgetUSD" in body) {
     // Blank means "no cap", the same reading every switchable budget rule here
     // takes. It is the one guard on a chat turn other than the clock, so an

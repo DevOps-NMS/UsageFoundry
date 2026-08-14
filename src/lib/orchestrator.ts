@@ -34,7 +34,7 @@ import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents"
 // The log's own extraction of what a tool call is about, so the parser retains
 // the same line for a call whose result comes back an error. Client-safe and
 // pure; the dependency runs the permitted way round.
-import { toolArgs } from "./logLine";
+import { clipToolInput, MAX_LOG_CHARS, toolArgs } from "./logLine";
 import type { RunDependencyDTO } from "./apiTypes";
 
 /**
@@ -318,7 +318,21 @@ function emit(e: RunEvent) {
 }
 
 function log(runId: string, message: string, extra: Record<string, unknown> = {}) {
-  emit({ runId, ts: Date.now(), kind: "log", payload: { message, ...extra } });
+  // Bounded before it is stored, never after: this is where an agent's whole
+  // build output arrives, one stderr chunk per row. `truncatedFrom` rides
+  // alongside so the line can say it was cut — a shortened message that reads
+  // as a short one is the failure the read-side `dropped` count already avoids.
+  const cut = message.length > MAX_LOG_CHARS;
+  emit({
+    runId,
+    ts: Date.now(),
+    kind: "log",
+    payload: {
+      message: cut ? `${message.slice(0, MAX_LOG_CHARS)}…` : message,
+      ...(cut ? { truncatedFrom: message.length } : {}),
+      ...extra,
+    },
+  });
 }
 
 /**
@@ -3974,13 +3988,21 @@ function handleStreamLine(
             command: toolArgs(b.input),
           });
         }
+        // Bounded before it is stored. `b.input` for a `Write` or an `Edit` is
+        // the file itself, and the log has only ever rendered one clipped line
+        // of it, so the whole of the difference was storage — see
+        // `clipToolInput`, which keeps the field that names the call.
+        const stored = clipToolInput(b.input);
         emit({
           runId,
           ts: Date.now(),
           kind: "tool",
           payload: {
             name: b.name,
-            input: b.input,
+            input: stored.input,
+            ...(stored.truncatedFrom !== undefined
+              ? { truncatedFrom: stored.truncatedFrom }
+              : {}),
             // A tool call a sub-agent made, rather than one the main thread
             // made. Same reasoning as the text above: unattributed, a `Grep`
             // between two of the main thread's lines reads as the main

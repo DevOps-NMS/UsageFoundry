@@ -13,8 +13,14 @@ import type {
   BudgetPolicyDTO,
   RunGuardsDTO,
   SettingsDTO,
+  StorageReportDTO,
 } from "@/lib/apiTypes";
-import { describeAmbientAgents, fmtTokens, fmtUSD } from "@/lib/format";
+import {
+  describeAmbientAgents,
+  fmtBytes,
+  fmtTokens,
+  fmtUSD,
+} from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
@@ -72,6 +78,7 @@ const SECTIONS = [
   { id: "runs", label: "Runs" },
   { id: "guards", label: "Default guards" },
   { id: "unattended", label: "Unattended runs" },
+  { id: "storage", label: "Storage" },
   { id: "prompts", label: "Prompts" },
 ];
 
@@ -159,6 +166,7 @@ const EDITABLE_PATHS = [
   "killProcessGroup",
   "resumeGraceHours",
   "telemetryForRuns",
+  "eventRetentionDays",
 ] as const;
 
 /**
@@ -498,6 +506,74 @@ function EditedRail({ on }: { on: boolean }) {
   );
 }
 
+/** How long ago, in the coarsest unit that still says something. */
+function ago(ms: number): string {
+  const mins = Math.max(0, Math.round((Date.now() - ms) / 60_000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}
+
+/**
+ * What each store holds right now.
+ *
+ * Rows in a grouped list rather than `Stat` cards: the question an operator
+ * brings to this is "which of these is filling my disk", which is a comparison
+ * down a column rather than three headline figures. A failed read says so —
+ * a store that could not be measured and a store with nothing in it must not
+ * read alike, which is the same rule the hatched meter follows.
+ */
+function StorageFigures({
+  report,
+  error,
+}: {
+  report: StorageReportDTO | null;
+  error: string | null;
+}) {
+  if (error !== null) {
+    return (
+      <Notice tone="warn">
+        <strong>Sizes could not be read.</strong> {error}. The horizons below
+        still apply — this is a measurement, not a setting.
+      </Notice>
+    );
+  }
+  if (!report) return <Empty>Measuring…</Empty>;
+
+  const { database, lastSweep } = report;
+  return (
+    <ListGroup
+      label="On disk now"
+      footnote={
+        <>
+          Removing rows lets SQLite reuse the pages; the file itself only
+          shrinks after a <span className="mono">VACUUM</span>, which{" "}
+          <span className="mono">README.md</span> gives beside the backup
+          procedure
+          {lastSweep && (
+            <>
+              . Last swept {ago(lastSweep.at)} — {lastSweep.events.toLocaleString()}{" "}
+              log rows and {lastSweep.telemetry.toLocaleString()} telemetry rows
+              discarded
+            </>
+          )}
+        </>
+      }
+    >
+      <ListRow
+        label="Database"
+        description={`${database.path} — ${database.runEvents.toLocaleString()} log rows, ${database.telemetryRows.toLocaleString()} telemetry rows`}
+      >
+        <span className="tabular-nums text-sm">
+          {fmtBytes(database.bytes + database.walBytes)}
+        </span>
+      </ListRow>
+    </ListGroup>
+  );
+}
+
 /** One `label: value` line in the environment summary under the title. */
 function EnvRow({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -530,6 +606,11 @@ export default function SettingsPage() {
   const [agents, setAgents] = useState<AgentDTO[]>([]);
   const [ambientAgents, setAmbientAgents] = useState<AmbientAgentDTO[]>([]);
   const [agentsLoaded, setAgentsLoaded] = useState(false);
+  // What the append-only stores currently hold. Its own read because it walks
+  // directories, and its own failure state because a missing figure must read
+  // as "not measured" rather than as a store with nothing in it.
+  const [storage, setStorage] = useState<StorageReportDTO | null>(null);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const standalone = useStandalone();
 
   const load = useCallback(async () => {
@@ -558,6 +639,17 @@ export default function SettingsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    fetch("/api/storage", { cache: "no-store" })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`the server answered ${r.status}`);
+        setStorage((await r.json()) as StorageReportDTO);
+      })
+      .catch((err: unknown) =>
+        setStorageError(err instanceof Error ? err.message : String(err)),
+      );
+  }, []);
 
   useEffect(() => {
     // A failed read leaves the picker holding only the stored value, which is
@@ -1748,6 +1840,44 @@ export default function SettingsPage() {
               checked={effective.telemetryForRuns}
               onChange={(v) => patch({ telemetryForRuns: v })}
             />
+          </SettingRow>
+        </ListGroup>
+      </Section>
+
+      <Section
+        id="storage"
+        title="Storage"
+        lede="Three stores grow with the work rather than with these settings. A run's own record — its spend, its cycles, how it ended — is never discarded; what a horizon below bounds is the evidence behind it."
+      >
+        <StorageFigures report={storage} error={storageError} />
+
+        <ListGroup
+          className="mt-4"
+          label="Retention"
+          footnote="Blank keeps everything for ever. A run that has not finished is never swept, whatever the horizon says"
+        >
+          <SettingRow
+            htmlFor="evret"
+            edited={isEdited("eventRetentionDays")}
+            label="Keep a finished run's log for"
+            description="Every tool call, every reply and every line of an agent's build output is a row. The run itself stays on the list with its spend and its stop reason — this discards the log behind it"
+          >
+            <div className="w-32">
+              <Input
+                id="evret"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="days"
+                value={numOrEmpty(effective.eventRetentionDays)}
+                onChange={(e) =>
+                  patch({
+                    eventRetentionDays:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
           </SettingRow>
         </ListGroup>
       </Section>

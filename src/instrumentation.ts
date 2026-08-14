@@ -86,6 +86,14 @@ export async function register() {
       // one window pressed twice.
       const { reconcileSchedulesOnBoot } = await import("./lib/schedules");
       reconcileSchedulesOnBoot();
+
+      // And the one sweep that deletes rather than reconciles. Gated on the
+      // same claim as everything above, for a reason of its own: it decides
+      // what is safe to discard from the *live* state — which runs have
+      // settled, which checkouts nothing holds — and a process that does not
+      // own this directory is reading another server's answers to both.
+      const { startRetentionSweeper } = await import("./lib/retention");
+      startRetentionSweeper();
     } else {
       console.warn(
         "[usagefoundry] Another server process already holds this data " +

@@ -89,6 +89,75 @@ name on it: **[docs/limits-and-accuracy.md](docs/limits-and-accuracy.md)**.
 
 ---
 
+## Disk, retention and backup
+
+Agents produce data on three different volumes, and all three grow with the work
+rather than with your settings. What each one is bounded by is on
+**Settings → Storage**, which also shows what is in it right now.
+
+| Store | Where | Grows with | Kept for |
+|---|---|---|---|
+| Run logs (`run_events`, telemetry) | the `usagefoundry-data` named volume | tool calls, replies, agent stderr | 30 days after a run finishes |
+
+The horizons are per store because the media are. Blank means *keep for ever*,
+which is what shipped before this existed. **A run that has not finished is
+never swept**, however old its rows are, and **no sweep ever removes a run's own
+record** — its spend, its cycle count, how it ended and where its branch went
+stay for as long as the database does. What a horizon discards is the evidence
+behind those figures.
+
+**What to provision.** A run log is roughly 1 KB per tool call plus whatever the
+agent's own build output comes to, and a stored tool input is cut at 4 KB, so a
+busy single-operator install settles around a few hundred megabytes. Twenty-five
+concurrent runs is ~11,000 tool events an hour: about **1 GB a week** at the
+30-day default, an order of magnitude more without one.
+
+**Backing it up.** The `usagefoundry-data` volume holds the only copy of every
+run's history, every template, every workflow and your settings. Nothing here
+replicates it. Compose namespaces the volume with the project name, so find its
+real name once:
+
+```bash
+VOL=$(docker volume ls -q | grep usagefoundry-data | head -1)
+```
+
+```bash
+# Back up — with the container stopped, so the WAL is checkpointed into the file.
+docker compose stop usagefoundry
+docker run --rm -v "$VOL":/data -v "$PWD":/backup alpine \
+  tar czf "/backup/usagefoundry-$(date +%F).tar.gz" -C /data .
+docker compose start usagefoundry
+```
+
+```bash
+# Restore onto a fresh container. Let compose create the volume — /data's mode
+# is copied from the image, which is what makes it writable by your UF_UID.
+docker compose up -d
+docker compose stop usagefoundry
+VOL=$(docker volume ls -q | grep usagefoundry-data | head -1)
+docker run --rm -v "$VOL":/data -v "$PWD":/backup alpine \
+  sh -c 'rm -rf /data/* && tar xzf /backup/usagefoundry-YYYY-MM-DD.tar.gz -C /data'
+docker compose start usagefoundry
+```
+
+A backup taken with the container *running* is a live SQLite file plus its WAL;
+it will usually restore, but stopping first is the only way to be sure.
+
+**Reclaiming the space.** Retention frees SQLite's pages for reuse, so the
+database stops growing — but the file only shrinks when it is rewritten, and
+this app deliberately never does that on its own: `VACUUM` blocks the single
+writer for as long as it takes, on a process that is also carrying live budget
+guards. Run it by hand when the figure on Settings → Storage warrants it:
+
+```bash
+docker compose stop usagefoundry
+docker run --rm -v "$VOL":/data alpine \
+  sh -c 'apk add --no-cache sqlite >/dev/null && sqlite3 /data/usagefoundry.db "VACUUM;"'
+docker compose start usagefoundry
+```
+
+---
+
 ## Specialists
 
 A **specialist** is a saved agent: a name, a description, a prompt, and

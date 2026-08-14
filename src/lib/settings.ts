@@ -249,6 +249,26 @@ export interface Settings {
    */
   chatTurnBudgetUSD: number | null;
   /**
+   * How long a finished run's event log is kept, in days. Null keeps it always.
+   *
+   * The first of the three retention horizons, and the one furthest from the
+   * operator: `run_events` holds every assistant block, every tool call with
+   * its whole input, and every stderr chunk, so it grows at roughly the byte
+   * volume of the agents' own traffic — measured at ~13 MB per thousand tool
+   * events with a 4 KB payload — into a named volume with no size limit. What
+   * is discarded is the *evidence*; the run's own row, with its spend, its
+   * cycle count and its stop reason, is never touched. A run that has not
+   * settled keeps all of it however old the rows are, because a log the page is
+   * showing must not lose lines under the reader.
+   *
+   * Not a window ceiling, so the no-default-numbers rule does not apply: it
+   * bounds this app's own storage rather than guessing at a limit Anthropic
+   * knows and we do not. It needs a default because the failure it prevents is
+   * a full volume, at which point every SQLite write fails at once and runs
+   * simply stop being admitted with nothing on any page saying why.
+   */
+  eventRetentionDays: number | null;
+  /**
    * What an agent may do when a chat proposal names no template.
    *
    * The chat used to be able to propose only against a saved template, which
@@ -408,6 +428,7 @@ const DEFAULTS: Settings = {
   landStrategy: "merge",
   killProcessGroup: true,
   chatTurnBudgetUSD: 2,
+  eventRetentionDays: 30,
   chatDefaultGuards: DEFAULT_CHAT_GUARDS,
 };
 
