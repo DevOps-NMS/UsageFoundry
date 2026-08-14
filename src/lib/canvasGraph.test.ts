@@ -44,6 +44,7 @@ function block(id: string, over: Partial<BlockDraft> = {}): BlockDraft {
     folder: "",
     task: "do the thing",
     promptOverride: "",
+    agentId: "",
     fanOut: "3",
     mergeStrategy: "merge",
     mergeAutoResolve: false,
@@ -109,6 +110,29 @@ test("no template is null on the wire, not an empty string", () => {
   });
   assert.equal(wire.nodes[0].templateId, null);
   assert.equal(wire.nodes[1].templateId, "tpl-1");
+});
+
+test("a specialist is carried by the kinds that spawn a child, and by no other", () => {
+  // The merge case is why this is here rather than left to the server. That
+  // block spawns nothing, so naming a specialist on it is *refused* — not
+  // dropped, because a specialist the operator believes is in play and that no
+  // process is ever given is the fault the whole registry exists to end. A
+  // block switched from run to merge with an agent still picked would therefore
+  // be unsavable over a control the inspector no longer shows, which is a dead
+  // end rather than a refusal anyone can act on.
+  const wire = draftToGraph({
+    blocks: [
+      block("a", { agentId: "agent-1" }),
+      block("b", { kind: "orchestrator", agentId: "agent-1" }),
+      block("c", { kind: "merge", agentId: "agent-1" }),
+      block("d"),
+    ],
+    links: [],
+  });
+  assert.equal(wire.nodes[0].agentId, "agent-1");
+  assert.equal(wire.nodes[1].agentId, "agent-1", "a deciding turn may have one");
+  assert.equal(wire.nodes[2].agentId, null, "a merge block never sends one");
+  assert.equal(wire.nodes[3].agentId, null, "and none is null, not an empty id");
 });
 
 /* ------------------------------------------------------------------ */

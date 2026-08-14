@@ -366,21 +366,10 @@ export function resolveAgentForRun(raw: unknown): AgentResolution {
   if (!id) return { ok: true, agent: null };
 
   const saved = getAgent(id);
-  const known = new Map<string, AgentFacts>();
-  if (saved) known.set(saved.id, { name: saved.name, usable: saved.usable });
-
-  const refusal = agentRefusal(id, known);
+  const refusal = agentRefusal(id, agentKnowledgeOf(saved));
   if (refusal || !saved) return { ok: false, error: refusal ?? "No such agent." };
 
-  return {
-    ok: true,
-    agent: {
-      name: saved.name,
-      description: saved.description,
-      prompt: saved.prompt,
-      model: saved.model,
-    },
-  };
+  return { ok: true, agent: agentDefinition(saved) };
 }
 
 /**
@@ -662,6 +651,52 @@ export function getAgent(id: string): (SavedAgent & { usable: boolean }) | null 
     .prepare(`SELECT ${COLUMNS} FROM agents WHERE id = ?`)
     .get(id) as AgentRow | undefined;
   return row ? rowToAgent(row) : null;
+}
+
+/**
+ * One saved agent by the name it answers to, case-folded as the index is.
+ *
+ * By name rather than by id because of the one caller that has no id: an
+ * orchestrator block's turn names a specialist for a run it is emitting, and
+ * what that child was shown is a list of *names* — an id is a thing only this
+ * app's own forms ever hold, and putting one in front of a model would be
+ * inviting it to guess at an identifier. Case-folded because `idx_agents_name`
+ * is, so the name the turn typed and the name the operator saved are one agent
+ * here for the same reason they are one row there.
+ */
+export function getAgentByName(
+  name: string,
+): (SavedAgent & { usable: boolean }) | null {
+  const row = db()
+    .prepare(`SELECT ${COLUMNS} FROM agents WHERE name = ? COLLATE NOCASE`)
+    .get(name.trim()) as AgentRow | undefined;
+  return row ? rowToAgent(row) : null;
+}
+
+/** The four fields a spawn carries, out of the row the registry holds. */
+export function agentDefinition(agent: SavedAgent): AgentDefinition {
+  return {
+    name: agent.name,
+    description: agent.description,
+    prompt: agent.prompt,
+    model: agent.model,
+  };
+}
+
+/**
+ * The registry as `agentRefusal` reads it, for one row a caller has resolved.
+ *
+ * `currentAgentKnowledge`'s shape for a caller that already knows which agent it
+ * is asking about — a saved graph's block, an emitted run — so the refusal for
+ * "that agent is gone" is the same sentence whether it was reached by listing
+ * the registry or by looking up one row.
+ */
+export function agentKnowledgeOf(
+  agent: (SavedAgent & { usable: boolean }) | null,
+): AgentKnowledge {
+  const known = new Map<string, AgentFacts>();
+  if (agent) known.set(agent.id, { name: agent.name, usable: agent.usable });
+  return known;
 }
 
 /**

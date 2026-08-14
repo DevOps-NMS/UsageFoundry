@@ -624,6 +624,20 @@ export interface WorkflowNodeDTO {
    */
   promptOverride: string | null;
   /**
+   * A saved agent this block's own child may hand a subtask to, by id.
+   *
+   * On the *work* side of the block, beside the mount, the folder and the task,
+   * and never on the guard side: an agent holds no tool list and no permission
+   * mode, so what it changes is who does a piece of the work and never what the
+   * block may do. It is the block's own rather than its template's — the reason
+   * is in `WorkflowNode.agentId`.
+   *
+   * Null on a merge block always, and naming one there is refused rather than
+   * dropped: that block spawns no child, so there would be nothing to hand a
+   * subtask to.
+   */
+  agentId: string | null;
+  /**
    * How many runs an orchestrator block may start. Null on a run block, and
    * **never** null on an orchestrator one — a block that starts agents with no
    * approval and no ceiling is an unbounded number of billed agents from one

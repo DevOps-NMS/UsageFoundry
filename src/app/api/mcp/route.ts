@@ -461,13 +461,22 @@ const CHAT_TOOLS = [
 /**
  * The one tool an orchestrator block gets that writes anything.
  *
- * Four fields per run and no fifth. There is no template id, no budget, no
+ * Five fields per run and no sixth. There is no template id, no budget, no
  * permission mode, no isolation choice and no model on this schema, and their
  * absence is the whole reason auto-start is defensible: the block's guards were
  * chosen by a person when the graph was saved, and a field here that could name
  * different ones would be a route to `--permission-mode` reached by a model with
  * nobody reading the result. The description says so outright, because a model
  * that believes it can set guards writes a task explaining what guards it wants.
+ *
+ * The fifth is `agent`, and it is on the other side of that line rather than an
+ * exception to it: a saved agent is a description and a prompt, the registry
+ * refuses a tool list at the door and has no column for a permission mode, so
+ * naming one decides *who* does a piece of the work exactly as the task text
+ * beside it decides what the work is. `planEmission` refuses a name this install
+ * does not have, for the reason every other door refuses a deleted agent by name
+ * — a run given a specialist it does not have is bit-for-bit a run that was
+ * never given one.
  */
 const BLOCK_TOOLS = [
   {
@@ -510,6 +519,16 @@ const BLOCK_TOOLS = [
                   "Path within this block's own workspace, exactly as " +
                   "list_folders gives it. A folder outside it is refused. " +
                   "\"\" is the workspace root.",
+              },
+              agent: {
+                type: "string",
+                description:
+                  "Optional: the name of a saved specialist this run may hand " +
+                  "a subtask to, exactly as your instructions list it. It " +
+                  "changes who does a piece of the work and never what the run " +
+                  "may do — the guards are still the block's. A name this " +
+                  "install does not have is refused; omit it for the ordinary " +
+                  "run.",
               },
               dependsOn: {
                 type: "array",

@@ -18,7 +18,13 @@ import type {
   WorkspaceFolderDTO,
   WorkspaceMountDTO,
 } from "@/lib/apiTypes";
-import { fmtPct, fmtUSD, pctField, pollFailureMessage } from "@/lib/format";
+import {
+  describeAmbientAgents,
+  fmtPct,
+  fmtUSD,
+  pctField,
+  pollFailureMessage,
+} from "@/lib/format";
 import { jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle } from "@/components/ui/Card";
@@ -202,25 +208,6 @@ function humanMinutes(n: number): string {
 function joinClauses(parts: string[]): string {
   if (parts.length <= 1) return parts[0] ?? "";
   return `${parts.slice(0, -1).join(", ")} or ${parts[parts.length - 1]}`;
-}
-
-/**
- * What the operator's own `~/.claude` puts in play whatever this form picks.
- *
- * The saved registry is a *part* of the set of agents a run can delegate to and
- * never the whole of it: the mounted config directory reaches every child this
- * app spawns and always has, and `--agents` merges with it rather than replacing
- * it. So a surface that offers a choice has to say so, or the picker reads as
- * the complete answer to "which specialists exist here".
- */
-function describeAmbient(ambient: AmbientAgentDTO[]): string | null {
-  if (ambient.length === 0) return null;
-  const names = ambient.slice(0, 3).map((a) => a.name);
-  const rest = ambient.length - names.length;
-  const list = rest > 0 ? `${names.join(", ")} and ${rest} more` : names.join(", ");
-  return ambient.length === 1
-    ? `Your own ~/.claude also carries ${list}, in play whatever you pick here`
-    : `Your own ~/.claude also carries ${ambient.length} agents (${list}), in play whatever you pick here`;
 }
 
 /** One line describing what a template will do, for the picker's hint. */
@@ -738,7 +725,9 @@ export default function NewRunPage() {
   // did it silently would start the run this page exists to stop.
   const agentMissing = agentsLoaded && agentId !== "" && selectedAgent === null;
   const ambientLine = useMemo(
-    () => describeAmbient(ambientAgents),
+    // One sentence for this picker and the workflow canvas's — see
+    // `describeAmbientAgents`.
+    () => describeAmbientAgents(ambientAgents),
     [ambientAgents],
   );
   // Case-insensitive, because the unique index on the name is. Without it the

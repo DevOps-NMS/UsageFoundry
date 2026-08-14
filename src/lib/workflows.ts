@@ -52,6 +52,19 @@ import {
   type InstanceBudgetPolicy,
   type InstanceProgress,
 } from "./budget";
+import {
+  agentDefinition,
+  agentKnowledgeOf,
+  agentRefusal,
+  currentAgentKnowledge,
+  getAgent,
+  getAgentByName,
+  listAgents,
+  type AgentDefinition,
+  type AgentFacts,
+  type AgentKnowledge,
+  type SavedAgent,
+} from "./agents";
 import { telemetrySpendSince } from "./otlp";
 import type { UsageSnapshot } from "./windows";
 import { chatGuards, getSettings, type RunGuards } from "./settings";
@@ -171,6 +184,50 @@ export interface WorkflowNode {
    */
   promptOverride: string | null;
   /**
+   * A saved agent this block's own child may hand a subtask to, or null.
+   *
+   * On the **work** side of the node — beside the mount, the folder, the task
+   * and the prompt override — and deliberately not on the guard side. An agent
+   * carries no capability at all: it holds no tool list and no permission mode,
+   * so what it changes is who does a piece of the work and never what the block
+   * may do. The three narrowings of `--permission-mode` stay three, the two
+   * routes to it stay two, and `guardsFor` still returns the same three fields.
+   *
+   * **It is the node's own and is never inherited from its template**, which is
+   * the mount and folder's rule rather than the prompt's. What decides it is
+   * what a template answers *here*: the run form applies one as a seed for every
+   * field, where a node reads one for exactly two things — its guards, and the
+   * standing instructions `promptOverride` replaces. It supplies neither the
+   * mount nor the folder, for the stated reason that a template edited months
+   * later would silently move a saved block's run to another repository, and an
+   * agent is the same shape of change one field over: it decides who does the
+   * work, it points into a registry that is edited somewhere else entirely, and
+   * a saved graph whose specialist moved with nothing in the graph changing is
+   * exactly that surprise. The canvas states this field in the sentence a press
+   * of Run is approved against, which it could not do honestly for a value that
+   * lives on another record.
+   *
+   * An **id** rather than a copy, which is `run_templates.agent_id`'s rule and
+   * the opposite of `runs.agent`'s, for that pair's reason: a saved graph is
+   * form input applied again and again, so an operator who fixes their
+   * reviewer's prompt expects the next press of Run to use the fixed one. The
+   * copy is taken where it always is — `createRun` freezes the whole definition
+   * onto the run — so an agent deleted between two blocks of one instance
+   * cannot reach a run that has already started.
+   *
+   * Which child it is differs by kind, and the field does not. On a run block it
+   * is that run's own specialist. On an orchestrator block it is the **deciding
+   * turn's**, because that turn is the child this block spawns; the runs it
+   * emits name their own, one per spec, which is the only per-run answer
+   * available to a block that has not decided on them yet. That is the opposite
+   * way round from `promptOverride`, which an orchestrator block holds on behalf
+   * of the runs it emits — standing instructions are what a run is *asked*, and
+   * the deciding turn is asked by `blockSystemPrompt` instead. A merge block
+   * spawns no child at all, so one named there is refused rather than dropped;
+   * see `normalizeWorkflowInput`.
+   */
+  agentId: string | null;
+  /**
    * How many runs an orchestrator block may start. Null on a run block.
    *
    * Never null on an orchestrator block, and that is enforced at *save* rather
@@ -261,7 +318,19 @@ export interface WorkflowKnowledge {
   mountIds: readonly string[];
   /** Whether `settings.chatDefaultGuards` isolates — a node naming no template. */
   defaultIsolate: boolean;
+  /**
+   * The agent registry, for a node that names a specialist.
+   *
+   * Injected like the templates and for the identical reason, and read through
+   * the same `agentRefusal` the run door and the template door read — so a
+   * saved graph, a saved template and a started run all say the same sentence
+   * about an agent that has gone.
+   */
+  agents: AgentKnowledge;
 }
+
+/** One row of the registry as this file resolves it, before it becomes argv. */
+type RegistryAgent = SavedAgent & { usable: boolean };
 
 export type WorkflowNormalization =
   | { ok: true; value: WorkflowInput }
@@ -491,11 +560,45 @@ export function normalizeWorkflowInput(
     const promptOverride =
       kind === "merge" ? "" : String(n.promptOverride ?? "").trim();
 
+    // The specialist this block's own child may be handed a subtask by.
+    //
+    // Refused rather than dropped on a merge block, and that is the one place
+    // this loop's habit of coercing a field the kind does not hold stops. A
+    // template on a merge block decides nothing, because no agent runs under it;
+    // an agent named on a block that spawns no child at all is a specialist the
+    // operator believes is in play and that no process will ever be given —
+    // which is the exact shape `agents.ts` exists to refuse, and dropping it
+    // here would be this app performing the CLI's own silent drop at the one
+    // door built to end it. Both ends of a `continueBranch` edge are refused by
+    // name below on the same grounds.
+    const namedAgent =
+      n.agentId === null || n.agentId === undefined || String(n.agentId).trim() === ""
+        ? null
+        : String(n.agentId).trim();
+    if (namedAgent !== null && kind === "merge") {
+      return {
+        ok: false,
+        error:
+          `“${nodeName}” lands the branches in front of it and starts no agent ` +
+          "of its own, so there is nothing for a specialist to be handed. " +
+          "Remove it, or put it on the block that does the work.",
+      };
+    }
+    const agentId = kind === "merge" ? null : namedAgent;
+    if (agentId !== null) {
+      // The same wording the run door and the template door give, prefixed with
+      // the block — a graph is read as a list of steps, so every refusal here
+      // names the one it is about.
+      const refusal = agentRefusal(agentId, known.agents);
+      if (refusal) return { ok: false, error: `“${nodeName}”: ${refusal}` };
+    }
+
     nodes.push({
       id,
       name: nodeName,
       kind,
       templateId,
+      agentId,
       mountId,
       // The empty string is the mount root — the one selection that blocks
       // every other run in the tree — so it is kept rather than collapsed into
@@ -753,6 +856,7 @@ export function currentKnowledge(): WorkflowKnowledge {
     ),
     mountIds: WORKSPACE_MOUNTS.map((m) => m.id),
     defaultIsolate: chatGuards().isolate,
+    agents: currentAgentKnowledge(),
   };
 }
 
@@ -961,12 +1065,16 @@ export type NodePlan =
  * the untemplated guard set rather than reading either.
  *
  * The branch that matters is the one that is not here. No value off a node sets
- * a budget, a permission mode or an isolation choice.
+ * a budget, a permission mode or an isolation choice. The agent is not one of
+ * those and never becomes one: it is resolved by the caller for the reason the
+ * template is — this function stays pure — and it reaches the run as a
+ * definition rather than as a capability.
  */
 export function planNode(
   node: WorkflowNode,
   template: RunTemplate | null,
   defaults: RunGuards,
+  agent: RegistryAgent | null,
 ): NodePlan {
   if (node.templateId !== null && !template) {
     return {
@@ -976,6 +1084,20 @@ export function planNode(
         "no guards to start it under. Edit the workflow to pick another, or " +
         "none, which uses the guards in Settings.",
     };
+  }
+
+  // Refused by name for the template's reason and the registry's own: a run
+  // given a specialist it does not have is bit-for-bit a run that was never
+  // given one, and nothing downstream can tell them apart — not the event log,
+  // not the cost, not the transcript's own attribution.
+  //
+  // Read as truthy rather than against null, unlike the template above it: a
+  // graph blob copied onto an instance before this field existed has no key
+  // here at all, and `undefined !== null` would refuse every block of every
+  // instance still in flight across the upgrade.
+  if (node.agentId) {
+    const refusal = agentRefusal(node.agentId, agentKnowledgeOf(agent));
+    if (refusal) return { ok: false, reason: `“${node.name}”: ${refusal}` };
   }
 
   const task = node.task.trim();
@@ -995,6 +1117,10 @@ export function planNode(
       permissionMode: guards.permissionMode,
       isolate: guards.isolate,
       budget: guards.budget,
+      // And this one comes from the node and from nowhere else, because it is
+      // work rather than permission — see `WorkflowNode.agentId`. Frozen onto
+      // the run by `createRun`, so the row keeps what it was started with.
+      agent: node.agentId && agent ? agentDefinition(agent) : null,
     },
   };
 }
@@ -1034,12 +1160,20 @@ function guardsFor(
  * `--permission-mode` is not a thing a model should be able to reach for, and
  * this is the one path in the app where nobody looks at the answer before it
  * becomes a process.
+ *
+ * The **specialist is the third thing the turn decides**, and it belongs with
+ * the task and the folder rather than with the guards: an agent is a
+ * description and a prompt, it carries no tool list and no permission mode, and
+ * every guard below still comes off the block a person saved. It is resolved by
+ * the caller — `planEmission` has already refused a name the registry does not
+ * have, and this takes the definition that name resolved to.
  */
 export function planEmittedRun(
   node: WorkflowNode,
   spec: RunSpec,
   template: RunTemplate | null,
   defaults: RunGuards,
+  agent: AgentDefinition | null,
 ): Omit<CreateRunInput, "dependsOn"> {
   const guards = guardsFor(template, defaults);
   const base = node.promptOverride?.trim() || template?.prompt || null;
@@ -1050,6 +1184,7 @@ export function planEmittedRun(
     permissionMode: guards.permissionMode,
     isolate: guards.isolate,
     budget: guards.budget,
+    agent,
   };
 }
 
@@ -1060,12 +1195,18 @@ export function planEmittedRun(
 /**
  * One run an orchestrator block asks for.
  *
- * Four fields, and the list is the boundary rather than a starting point: a
- * title, the brief, a folder, and which of its siblings it starts after. There
- * is no template id, no budget, no permission mode, no isolation choice and no
- * model, because the block's own template already answered all of those and a
- * spec that could answer them again would be a fifth route to
+ * Five fields, and the list is the boundary rather than a starting point: a
+ * title, the brief, a folder, a specialist, and which of its siblings it starts
+ * after. There is no template id, no budget, no permission mode, no isolation
+ * choice and no model, because the block's own template already answered all of
+ * those and a spec that could answer them again would be a fifth route to
  * `--permission-mode` reached by a model with nobody reading the result.
+ *
+ * The specialist is not one of those and cannot become one. An agent is a
+ * description and a prompt — the registry refuses a tool list at the door and
+ * has no column for a permission mode — so naming one is the same class of act
+ * as writing the task text beside it: it decides who does a piece of the work,
+ * and every guard still comes from the block a person saved.
  */
 export interface RunSpec {
   /** Stable within one emission; the edges below name it. */
@@ -1076,6 +1217,15 @@ export interface RunSpec {
   task: string;
   /** Path within the *block's* own folder. `""` is the mount root. */
   folder: string;
+  /**
+   * A saved agent this run may hand a subtask to, by **name**, or null.
+   *
+   * A name rather than an id because a name is what the turn was shown — see
+   * `blockSystemPrompt` — and it is the registry's own spelling of it rather
+   * than the turn's, because the name is the key of the object `--agents` takes
+   * and the string a transcript attributes a delegated turn to.
+   */
+  agent: string | null;
   /** Siblings in this same emission that must settle first. */
   dependsOn: Array<{ id: string; edge: DependencyEdge }>;
 }
@@ -1098,6 +1248,17 @@ export interface EmissionLimits {
    * testable without one.
    */
   folderRefusal: (folder: string) => string | null;
+  /**
+   * The registry, as the turn was shown it.
+   *
+   * Data rather than an injected function, unlike `folderRefusal` beside it:
+   * containment is a syscall and this is a list, which is the same split
+   * `WorkflowKnowledge` makes between its templates and `folderRefusal`. Only
+   * the two fields a refusal is written from — a spec that names an agent gets
+   * the whole definition later, from the registry, at the moment its run is
+   * created.
+   */
+  agents: readonly AgentFacts[];
 }
 
 /** How many characters of a spec's own fields are worth keeping. */
@@ -1188,11 +1349,48 @@ export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan
       };
     }
 
+    // The specialist, checked here beside the cap and the folder because this
+    // is the last moment before these become processes. Refused by name rather
+    // than dropped, which is `agentRefusal`'s rule reached from the one door
+    // where nobody is looking: a run emitted "as the reviewer" and started
+    // without one is indistinguishable afterwards from a run that named none.
+    const namedAgent = String(e.agent ?? "").trim();
+    let agent: string | null = null;
+    if (namedAgent !== "") {
+      // Case-folded because `idx_agents_name` is, so the name the turn typed
+      // and the name the operator saved are one agent here too.
+      const match = limits.agents.find(
+        (a) => a.name.toLowerCase() === namedAgent.toLowerCase(),
+      );
+      if (!match) {
+        return {
+          ok: false,
+          reason:
+            `“${title}” asks for an agent this install does not have: ` +
+            `${namedAgent}. Name one of the agents listed in your instructions, ` +
+            "or leave it out — a run with no specialist is the ordinary run.",
+        };
+      }
+      if (!match.usable) {
+        return {
+          ok: false,
+          reason:
+            `“${title}” asks for the “${match.name}” agent, which is missing ` +
+            "its description or its prompt. Claude Code drops such an agent " +
+            "without a word, so the run would look exactly like one that was " +
+            "never given a specialist. Name another, or leave it out.",
+        };
+      }
+      // The registry's spelling, not the turn's — see `RunSpec.agent`.
+      agent = match.name;
+    }
+
     specs.push({
       id,
       title: title.slice(0, MAX_SPEC_TITLE),
       task,
       folder,
+      agent,
       dependsOn: [],
     });
     byId.set(id, specs[specs.length - 1]);
@@ -2326,6 +2524,12 @@ export function startWorkflow(
       node,
       node.templateId ? getTemplate(node.templateId) : null,
       defaults,
+      // Resolved to a definition here and frozen onto the run by `createRun`,
+      // so an agent deleted while this instance is working cannot reach a run
+      // that has already started. `normalizeWorkflowInput` above has refused a
+      // graph naming one that is already gone; this is the same refusal for the
+      // row that goes between the two reads.
+      node.agentId ? getAgent(node.agentId) : null,
     );
     if (!plan.ok) return { ok: false, reason: plan.reason };
     plans.set(node.id, plan.input);
@@ -3275,6 +3479,11 @@ function advanceInstance(instanceId: string): void {
       node,
       node.templateId ? getTemplate(node.templateId) : null,
       defaults,
+      // Read now rather than at `startWorkflow`: this node is being created
+      // hours later, behind a decision, so the registry is asked again and a
+      // specialist that has gone since blocks this one block by name instead of
+      // starting a run quietly without it.
+      node.agentId ? getAgent(node.agentId) : null,
     );
     if (!plan.ok) {
       upsertBlock(instanceId, node, "blocked", plan.reason);
@@ -3498,6 +3707,20 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
     return;
   }
 
+  // The specialist this turn itself may delegate to — the block's own child, so
+  // its own field. Asked before anything is spent and refused by name rather
+  // than dropped: failing here costs nothing and says what happened, where a
+  // turn deciding without the agent the operator gave it is the one failure
+  // shape nothing downstream can report.
+  const own = node.agentId ? getAgent(node.agentId) : null;
+  if (node.agentId) {
+    const missing = agentRefusal(node.agentId, agentKnowledgeOf(own));
+    if (missing) {
+      settleBlock(instanceId, nodeId, { status: "failed", error: missing });
+      return;
+    }
+  }
+
   const refusal = await assistRefusal();
   if (refusal) {
     settleBlock(instanceId, nodeId, { status: "failed", error: refusal });
@@ -3553,8 +3776,21 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
   runOrchestratorChild({
     subject: { kind: "block", instanceId, nodeId },
     prompt: node.task,
-    appendSystemPrompt: blockSystemPrompt(node, template, instance.workflowName),
+    appendSystemPrompt: blockSystemPrompt(
+      node,
+      template,
+      instance.workflowName,
+      own,
+      // What it may hand an *emitted* run to, which is a different question
+      // from the line above and is answered by the same registry. Read here so
+      // the prompt and `emitBlockRuns`' own check describe one list.
+      listAgents(),
+    ),
     cwd: safeFolder(node),
+    // Offered to this turn, never imposed: `--agents` hands the delegating
+    // model a role it may use, and everything bounding this child — its tool
+    // surface, its capability token, `--max-budget-usd` — is unchanged.
+    agents: own ? [agentDefinition(own)] : [],
     maxBudgetUSD: settings.chatTurnBudgetUSD,
     timeoutMs: BLOCK_TIMEOUT_MS,
     timedOutMessage: BLOCK_TIMED_OUT,
@@ -4085,6 +4321,26 @@ function createEmitted(
       );
       continue;
     }
+    // Resolved now rather than when the spec was accepted, for the reason the
+    // template beside it is read at this moment: a row can go between a turn
+    // ending and its runs being created. That spec fails by name — a run
+    // started without the specialist it was emitted with is the silent drop
+    // this app refuses at every other door — and the others still start, which
+    // is this pass's whole difference from `startWorkflow`'s.
+    let agent: AgentDefinition | null = null;
+    if (spec.agent) {
+      const saved = getAgentByName(spec.agent);
+      if (!saved || !saved.usable) {
+        failures.push(
+          `“${spec.title}” was not started: the “${spec.agent}” agent it was ` +
+            "emitted with is no longer usable, and a run without the " +
+            "specialist it was given cannot be told from one that never had it.",
+        );
+        continue;
+      }
+      agent = agentDefinition(saved);
+    }
+
     try {
       // Every one of these edges names a run created moments ago in this same
       // pass, whose id was minted after its own edges were read — so no insert
@@ -4093,7 +4349,7 @@ function createEmitted(
       // property of the data now that a graph written by a model reaches it;
       // `planEmission` has already refused a cyclic emission by name.
       const run = createRun({
-        ...planEmittedRun(node, spec, template, defaults),
+        ...planEmittedRun(node, spec, template, defaults, agent),
         dependsOn: spec.dependsOn.map((d) => ({
           runId: runIds.get(d.id)!,
           edge: d.edge,
@@ -4249,6 +4505,12 @@ export function emitBlockRuns(
       emittedFolderRefusal(node.folder, folder, (f) =>
         resolveWorkspaceFolder(f, node.mountId),
       ),
+    // The whole registry, which is exactly the list `blockSystemPrompt` showed
+    // this turn — two fields of it, because that is all a refusal is written
+    // from. An emitted run may name any saved agent for the reason it may write
+    // any task: an agent carries no capability, and every guard still comes off
+    // the block a person saved.
+    agents: listAgents().map((a) => ({ name: a.name, usable: a.usable })),
   });
   if (!plan.ok) {
     // The one refusal that most needs recording. Everything above is a turn
@@ -4293,10 +4555,38 @@ function blockSystemPrompt(
   node: WorkflowNode,
   template: RunTemplate | null,
   workflowName: string,
+  own: RegistryAgent | null,
+  registry: readonly RegistryAgent[],
 ): string {
   const guards = template
     ? `the “${template.name}” template`
     : "the operator's default guard set in Settings";
+
+  // The specialists an emitted run may be handed to, named because a name is
+  // what `emit_runs` takes. Descriptions are shortened here for the reason
+  // `MAX_AGENT_DESCRIPTION` exists at all — every one of them rides in this
+  // turn's context — and the whole of one reaches the run that names it, on its
+  // own argv, when it spawns. An unusable row is left out: the CLI would drop
+  // it in silence, so offering it would be offering a specialist that is not
+  // there.
+  const choices = registry.filter((a) => a.usable);
+  const specialists =
+    choices.length === 0
+      ? []
+      : [
+          "",
+          "Specialists you may hand a run to, by name in `agent` — this changes",
+          "who does a piece of the work and never what a run may do, and leaving",
+          "it out is the ordinary run:",
+          ...choices.map(
+            (a) =>
+              `- ${a.name} — ${
+                a.description.length > 200
+                  ? `${a.description.slice(0, 200)}…`
+                  : a.description
+              }`,
+          ),
+        ];
   // Exactly the bound `emittedFolderRefusal` enforces for this block and no
   // other. A block saved on a folder is held to that folder, the workspace root
   // included — so "" is a refusal there rather than the bad idea it is for a
@@ -4333,6 +4623,14 @@ function blockSystemPrompt(
     `- Every run gets its guards — budget, work-cycle limit, permission mode,`,
     `  whether it works in a checkout of its own — from ${guards}. There is no`,
     "  argument on emit_runs that touches any of them, deliberately.",
+    ...(own
+      ? [
+          `- You may hand a subtask of your own to the “${own.name}” agent, which`,
+          "  the operator gave this block. It changes who does part of your",
+          "  looking, not what you are allowed to do.",
+        ]
+      : []),
+    ...specialists,
     "",
     "Emitting:",
     "- One run per unit of work, with a short specific title.",

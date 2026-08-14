@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import type {
+  AgentDTO,
+  AmbientAgentDTO,
   MergeStrategyDTO,
   RunTemplateDTO,
   SettingsDTO,
@@ -25,7 +27,12 @@ import {
   type LinkDraft,
   type Point,
 } from "@/lib/canvasGraph";
-import { pctField, pctSubmit, pollFailureMessage } from "@/lib/format";
+import {
+  describeAmbientAgents,
+  pctField,
+  pctSubmit,
+  pollFailureMessage,
+} from "@/lib/format";
 import {
   KIND_LABEL,
   WorkflowCanvas,
@@ -71,6 +78,15 @@ import { Notice } from "@/components/ui/Notice";
  * what work to do. The one exception is the workflow-wide budget, which bounds
  * something no per-block guard can see — ten blocks under a $5 block limit is a
  * $50 workflow.
+ *
+ * The specialist picker is not a second exception, and its placement says so:
+ * it sits with the work rather than in the guards group, because a saved agent
+ * holds no tool list and no permission mode — it decides who does a piece of the
+ * work and never what the block may do. It is the block's own and never its
+ * template's, for the reason the workspace picker is; `WorkflowNode.agentId`
+ * has it in full. Beside it is the sentence the run form also carries: the
+ * registry is a *part* of the set of agents in play and never the whole of it,
+ * because the mounted `~/.claude` reaches every child this app spawns.
  *
  * The inspector is a sticky column beside the canvas rather than a form under
  * it, which is what a canvas app on this platform does — but the reason it
@@ -170,6 +186,7 @@ function emptyBlock(id: string, mountId: string, kind: WorkflowNodeKind): BlockD
     folder: "",
     task: "",
     promptOverride: "",
+    agentId: "",
     fanOut: DEFAULT_FAN_OUT,
     mergeStrategy: DEFAULT_MERGE_STRATEGY,
     mergeAutoResolve: false,
@@ -186,6 +203,7 @@ function toBlocks(workflow: WorkflowDTO): BlockDraft[] {
     folder: n.folder,
     task: n.task,
     promptOverride: n.promptOverride ?? "",
+    agentId: n.agentId ?? "",
     fanOut: n.fanOut?.toString() ?? DEFAULT_FAN_OUT,
     mergeStrategy: n.mergeStrategy ?? DEFAULT_MERGE_STRATEGY,
     mergeAutoResolve: n.mergeAutoResolve ?? false,
@@ -255,6 +273,13 @@ export function WorkflowEditor({
   const [templates, setTemplates] = useState<RunTemplateDTO[]>([]);
   const [mounts, setMounts] = useState<WorkspaceMountDTO[]>([]);
   const [folders, setFolders] = useState<WorkspaceFolderDTO[]>([]);
+  // The saved registry and the definitions on disk this app did not write, off
+  // one payload so no two surfaces can describe the set differently.
+  // `agentsLoaded` is what tells "this block names an agent that is gone" from
+  // "the list has not arrived yet" — the second must not raise the first.
+  const [agents, setAgents] = useState<AgentDTO[]>([]);
+  const [ambientAgents, setAmbientAgents] = useState<AmbientAgentDTO[]>([]);
+  const [agentsLoaded, setAgentsLoaded] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -330,6 +355,30 @@ export function WorkflowEditor({
     };
   }, []);
 
+  // Separate from the pair above for that pair's reason, and it decides what a
+  // picker offers rather than only a warning: a failed read leaves the list
+  // empty and `agentsLoaded` false, so a block naming an agent is never
+  // reported as naming a missing one on the strength of a list that never
+  // arrived. Save still refuses it by name, which is the answer that guards
+  // anything.
+  useEffect(() => {
+    let live = true;
+    fetch("/api/agents", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        if (!live) return;
+        setAgents((d.agents ?? []) as AgentDTO[]);
+        setAmbientAgents((d.ambient ?? []) as AmbientAgentDTO[]);
+        setAgentsLoaded(true);
+      })
+      .catch(() => {
+        /* see above; the picker stays empty and the server still decides */
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
   // Separate from the pair above and deliberately not blocking `loaded`: this
   // decides whether one warning renders, so a slow or failed read must not hold
   // the editor back or turn into an error banner over it.
@@ -372,6 +421,13 @@ export function WorkflowEditor({
   const foldersFor = useCallback(
     (mountId: string) => folders.filter((f) => f.mountId === mountId),
     [folders],
+  );
+
+  // The sentence the run form's picker carries too, from one place — see
+  // `describeAmbientAgents`.
+  const ambientLine = useMemo(
+    () => describeAmbientAgents(ambientAgents),
+    [ambientAgents],
   );
 
   /* ---------------------------------------------------------------- */
@@ -653,6 +709,9 @@ export function WorkflowEditor({
                 block={selectedBlock}
                 templates={templates}
                 templateName={templateName}
+                agents={agents}
+                agentsLoaded={agentsLoaded}
+                ambientLine={ambientLine}
                 mounts={mounts}
                 folders={foldersFor(selectedBlock.mountId)}
                 onChange={(patch) => updateBlock(selectedBlock.id, patch)}
@@ -793,10 +852,11 @@ export function WorkflowEditor({
  *
  * The controls under it are how it is changed; this is what it *says*, and it
  * is the copy a press of Run is approved against — which guard set applies (or
- * that it is the untemplated one from Settings), where it runs, how many runs a
- * deciding block may start with nobody looking, and whether a merge block may
- * pay a model to reconcile a conflict. Every one of those is a fact somebody
- * would otherwise have to assemble by reading four separate pickers.
+ * that it is the untemplated one from Settings), where it runs, which
+ * specialist it may hand a subtask to, how many runs a deciding block may start
+ * with nobody looking, and whether a merge block may pay a model to reconcile a
+ * conflict. Every one of those is a fact somebody would otherwise have to
+ * assemble by reading five separate pickers.
  *
  * It is deliberately not a warning: an orchestrator block's fan-out and a merge
  * block's authorisation are ordinary properties of a block that was configured
@@ -806,10 +866,20 @@ function BlockStatement({
   block,
   guards,
   where,
+  specialist,
 }: {
   block: BlockDraft;
   guards: ReactNode;
   where: ReactNode;
+  /**
+   * The agent this block's own child may hand a subtask to, or null.
+   *
+   * Stated rather than implied, because this sentence is what a press of Run is
+   * approved against — and stated *outside* the guard clause, because an agent
+   * bounds nothing: it holds no tool list and no permission mode, and a phrase
+   * inside "under …" would claim it does.
+   */
+  specialist: ReactNode | null;
 }) {
   if (block.kind === "merge") {
     return (
@@ -847,13 +917,17 @@ function BlockStatement({
           </strong>
         )}{" "}
         with no approval — each under {guards}.
+        {specialist && (
+          <> While it decides it may hand a subtask to {specialist}.</>
+        )}
       </p>
     );
   }
 
   return (
     <p className="mb-3.5 text-sm leading-normal text-ink-muted">
-      Runs in {where}, under {guards}.
+      Runs in {where}, under {guards}
+      {specialist ? <>, and may hand a subtask to {specialist}</> : null}.
     </p>
   );
 }
@@ -862,6 +936,9 @@ function BlockPanel({
   block,
   templates,
   templateName,
+  agents,
+  agentsLoaded,
+  ambientLine,
   mounts,
   folders,
   onChange,
@@ -870,6 +947,9 @@ function BlockPanel({
   block: BlockDraft;
   templates: RunTemplateDTO[];
   templateName: (id: string) => string | null;
+  agents: AgentDTO[];
+  agentsLoaded: boolean;
+  ambientLine: string | null;
   mounts: WorkspaceMountDTO[];
   folders: WorkspaceFolderDTO[];
   onChange: (patch: Partial<BlockDraft>) => void;
@@ -878,6 +958,9 @@ function BlockPanel({
   const mount = mounts.find((m) => m.id === block.mountId);
   const missingTemplate =
     block.templateId !== "" && templateName(block.templateId) === null;
+  const agent = agents.find((a) => a.id === block.agentId) ?? null;
+  // Only once the registry has answered — see `agentsLoaded`.
+  const missingAgent = block.agentId !== "" && agentsLoaded && agent === null;
   const orchestrator = block.kind === "orchestrator";
   // A merge block holds none of the fields below the kind picker: no guards,
   // because it starts no agent; no workspace or folder, because it works in
@@ -909,9 +992,32 @@ function BlockPanel({
     </strong>
   );
 
+  // Null on a block that names none, which is the ordinary block: a sentence
+  // saying "and no specialist" would put a permanent phrase on every graph in
+  // the app to describe the absence of an option most of them never take.
+  const specialist: ReactNode | null =
+    block.agentId === "" ? null : missingAgent ? (
+      <strong className="font-semibold text-danger">
+        an agent that has been deleted
+      </strong>
+    ) : agent && !agent.usable ? (
+      <strong className="font-semibold text-danger">
+        {agent.name}, which Claude Code would drop
+      </strong>
+    ) : (
+      <strong className="font-semibold text-ink">
+        {agent?.name ?? "a saved agent"}
+      </strong>
+    );
+
   return (
     <>
-      <BlockStatement block={block} guards={guards} where={where} />
+      <BlockStatement
+        block={block}
+        guards={guards}
+        where={where}
+        specialist={specialist}
+      />
 
       <ListGroup className="mb-4">
         <ListRow label="Name" htmlFor={`${block.id}-name`}>
@@ -1124,6 +1230,75 @@ function BlockPanel({
               </div>
             </ListRow>
           </ListGroup>
+
+          {/* A group of its own rather than a row in the guards one, because an
+              agent is not a guard: it holds no tool list and no permission
+              mode, so a row inside that group would claim it bounds something.
+              Shown when there is something to offer — or when this block
+              already names one, so a registry that has emptied out cannot hide
+              the control that is about to refuse the save. */}
+          {(agents.length > 0 || block.agentId !== "") && (
+            <ListGroup
+              className="mb-4"
+              footnote={
+                ambientLine ? (
+                  <>
+                    {ambientLine}. An agent changes who does part of the work,
+                    never what this block may do.
+                  </>
+                ) : (
+                  "An agent changes who does part of the work, never what this block may do"
+                )
+              }
+            >
+              <ListRow
+                label={orchestrator ? "Specialist for this turn" : "Specialist"}
+                htmlFor={`${block.id}-agent`}
+                description={
+                  missingAgent ? (
+                    <span role="alert" className="text-danger">
+                      That agent has been deleted, so Save will refuse this
+                      graph — pick another, or none
+                    </span>
+                  ) : agent && !agent.usable ? (
+                    <span role="alert" className="text-danger">
+                      {agent.name} is missing its description or its prompt, and
+                      Claude Code drops such an agent without a word
+                    </span>
+                  ) : agent ? (
+                    agent.description
+                  ) : orchestrator ? (
+                    "For this block's own deciding turn — the runs it starts name their own"
+                  ) : undefined
+                }
+              >
+                <div className={ROW_CONTROL}>
+                  <Select
+                    id={`${block.id}-agent`}
+                    value={block.agentId}
+                    aria-invalid={missingAgent || undefined}
+                    onChange={(e) => onChange({ agentId: e.target.value })}
+                  >
+                    <option value="">No specialist</option>
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name}
+                        {a.usable ? "" : "  (incomplete)"}
+                      </option>
+                    ))}
+                    {/* An id the registry no longer has still selects
+                        something, so the control cannot read as "none" while
+                        the graph is about to be refused for naming one. */}
+                    {missingAgent && (
+                      <option value={block.agentId}>
+                        {block.agentId} (deleted)
+                      </option>
+                    )}
+                  </Select>
+                </div>
+              </ListRow>
+            </ListGroup>
+          )}
 
           {/* Label above the control rather than beside it, which is the same
               exception the run form and Settings make: a nine-line text region

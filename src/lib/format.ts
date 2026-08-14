@@ -278,6 +278,32 @@ export function guardBadge(
     : { text: "template deleted", tone: "danger" };
 }
 
+/**
+ * What the operator's own `~/.claude` puts in play whatever a picker picks.
+ *
+ * The saved registry is a *part* of the set of agents a child can delegate to
+ * and never the whole of it: the mounted config directory reaches every child
+ * this app spawns, and `--agents` merges with it rather than replacing it. So
+ * every surface that offers a choice has to say so, or the picker reads as the
+ * complete answer to "which specialists exist here".
+ *
+ * One sentence rather than one per surface, for the reason `GET /api/agents`
+ * answers with `ambient` beside `agents`: the run form and the workflow canvas
+ * are describing the same set, and two wordings of it would be two claims that
+ * could drift apart. Null when there is nothing to declare.
+ */
+export function describeAmbientAgents(
+  ambient: ReadonlyArray<{ name: string }>,
+): string | null {
+  if (ambient.length === 0) return null;
+  const names = ambient.slice(0, 3).map((a) => a.name);
+  const rest = ambient.length - names.length;
+  const list = rest > 0 ? `${names.join(", ")} and ${rest} more` : names.join(", ");
+  return ambient.length === 1
+    ? `Your own ~/.claude also carries ${list}, in play whatever you pick here`
+    : `Your own ~/.claude also carries ${ambient.length} agents (${list}), in play whatever you pick here`;
+}
+
 export type Severity = "ok" | "warn" | "danger";
 
 export function severityFor(fraction: number | null): Severity {

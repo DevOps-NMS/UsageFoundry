@@ -58,6 +58,14 @@ const KNOWN: WorkflowKnowledge = {
   ]),
   mountIds: ["work", "other"],
   defaultIsolate: true,
+  // The registry as a saved graph is measured against it. `a-broken` is the row
+  // that has decayed into something the CLI would drop in silence — `rowToAgent`
+  // reports rather than repairs, so a graph naming it has to be refused here
+  // too, or the block starts with a specialist that is simply not there.
+  agents: new Map([
+    ["a-rev", { name: "Reviewer", usable: true }],
+    ["a-broken", { name: "Half a thing", usable: false }],
+  ]),
 };
 
 /** A block with everything filled in, so a case states only what it varies. */
@@ -367,6 +375,87 @@ describe("normalizeWorkflowInput — templates and mounts", () => {
 
   it("refuses a block naming no workspace", () => {
     assert.match(error(graph([node("a", { mountId: "" })])), /names no workspace/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Specialists                                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Who does a piece of a block's work, which is not what the block may do.
+ *
+ * Every failure here is the one this app's whole agent registry exists to end,
+ * arriving from a saved graph rather than from the CLI: a block given a
+ * specialist it does not have is bit-for-bit a block that was never given one,
+ * and nothing downstream can tell them apart — not the event log, not the cost,
+ * not the transcript's own attribution. So a name that resolves to nothing is
+ * refused rather than dropped, and it is refused *at save*, where a person is
+ * looking, as well as at every Run afterwards.
+ *
+ * The merge case is the same fault in its cheapest form. That block spawns no
+ * child at all, so a specialist named on it can never be handed anything —
+ * accepting it silently would be this app performing the CLI's own silent drop
+ * at the one door built to stop it.
+ */
+describe("normalizeWorkflowInput — the agent a block may hand work to", () => {
+  it("carries an agent the registry has", () => {
+    const v = value(graph([node("a", { agentId: "a-rev" })]));
+    assert.equal(v.graph.nodes[0].agentId, "a-rev");
+  });
+
+  it("reads no agent, an empty one and a blank one all as none", () => {
+    // `""` is the picker's own empty option rather than a missing answer, the
+    // same absence `templateId` collapses one field up.
+    assert.equal(value(graph([node("a")])).graph.nodes[0].agentId, null);
+    assert.equal(
+      value(graph([node("a", { agentId: "" })])).graph.nodes[0].agentId,
+      null,
+    );
+    assert.equal(
+      value(graph([node("a", { agentId: "   " })])).graph.nodes[0].agentId,
+      null,
+    );
+  });
+
+  it("refuses an agent that has been deleted, by block name and by refusal", () => {
+    // The same sentence the run door and the template door give, so an operator
+    // who meets it in three places meets one wording. Never a fallback to none:
+    // the graph says "and hand the review to the reviewer".
+    const message = error(graph([node("a", { agentId: "a-gone" })]));
+    assert.match(message, /“A”/);
+    assert.match(message, /no longer exists/);
+    assert.match(message, /a-gone/, "and names the id that resolved to nothing");
+  });
+
+  it("refuses one that has decayed into what the CLI drops in silence", () => {
+    // `rowToAgent` reports rather than repairs, so an unusable row reaches here
+    // as a row that exists. Accepted, it would produce a block whose specialist
+    // is absent with nothing at all saying so.
+    const message = error(graph([node("a", { agentId: "a-broken" })]));
+    assert.match(message, /Half a thing/);
+    assert.match(message, /without a word/);
+  });
+
+  it("lets an orchestrator block name one for its own deciding turn", () => {
+    const v = value(graph([decider("a", { agentId: "a-rev" })]));
+    assert.equal(v.graph.nodes[0].agentId, "a-rev");
+  });
+
+  it("refuses one on a merge block, which spawns no child to hand it to", () => {
+    // Refused rather than dropped, unlike the template on the same block: a
+    // template there decides nothing because no agent runs under it, where a
+    // specialist named here is one the operator believes is in play.
+    const message = error(
+      graph([node("a"), merger("m", { agentId: "a-rev" })], [edge("a", "m")]),
+    );
+    assert.match(message, /“M”/);
+    assert.match(message, /starts no agent of its own/);
+  });
+
+  it("still accepts a merge block that names none", () => {
+    const v = value(graph([node("a"), merger("m")], [edge("a", "m")]));
+    assert.equal(v.graph.nodes[1].agentId, null);
   });
 });
 
@@ -1017,6 +1106,12 @@ function limits(over: Partial<EmissionLimits> = {}): EmissionLimits {
     // "outside" is the one path this fixture refuses.
     folderRefusal: (folder) =>
       folder.startsWith("..") ? "It is outside the workspace." : null,
+    // The registry as the turn was shown it. Data rather than an injected
+    // function, unlike the folder above: one is a syscall and this is a list.
+    agents: [
+      { name: "Reviewer", usable: true },
+      { name: "Half a thing", usable: false },
+    ],
     ...over,
   };
 }
@@ -1188,13 +1283,18 @@ describe("planEmission — which specs become runs", () => {
     );
     // And nothing else. A spec that could carry a guard would be a route to
     // --permission-mode reached by a model with nobody reading the result.
+    // `agent` is on this list and is not one of those: a saved agent holds no
+    // tool list and no permission mode, so naming one decides who does a piece
+    // of the work exactly as the task text decides what the work is.
     assert.deepEqual(Object.keys(specs[0]).sort(), [
+      "agent",
       "dependsOn",
       "folder",
       "id",
       "task",
       "title",
     ]);
+    assert.equal(specs[0].agent, null, "a spec that names none carries none");
   });
 
   it("takes the mount root as a real answer", () => {
@@ -1317,6 +1417,38 @@ describe("planEmission — which specs become runs", () => {
       refused([spec("a", { dependsOn: [{ id: "a", edge: "on-finish" }] })]),
       /start after itself|loop/,
     );
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* …and who they may hand a subtask to                               */
+  /* ---------------------------------------------------------------- */
+
+  it("accepts a specialist the registry has, in the registry's own spelling", () => {
+    // The name is the key of the object `--agents` takes and the string a
+    // transcript attributes a delegated turn to, so what reaches the run is
+    // what the operator saved rather than the turn's approximation of it.
+    assert.equal(emitted([spec("a", { agent: "reviewer" })])[0].agent, "Reviewer");
+  });
+
+  it("refuses a specialist this install does not have, by the name it asked for", () => {
+    // Refused rather than dropped, beside the cap and the loop and for the same
+    // reason: there is no person between this answer and the spawn, and a run
+    // emitted "as the reviewer" that starts without one cannot be told
+    // afterwards from a run that named none.
+    const reason = refused([spec("a", { agent: "Auditor" })]);
+    assert.match(reason, /“A”/);
+    assert.match(reason, /does not have/);
+    assert.match(reason, /Auditor/);
+  });
+
+  it("refuses one the CLI would drop, rather than emitting a run without it", () => {
+    const reason = refused([spec("a", { agent: "Half a thing" })]);
+    assert.match(reason, /missing its description or its prompt/);
+  });
+
+  it("takes no specialist as the ordinary run", () => {
+    assert.equal(emitted([spec("a")])[0].agent, null);
+    assert.equal(emitted([spec("a", { agent: "" })])[0].agent, null);
   });
 
   /* ---------------------------------------------------------------- */
@@ -1567,6 +1699,7 @@ const FAN: WorkflowGraph = {
       folder: "repo",
       task: "Decide",
       promptOverride: null,
+      agentId: null,
       fanOut: 3,
       mergeStrategy: null,
       mergeAutoResolve: false,
@@ -1580,6 +1713,7 @@ const FAN: WorkflowGraph = {
       folder: "repo",
       task: "Review",
       promptOverride: null,
+      agentId: null,
       fanOut: null,
       mergeStrategy: null,
       mergeAutoResolve: false,
@@ -1695,6 +1829,7 @@ describe("planInstanceStep — what an instance may do next", () => {
           folder: "repo",
           task: "Land",
           promptOverride: null,
+          agentId: null,
           fanOut: null,
           mergeStrategy: null,
           mergeAutoResolve: false,
@@ -1746,6 +1881,7 @@ describe("planInstanceStep — what an instance may do next", () => {
           folder: "repo",
           task: "Land",
           promptOverride: null,
+          agentId: null,
           fanOut: null,
           mergeStrategy: null,
           mergeAutoResolve: false,
@@ -1801,6 +1937,7 @@ describe("planInstanceStep — what an instance may do next", () => {
           folder: "repo",
           task: "Build",
           promptOverride: null,
+          agentId: null,
           fanOut: null,
           mergeStrategy: null,
           mergeAutoResolve: false,
@@ -1859,6 +1996,7 @@ function mergeNode(id: string, name: string) {
     folder: "",
     task: "",
     promptOverride: null,
+    agentId: null,
     fanOut: null,
     mergeStrategy: "merge" as const,
     mergeAutoResolve: false,
