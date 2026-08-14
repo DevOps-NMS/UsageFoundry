@@ -250,11 +250,14 @@ export function normalizeAgentInput(raw: unknown): AgentNormalization {
 /**
  * The value of `--agents`, or null when there is nothing to attach.
  *
- * One function rather than three, because there are three spawn sites that can
- * carry agents — `buildArgs` for a work cycle, `runOrchestratorChild` for a chat
- * turn or an orchestrator block, `spawnAssist` for a review or a conflict
- * resolution — and the CLI's failure mode makes a second copy of this shape
- * expensive in a way nothing would report. Measured against 2.1.226:
+ * One function rather than one per caller. Three modules can carry agents and
+ * four callers reach them — `buildArgs` for a work cycle, `runOrchestratorChild`
+ * for a chat turn or an orchestrator block, `spawnAssist` for a review or a
+ * conflict resolution — and the CLI's failure mode makes a second copy of this
+ * shape expensive in a way nothing would report. Two of the four hand one over
+ * today: a work cycle and an orchestrator block. `runTurn` withholds one
+ * deliberately (see the note above it), and no caller of `startAssist` supplies
+ * one, so a review has never been given a specialist. Measured against 2.1.226:
  *
  *   `{"<name>": {"description": "…", "prompt": "…", "model": "…"?}}`
  *
@@ -605,7 +608,10 @@ interface AgentRow {
  * wrote it. What it narrows is the pair the CLI drops in silence. A row whose
  * description or prompt is empty would produce a spawn whose specialist is
  * simply absent, so it is reported as `usable: false` rather than repaired with
- * a placeholder, and `spawnableAgents` is what keeps it off an argv.
+ * a placeholder. What keeps such a row off an argv is every door reading that
+ * flag through `agentRefusal` and refusing the run by name, plus `parseRunAgent`
+ * re-applying the same narrowing to what a run froze — not this function, which
+ * only reports.
  */
 export function rowToAgent(row: AgentRow): SavedAgent & { usable: boolean } {
   const description = (row.description ?? "").trim();
@@ -713,12 +719,19 @@ export function agentKnowledgeOf(
 /**
  * The definitions for a set of saved ids, ready for an argv.
  *
- * Unusable rows are left out rather than sent, because the CLI would drop them
- * anyway and without saying so — this is where that silence becomes something a
- * caller can count. Ids that name nothing are simply absent: what to say about a
- * deleted agent is a decision for the surface that named it, and `planProposal`
- * already sets the rule those surfaces follow, which is to refuse by name rather
- * than fall back.
+ * **Nothing calls this**, and that is worth stating rather than leaving to be
+ * discovered: every surface that names an agent settled on refusing a missing or
+ * decayed one *by name* through `agentRefusal`, which is the opposite of what
+ * this does — it drops them silently, which is the CLI's own behaviour and the
+ * thing this module exists to stop. It was written for a caller that turned out
+ * not to want it. Left in place rather than deleted because removing an export
+ * is a decision about the module's surface; do not reach for it without deciding
+ * that question, and do not read it as the guard that keeps an unusable row off
+ * an argv — the doors are that guard.
+ *
+ * Ids that name nothing are simply absent: what to say about a deleted agent is
+ * a decision for the surface that named it, and `planProposal` already sets the
+ * rule those surfaces follow.
  */
 export function spawnableAgents(ids: string[]): AgentDefinition[] {
   const defs: AgentDefinition[] = [];

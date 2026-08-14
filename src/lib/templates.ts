@@ -61,9 +61,17 @@ export interface RunTemplate {
    * The saved agent a run from this template may hand a subtask to, or null.
    *
    * An id rather than a copy, unlike `runs.agent` — see the column note in
-   * `db.ts`. It carries onto the run exactly as the task and the guards do, and
-   * it carries no capability with it: an agent holds no tool list and no
-   * permission mode, so this is not a fourth route to `--permission-mode`.
+   * `db.ts`. It carries no capability with it: an agent holds no tool list and
+   * no permission mode, so this is not a fourth route to `--permission-mode`.
+   *
+   * What it reaches is the **new-run form**, as a seed for the picker there, the
+   * same treatment `mountId`/`folder` get and not the treatment the prompt and
+   * the guards get. The two server-side readers of a template deliberately do
+   * not inherit it: `planProposal` takes the specialist off the proposal and
+   * `planNode` takes it off the node, each for its own stated reason, so a chat
+   * proposal made under this template gets its prompt and its guards from here
+   * and its agent from itself. Saying "it carries onto the run like the guards
+   * do" would be true of the form and false of both of those.
    */
   agentId: string | null;
   budget: BudgetPolicy;
