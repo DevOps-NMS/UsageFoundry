@@ -50,6 +50,21 @@ services:
       # set in .env — is skipped, so extra workspaces are switched on from .env
       # without editing this file.
       WORKSPACE_ROOTS: "${UF_WORKSPACE_NAME:-Workspace}=/workspace|${UF_WORKSPACE_2_NAME:-}=/workspace2|${UF_WORKSPACE_3_NAME:-}=/workspace3|${UF_WORKSPACE_4_NAME:-}=/workspace4"
+      # Slots this file has no volume line for, named rather than ignored.
+      #
+      # The four above are a ceiling in YAML, not a cap in the code: compose
+      # cannot add a volume conditionally, so a fifth slot cannot come from
+      # .env. Left undetected it is a silent no-op — never mounted, never in
+      # the picker, indistinguishable from a mounted directory that is empty —
+      # which is the failure the `:?` markers below exist to refuse. These
+      # names (values are deliberately not forwarded) make the app refuse to
+      # start and say which variable it cannot honour.
+      #
+      # Slots 5-8 are what an operator following .env.example would reach for.
+      # A deployment that really does mount more does it in a
+      # docker-compose.override.yml — see README, "More than four workspaces" —
+      # and sets this to "" there to say the mount was actually made.
+      UF_UNMOUNTED_WORKSPACES: "${UF_WORKSPACE_5_NAME:+UF_WORKSPACE_5_NAME }${UF_WORKSPACE_6_NAME:+UF_WORKSPACE_6_NAME }${UF_WORKSPACE_7_NAME:+UF_WORKSPACE_7_NAME }${UF_WORKSPACE_8_NAME:+UF_WORKSPACE_8_NAME }"
       WORKSPACE_ROOT: /workspace
       CLAUDE_HOME: /home/node/.claude
       CLAUDE_CONFIG_DIR: /home/node/.claude

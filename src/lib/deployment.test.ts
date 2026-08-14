@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
+import { MOUNTED_WORKSPACE_SLOTS } from "./config";
+
 /**
  * Covers one agreement between `Dockerfile` and `docker-compose.yml`: that the
  * directory compose points `DATA_DIR` at is writable by whatever uid compose
@@ -100,5 +102,58 @@ describe("the image and compose agree on the data volume", () => {
     // bind-mount ownership failure the README describes, so it must not happen
     // quietly either.
     assert.match(compose, /^\s*user:\s*"\$\{UF_UID:-1000\}:\$\{UF_GID:-1000\}"\s*$/m);
+  });
+});
+
+/**
+ * The second agreement between the two files, and it points the other way: the
+ * *code* carries a number that only `docker-compose.yml` can make true.
+ *
+ * `MOUNTED_WORKSPACE_SLOTS` is what `unmountedWorkspaceRefusal` refuses past, so
+ * a fifth volume line added without bumping it would refuse a slot the
+ * deployment really does mount — the same silence inverted, and louder. Both
+ * halves are one edit away from each other and neither typechecks against the
+ * other, which is what this is for.
+ */
+describe("the mounted workspace slots the code assumes", () => {
+  /** Slot numbers compose bind-mounts: `/workspace` is 1, `/workspace2` is 2. */
+  function mountedSlots(): number[] {
+    const slots: number[] = [];
+    for (const match of compose.matchAll(/^\s*-\s+\S.*:\/workspace(\d*)\s*$/gm)) {
+      slots.push(match[1] ? Number(match[1]) : 1);
+    }
+    return slots.sort((a, b) => a - b);
+  }
+
+  it("matches the number of volume lines in compose", () => {
+    assert.deepEqual(
+      mountedSlots(),
+      Array.from({ length: MOUNTED_WORKSPACE_SLOTS }, (_, i) => i + 1),
+      `docker-compose.yml mounts a different set of workspace slots than ` +
+        `MOUNTED_WORKSPACE_SLOTS (${MOUNTED_WORKSPACE_SLOTS}) claims. A slot that is ` +
+        `mounted and refused, or configured and never mounted, is the failure ` +
+        `unmountedWorkspaceRefusal exists to end.`,
+    );
+  });
+
+  it("forwards the slots beyond it so a boot can refuse them", () => {
+    const line = /^\s*UF_UNMOUNTED_WORKSPACES:\s*"(.*)"\s*$/m.exec(compose);
+    assert.ok(line, "docker-compose.yml no longer forwards UF_UNMOUNTED_WORKSPACES");
+
+    const forwarded = [...line[1].matchAll(/UF_WORKSPACE_(\d+)_NAME:\+/g)].map((m) =>
+      Number(m[1]),
+    );
+    assert.ok(forwarded.length > 0, "no slot is detected, so a fifth is silent again");
+    assert.equal(
+      Math.min(...forwarded),
+      MOUNTED_WORKSPACE_SLOTS + 1,
+      "detection has to start at the first slot compose does not mount",
+    );
+    // Contiguous, so there is no gap an operator can fall into between the
+    // highest mounted slot and the highest detected one.
+    assert.deepEqual(
+      [...forwarded].sort((a, b) => a - b),
+      Array.from({ length: forwarded.length }, (_, i) => MOUNTED_WORKSPACE_SLOTS + 1 + i),
+    );
   });
 });

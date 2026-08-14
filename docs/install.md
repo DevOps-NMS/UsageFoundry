@@ -152,3 +152,45 @@ WORKSPACE_ROOTS='Code=/Users/you/GIT|Notes=/Users/you/Notes' npm run dev
 
 With `WORKSPACE_ROOTS` unset the app falls back to the single `WORKSPACE_ROOT`
 mount, so existing deployments behave exactly as before.
+
+### More than four workspaces
+
+Four is a real ceiling, and it lives in `docker-compose.yml` rather than in the
+app: compose cannot add a volume conditionally, so each slot is a hand-written
+volume line and `.env` can only switch one on or off. A fifth slot in `.env`
+used to be a silent no-op — never mounted, never in the picker, which is
+indistinguishable from a mounted directory that happens to be empty. It now
+refuses the boot instead, naming the variable:
+
+```
+UF_WORKSPACE_5_NAME is set in .env, but this deployment mounts 4 workspace
+slots and a bind mount cannot be added from .env.
+```
+
+Two ways forward.
+
+**Put the extra repositories under a directory that is already mounted.** One
+mount holding fifteen repositories works, and is the simpler answer. The cost is
+worth knowing: containment is per mount, so a run started in a mount holding
+everything may reach everything in it, and `.uf-worktrees` is per mount, so all
+of those repositories share one checkout store.
+
+**Or mount it yourself in a `docker-compose.override.yml`**, which compose reads
+automatically alongside the main file:
+
+```yaml
+services:
+  usagefoundry:
+    environment:
+      WORKSPACE_ROOTS: "Code=/workspace|Notes=/workspace2|Extra=/workspace5"
+      # This deployment really did mount the slot, so the boot must not refuse it.
+      UF_UNMOUNTED_WORKSPACES: ""
+    volumes:
+      - /Users/you/extra:/workspace5
+```
+
+Write `WORKSPACE_ROOTS` out in full there — an override replaces the value
+rather than appending to it — and clear `UF_UNMOUNTED_WORKSPACES`, which is the
+one line that says the mount was actually made. Slots 5–8 are what the app
+detects; a slot numbered beyond that is not configuration anyone reaches by
+following `.env.example`, and is not detected.

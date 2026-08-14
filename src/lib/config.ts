@@ -130,6 +130,55 @@ function parseMounts(spec: string): WorkspaceMount[] {
   return mounts;
 }
 
+/**
+ * How many workspace slots `docker-compose.yml` bind-mounts.
+ *
+ * The ceiling on mounts is the number of volume lines in that file, not a cap
+ * in `parseMounts` — which has none, and must not gain one, because a compose
+ * override file is a legitimate way to mount more. Compose cannot add a volume
+ * conditionally, which is the same asymmetry the empty-label rule above relies
+ * on, so the ceiling cannot be raised from `.env` alone.
+ *
+ * `deployment.test.ts` pins this against the volume lines themselves.
+ */
+export const MOUNTED_WORKSPACE_SLOTS = 4;
+
+/**
+ * Refuse a boot whose `.env` configures workspace slots compose never mounted.
+ *
+ * Left alone, a fifth slot is a no-op with no error, no warning and no log
+ * line: `UF_WORKSPACE_5_NAME` is interpolated by nothing, so `WORKSPACE_ROOTS`
+ * never carries the entry, `/workspace5` is never mounted, and the directory
+ * simply never appears in the picker — which reads exactly like a directory
+ * that *is* mounted and happens to be empty. That is the same silence
+ * `${UF_WORKSPACE:?…}` and `${HOME:?…}` already refuse one file over, and it
+ * gets the same treatment.
+ *
+ * Compose forwards the names it could not honour rather than their values: a
+ * host path is not a secret, but nothing here needs it, and the sentence has to
+ * name the *variable* the operator wrote so they can find it.
+ *
+ * A deployment that really does mount more — through a `docker-compose.override.yml`,
+ * which is the supported route — says so by clearing this, and that is the one
+ * thing an override has to remember. Nothing else about it changes.
+ */
+export function unmountedWorkspaceRefusal(forwarded: string): string | null {
+  const names = forwarded.split(/[\s,|]+/).filter(Boolean);
+  if (names.length === 0) return null;
+
+  const list = names.join(", ");
+  return (
+    `${list} ${names.length === 1 ? "is" : "are"} set in .env, but this deployment mounts ` +
+    `${MOUNTED_WORKSPACE_SLOTS} workspace slots and a bind mount cannot be added from .env. ` +
+    `Unset ${names.length === 1 ? "it" : "them"}, or mount the directory in a ` +
+    `docker-compose.override.yml and set UF_UNMOUNTED_WORKSPACES to an empty string there — ` +
+    "see README, \"More than four workspaces\"."
+  );
+}
+
+const unmountedWorkspaces = unmountedWorkspaceRefusal(env("UF_UNMOUNTED_WORKSPACES", ""));
+if (unmountedWorkspaces) throw new Error(unmountedWorkspaces);
+
 function legacyMount(): WorkspaceMount {
   const abs = path.resolve(
     env("WORKSPACE_ROOT", path.join(os.homedir(), "workspace")),
