@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 
 export type ButtonVariant = "primary" | "secondary" | "danger" | "ghost";
@@ -15,9 +16,14 @@ export type ButtonSize = "default" | "compact";
  * outside the box model), and disabled is opacity. A press that nudged the
  * button by a pixel would reflow every sibling in a ButtonRow.
  *
- * `enabled:` rather than a `disabled:hover:` undo. Both were being emitted for
- * a hovered disabled button and which one won came down to Tailwind's variant
- * sort order, which is not a contract. The focus outline colour is in here for
+ * A guard on the interaction states rather than a `disabled:hover:` undo. Both
+ * were being emitted for a hovered disabled button and which one won came down
+ * to Tailwind's variant sort order, which is not a contract. It is spelt
+ * `not-disabled:` rather than `enabled:` so `ButtonLink` can share this map:
+ * `:enabled` matches form controls and nothing else, so on an `<a>` every hover
+ * and press state would emit and never match — a filled control that does not
+ * answer the pointer, wrong and silent. `:not(:disabled)` is the same guard and
+ * matches both elements. The focus outline colour is in here for
  * the same reason: stated once in a shared string and again per variant, the
  * two would set the same property under the same variant and the winner would
  * be Tailwind's internal order rather than anything written here. Only the
@@ -33,19 +39,19 @@ export type ButtonSize = "default" | "compact";
 const VARIANT: Record<ButtonVariant, string> = {
   primary:
     "border-transparent bg-tint text-tint-fg shadow-e1 focus-visible:outline-ring " +
-    "enabled:hover:brightness-110 enabled:active:brightness-95 enabled:active:shadow-press",
+    "not-disabled:hover:brightness-110 not-disabled:active:brightness-95 not-disabled:active:shadow-press",
   secondary:
     "border-line bg-bezel text-ink shadow-e1 focus-visible:outline-ring " +
-    "enabled:hover:border-line-strong enabled:hover:bg-bezel-hover enabled:active:shadow-press",
+    "not-disabled:hover:border-line-strong not-disabled:hover:bg-bezel-hover not-disabled:active:shadow-press",
   // Reads as destructive before it is clicked, and keeps saying so through
   // focus: an accent focus ring on a red button would be the app's "go ahead"
   // colour drawn around the one control that cannot be undone.
   danger:
     "border-transparent bg-danger text-white shadow-e1 focus-visible:outline-ring-danger " +
-    "enabled:hover:brightness-110 enabled:active:brightness-95 enabled:active:shadow-press",
+    "not-disabled:hover:brightness-110 not-disabled:active:brightness-95 not-disabled:active:shadow-press",
   ghost:
     "border-transparent bg-transparent text-ink-muted focus-visible:outline-ring " +
-    "enabled:hover:bg-inset enabled:hover:text-ink enabled:active:shadow-press",
+    "not-disabled:hover:bg-inset not-disabled:hover:text-ink not-disabled:active:shadow-press",
 };
 
 /**
@@ -115,6 +121,47 @@ export function Button({
         />
       )}
     </button>
+  );
+}
+
+/**
+ * A button that is a destination.
+ *
+ * Same maps, same five states, an `<a>` underneath — so ⌘-click and middle
+ * click still open a new window, which a `router.push` on a `<button>` throws
+ * away. It exists because the toolbar's primary action is always a route: the
+ * alternative was a second set of variant strings for anchors, and two places
+ * drawing the same filled control is how the two focus rings this file already
+ * documents drifted apart.
+ *
+ * No `busy` and no `disabled`: a link either goes somewhere or is not offered.
+ */
+export function ButtonLink({
+  children,
+  href,
+  variant = "secondary",
+  size = "default",
+  className = "",
+  ...rest
+}: {
+  children: ReactNode;
+  href: string;
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  className?: string;
+} & Omit<React.ComponentPropsWithoutRef<typeof Link>, "href" | "className">) {
+  return (
+    <Link
+      {...rest}
+      href={href}
+      className={
+        "ui-transition relative inline-flex cursor-pointer items-center " +
+        "justify-center gap-2 rounded-sm border text-sm font-medium no-underline " +
+        `hover:no-underline ${SIZE[size]} ${VARIANT[variant]} ${className}`
+      }
+    >
+      {children}
+    </Link>
   );
 }
 

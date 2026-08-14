@@ -706,7 +706,10 @@ export default function Branches() {
           <div
             role="region"
             aria-label="Selected branches"
-            className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-surface shadow-bar"
+            // Fixed, so it is positioned against the viewport rather than the
+            // content pane — which means it has to step around the source list
+            // itself. `--sidebar-w` follows the collapse, so this does too.
+            className="fixed right-0 bottom-0 left-[var(--sidebar-w)] z-30 border-t border-line bg-surface shadow-bar"
           >
             <div className="mx-auto flex max-w-shell flex-wrap items-center gap-x-5 gap-y-3 px-5 py-3">
               <div className="min-w-0">

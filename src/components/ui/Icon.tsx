@@ -25,6 +25,9 @@ export type IconName =
   | "branches"
   | "account"
   | "settings"
+  // The shell's own two controls: collapse the source list, and quick open.
+  | "sidebar"
+  | "search"
   // Disclosure.
   | "chevron-right"
   | "chevron-down"
@@ -81,6 +84,19 @@ const GLYPH: Record<IconName, ReactElement> = {
       <path d="M2.5 5h11M2.5 11h11" />
       <circle cx="6" cy="5" r="1.6" />
       <circle cx="10" cy="11" r="1.6" />
+    </>
+  ),
+  // The macOS sidebar glyph: the window, with the source list partitioned off.
+  sidebar: (
+    <>
+      <rect x="2" y="3" width="12" height="10" rx="2" />
+      <path d="M6.25 3v10" />
+    </>
+  ),
+  search: (
+    <>
+      <circle cx="7.25" cy="7.25" r="4.25" />
+      <path d="m10.5 10.5 2.75 2.75" />
     </>
   ),
   "chevron-right": <path d="M6.25 3.75 10.5 8l-4.25 4.25" />,

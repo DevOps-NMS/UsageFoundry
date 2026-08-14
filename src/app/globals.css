@@ -147,6 +147,23 @@
   --control-h: 2rem;      /* 32 — nav link, icon button, compact button */
   --control-h-lg: 2.25rem;/* 36 — button, input, select */
 
+  /* A neutral hover wash, and the pressed step under it. Translucent rather
+     than a hex pair, because these land on three different surfaces — the
+     sidebar's --bg-inset, the quick-open list, a toolbar button — and a
+     translucent neutral darkens a light one and lightens a dark one, which is
+     what AppKit's own hover does. Every opaque token in the palette is within
+     2% of --bg-inset in light mode and reads as no change at all. */
+  --fill-hover:  color-mix(in oklab, var(--fg) 8%, transparent);
+  --fill-active: color-mix(in oklab, var(--fg) 14%, transparent);
+
+  /* The shell's geometry: the source list on the left, and the titlebar-height
+     strip at the top of the content pane. --toolbar-h is a floor rather than
+     the height — under Window Controls Overlay the strip takes
+     env(titlebar-area-height) instead, which is the window's own titlebar. */
+  --sidebar-w: 14rem;             /* 224 — expanded */
+  --sidebar-w-rail: 3.5rem;       /* 56  — collapsed to glyphs */
+  --toolbar-h: 3.25rem;           /* 52  — the macOS unified toolbar */
+
   /* Consumed only by the legacy layer below; delete with the last rule
      that reads them. Everything new reads the @theme names instead. */
   --radius: 10px;
@@ -176,6 +193,38 @@
 
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"]  { color-scheme: dark; }
+
+/* The collapsed source list, on the same footing as the theme and for the same
+   reason: it has to be on the element before first paint. The sidebar is 224px
+   and the rail is 56px, so a React-state-only collapse would shift the whole
+   content pane 168px one frame after load, on every navigation, for anyone who
+   collapsed it — a far louder flash than the one the theme script exists to
+   prevent. So the pre-paint script in layout.tsx sets the attribute, these two
+   rules are the whole of what it changes, and `Sidebar` reads the same
+   attribute back so its toggle announces the right state.
+   Geometry only. Every *component* variant in this app stays a typed prop with
+   a Record lookup — see the note on that in CLAUDE.md. */
+:root[data-sidebar="collapsed"] { --sidebar-w: var(--sidebar-w-rail); }
+
+@layer components {
+  /* The rail centres its glyphs and its labels stop being drawn — but they
+     stay in the accessibility tree, because the glyph is then the only thing
+     naming the destination. This is the sr-only recipe written out rather than
+     @apply'd, so it does not depend on how Tailwind resolves an @apply inside
+     a layer. */
+  :root[data-sidebar="collapsed"] .uf-sidebar-row { justify-content: center; }
+  :root[data-sidebar="collapsed"] .uf-sidebar-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border-width: 0;
+  }
+}
 
 /* Semantic tokens swap themselves, so `dark:` is rarely needed — it is here
    for the cases where dark wants a structurally different treatment rather
@@ -216,6 +265,8 @@
   --color-ring:        var(--ring);
   --color-ring-danger: var(--ring-danger);
   --color-selection:   var(--selection);
+  --color-fill-hover:  var(--fill-hover);
+  --color-fill-active: var(--fill-active);
   --color-ok:          var(--ok);
   --color-warn:        var(--warn);
   --color-danger:      var(--danger);
@@ -367,6 +418,22 @@
 @keyframes uf-sheet-in {
   from { transform: translateY(-16px); opacity: 0; }
   to   { transform: translateY(0); opacity: 1; }
+}
+
+/* Window Controls Overlay: which parts of the toolbar drag the window.
+   Named utilities rather than arbitrary values because the property is
+   `-webkit-app-region` — vendor-prefixed with no standard spelling that ships
+   anywhere — and an app that gets this wrong is either impossible to move or
+   has a title bar whose buttons cannot be clicked. Inert outside an installed
+   window, where the whole page is already draggable by the browser's own
+   title bar. Every interactive child of a `app-drag` strip owes an
+   `app-no-drag`: a drag region swallows the pointer press. */
+@utility app-drag {
+  -webkit-app-region: drag;
+}
+
+@utility app-no-drag {
+  -webkit-app-region: no-drag;
 }
 
 @layer base {
