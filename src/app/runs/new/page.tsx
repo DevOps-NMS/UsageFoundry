@@ -24,13 +24,17 @@ import { Button, ButtonRow } from "@/components/ui/Button";
 import {
   Field,
   Input,
-  LimitField,
   Select,
+  Switch,
   Textarea,
-  Toggle,
 } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
+import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
+import {
+  SegmentedControl,
+  type SegmentedOption,
+} from "@/components/ui/SegmentedControl";
 
 /** Everything a template or an earlier run supplies to this form. */
 interface FormSeed {
@@ -210,6 +214,132 @@ function describeTemplate(t: RunTemplateDTO): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* The three decisions, as segmented controls                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Where an isolated run writes. Two options, so the pair fits in one control
+ * and the consequence of the chosen one is spelled out beside it — as three
+ * stacked radio cards these read as three more forms in a page of forms, and
+ * the consequences of the options nobody picked were on screen permanently.
+ */
+type IsolationChoice = "worktree" | "direct";
+
+const ISOLATION_OPTIONS: readonly SegmentedOption<IsolationChoice>[] = [
+  { value: "worktree", label: "Own branch" },
+  { value: "direct", label: "This folder" },
+];
+
+const ISOLATION_CONSEQUENCE: Record<IsolationChoice, string> = {
+  worktree:
+    "Its own checkout, started from the last commit and committing as it goes. Your uncommitted work stays where it is, and other runs can use this folder at the same time. Only the config files named in Settings are copied across — dependencies are the agent's job.",
+  direct:
+    "Claude edits the files you have open, uncommitted work included. No other run can use this folder, or anything under it, until this one finishes.",
+};
+
+/**
+ * Least to most permissive, rather than the order the literals happen to be
+ * declared in — the settings page orders the same four this way, because the
+ * list is a scale and should read as one.
+ */
+const PERMISSION_OPTIONS: readonly SegmentedOption<string>[] = [
+  { value: "plan", label: "Plan only" },
+  { value: "default", label: "Ask first" },
+  { value: "acceptEdits", label: "Edit files" },
+  { value: "bypassPermissions", label: "Anything" },
+];
+
+const ENFORCEMENT_OPTIONS: readonly SegmentedOption<EnforcementModeDTO>[] = [
+  { value: "between-cycles", label: "Between cycles" },
+  { value: "live", label: "Stop mid-cycle" },
+  { value: "live-resume", label: "Stop, then resume" },
+];
+
+type NoteTone = "neutral" | "warn" | "danger";
+
+/** Complete class strings per tone, looked up rather than interpolated. */
+const NOTE_TONE: Record<NoteTone, string> = {
+  neutral: "",
+  warn: "text-warn",
+  danger: "text-danger",
+};
+
+/** A sentence inside a row's description that has to carry a tone of its own. */
+function Toned({
+  tone = "neutral",
+  children,
+}: {
+  tone?: NoteTone;
+  children: ReactNode;
+}) {
+  return <span className={NOTE_TONE[tone]}>{children}</span>;
+}
+
+/**
+ * What the chosen permission mode lets an agent nobody is watching do.
+ *
+ * A segmented control shows the options and not their consequences, so the
+ * selected one is written out under the row. A switch rather than a lookup map
+ * because the value is a bare string: a mode from a build this one does not
+ * know has to say so, rather than silently borrow acceptEdits' sentence.
+ */
+function permissionConsequence(mode: string): {
+  text: ReactNode;
+  tone: NoteTone;
+} {
+  switch (mode) {
+    case "plan":
+      return {
+        text: (
+          <>
+            <span className="mono">plan</span> — reads and plans; nothing on
+            disk changes
+          </>
+        ),
+        tone: "neutral",
+      };
+    case "default":
+      return {
+        text: (
+          <>
+            <span className="mono">default</span> — every tool call asks first,
+            and there is nobody to answer, so the run sits there until a limit
+            stops it
+          </>
+        ),
+        tone: "warn",
+      };
+    case "acceptEdits":
+      return {
+        text: (
+          <>
+            <span className="mono">acceptEdits</span> — file edits and read-only
+            commands go ahead. Anything else is refused, and the refusal is
+            listed in the run log
+          </>
+        ),
+        tone: "neutral",
+      };
+    case "bypassPermissions":
+      return {
+        text: (
+          <>
+            <span className="mono">bypassPermissions</span> — any command in the
+            folder, deleting files and reaching the network included. Only for
+            code and a container you are willing to have modified
+          </>
+        ),
+        tone: "danger",
+      };
+    default:
+      return {
+        text: `“${mode}” is not one of the four modes this form offers — choose one before starting`,
+        tone: "danger",
+      };
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Call-site pieces                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -219,7 +349,8 @@ function describeTemplate(t: RunTemplateDTO): string {
  * `Field`'s own `label` prop renders inside `<label>`, and the marker is a
  * button — nesting one inside a label makes the label's own click target
  * ambiguous. So the head is composed here instead, matching `Field`'s label
- * typography exactly.
+ * typography exactly. The grouped rows below have no such problem: their marker
+ * sits beside the control, in the row's trailing slot.
  */
 function FieldHead({
   htmlFor,
@@ -230,169 +361,50 @@ function FieldHead({
   children: ReactNode;
   marker?: ReactNode;
 }) {
-  const text = (
-    <span className="text-xs font-medium text-ink-muted">{children}</span>
-  );
   return (
     // A fixed height whether or not a marker is present, so a label does not
     // shift down the moment a field is overridden.
     <div className="mb-1 flex min-h-8 items-center justify-between gap-3">
-      {/* A <label> with nothing to point at is not a label. Two of these head
-          a group rather than one control, and say so by being plain text. */}
-      {htmlFor ? (
-        // `mb-0` is load-bearing: the legacy sheet puts 5px under every bare
-        // <label>, which in an items-center row lifts the text off centre.
-        <label htmlFor={htmlFor} className="mb-0">
-          {text}
-        </label>
-      ) : (
-        text
-      )}
+      {/* `mb-0` is load-bearing: the legacy sheet puts 5px under every bare
+          <label>, which in an items-center row lifts the text off centre. */}
+      <label htmlFor={htmlFor} className="mb-0">
+        <span className="text-xs font-medium text-ink-muted">{children}</span>
+      </label>
       {marker}
     </div>
   );
 }
 
 /**
- * Whether a row still holds what the template gave it.
+ * The way back to what the template — or this form's own default — asked for.
  *
- * Silence means "the form's own default" — the alternative was a badge on every
- * field saying `DEFAULT`, which is a badge that never varies and so says
- * nothing. What varies is a template's value, and an operator's edit of one.
+ * Only ever rendered for a row that differs from the baseline. There was a
+ * companion `from template` badge on every unchanged row, and it is gone: one
+ * form has one baseline, so that badge said the same thing on every row it
+ * appeared on, which is the repeated hint a group footnote exists to replace.
+ * What varies — and so what is worth a marker — is an operator's edit of one.
  */
-function ProvenanceMark({
-  changed,
+function ResetToBaseline({
   from,
   what,
   onReset,
 }: {
-  changed: boolean;
   /** "template" / "that run", or null when the baseline is the form's defaults. */
   from: string | null;
   what: string;
   onReset: () => void;
 }) {
-  if (changed) {
-    return (
-      <button
-        type="button"
-        onClick={onReset}
-        aria-label={`Reset ${what} to ${from ? `the ${from}` : "the default"}`}
-        className="inline-flex min-h-8 shrink-0 cursor-pointer items-center whitespace-nowrap rounded-full border border-accent bg-inset px-2.5 py-0 text-2xs font-semibold uppercase tracking-wide text-accent transition-colors duration-150 hover:bg-accent-dim"
-      >
-        Changed · reset
-      </button>
-    );
-  }
-  if (!from) return null;
-  return <Badge>from {from}</Badge>;
-}
-
-/** One option of a decision, as against one row of a dropdown. */
-interface Choice<T extends string> {
-  value: T;
-  title: string;
-  /** What Claude Code calls it, where the operator will meet the name again. */
-  code?: string;
-  /** What choosing it means for this run. Never a restatement of the title. */
-  consequence: string;
-  tone?: ChoiceTone;
-  badge?: ReactNode;
-}
-
-type ChoiceTone = "neutral" | "warn" | "danger";
-
-/**
- * Complete class strings per tone, looked up rather than interpolated —
- * Tailwind scans source as text, so `border-${tone}` emits nothing at all, and
- * does it silently.
- */
-const CHOICE_SELECTED: Record<ChoiceTone, string> = {
-  neutral: "border-accent ring-1 ring-accent bg-inset",
-  warn: "border-warn ring-1 ring-warn bg-inset",
-  danger: "border-danger ring-1 ring-danger bg-inset",
-};
-
-/**
- * A decision, spelled out.
- *
- * Permission mode, isolation and enforcement decide what an unattended agent
- * may do and what happens to work in flight. As `<select>`s they read as three
- * more dropdowns in a row of dropdowns, and their consequences were only
- * visible for whichever option happened to be selected.
- */
-function ChoiceGroup<T extends string>({
-  name,
-  label,
-  value,
-  onChange,
-  choices,
-  marker,
-  className = "",
-}: {
-  name: string;
-  label: string;
-  value: T;
-  onChange: (next: T) => void;
-  choices: ReadonlyArray<Choice<T>>;
-  marker?: ReactNode;
-  className?: string;
-}) {
-  const labelId = `${name}-label`;
   return (
-    <div className={`mb-3.5 ${className}`}>
-      <div className="mb-1 flex min-h-8 items-center justify-between gap-3">
-        <span id={labelId} className="text-xs font-medium text-ink-muted">
-          {label}
-        </span>
-        {marker}
-      </div>
-      <div role="radiogroup" aria-labelledby={labelId} className="grid gap-1.5">
-        {choices.map((c) => {
-          const selected = c.value === value;
-          return (
-            <label
-              key={c.value}
-              htmlFor={`${name}-${c.value}`}
-              className={`mb-0 flex cursor-pointer items-start gap-2.5 rounded-sm border px-3 py-2.5 transition-colors duration-150 ${
-                selected
-                  ? CHOICE_SELECTED[c.tone ?? "neutral"]
-                  : "border-line hover:bg-inset"
-              }`}
-            >
-              <input
-                type="radio"
-                id={`${name}-${c.value}`}
-                name={name}
-                value={c.value}
-                checked={selected}
-                onChange={() => onChange(c.value)}
-                className="mt-1 h-3.5 w-3.5 shrink-0 accent-accent"
-              />
-              <span className="min-w-0">
-                <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-medium text-ink">
-                  {c.title}
-                  {c.code && (
-                    <span className="mono text-ink-faint">{c.code}</span>
-                  )}
-                  {c.badge}
-                </span>
-                <span className="mt-0.5 block text-xs leading-snug text-ink-muted">
-                  {c.consequence}
-                </span>
-              </span>
-            </label>
-          );
-        })}
-      </div>
-    </div>
+    <Button
+      type="button"
+      variant="secondary"
+      size="compact"
+      onClick={onReset}
+      aria-label={`Reset ${what} to ${from ? `the ${from}` : "the default"}`}
+    >
+      Reset
+    </Button>
   );
-}
-
-/** Nothing to say about a field is not the same as an empty `aria-describedby`. */
-function describedBy(...ids: Array<string | false | null | undefined>) {
-  const list = ids.filter(Boolean).join(" ");
-  return list === "" ? undefined : list;
 }
 
 /**
@@ -409,8 +421,6 @@ interface Problem {
   focus: string;
   message: string;
   immediate: boolean;
-  /** Inside the collapsible limit detail, which must never hide an error. */
-  inLimits: boolean;
 }
 
 export default function NewRunPage() {
@@ -490,7 +500,6 @@ export default function NewRunPage() {
   // covers the whole form and is set by a Start that could not go through.
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [attempted, setAttempted] = useState(false);
-  const [showLimits, setShowLimits] = useState(true);
 
   // Set before any fetch is issued, so the loaders below can tell "nobody has
   // chosen yet" from "a seed is on its way". Without it the mount default and
@@ -773,16 +782,15 @@ export default function NewRunPage() {
     }
   }
 
-  /** The marker that sits on a field's label line, or nothing. */
+  /** The way back to the baseline, beside the control that departed from it. */
   function mark(row: RowId): ReactNode {
-    const changed = rowChanged(row);
     // With no template in play the only thing worth saying is that a guard is
     // no longer its default — and the task and the folder have no default to
     // depart from, so they say nothing at all.
-    if (baselineFrom === null && !(changed && GUARD_ROWS.has(row))) return null;
+    if (!rowChanged(row)) return null;
+    if (baselineFrom === null && !GUARD_ROWS.has(row)) return null;
     return (
-      <ProvenanceMark
-        changed={changed}
+      <ResetToBaseline
         from={baselineFrom}
         what={ROW_LABEL[row]}
         onReset={() => restoreRow(row)}
@@ -802,7 +810,6 @@ export default function NewRunPage() {
         ? "No workspace is mounted, so there is nowhere for a run to work."
         : "Choose the workspace this run should work in.",
       immediate: false,
-      inLimits: false,
     });
   }
   if (prompt.trim() === "") {
@@ -810,7 +817,6 @@ export default function NewRunPage() {
       focus: "prompt",
       message: "Describe what Claude should work on.",
       immediate: false,
-      inLimits: false,
     });
   }
   if (iterationsCapped && positive(maxIterations) === null) {
@@ -818,7 +824,6 @@ export default function NewRunPage() {
       focus: "iters",
       message: "Set at least one work cycle, or switch the cycle limit off.",
       immediate: false,
-      inLimits: true,
     });
   }
   if (costLimited && effCost === null) {
@@ -827,7 +832,6 @@ export default function NewRunPage() {
       message:
         "Enter an amount above $0, or switch the spending limit off — a blank box starts a run with no spending limit at all.",
       immediate: false,
-      inLimits: true,
     });
   }
   if (timeLimited && effMinutes === null) {
@@ -836,18 +840,17 @@ export default function NewRunPage() {
       message:
         "Enter a number of minutes, or switch the time limit off — a blank box starts a run with no time limit at all.",
       immediate: false,
-      inLimits: true,
     });
   }
   if (noTerminus) {
     problems.push({
-      // The two mode pickers are inside `LimitField` and carry no id of their
-      // own, so this points at the control that reveals them.
-      focus: "limits-toggle",
+      // Neither limit has a value box while it is switched off, so this points
+      // at the switch that brings one back — which is stable in both states,
+      // where the number input only exists in one of them.
+      focus: "cycles-on",
       message:
         "Set a time limit, or cap the work cycles. Nothing else here only moves one way, so without one of them nothing would ever end this run.",
       immediate: true,
-      inLimits: true,
     });
   }
   // Above 100 is not a stricter guard, it is a hundredth of one: the form sends
@@ -861,7 +864,6 @@ export default function NewRunPage() {
       focus: "sess",
       message: "The 5-hour guard has to be between 1 and 100 percent.",
       immediate: true,
-      inLimits: true,
     });
   }
   if (
@@ -872,7 +874,6 @@ export default function NewRunPage() {
       focus: "wk",
       message: "The weekly guard has to be between 1 and 100 percent.",
       immediate: true,
-      inLimits: true,
     });
   }
 
@@ -880,11 +881,6 @@ export default function NewRunPage() {
     (p) => p.immediate || attempted || touched[p.focus],
   );
   const problemFor = (focus: string) => visible.find((p) => p.focus === focus);
-  // A collapsed section must never be the reason an error is unread — so the
-  // detail is pinned open while one is live, and the control that would close
-  // it says so rather than becoming a button that does nothing.
-  const limitsPinned = visible.some((p) => p.inLimits);
-  const limitsOpen = showLimits || limitsPinned;
 
   const touch = (id: string) => () =>
     setTouched((t) => (t[id] ? t : { ...t, [id]: true }));
@@ -986,10 +982,6 @@ export default function NewRunPage() {
     setEnforcement(next.enforcement);
     setContinueAfterDone(next.continueAfterDone);
     setBaseline({ kind, values: next });
-
-    // The limits are now somebody's stated choice rather than this form's
-    // defaults, so the detail folds away — available, not shouted.
-    setShowLimits(false);
 
     // The two that decide what an unattended agent may do. Applied, but
     // announced — see the notices beside the controls themselves.
@@ -1115,8 +1107,8 @@ export default function NewRunPage() {
     setAttempted(true);
     if (problems.length > 0) {
       const first = problems[0];
-      // After the render that opens the limit detail — a control inside a
-      // display:none subtree cannot take focus.
+      // After the render that draws the error beside the field, so the control
+      // it names is the one the operator lands on.
       requestAnimationFrame(() => focusControl(first.focus));
       return;
     }
@@ -1184,17 +1176,22 @@ export default function NewRunPage() {
     windowLines.push(`Stops when your weekly window reaches ${effWeeklyPct}%.`);
   }
 
+  // Both live modes say "tighter, not exact" in as many words: a mid-cycle
+  // check is bounded by one model turn plus one interval plus the kill, and
+  // copy that implies a hard cut-off would be describing a guard this app
+  // cannot offer.
   const enforcementLine =
     enforcement === "between-cycles"
       ? "Limits are read before each cycle, so the cycle already running always finishes — and the run can end up one cycle past a limit."
       : resuming
-        ? `Limits are also read about every ${guardInterval}s while Claude is working, and that cycle's work is lost. A full 5-hour window parks the run instead of ending it; every other limit still ends it.`
+        ? `Limits are also read about every ${guardInterval}s while Claude is working, and that cycle's work is lost — tighter than waiting for the cycle to end, but still not an exact cut-off. A full 5-hour window parks the run instead of ending it; every other limit still ends it.`
         : `Limits are also read about every ${guardInterval}s while Claude is working, and that cycle's work is lost. Tighter than waiting for the cycle to end, but still not an exact cut-off.`;
 
   const folderLabel = folder || activeMount?.label || "this workspace";
+  const permission = permissionConsequence(permissionMode);
 
   return (
-    <div className="mx-auto max-w-2xl">
+    <>
       <div className="mb-5">
         <h1 className="mb-1 text-xl font-semibold tracking-tight">New run</h1>
         <p className="max-w-[68ch] text-ink-muted">
@@ -1234,70 +1231,54 @@ export default function NewRunPage() {
         <Card className="mb-4" emphasis="primary">
           <CardTitle>What to work on</CardTitle>
 
-          {templates.length > 0 && (
-            <Field>
-              <FieldHead htmlFor="tpl">Start from a template</FieldHead>
-              <Select
-                id="tpl"
-                value={templateId}
-                onChange={(e) => pickTemplate(e.target.value)}
-                aria-describedby="tpl-hint"
-              >
-                <option value="">— no template —</option>
-                {templates.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
-                ))}
-              </Select>
-              <Hint>
-                <span id="tpl-hint">
-                  {selectedTemplate
+          <ListGroup
+            className="mb-4"
+            footnote={
+              folder === "" && folders.length > 0
+                ? "A run on the whole workspace takes the entire tree — no run in any folder inside it can start until this one finishes"
+                : undefined
+            }
+          >
+            {templates.length > 0 && (
+              <ListRow
+                htmlFor="tpl"
+                label="Template"
+                description={
+                  selectedTemplate
                     ? describeTemplate(selectedTemplate)
-                    : "Fills in everything below; nothing starts until you press Start run"}
-                </span>
-              </Hint>
-            </Field>
-          )}
-
-          <div className="grid gap-x-4 sm:grid-cols-2">
-            <Field>
-              <FieldHead htmlFor="mount">Workspace</FieldHead>
-              <Select
-                id="mount"
-                value={mountId}
-                onChange={(e) => selectMount(e.target.value)}
-                onBlur={touch("mount")}
-                disabled={!foldersLoaded || mounts.length === 0}
-                aria-invalid={problemFor("mount") ? true : undefined}
-                aria-describedby={describedBy(
-                  "mount-hint",
-                  problemFor("mount") && "mount-err",
-                )}
-                className={problemFor("mount") ? "ring-1 ring-danger" : ""}
-                required
-              >
-                {!foldersLoaded && <option value="">Loading…</option>}
-                {mounts.map((m) => (
-                  <option key={m.id} value={m.id} disabled={!m.available}>
-                    {m.label}
-                    {m.available ? "" : "  (not mounted)"}
-                  </option>
-                ))}
-              </Select>
-              {/* The stale-mount case is separate from the no-mounts case
-                  because a template or an earlier run can name a workspace that
-                  has since been removed from `.env`. Reported here rather than
-                  left to `POST /api/runs`, which would refuse it correctly but
-                  only after the operator pressed Start. */}
-              <Hint
-                tone={
-                  !activeMount && foldersLoaded && mounts.length > 0
-                    ? "warn"
-                    : "neutral"
+                    : "Fills in everything below; nothing starts until you press Start run"
                 }
               >
-                <span id="mount-hint">
+                {/* The width is on a wrapper, never on the control: `Select`
+                    already states `w-full`, and two width utilities on one
+                    element resolve by stylesheet order, not class order. */}
+                <div className="w-64">
+                  <Select
+                    id="tpl"
+                    value={templateId}
+                    onChange={(e) => pickTemplate(e.target.value)}
+                  >
+                    <option value="">— no template —</option>
+                    {templates.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </ListRow>
+            )}
+
+            {/* The stale-mount case is separate from the no-mounts case because
+                a template or an earlier run can name a workspace that has since
+                been removed from `.env`. Reported here rather than left to
+                `POST /api/runs`, which would refuse it correctly but only after
+                the operator pressed Start. */}
+            <ListRow
+              htmlFor="mount"
+              label="Workspace"
+              description={
+                <>
                   {activeMount ? (
                     <>
                       Mounted at{" "}
@@ -1309,67 +1290,85 @@ export default function NewRunPage() {
                   ) : mounts.length === 0 ? (
                     "No workspace mounts are configured"
                   ) : (
-                    "That workspace is not configured any more"
+                    <Toned tone="warn">
+                      That workspace is not configured any more
+                    </Toned>
                   )}
-                </span>
-              </Hint>
-              {problemFor("mount") && (
-                <Hint tone="danger">
-                  <span id="mount-err">{problemFor("mount")?.message}</span>
-                </Hint>
-              )}
-            </Field>
+                  {problemFor("mount") && (
+                    <Toned tone="danger">
+                      <span className="mt-0.5 block">
+                        {problemFor("mount")?.message}
+                      </span>
+                    </Toned>
+                  )}
+                </>
+              }
+            >
+              <div className="w-64">
+                <Select
+                  id="mount"
+                  value={mountId}
+                  onChange={(e) => selectMount(e.target.value)}
+                  onBlur={touch("mount")}
+                  disabled={!foldersLoaded || mounts.length === 0}
+                  aria-invalid={problemFor("mount") ? true : undefined}
+                  required
+                >
+                  {!foldersLoaded && <option value="">Loading…</option>}
+                  {mounts.map((m) => (
+                    <option key={m.id} value={m.id} disabled={!m.available}>
+                      {m.label}
+                      {m.available ? "" : "  (not mounted)"}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </ListRow>
 
-            <Field>
-              <FieldHead htmlFor="folder" marker={mark("where")}>
-                Folder
-              </FieldHead>
-              <Select
-                id="folder"
-                value={folder}
-                onChange={(e) => setFolder(e.target.value)}
-                disabled={!activeMount}
-                aria-describedby="folder-hint"
-              >
-                <option value="">
-                  {activeMount
-                    ? `${activeMount.label} — the whole workspace`
-                    : "— the whole workspace"}
-                </option>
-                {folders.map((f) => (
-                  <option key={f.path} value={f.path}>
-                    {f.path}
-                    {f.isGitRepo ? "  (git)" : ""}
-                    {f.busyRunId
-                      ? "  · busy"
-                      : f.parkedRunId
-                        ? "  · parked"
-                        : ""}
-                    {f.queuedCount ? `  · ${f.queuedCount} waiting` : ""}
+            <ListRow
+              htmlFor="folder"
+              label="Folder"
+              description={
+                folder === ""
+                  ? "The whole tree, and every folder inside it"
+                  : selectedFolder?.isGitRepo
+                    ? "A git repository, so Claude can work on its own branch"
+                    : "Not a git repository, so Claude works in it directly"
+              }
+            >
+              {mark("where")}
+              <div className="w-64">
+                <Select
+                  id="folder"
+                  value={folder}
+                  onChange={(e) => setFolder(e.target.value)}
+                  disabled={!activeMount}
+                >
+                  <option value="">
+                    {activeMount
+                      ? `${activeMount.label} — the whole workspace`
+                      : "— the whole workspace"}
                   </option>
-                ))}
-              </Select>
-              <Hint>
-                <span id="folder-hint">
-                  {folder === ""
-                    ? "The whole tree, and every folder inside it"
-                    : selectedFolder?.isGitRepo
-                      ? "A git repository, so Claude can work on its own branch"
-                      : "Not a git repository, so Claude works in it directly"}
-                </span>
-              </Hint>
-            </Field>
-          </div>
+                  {folders.map((f) => (
+                    <option key={f.path} value={f.path}>
+                      {f.path}
+                      {f.isGitRepo ? "  (git)" : ""}
+                      {f.busyRunId
+                        ? "  · busy"
+                        : f.parkedRunId
+                          ? "  · parked"
+                          : ""}
+                      {f.queuedCount ? `  · ${f.queuedCount} waiting` : ""}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </ListRow>
+          </ListGroup>
 
-          {/* Whose folder it is, and who is waiting for it. Below the grid
-              rather than inside a column, because these run to two lines and a
-              two-column row with one tall cell reads as a broken layout. */}
-          {folder === "" && folders.length > 0 && (
-            <Hint className="mb-3.5">
-              A run on the whole workspace takes the entire tree — no run in any
-              folder inside it can start until this one finishes
-            </Hint>
-          )}
+          {/* Whose folder it is, and who is waiting for it. Under the group
+              rather than in a row, because each of these is a condition of the
+              moment rather than a description of a control. */}
           {rootOccupant && (
             <Hint tone="warn" className="mb-3.5">
               A run is already working somewhere in this workspace, so this one
@@ -1397,7 +1396,18 @@ export default function NewRunPage() {
             </Hint>
           )}
 
-          <Field>
+          {/* Not a row: a nine-line text region has nothing to align a right
+              edge against, and its label belongs above it. */}
+          <Field
+            className="last:mb-0"
+            htmlFor="prompt"
+            hint={
+              prompt.trim() === ""
+                ? "Say what to change and how Claude will know it worked — this text is sent verbatim as the first turn"
+                : "Sent verbatim as the first turn; the run ends when Claude replies DONE"
+            }
+            error={problemFor("prompt")?.message}
+          >
             <FieldHead htmlFor="prompt" marker={mark("task")}>
               Task
             </FieldHead>
@@ -1410,68 +1420,18 @@ export default function NewRunPage() {
               placeholder={
                 "Add integration tests for the payments module and make them pass.\n\nThe suite runs with `npm test`. Do not change the public API."
               }
-              aria-invalid={problemFor("prompt") ? true : undefined}
-              aria-describedby={describedBy(
-                "prompt-hint",
-                problemFor("prompt") && "prompt-err",
-              )}
-              className={problemFor("prompt") ? "ring-1 ring-danger" : ""}
               required
             />
-            <Hint>
-              <span id="prompt-hint">
-                {prompt.trim() === ""
-                  ? "Say what to change and how Claude will know it worked — this text is sent verbatim as the first turn"
-                  : "Sent verbatim as the first turn; the run ends when Claude replies DONE"}
-              </span>
-            </Hint>
-            {problemFor("prompt") && (
-              <Hint tone="danger">
-                <span id="prompt-err">{problemFor("prompt")?.message}</span>
-              </Hint>
-            )}
           </Field>
         </Card>
 
         <Card className="mb-4">
           <CardTitle>What the agent may do</CardTitle>
 
-          {canIsolate ? (
-            <ChoiceGroup
-              name="isolation"
-              label="Where Claude writes"
-              value={isolate ? "worktree" : "direct"}
-              onChange={(v) => setIsolate(v === "worktree")}
-              marker={mark("isolate")}
-              choices={[
-                {
-                  value: "worktree",
-                  title: "Its own checkout, on a new branch",
-                  consequence:
-                    "Starts from the last commit and commits as it goes. Your uncommitted work stays where it is, and other runs can use this folder at the same time. Only the config files named in Settings are copied across — dependencies are the agent's job.",
-                },
-                {
-                  value: "direct",
-                  title: "This folder, as it stands",
-                  consequence:
-                    "Claude edits the files you have open, uncommitted work included. No other run can use this folder, or anything under it, until this one finishes.",
-                },
-              ]}
-            />
-          ) : (
-            <Field>
-              <FieldHead>Where Claude writes</FieldHead>
-              <Hint>
-                {folder === ""
-                  ? "A run on the whole workspace always works in place, and holds the entire tree until it finishes"
-                  : "This folder is not a git repository, so there is no branch to work on — Claude edits it in place and no other run can use it meanwhile"}
-              </Hint>
-            </Field>
-          )}
-
           {/* Applying a template must not be the same as choosing. This setting
               decides what an unattended agent is allowed to do, so it is
-              applied, named, and offered back. */}
+              applied, named, and offered back — above the group that holds it,
+              where it cannot be scrolled past. */}
           {carriedPermission && (
             <Notice tone="danger">
               <strong>
@@ -1502,71 +1462,96 @@ export default function NewRunPage() {
             </Notice>
           )}
 
-          <ChoiceGroup
-            name="perm"
-            label="What it may do without asking"
-            value={permissionMode}
-            onChange={(v) => {
-              setPermissionMode(v);
-              // Chosen here, so it is no longer inherited — the banner above
-              // would be describing a decision that is now the operator's.
-              setCarriedPermission(false);
-              // And a settings read still in flight must not answer a question
-              // the operator has just answered themselves.
-              permissionTouched.current = true;
-            }}
-            marker={mark("permission")}
-            choices={[
-              {
-                value: "acceptEdits",
-                title: "Edit files, ask for anything else",
-                code: "acceptEdits",
-                consequence:
-                  "File edits and read-only commands go ahead. Anything else is refused, and the refusal is listed in the run log.",
-              },
-              {
-                value: "plan",
-                title: "Read and plan only",
-                code: "plan",
-                consequence: "Nothing on disk changes.",
-              },
-              {
-                value: "default",
-                title: "Ask before everything",
-                code: "default",
-                tone: "warn",
-                badge: <Badge tone="warn">stalls</Badge>,
-                consequence:
-                  "There is nobody to answer the prompt, so the run sits there until a limit stops it.",
-              },
-              {
-                value: "bypassPermissions",
-                title: "Anything, without asking",
-                code: "bypassPermissions",
-                tone: "danger",
-                badge: <Badge tone="danger">risky</Badge>,
-                consequence:
-                  "Any command in the folder — deleting files, reaching the network. Only for code and a container you are willing to have modified.",
-              },
-            ]}
-          />
+          {/* Two standing facts about the group rather than a hint under each
+              control, and each is here only while it applies — a footnote that
+              is true whatever the rows say is a footnote the eye stops
+              reading. */}
+          <ListGroup
+            footnote={
+              isolated || permissionMode === "bypassPermissions" ? (
+                <>
+                  {isolated && (
+                    <>
+                      An isolated run is also allowed{" "}
+                      <span className="mono">git add</span> and{" "}
+                      <span className="mono">git commit</span>, whatever is
+                      chosen above — that is how its work reaches its branch.
+                      {permissionMode === "bypassPermissions" ? " " : ""}
+                    </>
+                  )}
+                  {permissionMode === "bypassPermissions" && (
+                    <>
+                      <span className="mono">pkill</span> and{" "}
+                      <span className="mono">killall</span> stay refused even
+                      here, because a name match reaches this server as readily
+                      as the agent&rsquo;s own processes.
+                    </>
+                  )}
+                </>
+              ) : undefined
+            }
+          >
+            <ListRow
+              label="Where Claude writes"
+              description={
+                canIsolate ? (
+                  ISOLATION_CONSEQUENCE[isolate ? "worktree" : "direct"]
+                ) : folder === "" ? (
+                  "A run on the whole workspace always works in place, and holds the entire tree until it finishes"
+                ) : (
+                  "This folder is not a git repository, so there is no branch to work on — Claude edits it in place and no other run can use it meanwhile"
+                )
+              }
+            >
+              {canIsolate ? (
+                <>
+                  {mark("isolate")}
+                  <SegmentedControl
+                    options={ISOLATION_OPTIONS}
+                    value={isolate ? "worktree" : "direct"}
+                    onChange={(v) => setIsolate(v === "worktree")}
+                    label="Where Claude writes"
+                  />
+                </>
+              ) : (
+                <span className="text-sm font-medium text-ink">
+                  In the folder itself
+                </span>
+              )}
+            </ListRow>
 
-          {isolated && (
-            <Hint>
-              An isolated run is also allowed{" "}
-              <span className="mono">git add</span> and{" "}
-              <span className="mono">git commit</span>, whatever is chosen above
-              — that is how its work reaches its branch
-            </Hint>
-          )}
-          {permissionMode === "bypassPermissions" && (
-            <Hint>
-              <span className="mono">pkill</span> and{" "}
-              <span className="mono">killall</span> stay refused in every mode,
-              because a name match reaches this server as readily as the
-              agent&rsquo;s own processes
-            </Hint>
-          )}
+            <ListRow
+              label={
+                <>
+                  What it may do without asking{" "}
+                  {permissionMode === "bypassPermissions" && (
+                    <Badge tone="danger">risky</Badge>
+                  )}
+                  {permissionMode === "default" && (
+                    <Badge tone="warn">stalls</Badge>
+                  )}
+                </>
+              }
+              description={<Toned tone={permission.tone}>{permission.text}</Toned>}
+            >
+              {mark("permission")}
+              <SegmentedControl
+                options={PERMISSION_OPTIONS}
+                value={permissionMode}
+                onChange={(v) => {
+                  setPermissionMode(v);
+                  // Chosen here, so it is no longer inherited — the banner
+                  // above would be describing a decision that is now the
+                  // operator's.
+                  setCarriedPermission(false);
+                  // And a settings read still in flight must not answer a
+                  // question the operator has just answered themselves.
+                  permissionTouched.current = true;
+                }}
+                label="What the agent may do without asking"
+              />
+            </ListRow>
+          </ListGroup>
         </Card>
 
         <Card className="mb-4">
@@ -1580,8 +1565,8 @@ export default function NewRunPage() {
             <Notice tone="warn">
               <strong>The template cuts cycles short.</strong>{" "}
               {resuming
-                ? "“Stop the cycle, carry on next window”"
-                : "“Stop the cycle in flight”"}{" "}
+                ? "“Stop, then resume”"
+                : "“Stop mid-cycle”"}{" "}
               reads your limits mid-cycle and kills the agent when one trips, so
               that cycle&rsquo;s work is thrown away.
               <ButtonRow className="mt-2.5">
@@ -1606,6 +1591,10 @@ export default function NewRunPage() {
             </Notice>
           )}
 
+          {/* The one line that leads the card: what is on the controls below,
+              read back as the sentence it amounts to. Nothing here is behind a
+              disclosure — a guard an unattended agent is about to run under is
+              what most people came to this page to set. */}
           <p
             className={`text-sm tabular-nums ${
               hasTerminus ? "text-ink" : "text-danger"
@@ -1625,411 +1614,387 @@ export default function NewRunPage() {
               can fall. Set a time limit, or cap the work cycles.
             </p>
           )}
-          <p className="mt-1.5 max-w-[68ch] text-xs leading-snug text-ink-muted">
-            {enforcementLine}
-          </p>
 
-          <button
-            type="button"
-            id="limits-toggle"
-            onClick={() => {
-              if (!limitsPinned) setShowLimits((v) => !v);
-            }}
-            aria-expanded={limitsOpen}
-            aria-disabled={limitsPinned || undefined}
-            aria-controls="limit-detail"
-            // aria-disabled rather than disabled: this is the focus target the
-            // error summary jumps to, and a disabled button cannot take focus.
-            className={`mt-3 inline-flex min-h-8 items-center gap-1.5 rounded-sm border border-line-strong bg-inset px-3 py-1.5 text-xs font-medium transition-colors duration-150 ${
-              limitsPinned
-                ? "cursor-default text-ink-muted"
-                : "cursor-pointer text-ink hover:border-ink-faint"
-            }`}
+          <ListGroup
+            className="mt-4"
+            label="Stop conditions"
+            footnote={
+              liveSpendGuard
+                ? "This run switches on Claude Code's own per-request reporting so the spend can be read mid-cycle; those records land a second or two behind, and what a cut-short cycle cost is worked back out of your transcripts afterwards"
+                : undefined
+            }
           >
-            <span aria-hidden="true" className="text-ink-faint">
-              {limitsOpen ? "▾" : "▸"}
-            </span>
-            {limitsPinned
-              ? "Open until the limits are settled"
-              : limitsOpen
-                ? "Hide the limits"
-                : "Change these limits"}
-          </button>
+            <ListRow
+              htmlFor={iterationsCapped ? "iters" : undefined}
+              label="Work cycles"
+              description={
+                <>
+                  {iterationsCapped
+                    ? "Each cycle picks up the same conversation where the last one left off; 1 means one pass and then stop"
+                    : "Needs the time limit below — the clock is the only limit that keeps advancing whether or not Claude reports what it spent"}
+                  {problemFor("iters") && (
+                    <Toned tone="danger">
+                      <span className="mt-0.5 block">
+                        {problemFor("iters")?.message}
+                      </span>
+                    </Toned>
+                  )}
+                </>
+              }
+            >
+              {mark("cycles")}
+              {/* React's onBlur is focusout, which bubbles, so one wrapper
+                  catches the switch and the value alike. */}
+              <div
+                className="flex items-center gap-2"
+                onBlur={touch("iters")}
+              >
+                {iterationsCapped && (
+                  <div className="w-32">
+                    <Input
+                      id="iters"
+                      type="number"
+                      min={1}
+                      className="tabular-nums"
+                      unit="cycles"
+                      value={maxIterations}
+                      onChange={(e) => setMaxIterations(e.target.value)}
+                      aria-invalid={problemFor("iters") ? true : undefined}
+                    />
+                  </div>
+                )}
+                <Switch
+                  id="cycles-on"
+                  checked={iterationsCapped}
+                  onChange={setIterationsCapped}
+                  label="Cap the work cycles"
+                />
+              </div>
+            </ListRow>
 
-          <div
-            id="limit-detail"
-            className={limitsOpen ? "mt-4 border-t border-line pt-4" : "hidden"}
+            <ListRow
+              htmlFor={costLimited ? "cost" : undefined}
+              label="Spending limit for this run"
+              description={
+                <>
+                  {!costLimited
+                    ? "This run is not capped in dollars — only the cycle count, the clock and the two window guards below stop it"
+                    : live
+                      ? "Read mid-cycle too, so the run stops near this figure rather than a whole cycle past it"
+                      : "No new cycle starts once this much is spent, so the final figure can be up to one cycle higher"}
+                  {problemFor("cost") && (
+                    <Toned tone="danger">
+                      <span className="mt-0.5 block">
+                        {problemFor("cost")?.message}
+                      </span>
+                    </Toned>
+                  )}
+                </>
+              }
+            >
+              {mark("cost")}
+              <div className="flex items-center gap-2" onBlur={touch("cost")}>
+                {costLimited && (
+                  <div className="w-32">
+                    <Input
+                      id="cost"
+                      type="number"
+                      min={0}
+                      step="0.5"
+                      className="tabular-nums"
+                      unit="USD"
+                      value={maxRunCostUSD}
+                      onChange={(e) => setMaxRunCostUSD(e.target.value)}
+                      aria-invalid={problemFor("cost") ? true : undefined}
+                    />
+                  </div>
+                )}
+                <Switch
+                  id="cost-on"
+                  checked={costLimited}
+                  onChange={setCostLimited}
+                  label="Cap what this run may spend"
+                />
+              </div>
+            </ListRow>
+
+            <ListRow
+              htmlFor={timeLimited ? "dur" : undefined}
+              label="Time limit"
+              description={
+                <>
+                  {!timeLimited
+                    ? "The run continues until Claude reports the task complete, or another limit stops it"
+                    : live
+                      ? "Measured from the start and including any time parked; a cycle can be cut off part-way"
+                      : "Measured from the start and including any time parked; a cycle already underway is never cut off mid-edit"}
+                  {timeLimited && resuming && (effMinutes ?? 0) > 720 && (
+                    <Toned tone="warn">
+                      <span className="mt-0.5 block">
+                        That is about {((effMinutes ?? 0) / 60).toFixed(0)} hours
+                        of unattended agent, most of it likely spent waiting
+                      </span>
+                    </Toned>
+                  )}
+                  {problemFor("dur") && (
+                    <Toned tone="danger">
+                      <span className="mt-0.5 block">
+                        {problemFor("dur")?.message}
+                      </span>
+                    </Toned>
+                  )}
+                </>
+              }
+            >
+              {mark("time")}
+              <div className="flex items-center gap-2" onBlur={touch("dur")}>
+                {timeLimited && (
+                  <div className="w-36">
+                    <Input
+                      id="dur"
+                      type="number"
+                      min={1}
+                      className="tabular-nums"
+                      unit="minutes"
+                      value={maxDurationMinutes}
+                      onChange={(e) => setMaxDurationMinutes(e.target.value)}
+                      aria-invalid={problemFor("dur") ? true : undefined}
+                    />
+                  </div>
+                )}
+                <Switch
+                  id="time-on"
+                  checked={timeLimited}
+                  onChange={setTimeLimited}
+                  label="Cap how long this run may take"
+                />
+              </div>
+            </ListRow>
+          </ListGroup>
+
+          <ListGroup
+            className="mt-4"
+            label="Window guards"
+            footnote="Both measure your whole subscription, not this run's share"
           >
-            <Field>
-              <FieldHead
-                htmlFor={iterationsCapped ? "iters" : undefined}
-                marker={mark("cycles")}
-              >
-                Work cycles
-              </FieldHead>
-              {/* `LimitField` takes no onBlur of its own; React's onBlur is
-                  focusout, which bubbles, so the wrapper catches the mode
-                  picker and the value alike. */}
-              <div onBlur={touch("iters")}>
-                <LimitField
-                  id="iters"
-                  modeLabel="Work cycle limit mode"
-                  enabled={iterationsCapped}
-                  onEnabledChange={setIterationsCapped}
-                  value={maxIterations}
-                  onValueChange={setMaxIterations}
-                  unit="cycles"
-                  offLabel="No cycle limit"
-                />
-              </div>
-              <Hint>
-                {iterationsCapped
-                  ? "Each cycle picks up the same conversation where the last one left off; 1 means one pass and then stop"
-                  : "Needs the time limit below — the clock is the only limit that keeps advancing whether or not Claude reports what it spent"}
-              </Hint>
-              {problemFor("iters") && (
-                <Hint tone="danger">{problemFor("iters")?.message}</Hint>
-              )}
-            </Field>
-
-            <Field>
-              <FieldHead
-                htmlFor={costLimited ? "cost" : undefined}
-                marker={mark("cost")}
-              >
-                Spending limit for this run
-              </FieldHead>
-              {/* `LimitField` takes no onBlur of its own; React's onBlur is
-                  focusout, which bubbles, so the wrapper catches the mode
-                  picker and the value alike. */}
-              <div onBlur={touch("cost")}>
-                <LimitField
-                  id="cost"
-                  modeLabel="Spending limit mode"
-                  enabled={costLimited}
-                  onEnabledChange={setCostLimited}
-                  value={maxRunCostUSD}
-                  onValueChange={setMaxRunCostUSD}
-                  unit="USD"
-                  offLabel="No spending limit"
-                  min={0}
-                  step="0.5"
-                />
-              </div>
-              <Hint>
-                {!costLimited
-                  ? "This run is not capped in dollars — only the cycle count, the clock and the two window guards below stop it"
-                  : live
-                    ? "Read mid-cycle too, so the run stops near this figure rather than a whole cycle past it"
-                    : "No new cycle starts once this much is spent, so the final figure can be up to one cycle higher"}
-              </Hint>
-              {liveSpendGuard && (
-                <Hint>
-                  This run switches on Claude Code&rsquo;s own per-request
-                  reporting so the figure can be read mid-cycle; those records
-                  land a second or two behind the spend, and what a cut-short
-                  cycle cost is worked back out of your transcripts afterwards
-                </Hint>
-              )}
-              {problemFor("cost") && (
-                <Hint tone="danger">{problemFor("cost")?.message}</Hint>
-              )}
-            </Field>
-
-            <Field>
-              <FieldHead
-                htmlFor={timeLimited ? "dur" : undefined}
-                marker={mark("time")}
-              >
-                Time limit
-              </FieldHead>
-              {/* `LimitField` takes no onBlur of its own; React's onBlur is
-                  focusout, which bubbles, so the wrapper catches the mode
-                  picker and the value alike. */}
-              <div onBlur={touch("dur")}>
-                <LimitField
-                  id="dur"
-                  modeLabel="Time limit mode"
-                  enabled={timeLimited}
-                  onEnabledChange={setTimeLimited}
-                  value={maxDurationMinutes}
-                  onValueChange={setMaxDurationMinutes}
-                  unit="minutes"
-                  offLabel="No time limit"
-                />
-              </div>
-              <Hint>
-                {!timeLimited
-                  ? "The run continues until Claude reports the task complete, or another limit stops it"
-                  : live
-                    ? "Measured from the start and including any time parked; a cycle can be cut off part-way"
-                    : "Measured from the start and including any time parked; a cycle already underway is never cut off mid-edit"}
-              </Hint>
-              {timeLimited && resuming && (effMinutes ?? 0) > 720 && (
-                <Hint tone="warn">
-                  That is about {((effMinutes ?? 0) / 60).toFixed(0)} hours of
-                  unattended agent, most of it likely spent waiting
-                </Hint>
-              )}
-              {problemFor("dur") && (
-                <Hint tone="danger">{problemFor("dur")?.message}</Hint>
-              )}
-            </Field>
-
-            <div className="grid gap-x-4 sm:grid-cols-2">
-              <Field>
-                <FieldHead htmlFor="sess" marker={mark("session")}>
-                  {resuming
-                    ? "Step aside at 5-hour usage"
-                    : "Stop at 5-hour usage"}
-                </FieldHead>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="sess"
-                    type="number"
-                    min={1}
-                    max={100}
-                    placeholder="off"
-                    value={maxSessionFraction}
-                    onChange={(e) => setMaxSessionFraction(e.target.value)}
-                    onBlur={touch("sess")}
-                    aria-invalid={problemFor("sess") ? true : undefined}
-                    aria-describedby={describedBy(
-                      "sess-hint",
-                      problemFor("sess") && "sess-err",
-                    )}
-                    className={`min-w-0 flex-1 tabular-nums ${
-                      problemFor("sess") ? "ring-1 ring-danger" : ""
-                    }`}
-                  />
-                  <span className="whitespace-nowrap text-xs text-ink-muted">
-                    %
-                  </span>
-                </div>
-                {problemFor("sess") ? (
-                  <Hint tone="danger">
-                    <span id="sess-err">{problemFor("sess")?.message}</span>
-                  </Hint>
+            <ListRow
+              htmlFor="sess"
+              label={
+                resuming ? "Step aside at 5-hour usage" : "Stop at 5-hour usage"
+              }
+              description={
+                problemFor("sess") ? (
+                  <Toned tone="danger">{problemFor("sess")?.message}</Toned>
                 ) : maxSessionFraction && !sessionCeilingSet ? (
-                  <Hint tone="warn">
-                    <span id="sess-hint">
-                      No 5-hour ceiling is set, so this guard has nothing to
-                      measure against and the run is refused before its first
-                      cycle — <Link href="/settings">set one</Link>
-                    </span>
-                  </Hint>
+                  <Toned tone="warn">
+                    No 5-hour ceiling is set, so this guard has nothing to
+                    measure against and the run is refused before its first
+                    cycle — <Link href="/settings">set one</Link>
+                  </Toned>
                 ) : (
-                  <Hint>
-                    <span id="sess-hint">
-                      {resuming
-                        ? "Measures your whole subscription, not this run's share; the run waits and picks up in the next window"
-                        : "Measures your whole subscription, not this run's share"}
-                      {usage
-                        ? usage.snapshot.session.fraction != null
-                          ? ` · now at ${fmtPct(usage.snapshot.session.fraction)}`
-                          : " · no ceiling set, so there is no percentage to show"
-                        : ""}
-                    </span>
-                  </Hint>
-                )}
-              </Field>
+                  <>
+                    {resuming
+                      ? "The run waits and picks up in the next window"
+                      : "The run ends when the window reaches this"}
+                    {usage
+                      ? usage.snapshot.session.fraction != null
+                        ? ` · now at ${fmtPct(usage.snapshot.session.fraction)}`
+                        : " · no ceiling set, so there is no percentage to show"
+                      : ""}
+                  </>
+                )
+              }
+            >
+              {mark("session")}
+              <div className="w-24">
+                <Input
+                  id="sess"
+                  type="number"
+                  min={1}
+                  max={100}
+                  placeholder="off"
+                  className="tabular-nums"
+                  unit="%"
+                  value={maxSessionFraction}
+                  onChange={(e) => setMaxSessionFraction(e.target.value)}
+                  onBlur={touch("sess")}
+                  aria-invalid={problemFor("sess") ? true : undefined}
+                />
+              </div>
+            </ListRow>
 
-              <Field>
-                <FieldHead htmlFor="wk" marker={mark("weekly")}>
-                  Stop at weekly usage
-                </FieldHead>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="wk"
-                    type="number"
-                    min={1}
-                    max={100}
-                    placeholder="off"
-                    value={maxWeeklyFraction}
-                    onChange={(e) => setMaxWeeklyFraction(e.target.value)}
-                    onBlur={touch("wk")}
-                    aria-invalid={problemFor("wk") ? true : undefined}
-                    aria-describedby={describedBy(
-                      "wk-hint",
-                      problemFor("wk") && "wk-err",
-                    )}
-                    className={`min-w-0 flex-1 tabular-nums ${
-                      problemFor("wk") ? "ring-1 ring-danger" : ""
-                    }`}
-                  />
-                  <span className="whitespace-nowrap text-xs text-ink-muted">
-                    %
-                  </span>
-                </div>
-                {problemFor("wk") ? (
-                  <Hint tone="danger">
-                    <span id="wk-err">{problemFor("wk")?.message}</span>
-                  </Hint>
+            <ListRow
+              htmlFor="wk"
+              label="Stop at weekly usage"
+              description={
+                problemFor("wk") ? (
+                  <Toned tone="danger">{problemFor("wk")?.message}</Toned>
                 ) : maxWeeklyFraction && !weeklyCeilingSet ? (
-                  <Hint tone="warn">
-                    <span id="wk-hint">
-                      No weekly ceiling is set, so this guard has nothing to
-                      measure against and the run is refused before its first
-                      cycle — <Link href="/settings">set one</Link>
-                    </span>
-                  </Hint>
+                  <Toned tone="warn">
+                    No weekly ceiling is set, so this guard has nothing to
+                    measure against and the run is refused before its first
+                    cycle — <Link href="/settings">set one</Link>
+                  </Toned>
                 ) : (
-                  <Hint>
-                    <span id="wk-hint">
-                      Always ends the run — a weekly window has no reset instant
-                      to wait for
-                      {usage
-                        ? usage.snapshot.weekly.fraction != null
-                          ? ` · now at ${fmtPct(usage.snapshot.weekly.fraction)}`
-                          : " · no ceiling set, so there is no percentage to show"
-                        : ""}
-                    </span>
-                  </Hint>
-                )}
-              </Field>
-            </div>
+                  <>
+                    Always ends the run — a weekly window has no reset instant to
+                    wait for
+                    {usage
+                      ? usage.snapshot.weekly.fraction != null
+                        ? ` · now at ${fmtPct(usage.snapshot.weekly.fraction)}`
+                        : " · no ceiling set, so there is no percentage to show"
+                      : ""}
+                  </>
+                )
+              }
+            >
+              {mark("weekly")}
+              <div className="w-24">
+                <Input
+                  id="wk"
+                  type="number"
+                  min={1}
+                  max={100}
+                  placeholder="off"
+                  className="tabular-nums"
+                  unit="%"
+                  value={maxWeeklyFraction}
+                  onChange={(e) => setMaxWeeklyFraction(e.target.value)}
+                  onBlur={touch("wk")}
+                  aria-invalid={problemFor("wk") ? true : undefined}
+                />
+              </div>
+            </ListRow>
+          </ListGroup>
 
-            <ChoiceGroup
-              name="enf"
-              label="When a limit is reached"
-              value={enforcement}
-              onChange={(v) => {
-                setEnforcement(v);
-                setCarriedEnforcement(false);
-              }}
-              marker={mark("enforcement")}
-              choices={[
-                {
-                  value: "between-cycles",
-                  title: "Let the cycle finish, then stop",
-                  consequence:
-                    "Limits are read before each cycle only. The run can end up one cycle past a limit, and no work is thrown away.",
-                },
-                {
-                  value: "live",
-                  title: "Stop the cycle in flight",
-                  tone: "warn",
-                  consequence: `Limits are also read about every ${guardInterval}s while Claude is working. The cycle is killed and its work is lost — tighter, but still not an exact cut-off.`,
-                },
-                {
-                  value: "live-resume",
-                  title: "Stop the cycle, carry on next window",
-                  tone: "warn",
-                  consequence:
-                    "As above, except a full 5-hour window parks the run until the window refills. It is the only limit that can be waited out; every other one still ends the run.",
-                },
-              ]}
-            />
+          <ListGroup
+            className="mt-4"
+            label="How the run ends"
+            footnote={enforcementLine}
+          >
+            <ListRow label="When a limit is reached">
+              {mark("enforcement")}
+              <SegmentedControl
+                options={ENFORCEMENT_OPTIONS}
+                value={enforcement}
+                onChange={(v) => {
+                  setEnforcement(v);
+                  setCarriedEnforcement(false);
+                }}
+                label="When a limit is reached"
+              />
+            </ListRow>
 
-            {live && !costLimited && settings?.telemetryForRuns === false && (
-              <Hint tone="warn" className="mb-3.5">
-                Consider turning on{" "}
-                <Link href="/settings">agent self-reporting</Link> — it is the
-                only independent record of what a cut-short cycle cost
-              </Hint>
-            )}
-            {resuming && !maxSessionFraction && (
-              <Hint className="mb-3.5">
-                With no 5-hour percentage the run carries on until Claude itself
-                refuses a cycle, then waits for the allowance to refill
-              </Hint>
-            )}
-
-            <Field>
-              <FieldHead marker={mark("afterDone")}>
-                When Claude says the task is done
-              </FieldHead>
-              <Toggle
+            <ListRow
+              htmlFor="after-done"
+              label="Keep going after DONE"
+              description={
+                continueAfterDone
+                  ? "Claude is asked to verify and tighten rather than invent work, and the run can then only end at a limit"
+                  : "The run ends as soon as Claude replies DONE"
+              }
+            >
+              {mark("afterDone")}
+              <Switch
                 id="after-done"
                 checked={continueAfterDone}
                 onChange={setContinueAfterDone}
-                label="Send it back in until a limit stops it"
               />
-              <Hint>
-                {continueAfterDone
-                  ? "Claude is asked to verify and tighten rather than invent work, and the run can then only end at a limit"
-                  : "The run ends as soon as Claude replies DONE"}
-              </Hint>
-              {continueAfterDone && !isolated && (
-                <Hint tone="warn">
-                  This run edits your folder directly and will keep editing it
-                  after it believes the task is finished
-                </Hint>
-              )}
-            </Field>
-          </div>
+            </ListRow>
+          </ListGroup>
+
+          {live && !costLimited && settings?.telemetryForRuns === false && (
+            <Hint tone="warn" className="mt-2">
+              Consider turning on{" "}
+              <Link href="/settings">agent self-reporting</Link> — it is the
+              only independent record of what a cut-short cycle cost
+            </Hint>
+          )}
+          {resuming && !maxSessionFraction && (
+            <Hint className="mt-2">
+              With no 5-hour percentage the run carries on until Claude itself
+              refuses a cycle, then waits for the allowance to refill
+            </Hint>
+          )}
+          {continueAfterDone && !isolated && (
+            <Hint tone="warn" className="mt-2">
+              This run edits your folder directly and will keep editing it after
+              it believes the task is finished
+            </Hint>
+          )}
         </Card>
 
         <Card className="mb-4" emphasis="quiet">
           <CardTitle>Save for next time</CardTitle>
 
-          <Field>
-            <FieldHead htmlFor="tpl-name">Template name</FieldHead>
-            <div className="flex items-center gap-2">
-              <Input
-                id="tpl-name"
-                className="min-w-0 flex-1"
-                value={templateName}
-                onChange={(e) => {
-                  setTemplateName(e.target.value);
-                  setArmedDelete(false);
-                }}
-                placeholder="Update dependencies and fix what breaks"
-                maxLength={MAX_TEMPLATE_NAME}
-                aria-describedby="tpl-name-hint"
-              />
+          <ListGroup>
+            <ListRow
+              htmlFor="tpl-name"
+              label="Template name"
+              description={
+                !prompt
+                  ? "Write the task above first — the prompt is the part worth saving"
+                  : nameTaken
+                    ? `Replaces the template already called “${templateName.trim()}”`
+                    : "Keeps the task, the limits and how it behaves. Not the model — that stays a single global setting"
+              }
+            >
+              <div className="w-56">
+                <Input
+                  id="tpl-name"
+                  value={templateName}
+                  onChange={(e) => {
+                    setTemplateName(e.target.value);
+                    setArmedDelete(false);
+                  }}
+                  placeholder="Update dependencies and fix what breaks"
+                  maxLength={MAX_TEMPLATE_NAME}
+                />
+              </div>
               <Button
                 type="button"
                 variant="secondary"
-                className="shrink-0"
                 onClick={saveTemplate}
-                disabled={savingTemplate || !templateName.trim() || !prompt}
+                busy={savingTemplate}
+                disabled={!templateName.trim() || !prompt}
               >
-                {savingTemplate ? "Saving…" : nameTaken ? "Update" : "Save"}
+                {nameTaken ? "Update" : "Save"}
               </Button>
               {templateId && (
                 <Button
                   type="button"
                   variant={armedDelete ? "danger" : "ghost"}
-                  className="shrink-0"
                   onClick={removeTemplate}
                 >
                   {armedDelete ? "Really delete" : "Delete"}
                 </Button>
               )}
-            </div>
-            <Hint>
-              <span id="tpl-name-hint">
-                {!prompt
-                  ? "Write the task above first — the prompt is the part worth saving"
-                  : nameTaken
-                    ? `Replaces the template already called “${templateName.trim()}”`
-                    : "Keeps the task, the limits and how it behaves. Not the model — that stays a single global setting"}
-              </span>
-            </Hint>
-          </Field>
+            </ListRow>
 
-          <Field>
-            <Toggle
-              id="tpl-folder"
-              checked={rememberFolder}
-              onChange={setRememberFolder}
-              label="Remember the workspace and folder chosen above"
-            />
-            <Hint>
-              {rememberFolder
-                ? "The template pre-selects that folder. Right for a task about one project"
-                : "The template asks for a folder each time. Right for a task that applies to any project"}
-            </Hint>
-          </Field>
+            <ListRow
+              htmlFor="tpl-folder"
+              label="Remember the workspace and folder"
+              description={
+                rememberFolder
+                  ? "The template pre-selects that folder. Right for a task about one project"
+                  : "The template asks for a folder each time. Right for a task that applies to any project"
+              }
+            >
+              <Switch
+                id="tpl-folder"
+                checked={rememberFolder}
+                onChange={setRememberFolder}
+              />
+            </ListRow>
+          </ListGroup>
 
           {templateNote && (
-            <Hint>
+            <Hint className="mt-2">
               <span role="status">{templateNote}</span>
             </Hint>
           )}
           {templateError && (
-            <Hint tone="danger">
+            <Hint tone="danger" className="mt-2">
               <span role="alert">{templateError}</span>
             </Hint>
           )}
@@ -2125,22 +2090,8 @@ export default function NewRunPage() {
             most of its life lying across a card. */}
         <div className="sticky bottom-0 z-10 border-t border-line bg-canvas py-3 shadow-bar">
           <ButtonRow>
-            <Button type="submit" disabled={submitting} aria-busy={submitting}>
-              {/* Both labels occupy one grid cell, so the button is as wide as
-                  the longer of them in either state and nothing moves when it
-                  starts. */}
-              <span className="grid place-items-center">
-                <span
-                  className={`col-start-1 row-start-1 ${submitting ? "invisible" : ""}`}
-                >
-                  Start run
-                </span>
-                <span
-                  className={`col-start-1 row-start-1 ${submitting ? "" : "invisible"}`}
-                >
-                  Starting…
-                </span>
-              </span>
+            <Button type="submit" busy={submitting}>
+              Start run
             </Button>
             <Button
               type="button"
@@ -2159,6 +2110,6 @@ export default function NewRunPage() {
           </ButtonRow>
         </div>
       </form>
-    </div>
+    </>
   );
 }
