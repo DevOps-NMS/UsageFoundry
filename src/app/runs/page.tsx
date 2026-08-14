@@ -182,7 +182,9 @@ function SkeletonRows() {
           <Td aria-hidden="true">
             <SkeletonBar className="w-16" />
           </Td>
-          <Td aria-hidden="true">
+          {/* The same `w-full max-w-0` the task cell carries, so the column
+              edges do not move when the poll answers. */}
+          <Td aria-hidden="true" className="w-full max-w-0">
             <SkeletonBar className="w-[58%]" />
             <SkeletonBar className="mt-3 w-[30%]" />
           </Td>
@@ -309,10 +311,21 @@ function RunList({
                       </div>
                     )}
                   </Td>
-                  <Td className="align-top">
+                  {/* `w-full max-w-0` is what makes this the column that gives.
+                      A truncating line is `white-space: nowrap`, so its
+                      min-content width is the whole sentence — capped at 56ch,
+                      that made the table 916px wide however narrow the window
+                      got, and the pane scrolled sideways into empty canvas
+                      beside cards that had stopped at its own edge. Zero as the
+                      cell's *max* content contribution and 100% as its
+                      preference leaves the fixed columns their widths and hands
+                      this one whatever is left, which is what the ellipsis was
+                      for. */}
+                  <Td className="w-full max-w-0 align-top">
                     {/* The task is what tells two runs in the same project
                         apart, so it leads and the folder hangs under it. Both
-                        truncate; both keep the whole value in `title`. */}
+                        truncate; both keep the whole value in `title`. 56ch is
+                        an upper bound on a wide window, never a floor. */}
                     <Link
                       href={`/runs/${r.id}`}
                       className="block max-w-[56ch] truncate font-medium text-ink hover:text-accent"

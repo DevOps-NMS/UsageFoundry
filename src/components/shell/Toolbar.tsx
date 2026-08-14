@@ -39,7 +39,7 @@ export function Toolbar({
     <header
       className="app-drag flex shrink-0 items-center gap-3 border-b border-line bg-canvas"
       style={{
-        height: "max(var(--toolbar-h), env(titlebar-area-height, 0px))",
+        height: "var(--toolbar-actual)",
         // The traffic lights are measured from the *window's* left edge, and
         // the sidebar has already absorbed that much of it. What is left over
         // is what this strip has to keep clear — nothing on macOS with the

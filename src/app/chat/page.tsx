@@ -602,8 +602,19 @@ export default function ChatPage() {
       {pollError && <Notice tone="danger">{pollError}</Notice>}
       {error && <Notice tone="danger">{error}</Notice>}
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <Card emphasis="primary" className="flex h-[68vh] min-h-[26rem] flex-col">
+      {/* Fills what is left of the pane rather than taking 68vh of the window,
+          which is a taller box than the pane it sits in — the composer went
+          under the fold and the page grew a second scrollbar behind a thread
+          that was already scrolling itself.
+
+          Only at `lg`, where the proposals sit *beside* the thread. Stacked
+          under it there is a second column of content below the fold and the
+          page is meant to scroll, so the card stays a bounded box there. */}
+      <div className="grid gap-4 lg:min-h-[26rem] lg:flex-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <Card
+          emphasis="primary"
+          className="flex min-h-[26rem] max-h-[60vh] flex-col lg:max-h-none lg:min-h-0"
+        >
           <div className="relative min-h-0 flex-1">
             <div ref={threadRef} onScroll={onScroll} className="h-full overflow-y-auto pr-1">
               {/* `additions` only: the waiting row's elapsed time changes every
@@ -834,7 +845,10 @@ export default function ChatPage() {
           </div>
         </Card>
 
-        <div className="flex flex-col gap-4">
+        {/* Its own scroll region, for the reason the thread beside it has one:
+            the row's height is the pane's now, so a column of twenty proposals
+            has to scroll somewhere, and the page is no longer that somewhere. */}
+        <div className="flex flex-col gap-4 lg:min-h-0 lg:overflow-y-auto">
           <Card emphasis={PROPOSALS_EMPHASIS[pending.length > 0 ? "waiting" : "clear"]}>
             <CardTitle>
               Proposals

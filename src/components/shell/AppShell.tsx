@@ -105,8 +105,20 @@ export function AppShell({ children }: { children: ReactNode }) {
             is where it was always meant to be. */}
         <main id="main" className="min-h-0 flex-1 overflow-y-auto">
           {/* px-4 / sm:px-5 is the gutter two pages already reach through with
-              a matching negative margin — keep the pair in step. */}
-          <div className="px-4 pt-5 pb-12 sm:px-5">{children}</div>
+              a matching negative margin — keep the pair in step.
+
+              A flex column of at least the pane's own height, which is how a
+              page says "fill what is left" without naming a number. A `vh`
+              figure cannot: the pane is the window less the toolbar less this
+              padding less whatever heading stands above the box, so every
+              62vh/68vh box here hung past the bottom edge and gave the pane a
+              scrollbar whose whole travel was empty. `min-h-full` rather than
+              `h-full` is what keeps a page longer than the pane growing
+              exactly as before — free space is never negative, so nothing
+              shrinks either. */}
+          <div className="flex min-h-full flex-col px-4 pt-5 pb-12 sm:px-5">
+            {children}
+          </div>
         </main>
       </div>
       <QuickOpen open={quickOpen} onDismiss={() => setQuickOpen(false)} />

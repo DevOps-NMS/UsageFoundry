@@ -2334,7 +2334,7 @@ export default function NewRunPage() {
             breakpoint or the bar is wider than the page and scrolls it
             sideways. Opaque and raised, because it spends most of its life
             lying across a card. */}
-        <div className="sticky bottom-0 z-10 -mx-4 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
+        <div className="sticky bottom-0 z-10 -mx-4 -mb-12 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
           <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
             <p
               role="status"

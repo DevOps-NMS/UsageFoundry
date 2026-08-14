@@ -36,14 +36,28 @@ export type LogSize = "inline" | "pane";
 /**
  * Complete class strings per size, never interpolated — Badge's rule.
  *
- * `pane` is the log as the whole of what a tab shows: a fixed terminal-shaped
- * region rather than a box that grows with its content, so the scrollbar is the
- * log's own and the page behind it does not lengthen by a screen every minute.
+ * `pane` is the log as the whole of what a tab shows: a terminal-shaped region
+ * rather than a box that grows with its content, so the scrollbar is the log's
+ * own and the page behind it does not lengthen by a screen every minute.
+ *
+ * Two behaviours, because it is shown two ways. Beside the inspector it *fills*
+ * its column — 62vh is measured against the window, which is taller than the
+ * pane and shorter than the inspector, so the column ended in a band of nothing
+ * that the page nonetheless scrolled through. It fills by being taken out of
+ * flow rather than by `flex-1`, which is the part worth keeping: an in-flow box
+ * with no height of its own reports its *content* as its intrinsic height, and
+ * a log is thousands of lines — the row would then be sized by the transcript
+ * instead of by the pane. Out of flow it contributes nothing to that
+ * measurement and simply takes the box it was given. The requirement on the
+ * caller is the other half: at `lg` the parent must be `relative` and have a
+ * height. Stacked under the inspector on a narrow window there is no column to
+ * fill and the page is meant to scroll, so it stays a bounded box.
+ *
  * `inline` is the older behaviour, for a log sitting among other cards.
  */
 const SIZE: Record<LogSize, string> = {
   inline: "max-h-[560px]",
-  pane: "h-[min(62vh,44rem)] min-h-[18rem]",
+  pane: "h-[min(62vh,44rem)] min-h-[18rem] lg:absolute lg:inset-0 lg:h-auto lg:min-h-0",
 };
 
 export function Log({
