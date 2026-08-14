@@ -295,12 +295,15 @@ dashboard's marks. Everything here follows from that one gap:
   that the forwarded text is set apart under the specialist's name rather than
   folded into the run's own report, and that a sub-agent writing `DONE` on a line
   of its own does not end the run.
-- **`/api/agents` against a running server.** The routes are unit tested against
-  a throwaway database — a create, an edit, a delete and every refusal, including
-  the duplicate name — but no request has reached a *running* server, and no
-  browser has sent one. The Agents page is what sends them now, so a create that
-  works in the suite and not in the container would leave every picker in this
-  app empty exactly as before.
+- **The Agents page in a browser.** The routes are unit tested against a
+  throwaway database — a create, an edit, a delete and every refusal, including
+  the duplicate name — and `curl` has driven a create, a list, the `tools`
+  refusal and the duplicate-name refusal against a `next dev` server, which
+  answered with the sentences the form is built to show. What has *not* happened
+  is a browser: nothing has rendered the form, typed into it, saved from it, or
+  seen the name-clash annotation or the delete sheet. The page's own server
+  render was checked for a 200 and for the sidebar row carrying ⌘5, which is not
+  the same thing.
 
 The [verification log](docs/verification.md) does not cover specialists yet; read
 the list above as its honest boundary until it does.
