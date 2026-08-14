@@ -5,6 +5,7 @@ import {
   normalizeTemplateInput,
   updateTemplate,
 } from "@/lib/templates";
+import { currentAgentKnowledge } from "@/lib/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -30,7 +31,9 @@ export async function PUT(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
-  const parsed = normalizeTemplateInput(body);
+  const parsed = normalizeTemplateInput(body, {
+    agents: currentAgentKnowledge(),
+  });
   if (!parsed.ok) {
     return NextResponse.json({ error: parsed.error }, { status: 400 });
   }

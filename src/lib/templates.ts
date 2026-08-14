@@ -6,6 +6,7 @@ import {
   type BudgetPolicy,
 } from "./budget";
 import { PERMISSION_MODES, type PermissionMode } from "./settings";
+import { agentRefusal, type AgentKnowledge } from "./agents";
 import { MAX_TEMPLATE_NAME } from "./apiTypes";
 
 /**
@@ -34,6 +35,10 @@ import { MAX_TEMPLATE_NAME } from "./apiTypes";
  * - **The model.** `settings.defaultModel` already sets it globally and the run
  *   form does not offer it at all. Two places to set one thing is how they
  *   drift, and the second place would be the one nobody remembers to check.
+ *   `agentId` below is not a second one: an agent's own `model` is the model one
+ *   *delegated* turn runs on, which nothing else here can express, and it is on
+ *   the agent rather than on the template for the same reason this list gives —
+ *   there is one place to set it.
  * - **A last-used timestamp.** Ordering is by name, so the picker reads the way
  *   a person scans it. Most-recently-used would need a write on every
  *   instantiation and a `templateId` on the run wire that exists for nothing
@@ -52,9 +57,30 @@ export interface RunTemplate {
   folder: string | null;
   isolate: boolean;
   permissionMode: PermissionMode;
+  /**
+   * The saved agent a run from this template may hand a subtask to, or null.
+   *
+   * An id rather than a copy, unlike `runs.agent` — see the column note in
+   * `db.ts`. It carries onto the run exactly as the task and the guards do, and
+   * it carries no capability with it: an agent holds no tool list and no
+   * permission mode, so this is not a fourth route to `--permission-mode`.
+   */
+  agentId: string | null;
   budget: BudgetPolicy;
   createdAt: number;
   updatedAt: number;
+}
+
+/**
+ * What a template is validated against — the registry, as of now.
+ *
+ * An argument rather than a read, for `normalizeWorkflowInput`'s reason: it is
+ * what keeps this function pure and testable without a database, and what makes
+ * "saved, then no longer startable" something the save door and the run door can
+ * say in the same words at two different moments.
+ */
+export interface TemplateKnowledge {
+  agents: AgentKnowledge;
 }
 
 /** A template stripped of its identity — everything a save or an edit supplies. */
@@ -79,8 +105,16 @@ export type TemplateNormalization =
  * `normalizePolicy`, which has no error channel and must coerce — a template is
  * saved once and used many times, so the moment to reject a value is while the
  * person who typed it is still looking at it.
+ *
+ * `known` is what makes that true of the agent as well: a template naming an
+ * agent that is not there is refused here *and* at instantiation, in the same
+ * words, rather than being saveable and then failing weeks later against a form
+ * nobody remembers filling in.
  */
-export function normalizeTemplateInput(raw: unknown): TemplateNormalization {
+export function normalizeTemplateInput(
+  raw: unknown,
+  known: TemplateKnowledge,
+): TemplateNormalization {
   const o = (raw ?? {}) as Record<string, unknown>;
 
   const name = String(o.name ?? "").trim();
@@ -151,6 +185,19 @@ export function normalizeTemplateInput(raw: unknown): TemplateNormalization {
       : String(o.mountId);
   const folder = mountId === null ? null : String(o.folder ?? "");
 
+  // Blank is "no agent", the way every optional string here is. A named one is
+  // checked against the registry rather than stored on trust: instantiation
+  // refuses an agent that is not there, so saving a template that names one
+  // would be saving something that can never be run.
+  const agentId =
+    o.agentId === null || o.agentId === undefined || String(o.agentId).trim() === ""
+      ? null
+      : String(o.agentId).trim();
+  if (agentId !== null) {
+    const refusal = agentRefusal(agentId, known.agents);
+    if (refusal) return { ok: false, error: refusal };
+  }
+
   return {
     ok: true,
     value: {
@@ -158,6 +205,7 @@ export function normalizeTemplateInput(raw: unknown): TemplateNormalization {
       prompt,
       mountId,
       folder,
+      agentId,
       // Matches `POST /api/runs`: anything but an explicit false asks for the
       // isolated checkout, which is the choice that cannot damage the
       // operator's own working tree.
@@ -176,6 +224,7 @@ interface TemplateRow {
   folder: string | null;
   isolate: number;
   permission_mode: string;
+  agent_id: string | null;
   budget: string;
   created_at: number;
   updated_at: number;
@@ -216,6 +265,12 @@ export function rowToTemplate(row: TemplateRow): RunTemplate {
     folder: row.folder,
     isolate: row.isolate !== 0,
     permissionMode,
+    // Read back as it was written, including an id whose agent has since been
+    // deleted: the surfaces that instantiate this refuse such a template by
+    // name, and repairing it to null here would turn that refusal into a run
+    // quietly started with no specialist. A blank column and a blank string are
+    // the same absence, which is the one thing collapsed.
+    agentId: (row.agent_id ?? "").trim() === "" ? null : row.agent_id,
     budget: normalizePolicy(rawBudget),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -227,7 +282,7 @@ export function rowToTemplate(row: TemplateRow): RunTemplate {
 /* ------------------------------------------------------------------ */
 
 const COLUMNS = `id, name, prompt, mount_id, folder, isolate, permission_mode,
-                 budget, created_at, updated_at`;
+                 agent_id, budget, created_at, updated_at`;
 
 /**
  * Turn SQLite's unique-index violation into the sentence the form should show.
@@ -277,8 +332,8 @@ export function createTemplate(input: TemplateInput): RunTemplate {
       .prepare(
         `INSERT INTO run_templates
            (id, name, prompt, mount_id, folder, isolate, permission_mode,
-            budget, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            agent_id, budget, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -288,6 +343,7 @@ export function createTemplate(input: TemplateInput): RunTemplate {
         input.folder,
         input.isolate ? 1 : 0,
         input.permissionMode,
+        input.agentId,
         JSON.stringify(input.budget),
         now,
         now,
@@ -307,7 +363,7 @@ export function updateTemplate(
       .prepare(
         `UPDATE run_templates
             SET name = ?, prompt = ?, mount_id = ?, folder = ?, isolate = ?,
-                permission_mode = ?, budget = ?, updated_at = ?
+                permission_mode = ?, agent_id = ?, budget = ?, updated_at = ?
           WHERE id = ?`,
       )
       .run(
@@ -317,6 +373,7 @@ export function updateTemplate(
         input.folder,
         input.isolate ? 1 : 0,
         input.permissionMode,
+        input.agentId,
         JSON.stringify(input.budget),
         Date.now(),
         id,

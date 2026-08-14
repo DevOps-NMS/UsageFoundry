@@ -4,6 +4,7 @@ import {
   listTemplates,
   normalizeTemplateInput,
 } from "@/lib/templates";
+import { currentAgentKnowledge } from "@/lib/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,6 +20,11 @@ export const dynamic = "force-dynamic";
  * as a *preference* — it holds no claim on it, and the folder may not even
  * exist when the template is saved. `POST /api/runs` resolves it inside a mount
  * and refuses if it cannot, which is the check that actually guards anything.
+ *
+ * The agent is the opposite case and is checked, because an agent that is not
+ * in the registry is one no run could ever be started with: the same refusal
+ * `POST /api/runs` gives, in the same words, at the moment it can still be
+ * fixed. `currentAgentKnowledge()` is the read both doors share.
  */
 
 export async function GET() {
@@ -28,7 +34,9 @@ export async function GET() {
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
-  const parsed = normalizeTemplateInput(body);
+  const parsed = normalizeTemplateInput(body, {
+    agents: currentAgentKnowledge(),
+  });
   if (!parsed.ok) {
     return NextResponse.json({ error: parsed.error }, { status: 400 });
   }

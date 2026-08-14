@@ -164,6 +164,7 @@ const template: RunTemplate = {
   folder: "acme/api",
   isolate: true,
   permissionMode: "acceptEdits",
+  agentId: null,
   budget: {
     maxIterations: 4,
     maxDurationMinutes: 60,

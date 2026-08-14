@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { MAX_TEMPLATE_NAME } from "./apiTypes";
-import { normalizeTemplateInput, rowToTemplate } from "./templates";
+import {
+  normalizeTemplateInput,
+  rowToTemplate,
+  type TemplateKnowledge,
+} from "./templates";
 
 /**
  * Covers the two narrowings a template does, and only those.
@@ -28,16 +32,30 @@ const OK = {
   budget: { maxIterations: 5, maxDurationMinutes: 60 },
 };
 
+/**
+ * The registry as the save door reads it.
+ *
+ * Passed in rather than read, which is what keeps this function pure — and what
+ * lets the two agents below stand for the two things that can be wrong with one:
+ * gone, and present but in a shape the CLI drops without a word.
+ */
+const KNOWN: TemplateKnowledge = {
+  agents: new Map([
+    ["a1", { name: "reviewer", usable: true }],
+    ["a2", { name: "half-written", usable: false }],
+  ]),
+};
+
 /** Unwrap a normalization that is expected to succeed. */
-function value(raw: unknown) {
-  const res = normalizeTemplateInput(raw);
+function value(raw: unknown, known: TemplateKnowledge = KNOWN) {
+  const res = normalizeTemplateInput(raw, known);
   assert.ok(res.ok, `expected ok, got: ${res.ok ? "" : res.error}`);
   return res.value;
 }
 
 /** The refusal message for input expected to be rejected. */
-function error(raw: unknown): string {
-  const res = normalizeTemplateInput(raw);
+function error(raw: unknown, known: TemplateKnowledge = KNOWN): string {
+  const res = normalizeTemplateInput(raw, known);
   assert.ok(!res.ok, "expected a refusal");
   return res.error;
 }
@@ -203,6 +221,52 @@ describe("normalizeTemplateInput — target", () => {
 });
 
 /* ------------------------------------------------------------------ */
+/* The agent a template names                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The refusals here are the `no_terminus` rule applied to a second field: a
+ * template that can be saved and never instantiated fails weeks away from the
+ * form that caused it. What makes it worth a test rather than a comment is that
+ * the *other* reading is silent — a template naming a deleted agent, quietly
+ * saved with none, starts runs that look exactly like runs that were never given
+ * a specialist, which is the one shape the whole agent registry exists to end.
+ */
+describe("normalizeTemplateInput — the agent", () => {
+  it("names none by default, and reads blank as none", () => {
+    assert.equal(value(OK).agentId, null);
+    assert.equal(value({ ...OK, agentId: null }).agentId, null);
+    assert.equal(value({ ...OK, agentId: "" }).agentId, null);
+    assert.equal(value({ ...OK, agentId: "   " }).agentId, null);
+  });
+
+  it("keeps an agent that is in the registry, trimmed", () => {
+    assert.equal(value({ ...OK, agentId: "a1" }).agentId, "a1");
+    assert.equal(value({ ...OK, agentId: "  a1  " }).agentId, "a1");
+  });
+
+  it("is idempotent through its own output", () => {
+    const once = value({ ...OK, agentId: " a1 " });
+    assert.equal(value(once).agentId, "a1");
+  });
+
+  it("refuses an agent that is not there, rather than saving none", () => {
+    assert.match(error({ ...OK, agentId: "gone" }), /no longer exists/);
+    // And with an empty registry, which is what a fresh install looks like.
+    assert.match(
+      error({ ...OK, agentId: "a1" }, { agents: new Map() }),
+      /no longer exists/,
+    );
+  });
+
+  it("refuses one the CLI would drop, and names it", () => {
+    const message = error({ ...OK, agentId: "a2" });
+    assert.match(message, /half-written/);
+    assert.match(message, /without a word/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
 /* Reading a row back                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -214,6 +278,7 @@ const ROW = {
   folder: "api",
   isolate: 1,
   permission_mode: "acceptEdits",
+  agent_id: null as string | null,
   budget: JSON.stringify({ maxIterations: 5, maxDurationMinutes: 60 }),
   created_at: 1,
   updated_at: 2,
@@ -262,5 +327,22 @@ describe("rowToTemplate", () => {
     const t = rowToTemplate({ ...ROW, mount_id: null, folder: null });
     assert.equal(t.mountId, null);
     assert.equal(t.folder, null);
+  });
+
+  it("reads a blank agent column as no agent", () => {
+    assert.equal(rowToTemplate(ROW).agentId, null);
+    assert.equal(rowToTemplate({ ...ROW, agent_id: "" }).agentId, null);
+    assert.equal(rowToTemplate({ ...ROW, agent_id: "   " }).agentId, null);
+  });
+
+  /**
+   * The one narrowing this function deliberately does *not* do. An agent that
+   * has since been deleted is still what the template says, and the doors that
+   * instantiate it refuse it by name; repairing it to null here would turn that
+   * refusal into a run quietly started with no specialist, which is exactly the
+   * failure the refusal exists to prevent.
+   */
+  it("keeps an agent id whose agent may be gone, rather than repairing it", () => {
+    assert.equal(rowToTemplate({ ...ROW, agent_id: "deleted" }).agentId, "deleted");
   });
 });

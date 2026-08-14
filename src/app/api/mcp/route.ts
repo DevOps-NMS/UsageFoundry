@@ -27,6 +27,7 @@ import {
   normalizeTemplateInput,
   updateTemplate,
 } from "@/lib/templates";
+import { currentAgentKnowledge } from "@/lib/agents";
 import {
   activeRuns,
   currentSnapshot,
@@ -1208,12 +1209,21 @@ function saveTemplate(args: Record<string, unknown>, chatId: string) {
     folder: existing?.folder ?? null,
     isolate: guards.isolate,
     permissionMode: guards.permissionMode,
+    // Carried from the row rather than taken from an argument, and named here
+    // for the reason every other field on this object is: the update replaces
+    // the template wholesale, so a field this list forgets is a field the chat
+    // silently deletes. There is deliberately no argument for it — a specialist
+    // is one of the guard-shaped facts a person chose, and this tool may write
+    // a prompt and nothing else.
+    agentId: existing?.agentId ?? null,
     budget: guards.budget,
   };
 
   // Re-read through the same normaliser the form uses, so a prompt or name this
   // tool accepts is exactly one the operator could have typed.
-  const normalized = normalizeTemplateInput(input);
+  const normalized = normalizeTemplateInput(input, {
+    agents: currentAgentKnowledge(),
+  });
   if (!normalized.ok) return text(normalized.error, true);
 
   try {
