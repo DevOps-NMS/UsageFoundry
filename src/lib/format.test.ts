@@ -1,6 +1,11 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { fmtCycleInFlight, fmtCycles, pollFailureMessage } from "./format";
+import {
+  fmtCycleInFlight,
+  fmtCycles,
+  guardBadge,
+  pollFailureMessage,
+} from "./format";
 import type { RunDTO } from "./apiTypes";
 
 /**
@@ -113,4 +118,66 @@ test("the message says the page is no longer current", () => {
   // that has stopped tracking the thread, which is what the operator acts on.
   assert.match(pollFailureMessage(500, "boom"), /out of date/);
   assert.match(pollFailureMessage(401, "Unauthorized"), /out of date/);
+});
+
+/**
+ * Which guard set a block runs under, and the state that is neither present
+ * nor absent.
+ *
+ * The failure this pins is silent and typechecks: with two states, the list a
+ * page has not read yet is indistinguishable from a list with nothing in it, so
+ * every templated block on the workflow page wore a red "template deleted" —
+ * permanently when the request failed, and for a frame on every cold load. That
+ * badge is the one thing on the page that says the workflow will not run, and
+ * it was untrue; Run worked. The deleted case has to stay loud for the opposite
+ * reason, because `planNode` really does refuse such a node by name.
+ */
+
+const TEMPLATES = [
+  { id: "t1", name: "Careful guards" },
+  { id: "t2", name: "Cheap guards" },
+];
+
+test("an unread list is not an empty one", () => {
+  assert.deepEqual(guardBadge("t1", null), {
+    text: "guards not read",
+    tone: "neutral",
+  });
+  // The same id against a list that really has been read and does not hold it.
+  assert.deepEqual(guardBadge("t1", []), {
+    text: "template deleted",
+    tone: "danger",
+  });
+});
+
+test("a template that is there is named, and says nothing alarming", () => {
+  assert.deepEqual(guardBadge("t2", TEMPLATES), {
+    text: "Cheap guards",
+    tone: "neutral",
+  });
+});
+
+test("a block naming no template takes the untemplated set, read or not", () => {
+  // `null` here is the operator's own choice — Settings guards — and must not
+  // be confused with the unread list, which is the other null in this call.
+  for (const templates of [null, [], TEMPLATES]) {
+    assert.deepEqual(guardBadge(null, templates), {
+      text: "Settings guards",
+      tone: "neutral",
+    });
+  }
+});
+
+test("only a template that is genuinely absent is called deleted", () => {
+  const deleted = guardBadge("gone", TEMPLATES);
+  assert.equal(deleted.tone, "danger");
+  // Nothing else may reach the danger tone: it is what an operator reads as
+  // "this graph will be refused at Run".
+  for (const badge of [
+    guardBadge("gone", null),
+    guardBadge(null, null),
+    guardBadge("t1", TEMPLATES),
+  ]) {
+    assert.equal(badge.tone, "neutral");
+  }
 });

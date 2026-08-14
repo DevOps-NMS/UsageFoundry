@@ -9,7 +9,14 @@ import type {
   WorkflowDTO,
   WorkflowInstanceDTO,
 } from "@/lib/apiTypes";
-import { fmtDateTime, fmtPct, fmtUSD, pollFailureMessage } from "@/lib/format";
+import {
+  fmtDateTime,
+  fmtPct,
+  fmtUSD,
+  guardBadge,
+  pollFailureMessage,
+} from "@/lib/format";
+import { jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
@@ -49,9 +56,13 @@ export default function WorkflowPage() {
 
   const [workflow, setWorkflow] = useState<WorkflowDTO | null>(null);
   const [instances, setInstances] = useState<WorkflowInstanceDTO[]>([]);
-  const [templates, setTemplates] = useState<RunTemplateDTO[]>([]);
+  // Null until the list has been read, and null for good if it cannot be:
+  // `guardBadge` reads that as "unknown", where `[]` reads as "every template
+  // this graph names has been deleted".
+  const [templates, setTemplates] = useState<RunTemplateDTO[] | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
+  const [templatesError, setTemplatesError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"run" | "duplicate" | "delete" | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -89,12 +100,31 @@ export default function WorkflowPage() {
   }, [load]);
 
   useEffect(() => {
-    fetch("/api/templates", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d) => setTemplates((d.templates ?? []) as RunTemplateDTO[]))
-      .catch(() => {
-        /* the block list falls back to naming the id — see `guardLabel` */
-      });
+    // Through `jsonRequest` because a 401 or a 500 with a body resolves
+    // `r.json()` perfectly happily: read with a bare `.catch`, a refusal landed
+    // on the success branch as an empty list, which is the reading that called
+    // every block's template deleted. There is no retry here, so the sentence
+    // says what to do about it.
+    let live = true;
+    void jsonRequest<{ templates?: RunTemplateDTO[] }>("/api/templates").then((res) => {
+      if (!live) return;
+      if (!res.ok) {
+        setTemplatesError(
+          `The guard sets could not be read — ${
+            res.error ??
+            (res.status === null
+              ? "the server could not be reached"
+              : `the server answered ${res.status}`)
+          }. Reload to check them.`,
+        );
+        return;
+      }
+      setTemplates(res.data.templates ?? []);
+      setTemplatesError(null);
+    });
+    return () => {
+      live = false;
+    };
   }, []);
 
   const waitsFor = useMemo(() => {
@@ -116,24 +146,6 @@ export default function WorkflowPage() {
     }
     return map;
   }, [workflow]);
-
-  /**
-   * Which guard set a block runs under, in the operator's words.
-   *
-   * A template that has been deleted is called out here rather than left to the
-   * refusal at Run: this page is where the graph is read, and "the guards this
-   * block names are gone" is the one thing on it that stops the whole workflow.
-   */
-  function guardLabel(templateId: string | null): {
-    text: string;
-    missing: boolean;
-  } {
-    if (templateId === null) return { text: "Settings guards", missing: false };
-    const found = templates.find((t) => t.id === templateId);
-    return found
-      ? { text: found.name, missing: false }
-      : { text: "template deleted", missing: true };
-  }
 
   async function act(
     kind: "run" | "duplicate" | "delete",
@@ -252,6 +264,10 @@ export default function WorkflowPage() {
 
       <div role="alert">
         {pollError && <Notice tone="danger">{pollError}</Notice>}
+        {/* Warn rather than danger: the graph and Run are unaffected, and the
+            only thing lost is the check on whether a block's template is still
+            there. */}
+        {templatesError && <Notice tone="warn">{templatesError}</Notice>}
         {actionError && (
           <Notice tone="danger" live>
             {actionError}
@@ -347,7 +363,7 @@ export default function WorkflowPage() {
             </thead>
             <tbody>
               {workflow.nodes.map((n, i) => {
-                const guards = guardLabel(n.templateId);
+                const guards = guardBadge(n.templateId, templates);
                 const waits = waitsFor.get(n.id) ?? [];
                 return (
                   <Tr key={n.id}>
@@ -395,9 +411,7 @@ export default function WorkflowPage() {
                       )}
                     </Td>
                     <Td className="align-top">
-                      <Badge tone={guards.missing ? "danger" : "neutral"}>
-                        {guards.text}
-                      </Badge>
+                      <Badge tone={guards.tone}>{guards.text}</Badge>
                     </Td>
                     <Td className="align-top text-ink-muted">
                       {waits.length === 0 ? (

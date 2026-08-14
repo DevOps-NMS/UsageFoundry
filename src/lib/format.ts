@@ -234,6 +234,35 @@ export function pollFailureMessage(
   return `${head}${cause ? ` — ${cause}` : ""}. ${stale}`;
 }
 
+/**
+ * Which guard set a block runs under, as the badge beside it says it.
+ *
+ * Three states rather than two, and the third is the whole point: `templates`
+ * is null until the list has been read, and "not in a list we have not got" is
+ * a different fact from "not in the list". Collapsed into one, an unread list —
+ * the value on every cold load, and the permanent value when the request fails
+ * — calls every templated block's guards deleted, which is the one thing on
+ * that page that says the workflow will not run, and it is untrue: Run works.
+ *
+ * The deleted case stays loud, because `planNode` refuses a node whose template
+ * has gone by name rather than falling back to the untemplated guards, and this
+ * is where an operator sees that before pressing Run.
+ *
+ * The list is taken structurally rather than as `RunTemplateDTO[]` because only
+ * the two fields are read, and because the caller may hold either.
+ */
+export function guardBadge(
+  templateId: string | null,
+  templates: ReadonlyArray<{ id: string; name: string }> | null,
+): { text: string; tone: BadgeTone } {
+  if (templateId === null) return { text: "Settings guards", tone: "neutral" };
+  if (templates === null) return { text: "guards not read", tone: "neutral" };
+  const found = templates.find((t) => t.id === templateId);
+  return found
+    ? { text: found.name, tone: "neutral" }
+    : { text: "template deleted", tone: "danger" };
+}
+
 export type Severity = "ok" | "warn" | "danger";
 
 export function severityFor(fraction: number | null): Severity {
