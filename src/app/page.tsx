@@ -143,8 +143,8 @@ const STICKY_HEAD =
   "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
 
 /** Poll cadence: the second one applies while a run is still working. */
-const POLL_IDLE_MS = 10_000;
-const POLL_WORKING_MS = 5_000;
+const POLL_IDLE_MS = 120_000;
+const POLL_WORKING_MS = 60_000;
 
 /** Both tables cut their tail. What is cut is counted rather than dropped. */
 const MAX_BREAKDOWN_ROWS = 12;
@@ -154,7 +154,7 @@ const MAX_BLOCK_ROWS = 15;
  * The figure at the right of a grouped row.
  *
  * Tabular for the reason every figure on this page is: the whole card re-renders
- * every ten seconds, and a proportional digit set moves the right edge of the
+ * on every poll, and a proportional digit set moves the right edge of the
  * column each time a 1 becomes an 8.
  */
 function ListValue({ children }: { children: ReactNode }) {
@@ -384,7 +384,7 @@ export default function Dashboard() {
 
   // The banner is a live region so a page that has quietly stopped refreshing
   // announces itself. The figures deliberately are not: a polite region over
-  // the meters would read every dollar total aloud every ten seconds.
+  // the meters would read every dollar total aloud on every poll.
   const banner = (
     <div aria-live="polite">
       {pollError && <Notice tone="danger">{pollError}</Notice>}

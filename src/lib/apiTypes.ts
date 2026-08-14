@@ -119,7 +119,7 @@ export type PeriodGranularityDTO = "day" | "week" | "month";
  * One calendar period's spend.
  *
  * Leaner than `WindowStateDTO` on purpose: three series ship on every poll of a
- * page that already re-reads the whole snapshot every ten seconds, and the
+ * page that already re-reads the whole snapshot on every poll, and the
  * per-bucket token *breakdown* is the half of an `AggregateDTO` nothing on this
  * card renders.
  */
