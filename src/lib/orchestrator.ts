@@ -31,6 +31,10 @@ import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
 import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
 import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents";
+// The log's own extraction of what a tool call is about, so the parser retains
+// the same line for a call whose result comes back an error. Client-safe and
+// pure; the dependency runs the permitted way round.
+import { toolArgs } from "./logLine";
 import type { RunDependencyDTO } from "./apiTypes";
 
 /**
@@ -196,6 +200,8 @@ export interface RunEvent {
     /** A turn forwarded by `--forward-subagent-text`. See `handleStreamLine`. */
     | "subagent"
     | "tool"
+    /** A tool call that came back an error. See `toolResultFailures`. */
+    | "tool_error"
     | "iteration"
     | "budget"
     | "result"
@@ -2835,6 +2841,16 @@ interface IterationResult {
    */
   subagentNames: Map<string, string>;
   /**
+   * `tool_use` block id → what that call was, for the result that answers it.
+   *
+   * Parser state for `subagentNames`' reason and with its lifetime: a
+   * `tool_result` block names the id of the call and nothing else, so a failure
+   * can only be reported as "Bash: git push …" by something that saw the call.
+   * Bounded per entry rather than per cycle — the tool's name and one clipped
+   * line, never the input itself, which for a `Write` is the whole file.
+   */
+  toolCalls: Map<string, ToolCall>;
+  /**
    * Whether the CLI's terminal `result` event arrived. Cost and tokens come
    * only from that event, so when it is missing — operator stop, crash, OOM —
    * this iteration contributes $0 to the run's totals despite having burned
@@ -3410,6 +3426,7 @@ function runIteration(
       apiError: null,
       stderrTail: "",
       subagentNames: new Map(),
+      toolCalls: new Map(),
     };
 
     let stdoutBuf = "";
@@ -3535,6 +3552,125 @@ function parentToolUseId(
   return null;
 }
 
+/** What a `tool_use` block was, kept so the result answering it can name it. */
+export interface ToolCall {
+  name: string;
+  /** `toolArgs`' one bounded line — the command, the path, the query. */
+  command: string;
+}
+
+/** A tool call that came back an error, as the run's log records it. */
+export interface ToolFailure {
+  /** The call's own tool, or `tool` when the call was not seen this cycle. */
+  name: string;
+  command: string;
+  /** What the tool said, flattened and clipped. */
+  text: string;
+  toolUseId: string;
+  /** Present only for a delegated call — see `parentToolUseId`. */
+  parentToolUseId?: string;
+  subagent?: string;
+}
+
+/**
+ * How much of a failed tool's output is kept.
+ *
+ * Enough to name the failure — a `403 … not accessible by personal access
+ * token`, a compiler's first error — and not enough to be a log of the output.
+ * `run_events` already grows without bound, so a tool result is recorded when
+ * it failed and never otherwise.
+ */
+const TOOL_ERROR_TEXT_CHARS = 600;
+
+/**
+ * A `tool_result`'s own text. A string on the wire for most tools and an array
+ * of content blocks for the ones that answer with several (a `Task`'s report,
+ * anything returning an image beside its text) — both shapes measured against
+ * the pin, which is why neither is inferred from the other.
+ */
+function toolResultText(content: unknown): string {
+  const parts = Array.isArray(content) ? content : [content];
+  const text = parts
+    .map((part) => {
+      if (typeof part === "string") return part;
+      const block = part as { text?: unknown } | null;
+      return typeof block?.text === "string" ? block.text : "";
+    })
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return text.length > TOOL_ERROR_TEXT_CHARS
+    ? `${text.slice(0, TOOL_ERROR_TEXT_CHARS - 1)}…`
+    : text;
+}
+
+/**
+ * The failed tool calls carried by one `user` event, matched to the calls that
+ * produced them.
+ *
+ * A tool's *outcome* arrives on a later event than its call, and until this
+ * existed the whole of it was dropped: a `git push` that a token does not reach
+ * left a `tool` row saying the command was attempted, no record of the 403, and
+ * a run that finished `completed`. The operator's evidence was identical to a
+ * push that worked.
+ *
+ * Errors only, deliberately. `run_events` grows without bound and a full tool
+ * log would multiply it, where a failure is the line somebody is looking for.
+ *
+ * Pure, and separated from `handleStreamLine` for `permissionDenials`' reason:
+ * it reads a shape captured from one CLI build, every field of it is optional
+ * here, and both ways of being wrong are silent — a build that renames
+ * `is_error` must go back to recording nothing rather than filing every
+ * successful result as a failure.
+ */
+export function toolResultFailures(
+  ev: Record<string, unknown>,
+  acc: {
+    toolCalls: ReadonlyMap<string, ToolCall>;
+    subagentNames: ReadonlyMap<string, string>;
+  },
+): ToolFailure[] {
+  const message = ev.message as
+    | (Record<string, unknown> & { content?: unknown })
+    | undefined;
+  const blocks = Array.isArray(message?.content) ? message.content : [];
+
+  // Off the envelope with the message as a fallback, exactly as a forwarded
+  // turn's text is: a sub-agent's failed command must not read as the main
+  // thread's, and a key that moved has to fail towards attributing it.
+  const parent = parentToolUseId(ev, message);
+  const subagent = parent !== null ? acc.subagentNames.get(parent) : undefined;
+
+  const failures: ToolFailure[] = [];
+  for (const block of blocks) {
+    const b = block as Record<string, unknown> | null;
+    // `=== true` rather than truthiness, which is what keeps a renamed or
+    // re-typed field quiet: an undefined here is every successful tool result
+    // in the cycle, and the log would be nothing else.
+    if (b?.type !== "tool_result" || b.is_error !== true) continue;
+
+    const id = typeof b.tool_use_id === "string" ? b.tool_use_id : "";
+    // The call, when it was seen this cycle. A stream this app joined
+    // mid-conversation names the tool `tool` rather than dropping the failure:
+    // the result text is the half an operator acts on.
+    const call = id ? acc.toolCalls.get(id) : undefined;
+
+    failures.push({
+      name: call?.name ?? "tool",
+      command: call?.command ?? "",
+      text: toolResultText(b.content),
+      toolUseId: id,
+      ...(parent !== null
+        ? { parentToolUseId: parent, ...(subagent ? { subagent } : {}) }
+        : {}),
+    });
+  }
+
+  return failures;
+}
+
 /** Interpret one line of Claude Code's `stream-json` output. */
 function handleStreamLine(
   runId: string,
@@ -3636,6 +3772,15 @@ function handleStreamLine(
         if (id && typeof subagentType === "string" && subagentType) {
           acc.subagentNames.set(id, subagentType);
         }
+        // What this call was, for the result that answers it: a `tool_result`
+        // carries the id and nothing else, so a failure can only be reported as
+        // the command it failed on by something that saw the command.
+        if (id) {
+          acc.toolCalls.set(id, {
+            name: String(b.name ?? "tool"),
+            command: toolArgs(b.input),
+          });
+        }
         emit({
           runId,
           ts: Date.now(),
@@ -3668,11 +3813,29 @@ function handleStreamLine(
     return;
   }
 
-  // A forwarded sub-agent *result* — the tool output going back up. Dropped by
-  // name for the reason `thinking` is: these carry whole file reads and command
-  // output, the log already shows the call that produced them, and the main
-  // thread's own user turns have never been rendered either.
-  if (type === "user") return;
+  // Tool output going back up — the main thread's own, and a sub-agent's when
+  // `--forward-subagent-text` is on. A *successful* one is dropped by name for
+  // the reason `thinking` is: these carry whole file reads and command output,
+  // and the log already shows the call that produced them.
+  //
+  // A failed one is the exception and it is the whole of this branch. It is
+  // still not the run's own report and must not be mistaken for one, so it
+  // touches none of the three things a forwarded turn is kept out of:
+  // `finalText`, which the `DONE` test is matched against per line; `apiError`,
+  // which latches on first sight; and the `assistant` kind, which
+  // `cycleOutputs` takes the last of as the cycle's report. It has its own
+  // kind, like a delegated turn, rather than a flag on `tool`.
+  if (type === "user") {
+    for (const failure of toolResultFailures(ev, acc)) {
+      emit({
+        runId,
+        ts: Date.now(),
+        kind: "tool_error",
+        payload: { ...failure },
+      });
+    }
+    return;
+  }
 
   if (type === "result") {
     // Authoritative per-iteration accounting from the CLI itself.

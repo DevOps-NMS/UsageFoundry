@@ -394,6 +394,19 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **A failed tool result reaching the run page.** `toolResultFailures` is unit-
+  tested and `npm run typecheck` passes, and the `user`/`tool_result` shape it
+  reads was taken from real transcripts written by the pinned CLI (2.1.226) —
+  both the string `content` and the array-of-blocks one, with `is_error: true`
+  on each. What has **not** happened is a live `stream-json` stream reaching
+  this branch: transcripts are the *persisted* form of those messages, so that
+  `parent_tool_use_id` sits on the envelope of a forwarded one is still the
+  assumption the `subagent` branch already makes, and no browser has rendered a
+  `tool_error` row. Before trusting it: start a run whose task fails a command
+  on purpose (`git push` to a repository the token cannot reach is the case it
+  was written for) and confirm the log shows one danger row naming the tool,
+  the command and the error — and that a run whose commands all work gains no
+  new rows at all.
 - **The whole of "The agent's own report" above — including that it compiles.**
   It was written by a run whose permission allowlist carried no `npm`, so
   `npm run typecheck`, `npm test` and `npm run build` were never executed against

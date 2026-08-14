@@ -65,6 +65,7 @@ const {
   reopenPrompt,
   reopenRun,
   selectPromotable,
+  toolResultFailures,
   MAX_PAUSES_PER_RUN,
   MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
@@ -1303,6 +1304,204 @@ describe("permissionDenials", () => {
     for (const raw of [undefined, null, "nope", [], [{}], [{ tool_name: "" }]]) {
       assert.deepEqual(permissionDenials(raw), []);
     }
+  });
+});
+
+/**
+ * A tool's outcome, which is the half of a `stream-json` cycle this app used to
+ * drop whole.
+ *
+ * The failure it exists for is silent by construction: a `git push` the one
+ * configured token does not reach answers 403 *inside* the tool call, the agent
+ * carries on, the cycle emits `result`, and the run is written `completed` —
+ * with a `tool` row on the log saying the command was attempted and nothing
+ * after it. Nothing on any page in this app tells that run from one that
+ * pushed. So every case below is either "the failure is recorded, named" or
+ * "nothing else changed", and the second is the longer list.
+ *
+ * The shapes are quoted from real transcripts written by the pinned CLI
+ * (2.1.226), not invented: a string `content` for an ordinary tool, an array of
+ * blocks for one that answers with several.
+ */
+describe("failed tool results", () => {
+  const push = "git push -u origin uf/acme-web-1-1a2b3c4d";
+  const calls = new Map([
+    ["toolu_01", { name: "Bash", command: push }],
+    ["toolu_02", { name: "Read", command: "/repo/src/index.ts" }],
+  ]);
+  const acc = { toolCalls: calls, subagentNames: new Map<string, string>() };
+
+  /** One `user` event carrying one block, which is how they arrive. */
+  const userEvent = (
+    block: Record<string, unknown>,
+    envelope: Record<string, unknown> = {},
+  ) => ({
+    type: "user",
+    message: { role: "user", content: [block] },
+    session_id: "s1",
+    ...envelope,
+  });
+
+  it("names the tool and the command the result answers", () => {
+    // The whole point: a `tool_result` carries the id of its call and no name,
+    // so a failure that does not reach back for the command is a danger row
+    // reading "tool failed — remote: Permission … denied", which does not say
+    // which of a cycle's commands it was.
+    const failures = toolResultFailures(
+      userEvent({
+        type: "tool_result",
+        tool_use_id: "toolu_01",
+        content:
+          "remote: Permission to acme/web.git denied to uf-bot.\nfatal: unable to access 'https://github.com/acme/web.git/': The requested URL returned error: 403",
+        is_error: true,
+      }),
+      acc,
+    );
+
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].name, "Bash");
+    assert.equal(failures[0].command, push);
+    assert.equal(failures[0].toolUseId, "toolu_01");
+    assert.match(failures[0].text, /error: 403$/);
+    // Flattened, because no row in the log renders a stored newline: left in,
+    // the second half of the message is a line the reader never sees.
+    assert.equal(failures[0].text.includes("\n"), false);
+  });
+
+  it("records a result whose call it never saw, rather than dropping it", () => {
+    // A stream this app joined mid-conversation, or a call whose block carried
+    // no id. The text is the half an operator acts on, so "some tool failed
+    // with this" beats silence.
+    const [failure] = toolResultFailures(
+      userEvent({
+        type: "tool_result",
+        tool_use_id: "toolu_99",
+        content: "Exit code 1",
+        is_error: true,
+      }),
+      acc,
+    );
+
+    assert.equal(failure.name, "tool");
+    assert.equal(failure.command, "");
+    assert.equal(failure.text, "Exit code 1");
+  });
+
+  it("reads the array shape a tool that answers in blocks uses", () => {
+    const [failure] = toolResultFailures(
+      userEvent({
+        type: "tool_result",
+        tool_use_id: "toolu_02",
+        content: [
+          { type: "text", text: "File does not exist." },
+          { type: "text", text: "Did you mean src/index.tsx?" },
+        ],
+        is_error: true,
+      }),
+      acc,
+    );
+
+    assert.equal(failure.name, "Read");
+    assert.equal(failure.text, "File does not exist. Did you mean src/index.tsx?");
+  });
+
+  it("keeps a sub-agent's failure the sub-agent's", () => {
+    // Same routing as a forwarded turn's text, and for the same reason: a
+    // failed `Bash` between two of the main thread's lines reads as the main
+    // thread's, which sends the operator to the wrong place for the cause.
+    const delegated = {
+      toolCalls: calls,
+      subagentNames: new Map([["toolu_task", "reviewer"]]),
+    };
+    const block = {
+      type: "tool_result",
+      tool_use_id: "toolu_01",
+      content: "denied",
+      is_error: true,
+    };
+
+    const [onEnvelope] = toolResultFailures(
+      userEvent(block, { parent_tool_use_id: "toolu_task" }),
+      delegated,
+    );
+    assert.equal(onEnvelope.parentToolUseId, "toolu_task");
+    assert.equal(onEnvelope.subagent, "reviewer");
+
+    // The message as a fallback, because a key that moved must fail *towards*
+    // treating a delegated call as delegated.
+    const [onMessage] = toolResultFailures(
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content: [block],
+          parent_tool_use_id: "toolu_task",
+        },
+      },
+      delegated,
+    );
+    assert.equal(onMessage.parentToolUseId, "toolu_task");
+
+    // The main thread's own failure carries neither key, so nothing downstream
+    // can attribute it to a specialist that was never asked.
+    const [own] = toolResultFailures(userEvent(block), delegated);
+    assert.equal(own.parentToolUseId, undefined);
+    assert.equal(own.subagent, undefined);
+  });
+
+  it("records nothing for a result that worked, or a shape that moved", () => {
+    // `run_events` grows without bound and this branch sees every tool result
+    // in the cycle, so anything short of `is_error === true` records nothing.
+    // The direction matters: a renamed field costs the failures, where a
+    // truthiness test on a field that changed meaning costs the whole log.
+    const shapes: Array<Record<string, unknown>> = [
+      { type: "tool_result", tool_use_id: "toolu_01", content: "ok" },
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_01",
+        content: "ok",
+        is_error: false,
+      },
+      {
+        type: "tool_result",
+        tool_use_id: "toolu_01",
+        content: "ok",
+        is_error: "true",
+      },
+      { type: "text", text: "not a tool result at all" },
+    ];
+    for (const block of shapes) {
+      assert.deepEqual(toolResultFailures(userEvent(block), acc), []);
+    }
+  });
+
+  it("survives a build that stops sending the shape", () => {
+    // `permissionDenials`' rule: every field here was captured from one CLI
+    // build, and a cycle must not fail to finish because one of them moved.
+    const events: Array<Record<string, unknown>> = [
+      { type: "user" },
+      { type: "user", message: {} },
+      { type: "user", message: { content: "a string now" } },
+      { type: "user", message: { content: [null, 7, "text"] } },
+    ];
+    for (const ev of events) {
+      assert.deepEqual(toolResultFailures(ev, acc), []);
+    }
+  });
+
+  it("clips the output, because this is a log line and not the output", () => {
+    const [failure] = toolResultFailures(
+      userEvent({
+        type: "tool_result",
+        tool_use_id: "toolu_01",
+        content: "x".repeat(5_000),
+        is_error: true,
+      }),
+      acc,
+    );
+
+    assert.equal(failure.text.length, 600);
+    assert.equal(failure.text.endsWith("…"), true);
   });
 });
 
