@@ -281,11 +281,15 @@ export function guardBadge(
 /**
  * What the operator's own `~/.claude` puts in play whatever a picker picks.
  *
- * The saved registry is a *part* of the set of agents a child can delegate to
- * and never the whole of it: the mounted config directory reaches every child
- * this app spawns, and `--agents` merges with it rather than replacing it. So
- * every surface that offers a choice has to say so, or the picker reads as the
- * complete answer to "which specialists exist here".
+ * The saved registry is a *part* of the set of agents in play and never the
+ * whole of it: the mounted config directory reaches every child this app spawns,
+ * `--agents` merges with it rather than replacing it, and `--agent` resolves its
+ * name against the merged set — so starting a run as a saved agent withdraws
+ * none of them. Every surface that offers a choice has to say so, or the picker
+ * reads as the complete answer to "which agents exist here". The wording stays
+ * "in play whatever you pick here" rather than anything about delegation for
+ * exactly that reason: what these definitions do inside a run is the CLI's
+ * business, and what this sentence knows is that they are still there.
  *
  * One sentence rather than one per surface, for the reason `GET /api/agents`
  * answers with `ambient` beside `agents`: the run form and the workflow canvas

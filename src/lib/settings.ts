@@ -105,8 +105,8 @@ export interface Settings {
    * is deleted afterwards the form says so and starts with none, because the
    * alternative is a new-run page nobody can use until they visit Settings. That
    * is not the "never fall back to none" rule bending: that rule is about a run
-   * whose operator *named* a specialist, and a pre-filled field nobody has
-   * looked at is not a naming. Everything downstream is unchanged — the run door
+   * whose operator *named* an agent, and a pre-filled field nobody has looked
+   * at is not a naming. Everything downstream is unchanged — the run door
    * still refuses a deleted agent by name through `agentRefusal`.
    */
   defaultAgentId: string | null;

@@ -230,7 +230,7 @@ describe("normalizeTemplateInput — target", () => {
  * form that caused it. What makes it worth a test rather than a comment is that
  * the *other* reading is silent — a template naming a deleted agent, quietly
  * saved with none, starts runs that look exactly like runs that were never given
- * a specialist, which is the one shape the whole agent registry exists to end.
+ * an agent, which is the one shape the whole agent registry exists to end.
  */
 describe("normalizeTemplateInput — the agent", () => {
   it("names none by default, and reads blank as none", () => {
@@ -343,7 +343,7 @@ describe("rowToTemplate", () => {
    * The one narrowing this function deliberately does *not* do. An agent that
    * has since been deleted is still what the template says, and the doors that
    * instantiate it refuse it by name; repairing it to null here would turn that
-   * refusal into a run quietly started with no specialist, which is exactly the
+   * refusal into a run quietly started as no agent, which is exactly the
    * failure the refusal exists to prevent.
    */
   it("keeps an agent id whose agent may be gone, rather than repairing it", () => {

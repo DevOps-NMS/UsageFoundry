@@ -1626,7 +1626,7 @@ export interface CreateRunInput {
   /** Give this run its own checkout. Defaults on for a git repository. */
   isolate?: boolean;
   /**
-   * A specialised agent the run's main thread may hand a subtask to.
+   * The saved agent this run is started **as**.
    *
    * The whole definition, resolved from the registry by the caller — the door is
    * where an id becomes a definition or a refusal, exactly as it is where a
@@ -2117,12 +2117,13 @@ export function createRun(input: CreateRunInput): RunRow {
     }
     if (input.agent) {
       // Once, at creation, rather than per cycle: it is a fact about the run
-      // and not about a spawn. "may hand" rather than "runs as" is the literal
-      // truth of `--agents` — it offers the role to the delegating model, which
-      // is what a sub-agent is, and it bounds nothing about what the run may do.
+      // and not about a spawn. "runs as" is now the literal truth —
+      // `sessionAgentArgs` defines the member *and* selects it with `--agent`,
+      // so the saved prompt is this session's own. It still bounds nothing
+      // about what the run may do, which is the second sentence's whole job.
       log(
         id,
-        `Claude may hand a subtask to the “${input.agent.name}” agent. It changes who does a piece of the work, not what this run is allowed to do.`,
+        `This run is started as the “${input.agent.name}” agent, so its prompt is the run's own. It changes who the run is, not what this run is allowed to do.`,
         { agent: input.agent.name },
       );
     }
@@ -2965,7 +2966,7 @@ interface IterationResult {
   finalText: string;
   isError: boolean;
   /**
-   * `tool_use` block id → the specialist that `Task` call handed work to.
+   * `tool_use` block id → the sub-agent that `Task` call handed work to.
    *
    * Parser state rather than a result, and it lives here because this is the
    * only thing that survives from one line of the stream to the next: the id
@@ -3964,7 +3965,7 @@ function handleStreamLine(
           payload: { text: b.text },
         });
       } else if (b.type === "tool_use") {
-        // A `Task` call names the specialist it is handing work to, and its own
+        // A `Task` call names the sub-agent it is handing work to, and its own
         // block id is what every forwarded message from that sub-agent carries.
         // Recorded so those messages can be labelled; per cycle, because the
         // ids are.
@@ -5669,14 +5670,14 @@ export function reopenRun(
     };
   }
 
-  // The specialised agent is carried the same way and more simply: the `agent`
-  // column is not touched here at all, and there is no argument on this function
-  // and no field on the reopen route that could reach it. Same reasoning as
+  // The agent is carried the same way and more simply: the `agent` column is
+  // not touched here at all, and there is no argument on this function and no
+  // field on the reopen route that could reach it. Same reasoning as
   // `permissionMode` below — the operator answered that question when they
   // started the run, and picking it up again is not a second chance to answer
   // it. The definition is the run's own copy, so this is also the one path where
-  // a run whose agent has since been deleted still gets the specialist it ran
-  // with, rather than being refused or quietly losing it.
+  // a run whose agent has since been deleted is still picked up *as* the agent
+  // it ran as, rather than being refused or quietly losing it.
 
   // Carried from the stored blob rather than accepted from the caller: this
   // value reaches `--permission-mode` on a process that edits files, and

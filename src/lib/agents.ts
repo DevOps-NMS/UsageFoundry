@@ -217,14 +217,15 @@ const BUILT_IN_AGENTS = [
  *
  * Refused by name rather than dropped, for `normalizeTemplateInput`'s reason: an
  * operator who typed a tool list and got a saved agent that silently ignored it
- * would believe their specialist was narrowed when it was not.
+ * would believe their agent was narrowed when it was not.
  */
 const TOOLS_REFUSAL =
-  "An agent cannot carry a tool list. What an agent may do comes from the " +
-  "guard set on the run it is delegated inside — the permission mode and this " +
-  "app's own allow and deny lists — and a per-agent list would be a second " +
-  "place that decides it, reachable from a saved record that a chat proposal " +
-  "or a workflow block can name. Remove `tools` and set the guards on the run.";
+  "An agent cannot carry a tool list. What a run may do comes from its own " +
+  "guard set — the permission mode and this app's own allow and deny lists — " +
+  "and since a run is started as the agent it names, a per-agent list would be " +
+  "a second place deciding what the whole session may do, reachable from a " +
+  "saved record that a chat proposal or a workflow block can name. Remove " +
+  "`tools` and set the guards on the run.";
 
 /* ------------------------------------------------------------------ */
 /* Validation — pure, and the reason this file has a test              */
@@ -762,10 +763,11 @@ interface AgentRow {
  *
  * Pure — it takes the row rather than reading one — and it has a job beyond
  * renaming columns, for `rowToTemplate`'s reason: a row outlives the build that
- * wrote it. What it narrows is the pair the CLI drops in silence. A row whose
- * description or prompt is empty would produce a spawn whose specialist is
- * simply absent, so it is reported as `usable: false` rather than repaired with
- * a placeholder. What keeps such a row off an argv is every door reading that
+ * wrote it. What it narrows is the pair the CLI will not register. A row whose
+ * description or prompt is empty would produce a spawn the CLI refuses by name —
+ * and, offered rather than selected, one whose member is simply absent — so it
+ * is reported as `usable: false` rather than repaired with a placeholder. What
+ * keeps such a row off an argv is every door reading that
  * flag through `agentRefusal` and refusing the run by name, plus `parseRunAgent`
  * re-applying the same narrowing to what a run froze — not this function, which
  * only reports.
@@ -831,7 +833,7 @@ export function getAgent(id: string): (SavedAgent & { usable: boolean }) | null 
  * One saved agent by the name it answers to, case-folded as the index is.
  *
  * By name rather than by id because of the one caller that has no id: an
- * orchestrator block's turn names a specialist for a run it is emitting, and
+ * orchestrator block's turn names the agent a run it is emitting starts as, and
  * what that child was shown is a list of *names* — an id is a thing only this
  * app's own forms ever hold, and putting one in front of a model would be
  * inviting it to guess at an identifier. Case-folded because `idx_agents_name`

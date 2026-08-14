@@ -525,8 +525,9 @@ export default function SettingsPage() {
   // The registry, and the definitions this app did not write. Both are needed
   // for one row: the picker offers the first, and the sentence beside it has to
   // declare the second, because `--agents` merges with what the CLI finds on
-  // disk rather than replacing it — so the registry is a part of the set a run
-  // can delegate to and never the whole of it.
+  // disk rather than replacing it and `--agent` resolves against the merged
+  // set — so the registry is a part of what is in play and never the whole of
+  // it, whichever of them a run is started as.
   const [agents, setAgents] = useState<AgentDTO[]>([]);
   const [ambientAgents, setAmbientAgents] = useState<AmbientAgentDTO[]>([]);
   const [agentsLoaded, setAgentsLoaded] = useState(false);
@@ -1353,13 +1354,15 @@ export default function SettingsPage() {
           {/* Beside the model and deliberately not among the guards below. An
               agent carries a description and a prompt — the registry refuses a
               tool list at the door and has no column for a permission mode — so
-              this decides who does part of the work and never what a run is
-              allowed to do. It is an id, so an operator who fixes their
-              reviewer's prompt gets the fixed one on the next run. */}
+              this decides who a run *is* and never what it is allowed to do.
+              Beside the model for a second reason since `--agent`: a saved
+              agent's model is the session's, reached only where the field above
+              is blank. It is an id, so an operator who fixes their reviewer's
+              prompt gets the fixed one on the next run. */}
           <SettingRow
             htmlFor="agent"
             edited={isEdited("defaultAgentId")}
-            label="Default specialist"
+            label="Default agent"
             description={
               describeAmbientAgents(ambientAgents) ??
               "Pre-selected on the new-run form, which can change it or clear it"
@@ -1373,7 +1376,7 @@ export default function SettingsPage() {
                   patch({ defaultAgentId: e.target.value || null })
                 }
               >
-                <option value="">No specialist</option>
+                <option value="">No agent</option>
                 {agents.map((a) => (
                   <option key={a.id} value={a.id} disabled={!a.usable}>
                     {a.name}
@@ -1382,8 +1385,8 @@ export default function SettingsPage() {
                 ))}
                 {/* A default whose agent has been deleted since it was saved.
                     Kept as an option rather than silently reverting the picker
-                    to "No specialist", which would look like the setting had
-                    never been made — and Save then refuses it by name. */}
+                    to "No agent", which would look like the setting had never
+                    been made — and Save then refuses it by name. */}
                 {agentsLoaded &&
                   effective.defaultAgentId !== null &&
                   !agents.some((a) => a.id === effective.defaultAgentId) && (

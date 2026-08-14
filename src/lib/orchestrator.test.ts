@@ -1658,7 +1658,7 @@ describe("failed tool results", () => {
     assert.equal(onMessage.parentToolUseId, "toolu_task");
 
     // The main thread's own failure carries neither key, so nothing downstream
-    // can attribute it to a specialist that was never asked.
+    // can attribute it to a sub-agent that was never asked.
     const [own] = toolResultFailures(userEvent(block), delegated);
     assert.equal(own.parentToolUseId, undefined);
     assert.equal(own.subagent, undefined);

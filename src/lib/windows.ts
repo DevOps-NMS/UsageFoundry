@@ -497,7 +497,7 @@ export interface AgentSpend {
   costGuardUSD: number;
   tokens: number;
   entryCount: number;
-  /** Everything that is not `(main thread)` — what was handed to a specialist. */
+  /** Everything that is not `(main thread)`, whatever put it in another bucket. */
   delegatedCostUSD: number;
   delegatedCostGuardUSD: number;
   /** Cost-descending, main thread included. */

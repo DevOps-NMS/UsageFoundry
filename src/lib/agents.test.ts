@@ -27,7 +27,7 @@ import {
  * That silence was the whole argument for validating here, and the move from
  * `--agents` to `--agent` **keeps the refusals and changes what they buy**. The
  * drop above is a drop from the set `--agent` resolves against, so a member the
- * CLI will not register is no longer a run quietly missing its specialist — it
+ * CLI will not register is no longer a run quietly missing its agent — it
  * is a run whose every work cycle exits non-zero at the spawn, before any
  * request is made:
  *
@@ -189,7 +189,7 @@ describe("agentsFlagValue", () => {
   /**
    * The one that would be silent. `{"model": null}` is legal JSON and an illegal
    * member: the CLI drops the whole agent and carries on, so the run loses its
-   * specialist and nothing anywhere says so. The key is omitted rather than
+   * agent and nothing anywhere says so. The key is omitted rather than
    * nulled, which is the only spelling of "inherit" that survives.
    */
   it("omits model rather than sending null, which would drop the agent", () => {
@@ -344,7 +344,7 @@ describe("rowToAgent", () => {
  * It earns a test on the grounds the rest of this file does, with the failure
  * pointing inwards rather than at the CLI: the alternative to refusing is
  * *falling back to no agent*, which produces a run the operator believes has a
- * specialist and which is bit-for-bit a run that was never given one. That is
+ * agent and which is bit-for-bit a run that was never given one. That is
  * the CLI's own silent drop, reproduced by this app, at the one door built to
  * stop it. Both refusals are also the only thing standing between a template
  * that names a deleted agent and a run started under guards nobody reviewed.

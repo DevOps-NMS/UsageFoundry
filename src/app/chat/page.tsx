@@ -85,7 +85,9 @@ interface MentionToken {
  * **What this is, before what it does.** The chat's child is `claude -p`, so
  * there is no interactive `@` on the wire and nothing here completes into the
  * model's own context: a mention is *text the operator writes*, and what it
- * does is tell the orchestrator which saved agent to propose the work under.
+ * does is tell the orchestrator which saved agent to start the proposed run as.
+ * It names the *run's* agent and never this turn's — the chat's own child is
+ * deliberately started as none, which `chat.ts` argues beside `runTurn`.
  * The orchestrator reads it, calls `list_agents`, and passes an `agentId` to
  * `propose_run` — where the agent is refused by name if it has gone. This app
  * never parses the mention back out of the message, which is why a name with a
@@ -1159,10 +1161,11 @@ function Proposal({
                 {missing ? "template deleted" : proposal.guardsLabel}
               </span>
             </span>
-            {/* Outside the guard mark and never inside it. `--agents` offers a
-                role to the delegating model: it carries no tool list and no
-                permission mode, so a phrase under the shield would claim this
-                bounds something. What it says is who does part of the work. */}
+            {/* Outside the guard mark and never inside it. The agent is what
+                the run will be *started as*, which is a larger fact than the
+                delegation this used to name — and still not a guard: it carries
+                no tool list and no permission mode, so a phrase under the
+                shield would claim it bounds something. */}
             {(proposal.agentName || proposal.agentMissing) && (
               <span
                 className={`inline-flex min-w-0 max-w-full items-center gap-1 ${
@@ -1172,7 +1175,7 @@ function Proposal({
                 <span className="truncate">
                   {proposal.agentName
                     ? `as ${proposal.agentName}`
-                    : "specialist deleted"}
+                    : "agent deleted"}
                 </span>
               </span>
             )}
@@ -1210,13 +1213,13 @@ function Proposal({
         {/* Said in full rather than left to the mark above, because the two
             ways of being unusable read differently and only one of them is
             about deletion: an agent missing its description or its prompt is
-            dropped by Claude Code without a word, so a run started with it
-            looks exactly like a run that was never given one. */}
+            one Claude Code will not register, so a run started as it would
+            fail the moment it spawned. */}
         {proposal.agentMissing && !workflow && (
           <p className="mt-2 text-2xs leading-normal font-medium text-danger">
             {proposal.agentName
               ? `The “${proposal.agentName}” agent is missing its description or its prompt, so approving this will be refused.`
-              : "The specialist this names has been deleted, so approving it will be refused."}
+              : "The agent this names has been deleted, so approving it will be refused."}
           </p>
         )}
       </div>

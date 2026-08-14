@@ -130,8 +130,8 @@ export async function PUT(req: Request) {
       // Refused here rather than stored and discovered later, which is
       // `normalizeTemplateInput`'s rule: this is the door with a person behind
       // it and an error channel, and a default that names an agent Claude Code
-      // would drop in silence is a form that pre-fills a specialist no run will
-      // ever have. `agentRefusal` is the one wording, so this says what the run
+      // will not register is a form that pre-fills a run which dies at the
+      // spawn. `agentRefusal` is the one wording, so this says what the run
       // door and the template door say.
       const refusal = agentRefusal(id, agentKnowledgeOf(getAgent(id)));
       if (refusal) return NextResponse.json({ error: refusal }, { status: 400 });

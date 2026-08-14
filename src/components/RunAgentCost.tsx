@@ -22,8 +22,9 @@ import { Table, Td, Th, Tr } from "@/components/ui/Table";
  * The run page already says what the run spent twice over — `runs.spent_usd`,
  * which is what Claude Code reported for each cycle that finished, and
  * telemetry, which is its own per-request figure. Neither can answer "how much
- * of this went to a specialist", because neither records which agent produced a
- * turn. The transcripts do: `attributionAgent` is on the assistant record
+ * of this did the main thread produce itself", because neither records which
+ * agent produced a turn. The transcripts do: `attributionAgent` is on the
+ * assistant record
  * already, which is why this reading is the *same* source the dashboard meters
  * come from rather than a new one, scoped to one session id.
  *
@@ -92,7 +93,7 @@ export function RunAgentCost({
   // Unknown is never zero. Three different things reach this bar as null — the
   // read has not landed, it failed, or the run has no session to read — and each
   // of them is "we do not know what the split is", which is the hatched
-  // indeterminate bar rather than a delegated share of 0%.
+  // indeterminate bar rather than a share of 0%.
   const share =
     spend && spend.costUSD > 0 ? spend.delegatedCostUSD / spend.costUSD : null;
   const upperShare =
@@ -102,9 +103,16 @@ export function RunAgentCost({
 
   return (
     <>
+      {/* "Outside the main thread" rather than "handed to a specialist",
+          because the figure is literally the spend that did not land in
+          `MAIN_THREAD_BUCKET` and nothing here knows why it did not. Under
+          `--agent` that matters: whether a run started as an agent files its
+          own turns under that agent's name is unmeasured, so a label naming
+          delegation would be a claim this card cannot support the day the
+          answer is "it does". The label says what was counted. */}
       <Meter
         size="compact"
-        label="Handed to a specialist"
+        label="Outside the main thread"
         fraction={share}
         // The gap an unpriced model opens, drawn as the hatched band every other
         // meter here draws it as — the displayed figure stays a floor.

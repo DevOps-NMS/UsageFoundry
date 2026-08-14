@@ -137,7 +137,7 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
         : {
             voice: "subagent",
             tone: "neutral",
-            // The specialist's own name when the `Task` call that opened it was
+            // The sub-agent's own name when the `Task` call that opened it was
             // seen this cycle, and the bare word otherwise — a stream the
             // browser joined late, or a call whose input named no type. Never a
             // tool-use id: that is an identifier for this app, not a speaker.

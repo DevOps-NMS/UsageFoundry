@@ -454,18 +454,18 @@ export interface RunDTO {
 }
 
 /**
- * What a run records about the specialist it carries.
+ * What a run records about the agent it was started as.
  *
- * The agent's own `prompt` is deliberately absent: it is the system prompt of a
- * delegated turn, nothing on the run page acts on it, and this payload is polled
- * every three seconds. The name and the description are what a reader needs —
- * the description because it is the whole of what the delegating model was told
- * when it chose, so it is what explains a delegation that happened.
+ * The agent's own `prompt` is deliberately absent: it is the run's own system
+ * prompt, nothing on the run page acts on it, and this payload is polled every
+ * three seconds. The name and the description are what a reader needs — the
+ * description because it is what the operator read when they chose, so it is
+ * what explains the run they are looking at.
  */
 export interface RunAgentDTO {
   name: string;
   description: string;
-  /** Null means the delegated turn ran on the session's own model. */
+  /** Null means the session ran on the run's own model. */
   model: string | null;
 }
 
@@ -543,7 +543,7 @@ export interface RunTemplateDTO {
   isolate: boolean;
   permissionMode: string;
   /**
-   * The saved agent a run from this template may delegate to, by id.
+   * The saved agent a run from this template is started as, by id.
    *
    * An id rather than a copy, unlike `RunDTO.agent`: a template is applied again
    * and again, so it should follow the agent as the operator edits it. A form
@@ -557,7 +557,7 @@ export interface RunTemplateDTO {
 }
 
 /* ------------------------------------------------------------------ */
-/* Agents: a saved role a run may delegate a subtask to                */
+/* Agents: a saved role a run is started as                            */
 /* ------------------------------------------------------------------ */
 
 /** Bounded for the reason a template name is: it is picked out of a list. */
@@ -566,20 +566,19 @@ export const MAX_AGENT_NAME = 80;
 /**
  * How long an agent's description may be.
  *
- * Not a form-tidiness bound. The description is what the delegating model reads
- * to choose the agent, so it is carried in that model's context for the whole
- * session rather than at the moment of a delegation — it is paid for on every
- * request the run makes, and an unbounded one is a cost multiplier with no
- * ceiling on a run whose spend guards are all denominated in dollars.
+ * Not a form-tidiness bound. A registered agent's description is carried in the
+ * session's context for the whole run — it is paid for on every request the run
+ * makes, and an unbounded one is a cost multiplier with no ceiling on a run
+ * whose spend guards are all denominated in dollars.
  */
 export const MAX_AGENT_DESCRIPTION = 1_000;
 
 /**
- * A saved specialised agent.
+ * A saved agent: a role a run is started as.
  *
  * There is deliberately no tool list, no permission mode and no budget here, and
- * the absence is the design: what an agent may do comes from the guard set on
- * the run it is delegated inside. The reasoning is in `agents.ts` beside the
+ * the absence is the design: what a run may do comes from its own guard set and
+ * never from the role it takes. The reasoning is in `agents.ts` beside the
  * refusal that enforces it.
  */
 export interface AgentDTO {
@@ -587,15 +586,15 @@ export interface AgentDTO {
   name: string;
   description: string;
   prompt: string;
-  /** Null means the delegated turn inherits the session's model. */
+  /** Null means the session keeps whatever model the run already had. */
   model: string | null;
   /**
    * Whether this row can actually be attached to a spawn.
    *
-   * False for a row whose description or prompt is empty — the CLI drops such a
-   * member without a word, so a surface that offered it would be offering a run
-   * a specialist that silently is not there. On the DTO because nothing on the
-   * page can work it out: the row looks complete either way.
+   * False for a row whose description or prompt is empty — the CLI will not
+   * register such a member, so a run started as it fails at the spawn. On the
+   * DTO because nothing on the page can work it out: the row looks complete
+   * either way.
    */
   usable: boolean;
   createdAt: number;
@@ -692,17 +691,17 @@ export interface WorkflowNodeDTO {
    */
   promptOverride: string | null;
   /**
-   * A saved agent this block's own child may hand a subtask to, by id.
+   * A saved agent this block's own child is started as, by id.
    *
    * On the *work* side of the block, beside the mount, the folder and the task,
    * and never on the guard side: an agent holds no tool list and no permission
-   * mode, so what it changes is who does a piece of the work and never what the
-   * block may do. It is the block's own rather than its template's — the reason
-   * is in `WorkflowNode.agentId`.
+   * mode, so what it changes is who the child *is* and never what the block may
+   * do. It is the block's own rather than its template's — the reason is in
+   * `WorkflowNode.agentId`.
    *
    * Null on a merge block always, and naming one there is refused rather than
-   * dropped: that block spawns no child, so there would be nothing to hand a
-   * subtask to.
+   * dropped: that block spawns no child, so there is nothing for the agent to
+   * be.
    */
   agentId: string | null;
   /**
@@ -1308,12 +1307,12 @@ export interface ProposedBlockDTO {
   /** The template's name, or the untemplated guard set written out. */
   guardsLabel: string;
   /**
-   * The specialist this block may hand a subtask to, or null for none.
+   * The agent this block's child is started as, or null for none.
    *
    * Beside the guards and never inside them: an agent holds no tool list and no
-   * permission mode, so it says who does part of the work rather than what the
-   * block may do. `"agent deleted"` for an id the registry no longer has, which
-   * approval refuses by name.
+   * permission mode, so it says who the child is rather than what the block may
+   * do. `"agent deleted"` for an id the registry no longer has, which approval
+   * refuses by name.
    */
   agentLabel: string | null;
   /** Where it runs. Null on a merge block, which names no workspace. */
@@ -1347,19 +1346,19 @@ export interface ChatProposalDTO {
   /** The chat wrote this run's prompt instead of taking the template's. */
   promptRewritten: boolean;
   /**
-   * The saved specialist this run would be handed, by name, or null for none.
+   * The saved agent this run would be started as, by name, or null for none.
    *
    * Null when the id names nothing, because the row holds only an id — the card
    * then says the agent is gone from `agentMissing` rather than inventing a
    * name. The two are separate fields for the same reason `guardsSource` is
-   * separate from `guardsLabel`: "no specialist was asked for" and "the one
-   * that was asked for is gone" are different facts, and approval refuses only
-   * the second.
+   * separate from `guardsLabel`: "no agent was asked for" and "the one that was
+   * asked for is gone" are different facts, and approval refuses only the
+   * second.
    */
   agentName: string | null;
   /**
-   * This proposal names an agent that is gone, or one the CLI would drop.
-   * Approval refuses it by name rather than starting the run without one.
+   * This proposal names an agent that is gone, or one the CLI will not
+   * register. Approval refuses it by name rather than starting the run as none.
    */
   agentMissing: boolean;
   title: string;
