@@ -425,6 +425,35 @@ Built and exercised against real transcripts:
   - **A name with a space registers and resolves** —
     `--agents '{"uf spaced":{…}}' --agent "uf spaced"` — which holds only
     because nothing here goes through a shell.
+- **The `agent` key in `settings.json` selects a session agent, and this app
+  neither passes it nor says it exists.** `claude --help` describes `--agent` as
+  overriding "the 'agent' setting"; nothing here had established whether that
+  setting was real, and the operator's own `~/.claude` is bind-mounted into every
+  child this app spawns. Four probes on the pin against a throwaway
+  `CLAUDE_CONFIG_DIR` holding a copy of the real credentials, one ambient
+  definition (`uf-set-probe`, whose whole prompt was "reply with exactly the
+  single word BANANA"), a second (`uf-set-probe2`, CHERRY) and the same prompt
+  each time, `-p "Say hello." --max-budget-usd 0.20`:
+
+  | settings.json | argv | answer |
+  |---|---|---|
+  | no `agent` key | — | `Hello! 👋 What can I help you with today?` |
+  | `"agent": "uf-set-probe"` | — | `BANANA` |
+  | `"agent": "uf-set-probe"` | `--agent uf-set-probe2` | `CHERRY` |
+  | `"agent": "uf-set-probe"` | `--agents '{"uf-offered":{…}}'` | `BANANA` |
+  | `"agent": "uf-set-typo"` | — | `Hello! 👋 …`, exit 0 |
+
+  So the key is real, the flag outranks it as documented, the **plural** flag
+  does not, and an unresolvable value is *silently ignored* — the opposite
+  direction from `--agent`, which answered `--agent 'uf-set-typo' not found.
+  Available agents: claude, Explore, general-purpose, Plan, statusline-setup,
+  uf-set-probe` and exited 1 before any API call against the same directory.
+  What that leaves: every door in this app that names an agent emits `--agent`
+  and wins, so what the key reaches is every child started as *nobody* — an
+  agentless run, every chat turn, every review (`spawnAssist` is the plural-flag
+  caller), and an orchestrator block whose node names none. It is recorded rather
+  than declared; see the entry below for why and for what declaring it would
+  take.
 
 ## Not yet verified by hand
 
@@ -797,9 +826,19 @@ through before trusting this unattended:
   come back as the list the card renders, whether the commit satisfies
   `ensureWorktree`'s reuse check on the next run into that slot, and whether a
   purged slot is re-created cleanly rather than tripping the "checkout is gone"
-  guard for a run that had already worked in it. `next build` could not be run
-  here at all — it fails with `TypeError: generate is not a function` on the
-  unmodified tree too, so it says nothing either way about these changes.
+  guard for a run that had already worked in it. That entry used to add that
+  `next build` could not be run at all, failing with `TypeError: generate is not
+  a function` on the unmodified tree — which was true and was **not** about this
+  repository. That error is `config.generateBuildId` being undefined, and it is
+  undefined because a run started from inside a UsageFoundry container inherits
+  `__NEXT_PRIVATE_STANDALONE_CONFIG` from the server supervising it: `loadConfig`
+  returns that JSON verbatim instead of loading `next.config.ts` and applying
+  defaults, and a serialized config cannot carry a function. `env -u
+  __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` builds cleanly, standalone
+  output included. Worth knowing before reading a build failure in any run this
+  app spawns as evidence about the tree — the same class of trap as the bare
+  `npm ci` that silently skips devDependencies under this image's
+  `NODE_ENV=production`.
 - **The Live from runs card in a browser, fed by a real telemetry-enabled run.**
   Its query was driven against a real database through the real ingest route and
   its markup was rendered and read, but the batches were synthesised from the
@@ -925,7 +964,13 @@ through before trusting this unattended:
   - **Whether a `--agent` session records that agent's name on its own turns**,
     or leaves them in `(main thread)`. `byAgent` and `agentSpend` report whatever
     the transcript says and infer nothing, so this decides what the two cards
-    read and no branch depends on the answer.
+    read and no branch depends on the answer. Both now say so in words rather
+    than waiting on it: the run's *Agent work* card names what the run was
+    started as and states that the rows may sit wholly under that name or wholly
+    under `(main thread)`, and the dashboard's column is *Agent* rather than
+    *Sub-agent* with a footnote saying `(main thread)` is a turn carrying no
+    agent name. Either answer leaves both correct, which is the point — what
+    would have been wrong is a card whose wording only made sense under one.
   - **Whether a `--agent` session delegates at all.** If it does, the forwarding
     and the split cover it unchanged; if it does not, that machinery goes quiet
     rather than wrong. The ambient definitions reach it either way.
@@ -933,6 +978,23 @@ through before trusting this unattended:
     Deny is verified to beat `--permission-mode` for the main thread and has been
     watched against nothing else. It is why the field is refused at save rather
     than stored and narrowed, under either flag.
+- **Declaring the `settings.json` `agent` key, which is measured (see *Verified*)
+  and deliberately not built.** The fact belongs in the same sentence the ambient
+  definitions get — the registry is a part of the set and not the whole of it —
+  and it is more than a sentence, which is why it is written down instead. What
+  it would take: a read of `$CLAUDE_CONFIG_DIR/settings.json` in `agents.ts`
+  beside `listAmbientAgents` (try/catch to null, that function's rule, since it
+  feeds copy rather than a decision); a field on `GET /api/agents` beside
+  `agents` and `ambient`, and its DTO; a second argument on
+  `describeAmbientAgents` and its four call sites. The awkward half is the copy
+  rather than the plumbing: that sentence sits under a *picker*, and choosing an
+  agent there is exactly what overrides the key — so it would have to be
+  conditional on the control's current value to avoid being false half the time,
+  while the two children where the key actually bites, a chat turn and a review,
+  have no picker to hang it on. The cheap first move is probably not the picker
+  at all but the Settings page, where the app already declares the ambient set
+  once and where "your `~/.claude` starts every agentless child as *X*" is a true
+  sentence with no control to contradict it.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

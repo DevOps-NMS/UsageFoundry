@@ -24,8 +24,8 @@
 **Track the allowance.** Parses Claude Code's own transcripts (`~/.claude/projects/**/*.jsonl`)
 into exact token volumes and costs, and reads your real utilisation percentage
 from the same first-party endpoint `claude /usage` calls. 5-hour window, weekly
-quota, burn rate, projected exhaustion, and breakdowns by model, project,
-sub-agent, skill and reasoning effort.
+quota, burn rate, projected exhaustion, and breakdowns by model, project, agent,
+skill and reasoning effort.
 
 **Spend it deliberately.** Point a run at a folder, give it a task and a budget,
 and it drives `claude -p` headlessly in a loop — re-checking the guard before
@@ -245,6 +245,33 @@ also uses, which definition Claude Code actually runs is **not established
 here**. The app will not pick a winner; it marks the row *name clash* wherever
 that name shows up in a cost table, because you are the only one who can resolve
 it.
+
+There is a second one, and this app does not yet say it anywhere: your
+`settings.json` can name a session agent too. `claude --help` describes `--agent`
+as overriding "the 'agent' setting", and on the pin that setting is real — an
+`agent` key in `~/.claude/settings.json` starts the session as that agent, with
+no flag involved. Because the same `~/.claude` is mounted, it reaches every child
+this app spawns. Measured on 2.1.226, with a probe agent whose whole prompt was
+"reply with exactly BANANA":
+
+| | |
+|---|---|
+| `agent` key set, no flag | `BANANA` — the setting selects the session's agent |
+| key absent | an ordinary greeting |
+| key set, `--agent other` | the other one — the flag wins, as the help says |
+| key set, `--agents` only | `BANANA` — the plural flag does **not** override it |
+| key naming an agent that does not exist | an ordinary greeting, exit 0 — silently ignored, where the same name on `--agent` exits 1 before any API call |
+
+What that means here: a run, block or chat turn this app starts **as** an agent
+is unaffected, because it passes `--agent` and the flag wins. Anything this app
+starts as *nobody* — an agentless run, every chat turn, a review — is started as
+whatever that key names, and no page in this app knows. It is not declared, and
+the reason is under [Not yet verified](docs/verification.md): saying it would be
+a new read, a new field on `/api/agents`, a second argument threaded through the
+one sentence four pickers share — and the sentence would be false on the picker
+that carries it, since choosing an agent there is exactly what overrides the key.
+If you use it, know that clearing an agent picker in this app does not mean the
+run has none.
 
 ### What it costs, and where that shows up
 
