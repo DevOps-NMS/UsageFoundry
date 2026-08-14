@@ -498,11 +498,16 @@ starts nothing; you can edit anything before you run it, and editing the form
 does not write back to the template.
 
 What a template holds is the task, the limits, how it behaves, and — optionally —
-the folder. *Remember the workspace and folder* is a switch on the save row,
-because both answers are right for different tasks: "update the changelog for
-this project" wants a folder recorded, "run the test suite and fix what fails"
-wants to be asked. A template with no folder leaves the picker alone rather than
-guessing.
+the folder and a [specialist](#specialists). *Remember the workspace and folder*
+is a switch on the save row, because both answers are right for different tasks:
+"update the changelog for this project" wants a folder recorded, "run the test
+suite and fix what fails" wants to be asked. A template with no folder leaves the
+picker alone rather than guessing. The specialist it names is a seed for the
+form, resolved when you load the template — so fixing that agent's prompt reaches
+the next run you start from it. Saving a template that names an agent the
+registry does not have is refused outright; one whose agent is deleted afterwards
+is marked in the template list, and *Start run* refuses it by name rather than
+starting a run without a specialist.
 
 Three things it does **not** do, each on purpose:
 
@@ -605,6 +610,175 @@ the guard by some other route.
 
 ---
 
+## Specialists
+
+A **specialist** is a saved agent: a name, a description, a prompt, and
+optionally a model. Attaching one to a run offers it to that run's Claude, which
+may hand a subtask to it — a diff to review, a migration to write out, a search
+to run — and gets back the specialist's answer. The delegated turn happens
+*inside* the run: same process, same working directory, same permission mode,
+same limits, same cost.
+
+The description is what the model reads when it decides whether this is the agent
+for a subtask, so an agent without a good one never gets chosen. The prompt is
+what makes it different from the Claude that would have done the work anyway.
+
+**Naming a specialist changes who does part of the work. It never changes what
+the run may do.** That is the line the whole feature is built on, and it is
+enforced by absence: a saved agent has no tool list, no permission mode, no
+budget, no folder and no isolation choice — there are no columns for them, so
+there is nothing on the wire that could carry one. Everywhere this app shows a
+specialist it is stated *beside* the guards and never among them, because a row
+inside that group would be claiming to bound something it does not.
+
+The one thing an agent does hold that a template deliberately does not is a
+**model**. It is not the same field: a template's would be a second place to set
+the *run's* model, where this is the model one delegated turn runs on, which
+nothing else here can express, and which is the whole reason to keep a cheap
+specialist for the mechanical half of a job. It moves cost, not capability, and
+every cost guard already covers it — a delegated turn's spend arrives on the
+run's own `result` event like any other.
+
+### Defining one
+
+**There is no page for this yet.** The registry is read by four surfaces and
+written by none of them, so every picker below is empty until you create a row
+by hand:
+
+```bash
+curl -sX POST localhost:3000/api/agents \
+  -H 'content-type: application/json' \
+  -d '{
+    "name": "reviewer",
+    "description": "Reviews a diff for correctness bugs. Use before landing.",
+    "prompt": "You review changes. Report what is wrong and nothing else.",
+    "model": "claude-sonnet-5"
+  }'
+```
+
+`GET` lists them, `PUT /api/agents/<id>` replaces one, `DELETE` removes one. With
+`UF_AUTH_TOKEN` set, send it as a bearer token like any other route.
+
+Three things are refused when you save because Claude Code accepts them
+**silently** and then behaves as though you had named no agent at all — exit 0,
+nothing on stderr, nothing in the run log, and a run that is bit-for-bit one that
+was never given a specialist:
+
+- **No description**, or **no prompt**. Either one and the member is dropped.
+- **No name**, which registers as an empty entry rather than as an error.
+- **A name Claude Code already answers to** — `claude`, `Explore`,
+  `general-purpose`, `Plan`, `statusline-setup`. Such a member either does
+  nothing while you believe it is in play, or replaces a built-in the main thread
+  delegates to, and nothing says which.
+
+A fourth is this tool's own decision rather than the CLI's: **a `tools` list**.
+`--agents` members accept one and this refuses to store one, because what an
+agent may do comes from the guard set on the run it is delegated inside.
+Accepting it would put a capability inside a record that a chat proposal or a
+workflow block can name, which is exactly the line above. It is refused by name
+rather than dropped, so nobody ends up believing their specialist is narrowed
+when it is not.
+
+`model` is free-form — an alias (`sonnet`), a full id, or omitted to inherit the
+run's. Blank means inherit; it is never sent as a JSON `null`, which is a fifth
+thing the CLI drops without a word.
+
+### Where one can be chosen
+
+| Surface | What it names | When it is resolved |
+|---|---|---|
+| New-run form → *Specialist* | the run's own | at *Start run* |
+| Settings → *Default specialist* | what the run form starts on | pre-filled, and you can change or clear it |
+| A template | what the run form starts on when you load it | at load |
+| Workflow block (a run block, or a deciding block's own turn) | that block's child | at each press of *Run* |
+| A deciding block's emitted runs | one per run, by name, chosen by the block | as each run is created |
+| Orchestrator chat | the proposed run's | at *Approve* |
+
+In the chat, type `@` in the composer to insert a name — Tab inserts, Enter still
+sends. The mention is ordinary text; what makes it work is that the chat can read
+the registry and proposes the run under the agent you named. The proposal card
+says which specialist it will run under, outside the guard line.
+
+A **merge block** is the one place naming a specialist is refused rather than
+ignored: it starts no agent, so there would be nothing to hand a subtask to.
+
+**A specialist that has been deleted, or that has decayed into something Claude
+Code would drop, is refused by name at every one of those doors — never quietly
+replaced with none.** You started the run that said "and hand the review to the
+reviewer"; a run that silently has no specialist is indistinguishable afterwards
+from a run that was never given one, and that is the failure the whole registry
+exists to prevent. The single exception is the Settings default: if the agent it
+names is deleted later, the new-run form starts with no specialist and *says so*,
+because the alternative is a page nobody can start a run from until they visit
+Settings.
+
+A run keeps a **copy** of the definition it was given, so editing or deleting the
+agent afterwards cannot reach a run already in flight, and picking that run back
+up months later still gives it the specialist it ran with. Everything that is
+form input — a template, a workflow block, a chat proposal, the Settings
+default — keeps a **reference**, so fixing your reviewer's prompt reaches the
+next run started from it.
+
+### The agents you already have
+
+Your own `~/.claude/agents/` is mounted into the container, so anything defined
+there already reaches every run, chat turn, deciding block and review this app
+spawns — and always has, since before this feature existed. An isolated run's
+checkout carries the repository's own `.claude/agents/` for the same reason.
+Naming a saved agent **merges** with that set rather than replacing it.
+
+They are deliberately left in play. The only way to exclude them on this CLI is
+`--setting-sources` with an empty value, and that flag governs settings *whole* —
+it would take your `settings.json`, your hooks, your permissions and your
+environment out of every run along with the agents, which is a much bigger change
+than the one being made and one nothing would report. So instead the app
+*declares* them: every picker says what else is in play beside it ("Your own
+~/.claude also carries 5 agents (reviewer, tidier, docs and 2 more), in play
+whatever you pick here"), and the chat's `list_agents` reports them as a group
+that cannot be named.
+
+One consequence worth knowing: if you save an agent under a name a file on disk
+also uses, which definition Claude Code actually runs is **not established
+here**. The app will not pick a winner; it marks the row *name clash* wherever
+that name shows up in a cost table, because you are the only one who can resolve
+it.
+
+### What it costs, and where that shows up
+
+A delegated turn is billed to the run that delegated it, and every guard already
+covers it: the run's spend limit, its cycle cap, the window guards, the workflow
+budget. There is no separate ceiling for a specialist and no way for one to
+extend a run.
+
+Three places make the work visible.
+
+**The run log.** A sub-agent's output is forwarded into the run's stream and set
+apart — indented behind a rule, under the specialist's name — so it can be read
+as somebody else answering a question the main thread asked. Without it a
+delegation is a `Task` call followed by silence for as long as the sub-agent
+takes. A sub-agent's words are never the run's own report and can never end the
+run: the `DONE` test runs against the main thread only. Turn it off in
+Settings → *Sub-agent output in the run log* if you would rather have the shorter
+log; the switch exists mostly because the CLI rejects a flag it does not know, so
+a future pin that drops this flag would otherwise fail every run at the spawn.
+
+**The run page's *Agent work* card.** What this run's turns cost, split by who
+produced them, priced from your own transcripts for that run's session — so every
+turn lands in a row and the rows add up. It is a *third* reading beside what the
+CLI reported and what telemetry reported, never added to either: all three
+measure the same work by different routes, so summing any pair double-counts it.
+A run with no session yet reads as the hatched indeterminate meter, not as 0%.
+
+**The dashboard's by-agent breakdown**, which now says where each name's
+definition lives: *saved* for one in this registry, *on disk* for one only your
+`~/.claude` has, *name clash* for both. Unmarked is the ordinary case — a Claude
+Code built-in, a repository's own `.claude/agents`, or an agent since deleted —
+and the card says so in a footnote. The bucket a turn lands in is whatever Claude
+Code recorded on it; the mark is a fact about your registry, so renaming a saved
+agent moves no money between rows.
+
+---
+
 ## Workflows
 
 A **workflow** is a saved graph of run blocks. Pressing *Run* on one creates
@@ -622,9 +796,17 @@ reconcile a conflict; it too has [a section](#a-block-that-lands-the-work).
 
 ### What a block holds, and what it does not
 
-A block holds the **work**: a name, a workspace and folder, a task, and
-optionally a prompt that replaces its template's own for this block. That is the
-whole list, and the omission is the point.
+A block holds the **work**: a name, a workspace and folder, a task, optionally a
+prompt that replaces its template's own for this block, and optionally a
+[specialist](#specialists) its own child may hand a subtask to. That is the whole
+list, and the omission is the point.
+
+The specialist is on the block rather than inherited from its template, for the
+reason the folder is: a template edited months later would otherwise move a saved
+block's work somewhere nobody looked. It carries no capability, so it is stated
+outside the guard clause in the inspector's one-sentence summary of what a press
+of *Run* is approved against — and it is refused on a **merge** block, which
+starts no agent to hand anything to.
 
 A block does **not** hold a budget, a permission mode, an isolation choice or a
 model. It **names a template**, and every guard comes from that template; a block
@@ -669,12 +851,18 @@ cannot be saved, for the same reason a run with no work-cycle limit and no time
 limit cannot be started: the number is the whole of what you agreed to, and
 without one you agreed to an unbounded number of agents.
 
-Its emit tool carries four fields per run — a title, the task, a folder, and
-which of its siblings that run should start after — and there is no fifth. There
-is no argument on it that names a template, a budget, a permission mode or an
-isolation choice, so the sentence above holds by construction rather than by the
-model's cooperation. A folder outside the block's own workspace is refused by
-name; so is a set of runs that would wait for each other in a loop.
+Its emit tool carries five fields per run — a title, the task, a folder, a
+[specialist](#specialists) by name, and which of its siblings that run should
+start after — and there is no sixth. There is no argument on it that names a
+template, a budget, a permission mode or an isolation choice, so the sentence
+above holds by construction rather than by the model's cooperation. The
+specialist is on the work side of that line rather than an exception to it: an
+agent is a description and a prompt, so naming one decides who does a piece of
+the work exactly as the task text beside it decides what the work is. A folder
+outside the block's own workspace is refused by name; so is a set of runs that
+would wait for each other in a loop; so is a specialist this install does not
+have. The block's own deciding turn can be given one too — that is the
+*Specialist* row on the block itself.
 
 **A block that emits nothing stops what is behind it.** "There is nothing worth
 doing" is a real answer and the block is allowed to give it. But a block set to
@@ -1103,6 +1291,21 @@ run when the template nearly fits — the card marks it — and `save_template` 
 write a prompt back for reuse. Neither can touch a guard: a new template takes
 your default guard set, and an existing one keeps the guards it already has.
 
+**Who does the work is the other half it may write, and it is the same kind of
+act.** A proposal can name a [specialist](#specialists) for the run it proposes,
+and a proposed workflow can name one per block. That is not a third exception: an
+agent is a description and a prompt, so it decides *who* does a piece of the work
+and never what the run may do, and the card says it on the line that already
+carries the folder and the guard set — outside the guard mark, because a phrase
+under the shield would be claiming it bounds something. Type `@` in the composer
+to name one yourself; Tab inserts, Enter still sends. An agent deleted between
+the card and the click is refused by name rather than started without.
+
+The chat's *own* turn is never given a specialist, and that asymmetry is
+deliberate: it is the only child here whose boundary is the paragraph in its
+system prompt telling it to look and propose rather than build, and whether that
+appended text reaches a delegated turn is not established.
+
 **The approval is per batch and there is no way to turn it off.** Not a setting
 left switched on by default — there is no setting. The route takes the explicit
 list of proposals the page was showing when you clicked, so anything the chat
@@ -1380,6 +1583,15 @@ the window total instead of quietly omitting a remainder. Effort is typically
 the largest single lever; excluding sub-agent turns in Settings empties the
 by-agent table, which the card says outright.
 
+The by-agent table also marks **where each name's definition lives** — *saved*,
+*on disk*, *name clash* — so an agent you wrote down and a name that came from
+somewhere else stop reading alike. The mark is a fact about your registry and
+never about the turn: the bucket stays whatever Claude Code recorded, so renaming
+a saved agent moves no money between rows, it only stops the mark matching.
+Unmarked is the ordinary case and means nothing was found here — a built-in, a
+repository's own `.claude/agents`, or an agent since deleted. The same split for
+a single run is on its page, under *Agent work*; see [Specialists](#specialists).
+
 **Usage by period (day / week / month).** The two meters answer *may I start a
 run right now*; the **Usage by period** card answers *what has this been
 costing me*. It cuts the same deduplicated, same-priced entries into calendar
@@ -1481,6 +1693,14 @@ mounted code. Treat it as privileged.
   controls, and this app's own git never touches the network. The credential
   helper is scoped to `https://github.com`, so another host asking for
   credentials gets none.
+- A **specialist grants nothing**. A saved agent holds a description, a prompt
+  and optionally a model; a tool list is refused when you save it and there is no
+  column for a permission mode, so naming one — from the run form, a template, a
+  workflow block, or a model writing a chat proposal — cannot widen what a run
+  may do. The two routes to `--permission-mode` stay the two they were. What a
+  child may delegate to is also never assembled from a request: the wire carries
+  an **id** and the definition is looked up, so an agent nobody saved cannot be
+  named.
 
 ---
 
@@ -1501,6 +1721,9 @@ src/lib/
   land.ts          merge preview, landing, branch deletion, branch inventory
   chat.ts          the orchestrator chat (a fourth, deliberate child process),
                    and the shared spawn a workflow's deciding block reuses
+  agents.ts        saved specialists — form input, never a run: a role a spawn
+                   may offer, one --agents pair through one encoder, and the
+                   agents on disk this app did not write and does not exclude
   workflows.ts     saved graphs of run blocks — form input, never a run; and
                    the blocks that decide what to run, which are not
   schedules.ts     when a saved workflow presses its own Run — the one place
@@ -1509,7 +1732,7 @@ src/lib/
   db.ts            SQLite (runs, events, reviews, chats, proposals, workflows,
                    schedules, settings)
 src/app/api/       usage · account · runs · branches · calibrate · settings ·
-                   folders · chat · mcp · workflows
+                   folders · chat · mcp · workflows · agents
 ```
 
 Transcripts are re-read incrementally: only bytes appended since the last scan
@@ -1903,6 +2126,38 @@ Built and exercised against real transcripts:
   `/workflows/<id>` and `/workflows/<id>/edit` all answered 200, and the
   canvas — the palette, the empty state and the selection panel — is in the
   server-rendered HTML of `/workflows/new`.
+- **The three CLI flags the specialists feature rests on, read off the pin
+  itself** (`@anthropic-ai/claude-code@2.1.226`, the version in the image and the
+  one installed where this was checked). `--agents <json>` exists and its own
+  help gives the shape as
+  `'{"reviewer": {"description": "Reviews code", "prompt": "You are a code
+  reviewer"}}'` — exactly what `agentsFlagValue` emits, keyed by name, with
+  `description` and `prompt` as plain strings. `--agent <agent>` is documented as
+  *"Agent for the current session. Overrides the 'agent' setting"*, which is the
+  whole reason the plural flag is the one wired: it offers a role rather than
+  replacing the session's own. `--forward-subagent-text` is documented as
+  forwarding *"subagent text and thinking blocks as assistant/user messages with
+  `parent_tool_use_id` set (only works with `--print` and
+  `--output-format=stream-json`)"* — which names the key `handleStreamLine`
+  routes on, and the two flags `buildArgs` supplies unconditionally, so the
+  setting can never be carried into a spawn that would ignore it. The shipped
+  binary also carries `statusline-setup`, `general-purpose`, `subagent_type`,
+  `parent_tool_use_id` and the `--agent '…' not found. Available agents:` refusal
+  the built-in list was read from. That is a **documentation and strings** check,
+  not a spawn: see the *Not yet verified* entry for what a real `--agents` run
+  would still show.
+- The specialists work is covered by 753 passing unit tests (`npm test`) and a
+  clean `npm run typecheck`, including `agents.ts` end to end — every refusal
+  `normalizeAgentInput` gives, the `--agents` payload `agentsFlagValue` builds
+  (model omitted rather than nulled, duplicates collapsed first-wins), what
+  `rowToAgent` calls unusable, the one `agentRefusal` wording, what a run's frozen
+  copy reads back as, and how an agent file's frontmatter is read — plus the
+  refusal at each door that can name one (the run door, a template, the settings
+  default's probe, a chat proposal, a saved graph, a proposed graph, a block, and
+  an emitted spec), that a chosen specialist reaches `buildArgs` as one
+  `--agents` pair and moves nothing else on the argv, that a sub-agent's words
+  never become a cycle's report, and that every turn still lands in a `byAgent`
+  bucket with its origin annotated rather than its bucket moved.
 
 ### Not yet verified by hand
 
@@ -2355,6 +2610,55 @@ through before trusting this unattended:
   run. The cheapest way to exercise it is to delete a mount from
   `WORKSPACE_ROOTS` between the pre-flight and the pass, which is not a thing an
   operator can do; short of that, read it rather than trust it.
+- **Every part of specialists that is not a pure function.** `agents.ts` is unit
+  tested in full and the doors that can name one are tested at each door (see
+  *Verified*), and the three flags were read off the pinned CLI's own help — but
+  **no `claude` child has ever been spawned with `--agents` from this app or by
+  hand.** Everything below follows from that one gap, and it is the list to work
+  through before trusting a specialist to do any of the work:
+
+  - **The five silent drops the whole module is shaped around** — a member with
+    no `description`, one with no `prompt`, one whose `model` is JSON `null`, an
+    empty name, and a `--agents` value that is not JSON — were measured by the
+    run that built the feature and have **not** been re-measured since. They are
+    the reason `normalizeAgentInput` refuses what it refuses; if any of them is
+    wrong, the refusal is stricter than it needs to be, which is the safe
+    direction but is still a form saying no for a reason that has stopped being
+    true.
+  - **That `--agents` merges with `~/.claude/agents/` rather than replacing it.**
+    Same provenance, same caveat. If it replaces instead, then naming a
+    specialist silently withdraws every ambient agent from that run — the
+    opposite of what every picker in the app says.
+  - **Which definition wins when a saved agent and a file on disk share a name.**
+    Deliberately unestablished: the app marks the row *name clash* rather than
+    picking a winner. Worth resolving once, because it is the only place two
+    definitions can both plausibly be in play.
+  - **That a delegated turn is bound by the run's own guards.** The design rests
+    on it — the permission mode, `--allowedTools`, and the `pkill`/`killall`
+    deny — and it is *reasoned* from the delegation happening inside the same
+    process, not measured. The deny list is the one to check first: deny is
+    verified to beat `--permission-mode` for the main thread and has never been
+    watched applying to a sub-agent's turn. This is also why a `tools` field is
+    refused at save rather than stored and narrowed.
+  - **A forwarded sub-agent line off a real stream.** No `parent_tool_use_id` has
+    been parsed from a live CLI. The parser reads it off the envelope and falls
+    back to the message, which is the direction that fails safe, but the fallback
+    has never fired. Two things to watch on the first real delegation: that the
+    forwarded text is set apart under the specialist's name rather than folded
+    into the run's own report, and that a sub-agent writing `DONE` on a line of
+    its own does not end the run.
+  - **Every browser surface.** Nothing has rendered the run form's *Specialist*
+    row, the Settings default, the canvas inspector's specialist row, the chat's
+    `@` popover, the run page's *Agent work* card, or the *saved* / *on disk* /
+    *name clash* chips on the dashboard. `npm run typecheck` and `npm test` pass;
+    `next build` fails here with the same `TypeError: generate is not a function`
+    this README already records against an unmodified tree, and Docker is
+    unavailable, so neither says anything either way.
+  - **`/api/agents` against a running server.** The routes typecheck and the
+    functions under them are tested, but no request has created, edited or
+    deleted a row over HTTP — which matters more than usual here, because **there
+    is no page for the registry**: those routes are the only way to define a
+    specialist at all, so a `curl` round trip is the first thing to run.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
@@ -2363,8 +2667,9 @@ work cycle spawns with, the GitHub credentials handed to a work cycle, how a
 run's diff is parsed and budgeted, whether a saved graph of run blocks can run at
 all and the order its runs are created in, when a branch may be landed, what a
 queued merge does with the branch it reaches, what counts as a conflict marker — both
-for deciding whether one was really resolved and for deciding what to show — and
-the two renderings that would lie quietly about a number: an unconfigured
+for deciding whether one was really resolved and for deciding what to show —
+what a saved specialist may be and what happens at each door that can name one,
+and the two renderings that would lie quietly about a number: an unconfigured
 ceiling, and a first-party figure shown beside the meters. Two entries are
 neither a function nor a rendering: the order a chat's thread renders in, driven
 against a real database because what it pins is in the SQL rather than in any
