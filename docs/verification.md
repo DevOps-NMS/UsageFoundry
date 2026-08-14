@@ -394,6 +394,26 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **`/api/status` against a real fleet, and the structured lines on real
+  stdout.** The route is driven by `npm test` against a seeded database — the
+  counts, the documented keys, the read-only credential, the absence of prompts,
+  paths and tokens, and a checkout store's bytes — but every one of those is a
+  throwaway directory with six rows in it. What has **not** happened is a poll
+  against an install with runs in flight, so the cost of the snapshot and the
+  checkout walk at that size is reasoned from the cap and the five-minute cache
+  rather than measured. Nor has any browser rendered the restart banner on the
+  runs page, and no monitoring system has scraped a single JSON line. Before
+  trusting it:
+
+  ```
+  curl -s -H "Authorization: Bearer $UF_STATUS_TOKEN" \
+    http://127.0.0.1:3000/api/status | jq .
+  docker logs usagefoundry --since 1h | grep '^{' | jq -c .
+  ```
+
+  and confirm that no line carries a prompt, a folder path or a token, and that
+  `stores.partial` is false (or that the figure is understood as a floor when it
+  is not).
 - **The container's `HEALTHCHECK`.** `GET /api/health` is driven in both
   directions by `npm test` — 200 with counts, and 503 with the database handle
   throwing — and `src/lib/deployment.test.ts` pins the `HEALTHCHECK` directive

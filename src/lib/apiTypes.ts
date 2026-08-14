@@ -354,6 +354,21 @@ export interface RunDependencyDTO {
   continueBranch?: boolean;
 }
 
+/**
+ * The last time a restart closed runs out, as the runs list reads it.
+ *
+ * On the wire because the alternative was one `console.warn` at boot: twenty-
+ * five runs terminated, each needing an operator to pick it up by hand, into a
+ * stream nobody is tailing — and afterwards a screen full of `failed` runs with
+ * nothing in this app saying they died together and why. `closed` is what the
+ * boot ended; `kept` is the parked runs it deliberately spared.
+ */
+export interface BootReconcileDTO {
+  at: number;
+  closed: number;
+  kept: number;
+}
+
 export interface RunDTO {
   id: string;
   /** Absolute, canonicalised folder the operator picked. */

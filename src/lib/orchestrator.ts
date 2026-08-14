@@ -36,6 +36,8 @@ import {
   noteLiveTickFailure,
   noteSweep,
   noteSweepFailure,
+  opsLog,
+  recordOpsEvent,
 } from "./ops";
 // The log's own extraction of what a tool call is about, so the parser retains
 // the same line for a call whose result comes back an error. Client-safe and
@@ -321,6 +323,65 @@ function emit(e: RunEvent) {
   const published: PersistedRunEvent = { ...e, id: Number(written.lastInsertRowid) };
   bus.emit(e.runId, published);
   bus.emit("*", published);
+  logLifecycle(published);
+}
+
+/**
+ * A second sink, after the publish and never before it.
+ *
+ * Persist-then-publish is what makes an SSE reconnect lossless, so this is an
+ * addition at the end rather than a reordering. What it adds is a machine-
+ * readable line for the handful of events that describe a run's *life* — it
+ * started a cycle, a guard refused it, it finished, it broke — because at
+ * twenty-five unattended runs the run page is not where anyone finds that out.
+ *
+ * It **projects** rather than serialising the payload, and that is the whole of
+ * why it is a function and not `JSON.stringify(e)`: `iteration` carries the
+ * entire prompt, the creation `status` carries the folder, and `assistant`
+ * carries the model's own output. Container stdout is a different audience with
+ * a different lifetime from `run_events`, and every one of those would be on it.
+ *
+ * The kinds left out are the noisy ones — `log`, `assistant`, `subagent`,
+ * `tool` — which at this scale would be a stream nobody can read, defeating the
+ * point. `run_events` still has all of them.
+ */
+function logLifecycle(e: PersistedRunEvent): void {
+  const p = e.payload;
+  const num = (k: string): number | null =>
+    typeof p[k] === "number" ? (p[k] as number) : null;
+  const str = (k: string): string | null =>
+    typeof p[k] === "string" ? (p[k] as string).slice(0, 300) : null;
+
+  switch (e.kind) {
+    case "status":
+      opsLog("info", "run.status", { run_id: e.runId, status: str("status") });
+      return;
+    case "iteration":
+      opsLog("info", "run.cycle_started", { run_id: e.runId, cycle: num("n") });
+      return;
+    case "budget":
+      if (p.allowed === true) return; // an allowed guard is the ordinary case
+      opsLog("warn", "run.guard_tripped", {
+        run_id: e.runId,
+        code: str("code"),
+        disposition: str("disposition"),
+        reason: str("reason"),
+      });
+      return;
+    case "result":
+      opsLog("info", "run.cycle_finished", {
+        run_id: e.runId,
+        subtype: str("subtype"),
+        cost_usd: num("costUSD"),
+        duration_ms: num("durationMs"),
+      });
+      return;
+    case "error":
+      opsLog("error", "run.error", { run_id: e.runId, message: str("message") });
+      return;
+    default:
+      return;
+  }
 }
 
 function log(runId: string, message: string, extra: Record<string, unknown> = {}) {
@@ -5898,5 +5959,12 @@ export function reconcileOnBoot(): void {
       `[usagefoundry] Kept ${kept} paused run(s); they resume when their 5-hour window clears.`,
     );
     startSweeper();
+  }
+  if (closed > 0 || kept > 0) {
+    // Kept as a row as well as said out loud. Twenty-five runs terminated, each
+    // needing an operator to pick it up by hand, was one `console.warn` into a
+    // stream nobody is tailing — after which nothing in this app could answer
+    // "why is everything failed" at all. `RunsPage` reads the newest of these.
+    recordOpsEvent("warn", "boot.reconciled", { closed, kept });
   }
 }

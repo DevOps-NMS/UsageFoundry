@@ -98,6 +98,61 @@ your supervisor's job, and it is left to you deliberately — a restart here mar
 every in-flight run `failed` and leaves the cycle it was mid-way through
 unreconciled.
 
+**`GET /api/status`** — what the fleet is *doing*: queue depth, how long the
+oldest queued run has waited, the two live windows' spend and fractions, the
+three stores' sizes, sweeper liveness, and the last restart's reconciliation
+count. Set **`UF_STATUS_TOKEN`** in `.env` to give it a read-only credential of
+its own; that is what a monitor should hold, because `UF_AUTH_TOKEN` is the
+token that can also start billed agents.
+
+```bash
+curl -s -H "Authorization: Bearer $UF_STATUS_TOKEN" \
+  http://127.0.0.1:3000/api/status | jq .
+```
+
+With `UF_STATUS_TOKEN` unset the route is not exempt from the ordinary gate at
+all — a monitor gets a 401 rather than the endpoint being public.
+
+### What to alert on
+
+Every one of these is a field on `/api/status`. The thresholds are a starting
+point; the *conditions* are the ones that have gone wrong here.
+
+| Condition | Field | Suggested threshold |
+|---|---|---|
+| The queue is backing up | `queue.depth` | `> 10`, or `> maxConcurrentRuns × 2` |
+| A run has been queued and never started | `queue.oldestQueuedAgeSeconds` | `> 3600` |
+| Parked runs are not being reconsidered | `sweeper.lastTickAgeSeconds` | `> 180` while `runs.paused > 0` |
+| Every sweep is failing (parked runs never resume) | `sweeper.failures` | any increase |
+| A live guard has stopped reading | `liveGuard.failures` | any increase |
+| The 5-hour allowance is nearly spent | `windows.session.guardFraction` | `> 0.9` |
+| The weekly allowance is nearly spent | `windows.weekly.guardFraction` | `> 0.9` |
+| The database is growing without bound (#62) | `stores.databaseBytes` | `> 2e9` |
+| Checkouts are filling the disk (#69) | `stores.checkoutsBytes` | site-specific — compare against free space |
+| Transcripts are filling the disk (#95) | `stores.transcriptsBytes` | site-specific |
+| A restart terminated runs | `lastBootReconcile.closed` | `> 0` — each one needs picking up by hand |
+| Another process took the data directory | `dataDirOwned` | `false` |
+
+A `guardFraction` of `null` means *no ceiling is configured and the provider
+reported nothing* — it is not zero, and an alert that treats it as a number will
+read a window nobody can measure as a window at rest.
+
+### Logs
+
+Lifecycle events are written to container stdout as **one JSON object per
+line**, beside the existing `[usagefoundry] …` prose:
+
+```json
+{"ts":"2026-08-14T09:12:03.114Z","level":"info","event":"run.cycle_finished","run_id":"…","subtype":"success","cost_usd":0.42,"duration_ms":183422}
+```
+
+`run.status`, `run.cycle_started`, `run.cycle_finished`, `run.guard_tripped`,
+`run.error`, `sweep.failed`, `live_guard_tick.failed`, `boot.reconciled`. The
+noisy kinds — the agent's own output, every tool call, every log line — are
+deliberately **not** on stdout; they are in `run_events` and on the run page,
+where they are readable. What is on stdout is projected field by field rather
+than dumped, so no prompt text, folder path or credential reaches it.
+
 ---
 
 ## Read this before you trust a number

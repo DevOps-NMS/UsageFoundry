@@ -9,6 +9,8 @@ import {
   type DependencyEdge,
   type RunDependencyInput,
 } from "@/lib/orchestrator";
+import { recentOpsEvents } from "@/lib/ops";
+import type { BootReconcileDTO } from "@/lib/apiTypes";
 import { PERMISSION_MODES, type PermissionMode } from "@/lib/settings";
 import { resolveAgentForRun, runAgentDTO } from "@/lib/agents";
 import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
@@ -42,7 +44,17 @@ export async function GET() {
       queuePosition: r.status === "queued" ? queuePosition(r.id) : undefined,
     };
   });
-  return NextResponse.json({ runs });
+  // Beside the runs rather than on a route of its own: it is the explanation
+  // for the rows in that list, and this is the one the page already polls.
+  const boot = recentOpsEvents(1, "boot.reconciled")[0] ?? null;
+  const lastBootReconcile: BootReconcileDTO | null = boot
+    ? {
+        at: boot.ts,
+        closed: Number(boot.detail.closed ?? 0),
+        kept: Number(boot.detail.kept ?? 0),
+      }
+    : null;
+  return NextResponse.json({ runs, lastBootReconcile });
 }
 
 /**

@@ -851,6 +851,27 @@ function migrate(db: Database.Database) {
   // the model.
   addColumn(db, "workflow_instance_blocks", "reply", "TEXT");
   addColumn(db, "workflow_instance_blocks", "notes", "TEXT");
+
+  // Things that happened to the *server* rather than to a run.
+  //
+  // `run_events` is per run and cascades with it, so the one moment there is
+  // nothing to attach to is the moment worth recording: a restart that closed
+  // out every run it found. That was one `console.warn` into a stream nobody
+  // tails — twenty-five runs terminated, each needing a manual reopen, reported
+  // once and then unanswerable. This is where it is kept so a page can say it.
+  //
+  // `detail` is JSON and holds counts, never prose about a folder or a prompt:
+  // the status endpoint is read by a monitor, and rows here are what it reads.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ops_events (
+      id     INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts     INTEGER NOT NULL,
+      level  TEXT NOT NULL,
+      event  TEXT NOT NULL,
+      detail TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ops_events_event ON ops_events(event, ts);
+  `);
 }
 
 /**

@@ -61,6 +61,24 @@ export function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
+  // The monitor's route, and the third and last exemption. Conditional, which
+  // is what makes it different from the two above: it is exempt only while a
+  // *separate* read-only credential exists for it to check, and `/api/status`
+  // checks that credential itself.
+  //
+  // The credential is the whole reason this is not simply behind the gate. The
+  // token above is the one that can start billed agents, so polling any other
+  // route from a monitoring system means handing a scraper the master key.
+  // `UF_STATUS_TOKEN` reaches this route and nothing else. Unset, there is no
+  // exemption and the ordinary gate applies — the safe direction, since an
+  // operator who never configured one gets a 401 rather than a public endpoint.
+  //
+  // Keep this line and the check in that route together, exactly as with
+  // `/api/mcp` above.
+  if (pathname === "/api/status" && (process.env.UF_STATUS_TOKEN ?? "") !== "") {
+    return NextResponse.next();
+  }
+
   const cookie = req.cookies.get(COOKIE)?.value ?? "";
   if (cookie && timingSafeEqual(cookie, token)) return NextResponse.next();
 

@@ -36,6 +36,11 @@ services:
     environment:
       # Set to a long random string to require a token in the UI.
       UF_AUTH_TOKEN: "${UF_AUTH_TOKEN:-}"
+      # Optional: a read-only credential for /api/status, so a monitor can poll
+      # queue depth and spend without holding the token above — which is the one
+      # that can also start billed agents. Blank leaves that route behind the
+      # ordinary gate rather than open.
+      UF_STATUS_TOKEN: "${UF_STATUS_TOKEN:-}"
       # Optional: enables the API-account panel. Needs an org Admin key.
       ANTHROPIC_ADMIN_KEY: "${ANTHROPIC_ADMIN_KEY:-}"
       # Optional: what a run uses to push, open a PR, or read an issue. The
