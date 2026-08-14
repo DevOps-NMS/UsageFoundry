@@ -16,6 +16,7 @@ import {
   type WorkflowKnowledge,
 } from "../../../lib/workflows";
 import { getTemplate } from "../../../lib/templates";
+import { getAgent } from "../../../lib/agents";
 import { chatGuards } from "../../../lib/settings";
 import { mountById } from "../../../lib/config";
 import { fmtUSD } from "../../../lib/format";
@@ -101,6 +102,13 @@ function proposalDTO(
   known: WorkflowKnowledge | null,
 ): ChatProposalDTO {
   const template = p.template_id ? getTemplate(p.template_id) : null;
+  // Resolved here rather than on the client for the template's reason: the name
+  // is in the registry and the row holds an id, so a card that did not resolve
+  // it could only show the id — and could not tell "no specialist" from "the
+  // specialist is gone", which is the one of the two that approval refuses.
+  // An agent the CLI would drop counts as missing: `planProposal` refuses it,
+  // so a card calling it fine would be a card the click contradicts.
+  const agent = p.agent_id ? getAgent(p.agent_id) : null;
   return {
     id: p.id,
     createdAt: p.created_at,
@@ -115,6 +123,10 @@ function proposalDTO(
         ? "template deleted"
         : untemplated,
     promptRewritten: p.prompt_override !== null,
+    agentName: agent?.name ?? null,
+    // Truthy rather than `!== null`, `planProposal`'s rule: a row written before
+    // the column existed reads as no agent rather than as a missing one.
+    agentMissing: Boolean(p.agent_id) && (agent === null || !agent.usable),
     title: p.title,
     task: p.task,
     folderLabel: folderLabel(p.mount_id, p.folder),

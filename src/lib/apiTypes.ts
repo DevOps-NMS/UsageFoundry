@@ -1198,6 +1198,15 @@ export interface ProposedBlockDTO {
   kind: WorkflowNodeKind;
   /** The template's name, or the untemplated guard set written out. */
   guardsLabel: string;
+  /**
+   * The specialist this block may hand a subtask to, or null for none.
+   *
+   * Beside the guards and never inside them: an agent holds no tool list and no
+   * permission mode, so it says who does part of the work rather than what the
+   * block may do. `"agent deleted"` for an id the registry no longer has, which
+   * approval refuses by name.
+   */
+  agentLabel: string | null;
   /** Where it runs. Null on a merge block, which names no workspace. */
   folderLabel: string | null;
   /** How many runs a deciding block may start, with nobody looking. */
@@ -1228,6 +1237,22 @@ export interface ChatProposalDTO {
   guardsLabel: string;
   /** The chat wrote this run's prompt instead of taking the template's. */
   promptRewritten: boolean;
+  /**
+   * The saved specialist this run would be handed, by name, or null for none.
+   *
+   * Null when the id names nothing, because the row holds only an id — the card
+   * then says the agent is gone from `agentMissing` rather than inventing a
+   * name. The two are separate fields for the same reason `guardsSource` is
+   * separate from `guardsLabel`: "no specialist was asked for" and "the one
+   * that was asked for is gone" are different facts, and approval refuses only
+   * the second.
+   */
+  agentName: string | null;
+  /**
+   * This proposal names an agent that is gone, or one the CLI would drop.
+   * Approval refuses it by name rather than starting the run without one.
+   */
+  agentMissing: boolean;
   title: string;
   task: string;
   /** Where it would run, as a person reads it. Null means "as the template says". */

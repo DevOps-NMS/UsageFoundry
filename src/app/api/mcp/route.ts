@@ -27,7 +27,12 @@ import {
   normalizeTemplateInput,
   updateTemplate,
 } from "@/lib/templates";
-import { currentAgentKnowledge } from "@/lib/agents";
+import {
+  agentRefusal,
+  currentAgentKnowledge,
+  listAgents,
+  listAmbientAgents,
+} from "@/lib/agents";
 import {
   activeRuns,
   currentSnapshot,
@@ -117,7 +122,20 @@ interface JsonRpcRequest {
   params?: Record<string, unknown>;
 }
 
-/** Tools both kinds of caller get: everything that only reads. */
+/**
+ * Tools both kinds of caller get: everything that only reads.
+ *
+ * `list_agents` is deliberately in here rather than in `CHAT_TOOLS`, and the
+ * placement *is* the decision: both subjects can name a specialist — a chat on
+ * a proposal the operator then approves, a block on a run it emits — so both
+ * have to be able to see what exists before they name one, and the alternative
+ * is a block guessing at names out of its system prompt. It grants neither of
+ * them anything: an agent holds no tool list and no permission mode, so what
+ * this list can move is who does a piece of the work and never what a run may
+ * do. Being here is also what makes the two guards in `callTool` say the right
+ * thing about it — they refuse the tools of the *other* subject, and a shared
+ * tool is in neither list.
+ */
 const SHARED_TOOLS = [
   {
     name: "list_folders",
@@ -198,6 +216,19 @@ const SHARED_TOOLS = [
       "mentioning rather than duplicating.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
+  {
+    name: "list_agents",
+    description:
+      "Saved specialised agents: roles a run may hand a subtask to. Read it " +
+      "before naming one — the operator writes @name in their message and this " +
+      "is what turns that into the agent to propose the work under. An agent " +
+      "carries a description and a prompt and nothing else: it changes who " +
+      "does a piece of the work, never what the run is allowed to do, so " +
+      "naming one sets no budget, no permission mode and no isolation choice. " +
+      "It also reports the agent definitions on this machine that this app did " +
+      "not save, which reach every run either way and cannot be named here.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
 ];
 
 /** Tools only the orchestrator chat gets. None of them starts anything. */
@@ -259,6 +290,16 @@ const CHAT_TOOLS = [
           description:
             "Replaces the template's own prompt for this run only. Use when " +
             "the template nearly fits; the task is still appended below it.",
+        },
+        agentId: {
+          type: "string",
+          description:
+            "id from list_agents: a saved specialist the run may hand a " +
+            "subtask to. Name one when the operator writes @something in " +
+            "their message, or when a saved agent plainly fits the work. It " +
+            "changes who does part of the work and never what the run may do " +
+            "— the guards are still the template's, or the default set. Omit " +
+            "it for the ordinary run.",
         },
         title: {
           type: "string",
@@ -400,6 +441,14 @@ const CHAT_TOOLS = [
                 description:
                   "Standing instructions replacing the template's prompt for " +
                   "this block. The task is appended below it.",
+              },
+              agentId: {
+                type: "string",
+                description:
+                  "id from list_agents: a saved specialist this block's own " +
+                  "child may hand a subtask to. It changes who does part of " +
+                  "the work and never what the block may do. Refused on a " +
+                  "merge block, which starts no agent at all.",
               },
               fanOut: {
                 type: "number",
@@ -761,6 +810,52 @@ async function callTool(
               budget: t.budget,
             })),
             guardsWhenNoTemplateNamed: chatGuards(),
+          },
+          null,
+          1,
+        ),
+      );
+    }
+
+    case "list_agents": {
+      // Both handles, each named for the caller that takes it: the chat's
+      // proposal tools take an `agentId` like every other identifier they
+      // speak in, and `emit_runs` takes the `name`, because a block's turn
+      // names a specialist for a run it is creating and a name is the key the
+      // `--agents` flag itself uses. Reporting only one would leave whichever
+      // caller wanted the other guessing at it.
+      //
+      // `usable: false` is reported rather than the row being hidden, because
+      // the two failures read alike from here and only one of them is the
+      // operator's to fix: an agent missing its description or its prompt is
+      // dropped by the CLI without a word, so a run given it looks exactly
+      // like a run that was never given one. Every door refuses it by name.
+      return text(
+        JSON.stringify(
+          {
+            agents: listAgents().map((a) => ({
+              agentId: a.id,
+              name: a.name,
+              description: a.description,
+              model: a.model,
+              usable: a.usable,
+            })),
+            // Declared rather than merged into the list above: these reach
+            // every child this app spawns whatever is named here, and they
+            // cannot be named — they have no row and so no id. A model that
+            // saw one list would offer the operator an agent nothing can
+            // select.
+            alsoOnThisMachine: listAmbientAgents().map((a) => ({
+              name: a.name,
+              description: a.description,
+              scope: a.scope,
+            })),
+            note:
+              "Naming an agent sets no guard. Budget, work-cycle limit, " +
+              "permission mode and isolation all come from the template a " +
+              "proposal or block names, or from the operator's default guard " +
+              "set. The agents under alsoOnThisMachine are in play for every " +
+              "run whether or not one is named, and cannot be named here.",
           },
           null,
           1,
@@ -1291,6 +1386,20 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
     );
   }
 
+  // The specialist, refused here as well as at approval for the reason the
+  // template above it is: a proposal that cannot be approved is otherwise
+  // discovered by a person clicking Approve on a list of twenty. It is the same
+  // `agentRefusal` the run door, the template door and every workflow door use,
+  // so an agent that has gone is one sentence wherever it is named — and it is
+  // a refusal rather than a silent drop, because a run proposed "as the
+  // reviewer" and started with no specialist is bit-for-bit a run that was
+  // never given one.
+  const agentId = String(args.agentId ?? "").trim() || null;
+  if (agentId !== null) {
+    const refusal = agentRefusal(agentId, currentAgentKnowledge());
+    if (refusal) return text(`${refusal} Call list_agents for the ids.`, true);
+  }
+
   const title = String(args.title ?? "").trim();
   if (!title) return text("A proposal needs a title.", true);
 
@@ -1463,6 +1572,7 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
 
   const proposal = createProposal(chatId, {
     templateId: template ? template.id : null,
+    agentId,
     title,
     task,
     promptOverride,
@@ -1475,6 +1585,12 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
   const guards = template
     ? `template "${template.name}"${promptOverride ? ", with a prompt you rewrote" : ""}`
     : "the operator's default guard set";
+  // Said outside the guard clause, because an agent bounds nothing — the same
+  // separation the run page and the workflow canvas make, so this app never
+  // words it as though naming one narrowed anything.
+  const specialist = agentId
+    ? ` It may hand a subtask to ${currentAgentKnowledge().get(agentId)?.name ?? "the agent you named"}.`
+    : "";
   const after =
     dependsOn.length === 0
       ? ""
@@ -1486,7 +1602,7 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
           .join(" and ")} — say so, because both have to be approved in the ` +
         "same click unless the earlier one has already started.";
   return text(
-    `Proposed "${title}" (id ${proposal.id}) under ${guards}.${after} It is ` +
-      "waiting for the operator to approve it; nothing is running.",
+    `Proposed "${title}" (id ${proposal.id}) under ${guards}.${specialist}${after} ` +
+      "It is waiting for the operator to approve it; nothing is running.",
   );
 }

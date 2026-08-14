@@ -18,6 +18,7 @@ import type {
 } from "./chat";
 import type { RunTemplate } from "./templates";
 import type { RunGuards } from "./settings";
+import type { RegistryAgent } from "./agents";
 
 /**
  * Covers `planProposal`, `planApprovalBatch`, `chatPrompt`, `decisionNote`,
@@ -33,8 +34,21 @@ import type { RunGuards } from "./settings";
  *    isolation choice, because the whole approval gate rests on those coming
  *    from something a person wrote — a template, or the untemplated guard set
  *    in settings. A regression here type-checks perfectly and shows up as an
- *    agent running somewhere nobody chose.
- *  - `planApprovalBatch` decides the order one click creates its runs in and
+ *    agent running somewhere nobody chose. The specialist is the second thing
+ *    a proposal may name and it is on the other side of that line — it decides
+ *    who does a piece of the work — so what is pinned about it is both
+ *    directions at once: the whole definition reaches the run, no guard and no
+ *    word of the prompt moves, and one that has been deleted is refused **by
+ *    name** rather than falling back to none. That fallback is the expensive
+ *    one, because a run given a specialist it does not have is bit-for-bit a
+ *    run that was never given one, and nothing downstream can tell them apart.
+ *  - `planApprovalBatch` has no agent dimension by construction — `BatchProposal`
+ *    carries a label, a title and its edges and nothing else — which is why
+ *    there is no case for one below. A proposal whose agent has gone is refused
+ *    inside `approveProposal`, and the dependents behind it are then failed by
+ *    the same `stillborn` cascade any other failed creation triggers, with no
+ *    agent-specific branch anywhere in it. It decides the order one click
+ *    creates its runs in and
  *    what each one waits for, and both ways of being wrong are silent. Out of
  *    order, a proposal names a run that does not exist yet and is refused as a
  *    missing run — an artefact of what the page happened to display, reported
@@ -202,6 +216,7 @@ const proposal = (over: Partial<ChatProposalRow> = {}) =>
   ({
     task: "Fix the flaky auth test in #412.",
     template_id: "tpl1",
+    agent_id: null,
     prompt_override: null,
     mount_id: null,
     folder: null,
@@ -216,12 +231,30 @@ const proposal = (over: Partial<ChatProposalRow> = {}) =>
     | "status"
     | "title"
     | "template_id"
+    | "agent_id"
     | "prompt_override"
   >;
 
+/**
+ * A registry row as `planProposal` takes one.
+ *
+ * Every field deliberately different from the template's and the defaults', so
+ * a test that reads the agent cannot be passing on something read off either.
+ */
+const agent: RegistryAgent = {
+  id: "agent1",
+  name: "Reviewer",
+  description: "Reads a diff and reports what is wrong with it.",
+  prompt: "You review code. Report; do not edit.",
+  model: "claude-haiku-4-5-20251001",
+  usable: true,
+  createdAt: 0,
+  updatedAt: 0,
+};
+
 describe("planProposal", () => {
   it("takes every guard from the template and none from the proposal", () => {
-    const plan = planProposal(proposal(), template, defaults);
+    const plan = planProposal(proposal(), template, defaults, null);
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
 
@@ -231,7 +264,7 @@ describe("planProposal", () => {
   });
 
   it("leads with the template's prompt and marks where the chat's task starts", () => {
-    const plan = planProposal(proposal(), template, defaults);
+    const plan = planProposal(proposal(), template, defaults, null);
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
 
@@ -241,7 +274,7 @@ describe("planProposal", () => {
   });
 
   it("falls back to the template's folder when the proposal names none", () => {
-    const plan = planProposal(proposal(), template, defaults);
+    const plan = planProposal(proposal(), template, defaults, null);
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
     assert.equal(plan.input.mountId, "workspace");
@@ -253,6 +286,7 @@ describe("planProposal", () => {
       proposal({ mount_id: "other", folder: "acme/web" }),
       template,
       defaults,
+      null,
     );
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
@@ -269,6 +303,7 @@ describe("planProposal", () => {
       proposal({ mount_id: "workspace", folder: "" }),
       template,
       defaults,
+      null,
     );
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
@@ -279,7 +314,7 @@ describe("planProposal", () => {
     // The quiet failure this rules out: a proposal the operator approved
     // because the card said "Fix a bug" starting under a different permission
     // mode entirely, because the template was tidied away in between.
-    const plan = planProposal(proposal(), null, defaults);
+    const plan = planProposal(proposal(), null, defaults, null);
     assert.equal(plan.ok, false);
     if (plan.ok) return;
     assert.match(plan.reason, /no longer exists/);
@@ -290,6 +325,7 @@ describe("planProposal", () => {
       proposal(),
       { ...template, mountId: null, folder: null },
       defaults,
+      null,
     );
     assert.equal(plan.ok, false);
     if (plan.ok) return;
@@ -298,13 +334,13 @@ describe("planProposal", () => {
 
   it("refuses a proposal that was already decided", () => {
     for (const status of ["approved", "rejected", "failed"] as const) {
-      const plan = planProposal(proposal({ status }), template, defaults);
+      const plan = planProposal(proposal({ status }), template, defaults, null);
       assert.equal(plan.ok, false, `${status} should not be approvable`);
     }
   });
 
   it("refuses an empty task", () => {
-    const plan = planProposal(proposal({ task: "   " }), template, defaults);
+    const plan = planProposal(proposal({ task: "   " }), template, defaults, null);
     assert.equal(plan.ok, false);
   });
 
@@ -312,7 +348,7 @@ describe("planProposal", () => {
     proposal({ template_id: null, mount_id: "workspace", folder: "acme/api", ...over });
 
   it("takes every guard from the operator's defaults when there is no template", () => {
-    const plan = planProposal(untemplated(), null, defaults);
+    const plan = planProposal(untemplated(), null, defaults, null);
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
 
@@ -325,7 +361,7 @@ describe("planProposal", () => {
     // No heading with nothing above it: the section marker exists to separate
     // standing instructions from this run's brief, and with no standing
     // instructions it would be a marker for a section that is not there.
-    const plan = planProposal(untemplated(), null, defaults);
+    const plan = planProposal(untemplated(), null, defaults, null);
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
     assert.equal(plan.input.prompt, "Fix the flaky auth test in #412.");
@@ -336,6 +372,7 @@ describe("planProposal", () => {
       proposal({ template_id: null }),
       null,
       defaults,
+      null,
     );
     assert.equal(plan.ok, false);
     if (plan.ok) return;
@@ -349,6 +386,7 @@ describe("planProposal", () => {
       proposal({ prompt_override: "Read only. Report, do not edit." }),
       template,
       defaults,
+      null,
     );
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
@@ -364,10 +402,96 @@ describe("planProposal", () => {
       proposal({ prompt_override: "   " }),
       template,
       defaults,
+      null,
     );
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
     assert.ok(plan.input.prompt.startsWith("Work carefully and commit as you go."));
+  });
+
+  it("carries the named agent's whole definition onto the run", () => {
+    // The definition rather than the id, because that is what `createRun`
+    // freezes onto the row: an id there would leave cycle 4 of this run with no
+    // specialist the moment somebody tidies the registry, which is the CLI's own
+    // silent drop performed by this app.
+    const plan = planProposal(
+      proposal({ agent_id: "agent1" }),
+      template,
+      defaults,
+      agent,
+    );
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.deepEqual(plan.input.agent, {
+      name: "Reviewer",
+      description: "Reads a diff and reports what is wrong with it.",
+      prompt: "You review code. Report; do not edit.",
+      model: "claude-haiku-4-5-20251001",
+    });
+  });
+
+  it("takes no guard from the agent, and does not put it in the prompt", () => {
+    // The branch that matters is the one that is not there. An agent carries a
+    // description and a prompt, so naming one must move nothing about what the
+    // run may do — and it must not silently reach the agent's own instructions
+    // into the run's task either, which would be a second prompt nobody wrote
+    // into `composeTask`'s two halves.
+    const withAgent = planProposal(
+      proposal({ agent_id: "agent1" }),
+      template,
+      defaults,
+      agent,
+    );
+    const without = planProposal(proposal(), template, defaults, null);
+    assert.equal(withAgent.ok, true);
+    assert.equal(without.ok, true);
+    if (!withAgent.ok || !without.ok) return;
+
+    assert.equal(withAgent.input.permissionMode, without.input.permissionMode);
+    assert.equal(withAgent.input.isolate, without.input.isolate);
+    assert.deepEqual(withAgent.input.budget, without.input.budget);
+    assert.equal(withAgent.input.prompt, without.input.prompt);
+    assert.ok(!withAgent.input.prompt.includes("You review code"));
+    assert.equal(without.input.agent ?? null, null);
+  });
+
+  it("refuses a proposal whose agent has been deleted, by name", () => {
+    // Never a fallback to no specialist: the operator approved the card that
+    // said "and hand the review to the reviewer", and a run that quietly has
+    // none is bit-for-bit a run that was never given one.
+    const plan = planProposal(
+      proposal({ agent_id: "agent1" }),
+      template,
+      defaults,
+      null,
+    );
+    assert.equal(plan.ok, false);
+    if (plan.ok) return;
+    assert.match(plan.reason, /no longer exists/);
+  });
+
+  it("refuses an agent the CLI would drop, naming it", () => {
+    // `rowToAgent` reports rather than repairs, so a decayed row arrives here
+    // resolvable and unusable — and sending it is the one outcome with no
+    // symptom at all: exit 0, nothing on stderr, no specialist.
+    const plan = planProposal(
+      proposal({ agent_id: "agent1" }),
+      template,
+      defaults,
+      { ...agent, description: "", usable: false },
+    );
+    assert.equal(plan.ok, false);
+    if (plan.ok) return;
+    assert.match(plan.reason, /Reviewer/);
+  });
+
+  it("ignores a resolved agent the proposal did not ask for", () => {
+    // The row decides, not the argument: a caller that resolved an agent for
+    // the wrong proposal must not attach it to this one.
+    const plan = planProposal(proposal(), template, defaults, agent);
+    assert.equal(plan.ok, true);
+    if (!plan.ok) return;
+    assert.equal(plan.input.agent ?? null, null);
   });
 });
 
@@ -734,6 +858,7 @@ describe("a proposal's label, dependencies and graph survive the round trip", ()
     });
     createProposal(chat.id, {
       templateId: null,
+      agentId: "agent1",
       title: "Prove it",
       task: "Add the test.",
       promptOverride: null,
@@ -765,10 +890,15 @@ describe("a proposal's label, dependencies and graph survive the round trip", ()
     assert.equal(fix.kind, "run", "a proposal that says nothing is a run");
     assert.equal(fix.spec_id, "fix");
     assert.deepEqual(proposalDeps(fix), []);
+    // The column `planProposal` reads to decide whether to refuse: a proposal
+    // that named no agent must read back as null rather than as an id that
+    // resolves to nothing, which would refuse every untargeted proposal.
+    assert.equal(fix.agent_id, null);
 
     assert.deepEqual(proposalDeps(prove), [
       { specId: "fix", edge: "on-success", continueBranch: true },
     ]);
+    assert.equal(prove.agent_id, "agent1");
 
     assert.equal(nightly.kind, "workflow");
     assert.equal(nightly.graph, '{"nodes":[],"edges":[]}');

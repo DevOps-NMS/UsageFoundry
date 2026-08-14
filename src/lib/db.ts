@@ -726,6 +726,25 @@ function migrate(db: Database.Database) {
   addColumn(db, "chat_proposals", "graph", "TEXT");
   addColumn(db, "chat_proposals", "workflow_id", "TEXT");
 
+  // The saved agent a proposed run may hand a subtask to, by id — and an **id**
+  // rather than the frozen copy `runs.agent` holds, for `run_templates`'
+  // reason: a proposal is form input that a person reads and decides on, so it
+  // should still name the agent as it stands at the click rather than as it
+  // stood when the model wrote the card. The copy is taken where it always is,
+  // by `createRun`, at the moment the run exists.
+  //
+  // Not a foreign key, exactly as `template_id` above is not: an agent deleted
+  // between the proposal and the approval must fail the approval with a
+  // sentence naming it, not silently take the row the operator is looking at
+  // with it — and never fall back to no specialist, which is bit-for-bit the
+  // run the whole registry exists to stop.
+  //
+  // It carries no capability. An agent holds no tool list and no permission
+  // mode, so this is not a route to `--permission-mode` reached by a model;
+  // every guard on a proposed run still comes from `template_id` above or from
+  // the untemplated guard set in settings.
+  addColumn(db, "chat_proposals", "agent_id", "TEXT");
+
   // The order a chat's messages were written in, because `ts` does not decide
   // it: `finishTurn` appends the reply, an error and a denial note inside one
   // synchronous block, so they routinely share a millisecond, and the primary

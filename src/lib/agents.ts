@@ -74,6 +74,17 @@ export interface SavedAgent {
 /** An agent stripped of its identity — everything a save or an edit supplies. */
 export type AgentInput = Omit<SavedAgent, "id" | "createdAt" | "updatedAt">;
 
+/**
+ * A registry row as every door that resolves one reads it.
+ *
+ * The record plus `usable`, which is `rowToAgent`'s verdict rather than a
+ * column — a row that has decayed into something the CLI would drop is reported
+ * rather than repaired. Named once here because three callers now take one and
+ * pass it to `agentRefusal`: the run door, a template being saved, and the two
+ * planners that turn a proposal or a node into a run.
+ */
+export type RegistryAgent = SavedAgent & { usable: boolean };
+
 /** Exactly what goes onto a child's argv. Nothing here bounds what it may do. */
 export type AgentDefinition = Pick<
   SavedAgent,

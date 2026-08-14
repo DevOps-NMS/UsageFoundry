@@ -63,7 +63,7 @@ import {
   type AgentDefinition,
   type AgentFacts,
   type AgentKnowledge,
-  type SavedAgent,
+  type RegistryAgent,
 } from "./agents";
 import { telemetrySpendSince } from "./otlp";
 import type { UsageSnapshot } from "./windows";
@@ -329,8 +329,6 @@ export interface WorkflowKnowledge {
   agents: AgentKnowledge;
 }
 
-/** One row of the registry as this file resolves it, before it becomes argv. */
-type RegistryAgent = SavedAgent & { usable: boolean };
 
 export type WorkflowNormalization =
   | { ok: true; value: WorkflowInput }
@@ -904,6 +902,17 @@ export interface ProposedBlockSummary {
   kind: WorkflowNodeKind;
   /** The template's name, or what the untemplated guard set permits. */
   guardsLabel: string;
+  /**
+   * The specialist this block may hand a subtask to, by name, or null for none.
+   *
+   * Separate from `guardsLabel` rather than folded into it, which is the same
+   * separation `BlockStatement` makes in the editor and for the same reason: an
+   * agent bounds nothing, so a phrase inside the guard clause would claim it
+   * does. `"agent deleted"` when the id names nothing, which is what
+   * `guardsLabel` already says one field over about a template — approval
+   * refuses it by name either way.
+   */
+  agentLabel: string | null;
   /** Where it runs, as the folder picker words it. Null on a merge block. */
   folderLabel: string | null;
   /** How many runs a deciding block may start. Null on every other kind. */
@@ -989,6 +998,11 @@ export function summarizeProposedGraph(
         : node.templateId === null
           ? untemplatedLabel
           : (known.templates.get(node.templateId)?.name ?? "template deleted"),
+    // The registry's own spelling rather than the graph's id, because the id is
+    // a thing only this app's forms hold and the card is read by a person.
+    agentLabel: node.agentId
+      ? (known.agents.get(node.agentId)?.name ?? "agent deleted")
+      : null,
     folderLabel:
       node.kind === "merge"
         ? null

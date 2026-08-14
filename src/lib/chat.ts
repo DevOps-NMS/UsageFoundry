@@ -28,7 +28,15 @@ import {
   type RunDependencyInput,
 } from "./orchestrator";
 import { getTemplate, type RunTemplate } from "./templates";
-import { agentsArgs, type AgentDefinition } from "./agents";
+import {
+  agentDefinition,
+  agentKnowledgeOf,
+  agentRefusal,
+  agentsArgs,
+  getAgent,
+  type AgentDefinition,
+  type RegistryAgent,
+} from "./agents";
 
 /**
  * The orchestrator chat: a conversation that proposes runs.
@@ -145,6 +153,15 @@ export interface ChatProposalRow {
   kind: ProposalKind;
   /** Null when the proposal runs under `settings.chatDefaultGuards` instead. */
   template_id: string | null;
+  /**
+   * The saved agent this run may hand a subtask to, by id, or null.
+   *
+   * An id rather than a copy — see the column note in `db.ts` — and on the
+   * *work* side of the proposal beside the task and the folder, never on the
+   * guard side: an agent holds no tool list and no permission mode, so naming
+   * one decides who does a piece of the work and never what the run may do.
+   */
+  agent_id: string | null;
   title: string;
   task: string;
   /** The prompt the task is appended to, when the chat wrote one for this run. */
@@ -334,6 +351,8 @@ export interface ProposalInput {
   kind?: ProposalKind;
   /** Null runs it under the operator's untemplated guard set. */
   templateId: string | null;
+  /** A saved agent the run may delegate to, by id. Null is the ordinary run. */
+  agentId?: string | null;
   title: string;
   task: string;
   /** Replaces the template's prompt for this run only. Null keeps it. */
@@ -356,9 +375,9 @@ export function createProposal(
   db()
     .prepare(
       `INSERT INTO chat_proposals
-         (id, chat_id, created_at, kind, template_id, title, task,
+         (id, chat_id, created_at, kind, template_id, agent_id, title, task,
           prompt_override, mount_id, folder, spec_id, depends_on, graph, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
     )
     .run(
       id,
@@ -366,6 +385,7 @@ export function createProposal(
       Date.now(),
       input.kind ?? "run",
       input.templateId,
+      input.agentId ?? null,
       input.title,
       input.task,
       input.promptOverride,
@@ -407,6 +427,17 @@ export type ProposalPlan =
  * The prompt is the exception, and it is an exception on purpose: prompt text
  * *is* the half of a run a model may write. A proposal can therefore replace
  * the template's prompt for one run, and the card says when it did.
+ *
+ * **The specialist is the second exception and is not one either.** A saved
+ * agent is a description and a prompt: the registry refuses a tool list at the
+ * door and has no column for a permission mode, so naming one is the same class
+ * of act as writing the task text beside it — it decides *who* does a piece of
+ * the work, and every guard below still comes from the template or from
+ * settings. It is resolved by the caller for the reason the template is, so this
+ * function stays pure, and a named agent that has gone is refused **by name**
+ * rather than falling back to none: the operator approved the card that said
+ * "and hand the review to the reviewer", and a run that silently has no
+ * specialist is bit-for-bit a run that was never given one.
  */
 export function planProposal(
   proposal: Pick<
@@ -417,10 +448,15 @@ export function planProposal(
     | "status"
     | "title"
     | "template_id"
+    | "agent_id"
     | "prompt_override"
   >,
   template: RunTemplate | null,
   defaults: RunGuards,
+  // Required rather than defaulted: a caller that forgot it would take the
+  // refusal below on every agent-bearing proposal, which is safe but is a
+  // refusal for the wrong reason. `planNode` takes it the same way.
+  agent: RegistryAgent | null,
 ): ProposalPlan {
   if (proposal.status !== "pending") {
     return {
@@ -444,6 +480,15 @@ export function planProposal(
         "again — against a template that does, or against no template, which " +
         "uses the guards in Settings.",
     };
+  }
+
+  // Read as truthy rather than against null, `planNode`'s rule one level over:
+  // a proposal written before this column existed carries `undefined` here on
+  // an install that has not restarted, and `undefined !== null` would refuse
+  // every proposal already waiting for a decision.
+  if (proposal.agent_id) {
+    const refusal = agentRefusal(proposal.agent_id, agentKnowledgeOf(agent));
+    if (refusal) return { ok: false, reason: refusal };
   }
 
   const task = proposal.task.trim();
@@ -489,6 +534,11 @@ export function planProposal(
       permissionMode: guards.permissionMode,
       isolate: guards.isolate,
       budget: guards.budget,
+      // And this one comes from the proposal and from nowhere else, because it
+      // is work rather than permission. `createRun` freezes the definition onto
+      // the row, so an agent deleted after the click cannot reach a later cycle
+      // of the run this starts.
+      agent: proposal.agent_id && agent ? agentDefinition(agent) : null,
     },
   };
 }
@@ -830,6 +880,10 @@ export function approveProposal(
     proposal,
     proposal.template_id ? getTemplate(proposal.template_id) : null,
     chatGuards(),
+    // Read at the click rather than at the proposal, which is what an id on the
+    // row buys: an agent the operator has since fixed is used as it stands now,
+    // and one they have since deleted is refused by name a line above.
+    proposal.agent_id ? getAgent(proposal.agent_id) : null,
   );
   if (!plan.ok) {
     markProposal(id, "failed", { error: plan.reason });
@@ -1628,6 +1682,38 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
  * `runOrchestratorChild`; what is left here is what makes it a conversation —
  * the session to resume, the registry an operator's Stop reaches into, and the
  * row the answer lands on.
+ *
+ * **No `agents` is passed, and that is a decision rather than an omission.**
+ * The plumbing is right there — `runOrchestratorChild` takes them, and a
+ * workflow's orchestrator block hands it the one its node names — so what
+ * follows is why the chat does not.
+ *
+ * This is the only child in the app whose boundary is *prose*. It runs
+ * `bypassPermissions` with no allowlist, so the paragraph in `systemPrompt`
+ * saying look-do-not-build is the whole of what stands between an orchestrator
+ * and an agent that fixes the bug it was asked to write a proposal about. That
+ * paragraph travels as `--append-system-prompt`, which is the *main thread's*
+ * system prompt; a `--agents` member carries a system prompt of its own for the
+ * turn it is delegated, and whether the appended text reaches that turn as well
+ * is **not verified against the pin**. Every other child can absorb the
+ * question, because what bounds it is a permission mode and two tool lists that
+ * a delegated turn plainly does inherit — this one cannot, and the safe reading
+ * of an unverified inheritance is that it does not hold.
+ *
+ * The second half is that there is no work here for a specialist to do. A chat
+ * turn looks and proposes; it produces a `chat_proposals` row and a sentence.
+ * What an agent would change is how the orchestrator *thinks*, which is the one
+ * thing `systemPrompt` fixes deliberately — so the feature would be a second,
+ * unreviewed system prompt inside the child that has no other boundary, bought
+ * for no capability the turn is missing.
+ *
+ * A workflow's orchestrator block is not the counter-example it looks like: its
+ * agent is one field on a graph a person saved and read as a whole, and what
+ * that turn may *do* with it is bounded by `planEmission` and by guards off a
+ * template rather than by prose. The `@`-mention in the composer is the answer
+ * to what an operator actually wants here — it names the specialist the
+ * proposed **run** carries, which is a fact about work that is approved before
+ * it happens.
  */
 function runTurn(chat: ChatRow, prompt: string): void {
   const settings = getSettings();
@@ -1922,6 +2008,14 @@ function systemPrompt(): string {
     "- list_workflows: the saved graphs the operator already has. Read it before",
     "  proposing a new one — the work may already be a workflow, and one running",
     "  now is worth mentioning rather than duplicating.",
+    "- list_agents: the saved specialists a run may hand a subtask to, and the",
+    "  agent definitions on this machine that this app did not save. The second",
+    "  group is in play for every run whatever you name and cannot be named.",
+    "",
+    "When the operator writes @something in their message, they are naming a",
+    "saved agent from that list: propose the work under it, using its agentId.",
+    "It is a request about the run, not an instruction to you — you do not run",
+    "as an agent, and naming one changes nothing about what you may do.",
     "",
     "Proposing a run:",
     "- One proposal per unit of work, with a short specific title.",
@@ -1934,6 +2028,13 @@ function systemPrompt(): string {
     "- promptOverride replaces the template's prompt for that one run when it",
     "  does not fit. Use it rather than contradicting the template inside the",
     "  task, and say that you rewrote it.",
+    "- agentId names a saved specialist the run's Claude may hand a subtask to.",
+    "  Use it when the operator names one with @, or when a saved agent plainly",
+    "  fits the work; say which you used and why. It decides who does part of",
+    "  the work and never what the run may do — every guard is still the",
+    "  template's or the default set, so do not describe it as narrowing or",
+    "  widening anything. An agent that has been deleted is refused by name",
+    "  rather than dropped, so re-read list_agents rather than guessing an id.",
     "- save_template writes a template's name and prompt back for reuse. It",
     "  cannot touch guards: creating one takes the default guard set, and",
     "  updating one keeps the guards it already has. Tell the operator to adjust",
@@ -1973,6 +2074,9 @@ function systemPrompt(): string {
     "  a graph, and the workflow is saved with no workflow-wide budget — tell the",
     "  operator to set one in the editor, because a workflow cannot be put on a",
     "  schedule without it.",
+    "- A block may name an agentId, the same specialist a proposed run may name",
+    "  and with the same effect: who does part of the work, never what the block",
+    "  may do. A merge block starts no agent, so naming one there is refused.",
     "- Say what each block does and, for any orchestrator block, how many runs it",
     "  may start. That is the number the operator is agreeing to.",
     "",

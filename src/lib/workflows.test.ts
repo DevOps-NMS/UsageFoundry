@@ -1209,6 +1209,52 @@ describe("planWorkflowProposal — a graph a model wrote becomes a saved workflo
       { from: "a", to: "b", edge: "on-success", continueBranch: true },
     ]);
   });
+
+  it("keeps a block's specialist, and takes no guard from it", () => {
+    // The chat may name who does a piece of the work. It may not name what the
+    // block is allowed to do — so the saved node carries the agent and every
+    // guard beside it is still the template's id and nothing else.
+    const plan = planWorkflowProposal(
+      proposal([node("a", { agentId: "a-rev" })]),
+      KNOWN,
+    );
+    assert.ok(plan.ok);
+    assert.equal(plan.input.graph.nodes[0].agentId, "a-rev");
+    assert.equal(plan.input.graph.nodes[0].templateId, "t-iso");
+  });
+
+  it("refuses an agent deleted since the proposal was written, by name", () => {
+    // The template's rule one field over, and the same window: the model wrote
+    // the card, the operator tidied the registry, then clicked. Falling back to
+    // no specialist would start the run the card described as the reviewer's
+    // with nothing to say it had not been.
+    const gone: WorkflowKnowledge = { ...KNOWN, agents: new Map() };
+    const plan = planWorkflowProposal(
+      proposal([node("a", { agentId: "a-rev" })]),
+      gone,
+    );
+    assert.ok(!plan.ok);
+    assert.match(plan.reason, /no longer exists/);
+  });
+
+  it("refuses an agent the CLI would drop, and one named on a merge block", () => {
+    // Both are the same failure arriving from different directions: a block
+    // whose specialist is silently absent, and a block that has no child to
+    // hand a subtask to at all.
+    const decayed = planWorkflowProposal(
+      proposal([node("a", { agentId: "a-broken" })]),
+      KNOWN,
+    );
+    assert.ok(!decayed.ok);
+    assert.match(decayed.reason, /Half a thing/);
+
+    const onMerge = planWorkflowProposal(
+      proposal([node("a"), merger("m", { agentId: "a-rev" })], [edge("a", "m")]),
+      KNOWN,
+    );
+    assert.ok(!onMerge.ok);
+    assert.match(onMerge.reason, /starts no agent/);
+  });
 });
 
 describe("summarizeProposedGraph — what the approval card has to show", () => {
@@ -1268,6 +1314,37 @@ describe("summarizeProposedGraph — what the approval card has to show", () => 
       untemplated,
     );
     assert.equal(a.guardsLabel, "template deleted");
+  });
+
+  it("names the specialist a block may hand a subtask to, apart from its guards", () => {
+    // Two fields rather than one string, because an agent bounds nothing: read
+    // inside the guard clause it would claim to narrow what the block may do,
+    // which is the one thing about a specialist that is not true.
+    const [a] = summarizeProposedGraph(
+      value(graph([node("a", { agentId: "a-rev" })])).graph,
+      KNOWN,
+      untemplated,
+    );
+    assert.equal(a.agentLabel, "Reviewer");
+    assert.equal(a.guardsLabel, "Isolated");
+  });
+
+  it("says nothing about a specialist where none was named", () => {
+    const [a] = summarizeProposedGraph(
+      value(graph([node("a")])).graph,
+      KNOWN,
+      untemplated,
+    );
+    assert.equal(a.agentLabel, null);
+  });
+
+  it("reports an agent deleted since, the same fact approval will refuse on", () => {
+    const [a] = summarizeProposedGraph(
+      value(graph([node("a", { agentId: "a-rev" })])).graph,
+      { ...KNOWN, agents: new Map() },
+      untemplated,
+    );
+    assert.equal(a.agentLabel, "agent deleted");
   });
 });
 
