@@ -1640,6 +1640,15 @@ describe("the parked sweeper's decision", () => {
  * definition: the sweeper reads its rows, then awaits a transcript scan that
  * takes seconds, and an operator's Stop landing in that gap must win. Nothing
  * pure can express either.
+ *
+ * What is deliberately *not* pinned here is that `promoteQueued()` is reached
+ * at the end of the sweep at all. Its only observable effect is a run starting,
+ * so a test for it is a test that spawns a child and leaves an async chain
+ * running past the assertion — and a flaky suite costs more than this line
+ * does, since every other terminal transition in the app calls `promoteQueued`
+ * too, so a resumed run left `queued` is picked up by the next one rather than
+ * stranded for ever. Calling `startRun` *instead of* it is the mistake that
+ * matters, and the cap in the first case is what catches that.
  */
 describe("applying the sweeper's decision", () => {
   const BUDGET_BLOB = '{"maxIterations":5,"maxDurationMinutes":600}';
@@ -1681,8 +1690,12 @@ describe("applying the sweeper's decision", () => {
     await sweepPaused();
 
     const row = getRun(parked)!;
-    assert.equal(row.status, "queued", "its window cleared, so it rejoins the queue");
-    assert.notEqual(row.status, "running", "the cap is promoteQueued's to enforce");
+    assert.equal(
+      row.status,
+      "queued",
+      "its window cleared, so it rejoins the queue — `running` here means the " +
+        "sweeper started it itself and walked past a cap it does not know about",
+    );
     assert.equal(row.resume_at, null, "a queued run has no wake time to keep");
 
     saveSettings({ maxConcurrentRuns: null });
