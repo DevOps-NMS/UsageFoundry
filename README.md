@@ -69,6 +69,31 @@ docker compose exec -it usagefoundry claude   # then: /login
 Full setup, including Linux `UF_UID`, multiple workspaces and GitHub access, is
 in **[docs/install.md](docs/install.md)**.
 
+### The configuration is checked before the server serves
+
+Exactly one variable is **required** and refuses to start when it is wrong:
+`DATA_DIR`, which decides where the only copy of your runs, settings, workflows
+and schedules lives. It is set to `/data` by `docker-compose.yml`, and the
+container exits with a message naming the path and the uid if it is blank, is
+not a directory, or cannot be written:
+
+```
+[usagefoundry] Refusing to start. DATA_DIR is set to the empty string, which is
+read as unset — so the database would be created at /app/.data … destroyed by
+the next `docker compose up --build`.
+```
+
+Everything else is **reported and kept running**, on stdout at boot and in a
+banner on the dashboard: a workspace whose path is not a directory (Docker
+creates a missing bind source rather than refusing, so a typo in `UF_WORKSPACE`
+looks exactly like an empty one), a `CLAUDE_HOME` with no `projects/` under it
+(every usage figure reads zero), and any variable set to the empty string where
+blank is not an answer. `UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY` and
+`UF_GITHUB_TOKEN` are the three where blank *is* an answer — it means off — and
+they are never reported.
+
+The full table is in [docs/install.md](docs/install.md#required-environment).
+
 ---
 
 ## Read this before you trust a number

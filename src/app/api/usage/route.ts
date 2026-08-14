@@ -12,6 +12,7 @@ import { readAccountProfile } from "@/lib/account";
 import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
 import { PROJECTS_DIR } from "@/lib/config";
+import { configProblems } from "@/lib/configCheck";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -115,6 +116,11 @@ export async function GET(req: Request) {
         entrypoints: [
           ...new Set(entries.map((e) => e.entrypoint).filter(Boolean)),
         ] as string[],
+        // Cached from the boot probe, so this costs a property read rather than
+        // a stat per mount on a ten-second poll. On this page because a wrongly
+        // pointed mount and a wrongly pointed CLAUDE_HOME both present as the
+        // zeros above it, which is also what a quiet week looks like.
+        configProblems: configProblems(),
       },
     });
   } catch (err) {

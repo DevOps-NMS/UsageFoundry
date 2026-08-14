@@ -17,6 +17,30 @@ export async function register() {
     if (g.__ufReconciled) return;
     g.__ufReconciled = true;
 
+    // Before anything opens the database or claims the directory it lives in.
+    // `configCheck.ts` carries the reasoning for which of these refuses and
+    // which warns; what is decided here is only what a refusal *does*.
+    //
+    // It exits rather than throwing. A rejected `register()` is logged by Next
+    // and the server then serves anyway, which for a `DATA_DIR` this process
+    // cannot write — or one it was never given — means a container that answers
+    // /login and writes every row to a file the next rebuild deletes. Exiting
+    // is what makes "refuses to start" true; `restart: unless-stopped` turns it
+    // into a visible restart loop with this message at the top of every attempt,
+    // which is louder than any log line and is the point.
+    const { configProblems } = await import("./lib/configCheck");
+    const problems = configProblems();
+    for (const p of problems.filter((x) => x.severity === "warn")) {
+      console.warn(`[usagefoundry] Configuration: ${p.message}`);
+    }
+    const refusals = problems.filter((p) => p.severity === "refuse");
+    if (refusals.length > 0) {
+      for (const p of refusals) {
+        console.error(`[usagefoundry] Refusing to start. ${p.message}`);
+      }
+      process.exit(1);
+    }
+
     const { reconcileOnBoot, killAllAgents } = await import("./lib/orchestrator");
 
     // Every reconciler below reads "this row says running, therefore the
