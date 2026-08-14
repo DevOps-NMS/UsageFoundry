@@ -394,6 +394,21 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **Checkout-slot exhaustion end to end, and the store inventory behind it.**
+  `resolveIsolation`'s refusal is unit-tested in both directions (it was seen to
+  fail against the old downgrade and to pass against the refusal), and
+  `npm run typecheck` and `npm test` pass — but no run has met a real exhausted
+  store. Filling one needs a workspace mount and 64 dirty checkouts, and Docker
+  was not available where this was written, so `allocateSlotPath`'s census
+  counts, `checkoutStores`' directory walk and the Branches table it feeds have
+  never seen a real `.uf-worktrees`. Before trusting it: on a real deployment,
+  make `<mount>/.uf-worktrees/<slug>-1` … `-64` dirty for one repository (start
+  and hard-kill isolated runs, or write a file into each checkout), confirm the
+  Branches page lists them with their uncommitted path counts and `0 of 64`
+  free, then submit an isolated run on that repository and confirm it is
+  **refused with the sentence** rather than started — and that `git status` in
+  your own checkout is unchanged afterwards. Then free one slot and confirm the
+  next run starts in it.
 - **A failed tool result reaching the run page.** `toolResultFailures` is unit-
   tested and `npm run typecheck` passes, and the `user`/`tool_result` shape it
   reads was taken from real transcripts written by the pinned CLI (2.1.226) —

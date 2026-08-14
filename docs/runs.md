@@ -253,6 +253,19 @@ it: review the branch from your own checkout, not by opening the worktree, and d
 not run `git worktree prune` on the host while a run is in flight — from there
 those registrations point at paths that do not exist.
 
+**Checkouts are a bounded pool, and running out refuses the run.** A repository
+gets up to 64 slots under `.uf-worktrees/`, reused between runs — but a checkout
+left holding uncommitted work is never reused, because reusing it would destroy
+that work, and nothing clears one on its own. So the pool only shrinks: every
+run interrupted mid-cycle retires a slot until you commit or purge what is in
+it. When a repository has none left, a run that asked for isolation is **refused
+with a sentence** naming the repository, the store and what took the slots. It
+is not quietly moved into your own checkout — that would put an agent on your
+current branch, unable even to commit, which is the one thing isolation is for.
+The **Branches** page lists slot pressure per repository as soon as the first
+checkout is retired, with each one's uncommitted path count, so this is visible
+long before it stops a run. Commit or purge from that page to free them.
+
 You can turn this off per run with **Isolation → work in the folder itself**, in
 which case it behaves like the case below.
 
