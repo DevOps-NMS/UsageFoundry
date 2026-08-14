@@ -78,7 +78,9 @@ export function Patch({
   // Exact rather than a guessed pixel width, because the pane is monospace and
   // `ch` is therefore the character cell: a fixed `w-10` truncates a five-digit
   // number in a long file, and a per-row intrinsic width would let every row
-  // size its own gutter and none of them line up.
+  // size its own gutter and none of them line up. The 0.75rem is the `px-1.5`
+  // on the spans, which sits inside the width under border-box — so the content
+  // box is exactly the digits.
   const gutter = { width: `calc(${Math.max(digits, 2)}ch + 0.75rem)` };
 
   return (
@@ -91,7 +93,11 @@ export function Patch({
       className={`${SHELL} ${className}`}
     >
       {rows.map((row, i) => (
-        <div key={i} className={`flex ${ROW[row.kind]}`}>
+        // `w-max min-w-full`: at least the width of the pane, so a row's tint
+        // reaches both edges, and as wide as its own line when that is longer,
+        // so the tint follows the code out into the horizontal scroll rather
+        // than stopping where the pane happens to end.
+        <div key={i} className={`flex w-max min-w-full ${ROW[row.kind]}`}>
           {digits > 0 && (
             // `select-none` on both columns, so selecting the patch and pasting
             // it somewhere yields the patch: a gutter that copies is the reason
@@ -100,22 +106,20 @@ export function Patch({
               <span
                 aria-hidden
                 style={gutter}
-                className="shrink-0 select-none pr-1.5 text-right text-ink-faint"
+                className="shrink-0 select-none px-1.5 text-right text-ink-faint"
               >
                 {row.oldLine ?? ""}
               </span>
               <span
                 aria-hidden
                 style={gutter}
-                className="shrink-0 select-none border-r border-line pr-1.5 text-right text-ink-faint"
+                className="shrink-0 select-none border-r border-line px-1.5 text-right text-ink-faint"
               >
                 {row.newLine ?? ""}
               </span>
             </>
           )}
-          <span className="min-w-0 flex-1 whitespace-pre pl-2.5 pr-2.5">
-            {row.text || " "}
-          </span>
+          <span className="whitespace-pre px-2.5">{row.text || " "}</span>
         </div>
       ))}
     </div>
