@@ -177,6 +177,13 @@ export const AUTH_TOKEN = env("UF_AUTH_TOKEN", "");
  */
 export const ALLOW_NO_AUTH = env("UF_ALLOW_NO_AUTH", "");
 
+/**
+ * Override for the session cookie's `Secure` flag: `"1"` forces it on, `"0"`
+ * off, anything else leaves the request to decide. See `cookieIsSecure` — the
+ * two directions exist for different failures, and neither is a preference.
+ */
+export const COOKIE_SECURE = env("UF_COOKIE_SECURE", "");
+
 /** Admin API key (sk-ant-admin01-...). Optional. */
 export const ADMIN_API_KEY = env("ANTHROPIC_ADMIN_KEY", "");
 

@@ -473,6 +473,22 @@ function migrate(db: Database.Database) {
       error       TEXT
     );
 
+    -- Browser sign-ins. One row per issued uf_session cookie, so a session has
+    -- a server-side referent at all: the cookie used to *be* UF_AUTH_TOKEN, so
+    -- there was nothing to count, nothing to revoke, and no answer to "how many
+    -- sessions exist" short of changing the environment and restarting.
+    --
+    -- The id is the random handle inside the cookie, never the signature and
+    -- never the token. expires_at is the same instant the cookie carries in its
+    -- signed payload, kept here so a revocation sweep can drop rows that can no
+    -- longer be presented.
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+      id          TEXT PRIMARY KEY,
+      created_at  INTEGER NOT NULL,
+      expires_at  INTEGER NOT NULL,
+      revoked_at  INTEGER
+    );
+
     CREATE TABLE IF NOT EXISTS chat_messages (
       id      TEXT PRIMARY KEY,
       chat_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,

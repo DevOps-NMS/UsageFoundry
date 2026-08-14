@@ -10,6 +10,17 @@ mounted code. Treat it as privileged.
 - Set `UF_AUTH_TOKEN` (`openssl rand -hex 32`). Leaving it blank makes the
   server refuse to start; the only way past that is `UF_ALLOW_NO_AUTH=1`, which
   runs with no authentication and puts a banner on every page saying so.
+- The `uf_session` cookie is a **signed session handle, not the token**: 32
+  random bytes naming a row in `auth_sessions`, plus an absolute 24-hour expiry,
+  signed with `UF_AUTH_TOKEN`. It cannot be replayed as a bearer credential, and
+  **Settings → Sign-in** ends one session or all of them without a restart.
+  `Secure` is set whenever the request reached the app over HTTPS
+  (`x-forwarded-proto` first, then the URL); `UF_COOKIE_SECURE=1`/`0` overrides
+  it either way for a terminator that sets no header, or for loopback.
+  One limit worth knowing: the gate runs in the edge runtime and cannot read the
+  database, so a revoked session's cookie — if somebody *captured* it — stays
+  valid until its own expiry. Rotating `UF_AUTH_TOKEN` invalidates every cookie
+  at once, and still costs a restart.
 - Folder input is resolved and containment-checked **before** filesystem access,
   and again after symlink resolution. `../`, absolute paths, and symlinks out of
   the tree are all rejected.

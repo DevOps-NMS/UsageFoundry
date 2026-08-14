@@ -46,6 +46,10 @@ services:
       # rather than defaulted here on purpose: a default would put the choice
       # back in this file, where nobody rereads it.
       UF_ALLOW_NO_AUTH: "${UF_ALLOW_NO_AUTH:-}"
+      # Forces the session cookie's Secure flag on ("1") or off ("0"). Blank
+      # follows the request, which is right behind a terminator that sets
+      # X-Forwarded-Proto and right on loopback HTTP.
+      UF_COOKIE_SECURE: "${UF_COOKIE_SECURE:-}"
       # Optional: enables the API-account panel. Needs an org Admin key.
       ANTHROPIC_ADMIN_KEY: "${ANTHROPIC_ADMIN_KEY:-}"
       # Optional: what a run uses to push, open a PR, or read an issue. The

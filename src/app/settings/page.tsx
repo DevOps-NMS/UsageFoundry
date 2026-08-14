@@ -499,6 +499,46 @@ function EditedRail({ on }: { on: boolean }) {
 }
 
 /** One `label: value` line in the environment summary under the title. */
+/**
+ * The one way to end a session from inside the app.
+ *
+ * It exists because a session now *is* something: the cookie used to be
+ * `UF_AUTH_TOKEN` itself, so there was nothing to end short of changing the
+ * environment and restarting the container — which kills every run in flight.
+ * "All" is here rather than only "this browser" because the case that matters
+ * is a cookie that got out, and the browser holding it is not this one.
+ */
+function SignOut({ sessions }: { sessions: number }) {
+  const [busy, setBusy] = useState(false);
+
+  async function signOut(all: boolean) {
+    setBusy(true);
+    try {
+      await fetch("/api/logout", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ all }),
+      });
+    } finally {
+      // Whatever happened, the credential this page was loaded with may no
+      // longer be good, and the gate is the authority on that.
+      window.location.href = "/login";
+    }
+  }
+
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      <Badge tone="ok">{sessions === 1 ? "1 session" : `${sessions} sessions`}</Badge>
+      <Button variant="secondary" busy={busy} onClick={() => void signOut(false)}>
+        Sign out
+      </Button>
+      <Button variant="secondary" busy={busy} onClick={() => void signOut(true)}>
+        Sign out everywhere
+      </Button>
+    </span>
+  );
+}
+
 function EnvRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex gap-2">
@@ -806,6 +846,16 @@ export default function SettingsPage() {
             <>
               <Badge tone="warn">not set</Badge>{" "}
               <span>runs cannot push or use gh</span>
+            </>
+          )}
+        </EnvRow>
+        <EnvRow label="Sign-in">
+          {env.authEnabled ? (
+            <SignOut sessions={Number(env.activeSessions ?? 0)} />
+          ) : (
+            <>
+              <Badge tone="danger">no token</Badge>{" "}
+              <span>every route is open</span>
             </>
           )}
         </EnvRow>

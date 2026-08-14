@@ -11,12 +11,14 @@ import {
 import { normalizePolicy } from "../../../lib/budget";
 import { agentKnowledgeOf, agentRefusal, getAgent } from "../../../lib/agents";
 import {
+  authEnabled,
   hasAdminKey,
   hasGithubToken,
   WORKSPACE_MOUNTS,
   WORKSPACE_ROOT,
   CLAUDE_HOME,
 } from "../../../lib/config";
+import { activeSessionCount } from "../../../lib/sessions";
 import { FIVE_HOURS_MS } from "../../../lib/windows";
 import { invalidatePlanUsage } from "../../../lib/planUsage";
 
@@ -35,6 +37,10 @@ export async function GET() {
       // tool call, so the only cheap way to know beforehand is to say here
       // whether the container was given a credential at all.
       githubTokenConfigured: hasGithubToken(),
+      authEnabled: authEnabled(),
+      // How many browser sign-ins are outstanding — a question that had no
+      // answer at all while the cookie was UF_AUTH_TOKEN itself.
+      activeSessions: authEnabled() ? activeSessionCount() : 0,
     },
   });
 }
