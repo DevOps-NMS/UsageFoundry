@@ -197,6 +197,34 @@ function ownerAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Is a *live* other process holding this data directory, right now?
+ *
+ * Synchronous, and deliberately narrower than `claimDataDir`: it answers only
+ * the `held` verdict — someone else's pid, alive, beating recently — and reads
+ * an undecided lock (`observe`) as not held. `db.ts` is the caller, and it has
+ * to ask before it migrates, from a code path that cannot await: `open()` runs
+ * on the first `db()` call in *any* process, which is how a second server ended
+ * up entitled to rebuild a table against the live database.
+ *
+ * Reading `observe` as free is the right direction for that caller. Refusing to
+ * migrate when nobody is actually there would leave a schema unbuilt and every
+ * query throwing, where running a migration a fraction of a second before the
+ * lock changes hands costs nothing — the migration is idempotent and the
+ * destructive one is now transactional.
+ */
+export function heldByAnotherProcess(): boolean {
+  const lock = readLock();
+  if (!lock) return false;
+  return (
+    lockVerdict(
+      lock,
+      { pid: process.pid, now: Date.now() },
+      ownerAlive(lock.pid),
+    ) === "held"
+  );
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
