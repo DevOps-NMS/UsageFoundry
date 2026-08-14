@@ -11,7 +11,7 @@ import {
   normalizePolicy,
   readWindowGuard,
 } from "./budget";
-import { pctField } from "./format";
+import { pctField, pctSubmit } from "./format";
 import type { UsageSnapshot, WindowState } from "./windows";
 
 /**
@@ -546,6 +546,43 @@ describe("normalizeInstanceBudget", () => {
       .maxSessionFraction, 0.8);
     assert.equal(normalizeInstanceBudget({ maxWeeklyFraction: 250 })
       .maxWeeklyFraction, 1);
+  });
+
+  it("round-trips a stored fraction through the workflow editor's percentage field", () => {
+    // The same pairing the run form's guards have, and the reason `frac()`
+    // above accepts both formats is the reason this has to be pinned: a bare
+    // number at or below 1 is read as an already-normalised fraction, so an
+    // editor that sent its field raw would store a typed "1" as the *whole*
+    // window — the smallest percentage the field offers, loosened by 100×,
+    // and a workflow guard that never trips is indistinguishable from one that
+    // was never reached. `pctField`/`pctSubmit` are the editor's own two halves
+    // and have to be exact inverses across `normalizeInstanceBudget`.
+    for (const f of [0.01, 0.05, 0.5, 0.8, 0.855, 0.999, 1]) {
+      const raw = { maxSessionFraction: pctSubmit(pctField(f)) };
+      const back = normalizeInstanceBudget(raw).maxSessionFraction;
+      // Within float noise rather than bit-identical, for the reason the
+      // `normalizePolicy` round trip above says: 0.999 comes back as
+      // 0.9990000000000001, and the error guarded against here is two orders
+      // of magnitude larger than that.
+      assert.ok(
+        back !== null && Math.abs(back - f) < 1e-9,
+        `round trip failed for ${f}: got ${back}`,
+      );
+      assert.equal(
+        normalizeInstanceBudget({ maxWeeklyFraction: pctSubmit(pctField(f)) })
+          .maxWeeklyFraction,
+        back,
+        `the weekly field must convert exactly as the 5-hour one does (${f})`,
+      );
+    }
+    // No guard stays no guard, rather than becoming a guard set to zero
+    // percent — which would halt the instance on its first block boundary.
+    assert.equal(pctField(null), "");
+    assert.equal(pctSubmit(pctField(null)), null);
+    assert.equal(
+      normalizeInstanceBudget({ maxSessionFraction: null }).maxSessionFraction,
+      null,
+    );
   });
 });
 

@@ -25,7 +25,7 @@ import {
   type LinkDraft,
   type Point,
 } from "@/lib/canvasGraph";
-import { pctField, pollFailureMessage } from "@/lib/format";
+import { pctField, pctSubmit, pollFailureMessage } from "@/lib/format";
 import {
   KIND_LABEL,
   WorkflowCanvas,
@@ -453,8 +453,12 @@ export function WorkflowEditor({
       graph: draftToGraph({ blocks, links }),
       instanceBudget: {
         maxInstanceCostUSD: costCapped ? maxInstanceCostUSD : "",
-        maxSessionFraction,
-        maxWeeklyFraction,
+        // Sent as 0–1 fractions rather than the 0–100 the fields show, the
+        // same conversion the run form makes: normalizeInstanceBudget's frac()
+        // reads a bare 1 as 100%, so a "1" typed into a field labelled % would
+        // otherwise be stored as the whole window.
+        maxSessionFraction: pctSubmit(maxSessionFraction),
+        maxWeeklyFraction: pctSubmit(maxWeeklyFraction),
       },
     }),
     [

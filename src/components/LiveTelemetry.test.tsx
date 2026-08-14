@@ -86,8 +86,39 @@ test("a run with no matching row reads as unknown, not as a status", () => {
       now={NOW}
     />,
   );
-  assert.match(html, /—/);
-  assert.doesNotMatch(html, /running/, "no status may be invented for it");
+  // Anchored on the cell, not on the document: the card title and the closing
+  // footnote each carry an em-dash of their own, so a bare /—/ is satisfied
+  // before the table body is reached and a component that rendered an *empty*
+  // cell for a null status would pass it. The null branch is a bare dash as the
+  // only child of its `Td`, which is what `>—<` picks out.
+  assert.match(html, />—</, "the unknown status is a dash in its own cell");
+  // Against the badge markup rather than the bare word, so this does not start
+  // depending on "running" being absent from unrelated copy on the card.
+  assert.doesNotMatch(
+    html,
+    /<span[^>]*>running<\/span>/,
+    "no status may be invented for it",
+  );
+});
+
+test("a run with a status wears it, so the dash is not what every cell says", () => {
+  // The control half of the test above, for the reason `haltedMembers.test.ts`
+  // carries three: a status cell that rendered a dash whatever it was handed
+  // satisfies the unknown case just as happily, and the two assertions only
+  // mean something as a pair.
+  const telemetry = windowOf();
+  const html = renderToStaticMarkup(
+    <LiveTelemetry
+      telemetry={{
+        ...telemetry,
+        runCount: 1,
+        runs: [telemetry.runs[0]],
+      }}
+      now={NOW}
+    />,
+  );
+  assert.match(html, /<span[^>]*>running<\/span>/, "a known status is a badge");
+  assert.doesNotMatch(html, />—</, "and it is not also an unknown");
 });
 
 test("nothing is described as working when no run is", () => {
