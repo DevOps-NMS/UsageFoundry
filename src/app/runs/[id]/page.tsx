@@ -928,8 +928,10 @@ export default function RunDetail({
 
               <Hint>
                 Everything else carries over: the window percentages, how the
-                limits are enforced, what happens after DONE, and the permission
-                mode. It keeps its folder
+                limits are enforced, what happens after DONE, the permission
+                mode
+                {run.agent ? `, and the ${run.agent.name} agent` : ""}. It keeps
+                its folder
                 {isolated ? ` and its checkout on ${run.worktree_branch}` : ""}
               </Hint>
 
@@ -1047,6 +1049,27 @@ export default function RunDetail({
               </ListRow>
             </ListGroup>
           </Section>
+
+          {/* Beside the guards and deliberately not among them. `--agents`
+              offers a role to the delegating model — it carries no tool list
+              and no permission mode, so a row inside the group above would say
+              it bounds something it does not. What it says instead is what was
+              sent: the run's own frozen copy, so it still names the agent even
+              after that agent has been renamed or deleted. */}
+          {run.agent && (
+            <Section title="Specialist">
+              <ListGroup footnote="Offered to the main thread, which may hand it a subtask. It changes who does part of the work, not what this run was allowed to do.">
+                <ListRow label="Agent" description={run.agent.description}>
+                  <GuardValue>{run.agent.name}</GuardValue>
+                </ListRow>
+                <ListRow label="Its model">
+                  <GuardValue>
+                    {run.agent.model ?? "the run's own"}
+                  </GuardValue>
+                </ListRow>
+              </ListGroup>
+            </Section>
+          )}
 
           {/* A separate measurement, deliberately not folded into the figures
               above. It counts every API request the agent made, including any

@@ -6,6 +6,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { MAX_TEMPLATE_NAME } from "@/lib/apiTypes";
 import type {
+  AgentDTO,
+  AmbientAgentDTO,
   BudgetPolicyDTO,
   EnforcementModeDTO,
   FoldersResponse,
@@ -44,6 +46,13 @@ interface FormSeed {
   prompt: string;
   isolate: boolean;
   permissionMode: string;
+  /**
+   * The saved agent, by id. A copied run carries null: it holds the definition
+   * it ran with rather than the id, deliberately, so there is nothing to select
+   * with — and picking the agent that happens to have the same name today would
+   * be this form guessing at an identity the run never recorded.
+   */
+  agentId: string | null;
   budget: BudgetPolicyDTO;
 }
 
@@ -62,6 +71,8 @@ interface FormValues {
   prompt: string;
   isolate: boolean;
   permissionMode: string;
+  /** `""` is "no agent" — the picker's own empty option, not a missing answer. */
+  agentId: string;
   iterationsCapped: boolean;
   maxIterations: string;
   costLimited: boolean;
@@ -88,6 +99,7 @@ type Baseline = {
 type RowId =
   | "task"
   | "where"
+  | "agent"
   | "isolate"
   | "permission"
   | "cycles"
@@ -101,6 +113,7 @@ type RowId =
 const ROW_FIELDS: Record<RowId, ReadonlyArray<keyof FormValues>> = {
   task: ["prompt"],
   where: ["mountId", "folder"],
+  agent: ["agentId"],
   isolate: ["isolate"],
   permission: ["permissionMode"],
   cycles: ["iterationsCapped", "maxIterations"],
@@ -116,6 +129,7 @@ const ROW_FIELDS: Record<RowId, ReadonlyArray<keyof FormValues>> = {
 const ROW_LABEL: Record<RowId, string> = {
   task: "the task",
   where: "the workspace and folder",
+  agent: "the specialist",
   isolate: "isolation",
   permission: "the permission mode",
   cycles: "the work-cycle limit",
@@ -151,6 +165,7 @@ const DEFAULT_VALUES: FormValues = {
   mountId: "",
   folder: "",
   prompt: "",
+  agentId: "",
   isolate: true,
   // Overwritten by settings.defaultPermissionMode when it loads — and so is the
   // baseline, because a value this form filled in is not an override.
@@ -189,8 +204,27 @@ function joinClauses(parts: string[]): string {
   return `${parts.slice(0, -1).join(", ")} or ${parts[parts.length - 1]}`;
 }
 
+/**
+ * What the operator's own `~/.claude` puts in play whatever this form picks.
+ *
+ * The saved registry is a *part* of the set of agents a run can delegate to and
+ * never the whole of it: the mounted config directory reaches every child this
+ * app spawns and always has, and `--agents` merges with it rather than replacing
+ * it. So a surface that offers a choice has to say so, or the picker reads as
+ * the complete answer to "which specialists exist here".
+ */
+function describeAmbient(ambient: AmbientAgentDTO[]): string | null {
+  if (ambient.length === 0) return null;
+  const names = ambient.slice(0, 3).map((a) => a.name);
+  const rest = ambient.length - names.length;
+  const list = rest > 0 ? `${names.join(", ")} and ${rest} more` : names.join(", ");
+  return ambient.length === 1
+    ? `Your own ~/.claude also carries ${list}, in play whatever you pick here`
+    : `Your own ~/.claude also carries ${ambient.length} agents (${list}), in play whatever you pick here`;
+}
+
 /** One line describing what a template will do, for the picker's hint. */
-function describeTemplate(t: RunTemplateDTO): string {
+function describeTemplate(t: RunTemplateDTO, agents: AgentDTO[]): string {
   const parts: string[] = [
     t.budget.maxIterations === null
       ? "no cycle limit"
@@ -208,6 +242,13 @@ function describeTemplate(t: RunTemplateDTO): string {
     );
   if (t.permissionMode !== "acceptEdits") parts.push(t.permissionMode);
   if (t.budget.continueAfterDone) parts.push("ignores DONE");
+  // Named rather than counted, and said even when the agent has gone: a
+  // template pointing at a deleted agent cannot start a run at all, and the
+  // picker's own line is where that is cheapest to notice.
+  if (t.agentId !== null) {
+    const agent = agents.find((a) => a.id === t.agentId);
+    parts.push(agent ? `with ${agent.name}` : "names a missing agent");
+  }
   parts.push(
     t.folder === null ? "asks for a folder" : t.folder || "whole workspace",
   );
@@ -446,6 +487,7 @@ export default function NewRunPage() {
   const [permissionMode, setPermissionMode] = useState(
     DEFAULT_VALUES.permissionMode,
   );
+  const [agentId, setAgentId] = useState(DEFAULT_VALUES.agentId);
   const [iterationsCapped, setIterationsCapped] = useState(
     DEFAULT_VALUES.iterationsCapped,
   );
@@ -483,6 +525,13 @@ export default function NewRunPage() {
   // picker: typing a name that already exists is how an edit is expressed, and
   // the save button says which of the two it will do.
   const [templates, setTemplates] = useState<RunTemplateDTO[]>([]);
+  // The saved registry and the definitions on disk this app did not write. Both
+  // come off one payload so no two surfaces can describe the set differently.
+  // `agentsLoaded` is what tells "this template names an agent that is gone"
+  // from "the list has not arrived yet" — the second must not raise the first.
+  const [agents, setAgents] = useState<AgentDTO[]>([]);
+  const [ambientAgents, setAmbientAgents] = useState<AmbientAgentDTO[]>([]);
+  const [agentsLoaded, setAgentsLoaded] = useState(false);
   const [templateId, setTemplateId] = useState("");
   const [templateName, setTemplateName] = useState("");
   const [rememberFolder, setRememberFolder] = useState(true);
@@ -615,6 +664,19 @@ export default function NewRunPage() {
       .then((d) => setTemplates(d.templates ?? []))
       .catch(() => void 0);
 
+    fetch("/api/agents", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        setAgents(d.agents ?? []);
+        setAmbientAgents(d.ambient ?? []);
+        setAgentsLoaded(true);
+      })
+      // A failed read leaves the picker empty and `agentsLoaded` false, so a
+      // template naming an agent is never reported as naming a missing one on
+      // the strength of a list that did not arrive. The run door still refuses
+      // it by name, which is the answer that guards anything.
+      .catch(() => void 0);
+
     if (seedRunId) {
       fetch(`/api/runs/${seedRunId}`, { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
@@ -637,6 +699,9 @@ export default function NewRunPage() {
               prompt: run.prompt,
               isolate: run.isolation === "worktree",
               permissionMode: run.budget.permissionMode ?? "acceptEdits",
+              // A run records the definition it was given, not the row it came
+              // from, so there is no id to carry — see `FormSeed`.
+              agentId: null,
               budget: run.budget,
             },
             "run",
@@ -663,6 +728,18 @@ export default function NewRunPage() {
   const selectedTemplate = useMemo(
     () => templates.find((t) => t.id === templateId) ?? null,
     [templates, templateId],
+  );
+  const selectedAgent = useMemo(
+    () => agents.find((a) => a.id === agentId) ?? null,
+    [agents, agentId],
+  );
+  // An id the registry does not have. Kept in state rather than cleared: falling
+  // back to no agent is exactly what the run door refuses to do, and a form that
+  // did it silently would start the run this page exists to stop.
+  const agentMissing = agentsLoaded && agentId !== "" && selectedAgent === null;
+  const ambientLine = useMemo(
+    () => describeAmbient(ambientAgents),
+    [ambientAgents],
   );
   // Case-insensitive, because the unique index on the name is. Without it the
   // button would offer to create a template the server then refuses.
@@ -720,6 +797,7 @@ export default function NewRunPage() {
     prompt,
     isolate,
     permissionMode,
+    agentId,
     iterationsCapped,
     maxIterations,
     costLimited,
@@ -752,6 +830,9 @@ export default function NewRunPage() {
       case "where":
         setMountId(b.mountId);
         setFolder(b.folder);
+        break;
+      case "agent":
+        setAgentId(b.agentId);
         break;
       case "isolate":
         setIsolate(b.isolate);
@@ -823,6 +904,25 @@ export default function NewRunPage() {
       focus: "prompt",
       message: "Describe what Claude should work on.",
       immediate: false,
+    });
+  }
+  // The refusal `POST /api/runs` will give, said beside the control instead of
+  // after a round trip. Immediate, because nothing the operator does to this row
+  // except changing it can clear it, and it is usually a template naming an
+  // agent that has been deleted since it was saved.
+  if (agentMissing) {
+    problems.push({
+      focus: "agent",
+      message:
+        "That agent is not in the registry any more, so this run cannot start. Pick another one, or start with none.",
+      immediate: true,
+    });
+  }
+  if (selectedAgent && !selectedAgent.usable) {
+    problems.push({
+      focus: "agent",
+      message: `“${selectedAgent.name}” is missing its description or its prompt, and Claude Code drops such an agent without a word. Fix it, or start with none.`,
+      immediate: true,
     });
   }
   if (iterationsCapped && positive(maxIterations) === null) {
@@ -950,6 +1050,7 @@ export default function NewRunPage() {
       prompt: seed.prompt,
       isolate: seed.isolate,
       permissionMode: seed.permissionMode,
+      agentId: seed.agentId ?? "",
       iterationsCapped: b.maxIterations !== null,
       maxIterations:
         b.maxIterations !== null ? String(b.maxIterations) : maxIterations,
@@ -977,6 +1078,7 @@ export default function NewRunPage() {
     setPrompt(next.prompt);
     setIsolate(next.isolate);
     setPermissionMode(next.permissionMode);
+    setAgentId(next.agentId);
     setIterationsCapped(next.iterationsCapped);
     setMaxIterations(next.maxIterations);
     setCostLimited(next.costLimited);
@@ -1049,6 +1151,9 @@ export default function NewRunPage() {
             // whatever folder the template is eventually used on.
             isolate,
             permissionMode,
+            // "" is the picker's own "no agent", and the column's null is the
+            // same absence — collapsed here rather than stored as an empty id.
+            agentId: agentId || null,
             budget: currentBudget(),
           }),
         },
@@ -1146,6 +1251,10 @@ export default function NewRunPage() {
           prompt,
           permissionMode,
           isolate: canIsolate ? isolate : false,
+          // An id, never a definition: the registry is where an agent comes
+          // from, and the door refuses one that is not in it rather than
+          // starting a run that quietly has no specialist.
+          agentId: agentId || null,
           budget: currentBudget(),
         }),
       });
@@ -1264,7 +1373,7 @@ export default function NewRunPage() {
                 label="Template"
                 description={
                   selectedTemplate
-                    ? describeTemplate(selectedTemplate)
+                    ? describeTemplate(selectedTemplate, agents)
                     : "Fills in everything below; nothing starts until you press Start run"
                 }
               >
@@ -1383,6 +1492,67 @@ export default function NewRunPage() {
                 </Select>
               </div>
             </ListRow>
+
+            {/* Offered only where there is something to offer. A specialist is
+                not a guard and is deliberately not in the card below: an agent
+                holds no tool list and no permission mode, so what it changes is
+                who does a piece of the work and never what the run may do. */}
+            {agents.length > 0 && (
+              <ListRow
+                htmlFor="agent"
+                label="Specialist"
+                description={
+                  <>
+                    {problemFor("agent") ? (
+                      <Toned tone="danger">{problemFor("agent")?.message}</Toned>
+                    ) : selectedAgent ? (
+                      selectedAgent.description
+                    ) : (
+                      "A saved agent Claude may hand a subtask to — it changes who does part of the work, not what the run may do"
+                    )}
+                    {selectedAgent?.model && (
+                      <span className="block">
+                        Its turns run on{" "}
+                        <span className="mono">{selectedAgent.model}</span>
+                      </span>
+                    )}
+                    {/* The registry is a part of the set and not the whole of
+                        it: the mounted ~/.claude reaches every child this app
+                        spawns, and --agents merges with it. Said wherever an
+                        agent is chosen, or the picker reads as the full list. */}
+                    {ambientLine && (
+                      <span className="mt-0.5 block">{ambientLine}</span>
+                    )}
+                  </>
+                }
+              >
+                {mark("agent")}
+                <div className="w-64">
+                  <Select
+                    id="agent"
+                    value={agentId}
+                    onChange={(e) => setAgentId(e.target.value)}
+                    aria-invalid={problemFor("agent") ? true : undefined}
+                  >
+                    <option value="">— no specialist —</option>
+                    {agents.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.name}
+                        {a.usable ? "" : "  (incomplete)"}
+                      </option>
+                    ))}
+                    {/* An id the registry no longer has still selects
+                        something, so the control cannot read as "none" while
+                        the form is about to be refused for naming one. */}
+                    {agentMissing && (
+                      <option value={agentId}>
+                        {`missing agent (${agentId.slice(0, 8)})`}
+                      </option>
+                    )}
+                  </Select>
+                </div>
+              </ListRow>
+            )}
           </ListGroup>
 
           {/* Whose folder it is, and who is waiting for it. Under the group
