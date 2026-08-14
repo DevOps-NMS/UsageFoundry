@@ -173,6 +173,29 @@ export interface UsageResponse {
     unpricedModels: string[];
     scannedAt: number;
     /**
+     * This process's own footprint, so the heap is readable without attaching a
+     * debugger to a container that has usually already died by then.
+     */
+    memory: {
+      cache: {
+        /** Transcript files with a cached byte offset. */
+        files: number;
+        /** Parsed turns held across those files. */
+        entries: number;
+        /** The bound `entries` is kept at or below. */
+        maxEntries: number;
+        /**
+         * Files dropped to stay under that bound since boot. Non-zero means the
+         * history on disk no longer fits, and the excess is re-parsed from disk
+         * on every scan — correct, and slower every time.
+         */
+        evictions: number;
+      };
+      heapUsedBytes: number;
+      /** V8's own ceiling for this process, which it derives from system memory. */
+      heapLimitBytes: number;
+    };
+    /**
      * Whether the window can show a percentage at all — true when the provider
      * answered, whatever is or is not configured.
      */

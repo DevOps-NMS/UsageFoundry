@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { PROJECTS_DIR } from "./config";
+import { PROJECTS_DIR, TRANSCRIPT_CACHE_MAX_ENTRIES } from "./config";
 import {
   type TokenCounts,
   costOf,
@@ -25,6 +25,16 @@ import {
  *  2. Files are append-only, so we track a byte offset per file and parse only
  *     the newly written bytes on each refresh. A full re-parse of a busy
  *     ~/.claude is slow enough to be noticeable in a polling dashboard.
+ *
+ *  3. What (2) buys is paid for in memory, so the retention is bounded. Holding
+ *     every record ever parsed is what made the offset cheap, and it is also a
+ *     heap that only grows: at ~330 bytes a turn it reaches V8's default limit
+ *     and aborts the process. Past `TRANSCRIPT_CACHE_MAX_ENTRIES` the coldest
+ *     files are dropped whole — records *and* offset — so a later scan re-reads
+ *     them and derives the same records again. Never the other way round:
+ *     keeping the offset and discarding the records would be cheaper and would
+ *     silently understate every window, which is the one direction a budget
+ *     guard must not fail in.
  */
 
 export interface UsageEntry {
@@ -81,15 +91,29 @@ interface FileCacheEntry {
   size: number;
   cwd: string;
   entries: UsageEntry[];
+  /**
+   * Newest timestamp in `entries`, or 0 when it holds none.
+   *
+   * Only eviction reads it, and it is kept here rather than derived because the
+   * array is the thing being measured: a scan that walked every entry of every
+   * file to decide what to drop would be paying the cost the cache exists to
+   * avoid.
+   */
+  lastTs: number;
 }
 
 // Persist across hot reloads in dev; a fresh Map per module evaluation would
 // silently re-parse every transcript on each request.
 const globalCache = globalThis as unknown as {
   __ufTranscriptCache?: Map<string, FileCacheEntry>;
+  __ufTranscriptCacheStats?: { evictions: number };
 };
 const cache: Map<string, FileCacheEntry> =
   globalCache.__ufTranscriptCache ?? (globalCache.__ufTranscriptCache = new Map());
+/** Pinned beside the cache it counts, for that Map's reason. */
+const cacheStats =
+  globalCache.__ufTranscriptCacheStats ??
+  (globalCache.__ufTranscriptCacheStats = { evictions: 0 });
 
 /**
  * In-flight refreshes, keyed by file, so overlapping scans never parse the same
@@ -240,7 +264,7 @@ async function readAppended(file: string): Promise<FileCacheEntry> {
   const base: FileCacheEntry =
     prev && !rotated
       ? prev
-      : { offset: 0, size: 0, cwd: "", entries: [] };
+      : { offset: 0, size: 0, cwd: "", entries: [], lastTs: 0 };
 
   if (stat.size === start) {
     base.size = stat.size;
@@ -273,7 +297,9 @@ async function readAppended(file: string): Promise<FileCacheEntry> {
   for (const line of complete.split("\n")) {
     if (!line) continue;
     const entry = parseLine(line, cwdRef);
-    if (entry) base.entries.push(entry);
+    if (!entry) continue;
+    base.entries.push(entry);
+    if (entry.ts > base.lastTs) base.lastTs = entry.ts;
   }
 
   // Backfill cwd onto entries parsed before the first record that carried it.
@@ -334,8 +360,87 @@ export function scanUsage(): Promise<ScanResult> {
   return started;
 }
 
+/** Parsed turns currently held across every cached file. */
+function retainedEntries(): number {
+  let n = 0;
+  for (const e of cache.values()) n += e.entries.length;
+  return n;
+}
+
+/**
+ * Drop whole files until the retained turn count is back under the bound.
+ *
+ * Coldest first, where cold is "newest turn is oldest": a transcript is written
+ * while its session is live and never touched again, so the file whose last turn
+ * is furthest back is both the least likely to gain bytes and the least likely
+ * to be inside the 5-hour or weekly window a guard reads. A file with nothing
+ * parsed out of it frees nothing and is skipped, and one with a refresh in
+ * flight is left alone — that refresh is holding the offset it read and would
+ * write the record straight back.
+ *
+ * A dropped file loses its byte offset along with its records, which is what
+ * makes this lossless: the next scan reads it from byte 0 and parses exactly the
+ * same turns out of it. The cost is a re-read, so an install whose live history
+ * sits permanently over the bound re-parses the excess on every scan — slow, and
+ * the answer to it is a larger bound or fewer transcripts on disk, not a cache
+ * that quietly reports less than it was asked about.
+ *
+ * Called after a scan has taken its result, never during one: what it evicts is
+ * retention, and the entries the caller is holding are unaffected.
+ */
+function evictToBound(): void {
+  let retained = retainedEntries();
+  if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return;
+
+  const candidates = [...cache.entries()]
+    .filter(([file, e]) => e.entries.length > 0 && !inflight.has(file))
+    .sort((a, b) => a[1].lastTs - b[1].lastTs);
+
+  for (const [file, e] of candidates) {
+    if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return;
+    cache.delete(file);
+    retained -= e.entries.length;
+    cacheStats.evictions += 1;
+  }
+}
+
+/** What the cache is holding, so an operator can read it off `/api/usage`. */
+export interface TranscriptCacheStats {
+  /** Transcript files with a cached byte offset. */
+  files: number;
+  /** Parsed turns held across those files. */
+  entries: number;
+  /** The bound `entries` is kept at or below. */
+  maxEntries: number;
+  /** Files dropped to stay under that bound since this process started. */
+  evictions: number;
+}
+
+/**
+ * A reading of the retention this module holds.
+ *
+ * Exported because the heap it bounds is otherwise only visible by attaching a
+ * debugger to a container, which is not a thing an operator does before the
+ * process has already died.
+ */
+export function transcriptCacheStats(): TranscriptCacheStats {
+  return {
+    files: cache.size,
+    entries: retainedEntries(),
+    maxEntries: TRANSCRIPT_CACHE_MAX_ENTRIES,
+    evictions: cacheStats.evictions,
+  };
+}
+
 async function runScan(): Promise<ScanResult> {
   const files = await listTranscriptFiles(PROJECTS_DIR);
+
+  // A transcript that is no longer on disk will never be read again, so its
+  // records are retention with nothing behind them. Dropped here rather than in
+  // `evictToBound`, which is about the bound: this one is free whatever the
+  // cache is holding.
+  const present = new Set(files);
+  for (const file of cache.keys()) if (!present.has(file)) cache.delete(file);
 
   const results = await Promise.all(
     files.map((f) => refreshFile(f).catch(() => null)),
@@ -359,19 +464,15 @@ async function runScan(): Promise<ScanResult> {
 
   entries.sort((a, b) => a.ts - b.ts);
 
+  // After the result is built, never before it: this scan answers with
+  // everything it read, and what eviction decides is only how much of that is
+  // still in memory when the next one starts.
+  evictToBound();
+
   return {
     entries,
     fileCount: files.length,
     unpricedModels: [...unpriced],
     scannedAt: Date.now(),
   };
-}
-
-/** Drop cached offsets so the next scan re-reads every file from byte 0. */
-export function invalidateTranscriptCache(): void {
-  cache.clear();
-  // In-flight refreshes still hold the offsets they read before the clear, so
-  // drop them too rather than letting one write a pre-invalidation offset back.
-  inflight.clear();
-  globalInflight.__ufScanInflight = null;
 }

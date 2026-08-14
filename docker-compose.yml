@@ -51,6 +51,12 @@ services:
       # without editing this file.
       WORKSPACE_ROOTS: "${UF_WORKSPACE_NAME:-Workspace}=/workspace|${UF_WORKSPACE_2_NAME:-}=/workspace2|${UF_WORKSPACE_3_NAME:-}=/workspace3|${UF_WORKSPACE_4_NAME:-}=/workspace4"
       WORKSPACE_ROOT: /workspace
+      # Optional: how many parsed transcript turns this process keeps in memory.
+      # Blank takes the default, which is sized against V8's own default heap
+      # limit. Past it the coldest files are re-read from disk on each scan, so
+      # raising it trades memory for speed and lowering it the other way — the
+      # figures on the dashboard are the same either way.
+      UF_TRANSCRIPT_CACHE_MAX_ENTRIES: "${UF_TRANSCRIPT_CACHE_MAX_ENTRIES:-}"
       CLAUDE_HOME: /home/node/.claude
       CLAUDE_CONFIG_DIR: /home/node/.claude
       DATA_DIR: /data

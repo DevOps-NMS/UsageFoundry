@@ -18,6 +18,31 @@ export const CLAUDE_HOME = env("CLAUDE_HOME", path.join(os.homedir(), ".claude")
 export const PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
 
 /**
+ * Most parsed transcript turns held in memory at once.
+ *
+ * `transcripts.ts` keeps the records it parses out of each file so the next scan
+ * only has to read the bytes appended since the last one. Nothing bounded that,
+ * so the heap grew with every turn ever written under `CLAUDE_HOME` and the
+ * process eventually died on V8's own limit — weeks on a busy fleet, months on a
+ * laptop, and never on a machine restarted daily, which is why it survived this
+ * long. Past this bound the coldest files are dropped *whole*, byte offset
+ * included, so the next scan that needs them re-reads them from disk and derives
+ * exactly the same records: what the bound costs is CPU, never accuracy.
+ *
+ * Process-level rather than a setting, because what it bounds is the heap this
+ * process was given rather than anything the user is choosing. Roughly 330 bytes
+ * are retained per turn, so the default is ~165 MB against V8's ~2 GB default
+ * limit. Raise it alongside `--max-old-space-size` on a larger host; lower it on
+ * a smaller one. A value that is not a positive number falls back to the
+ * default, which is the safe direction for a figure only an operator tuning
+ * memory ever sets.
+ */
+export const TRANSCRIPT_CACHE_MAX_ENTRIES = ((): number => {
+  const raw = Number(env("UF_TRANSCRIPT_CACHE_MAX_ENTRIES", ""));
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 500_000;
+})();
+
+/**
  * Where the Claude CLI keeps its own config and credential files.
  *
  * `CLAUDE_CONFIG_DIR` is the CLI's variable, not ours, and the container sets

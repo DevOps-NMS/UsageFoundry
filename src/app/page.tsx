@@ -439,6 +439,17 @@ export default function Dashboard() {
       <span>{meta.entryCount.toLocaleString()} deduplicated turns</span>
       <Sep />
       <span>{meta.fileCount.toLocaleString()} session files</span>
+      <Sep />
+      {/* This app's own footprint. It belongs on the provenance strip rather
+          than in a card because it is a fact about the reading, not a reading:
+          the parsed turns above are what fills this heap, and it used to be the
+          thing that eventually killed the container. */}
+      <span
+        title={`${meta.memory.cache.entries.toLocaleString()} of at most ${meta.memory.cache.maxEntries.toLocaleString()} parsed turns cached across ${meta.memory.cache.files.toLocaleString()} files`}
+      >
+        {Math.round(meta.memory.heapUsedBytes / 1e6).toLocaleString()} MB heap of{" "}
+        {Math.round(meta.memory.heapLimitBytes / 1e6).toLocaleString()} MB
+      </span>
       {meta.entrypoints.length > 0 && (
         <>
           <Sep />
@@ -696,6 +707,24 @@ export default function Dashboard() {
           it charges these models a conservative rate instead, which is the
           hatched span on the meters above. A run can therefore be stopped
           before the solid bar looks full.
+        </Notice>
+      )}
+
+      {/* Shown only while it is true, unlike the blind-spot notice below: this
+          one is a state an operator can act on, and it says which way the
+          trade went — correctness kept, refresh cost paid. */}
+      {meta.memory.cache.evictions > 0 && (
+        <Notice quiet>
+          <strong>Transcript cache at its bound.</strong>{" "}
+          <span className="tabular-nums">
+            {meta.memory.cache.evictions.toLocaleString()}
+          </span>{" "}
+          {meta.memory.cache.evictions === 1 ? "file has" : "files have"} been
+          dropped from memory and are re-read from disk on every scan. Figures
+          here are unaffected; each refresh costs more. Raise{" "}
+          <span className="mono">UF_TRANSCRIPT_CACHE_MAX_ENTRIES</span> — and the
+          heap behind it — or keep less history under{" "}
+          <span className="mono">CLAUDE_HOME</span>.
         </Notice>
       )}
 

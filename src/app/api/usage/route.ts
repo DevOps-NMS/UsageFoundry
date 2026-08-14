@@ -1,5 +1,6 @@
+import v8 from "node:v8";
 import { NextResponse } from "next/server";
-import { scanUsage } from "@/lib/transcripts";
+import { scanUsage, transcriptCacheStats } from "@/lib/transcripts";
 import {
   agentOriginIndex,
   buildPeriods,
@@ -83,6 +84,17 @@ export async function GET(req: Request) {
         entryCount: entries.length,
         unpricedModels: scan.unpricedModels,
         scannedAt: scan.scannedAt,
+        // What this process is holding, and what V8 will let it hold. The
+        // transcript cache is the largest thing on this heap by a wide margin
+        // and used to grow with every turn ever written, so the two are read
+        // together: a rising `heapUsedBytes` beside a flat `entries` at
+        // `maxEntries` is the cache doing its job, and beside a climbing
+        // `entries` it is something else.
+        memory: {
+          cache: transcriptCacheStats(),
+          heapUsedBytes: process.memoryUsage().heapUsed,
+          heapLimitBytes: v8.getHeapStatistics().heap_size_limit,
+        },
         // "Can this window show a percentage at all", which the provider's own
         // reading answers without anything being configured — the whole point
         // of it. Reading the snapshot rather than the settings is what keeps
