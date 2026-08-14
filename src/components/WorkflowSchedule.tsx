@@ -142,12 +142,18 @@ export function WorkflowSchedule({
       const data = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
       setEditing(false);
-      setConfirmDelete(false);
       await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+      // Closed however this ended, never only on success: the notice `error`
+      // sets renders *behind* the modal, so a sheet left open over a failure
+      // shows an enabled, un-busy confirm button and no sign anything went
+      // wrong. The purge sheet on the branches page clears its flag here for
+      // the same reason. The editor above is the opposite case and stays open,
+      // because what failed is still in it.
+      setConfirmDelete(false);
     }
   }
 
@@ -360,9 +366,17 @@ export function WorkflowSchedule({
                   // The message rides the row's own description, which is what
                   // reaches the control as aria-describedby — a `Field`'s error
                   // slot has nothing to align a right edge against in a row.
+                  // `role="alert"`, because `Field`'s error slot carries one and
+                  // a row's description does not: an aria-describedby that
+                  // changes is not announced on its own, so a screen-reader user
+                  // who cleared the field would meet a disabled Save with
+                  // nothing saying why — the outcome the note on that button
+                  // says must not happen.
                   description={
                     timeError ? (
-                      <span className="text-danger">{timeError}</span>
+                      <span role="alert" className="text-danger">
+                        {timeError}
+                      </span>
                     ) : undefined
                   }
                 >

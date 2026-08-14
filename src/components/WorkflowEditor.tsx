@@ -1012,11 +1012,17 @@ function BlockPanel({
 
       {!merge && (
         <>
+          {/* The conditional sentences ride the *row's* description rather than
+              the group's footnote, because that is the one `ListRow` wires to
+              the control as `aria-describedby` — a footnote is an unlabelled
+              paragraph, so a screen reader hears the picker and not what is
+              wrong with what is in it. The standing explanation stays a
+              footnote, where it belongs to the group. */}
           <ListGroup
             className="mb-4"
             footnote={
               missingTemplate
-                ? "That template has been deleted, so Save will refuse this graph — pick another"
+                ? undefined
                 : block.templateId === ""
                   ? "Budget, permission mode and isolation come from Settings"
                   : "Budget, permission mode and isolation come from that template"
@@ -1025,6 +1031,14 @@ function BlockPanel({
             <ListRow
               label={orchestrator ? "Guards for the runs it starts" : "Guards"}
               htmlFor={`${block.id}-template`}
+              description={
+                missingTemplate ? (
+                  <span role="alert" className="text-danger">
+                    That template has been deleted, so Save will refuse this
+                    graph — pick another
+                  </span>
+                ) : undefined
+              }
             >
               <div className={ROW_CONTROL}>
                 <Select
@@ -1049,16 +1063,7 @@ function BlockPanel({
             </ListRow>
           </ListGroup>
 
-          <ListGroup
-            className="mb-4"
-            footnote={
-              orchestrator
-                ? "Where it looks; the runs it starts must be in this workspace"
-                : block.folder === ""
-                  ? "The whole workspace — no other run in it can start meanwhile"
-                  : undefined
-            }
-          >
+          <ListGroup className="mb-4">
             <ListRow label="Workspace" htmlFor={`${block.id}-mount`}>
               <div className={ROW_CONTROL}>
                 <Select
@@ -1080,7 +1085,21 @@ function BlockPanel({
               </div>
             </ListRow>
 
-            <ListRow label="Folder" htmlFor={`${block.id}-folder`}>
+            {/* On the row, not in a footnote: this is a fact about what is in
+                the picker, and only a row's description reaches the control. */}
+            <ListRow
+              label="Folder"
+              htmlFor={`${block.id}-folder`}
+              description={
+                orchestrator ? (
+                  "Where it looks; the runs it starts must be in this workspace"
+                ) : block.folder === "" ? (
+                  <span className="text-warn">
+                    The whole workspace — no other run in it can start meanwhile
+                  </span>
+                ) : undefined
+              }
+            >
               <div className={ROW_CONTROL}>
                 <Select
                   id={`${block.id}-folder`}
@@ -1178,18 +1197,21 @@ function LinkPanel({
           ` ${toName} commits onto ${fromName}'s branch rather than cutting its own.`}
       </p>
 
-      <ListGroup
-        className="mb-4"
-        footnote={
-          link.edge === "" ? (
-            <span className="text-warn">
-              Neither answer is a safe default, so this one is yours to make —
-              until it is answered, Save refuses this graph
-            </span>
-          ) : undefined
-        }
-      >
-        <ListRow label="Condition" htmlFor={`${id}-edge`}>
+      <ListGroup className="mb-4">
+        <ListRow
+          label="Condition"
+          htmlFor={`${id}-edge`}
+          // On the row rather than in a footnote, so it reaches the picker it
+          // is about — see the guards group in `BlockPanel`.
+          description={
+            link.edge === "" ? (
+              <span className="text-warn">
+                Neither answer is a safe default, so this one is yours to make —
+                until it is answered, Save refuses this graph
+              </span>
+            ) : undefined
+          }
+        >
           <div className={ROW_CONTROL}>
             <Select
               id={`${id}-edge`}

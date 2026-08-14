@@ -547,7 +547,19 @@ export function WorkflowCanvas({
           : ""}
       </p>
 
-      <div className="relative max-h-[62vh] overflow-auto bg-inset">
+      {/* `tabIndex={-1}` is what makes the Delete above reachable at all. A
+          React `onKeyDown` on the frame only sees keys that bubble from a
+          *focused descendant*, and pressing a block's card focuses nothing — the
+          card is a plain div, so `activeElement` stays `<body>` and the key never
+          enters this subtree. Pressing inside a focusable region focuses the
+          region, so this is the one attribute that connects "click a block, press
+          Delete" to the handler written for it. Out of the tab order, and a
+          pointer press yields `:focus` rather than `:focus-visible`, so nothing
+          draws a ring. */}
+      <div
+        tabIndex={-1}
+        className="relative max-h-[62vh] overflow-auto bg-inset"
+      >
         <div
           ref={sheetRef}
           className="dot-grid relative"

@@ -302,11 +302,14 @@ export default function WorkflowInstancePage() {
       };
       if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
       if (data.instance) setInstance(data.instance);
-      setConfirmStop(false);
     } catch (err) {
       setStopError(err instanceof Error ? err.message : String(err));
     } finally {
       setStopping(false);
+      // Closed however this ended. `stopError` renders behind the modal, so a
+      // sheet left open over a failure shows an enabled, un-busy "Stop all
+      // blocks" and no sign that the agents are still spending.
+      setConfirmStop(false);
     }
   }
 
@@ -378,11 +381,15 @@ export default function WorkflowInstancePage() {
           <h1 className="text-xl font-semibold tracking-tight">
             Run of {fmtDateTime(instance.createdAt)}
           </h1>
+          {/* Not disabled by `confirmStop`: that lands in the same commit that
+              opens the sheet, so the button is blurred to <body> before
+              `showModal()` records what to restore focus to, and Esc would drop
+              the operator at the top of the page. */}
           {instance.status === "started" && instance.liveRunCount > 0 && (
             <Button
               variant="danger"
               onClick={() => setConfirmStop(true)}
-              disabled={confirmStop || stopping}
+              disabled={stopping}
             >
               Stop all
             </Button>

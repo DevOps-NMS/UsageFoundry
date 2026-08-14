@@ -168,6 +168,10 @@ export default function WorkflowPage() {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(null);
+      // The sheet closes however this ended. `actionError` renders behind the
+      // modal, so one left open over a failure shows an enabled, un-busy
+      // "Delete workflow" and nothing saying the last press did not work.
+      setConfirmDelete(false);
     }
   }
 
@@ -230,10 +234,15 @@ export default function WorkflowPage() {
             >
               Duplicate
             </Button>
+            {/* Not disabled by `confirmDelete`: that lands in the same commit
+                that opens the sheet, so the button is blurred to <body> before
+                `showModal()` records what to restore focus to — and Esc would
+                then drop the operator at the top of the page. The sheet is
+                modal, so a second press is impossible anyway. */}
             <Button
               variant="ghost"
               onClick={() => setConfirmDelete(true)}
-              disabled={busy !== null || confirmDelete}
+              disabled={busy !== null}
             >
               Delete
             </Button>
