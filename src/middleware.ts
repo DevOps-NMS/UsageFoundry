@@ -46,6 +46,21 @@ export function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
+  // The container's own liveness probe, which has to work before anyone has a
+  // credential and from a `HEALTHCHECK` that has no way to hold one. It is safe
+  // to leave open because of what it answers with and only that: counts of runs
+  // by status, whether SQLite responds, whether this process owns its data
+  // directory, and two timings. No prompt, no folder or mount path, no setting,
+  // no token, no model name, nothing read off a transcript.
+  //
+  // That list is the exemption's whole justification, so it is a constraint on
+  // the route rather than a description of it — see the same statement in
+  // `health.ts`. Anything added to that payload that is not a count makes this
+  // line a second unauthenticated data route.
+  if (pathname === "/api/health") {
+    return NextResponse.next();
+  }
+
   const cookie = req.cookies.get(COOKIE)?.value ?? "";
   if (cookie && timingSafeEqual(cookie, token)) return NextResponse.next();
 

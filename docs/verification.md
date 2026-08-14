@@ -394,6 +394,26 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **The container's `HEALTHCHECK`.** `GET /api/health` is driven in both
+  directions by `npm test` — 200 with counts, and 503 with the database handle
+  throwing — and `src/lib/deployment.test.ts` pins the `HEALTHCHECK` directive
+  against the route it names. What has **not** happened is Docker running it:
+  the container was never built, so no `docker inspect` has reported a health
+  status and the `${PORT}` expansion inside the `CMD` has not been watched
+  working. Before trusting it:
+
+  ```
+  docker compose up -d --build
+  docker inspect --format '{{json .State.Health}}' usagefoundry     # expect Status "healthy"
+  curl -sf http://127.0.0.1:3000/api/health | jq .
+  docker exec usagefoundry sh -c 'kill -STOP 1'                     # wedge it
+  docker inspect --format '{{.State.Health.Status}}' usagefoundry   # expect "unhealthy" within ~3 min
+  ```
+
+  Note what the last step does *not* do: Docker Engine surfaces the unhealthy
+  state and does not act on it — `restart: unless-stopped` restarts on process
+  exit only. Wiring a restart to it is the operator's own supervisor or
+  orchestrator, and the Dockerfile comment says why that is left to them.
 - **A failed tool result reaching the run page.** `toolResultFailures` is unit-
   tested and `npm run typecheck` passes, and the `user`/`tool_result` shape it
   reads was taken from real transcripts written by the pinned CLI (2.1.226) —

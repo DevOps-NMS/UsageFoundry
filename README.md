@@ -71,6 +71,35 @@ in **[docs/install.md](docs/install.md)**.
 
 ---
 
+## Operating it unattended
+
+At one operator watching one page, the operator *is* the monitoring. Left
+running with agents working on their own, nothing is looking — so two endpoints
+answer without you.
+
+**`GET /api/health`** — unauthenticated, counts only, and the container's own
+`HEALTHCHECK` probes it. It answers **503** when SQLite cannot be read or
+written, and 200 with `"status": "degraded"` when something is wrong but a
+restart would cost more than it fixes — this process no longer owning its data
+directory, parked runs whose sweeper has stopped, sweeps that are throwing, or a
+congested event loop.
+
+```bash
+curl -sf http://127.0.0.1:3000/api/health | jq .
+docker inspect --format '{{.State.Health.Status}}' usagefoundry
+```
+
+A loop blocked *outright* cannot be reported by any field in that body, because
+the request is never handled — that case is the probe's own `--timeout`, which
+is what turns the silence into an unhealthy container. And note that Docker
+Engine **surfaces** health state without acting on it: `restart: unless-stopped`
+restarts on process exit only. Wiring an unhealthy container to a restart is
+your supervisor's job, and it is left to you deliberately — a restart here marks
+every in-flight run `failed` and leaves the cycle it was mid-way through
+unreconciled.
+
+---
+
 ## Read this before you trust a number
 
 Your 5-hour and weekly limits are **shared across every Claude surface**, but

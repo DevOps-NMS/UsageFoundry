@@ -168,6 +168,52 @@ RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.cl
 USER node
 EXPOSE 3000
 
+# Liveness. `restart: unless-stopped` in compose sees process *exits* and
+# nothing else, so a server whose event loop is wedged, whose SQLite has become
+# unwritable, or which has lost its data-directory lock runs indefinitely with
+# Docker reporting it as fine. This is the only other signal Docker has.
+#
+# Pointed at /api/health rather than at `/`: with UF_AUTH_TOKEN set — which any
+# server deployment requires — `/` is a 307 to /login, which `curl -f` treats as
+# success, so the naive probe passes against a server that cannot open its
+# database. /api/health performs a real read and takes SQLite's write lock, and
+# answers 503 when that fails; the route's own comment says what it does and
+# does not detect.
+#
+# The numbers, and why:
+#
+#   --timeout=10s      the wedged-event-loop case. Nothing in the body can
+#                      report a loop that is blocked outright, because the
+#                      handler never runs — the probe simply never answers, and
+#                      this is what turns that silence into a failure. Ten
+#                      seconds is comfortably above a healthy answer (a few ms;
+#                      the route touches SQLite and nothing else) and well below
+#                      the 20 s a single `gitSync` may legitimately hold the
+#                      loop for.
+#   --start-period=180s the first transcript scan re-aggregates the whole
+#                      history synchronously and can take a while on a large
+#                      one. Failures inside this window do not count towards
+#                      `retries`.
+#   --interval=30s     often enough that a monitor watching `docker inspect`
+#                      learns within a minute or two; rare enough that the probe
+#                      itself is not a load.
+#   --retries=5        deliberately tolerant: 5 consecutive failures across
+#                      30 s intervals is ~2.5 minutes of sustained trouble
+#                      before the container is marked unhealthy. The bar is high
+#                      because acting on this is destructive — a restart marks
+#                      every in-flight run `failed` and leaves the cycle each one
+#                      was mid-way through unreconciled, so at 25 concurrent runs
+#                      a spurious unhealthy is far more expensive than a slow one.
+#
+# What this does NOT do is restart the container. Docker Engine surfaces health
+# state (`docker inspect`, and `docker ps` shows "(unhealthy)") but does not act
+# on it — only Swarm and other orchestrators do. Wiring it to a restart is the
+# operator's choice: an orchestrator's own policy, or a supervisor watching
+# `docker inspect --format '{{.State.Health.Status}}'`. Given how expensive a
+# restart is here, making that the operator's decision is the right default.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
+  CMD curl -fsS "http://127.0.0.1:${PORT}/api/health" > /dev/null || exit 1
+
 # tini reaps the claude child processes the orchestrator spawns; without an
 # init, killed agent processes linger as zombies for the container's lifetime.
 ENTRYPOINT ["/usr/bin/tini", "--"]

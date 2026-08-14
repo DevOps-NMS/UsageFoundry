@@ -31,6 +31,12 @@ import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
 import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
 import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents";
+import {
+  noteLiveTick,
+  noteLiveTickFailure,
+  noteSweep,
+  noteSweepFailure,
+} from "./ops";
 // The log's own extraction of what a tool call is about, so the parser retains
 // the same line for a call whose result comes back an error. Client-safe and
 // pure; the dependency runs the permitted way round.
@@ -5227,8 +5233,12 @@ async function liveGuardTick(): Promise<void> {
         at: now,
       });
     }
-  } catch {
-    /* a failed scan must not kill the ticker; the next tick retries */
+    noteLiveTick();
+  } catch (err) {
+    // A failed scan must not kill the ticker; the next tick retries. Counted
+    // rather than swallowed, for `sweepPaused`'s reason: a live guard that
+    // silently stops reading is a run spending past a limit somebody set.
+    noteLiveTickFailure(err);
   } finally {
     timers.ticking = false;
   }
@@ -5457,8 +5467,14 @@ export async function sweepPaused(): Promise<void> {
     }
 
     if (freed) promoteQueued();
-  } catch {
-    /* a failed sweep must not kill the timer; the next one retries */
+    noteSweep();
+  } catch (err) {
+    // A failed sweep must not kill the timer; the next one retries. It must not
+    // be silent either: every tick failing looks exactly like a working sweeper
+    // between windows, and the parked runs simply never resume. The counter is
+    // what `/api/status` reports and the age below is what says the timer is
+    // still alive at all.
+    noteSweepFailure(err);
   } finally {
     timers.sweeping = false;
   }

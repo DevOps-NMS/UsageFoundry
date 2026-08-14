@@ -102,3 +102,51 @@ describe("the image and compose agree on the data volume", () => {
     assert.match(compose, /^\s*user:\s*"\$\{UF_UID:-1000\}:\$\{UF_GID:-1000\}"\s*$/m);
   });
 });
+
+/**
+ * The healthcheck and the route it probes, pinned against each other.
+ *
+ * Same grounds as the volume pair above: Docker is not available here, so what
+ * can be checked is that the two halves still name one another. Both ways of
+ * breaking this are silent — a `HEALTHCHECK` pointed at a path that no longer
+ * exists reports every container unhealthy for ever, and one pointed at `/`
+ * reports a server that cannot open its database as healthy, because with
+ * `UF_AUTH_TOKEN` set that path is a 307 to /login and `curl -f` accepts a
+ * redirect.
+ */
+describe("the image declares a healthcheck against a route that exists", () => {
+  const directive = /^HEALTHCHECK\s+([\s\S]*?)$/m.exec(dockerfile);
+
+  it("declares one at all", () => {
+    assert.ok(
+      directive,
+      "Dockerfile has no HEALTHCHECK. `restart: unless-stopped` sees process " +
+        "exits only, so without this a wedged server runs indefinitely.",
+    );
+  });
+
+  it("probes the health route rather than a page", () => {
+    const block = dockerfile.slice(dockerfile.indexOf("HEALTHCHECK"));
+    assert.match(
+      block,
+      /\/api\/health/,
+      "the healthcheck must probe /api/health — any page path answers 307 to " +
+        "/login under UF_AUTH_TOKEN, which `curl -f` treats as success",
+    );
+    assert.ok(
+      fs.existsSync(path.join(root, "src/app/api/health/route.ts")),
+      "the route the HEALTHCHECK probes does not exist",
+    );
+  });
+
+  it("sets all four timings, and stays tolerant of a slow answer", () => {
+    const line = dockerfile.slice(dockerfile.indexOf("HEALTHCHECK"));
+    for (const flag of ["--interval=", "--timeout=", "--retries=", "--start-period="]) {
+      assert.ok(line.includes(flag), `HEALTHCHECK is missing ${flag}`);
+    }
+    // A restart marks every in-flight run failed and leaves its current cycle's
+    // spend unreconciled, so a single slow probe must never be enough.
+    const retries = /--retries=(\d+)/.exec(line);
+    assert.ok(retries && Number(retries[1]) >= 3, "retries must stay conservative");
+  });
+});
