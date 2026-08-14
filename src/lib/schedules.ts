@@ -261,6 +261,19 @@ export function describeSchedule(spec: ScheduleSpec, timeZone: string): string {
  * for, and it is still strictly between the day before's and the day after's.
  * Returning nothing would silently skip a day once a year, which is the failure
  * that looks exactly like a schedule that works.
+ *
+ * Which side of the gap the second pass lands on is *not* a property of the
+ * solve, though — it depends on where the nominal time sits in UTC relative to
+ * the transition instant, so it goes forward in Berlin (whose clocks move at
+ * 01:00Z, already behind a 02:30 nominal) and backward in a zone that moves them
+ * at local midnight (America/Santiago, America/Havana), where it lands on the
+ * *previous local date*: one local day with no occurrence, the day before it
+ * with two, and a weekly schedule firing on Saturday under the words "Every
+ * Sunday". So the date is checked rather than assumed. Both candidates are in
+ * hand already; the second pass is kept unless it has fallen off the day that
+ * was asked for and the first pass is still on it, which is the only case where
+ * the two disagree about the calendar. In Berlin both are on the requested day —
+ * 01:30 and 03:30 — and the second is the one at-or-after the nominal time.
  */
 function zonedTime(
   year: number,
@@ -271,7 +284,15 @@ function zonedTime(
 ): number {
   const wall = Date.UTC(year, month - 1, day) + minutes * 60_000;
   const first = wall - zoneOffset(wall, timeZone);
-  return wall - zoneOffset(first, timeZone);
+  const second = wall - zoneOffset(first, timeZone);
+  if (second === first) return second;
+
+  const onRequestedDate = (at: number) => {
+    const p = zonedParts(at, timeZone);
+    return p.year === year && p.month === month && p.day === day;
+  };
+  if (!onRequestedDate(second) && onRequestedDate(first)) return first;
+  return second;
 }
 
 /**

@@ -29,6 +29,9 @@ import {
  */
 
 const BERLIN = "Europe/Berlin";
+/** Two zones whose spring-forward transition lands at local midnight. */
+const SANTIAGO = "America/Santiago";
+const HAVANA = "America/Havana";
 
 /** Everything a context needs but the parts a case is actually about. */
 function ctx(over: Partial<ScheduleContext> & { spec: ScheduleSpec }): ScheduleContext {
@@ -44,6 +47,9 @@ function ctx(over: Partial<ScheduleContext> & { spec: ScheduleSpec }): ScheduleC
 
 const DAILY_0230: ScheduleSpec = { kind: "daily", minutes: 150 };
 const DAILY_0900: ScheduleSpec = { kind: "daily", minutes: 540 };
+const MIDNIGHT: ScheduleSpec = { kind: "daily", minutes: 0 };
+const DAILY_0030: ScheduleSpec = { kind: "daily", minutes: 30 };
+const SUNDAY_MIDNIGHT: ScheduleSpec = { kind: "weekly", weekday: 0, minutes: 0 };
 
 /** 09:00 Berlin is 07:00Z in summer. */
 const JUL_1_0900 = Date.UTC(2026, 6, 1, 7, 0);
@@ -84,26 +90,56 @@ describe("nextOccurrence", () => {
 
 describe("nextOccurrence across a DST boundary", () => {
   /** Every occurrence in `[from, to)`, walked the way the tick walks it. */
-  function walk(spec: ScheduleSpec, from: number, to: number): number[] {
+  function walk(
+    spec: ScheduleSpec,
+    zone: string,
+    from: number,
+    to: number,
+  ): number[] {
     const out: number[] = [];
-    let at = nextOccurrence(spec, BERLIN, from);
+    let at = nextOccurrence(spec, zone, from);
     while (at < to) {
       out.push(at);
-      at = nextOccurrence(spec, BERLIN, at);
+      at = nextOccurrence(spec, zone, at);
     }
     return out;
   }
 
-  function localOf(ts: number): string {
+  /**
+   * The weekday is in here rather than left implicit because the calendar half
+   * of the invariant is the half that broke: an instant an hour to one side of
+   * the time asked for is the answer a schedule wants, and the *previous local
+   * date* is not — which on a weekly schedule reads as Saturday under the words
+   * "Every Sunday".
+   */
+  function localOf(ts: number, zone: string): string {
     return new Intl.DateTimeFormat("en-GB", {
-      timeZone: BERLIN,
+      timeZone: zone,
       hourCycle: "h23",
+      weekday: "short",
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
     }).format(new Date(ts));
+  }
+
+  /** The local calendar date alone, for "exactly one occurrence a day". */
+  function localDateOf(ts: number, zone: string): string {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date(ts));
+  }
+
+  /** Strictly increasing, and no local date fired on twice. */
+  function assertOnePerLocalDay(days: number[], zone: string): void {
+    for (let i = 1; i < days.length; i++) assert.ok(days[i] > days[i - 1]);
+    const dates = days.map((ts) => localDateOf(ts, zone));
+    assert.equal(new Set(dates).size, dates.length);
   }
 
   it("fires 02:30 once a day through the spring-forward gap", () => {
@@ -116,17 +152,21 @@ describe("nextOccurrence across a DST boundary", () => {
     // from one that works.
     const days = walk(
       DAILY_0230,
+      BERLIN,
       Date.UTC(2026, 2, 27, 0, 0),
       Date.UTC(2026, 3, 1, 0, 0),
     );
-    assert.deepEqual(days.map(localOf), [
-      "27/03/2026, 02:30",
-      "28/03/2026, 02:30",
-      "29/03/2026, 03:30",
-      "30/03/2026, 02:30",
-      "31/03/2026, 02:30",
-    ]);
-    for (let i = 1; i < days.length; i++) assert.ok(days[i] > days[i - 1]);
+    assert.deepEqual(
+      days.map((ts) => localOf(ts, BERLIN)),
+      [
+        "Fri, 27/03/2026, 02:30",
+        "Sat, 28/03/2026, 02:30",
+        "Sun, 29/03/2026, 03:30",
+        "Mon, 30/03/2026, 02:30",
+        "Tue, 31/03/2026, 02:30",
+      ],
+    );
+    assertOnePerLocalDay(days, BERLIN);
     // The gap day is 23 hours after its predecessor, not 24 — the clocks moved,
     // and the schedule moved with them rather than drifting against UTC.
     assert.equal(days[2] - days[1], 24 * 3_600_000);
@@ -138,18 +178,124 @@ describe("nextOccurrence across a DST boundary", () => {
     // twice. Firing on both would bill a whole graph twice, unattended.
     const days = walk(
       DAILY_0230,
+      BERLIN,
       Date.UTC(2026, 9, 23, 0, 0),
       Date.UTC(2026, 9, 28, 0, 0),
     );
-    assert.deepEqual(days.map(localOf), [
-      "23/10/2026, 02:30",
-      "24/10/2026, 02:30",
-      "25/10/2026, 02:30",
-      "26/10/2026, 02:30",
-      "27/10/2026, 02:30",
-    ]);
+    assert.deepEqual(
+      days.map((ts) => localOf(ts, BERLIN)),
+      [
+        "Fri, 23/10/2026, 02:30",
+        "Sat, 24/10/2026, 02:30",
+        "Sun, 25/10/2026, 02:30",
+        "Mon, 26/10/2026, 02:30",
+        "Tue, 27/10/2026, 02:30",
+      ],
+    );
     assert.equal(new Set(days).size, days.length);
     assert.equal(days[2] - days[1], 25 * 3_600_000);
+  });
+
+  it("keeps a midnight occurrence on the local day it was asked for", () => {
+    // Santiago goes 04/09/2027 23:59 → 05/09/2027 01:00, so local midnight on
+    // the 5th does not exist at all. Berlin's gap sits in the middle of the
+    // local day, so both instants the two-pass solve can produce are on the
+    // date asked for and either one is defensible; here the earlier of them is
+    // on the *previous* date, which is a day with no occurrence and a day
+    // before it with two — and a schedule that stops for a day is
+    // indistinguishable from one that works.
+    const days = walk(
+      MIDNIGHT,
+      SANTIAGO,
+      Date.UTC(2027, 8, 2, 0, 0),
+      Date.UTC(2027, 8, 8, 0, 0),
+    );
+    assert.deepEqual(
+      days.map((ts) => localOf(ts, SANTIAGO)),
+      [
+        "Thu, 02/09/2027, 00:00",
+        "Fri, 03/09/2027, 00:00",
+        "Sat, 04/09/2027, 00:00",
+        "Sun, 05/09/2027, 01:00",
+        "Mon, 06/09/2027, 00:00",
+        "Tue, 07/09/2027, 00:00",
+      ],
+    );
+    assertOnePerLocalDay(days, SANTIAGO);
+  });
+
+  it("keeps a midnight occurrence on its own day in Havana too", () => {
+    // The same shape in the other hemisphere's spring: 13/03/2027 23:59 →
+    // 14/03/2027 01:00. Two zones rather than one because the fault is not a
+    // property of a zone — it is where the nominal time happens to sit in UTC
+    // relative to the transition instant, which is why Berlin was fine.
+    const days = walk(
+      MIDNIGHT,
+      HAVANA,
+      Date.UTC(2027, 2, 11, 0, 0),
+      Date.UTC(2027, 2, 17, 0, 0),
+    );
+    assert.deepEqual(
+      days.map((ts) => localOf(ts, HAVANA)),
+      [
+        "Thu, 11/03/2027, 00:00",
+        "Fri, 12/03/2027, 00:00",
+        "Sat, 13/03/2027, 00:00",
+        "Sun, 14/03/2027, 01:00",
+        "Mon, 15/03/2027, 00:00",
+        "Tue, 16/03/2027, 00:00",
+      ],
+    );
+    assertOnePerLocalDay(days, HAVANA);
+  });
+
+  it("keeps 00:30 on its own day when midnight is the skipped hour", () => {
+    // Anywhere inside the skipped hour, not only at its first minute: 00:30 on
+    // the 5th does not exist either, and lands at 01:30 — within an hour of the
+    // time asked for, on the date asked for. 01:00 was already correct before
+    // this, which is what bounds the fault to the gap itself.
+    const days = walk(
+      DAILY_0030,
+      SANTIAGO,
+      Date.UTC(2027, 8, 2, 0, 0),
+      Date.UTC(2027, 8, 8, 0, 0),
+    );
+    assert.deepEqual(
+      days.map((ts) => localOf(ts, SANTIAGO)),
+      [
+        "Thu, 02/09/2027, 00:30",
+        "Fri, 03/09/2027, 00:30",
+        "Sat, 04/09/2027, 00:30",
+        "Sun, 05/09/2027, 01:30",
+        "Mon, 06/09/2027, 00:30",
+        "Tue, 07/09/2027, 00:30",
+      ],
+    );
+    assertOnePerLocalDay(days, SANTIAGO);
+  });
+
+  it("fires a weekly Sunday schedule on Sunday through the gap", () => {
+    // The sharp one: `describeSchedule` renders this as "Every Sunday at
+    // 00:00", and an occurrence pushed onto the previous local date is a fire
+    // on Saturday under those words — a whole graph of unattended agents on the
+    // wrong day, with the page still saying Sunday.
+    for (const [zone, from, to] of [
+      [SANTIAGO, Date.UTC(2027, 7, 25, 0, 0), Date.UTC(2027, 8, 15, 0, 0)],
+      [HAVANA, Date.UTC(2027, 2, 3, 0, 0), Date.UTC(2027, 2, 24, 0, 0)],
+    ] as const) {
+      const days = walk(SUNDAY_MIDNIGHT, zone, from, to);
+      assert.equal(days.length, 3);
+      for (const ts of days) {
+        assert.match(localOf(ts, zone), /^Sun,/, `${zone}: ${localOf(ts, zone)}`);
+      }
+      assertOnePerLocalDay(days, zone);
+      // A full seven days to the occurrence inside the gap — it is an hour
+      // later in the local day than the two either side of it — and an hour
+      // short of seven days from there to the next. The clocks moved and the
+      // schedule moved with them rather than drifting against UTC.
+      assert.equal(days[1] - days[0], 7 * 24 * 3_600_000);
+      assert.equal(days[2] - days[1], 7 * 24 * 3_600_000 - 3_600_000);
+    }
   });
 
   it("leaves every-N-hours alone at the boundary", () => {
