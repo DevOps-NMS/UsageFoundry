@@ -3314,6 +3314,51 @@ export function enforceInstanceBudget(
 }
 
 /**
+ * The same guard, at the boundary the three above cannot see: a member has
+ * just **finished spending**.
+ *
+ * Every other call site is "before something spends", and for the ordinary
+ * graph that is not a boundary at all. A member with `maxIterations: 1` — which
+ * is what `normalizePolicy` answers when a template says nothing, and the run
+ * form's own default — reaches `startRun`'s pre-cycle guard exactly once,
+ * before its only cycle; the pass that would have seen that cycle's cost is
+ * refused on `iterations` and `break`s out *ahead* of the instance check. So a
+ * graph of single-cycle blocks released together checked the instance budget N
+ * times, all of them against a total of zero, and never again. The
+ * workflow-wide limit could not fire at all — `CLAUDE.md` named that as the
+ * limiting case, and at 25 nodes with a 25-way concurrency cap it is the
+ * ordinary one.
+ *
+ * Called from `startRun`'s `finally`, after the status write has put this
+ * member's spend on its row, so `instanceSpend` reads it. That turns "the guard
+ * never fires" into "the guard fires one cycle late", which is the bound the
+ * documentation already claims and the same bound the pre-cycle check gives a
+ * multi-cycle block.
+ *
+ * Async only because the window fractions need a reading, and a member settling
+ * is a far rarer event than a cycle boundary — the transcript scan is paid once
+ * per finished run, not once per cycle. `guardedInstanceOf` is one indexed
+ * lookup and answers null for every run that is not a member and every instance
+ * whose budget is off, so an install with no workflows pays a single query.
+ */
+export async function enforceInstanceBudgetAfterMember(
+  runId: string,
+): Promise<InstanceGuardOutcome | null> {
+  const instance = guardedInstanceOf(runId);
+  if (!instance) return null;
+  // Asked before the snapshot rather than left to `guardInstance`: a halted or
+  // rolled-back instance has nothing to decide, and a full transcript scan to
+  // find that out is the one cost worth avoiding here.
+  if (instance.status !== "started") return null;
+  return guardInstance(
+    instance.instanceId,
+    instance.status,
+    instance.budget,
+    await currentSnapshot(),
+  );
+}
+
+/**
  * The same guard, at the other kind of block boundary.
  *
  * An orchestrator block is about to spend and is not a member run, so the check

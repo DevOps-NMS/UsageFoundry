@@ -504,7 +504,7 @@ export default function WorkflowInstancePage() {
         <Hint>
           {noLimits
             ? "Nothing bounds this workflow as a whole — each block is bounded only by its own guards"
-            : "Checked before a block starts a work cycle, never during one — a block already working carries on until some block reaches a cycle boundary, so the total can overshoot by up to one work cycle per block running at the time, and blocks running at once multiply that"}
+            : "Checked before a block starts a work cycle and again as each block finishes, never during one — a block already working carries on until it or another reaches one of those boundaries, so the total can overshoot by up to one work cycle per block running at the time, and blocks running at once multiply that"}
         </Hint>
         {instance.liveRunCount > 0 && (
           <Hint>

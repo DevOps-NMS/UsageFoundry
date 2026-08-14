@@ -5028,6 +5028,27 @@ export async function startRun(id: string): Promise<void> {
       });
     }
 
+    // The workflow-wide guard's other boundary, and the only one that can see
+    // what this member *spent*. Every other call is before something spends,
+    // which for the ordinary single-cycle block is one check against a total of
+    // zero and then nothing — `evaluateBudget` refuses the next pass on
+    // `iterations` and breaks out before the pre-cycle instance check is
+    // reached, so a graph released together never compared its limit with a
+    // figure that had moved. The status write above has just put this run's
+    // spend on its row, which is what `instanceSpend` reads.
+    //
+    // Not awaited, for `emitHandoff`'s reason and one more: `releaseDependents`
+    // and `promoteQueued` below are synchronous by requirement — the folder
+    // claim is only atomic inside one event-loop turn — and an `await` here
+    // would put a full transcript scan in front of both. Nothing escapes by
+    // going first: a member promoted in the meantime meets the same guard at
+    // its own pre-cycle check before any child is spawned.
+    void import("./workflows")
+      .then((m) => m.enforceInstanceBudgetAfterMember(id))
+      .catch(() => {
+        /* a workflow we cannot guard is not a reason to fail a finished run */
+      });
+
     // Only once there is something to hand off, and only when the run is really
     // over. A run that never got past the budget guard, or died setting its
     // checkout up, has no branch to describe — and a parked one is not done
