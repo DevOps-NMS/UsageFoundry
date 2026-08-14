@@ -13,7 +13,7 @@ import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
-import { Input } from "@/components/ui/Field";
+import { Input, Select } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
 import { Sheet } from "@/components/ui/Sheet";
@@ -373,39 +373,50 @@ export function RunLand({ run }: { run: RunDTO }) {
       {/* One line about the state, not three. "Already in main", "landed on
           Tuesday" and "merged just now" are the same fact told three ways, and
           a card that stacks them reads as three separate things happening — so
-          the outcome of the last action, above, replaces this while it stands. */}
-      {!error &&
-        !note &&
-        (state.landedAt ? (
-          <Notice tone="info" quiet className="mt-3">
-            Merged into <span className="mono">{state.landedInto}</span> on{" "}
-            {fmtDateTime(state.landedAt)} ({state.landedStrategy}). Reopening this
-            run can put new commits on the branch, so this describes a moment, not
-            a permanent state.
-          </Notice>
-        ) : state.preview.outcome === "conflict" ? (
-          <>
-            <Notice tone="warn" className="mt-3">
-              <strong>
-                Conflicts with {state.target} in {state.preview.files.length} file
-                {state.preview.files.length === 1 ? "" : "s"}.
-              </strong>{" "}
-              Nothing was written to find that out — the merge was tried in
-              memory, and what is below is how it would land.
+          the outcome of the last action, above, replaces this while it stands.
+
+          The refusal is that line whenever there is one, and the conflict list
+          below is its elaboration rather than a rival statement. It used to be
+          the other way round: a conflict replaced the refusal outright, and
+          `landRefusal` tests the chain *before* the conflict — so on a branch a
+          later run carries on, the sentence naming that run was swapped for
+          "conflicts in 3 files" and the operator was left to find out by
+          pressing Resolve. There is no way to tell those two sentences apart
+          from here without reading the server's prose, which is what this card
+          must never do; showing the sentence it was given is what removes the
+          question. */}
+      {!error && !note && (
+        <>
+          {state.landedAt ? (
+            <Notice tone="info" quiet className="mt-3">
+              Merged into <span className="mono">{state.landedInto}</span> on{" "}
+              {fmtDateTime(state.landedAt)} ({state.landedStrategy}). Reopening
+              this run can put new commits on the branch, so this describes a
+              moment, not a permanent state.
             </Notice>
-            <div className="mt-2">
-              {state.preview.files.map((f) => (
-                <ConflictFile key={f.path} file={f} />
-              ))}
-            </div>
-          </>
-        ) : (
-          state.blocked && (
-            <Notice tone={state.merged ? "info" : "warn"} className="mt-3">
-              {state.blocked}
-            </Notice>
-          )
-        ))}
+          ) : (
+            state.blocked && (
+              <Notice tone={state.merged ? "info" : "warn"} className="mt-3">
+                {state.blocked}
+              </Notice>
+            )
+          )}
+
+          {state.preview.outcome === "conflict" && (
+            <>
+              <p className="mt-2 max-w-[70ch] text-xs leading-snug text-ink-muted">
+                Nothing was written to find that out — the merge was tried in
+                memory, and what is below is how it would land.
+              </p>
+              <div className="mt-2">
+                {state.preview.files.map((f) => (
+                  <ConflictFile key={f.path} file={f} />
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
 
       {state.pending && (
         <PendingWork
@@ -519,15 +530,21 @@ export function RunLand({ run }: { run: RunDTO }) {
           <ButtonRow>
             {canLand && (
               <>
-                <select
-                  className="w-auto rounded-sm border border-line bg-inset px-2.5 py-2 text-sm text-ink transition-colors duration-150"
+                {/* The kit's control, not a hand-rolled one: this was the app's
+                    own select geometry spelled a second time, so it wore a
+                    different height, a different border on hover and no focus
+                    ring from the two beside it. Width is the one thing `Select`
+                    never states, so it is stated here — see the note in
+                    `Field`. */}
+                <Select
+                  className="w-auto"
                   value={effectiveStrategy}
                   onChange={(e) => setStrategy(e.target.value as MergeStrategyDTO)}
                   aria-label="How to land it"
                 >
                   <option value="merge">Merge, keeping its commits</option>
                   <option value="squash">Squash into one commit</option>
-                </select>
+                </Select>
                 <Button
                   className="transition-colors duration-150"
                   onClick={() => act("land")}
