@@ -18,7 +18,6 @@ import {
   describeFolder,
   emitRunEvent,
   getRun,
-  listRuns,
   overlaps,
   resolveWorkspaceFolder,
   workDirOf,
@@ -1864,10 +1863,30 @@ export interface BranchSummary {
   prompt: string;
 }
 
+/** One repository holding branches, and how many of them it holds. */
+export interface BranchRepo {
+  repoRoot: string;
+  repoLabel: string;
+  branches: number;
+}
+
 export interface BranchInventory {
   branches: BranchSummary[];
-  /** Branches that were not examined, because the list is capped. */
+  /**
+   * Branches matching the filter that this page does not show — across every
+   * run this app has recorded, not merely the ones a run-count window reached.
+   */
   notShown: number;
+  /** Branches matching the filter, in total. */
+  total: number;
+  /** Where this page starts in that list. */
+  offset: number;
+  /** How many branches this page was allowed to examine. */
+  limit: number;
+  /** The repository filter in force, or null for every repository. */
+  repo: string | null;
+  /** Every repository holding a branch, whatever the filter — for the picker. */
+  repos: BranchRepo[];
 }
 
 /** Branches examined per request. Each costs a `rev-list --count`. */
@@ -1895,16 +1914,16 @@ const MAX_PENDING_PROBES = 20;
  * says so: the structural question is answered here, and whether it can really
  * be landed is re-derived from git and the full chain by `landRun`.
  */
-function oneRunPerBranch(runs: readonly RunRow[]): RunRow[] {
-  const byBranch = new Map<string, RunRow[]>();
+function oneRunPerBranch<T extends BranchCandidate>(runs: readonly T[]): T[] {
+  const byBranch = new Map<string, T[]>();
   for (const run of runs) {
-    const key = `${run.repo_root}\0${run.worktree_branch}`;
+    const key = `${run.repoRoot}\0${run.branch}`;
     const list = byBranch.get(key);
     if (list) list.push(run);
     else byBranch.set(key, [run]);
   }
 
-  const kept: RunRow[] = [];
+  const kept: T[] = [];
   for (const held of byBranch.values()) {
     if (held.length === 1) {
       kept.push(held[0]);
@@ -1919,21 +1938,148 @@ function oneRunPerBranch(runs: readonly RunRow[]): RunRow[] {
   return kept;
 }
 
+/** Everything the selection below reads off a branch-bearing run, and no more. */
+export interface BranchCandidate {
+  id: string;
+  status: RunRow["status"];
+  iterations: number;
+  repoRoot: string;
+  branch: string;
+}
+
+/** Which slice of the inventory a caller is asking for. */
+export interface BranchQuery {
+  /** `repo_root` to keep, or null/undefined for every repository. */
+  repo?: string | null;
+  /** Branches to skip, in the order below. */
+  offset?: number;
+  /** Branches to examine. Clamped to `MAX_INVENTORY`, whatever is asked for. */
+  limit?: number;
+}
+
+export interface BranchSelection<T> {
+  /** The branches this request pays git for, in the order they are listed. */
+  examined: T[];
+  total: number;
+  offset: number;
+  limit: number;
+  notShown: number;
+  /** Branch counts per repository, over the *unfiltered* set. */
+  repos: Array<{ repoRoot: string; branches: number }>;
+}
+
+/**
+ * Which branches this request examines, and what it must say about the rest.
+ *
+ * Pure, and separated from the git work below for the reason `selectPromotable`
+ * is separated from the spawn: the failure mode is silent. A branch dropped here
+ * is work committed on a ref with no route in the UI that reaches it — nothing
+ * throws, nothing is red, and the count that ought to say so is computed from
+ * the same truncated list. So `total` is counted over every candidate handed in
+ * and `notShown` is derived from it rather than from the page.
+ *
+ * `runs` must be newest-first, as the query that feeds it orders them. The
+ * collapse to one row per branch happens *before* the slice, so a page holds
+ * `limit` branches rather than `limit` runs, and a chain of five links does not
+ * consume five rows of somebody's page.
+ *
+ * `repos` is deliberately computed over the unfiltered set: it is what the
+ * picker is drawn from, and a filter that removes the other repositories from
+ * the list you would use to change it is a filter you cannot get out of.
+ */
+export function selectBranchCandidates<T extends BranchCandidate>(
+  runs: readonly T[],
+  query: BranchQuery = {},
+): BranchSelection<T> {
+  const all = oneRunPerBranch(runs);
+
+  const counts = new Map<string, number>();
+  for (const run of all) counts.set(run.repoRoot, (counts.get(run.repoRoot) ?? 0) + 1);
+
+  const matching = query.repo ? all.filter((r) => r.repoRoot === query.repo) : all;
+
+  // A limit that is missing, zero, negative or unreadable is the default page
+  // rather than the smallest legal one: these arrive off a query string, and a
+  // one-row page is a far worse answer to a typo than the ordinary one.
+  const asked = Math.floor(Number(query.limit));
+  const limit =
+    Number.isFinite(asked) && asked > 0
+      ? Math.min(MAX_INVENTORY, asked)
+      : MAX_INVENTORY;
+  // Clamped rather than refused: an offset past the end is what pressing Next
+  // on a page that shrank under you produces, and an empty page with an honest
+  // total is a better answer than a 400.
+  const offset = Math.min(
+    Math.max(0, Math.floor(Number(query.offset) || 0)),
+    Math.max(0, matching.length - 1),
+  );
+  const examined = matching.slice(offset, offset + limit);
+
+  return {
+    examined,
+    total: matching.length,
+    offset,
+    limit,
+    notShown: matching.length - examined.length,
+    repos: [...counts].map(([repoRoot, branches]) => ({ repoRoot, branches })),
+  };
+}
+
+/**
+ * Every branch-bearing run this app has recorded, newest first.
+ *
+ * A query of its own rather than `listRuns(400)` and a filter, because the
+ * question is "which branches exist" and answering it from the newest N *runs*
+ * silently stops answering it: at twenty-five concurrent runs the 400 newest are
+ * about five hours of work, after which a branch is not merely off the page but
+ * uncounted, so nothing on the page can say it is there. Only the columns the
+ * selection reads are fetched — the full rows for the handful actually examined
+ * are read back afterwards, so a machine with fifty thousand runs on it does not
+ * load fifty thousand prompts to list sixty branches.
+ */
+function branchBearingRuns(): Array<BranchCandidate & { createdAt: number }> {
+  return db()
+    .prepare(
+      `SELECT id, status, iterations, repo_root AS repoRoot,
+              worktree_branch AS branch, created_at AS createdAt
+         FROM runs
+        WHERE isolation = 'worktree'
+          AND worktree_branch IS NOT NULL
+          AND repo_root IS NOT NULL
+        ORDER BY created_at DESC`,
+    )
+    .all() as Array<BranchCandidate & { createdAt: number }>;
+}
+
 /**
  * Every branch this app has produced, with enough state to decide about it.
  *
  * Grouped by repository so the two set-shaped questions — which refs still
  * exist, and which are merged into a given target — are one `for-each-ref` each
  * rather than one git call per branch. The per-branch commit count is not
- * set-shaped and stays one call, which is what the cap above bounds.
+ * set-shaped and stays one call, which is what the cap above bounds. That cap is
+ * on the *page*, not on what exists: `query` is what moves which sixty branches
+ * are paid for, and the counts beside them describe the whole set.
  */
-export async function branchInventory(): Promise<BranchInventory> {
-  const candidates = oneRunPerBranch(
-    listRuns(400).filter(
-      (r) => r.isolation === "worktree" && r.worktree_branch && r.repo_root,
-    ),
-  );
-  const examined = candidates.slice(0, MAX_INVENTORY);
+export async function branchInventory(
+  query: BranchQuery = {},
+): Promise<BranchInventory> {
+  const selection = selectBranchCandidates(branchBearingRuns(), query);
+
+  const rows =
+    selection.examined.length === 0
+      ? []
+      : (db()
+          .prepare(
+            `SELECT * FROM runs WHERE id IN (${selection.examined
+              .map(() => "?")
+              .join(",")})`,
+          )
+          .all(...selection.examined.map((r) => r.id)) as RunRow[]);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const examined = selection.examined
+    .map((r) => byId.get(r.id))
+    .filter((r): r is RunRow => r !== undefined);
   const active = new Set(activeRuns().map((r) => r.id));
 
   const byRepo = new Map<string, RunRow[]>();
@@ -2028,6 +2174,31 @@ export async function branchInventory(): Promise<BranchInventory> {
     }
   }
 
-  branches.sort((a, b) => b.createdAt - a.createdAt);
-  return { branches, notShown: candidates.length - examined.length };
+  // Back into the order the selection listed them in, rather than re-sorted by
+  // the kept run's own `created_at`. The two differ for a chain — the row kept
+  // is the chain's *owner*, which can be an older link than the one that fixed
+  // the group's place in the list — and the page order has to be the order the
+  // slice was taken in, or which branches land on which page depends on which
+  // link happens to own each of them.
+  const order = new Map(selection.examined.map((r, i) => [r.id, i]));
+  branches.sort((a, b) => (order.get(a.runId) ?? 0) - (order.get(b.runId) ?? 0));
+
+  return {
+    branches,
+    notShown: selection.notShown,
+    total: selection.total,
+    offset: selection.offset,
+    limit: selection.limit,
+    repo: query.repo ?? null,
+    repos: selection.repos
+      .map(({ repoRoot, branches: n }) => {
+        const resolved = repoPathFor(repoRoot) ?? repoRoot;
+        return {
+          repoRoot,
+          repoLabel: describeFolder(resolved).relPath || resolved,
+          branches: n,
+        };
+      })
+      .sort((a, b) => a.repoLabel.localeCompare(b.repoLabel)),
+  };
 }

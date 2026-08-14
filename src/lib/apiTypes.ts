@@ -1209,10 +1209,31 @@ export interface BranchSummaryDTO {
   prompt: string;
 }
 
+/** One repository holding branches, for the filter. */
+export interface BranchRepoDTO {
+  repoRoot: string;
+  repoLabel: string;
+  branches: number;
+}
+
 export interface BranchInventoryDTO {
   branches: BranchSummaryDTO[];
-  /** Branches the per-request cap left out. */
+  /**
+   * Branches matching the filter that this page does not show. Counted over
+   * every branch-bearing run, not over a window of the newest ones — a count
+   * that is itself truncated cannot say a branch has fallen out of reach.
+   */
   notShown: number;
+  /** Branches matching the filter, in total. */
+  total: number;
+  /** Where this page starts in that list. */
+  offset: number;
+  /** The page size actually applied, after the per-request cap. */
+  limit: number;
+  /** The repository filter in force, or null for every repository. */
+  repo: string | null;
+  /** Every repository holding a branch, whatever the filter is set to. */
+  repos: BranchRepoDTO[];
   /** `settings.landStrategy`, so the queue form can default to it. */
   defaultStrategy: "merge" | "squash";
 }
