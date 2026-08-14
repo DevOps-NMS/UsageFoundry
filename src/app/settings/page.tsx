@@ -1763,7 +1763,11 @@ export default function SettingsPage() {
           Both buttons are always rendered, and the status line always occupies
           a line: a bar that gains a button the moment a field changes moves the
           only control the operator is reaching for. */}
-      <div className="sticky bottom-0 z-10 -mx-4 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
+      {/* -mb-12 pairs with the pane's own pb-12 exactly as -mx-4 pairs with its
+          px-4: a sticky bar is never pushed *past* where it sits in flow, so
+          that bottom padding stayed underneath it as a band of nothing between
+          the bar and the foot of the window. */}
+      <div className="sticky bottom-0 z-10 -mx-4 -mb-12 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
         <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
           <p
             role="status"

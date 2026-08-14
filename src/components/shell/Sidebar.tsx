@@ -75,7 +75,7 @@ export function Sidebar() {
       <div
         className="app-drag flex shrink-0 items-center gap-2 overflow-hidden px-3"
         style={{
-          height: "max(var(--toolbar-h), env(titlebar-area-height, 0px))",
+          height: "var(--toolbar-actual)",
           // Under Window Controls Overlay this is where the traffic lights are
           // drawn, and `titlebar-area-x` is how far in the free area starts.
           // Zero in an ordinary tab. On a collapsed rail the reservation is

@@ -774,11 +774,20 @@ export default function RunDetail({
           stays put while the log runs off the bottom of the pane. Explicit
           column and row placement rather than source order, so the inspector
           can lead on a narrow window (where there is one column and the state
-          is what you came for) and sit on the right on a wide one. */}
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_21rem] lg:items-start">
+          is what you came for) and sit on the right on a wide one.
+
+          `lg:flex-1` is what fills the pane, and it is the split's own rule
+          rather than decoration: the inspector is the taller column whenever
+          the log is what the pane is showing, and with the row sized to it and
+          the log a fixed 62vh box the column beside it ended in a screen-deep
+          band of nothing — which the page then scrolled through, because the
+          inspector's cap is measured from the top of the pane and it starts a
+          heading further down. Stacked, at one column, there is no second
+          column to be shorter than and the page is meant to scroll. */}
+      <div className="grid gap-5 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_21rem]">
         <Card
           emphasis={active ? "primary" : "default"}
-          className={`border-l-[3px] ${STATE_ACCENT[state.tone]} lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100dvh-var(--toolbar-h)-2rem)] lg:overflow-y-auto`}
+          className={`border-l-[3px] ${STATE_ACCENT[state.tone]} lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(var(--pane-h)-2rem)] lg:overflow-y-auto`}
         >
           {/* Announced, because it is the one thing on the page that changes
               on its own and matters. The detail below it is not: while the
@@ -1114,7 +1123,7 @@ export default function RunDetail({
           </Section>
         </Card>
 
-        <div className="min-w-0 lg:col-start-1 lg:row-start-1">
+        <div className="min-w-0 lg:col-start-1 lg:row-start-1 lg:flex lg:flex-col">
           <div className="mb-3 flex flex-wrap items-center gap-3">
             <SegmentedControl
               label="What to show for this run"
@@ -1138,7 +1147,7 @@ export default function RunDetail({
           </div>
 
           {activeTab === "log" && (
-            <div className="relative">
+            <div className="relative lg:min-h-[18rem] lg:flex-1">
               <Log
                 ref={logRef}
                 onScroll={onScroll}

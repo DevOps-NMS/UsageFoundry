@@ -1795,6 +1795,26 @@ Built and exercised against real transcripts:
   vertical rhythm is 24px throughout. The remaining reported intersections are
   inline text boxes wrapping inside a paragraph, and the save bar overlaying the
   page as a sticky bar is meant to.
+- Scrolling, re-measured after the shell landed and against the same harness:
+  a dev server on a scratch `DATA_DIR`/`CLAUDE_HOME` (two seeded runs, one of
+  them 243 log lines, and 400 seeded transcript turns so the dashboard draws its
+  meters, tables and period card), every pane driven in headless Chromium at
+  1440/1280/1024/768px, scrolled to the bottom, with the gap between the pane's
+  bottom edge and the lowest painted box read back out of the DOM along with the
+  pane's horizontal overflow. That is the measurement the earlier pass could not
+  have made: it predates the window, when the document was the scrollport.
+  Before: a 48px band of nothing under the pane footer on Settings, the run form
+  and the workflow editor; a ~200px band under the run log, which the page
+  scrolled through because the inspector beside it is capped from the *top* of
+  the pane and starts a heading further down; the chat's composer under the fold
+  behind a thread already scrolling itself; and the runs list 916px wide at every
+  width, so the pane scrolled sideways into empty canvas at 1024px. After: every
+  pane at 1024px and above ends flush at the bottom with no horizontal overflow
+  anywhere, and the only remaining bottom gap is the page's own 48px on the
+  stacked single-column layout at 768px, which is what every scrolling page ends
+  with. `npm run typecheck`, `npm test` (657 assertions) and `next build` all
+  pass, and the emitted stylesheet was grepped for each new variant — Tailwind
+  emits nothing for one it does not know, silently.
 
 - **The orchestrator chat, end to end against the real CLI.** A template was
   saved, a chat asked to list what it could see and propose one run, the

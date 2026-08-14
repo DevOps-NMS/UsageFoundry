@@ -623,7 +623,7 @@ export function WorkflowEditor({
           </div>
         </div>
 
-        <div className="flex flex-col gap-4 lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100dvh-var(--toolbar-h)-6rem)] lg:overflow-y-auto">
+        <div className="flex flex-col gap-4 lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(var(--pane-h)-6rem)] lg:overflow-y-auto">
           <Card>
             <CardTitle>
               {selectedBlock
@@ -756,7 +756,7 @@ export function WorkflowEditor({
       {/* The pane's footer, in the run form's and Settings' shape: the default
           action at the right edge of the pane it belongs to, and one line
           saying what pressing it does. */}
-      <div className="sticky bottom-0 z-10 -mx-4 mt-5 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
+      <div className="sticky bottom-0 z-10 -mx-4 -mb-12 mt-5 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
         <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
           <p
             role="status"
