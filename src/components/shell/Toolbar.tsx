@@ -23,9 +23,11 @@ import { toolbarAction, toolbarTitle } from "@/components/shell/panes";
 export function Toolbar({
   sidebarCollapsed,
   onToggleSidebar,
+  onQuickOpen,
 }: {
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
+  onQuickOpen: () => void;
 }) {
   const pathname = usePathname();
   const action = toolbarAction(pathname);
@@ -61,6 +63,23 @@ export function Toolbar({
       </div>
 
       <div className="ml-auto flex shrink-0 items-center gap-2">
+        {/* The chord is on the control, so the binding is discoverable without
+            a shortcuts sheet nobody opens — and announced, so it is not only
+            discoverable by sight. */}
+        <Button
+          variant="secondary"
+          size="compact"
+          onClick={onQuickOpen}
+          aria-keyshortcuts="Meta+K"
+          className="app-no-drag"
+        >
+          <Icon name="search" />
+          <span>Quick open</span>
+          <kbd className="mono rounded-[4px] border border-line bg-inset px-1 text-2xs text-ink-faint">
+            ⌘K
+          </kbd>
+        </Button>
+
         <div className="app-no-drag">
           <ThemeToggle />
         </div>

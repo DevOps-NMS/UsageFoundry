@@ -1,9 +1,16 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { QuickOpen } from "@/components/shell/QuickOpen";
+import { PANES } from "@/components/shell/panes";
 import { Sidebar, readCollapsed, writeCollapsed } from "@/components/shell/Sidebar";
 import { Toolbar } from "@/components/shell/Toolbar";
+import {
+  isCommitChord,
+  isPlainCommandChord,
+  isTextEntry,
+} from "@/components/shell/shortcuts";
 
 /**
  * The window: a source list on the left, a toolbar and a scrolling content
@@ -16,6 +23,7 @@ import { Toolbar } from "@/components/shell/Toolbar";
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
 
   // Mirrors the attribute the pre-paint script in layout.tsx already set, so
   // the toggle can announce `aria-expanded`. The server and the first client
@@ -24,6 +32,44 @@ export function AppShell({ children }: { children: ReactNode }) {
   // before this component existed.
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => setCollapsed(readCollapsed()), []);
+
+  const [quickOpen, setQuickOpen] = useState(false);
+
+  /**
+   * The app's one keyboard listener.
+   *
+   * ⌘1…⌘7 for the panes and ⌘K for quick open, and nothing else — every chord
+   * here is either the app's or the browser's, never both. ⌘R, ⌘L, ⌘T and ⌘W
+   * are the browser's and are never looked at; the modifier test in
+   * `isPlainCommandChord` is what keeps ⌘⇧K and Ctrl+1 out of range as well.
+   *
+   * Esc is not bound. The quick-open sheet is a native `<dialog>`, so the
+   * browser already closes it on Esc and routes that through `onDismiss` —
+   * a second handler for the same key would be two things racing to close one
+   * sheet.
+   */
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      // Nothing is intercepted while someone is typing. ⌘↩ is the documented
+      // exception and this layer binds it to nothing, which is the point: a
+      // page's own commit chord can never be swallowed here.
+      if (isTextEntry(e.target) && !isCommitChord(e)) return;
+      if (!isPlainCommandChord(e)) return;
+
+      if (e.key === "k") {
+        e.preventDefault();
+        setQuickOpen(true);
+        return;
+      }
+      const pane = PANES.find((p) => p.shortcut === e.key);
+      if (pane) {
+        e.preventDefault();
+        router.push(pane.href);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [router]);
 
   function toggleSidebar() {
     const next = !readCollapsed();
@@ -42,7 +88,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     <div className="flex h-dvh overflow-hidden">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        <Toolbar sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} />
+        <Toolbar
+          sidebarCollapsed={collapsed}
+          onToggleSidebar={toggleSidebar}
+          onQuickOpen={() => setQuickOpen(true)}
+        />
         {/* The pane's own scroll region. A `sticky bottom-0` bar inside a page
             now sticks to the bottom of this rather than of the document, which
             is where it was always meant to be. */}
@@ -52,6 +102,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="px-4 pt-5 pb-12 sm:px-5">{children}</div>
         </main>
       </div>
+      <QuickOpen open={quickOpen} onDismiss={() => setQuickOpen(false)} />
     </div>
   );
 }
