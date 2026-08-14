@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { CLAUDE_BIN } from "./config";
@@ -390,6 +390,54 @@ function buildPrompt(run: RunRow, diff: RunDiff, diffText: string): string {
   ].join("\n");
 }
 
+/** How long `close` is given to deliver the last of stdout after the exit. */
+const EXIT_DRAIN_MS = 2_000;
+
+/**
+ * Settle an assist on the child's `exit`, giving `close` a grace period first.
+ *
+ * `close` is the better signal — it means stdout has been fully drained — but
+ * it fires only once every inherited pipe has shut, and the CLI's own children
+ * hold those. A `claude` that leaves a grandchild behind has *exited* and will
+ * never *close*, so an assist wired to `close` alone is stranded: `land` never
+ * runs, the `run_reviews` row stays `running`, `assistRunning` then refuses
+ * every further review or resolution for that run, and a resolution's throwaway
+ * `<slug>-resolve` checkout is left registered mid-merge because `after` never
+ * runs. With `killProcessGroup` on, the ten-minute timeout eventually reaps the
+ * group and the completed, billed answer is recorded as a timeout — and for a
+ * resolution, rolled back. With it off there is no group to kill and nothing
+ * else reaps the grandchild, so the row is `running` until the server restarts.
+ *
+ * `runIteration` and `chat.ts`'s `settleOnExit` settle the identical hazard the
+ * identical way: `exit` is the guarantee, `close` is the fast path, and the
+ * grace period exists only so a normal exit flushes its last chunk through
+ * `close` before anything is parsed. This is a copy of chat.ts's rather than an
+ * import of it because `chat.ts` imports *this* module (`assistRefusal`), so
+ * reaching back for it would put a cycle across a layer boundary for four
+ * lines — the same reason `runIteration` carries its own.
+ *
+ * Exported for the same reason chat.ts's is: the shape it exists for — a child
+ * that exits while a grandchild holds its stdout — is only reachable from a
+ * test through this seam, since `spawnAssist` needs a database, a run row and
+ * a real `claude`.
+ */
+export function settleOnExit(
+  child: ChildProcess,
+  settle: (code: number | null) => void,
+): void {
+  let done = false;
+  const once = (code: number | null) => {
+    if (done) return;
+    done = true;
+    settle(code);
+  };
+
+  child.on("exit", (code) => {
+    setTimeout(() => once(code), EXIT_DRAIN_MS).unref?.();
+  });
+  child.on("close", (code) => once(code));
+}
+
 /** Spawn one, and record what it cost whatever happened. */
 function spawnAssist(id: string, req: AssistRequest): Promise<void> {
   const { run, kind, cwd, prompt, permissionMode } = req;
@@ -431,14 +479,23 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
 
     let settled = false;
     const done = () => {
-      if (settled) return;
-      settled = true;
       clearTimeout(timer);
       resolve();
     };
 
-    /** `after` runs on every outcome, so a caller can always clean up. */
+    /**
+     * `after` runs on every outcome, so a caller can always clean up.
+     *
+     * The latch is on `land` rather than on `done` because `land` is what
+     * writes the row and runs `after`: a resolution that committed a merge and
+     * then discarded its checkout must not do either twice. It is set before
+     * the first `await` for the same reason — `settleOnExit` can be followed by
+     * a late `close`, and `child.on("error")` can arrive alongside either,
+     * while `after` is still running.
+     */
     const land = async (result: AssistResult) => {
+      if (settled) return;
+      settled = true;
       let final = result;
       if (req.after) {
         try {
@@ -463,7 +520,7 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
       });
     });
 
-    child.on("close", (code) => {
+    settleOnExit(child, (code) => {
       if (timedOut) {
         void land({
           status: "failed",
