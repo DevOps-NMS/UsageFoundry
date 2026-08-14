@@ -97,8 +97,8 @@ function statusTone(status: unknown): LogTone {
  * own `system:` chatter, which is noise once a run is underway.
  *
  * The switch has no `default`, on purpose: every kind is handled by name, so
- * adding a twelfth to `RunEventDTO` is a compile error here rather than a line
- * that silently renders as nothing.
+ * adding one to `RunEventDTO` is a compile error here rather than a line that
+ * silently renders as nothing.
  */
 export function describeEvent(e: RunEventDTO): LogEntry | null {
   const p = e.payload ?? {};
