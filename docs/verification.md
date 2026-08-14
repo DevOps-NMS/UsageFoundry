@@ -394,6 +394,69 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **The whole privilege split, which is every part of it that matters.** The
+  server now runs as root and drops each child to `UF_AGENT_UID`; `/data` is
+  root-owned 0700 and reclaimed by an entrypoint; the MCP capability leaves
+  `/tmp`; the telemetry exporter carries a per-run capability instead of
+  `UF_AUTH_TOKEN`. `npm run typecheck` and `npm test` pass, the decision
+  (`resolveChildCredentials`), the compose/Dockerfile pair, the capability file
+  and `telemetryEnv` are all unit-tested, and **no container has been built or
+  started**: the run this was written in has no Docker at all. Nothing below is
+  reasoning about a design — it is reasoning about whether the design runs.
+
+  Build and start it, then:
+
+  ```sh
+  docker compose up --build -d
+  docker compose logs usagefoundry | grep 'privilege separation'
+  # expect "on: children run as 1000:1000, server as 0"
+
+  # #79 — the server's environment
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'tr "\0" "\n" < /proc/$(pgrep -f "next-server" | head -1)/environ | grep -c UF_'
+  # expect a permission error, not a count
+
+  # #80 — the database, on a fresh volume and on an upgraded one
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'test -w /data/usagefoundry.db && echo BAD-writable || echo ok'
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'test -w /data/server.lock && echo BAD-writable || echo ok'
+
+  # #87 — a capability in flight, with a run working and a chat turn sent
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'ls /tmp/uf-mcp-* 2>/dev/null; ls /run/uf-mcp 2>/dev/null; echo "exit=$?"'
+  # expect nothing from the first and a permission error from the second
+
+  # #83 — with UF_AUTH_TOKEN set and a run under live enforcement
+  #   task the agent with:  env | grep OTEL_EXPORTER_OTLP_HEADERS
+  # expect a bearer that is not UF_AUTH_TOKEN, and telemetry still on the
+  # run page and the dashboard card
+  ```
+
+  Then the half that is not a permission check, and is the way this breaks if
+  it breaks: **a run still has to work**. Start an isolated run on a git
+  repository and confirm it commits — that is `git worktree add`, the
+  `.uf-worktrees` store and `seedWorktree`'s copies all going through
+  `chownForChild`, and a `git commit` inside the operator's own `.git` as the
+  dropped uid. Then a non-isolated run in a plain folder, a review, a chat turn
+  and a merge from the queue. The specific unknown worth naming: **macOS Docker
+  Desktop**, whose bind-mount ownership remapping was written for a container
+  whose *process* is the mounted uid, and which now sees a root process
+  spawning children that are not. If writes fail there, the arrangement to
+  compare against is `user: "${UF_UID:-1000}:${UF_GID:-1000}"` with
+  `UF_AGENT_UID`/`UF_AGENT_GID` cleared, which is the previous behaviour whole
+  and which the app detects and reports at boot.
+
+  Two things are known-not-closed rather than unverified, and are in
+  `docs/security.md` rather than here: an agent can still read
+  `~/.claude/.credentials.json` (it is what a work cycle bills against), and a
+  sibling agent can still read a live MCP capability's path out of
+  `/proc/<pid>/cmdline`. Both need a second Claude credential to close.
+- **`npm run build` currently fails on a clean tree**, before any of the above,
+  with `TypeError: generate is not a function` — reproduced against commit
+  `aa42952` with the source extracted to a scratch directory, and identical
+  with these changes applied. Issue #112 is that failure and this is not it.
+
 - **A failed tool result reaching the run page.** `toolResultFailures` is unit-
   tested and `npm run typecheck` passes, and the `user`/`tool_result` shape it
   reads was taken from real transcripts written by the pinned CLI (2.1.226) —
