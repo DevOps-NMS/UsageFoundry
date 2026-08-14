@@ -17,6 +17,7 @@ import {
   conflictKey,
   describeFolder,
   emitRunEvent,
+  forgetSlotVerdict,
   getRun,
   listRuns,
   overlaps,
@@ -1547,6 +1548,11 @@ export async function commitPending(
   const head = await git(dir, ["rev-parse", "--short", "HEAD"]);
   const count = slot.files.length;
 
+  // Freeing the slot is half of what this button is for, and admission
+  // remembers which slots it found unusable — so say the answer has changed
+  // rather than leaving the next run to wait out the memo's window.
+  forgetSlotVerdict(dir);
+
   emitRunEvent({
     runId,
     ts: Date.now(),
@@ -1802,6 +1808,9 @@ export async function purgeBranch(
     if (!removed.ok) {
       return { ok: false, reason: `Could not remove its checkout: ${removed.stderr.split("\n")[0]}` };
     }
+    // The slot is gone, so whatever admission remembered about it is about a
+    // directory that no longer exists — see `forgetSlotVerdict`.
+    forgetSlotVerdict(slot);
   }
 
   const del = await git(repoRoot, ["branch", "-D", branch]);

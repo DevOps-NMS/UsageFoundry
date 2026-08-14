@@ -1301,12 +1301,22 @@ function gitCommonDir(dir: string): string | null {
  * Null for a path that is not a readable checkout — `slotIsDirty` already
  * refuses one of those, and answering "foreign" about an unreadable directory
  * would name an owner this cannot actually see.
+ *
+ * `ownGitDir` is the repository's own answer, for a caller in a loop: it is the
+ * same value on every iteration and asking git for it again is another
+ * subprocess on the admission path. `undefined` means "not supplied"; `null` is
+ * a repository git could not read, which is a real answer and must not be
+ * mistaken for one.
  */
-function foreignSlotOwner(slotPath: string, repoRoot: string): string | null {
+function foreignSlotOwner(
+  slotPath: string,
+  repoRoot: string,
+  ownGitDir?: string | null,
+): string | null {
   if (!fs.existsSync(slotPath)) return null;
   const owner = gitCommonDir(slotPath);
   if (!owner) return null;
-  const mine = gitCommonDir(repoRoot);
+  const mine = ownGitDir === undefined ? gitCommonDir(repoRoot) : ownGitDir;
   if (!mine || owner === mine) return null;
   return path.basename(owner) === ".git" ? path.dirname(owner) : owner;
 }
@@ -1336,6 +1346,85 @@ function slotIsDirty(slotPath: string): boolean {
   const st = gitSync(slotPath, ["status", "--porcelain"]);
   // Unreadable counts as dirty: refusing to reuse is the recoverable mistake.
   return !st.ok || st.stdout !== "";
+}
+
+/**
+ * How many checkouts one admission may ask git about.
+ *
+ * `createRun` runs from entry to INSERT with no `await`, which is what makes its
+ * folder claim atomic — and what makes every subprocess it spawns a hold on the
+ * one event loop that also drains every agent's stdout, feeds every SSE stream
+ * and beats the server lock's heartbeat. `git status --porcelain` walks the
+ * working tree with `core.fsmonitor` cleared, so on a large checkout it is
+ * hundreds of milliseconds rather than the single digits the rest of the
+ * admission path costs.
+ *
+ * Nothing bounded that walk before: dirty slots are left behind deliberately
+ * (see the loop below), they are never `taken`, and so every admission
+ * re-examined every one of them, for ever — 64 slots at git's own 20-second
+ * ceiling in the limit. The bound is now this constant and not the repository's
+ * history: at most four checkouts inspected, each costing one `status` and, only
+ * when that comes back clean, one `rev-parse --git-common-dir`, plus one more
+ * for the repository's own git directory. Nine git subprocesses, on top of
+ * `probeIsolation`'s four.
+ */
+export const MAX_SLOT_PROBES_PER_ADMISSION = 4;
+
+/**
+ * How long a "this slot is not usable" answer is believed.
+ *
+ * Only the negative verdicts are remembered, and that asymmetry is the whole
+ * safety argument: acting on a stale *dirty* reading costs a slot number, where
+ * acting on a stale *clean* one hands a run a checkout `ensureWorktree` then
+ * refuses by name — a run that fails at setup rather than one that takes the
+ * next number. So a slot is only ever returned after this admission has seen it
+ * clean for itself.
+ *
+ * The window exists because a dirty slot can be cleaned by something this
+ * process cannot see: the operator committing or deleting the leftovers by hand.
+ * The two buttons that do it from inside this app say so directly
+ * (`forgetSlotVerdict`), so what this covers is only the out-of-process case,
+ * and five minutes of not reusing one checkout is cheaper than re-walking the
+ * whole store on every admission.
+ */
+const SLOT_VERDICT_TTL_MS = 5 * 60_000;
+
+/**
+ * What earlier admissions learned about each checkout slot.
+ *
+ * `globalThis`-pinned for the reason every other long-lived map here is: a fresh
+ * Map per module evaluation silently resets on every request in dev, which would
+ * make the bound above the *only* thing keeping the walk cheap and so degrade
+ * every admission on a repository with a few dirty slots.
+ */
+const globalSlots = globalThis as unknown as {
+  __ufSlotVerdicts?: Map<string, { verdict: "dirty" | "foreign"; at: number }>;
+};
+const slotVerdicts: Map<string, { verdict: "dirty" | "foreign"; at: number }> =
+  globalSlots.__ufSlotVerdicts ?? (globalSlots.__ufSlotVerdicts = new Map());
+
+/** A remembered refusal, or null when there is none worth believing. */
+function recentSlotVerdict(slotPath: string, now: number): "dirty" | "foreign" | null {
+  const seen = slotVerdicts.get(slotPath);
+  if (!seen) return null;
+  if (now - seen.at > SLOT_VERDICT_TTL_MS) {
+    slotVerdicts.delete(slotPath);
+    return null;
+  }
+  return seen.verdict;
+}
+
+/**
+ * Forget what was learned about a checkout this app has just changed.
+ *
+ * Called by the two controls that exist to make a slot reusable again —
+ * committing what an agent left behind, and purging a branch and its checkout
+ * together. Both would otherwise be undone by the memo above for up to
+ * `SLOT_VERDICT_TTL_MS`, which is the one wait an operator who has just pressed
+ * the button would read as the button not having worked.
+ */
+export function forgetSlotVerdict(slotPath: string | null | undefined): void {
+  if (slotPath) slotVerdicts.delete(slotPath);
 }
 
 /**
@@ -1694,7 +1783,29 @@ function occupantOf(
   return null;
 }
 
-/** Lowest checkout slot for this repo that no live run already holds. */
+/**
+ * Lowest checkout slot for this repo that no live run already holds.
+ *
+ * The walk is ordered cheapest-question-first, because every git call here is a
+ * subprocess on the admission path — see `MAX_SLOT_PROBES_PER_ADMISSION` for
+ * what that costs and why it is bounded.
+ *
+ *  1. A slot an active run holds is skipped from SQLite, as it always was.
+ *  2. A slot an earlier admission found unusable is skipped from the memo.
+ *  3. A slot that is not on disk yet cannot be dirty and cannot belong to
+ *     another repository, so a `stat` settles it outright.
+ *  4. Only what is left is put to git, and only until the probe budget runs out.
+ *
+ * Past the budget the walk carries on looking for a slot of kind 3 — a number
+ * nothing has ever used, which is free by construction — and gives up rather
+ * than returning one it has not seen clean for itself. Giving up means
+ * `resolveIsolation` degrades the run to working in the folder, serialised, with
+ * `slotExhaustionReason` on the row: the same outcome a genuinely full store
+ * already produces. It takes a store where all 64 slots exist *and* more than
+ * four of the low ones are unusable to reach, and it clears itself, since each
+ * admission's budget is spent learning about four slots the next one then skips
+ * for nothing.
+ */
 function allocateSlotPath(repoRoot: string): string | null {
   const store = worktreeStore(repoRoot);
   if (!store) return null;
@@ -1712,28 +1823,57 @@ function allocateSlotPath(repoRoot: string): string | null {
       .filter((p): p is string => !!p),
   );
 
+  const now = Date.now();
+  let probes = 0;
+  // Asked for at most once per admission, and only when a candidate has already
+  // come back clean. `undefined` is "not asked yet"; `null` is git's own answer.
+  let ownGitDir: string | null | undefined;
+
   for (let slot = 1; slot <= 64; slot++) {
     const candidate = path.join(store, `${slug}-${slot}`);
+    if (taken.has(candidate)) continue;
     // Skip a slot left dirty by an earlier run: reusing it would either destroy
     // that work or fail at setup. Taking the next number keeps the new run
-    // moving and leaves the old one recoverable.
-    if (taken.has(candidate) || slotIsDirty(candidate)) continue;
+    // moving and leaves the old one recoverable. Dirty slots accumulate for
+    // ever, which is why the answer is remembered rather than re-derived.
+    if (recentSlotVerdict(candidate, now)) continue;
+    if (!fs.existsSync(candidate)) return candidate;
+    if (probes >= MAX_SLOT_PROBES_PER_ADMISSION) continue;
+    probes += 1;
+
+    if (slotIsDirty(candidate)) {
+      slotVerdicts.set(candidate, { verdict: "dirty", at: now });
+      continue;
+    }
     // And skip a checkout of a *different* repository, which neither test above
     // can see — it is clean, and nothing holds it — but which `worktree add`
     // refuses outright. Returning it would mean a run that fails at setup with
     // a git error about a path, where taking the next number costs nothing.
-    if (foreignSlotOwner(candidate, repoRoot)) continue;
+    if (ownGitDir === undefined) ownGitDir = gitCommonDir(repoRoot);
+    if (foreignSlotOwner(candidate, repoRoot, ownGitDir)) {
+      slotVerdicts.set(candidate, { verdict: "foreign", at: now });
+      continue;
+    }
     return candidate;
   }
   return null;
 }
 
-/** Directory the operator has to deal with when checkouts stop being reusable. */
+/**
+ * Directory the operator has to deal with when checkouts stop being reusable.
+ *
+ * "the ones it looked at" rather than "every one": `allocateSlotPath` stops
+ * asking git after `MAX_SLOT_PROBES_PER_ADMISSION` checkouts, so on a store
+ * where all 64 slots already exist it can give up with some of them unexamined.
+ * The remedy is the same either way, and claiming to have checked all 64 would
+ * be a sentence this admission cannot stand behind.
+ */
 function slotExhaustionReason(repoRoot: string): string {
   const store = worktreeStore(repoRoot);
   return (
-    "Every isolated checkout for this repository still holds uncommitted work, " +
-    `so this run works in the folder directly and waits its turn. Commit or delete what is left in ${store ?? ".uf-worktrees"} to get parallel runs back.`
+    "No isolated checkout was free for this run — every slot for this repository already exists, " +
+    "and the ones this admission looked at still hold uncommitted work. " +
+    `So it works in the folder directly and waits its turn. Commit or delete what is left in ${store ?? ".uf-worktrees"} to get parallel runs back.`
   );
 }
 
