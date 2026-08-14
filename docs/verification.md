@@ -386,6 +386,45 @@ Built and exercised against real transcripts:
   `/workflows/<id>` and `/workflows/<id>/edit` all answered 200, and the
   canvas — the palette, the empty state and the selection panel — is in the
   server-rendered HTML of `/workflows/new`.
+- **The two agent flags, probed by hand against the pin
+  (`@anthropic-ai/claude-code@2.1.226`).** Seven probes, each deciding a design
+  question rather than confirming one. Four of them refuse before any API call,
+  which is how `BUILT_IN_AGENTS` was derived in the first place.
+  - `--agent` **can select a definition supplied on the same argv** by
+    `--agents`, which is what made the feature wirable at all — the alternative
+    was writing agent files into the operator's mounted `~/.claude` or into a
+    checkout. `claude --agents '{"uf-probe-agent":{…}}' --agent uf-probe-typo -p
+    hi` answered `--agent 'uf-probe-typo' not found. Available agents: claude,
+    Explore, general-purpose, Plan, statusline-setup, typescript,
+    uf-probe-agent`. That same line settles the merge from the other side:
+    `typescript` is not a built-in but a definition on that machine's disk, so
+    the resolution set is the built-ins *and* the disk *and* this argv.
+  - **An unregistrable member fails the spawn rather than being dropped.**
+    `--agents '{"uf-nodesc":{"prompt":"p"}}' --agent uf-nodesc -p hi` answered
+    `--agent 'uf-nodesc' not found` and **exited 1**, identically for a missing
+    `prompt` and for `"model": null`. Under the plural flag each of those cost a
+    run its specialist at exit 0 with nothing on stderr; named on `--agent` the
+    failure is loud. The empty name and the non-JSON payload were **not**
+    re-measured — see below.
+  - **A member named after a built-in shows once, not twice.**
+    `--agents '{"Explore":{…}}'` still listed a single `Explore`, so
+    `--agent Explore` selects *an* Explore with no way to tell whose.
+  - **`--append-system-prompt` still reaches a `--agent` session.** An agent told
+    to reply with a secret word stated only in the appended text replied
+    `BANANA ZEBRA`. That flag carries `SELF_HOSTING_NOTICE` — the `pkill` deny
+    list's explanation and the safe recipe that replaces it — so the alternative
+    was a run started as an agent that had never been told either.
+  - **`--agent` survives `--resume`**: the same probe resumed replied
+    `BANANA ZEBRA` again, `subtype=success`. Without it a run would stop being
+    what it was started as at cycle 2.
+  - **The run's own `--model` outranks the agent's**, read off the `system`/`init`
+    event before any request: the definition alone reported `claude-opus-5[1m]`,
+    `--agent uf-m` reported `claude-sonnet-5`, `--model opus … --agent uf-m`
+    reported `claude-opus-5`, `--model haiku …` reported
+    `claude-haiku-4-5-20251001`.
+  - **A name with a space registers and resolves** —
+    `--agents '{"uf spaced":{…}}' --agent "uf spaced"` — which holds only
+    because nothing here goes through a shell.
 
 ## Not yet verified by hand
 
@@ -868,11 +907,39 @@ through before trusting this unattended:
   run. The cheapest way to exercise it is to delete a mount from
   `WORKSPACE_ROOTS` between the pre-flight and the pass, which is not a thing an
   operator can do; short of that, read it rather than trust it.
+- **Everything about a saved agent that is not one of the seven probes above.**
+  No `claude` child has ever been spawned with either flag *from this app*: the
+  probes were run by hand, outside it. No browser has rendered the run form's
+  *Agent* row, the Settings default, the canvas inspector, the chat's `@`
+  popover, the *Agent work* card or the dashboard's origin marks, and no request
+  has created, edited or deleted a row over HTTP — which matters more than usual,
+  because `/api/agents` is the only way to define one at all. Four specific
+  things are still open, each of which changes what a page says rather than what
+  it does:
+  - **The two remaining drops.** An empty name registering as an empty entry, and
+    a `--agents` value that is not JSON being ignored outright, were both
+    measured under `--agents` alone and have not been re-checked under `--agent`.
+    Wrong either way, the refusal is stricter than it needs to be — the safe
+    direction, and still a form saying no for a reason that has stopped being
+    true.
+  - **Whether a `--agent` session records that agent's name on its own turns**,
+    or leaves them in `(main thread)`. `byAgent` and `agentSpend` report whatever
+    the transcript says and infer nothing, so this decides what the two cards
+    read and no branch depends on the answer.
+  - **Whether a `--agent` session delegates at all.** If it does, the forwarding
+    and the split cover it unchanged; if it does not, that machinery goes quiet
+    rather than wrong. The ambient definitions reach it either way.
+  - **Whether a member's own `tools` list would beat the `PROCESS_KILLERS` deny.**
+    Deny is verified to beat `--permission-mode` for the main thread and has been
+    watched against nothing else. It is why the field is refused at save rather
+    than stored and narrowed, under either flag.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
-work cycle spawns with, the GitHub credentials handed to a work cycle, how a
+work cycle spawns with, the GitHub credentials handed to a work cycle, that a
+work cycle started as a saved agent both defines and selects it and moves none of
+what bounds the run, how a
 run's diff is parsed and budgeted, whether a saved graph of run blocks can run at
 all and the order its runs are created in, when a branch may be landed, what a
 queued merge does with the branch it reaches, what counts as a conflict marker — both
