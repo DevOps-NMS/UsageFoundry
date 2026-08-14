@@ -42,7 +42,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   /**
    * The app's one keyboard listener.
    *
-   * ⌘1…⌘7 for the panes and ⌘K for quick open, and nothing else — every chord
+   * ⌘1…⌘8 for the panes and ⌘K for quick open, and nothing else — every chord
    * here is either the app's or the browser's, never both. ⌘R, ⌘L, ⌘T and ⌘W
    * are the browser's and are never looked at; the modifier test in
    * `isPlainCommandChord` is what keeps ⌘⇧K and Ctrl+1 out of range as well.

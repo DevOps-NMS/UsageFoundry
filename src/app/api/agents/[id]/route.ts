@@ -4,7 +4,7 @@ import {
   getAgent,
   normalizeAgentInput,
   updateAgent,
-} from "@/lib/agents";
+} from "../../../../lib/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
