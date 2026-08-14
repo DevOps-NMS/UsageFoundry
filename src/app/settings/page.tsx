@@ -221,18 +221,20 @@ function at(obj: unknown, path: string): unknown {
 }
 
 /**
- * What a run's own spending limit can overshoot by, which depends entirely on
- * when the guard is read. Rendered from the stored mode rather than hardcoded:
- * nothing on this page can set it, but a guard set written by another build
- * could carry `live`, and a sentence describing the wrong mode is worse than
- * no sentence.
+ * What a run's own spending limit can overshoot by. Every mode now carries the
+ * remainder into the cycle as a ceiling of its own, so what the mode still
+ * decides is when a *fresh* reading is taken — which is why these three differ
+ * only in their first clause. Rendered from the stored mode rather than
+ * hardcoded: nothing on this page can set it, but a guard set written by
+ * another build could carry `live`, and a sentence describing the wrong mode is
+ * worse than no sentence.
  */
 const SPEND_READ_AT: Record<BudgetPolicyDTO["enforcement"], string> = {
   "between-cycles":
-    "Read before each work cycle, so a run can pass it by one cycle's spend.",
-  live: "Read on a ticker while a cycle is going, so a run can pass it by about one model turn.",
+    "Read before each work cycle, and carried into the cycle as its own ceiling, so a run stops near it.",
+  live: "Read on a ticker while a cycle is going, and carried into the cycle as its own ceiling, so a run stops near it.",
   "live-resume":
-    "Read on a ticker while a cycle is going, so a run can pass it by about one model turn.",
+    "Read on a ticker while a cycle is going, and carried into the cycle as its own ceiling, so a run stops near it.",
 };
 
 /** Complete class strings per tone, looked up rather than interpolated. */

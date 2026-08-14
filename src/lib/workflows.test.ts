@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 
 import {
   blockSettlement,
+  bootBlockPlan,
   emittedFolderRefusal,
   haltPlan,
   mergeBlockOutcome,
@@ -2257,5 +2258,93 @@ describe("planInstanceStep — merge blocks", () => {
     assert.deepEqual(step.create, []);
     assert.deepEqual(step.merge, [], "and it does not claim it twice");
     assert.deepEqual(step.block, []);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* What a restart leaves waiting                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `bootBlockPlan` decides which instances' `waiting` blocks a restart writes
+ * off, and it is the one decision in this file whose wrong answer is invisible
+ * for weeks. `reconcileOnBoot` keeps a `paused` member inside its grace period
+ * on purpose; closing out the blocks behind it destroys the tail of a graph
+ * that is still working and records a sentence about a predecessor that is not
+ * true. Sparing one nothing survived in is the opposite error and just as
+ * silent — a block that sits `waiting` for ever, because nothing is left that
+ * could ever reach `advanceInstances` on its behalf.
+ */
+function instances(
+  ...entries: Array<[string, WorkflowInstanceStatus, ...RunStatus[]]>
+) {
+  return entries.map(([id, status, ...memberStatuses]) => ({
+    id,
+    status,
+    memberStatuses,
+  }));
+}
+
+describe("bootBlockPlan — which waiting blocks a restart closes out", () => {
+  it("spares an instance a member survived the boot in", () => {
+    // The exception this exists for: `reconcileOnBoot` kept that run, so its
+    // successors are waiting on something that is genuinely still coming.
+    const plan = bootBlockPlan(instances(["i", "started", "completed", "paused"]));
+    assert.deepEqual(plan.spared, ["i"]);
+    assert.deepEqual(plan.abandoned, []);
+    assert.deepEqual(plan.settled, []);
+  });
+
+  it("reads every live status as a survivor, not just a pause", () => {
+    // `paused` is the only one that can reach this point in the boot today, but
+    // by way of a rule in `reconcileOnBoot` — restating it here as a test for
+    // one status would make this the second place that decides what survives.
+    for (const status of ["waiting", "queued", "running", "paused"] as const) {
+      const plan = bootBlockPlan(instances(["i", "started", status]));
+      assert.deepEqual(plan.spared, ["i"], status);
+    }
+  });
+
+  it("closes out an instance whose members all ended", () => {
+    const plan = bootBlockPlan(
+      instances(["i", "started", "completed", "failed", "stopped", "blocked"]),
+    );
+    assert.deepEqual(plan.abandoned, ["i"]);
+    assert.deepEqual(plan.spared, []);
+  });
+
+  it("closes out an instance with no members at all", () => {
+    // A graph deferred behind an orchestrator block the same boot has just
+    // failed: nothing was ever created, so there is nothing to wait for.
+    const plan = bootBlockPlan(instances(["i", "started"]));
+    assert.deepEqual(plan.abandoned, ["i"]);
+  });
+
+  it("closes out an instance that is not started, however live its members", () => {
+    // The bound the halt needs: `stopInstance` had already decided this graph
+    // was over, and a `failed` one is `startWorkflow`'s own rollback, which
+    // wrote every other block off in the same pass. Reviving half of either is
+    // the failure the positive test for `started` exists to have none of.
+    for (const status of ["stopping", "stopped", "failed"] as const) {
+      const plan = bootBlockPlan(instances(["i", status, "running", "paused"]));
+      assert.deepEqual(plan.settled, ["i"], status);
+      assert.deepEqual(plan.spared, [], status);
+    }
+  });
+
+  it("decides every instance exactly once", () => {
+    // Three lists and one pass: an instance that fell between two branches is a
+    // block nothing writes and nothing wakes, which reads on the page exactly
+    // like one that is about to run.
+    const given = instances(
+      ["live", "started", "paused"],
+      ["dead", "started", "failed"],
+      ["halted", "stopping", "running"],
+      ["empty", "started"],
+    );
+    const plan = bootBlockPlan(given);
+    const decided = [...plan.abandoned, ...plan.settled, ...plan.spared];
+    assert.equal(decided.length, given.length);
+    assert.deepEqual([...decided].sort(), given.map((i) => i.id).sort());
   });
 });

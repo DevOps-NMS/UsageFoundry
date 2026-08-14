@@ -10,6 +10,13 @@ import type { UsageSnapshot, WindowState } from "./windows";
  *   turn cannot be interrupted without losing its work, so the guarantee is "no
  *   new work starts past the threshold", not "spend never exceeds the
  *   threshold". Overshoot is bounded by one iteration.
+ *
+ *   `maxRunCostUSD` is the one exception, and it is enforced somewhere else
+ *   entirely: `buildArgs` hands each cycle what is left of the limit as
+ *   `--max-budget-usd`, so the CLI stops the cycle that *crosses* the threshold
+ *   rather than only the one after it. Read this whole list as a statement
+ *   about the count of cycles — it is money for every rule but that one, where
+ *   a cycle of arbitrary size is exactly what the flag exists to prevent.
  * - `live` also reads them on a timer while an iteration is in flight and kills
  *   the agent when one trips. That trades the in-flight cycle's work — and its
  *   self-reported cost — for a tighter bound: one model turn plus one check
@@ -47,9 +54,22 @@ export interface BudgetPolicy {
    * `enforcement` is what selects the response.
    */
   maxSessionFraction: number | null;
-  /** Stop when this run alone has spent this many USD. null = no limit. */
+  /**
+   * Stop when this run alone has spent this many USD. null = no limit.
+   *
+   * Read in two places, and it is the second one that makes it a limit on
+   * money rather than on cycles: the comparison below refuses the *next*
+   * cycle, and `buildArgs` gives the cycle about to spawn what is left of this
+   * figure as `--max-budget-usd`. Without the second, a run one cent under its
+   * limit was authorised for a cycle of any size at all.
+   */
   maxRunCostUSD: number | null;
-  /** Stop when this run alone has consumed this many tokens. null = no limit. */
+  /**
+   * Stop when this run alone has consumed this many tokens. null = no limit.
+   *
+   * No in-cycle equivalent: the CLI's own ceiling is denominated in dollars,
+   * so this one really is bounded by a whole cycle under `between-cycles`.
+   */
   maxRunTokens: number | null;
   /**
    * Cap on iterations ("work cycles" in the UI). `null` means no cap.
