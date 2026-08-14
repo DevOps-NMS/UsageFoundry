@@ -1928,7 +1928,6 @@ describe("the parked sweeper's decision", () => {
       "iterations",
       "duration",
       "instance_cost",
-      "no_ceiling",
       "no_terminus",
     ];
 
@@ -1946,6 +1945,44 @@ describe("the parked sweeper's decision", () => {
         action: "end",
         reason: "Out of time.",
       });
+    });
+
+    /**
+     * `no_ceiling` was on the list above and is deliberately no longer: it is
+     * the one refusal here that is not about this run at all. On a stock
+     * install ceilings ship null by design and the fraction guard's reading is
+     * the provider's own percentage, discarded after an hour without a fresh
+     * answer — so an unreachable Anthropic host made this branch end every
+     * parked run in the install, 60 seconds after the pre-cycle guard had
+     * already ended every running one. That is the outcome
+     * `INSTANCE_ENFORCEABLE_CODES` refuses one level up, in as many words, and
+     * `RUN_ENFORCEABLE_CODES` is the same list for a run.
+     *
+     * It resumes rather than parking, because there is nothing here to wait
+     * for: `resume_at` exists for a window that refills on a schedule, and a
+     * reading that has gone comes back when it comes back. The run rejoins the
+     * queue and `startRun`'s own pre-cycle check logs, once, that the guard has
+     * nothing to read.
+     */
+    it("resumes a run whose fraction guard has nothing to read", () => {
+      assert.deepEqual(
+        planPausedRun(stops("no_ceiling", "No reading for that window."), null),
+        { action: "resume" },
+      );
+    });
+
+    it("still asks who holds the folder before resuming on an unreadable guard", () => {
+      // The occupancy read is only made where the verdict clears the pause, so
+      // a new clearing case that skipped it would resume straight into an
+      // occupied working tree — the collision the folder claim exists to
+      // prevent, arriving through the one door allowed to un-park a run.
+      const plan = planPausedRun(
+        stops("no_ceiling", "No reading for that window."),
+        "holder-1",
+      );
+      assert.equal(plan.action, "hold");
+      if (plan.action !== "hold") return;
+      assert.equal(plan.heldBy, "holder-1");
     });
   });
 });

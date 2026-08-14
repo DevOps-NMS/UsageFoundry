@@ -198,6 +198,49 @@ export const LIVE_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
 ];
 
 /**
+ * Codes a run may actually be *ended* on, once it exists.
+ *
+ * `INSTANCE_ENFORCEABLE_CODES`' reasoning, one level down, and the argument is
+ * the same one word for word — which is why this list exists rather than a
+ * second policy: `no_ceiling` is checked **at the door**, where there is a
+ * person and an error channel (`POST /api/runs`, and the reopen route), and is
+ * deliberately not acted on afterwards. `fraction` going null under a run in
+ * flight is not the operator having failed to set a ceiling. On a stock install
+ * ceilings ship null by design and that reading comes from the provider, which
+ * is discarded after an hour without a fresh answer — so an unreachable
+ * Anthropic host would otherwise end every fraction-guarded run at its next
+ * cycle boundary, block every queued one (cascading `blocked` down every chain
+ * behind it) and let the sweeper end every parked one. Turning a provider
+ * outage into a stopped fleet is a worse failure than the one the refusal
+ * exists to prevent, and recovery is one manual reopen per run.
+ *
+ * It is not silently ignored either. The run whose check found it logs that the
+ * guard has nothing to read — once per segment, the same answer this app
+ * already gives for a live spending limit whose telemetry never arrived and for
+ * an instance limit that could not be read — and carries on under its remaining
+ * guards, which are per-run and still bind.
+ *
+ * `no_terminus` stays on this list and is not a second configuration code to
+ * treat the same way: it says nothing would ever end the run, so ignoring it
+ * would leave an agent nothing stops. It is also refused at the same door.
+ */
+export const RUN_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
+  "duration",
+  "run_cost",
+  "run_tokens",
+  "weekly_fraction",
+  "session_fraction",
+  "iterations",
+  "instance_cost",
+  "no_terminus",
+];
+
+/** Whether a refusal is one a run in flight may be ended on. */
+export function enforceableForRun(verdict: BudgetVerdict): boolean {
+  return verdict.allowed || RUN_ENFORCEABLE_CODES.includes(verdict.code);
+}
+
+/**
  * Slack past the window boundary before a parked run tries again.
  *
  * The boundary comes from transcripts, which are flushed as turns complete, so
@@ -293,6 +336,62 @@ export function readWindowGuard(
   if (window.fraction === null) return { state: "no-ceiling" };
   const at = window.guardFraction ?? 0;
   return at >= threshold ? { state: "over", at } : { state: "under", at };
+}
+
+/**
+ * What a fraction guard with nothing to read is told, in one place.
+ *
+ * Two readers — the door, which refuses, and the pre-cycle guard, which now
+ * only logs — so the wording lives here rather than at either. It names both
+ * causes because there are two and they need different actions: the provider's
+ * own utilisation is what a stock install measures against, and it can simply
+ * be unavailable for a while, where a typed ceiling is a thing to go and set.
+ */
+const NO_READING_REASON: Record<"weekly" | "session", string> = {
+  weekly:
+    "A weekly-fraction guard is set but that window has no reading to " +
+    "measure against: the provider's own utilisation was not available and " +
+    "no weekly ceiling is configured. Set one in Settings (or run Calibrate), " +
+    "or wait for the provider's reading to come back.",
+  session:
+    "A session-fraction guard is set but the 5-hour window has no reading to " +
+    "measure against: the provider's own utilisation was not available and " +
+    "no 5-hour ceiling is configured. Set one in Settings (or run Calibrate), " +
+    "or wait for the provider's reading to come back.",
+};
+
+/**
+ * The refusal a fraction guard with nothing to read earns **at a door**.
+ *
+ * `RUN_ENFORCEABLE_CODES` moves this condition out of the pre-cycle guard, so
+ * something has to say it where there is still a person: `POST /api/runs` and
+ * the reopen route both call this before anything is created. Separate from
+ * `evaluateBudget` rather than a mode of it, because the door has no progress
+ * to evaluate — no cycles used, no clock running, no spend — and putting a
+ * zeroed `RunProgress` through the full guard would answer about limits that
+ * cannot have been reached yet. It reads exactly what the guard reads,
+ * `readWindowGuard`, so the two cannot disagree about whether a window has a
+ * reading.
+ */
+export function windowGuardRefusal(
+  policy: BudgetPolicy,
+  snapshot: UsageSnapshot,
+): string | null {
+  if (
+    policy.maxWeeklyFraction !== null &&
+    readWindowGuard(snapshot.weekly, policy.maxWeeklyFraction).state ===
+      "no-ceiling"
+  ) {
+    return NO_READING_REASON.weekly;
+  }
+  if (
+    policy.maxSessionFraction !== null &&
+    readWindowGuard(snapshot.session, policy.maxSessionFraction).state ===
+      "no-ceiling"
+  ) {
+    return NO_READING_REASON.session;
+  }
+  return null;
 }
 
 export function evaluateBudget(
@@ -434,18 +533,16 @@ export function evaluateBudget(
   }
 
   // A fraction-of-limit rule is only meaningful when there is a reading to
-  // measure against. Refusing to start is the safe reading of "stop at 80% of
-  // my weekly limit" when we have no idea what 100% is — silently ignoring the
-  // rule would let a run proceed under a guard the user believes is active.
+  // measure against, and the verdict says so rather than passing silently: a
+  // run proceeding under a guard the user believes is active is the failure
+  // this refusal exists to prevent. What is done with it is the caller's, and
+  // it is deliberately not "end the run" — see `RUN_ENFORCEABLE_CODES`, which
+  // moves this one code to the door and leaves a log line here.
   // Which field answers which question is `readWindowGuard`'s business.
   if (policy.maxWeeklyFraction !== null) {
     const weekly = readWindowGuard(snapshot.weekly, policy.maxWeeklyFraction);
     if (weekly.state === "no-ceiling") {
-      return block(
-        "no_ceiling",
-        "A weekly-fraction guard is set but no weekly ceiling is configured. " +
-          "Set one in Settings (or run Calibrate) before using this guard.",
-      );
+      return block("no_ceiling", NO_READING_REASON.weekly);
     }
     if (weekly.state === "over") {
       return block(
@@ -459,11 +556,7 @@ export function evaluateBudget(
   if (policy.maxSessionFraction !== null) {
     const session = readWindowGuard(snapshot.session, policy.maxSessionFraction);
     if (session.state === "no-ceiling") {
-      return block(
-        "no_ceiling",
-        "A session-fraction guard is set but no 5-hour ceiling is configured. " +
-          "Set one in Settings (or run Calibrate) before using this guard.",
-      );
+      return block("no_ceiling", NO_READING_REASON.session);
     }
     if (session.state === "over") {
       const at = pct(session.at);

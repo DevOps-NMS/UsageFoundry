@@ -4,6 +4,8 @@ import {
   type BudgetPolicy,
   type InstanceBudgetPolicy,
   INSTANCE_ENFORCEABLE_CODES,
+  RUN_ENFORCEABLE_CODES,
+  enforceableForRun,
   evaluateBudget,
   evaluateInstanceBudget,
   instanceBudgetIsOff,
@@ -11,6 +13,7 @@ import {
   normalizePolicy,
   planReadingAgeMs,
   readWindowGuard,
+  windowGuardRefusal,
 } from "./budget";
 import { pctField, pctSubmit } from "./format";
 import type { UsageSnapshot, WindowState } from "./windows";
@@ -309,6 +312,108 @@ describe("evaluateBudget", () => {
     );
     assert.equal(v.allowed, false);
     assert.equal(v.allowed === false && v.code, "no_ceiling");
+  });
+
+  /**
+   * …and the run must not be *ended* on it, which is a separate decision from
+   * whether the verdict exists.
+   *
+   * `INSTANCE_ENFORCEABLE_CODES` already argues this out one level up, in as
+   * many words, and every clause of that argument is about a run: ceilings ship
+   * null by design, the reading behind `fraction` on a stock install is the
+   * provider's own percentage, and it is discarded after an hour without a
+   * fresh answer. Acted on, an unreachable Anthropic host ends every running
+   * fraction-guarded run at its next cycle boundary, blocks every queued one —
+   * cascading `blocked` down every chain behind it — and lets the sweeper end
+   * every parked one, with recovery being one manual reopen per run.
+   *
+   * Every other code stays enforceable, and that is the half that would be
+   * quietly expensive to get wrong: a whitelist that swallowed `run_cost` or
+   * `duration` is a run nothing ends.
+   */
+  it("keeps every refusal but that one actionable for a run", () => {
+    assert.equal(RUN_ENFORCEABLE_CODES.includes("no_ceiling"), false);
+    for (const code of [
+      "weekly_fraction",
+      "session_fraction",
+      "run_cost",
+      "run_tokens",
+      "iterations",
+      "duration",
+      "instance_cost",
+      "no_terminus",
+    ] as const) {
+      assert.equal(RUN_ENFORCEABLE_CODES.includes(code), true, code);
+    }
+
+    // The predicate the two callers read, rather than the list: an allowed
+    // verdict is trivially not something to end a run on.
+    const unreadable = evaluateBudget(
+      { ...base, maxSessionFraction: 0.8 },
+      snapshot(null, null),
+      noProgress,
+      0,
+    );
+    assert.equal(enforceableForRun(unreadable), false);
+    assert.equal(
+      enforceableForRun(
+        evaluateBudget({ ...base, maxRunCostUSD: 1 }, snapshot(null, null), {
+          ...noProgress,
+          spentUSD: 2,
+        }, 0),
+      ),
+      true,
+    );
+    assert.equal(
+      enforceableForRun(evaluateBudget(base, snapshot(null, null), noProgress, 0)),
+      true,
+    );
+  });
+
+  /**
+   * The door that the change above moves the refusal to.
+   *
+   * `POST /api/runs` and the reopen route both call this before anything is
+   * created, so the operator is told at the moment they ask rather than by a
+   * run that flickers queued → blocked. It reads `readWindowGuard`, the same
+   * function the guard reads, so the two cannot come to different conclusions
+   * about whether a window has a reading at all.
+   */
+  it("refuses at the door only where a fraction guard has nothing to read", () => {
+    // Both causes are named, because there are two and they call for different
+    // actions: a ceiling is a thing to go and set, where the provider's own
+    // utilisation simply comes back.
+    const session = windowGuardRefusal(
+      { ...base, maxSessionFraction: 0.8 },
+      snapshot(null, null),
+    );
+    assert.match(session ?? "", /5-hour window has no reading/);
+    assert.match(session ?? "", /provider's own utilisation/);
+    assert.match(
+      windowGuardRefusal({ ...base, maxWeeklyFraction: 0.8 }, snapshot(null, null)) ??
+        "",
+      /weekly-fraction guard/,
+    );
+
+    // The guard and the door say the same sentence, because there is one.
+    const verdict = evaluateBudget(
+      { ...base, maxSessionFraction: 0.8 },
+      snapshot(null, null),
+      noProgress,
+      0,
+    );
+    assert.equal(verdict.allowed === false ? verdict.reason : "", session);
+
+    // A guard with a reading passes, however close to its threshold — the door
+    // answers "can this guard be read", never "is it satisfied". That is
+    // `evaluateBudget`'s question, and asking it here with no progress to
+    // evaluate would refuse a run over limits it cannot yet have reached.
+    assert.equal(
+      windowGuardRefusal({ ...base, maxSessionFraction: 0.8 }, snapshot(0.99, null)),
+      null,
+    );
+    // And a policy with no fraction guard has nothing to say either way.
+    assert.equal(windowGuardRefusal(base, snapshot(null, null)), null);
   });
 
   /**

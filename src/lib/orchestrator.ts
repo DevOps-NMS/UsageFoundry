@@ -22,6 +22,7 @@ import {
   type RunProgress,
   LIVE_ENFORCEABLE_CODES,
   RESUME_MARGIN_MS,
+  enforceableForRun,
   evaluateBudget,
   normalizePolicy,
   planReadingAgeMs,
@@ -4251,6 +4252,8 @@ export async function startRun(id: string): Promise<void> {
    * keeps a twenty-cycle run from writing the same line twenty times.
    */
   let saidUnenforceable = false;
+  /** The same, for this run's *own* guard having nothing to read. */
+  let saidGuardUnreadable = false;
 
   /**
    * Take a session id as the run's own, and record it immediately.
@@ -4331,6 +4334,12 @@ export async function startRun(id: string): Promise<void> {
           reason: verdict.allowed ? null : verdict.reason,
           code: verdict.allowed ? null : verdict.code,
           disposition: verdict.allowed ? null : verdict.disposition,
+          // Whether the refusal above is one this run may be ended on. A
+          // `no_ceiling` verdict is real and is recorded as one, and the run
+          // carries on anyway — so without this the event says `allowed: false`
+          // beside a cycle that then started, which reads as the log
+          // disagreeing with itself.
+          enforceable: enforceableForRun(verdict),
           meters: verdict.meters,
           weeklyFraction: snapshot.weekly.fraction,
           sessionFraction: snapshot.session.fraction,
@@ -4346,7 +4355,26 @@ export async function startRun(id: string): Promise<void> {
         },
       });
 
-      if (!verdict.allowed) {
+      // A refusal this run may not be ended on — `no_ceiling`, and only that:
+      // the fraction guard's reading has gone, which on a stock install means
+      // the provider's percentage was not readable this minute rather than the
+      // operator having failed to configure anything. Logged and carried past,
+      // the answer this app already gives an instance limit it cannot read and
+      // a live spending limit whose telemetry never arrived, because ending
+      // the run instead turns one endpoint's outage into a stopped fleet. Once
+      // per segment, not once per cycle. The condition is refused where there
+      // is a person: `POST /api/runs` and the reopen route both call
+      // `windowGuardRefusal` before anything is created.
+      if (!verdict.allowed && !enforceableForRun(verdict)) {
+        if (!saidGuardUnreadable) {
+          saidGuardUnreadable = true;
+          log(
+            id,
+            `A guard on this run cannot be enforced right now: ${verdict.reason} ` +
+              "The run carries on under its remaining guards.",
+          );
+        }
+      } else if (!verdict.allowed) {
         stopReason = verdict.reason;
         if (verdict.disposition === "pause") {
           // The ordinary path for a well-behaved live-resume run: the cycle
@@ -5319,11 +5347,32 @@ const FOLDER_TAKEN_REASON =
  * fact about this run's own budget, so nothing about who holds the folder may
  * change the answer to it.
  */
+/**
+ * Whether a verdict leaves a parked run free to go back in the queue.
+ *
+ * A refusal the run may not be *ended* on is not one the sweeper may act on
+ * either — `RUN_ENFORCEABLE_CODES` is the one list, and the sweeper is the
+ * second place that would otherwise turn a provider outage into a dead fleet:
+ * it ends every parked run whose fraction guard has nothing to read, which is
+ * the same wrong answer the pre-cycle guard used to give, arriving 60 seconds
+ * later. Read as clear, so the run rejoins the queue and `startRun`'s own
+ * pre-cycle check is what says the guard is unreadable — once, in that run's
+ * log, rather than every sweep for as long as the outage lasts.
+ *
+ * Its two readers must agree: the decision below, and the occupancy read that
+ * feeds it. A cleared verdict whose folder was never checked is the
+ * two-agents-in-one-working-tree collision, arriving through the one door that
+ * is allowed to un-park a run.
+ */
+export function pauseVerdictClears(verdict: BudgetVerdict): boolean {
+  return verdict.allowed || !enforceableForRun(verdict);
+}
+
 export function planPausedRun(
   verdict: BudgetVerdict,
   heldBy: string | null,
 ): PausedRunPlan {
-  if (verdict.allowed) {
+  if (pauseVerdictClears(verdict)) {
     // Stay `paused` rather than joining the queue: `paused` is what the restart
     // grace keys on, and `resume_at` is already in the past, so the next sweep
     // re-checks and flips the moment the folder is free.
@@ -5332,6 +5381,8 @@ export function planPausedRun(
     }
     return { action: "resume" };
   }
+  // Narrowed by the branch above: an allowed verdict has already returned.
+  if (verdict.allowed) return { action: "resume" };
 
   if (verdict.disposition === "pause") return { action: "park", resumeAt: verdict.resumeAt };
 
@@ -5391,11 +5442,16 @@ export async function sweepPaused(): Promise<void> {
         now,
       );
 
-      // Only where the guard said yes, for the reason `planPausedRun` gives:
-      // occupancy cannot change a refusal, so asking would be a query per
-      // refused run per minute for an answer nothing reads. `running` alone,
-      // because a parked run yields its folder and a queued one is not in it.
-      const heldBy = verdict.allowed
+      // Only where the verdict clears the pause, for the reason
+      // `planPausedRun` gives: occupancy cannot change a refusal that is going
+      // to end the run, so asking would be a query per refused run per minute
+      // for an answer nothing reads. `pauseVerdictClears` rather than
+      // `verdict.allowed`, so the two stay one rule — a verdict this run may
+      // not be ended on resumes it, and resuming without asking who is in the
+      // folder is the collision the folder claim exists to prevent. `running`
+      // alone, because a parked run yields its folder and a queued one is not
+      // in it.
+      const heldBy = pauseVerdictClears(verdict)
         ? occupantOf(workDirOf(run), run.id, ["running"])
         : null;
       const plan = planPausedRun(verdict, heldBy?.id ?? null);
