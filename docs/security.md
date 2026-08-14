@@ -24,3 +24,12 @@ mounted code. Treat it as privileged.
   controls, and this app's own git never touches the network. The credential
   helper is scoped to `https://github.com`, so another host asking for
   credentials gets none.
+- *Which* token a work cycle gets is chosen from the repository it is working
+  in. `UF_GITHUB_TOKENS` maps a folder to a credential; a run in that folder
+  gets that one and no other, and a folder no entry names falls back to
+  `UF_GITHUB_TOKEN` — blank there means no credential rather than a wide one.
+  This narrows how far a compromised or badly-instructed agent reaches; it does
+  not narrow the helper, which still answers for `github.com` as a whole, so the
+  token you name has to be scoped on GitHub's side too. The withholding above is
+  by namespace, so `UF_GITHUB_TOKENS` never reaches the reviewer or this app's
+  own git either.

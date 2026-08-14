@@ -60,6 +60,28 @@ Scope it to the repositories you run agents against — Contents: read and write
 plus Pull requests and Issues if the agent should open them (a classic token
 needs `repo`). An unattended agent can use everything the token can.
 
+That advice stops being followable past a couple of repositories: one token for
+fifteen of them is a token for fifteen of them, and an agent fixing a test in one
+holds a credential that can force-push to the other fourteen. Nothing inside a
+run narrows it, because the credential helper answers for `github.com` as a
+whole. So name the repositories instead:
+
+```bash
+UF_GITHUB_TOKENS=acme/web=github_pat_aaa|acme/api=github_pat_bbb|acme/secret=
+```
+
+`folder=token`, separated by `|`, where the folder is written as the picker shows
+it or absolute (`/workspace/acme/web`), and covers everything under it. A run
+working there gets that token and no other. A folder no entry names falls back to
+`UF_GITHUB_TOKEN`, so **leave that blank** to give every unnamed repository no
+credential at all; an entry with an empty token excludes one repository while the
+rest keep the install-wide one. The Settings header says which of those three
+states you are in.
+
+The orchestrator chat still takes `UF_GITHUB_TOKEN`: it looks across every
+workspace before it knows which repository it is proposing work in, so there is
+no repository to narrow it to.
+
 With it set, each work cycle is spawned with `GH_TOKEN`/`GITHUB_TOKEN` for the
 `gh` CLI, a git credential helper for `github.com`, and a rewrite of
 `git@github.com:` remotes to HTTPS — the container holds no SSH key, so a
@@ -76,7 +98,8 @@ Settings shows whether a token is configured.
 | `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. Absolute path; compose refuses to start without it. |
 | `UF_AUTH_TOKEN` | Shared secret for the UI. Blank disables auth — only acceptable on loopback. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
-| `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only. |
+| `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only, and every repository. |
+| `UF_GITHUB_TOKENS` | Optional. `folder=token` entries separated by `\|`, narrowing the credential to the repository a run is working in. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid the container runs as; must own the mounts. Default 1000. |
 
 Compose also mounts `~/.claude` **read-write** — Claude Code writes new session

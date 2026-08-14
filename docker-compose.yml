@@ -45,6 +45,12 @@ services:
       # Scope it to the repositories you actually run agents against: an
       # unattended agent can use everything this token can.
       UF_GITHUB_TOKEN: "${UF_GITHUB_TOKEN:-}"
+      # Optional, and how the sentence above is followed past one or two
+      # repositories: `folder=token` entries separated by "|". A run gets the
+      # token its own repository is configured with and no other; a folder no
+      # entry names falls back to the one above, so leaving that blank gives an
+      # unnamed repository no credential at all.
+      UF_GITHUB_TOKENS: "${UF_GITHUB_TOKENS:-}"
       # One entry per selectable workspace, "Label=/container/path", separated
       # by "|". An entry whose label is empty — i.e. UF_WORKSPACE_N_NAME is not
       # set in .env — is skipped, so extra workspaces are switched on from .env

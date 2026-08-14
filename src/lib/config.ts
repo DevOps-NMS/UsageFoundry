@@ -234,6 +234,129 @@ export const ADMIN_API_KEY = env("ANTHROPIC_ADMIN_KEY", "");
  */
 export const GITHUB_TOKEN = env("UF_GITHUB_TOKEN", "");
 
+/**
+ * Per-repository GitHub credentials: `folder=token` entries, `|`- or
+ * newline-separated.
+ *
+ * One token for the whole install is one token for the whole fleet. `.env`'s own
+ * advice — "a fine-grained token limited to the repositories you run agents
+ * against … do not hand it one that reaches your whole account" — yields a
+ * one-repository token at one repository and a fifteen-repository token at
+ * fifteen, at which point an unattended agent asked to fix a test in one of them
+ * holds a credential that can force-push to the other fourteen. Nothing in this
+ * app narrowed that, because there was no second credential and no dimension to
+ * hang one on.
+ *
+ * The folder is written absolute as the container sees it
+ * (`/workspace/acme/web`) or relative to any mount (`acme/web`), the same
+ * vocabulary `isolationCopyGlobsByRepo` takes and for the same reason: it is
+ * what the operator is looking at. An entry whose token is **empty** is an
+ * answer rather than a typo — it says this repository gets no credential at all,
+ * which is otherwise unsayable while an install-wide token exists.
+ *
+ * Values never leave this map except into a child's environment. Nothing here
+ * logs one, and the boot refusal `unmountedWorkspaceRefusal` writes names for
+ * the same reason.
+ */
+function parseGithubTokens(spec: string): Map<string, string> {
+  const tokens = new Map<string, string>();
+  for (const raw of spec.split(/[|\n]/)) {
+    const entry = raw.trim();
+    if (!entry) continue;
+    const eq = entry.indexOf("=");
+    if (eq === -1) continue;
+    const folder = entry.slice(0, eq).trim().replace(/\/+$/, "");
+    if (!folder) continue;
+    tokens.set(folder, entry.slice(eq + 1).trim());
+  }
+  return tokens;
+}
+
+export const GITHUB_TOKENS: ReadonlyMap<string, string> = parseGithubTokens(
+  env("UF_GITHUB_TOKENS", ""),
+);
+
+/**
+ * The most specific configured folder key covering `folder`, or null.
+ *
+ * Shared by the two things that are configured per repository — which GitHub
+ * credential a run gets, and which files seed its checkout — because two copies
+ * of "does this key name this folder" would be two rules to keep in step, and
+ * the one that drifted would be silent in both cases. Compared segment-wise and
+ * case-folded, `overlaps`' comparison, because macOS is case-insensitive and
+ * these are paths a person typed.
+ *
+ * A key on a parent directory covers everything under it, so a mount-wide
+ * default is expressible and a key on the repository itself still beats it.
+ */
+export function matchFolderKey(
+  folder: string,
+  keys: Iterable<string>,
+  mounts: WorkspaceMount[],
+): string | null {
+  const target = path.resolve(folder).split(path.sep).filter(Boolean);
+  let best: { key: string; depth: number } | null = null;
+
+  for (const key of keys) {
+    const candidates = key.startsWith("/") ? [key] : mounts.map((m) => path.join(m.path, key));
+    for (const candidate of candidates) {
+      const segments = path.resolve(candidate).split(path.sep).filter(Boolean);
+      if (segments.length > target.length) continue;
+      if (!segments.every((s, i) => s.toLowerCase() === target[i].toLowerCase())) continue;
+      if (!best || segments.length > best.depth) best = { key, depth: segments.length };
+    }
+  }
+  return best?.key ?? null;
+}
+
+/** Where the credential a child was handed came from. */
+export type GithubTokenScope = "repository" | "install" | "none";
+
+/**
+ * Which GitHub credential a child working in `folder` is given.
+ *
+ * Pure, and taking every input as an argument, because the failure it prevents
+ * is not one anything downstream can see: a run handed the wrong token pushes
+ * successfully to a repository nobody pointed it at, and the only evidence is a
+ * commit in someone else's history.
+ *
+ * The install-wide token stays the answer for a folder no entry names — that is
+ * what keeps an existing deployment's behaviour exactly what it was, and the map
+ * empty means every folder takes that path. Narrowing the *whole* install is
+ * therefore leaving `UF_GITHUB_TOKEN` blank and naming every repository that
+ * should have one, which is the shape `.env.example` now describes.
+ *
+ * `folder` is null for a child with no repository — the orchestrator chat roams
+ * every mount by design — and that takes the install-wide token or nothing.
+ */
+export function selectGithubToken(
+  folder: string | null,
+  perRepo: ReadonlyMap<string, string>,
+  installToken: string,
+  mounts: WorkspaceMount[],
+): { token: string; scope: GithubTokenScope; key: string | null } {
+  const key = folder === null ? null : matchFolderKey(folder, perRepo.keys(), mounts);
+  if (key !== null) {
+    const token = perRepo.get(key) ?? "";
+    // An entry with no token is "this repository gets none", not "fall through
+    // to the install-wide one" — the second reading would make the narrowest
+    // thing an operator can write the widest one it does.
+    return { token, scope: token ? "repository" : "none", key };
+  }
+  return installToken
+    ? { token: installToken, scope: "install", key: null }
+    : { token: "", scope: "none", key: null };
+}
+
+/** The credential for a folder, from this process's own configuration. */
+export function githubTokenFor(folder: string | null): {
+  token: string;
+  scope: GithubTokenScope;
+  key: string | null;
+} {
+  return selectGithubToken(folder, GITHUB_TOKENS, GITHUB_TOKEN, WORKSPACE_MOUNTS);
+}
+
 /** Path to the Claude Code executable inside the container. */
 export const CLAUDE_BIN = env("CLAUDE_BIN", "claude");
 
@@ -245,5 +368,18 @@ export const ANTHROPIC_API_BASE = env("ANTHROPIC_API_BASE", "https://api.anthrop
 export const USER_AGENT = "UsageFoundry/0.1.0";
 
 export const hasAdminKey = () => ADMIN_API_KEY.length > 0;
-export const hasGithubToken = () => GITHUB_TOKEN.length > 0;
+export const hasGithubToken = () => GITHUB_TOKEN.length > 0 || GITHUB_TOKENS.size > 0;
+
+/**
+ * What the Settings header says about GitHub credentials — folders, never
+ * values.
+ *
+ * The one thing an operator cannot see from the outside is *how wide* the
+ * credential their agents hold is, and at fifteen repositories that is the whole
+ * question. `install: true` with no entries is one token for every repository,
+ * which is the state this app shipped with and is worth saying in words.
+ */
+export function githubTokenSummary(): { install: boolean; repositories: string[] } {
+  return { install: GITHUB_TOKEN.length > 0, repositories: [...GITHUB_TOKENS.keys()].sort() };
+}
 export const authEnabled = () => AUTH_TOKEN.length > 0;

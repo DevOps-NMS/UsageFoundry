@@ -13,6 +13,7 @@ import { agentKnowledgeOf, agentRefusal, getAgent } from "../../../lib/agents";
 import {
   hasAdminKey,
   hasGithubToken,
+  githubTokenSummary,
   WORKSPACE_MOUNTS,
   WORKSPACE_ROOT,
   CLAUDE_HOME,
@@ -35,6 +36,11 @@ export async function GET() {
       // tool call, so the only cheap way to know beforehand is to say here
       // whether the container was given a credential at all.
       githubTokenConfigured: hasGithubToken(),
+      // And *how wide* it is, which is the question at more than one
+      // repository: one install-wide token reaches every repository the
+      // operator points this at, and nothing else on this page says so.
+      // Folders, never values.
+      githubTokens: githubTokenSummary(),
     },
   });
 }

@@ -2112,6 +2112,17 @@ function chatCwd(): string {
  * what says not to make them, and `UF_*` still leaves by namespace, so nothing
  * hands this child the app's own credentials.
  *
+ * The token is the **install-wide** one, and this is the one child where that is
+ * still right: a work cycle takes the credential its own repository is
+ * configured with (`selectGithubToken`, off `runs.repo_root`), where an
+ * orchestrator turn's whole job is to look across every mount before it knows
+ * which repository it is proposing work in. Narrowing it to `o.cwd` would
+ * silently withhold the credential from every question about a repository the
+ * turn had not yet been pointed at, which is the failure this feature was
+ * widened to remove. Leaving `UF_GITHUB_TOKEN` blank and configuring only
+ * `UF_GITHUB_TOKENS` is what withholds it here — deliberately, and the same
+ * lever as everywhere else.
+ *
  * No telemetry, for the reason a review gets none: `otlp_requests.run_id` is
  * compared against a run's own spend, and a chat's requests in that comparison
  * would make an accounted-for run look unaccounted-for.

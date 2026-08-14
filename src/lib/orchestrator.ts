@@ -9,6 +9,8 @@ import {
   GITHUB_TOKEN,
   OTLP_SELF_URL,
   WORKSPACE_MOUNTS,
+  githubTokenFor,
+  matchFolderKey,
   mountById,
   type WorkspaceMount,
 } from "./config";
@@ -1678,7 +1680,10 @@ export function planSeedCopies(
  * wins, so a key on a parent directory is a default for everything under it and
  * a key on the repository itself still overrides that.
  *
- * Mounts are an argument for `matchesCopyGlobs`' reason.
+ * Mounts are an argument for `matchesCopyGlobs`' reason, and the key matching
+ * itself is `matchFolderKey` in `config.ts` rather than a copy here: the GitHub
+ * credential is configured per repository the same way, and two answers to
+ * "does this key name this folder" would be two rules to keep in step.
  */
 export function copyGlobsFor(
   repoRoot: string,
@@ -1686,25 +1691,8 @@ export function copyGlobsFor(
   byRepo: Record<string, string[]>,
   mounts: WorkspaceMount[],
 ): { globs: string[]; key: string | null } {
-  const target = segmentsOf(path.resolve(repoRoot));
-  let best: { key: string; depth: number } | null = null;
-
-  for (const key of Object.keys(byRepo)) {
-    const candidates = key.startsWith("/")
-      ? [key]
-      : mounts.map((m) => path.join(m.path, key));
-    for (const candidate of candidates) {
-      const segments = segmentsOf(path.resolve(candidate));
-      // Case-folded segment-wise, `overlaps`' comparison: this is a folder
-      // identity test on a path an operator typed, and macOS is
-      // case-insensitive.
-      if (segments.length > target.length) continue;
-      if (!segments.every((s, i) => s.toLowerCase() === target[i].toLowerCase())) continue;
-      if (!best || segments.length > best.depth) best = { key, depth: segments.length };
-    }
-  }
-
-  return best ? { globs: byRepo[best.key], key: best.key } : { globs, key: null };
+  const key = matchFolderKey(repoRoot, Object.keys(byRepo), mounts);
+  return key !== null ? { globs: byRepo[key], key } : { globs, key: null };
 }
 
 /**
@@ -3748,10 +3736,17 @@ const GITHUB_CREDENTIAL_HELPER =
  * nothing to authenticate. Same for `gitEnv()` in `git.ts`: hooks are off there
  * and `core.fsmonitor` is cleared, but a `.gitattributes` driver is still
  * repository-controlled code in a child this app never reads the output of,
- * and none of what this app runs git for touches the network.
+ * and none of what this app runs git for touches the network. That withholding
+ * is by namespace rather than by remembering, so a *second* credential shape is
+ * covered by it with no change: `UF_GITHUB_TOKENS` leaves those children the
+ * same way `UF_GITHUB_TOKEN` does.
  *
- * `token` is a parameter so the function is pure and testable; production
- * always uses the process-level value.
+ * *Which* token is decided by `selectGithubToken` in `config.ts`, off the
+ * folder the child is working in, and it is decided by the caller rather than
+ * here: this function's `credential.https://github.com.helper` answers for
+ * github.com as a whole, so how narrow the credential is comes entirely from
+ * how narrow the token handed in is. Callers that have a repository pass it;
+ * the chat, which roams every mount by design, has none to pass.
  */
 export function githubEnv(token: string = GITHUB_TOKEN): Record<string, string> {
   if (!token) return {};
@@ -3826,6 +3821,12 @@ function runIteration(
   cwd: string,
   args: string[],
   telemetryRequired: boolean,
+  // Required rather than defaulted, `buildArgs`' rule for the run-cost ceiling:
+  // the credential handed to an unattended agent is not something a call site
+  // should be able to widen by omission. `cwd` cannot supply it — an isolated
+  // run's cwd is its checkout under `.uf-worktrees`, not the repository the
+  // token is about.
+  githubToken: string,
   onSession: (sessionId: string) => void,
 ): Promise<IterationResult> {
   return new Promise((resolve) => {
@@ -3833,7 +3834,7 @@ function runIteration(
     // quotes, backticks, or semicolons is inert rather than interpreted.
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {
       cwd,
-      env: childEnv({ ...telemetryEnv(runId, telemetryRequired), ...githubEnv() }),
+      env: childEnv({ ...telemetryEnv(runId, telemetryRequired), ...githubEnv(githubToken) }),
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, so a kill reaches the builds, test runners and
       // servers the agent started. Those are what actually hold the working
@@ -4537,6 +4538,22 @@ export async function startRun(id: string): Promise<void> {
       workDir = await ensureWorktree(run);
     }
 
+    // The credential this run's cycles get, chosen once from the *repository*
+    // rather than from `workDir` — an isolated run's cwd is its checkout under
+    // `.uf-worktrees`, which no operator writes a token entry for. Resolved
+    // here rather than per cycle because it is process configuration, fixed at
+    // boot, and a run whose token changed between cycles would be a run that
+    // pushed from one repository and not another with nothing saying why.
+    const github = githubTokenFor(run.repo_root ?? run.folder);
+    if (github.scope === "repository") {
+      log(id, `GitHub credential scoped to ${github.key}`, { githubScope: github.key });
+    } else if (github.scope === "none" && github.key !== null) {
+      // Configured to have none, which is different from having none because
+      // nothing was set — and the failure it produces looks identical: a `gh`
+      // command refused inside a tool call.
+      log(id, `No GitHub credential: ${github.key} is configured to get none`);
+    }
+
     for (;;) {
       const preScan = interrupts.get(id);
       if (preScan) {
@@ -4804,7 +4821,7 @@ export async function startRun(id: string): Promise<void> {
 
       let res: IterationResult;
       try {
-        res = await runIteration(id, workDir, args, liveSpendTelemetry, (sid) => {
+        res = await runIteration(id, workDir, args, liveSpendTelemetry, github.token, (sid) => {
           // A resume that comes back under a different id is recorded rather
           // than treated as a failure: which of the two Claude Code reports for
           // a `--resume` is its business, and this app has never observed it

@@ -374,6 +374,22 @@ function parseGlobsByRepo(text: string): Record<string, string[]> {
   return map;
 }
 
+/**
+ * How wide the GitHub credential is, in words, beside the badge saying there is
+ * one.
+ *
+ * The header could already say a token exists and nothing said what it reached.
+ * At one repository those are the same sentence; at fifteen they are not, and
+ * the difference is what an unattended agent can do to the other fourteen.
+ */
+function githubScopeNote(summary: unknown): string {
+  const s = (summary ?? {}) as { install?: unknown; repositories?: unknown };
+  const repositories = Array.isArray(s.repositories) ? (s.repositories as string[]) : [];
+  if (repositories.length === 0) return "one token, every repository";
+  const scoped = `${repositories.length} folder${repositories.length === 1 ? "" : "s"} scoped`;
+  return s.install ? `${scoped}, the rest share one token` : `${scoped}, the rest get none`;
+}
+
 function formatGlobsByRepo(map: Record<string, string[]>): string {
   return Object.entries(map)
     .map(([folder, globs]) => `${folder}: ${globs.join(", ")}`)
@@ -831,7 +847,14 @@ export default function SettingsPage() {
         </EnvRow>
         <EnvRow label="GitHub token">
           {env.githubTokenConfigured ? (
-            <Badge tone="ok">configured</Badge>
+            <>
+              <Badge tone="ok">configured</Badge>{" "}
+              {/* How wide it is, which is the fact that changes with the number
+                  of repositories: one install-wide token authenticates an
+                  unattended agent against every repository it reaches, not
+                  only the one it was started in. */}
+              <span>{githubScopeNote(env.githubTokens)}</span>
+            </>
           ) : (
             <>
               <Badge tone="warn">not set</Badge>{" "}
