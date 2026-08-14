@@ -31,16 +31,33 @@ const SYSTEM_LABEL: Record<LogTone, string> = {
   accent: "text-accent",
 };
 
+export type LogSize = "inline" | "pane";
+
+/**
+ * Complete class strings per size, never interpolated — Badge's rule.
+ *
+ * `pane` is the log as the whole of what a tab shows: a fixed terminal-shaped
+ * region rather than a box that grows with its content, so the scrollbar is the
+ * log's own and the page behind it does not lengthen by a screen every minute.
+ * `inline` is the older behaviour, for a log sitting among other cards.
+ */
+const SIZE: Record<LogSize, string> = {
+  inline: "max-h-[560px]",
+  pane: "h-[min(62vh,44rem)] min-h-[18rem]",
+};
+
 export function Log({
   children,
   ref,
   onScroll,
   label = "Run output",
+  size = "inline",
 }: {
   children: ReactNode;
   ref?: React.Ref<HTMLDivElement>;
   onScroll?: React.UIEventHandler<HTMLDivElement>;
   label?: string;
+  size?: LogSize;
 }) {
   return (
     <div
@@ -57,10 +74,19 @@ export function Log({
       // named and navigable without narrating an agent's entire transcript.
       aria-live="off"
       aria-label={label}
-      // Typeface and wrapping are per line rather than set here: the agent's
-      // own words are prose and are set as prose, and only the app's lines and
-      // the tool arguments are monospace.
-      className="max-h-[560px] overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 text-xs"
+      // SF Mono is the default here, which is what a terminal pane is: every
+      // line this app or a tool writes is set in it, and it is what an unstyled
+      // child inherits. The agent's own prose is the one exception and says so
+      // locally — reading a page of English in a monospace column is the thing
+      // this file's per-line typefaces were introduced to stop.
+      //
+      // No horizontal padding: it is on each row instead, so a work-cycle
+      // header can span the full width and the lines scroll *under* it rather
+      // than beside it. `overflow-y-auto` computes overflow-x to auto as well,
+      // so a row reaching into the container's own padding with a negative
+      // margin risks a horizontal scrollbar; moving the padding out removes
+      // the question rather than answering it.
+      className={`overflow-y-auto rounded-sm border border-line bg-inset py-2.5 font-mono text-xs ${SIZE[size]}`}
     >
       {children}
     </div>
@@ -91,9 +117,15 @@ export function LogLine({
   // A real rule across the feed, rather than a line of em dashes pretending to
   // be one. This is the only place the log is allowed to take vertical space:
   // it is what turns a scroll of a thousand lines into a countable few groups.
+  //
+  // Sticky, the way a macOS list pins the group header of the section you are
+  // reading: a work cycle runs to hundreds of lines, so which one they belong
+  // to is exactly the fact that scrolls off the top first. It needs an opaque
+  // background of its own — matching the pane's — because the lines pass
+  // underneath it rather than being pushed along by it.
   if (entry.voice === "cycle") {
     return (
-      <div className="flex items-center gap-2.5 pb-1.5 pt-5 first:pt-0">
+      <div className="sticky top-0 z-10 flex items-center gap-2.5 bg-inset px-3 pb-1.5 pt-4 first:pt-0">
         <Time at={timestamp} />
         <span className="shrink-0 text-2xs font-semibold uppercase tracking-wide text-ink">
           {entry.label}
@@ -107,12 +139,14 @@ export function LogLine({
   }
 
   // The agent's own words, and the only thing here wearing no chrome at all —
-  // set as prose, at reading size, because that is what they are.
+  // set as prose, at reading size, because that is what they are. `font-sans`
+  // is stated rather than inherited: the pane itself is monospace now, and
+  // this is the one voice in it that must not be.
   if (entry.voice === "agent") {
     return (
-      <div className="flex gap-2.5 py-1.5">
+      <div className="flex gap-2.5 px-3 py-1.5">
         <Time at={timestamp} />
-        <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">
+        <p className="min-w-0 flex-1 whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-ink">
           {entry.text}
         </p>
       </div>
@@ -121,7 +155,7 @@ export function LogLine({
 
   if (entry.voice === "tool") {
     return (
-      <div className="flex gap-2.5 py-0.5">
+      <div className="flex gap-2.5 px-3 py-0.5">
         <Time at={timestamp} />
         <span className="flex min-w-0 flex-1 items-baseline gap-2">
           <span className="shrink-0 rounded-sm border border-line bg-surface px-1.5 font-mono text-2xs font-semibold text-accent">
@@ -141,7 +175,7 @@ export function LogLine({
   }
 
   return (
-    <div className="flex gap-2.5 py-0.5">
+    <div className="flex gap-2.5 px-3 py-0.5">
       <Time at={timestamp} />
       <span
         className={`flex min-w-0 flex-1 items-baseline gap-2 border-l-2 pl-2.5 ${SYSTEM_ROW[entry.tone]}`}
