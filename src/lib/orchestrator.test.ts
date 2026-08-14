@@ -36,6 +36,12 @@ fs.symlinkSync(path.join(ws, "nested"), nestedAlias);
 process.env.WORKSPACE_ROOTS = `Main=${ws}|Alias=${alias}|Nested=${ws}/nested|NestedAlias=${nestedAlias}`;
 process.env.DATA_DIR = path.join(tmp, "data");
 process.env.CLAUDE_HOME = path.join(tmp, "claude");
+// Pinned rather than left to fall back to CLAUDE_HOME: the sweeper cases below
+// reach `currentSnapshot()`, which reads `planUsage()`, which sends an HTTP
+// request when it finds an OAuth token in this directory. An ambient
+// CLAUDE_CONFIG_DIR would make a unit test talk to Anthropic on the operator's
+// own credential.
+process.env.CLAUDE_CONFIG_DIR = path.join(tmp, "claude");
 // The reopen case below is the one test here that reaches the database, and
 // `reopenRun` ends in `promoteQueued`. Its fixture keeps the folder occupied so
 // nothing is promotable, and this is the second lock on the same door: a
@@ -49,7 +55,9 @@ const {
   buildArgs,
   conflictKey,
   dependencyCycle,
+  duePausedRuns,
   overlaps,
+  planPausedRun,
   releasableRuns,
   resolveIsolation,
   revivableDependents,
@@ -65,12 +73,14 @@ const {
   reopenPrompt,
   reopenRun,
   selectPromotable,
+  sweepPaused,
   MAX_PAUSES_PER_RUN,
   MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
 
 const { normalizePolicy } = require("./budget") as typeof import("./budget");
 const { db } = require("./db") as typeof import("./db");
+const { saveSettings } = require("./settings") as typeof import("./settings");
 
 const clash = (a: string, b: string) => overlaps(conflictKey(a), conflictKey(b));
 
@@ -1031,6 +1041,8 @@ describe("buildArgs", () => {
     model: null,
     permissionMode: "acceptEdits" as const,
     resumeSessionId: null,
+    maxRunCostUSD: null,
+    spentGuardUSD: 0,
   };
 
   it("grants an isolated run the two git commands it is told to use", () => {
@@ -1171,6 +1183,63 @@ describe("buildArgs", () => {
     // The two the CLI gates the flag on. `-p` is `--print`.
     assert.equal(args[0], "-p");
     assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+  });
+
+  /**
+   * The only thing that bounds what *one* work cycle spends.
+   *
+   * `maxRunCostUSD` is read between cycles, so on its own it bounds the number
+   * of cycles that may start past a threshold and not the amount the one
+   * crossing it spends: a run at $34.99 of a $35 limit was authorised for one
+   * more cycle of any size at all, and twenty-five of those multiply it. The
+   * flag is the fix and every way of losing it is silent — a missing argv pair
+   * is not an exit code, not a stream event and not a log line, and the only
+   * evidence is a bill.
+   */
+  it("carries what is left of the run's spending limit into the cycle", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      maxRunCostUSD: 5,
+      spentGuardUSD: 1.25,
+    });
+    const at = args.indexOf("--max-budget-usd");
+    assert.notEqual(at, -1, "a run with a spending limit must cap its own cycle");
+    // The remainder, not the limit: a resumed run's later cycles would
+    // otherwise each be allowed the whole figure over again.
+    assert.equal(args[at + 1], "3.75");
+  });
+
+  it("attaches no ceiling when the run has no spending limit", () => {
+    // Null is "no limit" everywhere in `normalizePolicy`, and a run that opted
+    // out must not acquire one from whatever it has spent so far.
+    assert.equal(
+      buildArgs({ ...base, isolated: true, spentGuardUSD: 12 }).includes(
+        "--max-budget-usd",
+      ),
+      false,
+    );
+  });
+
+  /**
+   * The guard figure, not `runs.spent_usd`.
+   *
+   * `spentGuardUSD` is `spent_usd + spent_usd_est` — the same sum the pre-cycle
+   * check compares — and the estimate half is what a killed cycle cost, which
+   * is real money the CLI never got to report. Deriving the ceiling from the
+   * measured floor alone would hand the child more room than the guard believes
+   * the run has left, which is the display-versus-guard split inverted at the
+   * one door where it costs money. The clamp is what that reads as at the
+   * boundary: never a negative, which the CLI would take as no ceiling at all.
+   */
+  it("never hands over a negative ceiling", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      maxRunCostUSD: 5,
+      spentGuardUSD: 6.5,
+    });
+    assert.equal(args[args.indexOf("--max-budget-usd") + 1], "0");
   });
 
   it("still passes the mode, the model and the session to resume", () => {
@@ -1459,5 +1528,251 @@ describe("picking up a blocked run", () => {
     const row = getRun(dependent)!;
     assert.notEqual(row.status, "queued");
     assert.equal(row.work_dir, null);
+  });
+});
+
+/**
+ * Covers what the sweeper does with one parked run.
+ *
+ * It earns a test on exactly the grounds `selectPromotable` and
+ * `releasableRuns` do: pure, and every way of being wrong is silent, lands on
+ * disk and costs money. This is the only code that decides whether a parked run
+ * goes back to work, keeps waiting, or is killed, and it decides for every one
+ * of them in a single tick against a single snapshot — so one inverted branch
+ * is a whole parked fleet terminated that should have waited, or a whole fleet
+ * waiting for ever that should have resumed, and neither throws.
+ */
+describe("the parked sweeper's decision", () => {
+  type Verdict = import("./budget").BudgetVerdict;
+  type StopCode = import("./budget").BudgetStopCode;
+
+  /** Nothing about this run's own budget refuses it any more. */
+  const cleared: Verdict = { allowed: true, meters: [] };
+
+  /** The one refusal that clears on its own. */
+  const parks = (resumeAt: number): Verdict => ({
+    allowed: false,
+    code: "session_fraction",
+    reason: "The 5-hour window is full.",
+    disposition: "pause",
+    resumeAt,
+    meters: [],
+  });
+
+  const stops = (code: StopCode, reason: string): Verdict => ({
+    allowed: false,
+    code,
+    reason,
+    disposition: "stop",
+    meters: [],
+  });
+
+  describe("which parked runs it decides about", () => {
+    it("treats a null wake time as due now", () => {
+      // The hint's absence means "look on the next sweep", never "not yet".
+      // Read the other way these runs are parked for ever, and a sweeper that
+      // has quietly stopped deciding looks exactly like one between windows.
+      const row = { id: "a", resume_at: null };
+      assert.deepEqual(duePausedRuns([row], 1_000), [row]);
+    });
+
+    it("takes a wake time that has arrived and leaves one that has not", () => {
+      const past = { id: "past", resume_at: 999 };
+      const now = { id: "now", resume_at: 1_000 };
+      const later = { id: "later", resume_at: 1_001 };
+      assert.deepEqual(duePausedRuns([past, now, later], 1_000), [past, now]);
+    });
+
+    it("reports nothing when every parked run is still waiting", () => {
+      // What buys the scan: no due run means no `currentSnapshot()` this tick.
+      assert.deepEqual(duePausedRuns([{ id: "a", resume_at: 2_000 }], 1_000), []);
+    });
+  });
+
+  describe("once its guard has cleared", () => {
+    it("sends it back to the queue when the folder is free", () => {
+      assert.deepEqual(planPausedRun(cleared, null), { action: "resume" });
+    });
+
+    it("holds it when a run started while it waited is in the folder", () => {
+      // Resuming here is the two-agents-in-one-working-tree collision the
+      // folder claim exists to prevent, arriving through the one door in this
+      // app that is allowed to un-park a run.
+      const plan = planPausedRun(cleared, "holder-1");
+      assert.equal(plan.action, "hold");
+      if (plan.action !== "hold") return;
+      assert.equal(plan.heldBy, "holder-1", "the log line has to name what it waits for");
+      assert.match(plan.reason, /folder/i);
+    });
+
+    it("gives the same reason every time, whoever holds the folder", () => {
+      // The sweeper's UPDATE is guarded on `stop_reason IS NOT ?`, so this is
+      // the whole of why a parked run does not get a rewritten row and a fresh
+      // `run_events` line every 60 seconds. At twenty-five parked runs a reason
+      // that varied would be twenty-five rows a minute into a table with no
+      // retention.
+      const first = planPausedRun(cleared, "holder-1");
+      const again = planPausedRun(cleared, "holder-1");
+      const other = planPausedRun(cleared, "holder-2");
+      assert.equal(first.action, "hold");
+      assert.equal(other.action, "hold");
+      if (first.action !== "hold" || again.action !== "hold" || other.action !== "hold") return;
+
+      assert.equal(again.reason, first.reason);
+      assert.equal(other.reason, first.reason, "the holder must not reach the reason");
+      assert.equal(
+        first.reason.includes("holder-1"),
+        false,
+        "the holder's id belongs in the log payload, which is written once",
+      );
+    });
+  });
+
+  describe("while its guard still refuses", () => {
+    it("parks it at the instant the verdict just derived", () => {
+      // Re-derived rather than carried: the window that will clear this run is
+      // not necessarily the one that closed it. The row is not an argument
+      // here, so a carried `resume_at` is unreachable by construction.
+      assert.deepEqual(planPausedRun(parks(5_000), null), {
+        action: "park",
+        resumeAt: 5_000,
+      });
+    });
+
+    it("parks it whether or not the folder is taken", () => {
+      // A refusal is a fact about this run's own budget. Who is in the folder
+      // cannot answer it, so it must not change the answer.
+      assert.deepEqual(planPausedRun(parks(5_000), "holder-1"), {
+        action: "park",
+        resumeAt: 5_000,
+      });
+    });
+  });
+
+  describe("when the refusal can never clear", () => {
+    /**
+     * Every code the sweeper can meet with a `stop` disposition, including
+     * `session_fraction` — which parks only under `live-resume` and stops
+     * otherwise, so reading the code instead of the disposition parks a run
+     * for ever that its operator asked to be ended.
+     */
+    const NEVER_CLEARS: StopCode[] = [
+      "weekly_fraction",
+      "session_fraction",
+      "run_cost",
+      "run_tokens",
+      "iterations",
+      "duration",
+      "instance_cost",
+      "no_ceiling",
+      "no_terminus",
+    ];
+
+    for (const code of NEVER_CLEARS) {
+      it(`ends the run on ${code} rather than leaving it holding a folder`, () => {
+        assert.deepEqual(planPausedRun(stops(code, `refused: ${code}`), null), {
+          action: "end",
+          reason: `refused: ${code}`,
+        });
+      });
+    }
+
+    it("ends it even while the folder is taken", () => {
+      assert.deepEqual(planPausedRun(stops("duration", "Out of time."), "holder-1"), {
+        action: "end",
+        reason: "Out of time.",
+      });
+    });
+  });
+});
+
+/**
+ * Covers the two writes the pure decision above cannot reach.
+ *
+ * These go to the database, which `CLAUDE.md` sets a bar for rather than
+ * treating as ordinary, and each clears it on its own terms. The first pins
+ * that a resumed run is handed to `promoteQueued` rather than to `startRun`:
+ * the only evidence of the difference is that a run over the concurrency cap
+ * stays `queued`, and a regression is one more billed agent per parked run at
+ * the moment a window clears — which reads on the runs list exactly like a busy
+ * fleet. The second pins `AND status='paused'` on the flip, which is a race by
+ * definition: the sweeper reads its rows, then awaits a transcript scan that
+ * takes seconds, and an operator's Stop landing in that gap must win. Nothing
+ * pure can express either.
+ *
+ * What is deliberately *not* pinned here is that `promoteQueued()` is reached
+ * at the end of the sweep at all. Its only observable effect is a run starting,
+ * so a test for it is a test that spawns a child and leaves an async chain
+ * running past the assertion — and a flaky suite costs more than this line
+ * does, since every other terminal transition in the app calls `promoteQueued`
+ * too, so a resumed run left `queued` is picked up by the next one rather than
+ * stranded for ever. Calling `startRun` *instead of* it is the mistake that
+ * matters, and the cap in the first case is what catches that.
+ */
+describe("applying the sweeper's decision", () => {
+  const BUDGET_BLOB = '{"maxIterations":5,"maxDurationMinutes":600}';
+  let seq = 0;
+
+  function insertRun(fields: {
+    status: string;
+    workDir: string;
+    resumeAt?: number | null;
+  }): string {
+    const id = `sweep-${++seq}`;
+    db()
+      .prepare(
+        `INSERT INTO runs (id, folder, prompt, status, budget, max_iterations,
+                           iterations, created_at, started_at, work_dir, resume_at)
+         VALUES (?, ?, 'do the thing', ?, ?, 5, 0, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        fields.workDir,
+        fields.status,
+        BUDGET_BLOB,
+        Date.now() + seq,
+        Date.now() - 60_000,
+        fields.workDir,
+        fields.resumeAt ?? null,
+      );
+    return id;
+  }
+
+  it("puts a resumed run in the queue rather than starting it", async () => {
+    // A run already spending, and a cap it fills. `promoteQueued` is what knows
+    // about the cap; `startRun` is not, so a sweeper that called it directly
+    // would have this run `running` at the end of the tick.
+    saveSettings({ maxConcurrentRuns: 1 });
+    insertRun({ status: "running", workDir: `${ws}/Other` });
+    const parked = insertRun({ status: "paused", workDir: `${ws}/nested/Deep` });
+
+    await sweepPaused();
+
+    const row = getRun(parked)!;
+    assert.equal(
+      row.status,
+      "queued",
+      "its window cleared, so it rejoins the queue — `running` here means the " +
+        "sweeper started it itself and walked past a cap it does not know about",
+    );
+    assert.equal(row.resume_at, null, "a queued run has no wake time to keep");
+
+    saveSettings({ maxConcurrentRuns: null });
+  });
+
+  it("leaves a run that was stopped while it was scanning stopped", async () => {
+    const parked = insertRun({ status: "paused", workDir: `${ws}/nested/Deep` });
+
+    // The sweeper runs synchronously as far as its first `await`, which is the
+    // transcript scan — so by here it has already read this row as `paused`.
+    const sweeping = sweepPaused();
+    db().prepare("UPDATE runs SET status='stopped' WHERE id=?").run(parked);
+    await sweeping;
+
+    assert.equal(
+      getRun(parked)!.status,
+      "stopped",
+      "the flip is guarded on `status='paused'`, so the operator's stop wins",
+    );
   });
 });
