@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import type {
   MergeStrategyDTO,
@@ -37,14 +38,16 @@ import {
   Input,
   LimitField,
   Select,
+  Switch,
   Textarea,
-  Toggle,
 } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
+import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 
 /**
- * The canvas a workflow is drawn on, and the panel its selection is edited in.
+ * The canvas a workflow is drawn on, and the inspector its selection is edited
+ * in.
  *
  * **The graph is the whole interaction and nothing stands in for it.** Blocks
  * with nothing in front of them start at once, and several of them is the
@@ -68,6 +71,15 @@ import { Notice } from "@/components/ui/Notice";
  * what work to do. The one exception is the workflow-wide budget, which bounds
  * something no per-block guard can see — ten blocks under a $5 block limit is a
  * $50 workflow.
+ *
+ * The inspector is a sticky column beside the canvas rather than a form under
+ * it, which is what a canvas app on this platform does — but the reason it
+ * matters here is that the operator is reading the graph and the block's guards
+ * at the same time. `BlockStatement` is that pairing made explicit: every block
+ * says in one sentence which guard set applies, where it runs, how many runs it
+ * may start and whether it may pay to reconcile a conflict. That sentence is
+ * what a press of Run is approved against, so it is prose rather than a row of
+ * controls to be read off.
  */
 
 /* ------------------------------------------------------------------ */
@@ -141,6 +153,12 @@ const CONDITIONS: Array<{ id: LinkDraft["edge"]; label: string }> = [
  * has to fall back to `-D`.
  */
 const DEFAULT_MERGE_STRATEGY: MergeStrategyDTO = "merge";
+
+/** The width a control takes in the inspector's rows. See `ui/Field`'s note:
+ *  a width never goes on the control, because two width utilities on one
+ *  element resolve by stylesheet order rather than class order. */
+const ROW_CONTROL = "w-44";
+const ROW_CONTROL_NARROW = "w-24";
 
 function emptyBlock(id: string, mountId: string, kind: WorkflowNodeKind): BlockDraft {
   return {
@@ -550,109 +568,130 @@ export function WorkflowEditor({
 
   return (
     <>
+      {/* No heading here: the page that mounts this carries its own <h1>, the
+          same division the rest of the shell keeps. */}
       <div role="alert">{error && <Notice tone="danger" live>{error}</Notice>}</div>
 
-      <Card emphasis="primary">
-        <CardTitle>{workflow ? "Edit workflow" : "New workflow"}</CardTitle>
-
-        <Field label="Name" htmlFor="wf-name">
-          <Input
-            id="wf-name"
-            value={name}
-            maxLength={MAX_WORKFLOW_NAME}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Nightly maintenance"
-          />
-        </Field>
-
-        <WorkflowCanvas
-          blocks={blocks}
-          links={links}
-          positions={positions}
-          selection={selection}
-          full={blocks.length >= MAX_WORKFLOW_NODES}
-          onSelect={setSelection}
-          onMove={moveBlock}
-          onAddBlock={addBlock}
-          onConnect={connect}
-          onRemoveLink={removeLink}
-        />
-      </Card>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Card>
-          <CardTitle>
-            {selectedBlock
-              ? KIND_LABEL[selectedBlock.kind]
-              : selectedLink
-                ? "Link"
-                : "Nothing selected"}
-          </CardTitle>
-
-          {!selectedBlock && !selectedLink && (
-            <Empty>
-              <div className="text-ink-muted">
-                Choose a block or a link on the canvas
-              </div>
-            </Empty>
-          )}
-
-          {selectedBlock && !loaded && (
-            <>
-              <span className="sr-only">Reading workspaces and templates…</span>
-              <SkeletonText lines={4} />
-            </>
-          )}
-
-          {selectedBlock && loaded && (
-            <BlockPanel
-              block={selectedBlock}
-              templates={templates}
-              templateName={templateName}
-              mounts={mounts}
-              folders={foldersFor(selectedBlock.mountId)}
-              onChange={(patch) => updateBlock(selectedBlock.id, patch)}
-              onRemove={() => removeBlock(selectedBlock.id)}
+      {/* The split. The canvas is the pane — it is what this page is for — and
+          the inspector beside it holds whatever is selected plus the one limit
+          that bounds the whole graph. Column and row are placed explicitly
+          rather than left to source order, so on a narrow window the canvas
+          leads and the inspector follows it. */}
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_26rem] lg:items-start">
+        <div className="min-w-0 lg:col-start-1 lg:row-start-1">
+          <Field label="Name" htmlFor="wf-name">
+            <Input
+              id="wf-name"
+              value={name}
+              maxLength={MAX_WORKFLOW_NAME}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Nightly maintenance"
             />
-          )}
-
-          {selectedLink && (
-            <LinkPanel
-              link={selectedLink}
-              fromName={nameOf(selectedLink.from)}
-              toName={nameOf(selectedLink.to)}
-              onChange={(patch) =>
-                updateLink(selectedLink.from, selectedLink.to, patch)
-              }
-              onRemove={() => removeLink(selectedLink.from, selectedLink.to)}
-            />
-          )}
-        </Card>
-
-        <Card emphasis="quiet">
-          <CardTitle>Limits for the whole workflow</CardTitle>
-
-          <Field label="Spending limit" htmlFor="wf-cost">
-            <LimitField
-              id="wf-cost"
-              modeLabel="Workflow spending limit mode"
-              enabled={costCapped}
-              onEnabledChange={setCostCapped}
-              value={maxInstanceCostUSD}
-              onValueChange={setMaxInstanceCostUSD}
-              unit="USD"
-              offLabel="No workflow spending limit"
-              min={0}
-              step="0.5"
-            />
-            <Hint>
-              {costCapped
-                ? "Everything every block spends, together — each block still has its own limits from its guards"
-                : "Only the per-block guards bound this workflow, so ten blocks under a $5 block limit is a $50 workflow"}
-            </Hint>
           </Field>
 
-          <div className="grid gap-x-4 sm:grid-cols-2">
+          <WorkflowCanvas
+            blocks={blocks}
+            links={links}
+            positions={positions}
+            selection={selection}
+            full={blocks.length >= MAX_WORKFLOW_NODES}
+            onSelect={setSelection}
+            onMove={moveBlock}
+            onAddBlock={addBlock}
+            onConnect={connect}
+            onRemoveLink={removeLink}
+            onRemoveBlock={removeBlock}
+          />
+
+          {/* The server's own sentence, asked while the graph is being drawn.
+              Save is deliberately left enabled: this check is advisory and can
+              itself be unreachable, and a disabled Save behind a failed
+              advisory check strands the operator with no way to reach the
+              authority at all. */}
+          <div className="mt-4" role="status" aria-live="polite">
+            {unchecked ? (
+              <Notice tone="warn">{unchecked}</Notice>
+            ) : refusal ? (
+              <Notice tone="warn" className={checking ? "opacity-70" : ""}>
+                {refusal}
+              </Notice>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-4 lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100dvh-var(--toolbar-h)-6rem)] lg:overflow-y-auto">
+          <Card>
+            <CardTitle>
+              {selectedBlock
+                ? KIND_LABEL[selectedBlock.kind]
+                : selectedLink
+                  ? "Link"
+                  : "Nothing selected"}
+            </CardTitle>
+
+            {!selectedBlock && !selectedLink && (
+              <Empty>
+                <div className="text-ink-muted">
+                  Choose a block or a link on the canvas
+                </div>
+              </Empty>
+            )}
+
+            {selectedBlock && !loaded && (
+              <>
+                <span className="sr-only">Reading workspaces and templates…</span>
+                <SkeletonText lines={4} />
+              </>
+            )}
+
+            {selectedBlock && loaded && (
+              <BlockPanel
+                block={selectedBlock}
+                templates={templates}
+                templateName={templateName}
+                mounts={mounts}
+                folders={foldersFor(selectedBlock.mountId)}
+                onChange={(patch) => updateBlock(selectedBlock.id, patch)}
+                onRemove={() => removeBlock(selectedBlock.id)}
+              />
+            )}
+
+            {selectedLink && (
+              <LinkPanel
+                link={selectedLink}
+                fromName={nameOf(selectedLink.from)}
+                toName={nameOf(selectedLink.to)}
+                onChange={(patch) =>
+                  updateLink(selectedLink.from, selectedLink.to, patch)
+                }
+                onRemove={() => removeLink(selectedLink.from, selectedLink.to)}
+              />
+            )}
+          </Card>
+
+          <Card emphasis="quiet">
+            <CardTitle>Limits for the whole workflow</CardTitle>
+
+            <Field label="Spending limit" htmlFor="wf-cost">
+              <LimitField
+                id="wf-cost"
+                modeLabel="Workflow spending limit mode"
+                enabled={costCapped}
+                onEnabledChange={setCostCapped}
+                value={maxInstanceCostUSD}
+                onValueChange={setMaxInstanceCostUSD}
+                unit="USD"
+                offLabel="No limit"
+                min={0}
+                step="0.5"
+              />
+              <Hint>
+                {costCapped
+                  ? "Everything every block spends, together — each block still has its own limits from its guards"
+                  : "Only the per-block guards bound this workflow, so ten blocks under a $5 block limit is a $50 workflow"}
+              </Hint>
+            </Field>
+
             <Field label="Stop at 5-hour usage" htmlFor="wf-sess">
               <Input
                 id="wf-sess"
@@ -694,55 +733,126 @@ export function WorkflowEditor({
                 </Hint>
               )}
             </Field>
-          </div>
 
-          <Hint>
-            Checked before a block starts a work cycle, never during one — a
-            block already working carries on until some block reaches a cycle
-            boundary, so the total can overshoot by up to one work cycle per
-            block running at the time, and blocks running at once multiply that
-          </Hint>
-          <Hint>
-            Blocks that all start at once have no boundary between them, so the
-            maximum concurrent runs in Settings is what bounds this
-          </Hint>
-        </Card>
+            <Hint>
+              Checked before a block starts a work cycle, never during one — a
+              block already working carries on until some block reaches a cycle
+              boundary, so the total can overshoot by up to one work cycle per
+              block running at the time, and blocks running at once multiply
+              that
+            </Hint>
+            <Hint>
+              Blocks that all start at once have no boundary between them, so
+              the maximum concurrent runs in Settings is what bounds this
+            </Hint>
+          </Card>
+        </div>
       </div>
 
-      {/* The server's own sentence, asked while the graph is being drawn. Save
-          is deliberately left enabled: this check is advisory and can itself be
-          unreachable, and a disabled Save behind a failed advisory check strands
-          the operator with no way to find out what the authority thinks. */}
-      <div className="mt-4" role="status" aria-live="polite">
-        {unchecked ? (
-          <Notice tone="warn">{unchecked}</Notice>
-        ) : refusal ? (
-          <Notice tone="warn" className={checking ? "opacity-70" : ""}>
-            {refusal}
-          </Notice>
-        ) : null}
+      {/* The pane's footer, in the run form's and Settings' shape: the default
+          action at the right edge of the pane it belongs to, and one line
+          saying what pressing it does. */}
+      <div className="sticky bottom-0 z-10 -mx-4 mt-5 border-t border-line bg-canvas px-4 py-3 shadow-bar sm:-mx-5 sm:px-5">
+        <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-2">
+          <p
+            role="status"
+            aria-atomic="true"
+            className="mr-auto min-h-5 basis-full text-xs leading-5 text-ink-faint sm:basis-auto"
+          >
+            {saving
+              ? "Saving the graph…"
+              : "Saves the graph. Nothing starts until you press Run on it."}
+          </p>
+          <Button
+            variant="secondary"
+            onClick={() =>
+              router.push(workflow ? `/workflows/${workflow.id}` : "/workflows")
+            }
+          >
+            Cancel
+          </Button>
+          <Button onClick={save} busy={saving}>
+            {workflow ? "Save changes" : "Create workflow"}
+          </Button>
+        </div>
       </div>
-
-      <ButtonRow className="mt-4">
-        <Button onClick={save} busy={saving}>
-          {workflow ? "Save changes" : "Create workflow"}
-        </Button>
-        <Button
-          variant="ghost"
-          onClick={() =>
-            router.push(workflow ? `/workflows/${workflow.id}` : "/workflows")
-          }
-        >
-          Cancel
-        </Button>
-      </ButtonRow>
     </>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/* The panel beside the canvas                                         */
+/* The inspector                                                       */
 /* ------------------------------------------------------------------ */
+
+/**
+ * What this block is, in a sentence.
+ *
+ * The controls under it are how it is changed; this is what it *says*, and it
+ * is the copy a press of Run is approved against — which guard set applies (or
+ * that it is the untemplated one from Settings), where it runs, how many runs a
+ * deciding block may start with nobody looking, and whether a merge block may
+ * pay a model to reconcile a conflict. Every one of those is a fact somebody
+ * would otherwise have to assemble by reading four separate pickers.
+ *
+ * It is deliberately not a warning: an orchestrator block's fan-out and a merge
+ * block's authorisation are ordinary properties of a block that was configured
+ * that way. The tone is on the number itself, where it belongs.
+ */
+function BlockStatement({
+  block,
+  guards,
+  where,
+}: {
+  block: BlockDraft;
+  guards: ReactNode;
+  where: ReactNode;
+}) {
+  if (block.kind === "merge") {
+    return (
+      <p className="mb-3.5 text-sm leading-normal text-ink-muted">
+        Lands every branch in front of it onto the target that branch&rsquo;s own
+        run recorded,{" "}
+        <strong className="font-semibold text-ink">
+          {block.mergeStrategy === "squash" ? "squashed" : "as a merge commit"}
+        </strong>
+        .{" "}
+        {block.mergeAutoResolve ? (
+          <span className="text-warn">
+            A conflict is reconciled by Claude on the run&rsquo;s own branch, and
+            billed.
+          </span>
+        ) : (
+          "A conflicting branch is reported and left alone."
+        )}
+      </p>
+    );
+  }
+
+  if (block.kind === "orchestrator") {
+    const cap = Number(block.fanOut);
+    return (
+      <p className="mb-3.5 text-sm leading-normal text-ink-muted">
+        Decides in {where}, and starts{" "}
+        {Number.isFinite(cap) && cap > 0 ? (
+          <strong className="font-semibold text-warn">
+            up to {cap} run{cap === 1 ? "" : "s"}
+          </strong>
+        ) : (
+          <strong className="font-semibold text-danger">
+            an unstated number of runs
+          </strong>
+        )}{" "}
+        with no approval — each under {guards}.
+      </p>
+    );
+  }
+
+  return (
+    <p className="mb-3.5 text-sm leading-normal text-ink-muted">
+      Runs in {where}, under {guards}.
+    </p>
+  );
+}
 
 function BlockPanel({
   block,
@@ -771,205 +881,262 @@ function BlockPanel({
   // lands is whatever the blocks in front of it left behind.
   const merge = block.kind === "merge";
 
+  const guards: ReactNode = missingTemplate ? (
+    <strong className="font-semibold text-danger">
+      a template that has been deleted
+    </strong>
+  ) : block.templateId === "" ? (
+    <strong className="font-semibold text-ink">
+      the default guard set in Settings
+    </strong>
+  ) : (
+    <>
+      the guards of{" "}
+      <strong className="font-semibold text-ink">
+        {templateName(block.templateId)}
+      </strong>
+    </>
+  );
+
+  const where: ReactNode = (
+    <strong className="mono font-semibold text-ink">
+      {mount?.label ?? (block.mountId || "no workspace")}
+      {block.folder ? ` / ${block.folder}` : " — the whole workspace"}
+    </strong>
+  );
+
   return (
     <>
-      <div className="grid gap-x-4 sm:grid-cols-2">
-        <Field label="Name" htmlFor={`${block.id}-name`}>
-          <Input
-            id={`${block.id}-name`}
-            value={block.name}
-            onChange={(e) => onChange({ name: e.target.value })}
-            placeholder="Update dependencies"
-          />
-        </Field>
+      <BlockStatement block={block} guards={guards} where={where} />
 
-        <Field label="Block" htmlFor={`${block.id}-kind`}>
-          <Select
-            id={`${block.id}-kind`}
-            value={block.kind}
-            onChange={(e) =>
-              onChange({ kind: e.target.value as WorkflowNodeKind })
-            }
-          >
-            {(Object.keys(KIND_LABEL) as WorkflowNodeKind[]).map((kind) => (
-              <option key={kind} value={kind}>
-                {KIND_LABEL[kind]}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      </div>
+      <ListGroup className="mb-4">
+        <ListRow label="Name" htmlFor={`${block.id}-name`}>
+          <div className={ROW_CONTROL}>
+            <Input
+              id={`${block.id}-name`}
+              value={block.name}
+              onChange={(e) => onChange({ name: e.target.value })}
+              placeholder="Update dependencies"
+            />
+          </div>
+        </ListRow>
+
+        <ListRow label="Block" htmlFor={`${block.id}-kind`}>
+          <div className={ROW_CONTROL}>
+            <Select
+              id={`${block.id}-kind`}
+              value={block.kind}
+              onChange={(e) =>
+                onChange({ kind: e.target.value as WorkflowNodeKind })
+              }
+            >
+              {(Object.keys(KIND_LABEL) as WorkflowNodeKind[]).map((kind) => (
+                <option key={kind} value={kind}>
+                  {KIND_LABEL[kind]}
+                </option>
+              ))}
+            </Select>
+          </div>
+        </ListRow>
+      </ListGroup>
 
       {orchestrator && (
-        <Field label="Most runs it may start" htmlFor={`${block.id}-fanout`}>
-          <Input
-            id={`${block.id}-fanout`}
-            type="number"
-            min={1}
-            max={MAX_FAN_OUT}
-            className="tabular-nums"
-            value={block.fanOut}
-            onChange={(e) => onChange({ fanOut: e.target.value })}
-          />
-          <Hint tone="warn">
-            What this block decides on starts with no approval — this number is
-            the whole of what you are agreeing to
-          </Hint>
-        </Field>
+        <ListGroup
+          className="mb-4"
+          footnote={
+            <span className="text-warn">
+              What this block decides on starts with no approval — this number is
+              the whole of what you are agreeing to
+            </span>
+          }
+        >
+          <ListRow label="Most runs it may start" htmlFor={`${block.id}-fanout`}>
+            <div className={ROW_CONTROL_NARROW}>
+              <Input
+                id={`${block.id}-fanout`}
+                type="number"
+                min={1}
+                max={MAX_FAN_OUT}
+                className="tabular-nums"
+                value={block.fanOut}
+                onChange={(e) => onChange({ fanOut: e.target.value })}
+              />
+            </div>
+          </ListRow>
+        </ListGroup>
       )}
 
       {merge && (
-        <>
-          <Field label="How to land" htmlFor={`${block.id}-strategy`}>
-            <Select
-              id={`${block.id}-strategy`}
-              value={block.mergeStrategy}
-              onChange={(e) =>
-                onChange({ mergeStrategy: e.target.value as MergeStrategyDTO })
-              }
-            >
-              <option value="merge">Merge commit</option>
-              <option value="squash">Squash</option>
-            </Select>
-            <Hint>
+        <ListGroup
+          className="mb-4"
+          footnote={
+            <>
               Each branch goes onto the target its own run recorded, not one
-              named here
-            </Hint>
-          </Field>
+              named here. Your own checkout must be clean and on that branch, or
+              this block refuses that repository.
+            </>
+          }
+        >
+          <ListRow label="How to land" htmlFor={`${block.id}-strategy`}>
+            <div className={ROW_CONTROL}>
+              <Select
+                id={`${block.id}-strategy`}
+                value={block.mergeStrategy}
+                onChange={(e) =>
+                  onChange({ mergeStrategy: e.target.value as MergeStrategyDTO })
+                }
+              >
+                <option value="merge">Merge commit</option>
+                <option value="squash">Squash</option>
+              </Select>
+            </div>
+          </ListRow>
 
-          <Field label="Conflicts">
-            <Toggle
+          <ListRow
+            label="Let Claude resolve a conflict"
+            htmlFor={`${block.id}-autoresolve`}
+            description={
+              block.mergeAutoResolve
+                ? "Saving this is the authorisation, and it is billed"
+                : "A conflicting branch is reported and left alone"
+            }
+          >
+            <Switch
               id={`${block.id}-autoresolve`}
               checked={block.mergeAutoResolve}
               onChange={(next) => onChange({ mergeAutoResolve: next })}
-              label="Let Claude resolve a conflict"
             />
-            <Hint tone={block.mergeAutoResolve ? "warn" : "neutral"}>
-              {block.mergeAutoResolve
-                ? "Saving this is the authorisation — a conflict is reconciled on the run's own branch, and it is billed"
-                : "A conflicting branch is reported and left alone"}
-            </Hint>
-          </Field>
-
-          <Hint tone="warn">
-            Your own checkout must be clean and on the target branch, or this
-            block refuses that repository
-          </Hint>
-        </>
+          </ListRow>
+        </ListGroup>
       )}
 
       {!merge && (
         <>
-      <Field
-        label={orchestrator ? "Guards for the runs it starts" : "Guards"}
-        htmlFor={`${block.id}-template`}
-        hint={
-          missingTemplate
-            ? "That template has been deleted — pick another"
-            : block.templateId === ""
-              ? "Budget, permission mode and isolation come from Settings"
-              : undefined
-        }
-        hintTone={missingTemplate ? "danger" : "neutral"}
-      >
-        <Select
-          id={`${block.id}-template`}
-          value={block.templateId}
-          onChange={(e) => onChange({ templateId: e.target.value })}
-        >
-          <option value="">Guards from Settings</option>
-          {templates.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}
-            </option>
-          ))}
-          {missingTemplate && (
-            <option value={block.templateId}>{block.templateId} (deleted)</option>
-          )}
-        </Select>
-      </Field>
-
-      <div className="grid gap-x-4 sm:grid-cols-2">
-        <Field label="Workspace" htmlFor={`${block.id}-mount`}>
-          <Select
-            id={`${block.id}-mount`}
-            value={block.mountId}
-            // The folder belongs to the mount, so it cannot survive the mount
-            // changing under it.
-            onChange={(e) => onChange({ mountId: e.target.value, folder: "" })}
+          <ListGroup
+            className="mb-4"
+            footnote={
+              missingTemplate
+                ? "That template has been deleted, so Save will refuse this graph — pick another"
+                : block.templateId === ""
+                  ? "Budget, permission mode and isolation come from Settings"
+                  : "Budget, permission mode and isolation come from that template"
+            }
           >
-            {mounts.map((m) => (
-              <option key={m.id} value={m.id} disabled={!m.available}>
-                {m.label}
-                {m.available ? "" : "  (not mounted)"}
-              </option>
-            ))}
-          </Select>
-        </Field>
+            <ListRow
+              label={orchestrator ? "Guards for the runs it starts" : "Guards"}
+              htmlFor={`${block.id}-template`}
+            >
+              <div className={ROW_CONTROL}>
+                <Select
+                  id={`${block.id}-template`}
+                  value={block.templateId}
+                  aria-invalid={missingTemplate || undefined}
+                  onChange={(e) => onChange({ templateId: e.target.value })}
+                >
+                  <option value="">Guards from Settings</option>
+                  {templates.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                  {missingTemplate && (
+                    <option value={block.templateId}>
+                      {block.templateId} (deleted)
+                    </option>
+                  )}
+                </Select>
+              </div>
+            </ListRow>
+          </ListGroup>
 
-        <Field
-          label="Folder"
-          htmlFor={`${block.id}-folder`}
-          hint={
-            orchestrator
-              ? "Where it looks; the runs it starts must be in this workspace"
-              : block.folder === ""
-                ? "The whole workspace — no other run in it can start meanwhile"
-                : undefined
-          }
-          hintTone={!orchestrator && block.folder === "" ? "warn" : "neutral"}
-        >
-          <Select
-            id={`${block.id}-folder`}
-            value={block.folder}
-            onChange={(e) => onChange({ folder: e.target.value })}
-            disabled={!mount}
+          <ListGroup
+            className="mb-4"
+            footnote={
+              orchestrator
+                ? "Where it looks; the runs it starts must be in this workspace"
+                : block.folder === ""
+                  ? "The whole workspace — no other run in it can start meanwhile"
+                  : undefined
+            }
           >
-            <option value="">
-              {mount ? `${mount.label} — the whole workspace` : "—"}
-            </option>
-            {folders.map((f) => (
-              <option key={f.path} value={f.path}>
-                {f.path}
-                {f.isGitRepo ? "  (git)" : ""}
-              </option>
-            ))}
-          </Select>
-        </Field>
-      </div>
+            <ListRow label="Workspace" htmlFor={`${block.id}-mount`}>
+              <div className={ROW_CONTROL}>
+                <Select
+                  id={`${block.id}-mount`}
+                  value={block.mountId}
+                  // The folder belongs to the mount, so it cannot survive the
+                  // mount changing under it.
+                  onChange={(e) =>
+                    onChange({ mountId: e.target.value, folder: "" })
+                  }
+                >
+                  {mounts.map((m) => (
+                    <option key={m.id} value={m.id} disabled={!m.available}>
+                      {m.label}
+                      {m.available ? "" : "  (not mounted)"}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </ListRow>
 
-      <Field
-        label={orchestrator ? "What to decide" : "Task"}
-        htmlFor={`${block.id}-task`}
-      >
-        <Textarea
-          id={`${block.id}-task`}
-          value={block.task}
-          onChange={(e) => onChange({ task: e.target.value })}
-          placeholder={
-            orchestrator
-              ? "What this block should look at, and what makes a piece of work worth starting."
-              : "What this block asks the agent to do."
-          }
-        />
-      </Field>
+            <ListRow label="Folder" htmlFor={`${block.id}-folder`}>
+              <div className={ROW_CONTROL}>
+                <Select
+                  id={`${block.id}-folder`}
+                  value={block.folder}
+                  onChange={(e) => onChange({ folder: e.target.value })}
+                  disabled={!mount}
+                >
+                  <option value="">
+                    {mount ? `${mount.label} — the whole workspace` : "—"}
+                  </option>
+                  {folders.map((f) => (
+                    <option key={f.path} value={f.path}>
+                      {f.path}
+                      {f.isGitRepo ? "  (git)" : ""}
+                    </option>
+                  ))}
+                </Select>
+              </div>
+            </ListRow>
+          </ListGroup>
 
-      <Field
-        label={
-          orchestrator
-            ? "Standing instructions for the runs it starts"
-            : "Standing instructions"
-        }
-        htmlFor={`${block.id}-prompt`}
-        hint="Replaces the template's own prompt"
-      >
-        <Textarea
-          id={`${block.id}-prompt`}
-          value={block.promptOverride}
-          onChange={(e) => onChange({ promptOverride: e.target.value })}
-          className="min-h-[64px]"
-        />
-      </Field>
+          {/* Label above the control rather than beside it, which is the same
+              exception the run form and Settings make: a nine-line text region
+              has nothing to align a right edge against. */}
+          <Field
+            label={orchestrator ? "What to decide" : "Task"}
+            htmlFor={`${block.id}-task`}
+          >
+            <Textarea
+              id={`${block.id}-task`}
+              value={block.task}
+              onChange={(e) => onChange({ task: e.target.value })}
+              placeholder={
+                orchestrator
+                  ? "What this block should look at, and what makes a piece of work worth starting."
+                  : "What this block asks the agent to do."
+              }
+            />
+          </Field>
+
+          <Field
+            label={
+              orchestrator
+                ? "Standing instructions for the runs it starts"
+                : "Standing instructions"
+            }
+            htmlFor={`${block.id}-prompt`}
+            hint="Replaces the template's own prompt"
+          >
+            <Textarea
+              id={`${block.id}-prompt`}
+              value={block.promptOverride}
+              onChange={(e) => onChange({ promptOverride: e.target.value })}
+              className="min-h-[64px]"
+            />
+          </Field>
         </>
       )}
 
@@ -977,6 +1144,7 @@ function BlockPanel({
         <Button variant="ghost" size="compact" onClick={onRemove}>
           Remove block
         </Button>
+        <span className="text-xs text-ink-faint">or press Delete</span>
       </ButtonRow>
     </>
   );
@@ -998,53 +1166,62 @@ function LinkPanel({
   const id = linkKey(link).replace(/[^A-Za-z0-9_-]/g, "-");
   return (
     <>
-      <p className="mb-3.5 text-sm text-ink">
-        <strong className="font-semibold">{toName}</strong> starts after{" "}
-        <strong className="font-semibold">{fromName}</strong>
+      <p className="mb-3.5 text-sm leading-normal text-ink-muted">
+        <strong className="font-semibold text-ink">{toName}</strong> starts after{" "}
+        <strong className="font-semibold text-ink">{fromName}</strong>
+        {link.edge === ""
+          ? ", once you have said when."
+          : link.edge === "on-success"
+            ? ", only if it completes."
+            : ", once it finishes either way."}
+        {link.continueBranch &&
+          ` ${toName} commits onto ${fromName}'s branch rather than cutting its own.`}
       </p>
 
-      <Field
-        label="Condition"
-        htmlFor={`${id}-edge`}
-        hint={
-          link.edge === ""
-            ? "Neither answer is a safe default, so this one is yours to make"
-            : undefined
+      <ListGroup
+        className="mb-4"
+        footnote={
+          link.edge === "" ? (
+            <span className="text-warn">
+              Neither answer is a safe default, so this one is yours to make —
+              until it is answered, Save refuses this graph
+            </span>
+          ) : undefined
         }
-        hintTone={link.edge === "" ? "warn" : "neutral"}
       >
-        <Select
-          id={`${id}-edge`}
-          value={link.edge}
-          onChange={(e) =>
-            onChange({ edge: e.target.value as LinkDraft["edge"] })
-          }
-        >
-          {CONDITIONS.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.label}
-            </option>
-          ))}
-        </Select>
-      </Field>
+        <ListRow label="Condition" htmlFor={`${id}-edge`}>
+          <div className={ROW_CONTROL}>
+            <Select
+              id={`${id}-edge`}
+              value={link.edge}
+              aria-invalid={link.edge === "" || undefined}
+              onChange={(e) =>
+                onChange({ edge: e.target.value as LinkDraft["edge"] })
+              }
+            >
+              {CONDITIONS.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label}
+                </option>
+              ))}
+            </Select>
+          </div>
+        </ListRow>
 
-      {/* No `label` on the Field: the Toggle carries its own, and a second one
-          above it would leave the switch with two names and no clear one. */}
-      <Field
-        hint={`${toName} commits onto ${fromName}'s branch instead of cutting its own`}
-      >
-        <Toggle
-          id={`${id}-branch`}
-          checked={link.continueBranch}
-          onChange={(next) => onChange({ continueBranch: next })}
-          label="Carry on its branch"
-        />
-      </Field>
+        <ListRow label="Carry on its branch" htmlFor={`${id}-branch`}>
+          <Switch
+            id={`${id}-branch`}
+            checked={link.continueBranch}
+            onChange={(next) => onChange({ continueBranch: next })}
+          />
+        </ListRow>
+      </ListGroup>
 
       <ButtonRow className="mt-4 border-t border-line pt-3.5">
         <Button variant="ghost" size="compact" onClick={onRemove}>
           Remove link
         </Button>
+        <span className="text-xs text-ink-faint">or press Delete</span>
       </ButtonRow>
     </>
   );

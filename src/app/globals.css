@@ -357,6 +357,26 @@
   );
 }
 
+/* The workflow canvas's ground. A faint dot grid is what says "this is a
+   surface things are placed on" rather than "this is a box with a border",
+   which is the whole difference between the canvas reading as native and
+   reading as a web widget — and it is the only cue that a block has been
+   dragged somewhere deliberate rather than laid out by the app.
+
+   Neutral rather than a palette colour, and for --fill-hover's reason: the dot
+   has to darken --bg-inset in the light scheme and lighten it in the dark one,
+   which no single opaque token does. Named for `hatched`'s reason — a
+   background pattern written as an arbitrary value at its call site is a
+   pattern nobody can grep for. */
+@utility dot-grid {
+  background-image: radial-gradient(
+    circle at 1px 1px,
+    color-mix(in oklab, var(--fg) 14%, transparent) 1px,
+    transparent 0
+  );
+  background-size: 16px 16px;
+}
+
 /* Promoted from a legacy class to a real utility so the 37 existing
    `className="mono"` call sites keep working untouched — and now compose
    with variants and lose to a later utility, which the legacy rule did not. */

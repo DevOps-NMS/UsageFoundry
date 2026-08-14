@@ -20,10 +20,9 @@ import {
   type LinkDraft,
   type Point,
 } from "@/lib/canvasGraph";
+import { isTextEntry } from "@/components/shell/shortcuts";
 import { Badge } from "@/components/ui/Badge";
 import { Empty } from "@/components/ui/Card";
-import { Hint } from "@/components/ui/Hint";
-import { Notice } from "@/components/ui/Notice";
 
 /**
  * The surface a workflow is drawn on.
@@ -31,16 +30,25 @@ import { Notice } from "@/components/ui/Notice";
  * It owns the gestures and nothing else: where a block sits, what links what and
  * what is selected all live in `WorkflowEditor`, and every rule about what a
  * workflow may *be* lives on the server. This file decides only how a pointer
- * and a keyboard reach the same three actions — add a block, link two, remove a
- * link — because a canvas that needs a mouse excludes an operator, and this one
- * starts billed agents.
+ * and a keyboard reach the same four actions — add a block, link two, remove a
+ * link, remove a block — because a canvas that needs a mouse excludes an
+ * operator, and this one starts billed agents.
  *
- * Each of the three has both routes:
+ * Each of the four has both routes:
  *   add     — drag a block off the palette, or press Enter on it
  *   link    — drag from a block's Link handle onto another, or press Enter on
  *             the handle and then Enter on the target
- *   unlink  — Delete or Backspace on the link's own control, or Remove in the
- *             inspector beside the canvas
+ *   unlink  — Delete or Backspace on the link's own control or on the canvas
+ *             while it is selected, or Remove in the inspector beside it
+ *   remove  — Delete or Backspace on the block's name or on the canvas while it
+ *             is selected, or Remove in the inspector
+ *
+ * Delete is the *only* destructive gesture here and there is deliberately no
+ * undo: this app has no undo model, and a ⌘Z that put a block back but not the
+ * links that came with it, or not the position it was dragged to, would be
+ * worse than the absence — the operator would stop checking. What stands in for
+ * one is that nothing on this canvas has been saved yet: the graph on the server
+ * is whatever Save last sent, so leaving the editor discards a mistake whole.
  *
  * Pointer and keyboard reach those through *different* events on the same
  * controls, and `handledByPointer` is what keeps them from both firing: a
@@ -67,7 +75,7 @@ export const KIND_LABEL: Record<WorkflowNodeKind, string> = {
 };
 
 /**
- * The card's edge, per kind and per state, as one complete string each.
+ * The card's edge, per kind, as one complete string each.
  *
  * The border colour and the elevation are decided together rather than half in
  * a shared string: two class strings setting one property under one variant
@@ -84,7 +92,18 @@ const CARD_REST: Record<WorkflowNodeKind, string> = {
   orchestrator: "border-warn-line shadow-e1",
   merge: "border-accent-line shadow-e1",
 };
-const CARD_SELECTED = "border-accent shadow-e2";
+
+/**
+ * Selection is a halo *around* the card, never its border.
+ *
+ * Replacing the border was the previous treatment and it cost the one thing the
+ * border is for: selecting an orchestrator block painted its permanent warn edge
+ * accent, so the block that starts agents with no approval stopped saying so at
+ * exactly the moment somebody was looking at it. A ring is drawn outside the box
+ * and sets a different property, so both facts are on screen at once and neither
+ * class string can outrank the other.
+ */
+const CARD_SELECTED = "ring-[3px] ring-ring";
 
 type LinkTone = "chosen" | "unchosen" | "selected";
 
@@ -99,9 +118,16 @@ const LINK_FILL: Record<LinkTone, string> = {
   selected: "fill-accent",
 };
 const LINK_CHIP: Record<LinkTone, string> = {
-  chosen: "border-line-strong bg-surface text-ink-muted",
-  unchosen: "border-warn-line bg-surface text-warn",
-  selected: "border-accent bg-surface text-accent",
+  chosen: "border-line bg-surface text-ink-muted shadow-e1",
+  unchosen: "border-warn-line bg-surface text-warn shadow-e1",
+  selected: "border-accent-line bg-surface text-accent shadow-e1 ring-[3px] ring-ring",
+};
+
+/** A hairline, and one step up for the edge that is selected. Nothing shouts. */
+const LINK_WIDTH: Record<LinkTone, number> = {
+  chosen: 1.25,
+  unchosen: 1.25,
+  selected: 2,
 };
 
 /** What the link's own control says. Never a default — see `LinkDraft`. */
@@ -140,6 +166,10 @@ interface PlaceState {
   at: Point | null;
 }
 
+function isDeleteKey(key: string): boolean {
+  return key === "Delete" || key === "Backspace";
+}
+
 export function WorkflowCanvas({
   blocks,
   links,
@@ -151,6 +181,7 @@ export function WorkflowCanvas({
   onAddBlock,
   onConnect,
   onRemoveLink,
+  onRemoveBlock,
 }: {
   blocks: readonly BlockDraft[];
   links: readonly LinkDraft[];
@@ -163,6 +194,7 @@ export function WorkflowCanvas({
   onAddBlock: (kind: WorkflowNodeKind, at: Point) => void;
   onConnect: (from: string, to: string) => void;
   onRemoveLink: (from: string, to: string) => void;
+  onRemoveBlock: (id: string) => void;
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
   const handledByPointer = useRef(false);
@@ -396,10 +428,46 @@ export function WorkflowCanvas({
   }
 
   /* ---------------------------------------------------------------- */
-  /* Render                                                            */
+  /* Keys                                                              */
   /* ---------------------------------------------------------------- */
 
+  /**
+   * Delete, for whatever the inspector beside this is showing.
+   *
+   * The two controls that carry an identity of their own — a block's name and a
+   * link's condition chip — handle this themselves and stop it here, so the
+   * *focused* thing always wins over the *selected* one on the rare occasion
+   * they disagree (Tab moves focus without selecting). This handler is what
+   * covers the ordinary case: click a block, press Delete, with focus nowhere in
+   * particular.
+   *
+   * `preventDefault` is not cosmetic — Backspace outside a text field is the
+   * browser's own Back on more than one engine, and losing the whole draft to it
+   * is a worse outcome than the one this key is for.
+   */
+  function surfaceKeys(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape" && linkFrom !== null) {
+      setLinkFrom(null);
+      event.stopPropagation();
+      return;
+    }
+    if (!isDeleteKey(event.key) || selection === null) return;
+    // Nothing on this surface is a text field today. The guard is here because
+    // the day one arrives, the failure is a swallowed keystroke that looks like
+    // a dropped character — see `shortcuts.ts`, where the same rule is stated.
+    if (isTextEntry(event.target)) return;
+    event.preventDefault();
+    if (selection.kind === "block") onRemoveBlock(selection.id);
+    else onRemoveLink(selection.from, selection.to);
+  }
+
   function blockKeys(event: ReactKeyboardEvent<HTMLButtonElement>, id: string) {
+    if (isDeleteKey(event.key)) {
+      event.preventDefault();
+      event.stopPropagation();
+      onRemoveBlock(id);
+      return;
+    }
     const step = event.shiftKey ? FINE_STEP : STEP;
     switch (event.key) {
       case "ArrowLeft":
@@ -420,66 +488,58 @@ export function WorkflowCanvas({
     event.preventDefault();
   }
 
-  return (
-    <div
-      onKeyDown={(event) => {
-        if (event.key === "Escape" && linkFrom !== null) {
-          setLinkFrom(null);
-          event.stopPropagation();
-        }
-      }}
-    >
-      <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <div className="mb-1.5 text-xs font-medium text-ink-muted">Add</div>
-          <div className="flex flex-wrap items-center gap-2">
-            {(Object.keys(KIND_LABEL) as WorkflowNodeKind[]).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                disabled={full}
-                onPointerDown={(event) => startPlace(event, kind)}
-                onPointerMove={movePlace}
-                onPointerUp={endPlace}
-                onPointerCancel={() => setPlace(null)}
-                onClick={() => {
-                  if (claimedByPointer()) return;
-                  addAtFreeSpot(kind);
-                }}
-                className="ui-transition inline-flex min-h-[var(--control-h-lg)] cursor-grab
-                  touch-none select-none items-center gap-2 rounded-sm border border-line-strong
-                  bg-inset px-3 py-1.5 text-sm font-medium text-ink
-                  focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent
-                  enabled:hover:border-ink-faint enabled:hover:bg-surface
-                  enabled:active:shadow-press
-                  disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {KIND_LABEL[kind]}
-              </button>
-            ))}
-          </div>
-          <Hint>
-            {full
-              ? "This workflow is full"
-              : "Drag onto the canvas, or press Enter to place it"}
-          </Hint>
-        </div>
+  /* ---------------------------------------------------------------- */
+  /* Render                                                            */
+  /* ---------------------------------------------------------------- */
 
-        <div className="text-xs tabular-nums text-ink-muted">
+  return (
+    // The frame: a toolbar strip, the surface, and a footer that says what the
+    // gestures are. Clipped, so the recessed surface takes the frame's corners
+    // rather than squaring them off inside it.
+    <div
+      className="overflow-hidden rounded-lg border border-line bg-surface shadow-e2"
+      onKeyDown={surfaceKeys}
+    >
+      <div className="flex flex-wrap items-center gap-2 border-b border-line px-2.5 py-2">
+        <span className="text-xs font-medium text-ink-muted">Add</span>
+        {(Object.keys(KIND_LABEL) as WorkflowNodeKind[]).map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            disabled={full}
+            onPointerDown={(event) => startPlace(event, kind)}
+            onPointerMove={movePlace}
+            onPointerUp={endPlace}
+            onPointerCancel={() => setPlace(null)}
+            onClick={() => {
+              if (claimedByPointer()) return;
+              addAtFreeSpot(kind);
+            }}
+            className="ui-transition inline-flex min-h-[var(--control-h)] cursor-grab
+              touch-none select-none items-center rounded-sm border border-line
+              bg-bezel px-2.5 text-sm font-medium text-ink shadow-e1
+              not-disabled:hover:bg-bezel-hover not-disabled:active:shadow-press
+              disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {KIND_LABEL[kind]}
+          </button>
+        ))}
+        <span className="ml-auto text-xs tabular-nums text-ink-muted">
           {blocks.length} block{blocks.length === 1 ? "" : "s"} · {links.length}{" "}
           link{links.length === 1 ? "" : "s"}
-        </div>
+        </span>
       </div>
 
       {linking && (
-        <Notice tone="info" quiet>
-          Linking from <strong>{label(linkSource)}</strong> — choose the block
-          that starts after it. Escape cancels.
-        </Notice>
+        <div className="border-b border-line bg-inset px-3 py-1.5 text-xs text-ink-muted">
+          Linking from{" "}
+          <strong className="font-semibold text-ink">{label(linkSource)}</strong>{" "}
+          — choose the block that starts after it. Escape cancels.
+        </div>
       )}
 
       {/* The mode is a fact about the whole surface and a screen reader has no
-          other way to learn it: the banner above is nowhere near the handle that
+          other way to learn it: the strip above is nowhere near the handle that
           was just pressed. */}
       <p className="sr-only" role="status" aria-live="polite">
         {linking
@@ -487,10 +547,10 @@ export function WorkflowCanvas({
           : ""}
       </p>
 
-      <div className="relative max-h-[70vh] overflow-auto rounded-sm border border-line bg-inset">
+      <div className="relative max-h-[62vh] overflow-auto bg-inset">
         <div
           ref={sheetRef}
-          className="relative"
+          className="dot-grid relative"
           style={{ width, height }}
           onPointerDown={(event) => {
             // A press on the surface itself rather than on a block: clear what
@@ -528,11 +588,11 @@ export function WorkflowCanvas({
                   <path
                     d={geometry.d}
                     fill="none"
-                    strokeWidth={tone === "selected" ? 2.5 : 1.5}
+                    strokeWidth={LINK_WIDTH[tone]}
                     className={LINK_STROKE[tone]}
                   />
                   <path
-                    d={`M ${geometry.tip.x} ${geometry.tip.y} l -9 -5 l 0 10 z`}
+                    d={`M ${geometry.tip.x} ${geometry.tip.y} l -8 -4.5 l 0 9 z`}
                     className={LINK_FILL[tone]}
                   />
                 </g>
@@ -543,7 +603,7 @@ export function WorkflowCanvas({
               <path
                 d={`M ${linkOrigin.x + NODE_W} ${linkOrigin.y + NODE_H / 2} L ${pointerAt.x} ${pointerAt.y}`}
                 fill="none"
-                strokeWidth={1.5}
+                strokeWidth={1.25}
                 strokeDasharray="5 4"
                 className="stroke-accent"
               />
@@ -566,8 +626,9 @@ export function WorkflowCanvas({
                   onSelect({ kind: "link", from: link.from, to: link.to })
                 }
                 onKeyDown={(event) => {
-                  if (event.key !== "Delete" && event.key !== "Backspace") return;
+                  if (!isDeleteKey(event.key)) return;
                   event.preventDefault();
+                  event.stopPropagation();
                   onRemoveLink(link.from, link.to);
                 }}
                 aria-label={`${label(target)} starts after ${label(source)}, ${
@@ -577,8 +638,6 @@ export function WorkflowCanvas({
                 className={`ui-transition absolute z-10 inline-flex min-h-[var(--control-h)]
                   -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center gap-1.5
                   whitespace-nowrap rounded-full border px-2.5 py-1 text-2xs font-semibold
-                  hover:shadow-e1
-                  focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent
                   ${LINK_CHIP[tone]}`}
               >
                 {CONDITION_CHIP[link.edge]}
@@ -607,7 +666,7 @@ export function WorkflowCanvas({
                   className={`ui-transition flex h-full touch-none select-none flex-col
                     rounded-lg border bg-surface p-2.5 ${
                       drag?.id === block.id ? "cursor-grabbing" : "cursor-grab"
-                    } ${selected ? CARD_SELECTED : CARD_REST[block.kind]}`}
+                    } ${CARD_REST[block.kind]} ${selected ? CARD_SELECTED : ""}`}
                 >
                   <button
                     type="button"
@@ -618,11 +677,10 @@ export function WorkflowCanvas({
                     onKeyDown={(event) => blockKeys(event, block.id)}
                     aria-label={`${label(block)} — ${KIND_LABEL[block.kind]}${
                       linking && !armed ? ". Starts after " + label(linkSource) : ""
-                    }`}
+                    }. Delete removes this block.`}
                     className="ui-transition -mx-1 mb-1 cursor-pointer rounded-sm border
                       border-transparent bg-transparent px-1 py-0.5 text-left text-sm
-                      font-medium text-ink hover:bg-inset
-                      focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      font-medium text-ink hover:bg-fill-hover"
                   >
                     <span className="block truncate">{label(block)}</span>
                   </button>
@@ -671,11 +729,10 @@ export function WorkflowCanvas({
                       }
                       className={`ui-transition inline-flex min-h-[var(--control-h)] cursor-pointer
                         touch-none items-center rounded-sm border px-2 py-1 text-2xs font-semibold
-                        focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent
                         ${
                           armed
-                            ? "border-accent bg-accent-dim text-ink"
-                            : "border-line-strong bg-inset text-ink-muted hover:border-ink-faint hover:text-ink"
+                            ? "border-accent-line bg-accent-dim text-ink"
+                            : "border-line bg-bezel text-ink-muted shadow-e1 hover:bg-bezel-hover hover:text-ink"
                         }`}
                     >
                       {armed ? "Cancel" : linking ? "Link here" : "Link"}
@@ -699,6 +756,15 @@ export function WorkflowCanvas({
             />
           )}
         </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-line px-2.5 py-1.5 text-xs text-ink-faint">
+        <span>
+          {full
+            ? "This workflow is full"
+            : "Drag a block onto the canvas, or press Enter to place it"}
+        </span>
+        <span>Delete removes what is selected — there is no undo</span>
       </div>
     </div>
   );

@@ -47,6 +47,9 @@ export default function EditWorkflowPage() {
         <Link href={`/workflows/${id}`} className="text-sm text-ink-muted">
           ← Back
         </Link>
+        <h1 className="mt-1 text-xl font-semibold tracking-tight">
+          Edit workflow
+        </h1>
       </div>
 
       {!loaded ? (
