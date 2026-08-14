@@ -17,7 +17,7 @@ import {
 import { db } from "./db";
 import { chatGuards, getSettings, type RunGuards } from "./settings";
 import { assistRefusal } from "./review";
-import { childCredentials } from "./privsep";
+import { childCredentials, chownForChild, privilegeSeparated } from "./privsep";
 import {
   createRun,
   dependencyCycle,
@@ -1658,11 +1658,7 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
       // Both of these are why the token is worth having: the credential dies
       // with the turn, and the file that carried it does not outlive it either.
       revokeCapability(token);
-      try {
-        fs.unlinkSync(configPath);
-      } catch {
-        // Already gone, or a read-only tmp. Not worth failing a turn over.
-      }
+      removeMcpConfig(configPath);
       o.onSettle(result);
     };
 
@@ -2138,18 +2134,57 @@ function chatEnv(): NodeJS.ProcessEnv {
 }
 
 /**
+ * Where a turn's MCP config goes: a directory of its own, never a shared one.
+ *
+ * Under privilege separation this is a fixed base the *server* owns, mode 0711
+ * — traversable by a child that has been handed a path, and not listable by
+ * anything. `/tmp` was the whole of the problem: 1777 and world-readable, so
+ * `ls /tmp/uf-mcp-*.json` found a live capability without guessing the random
+ * name, and any of the twenty-five concurrent agents could run it.
+ *
+ * Without separation there is no boundary to build and no point pretending
+ * otherwise, so it falls back to `os.tmpdir()` — one uid means a sibling reads
+ * whatever this process can write, wherever it is put.
+ */
+export const MCP_CONFIG_BASE = "/run/uf-mcp";
+
+function mcpConfigBase(): string {
+  if (!privilegeSeparated()) return os.tmpdir();
+  fs.mkdirSync(MCP_CONFIG_BASE, { recursive: true, mode: 0o711 });
+  // `mkdir` masks the mode through the umask and does nothing at all when the
+  // directory already exists, so the mode is set rather than requested.
+  fs.chmodSync(MCP_CONFIG_BASE, 0o711);
+  return MCP_CONFIG_BASE;
+}
+
+/**
  * The MCP config, as a file rather than an argv string.
  *
  * `--mcp-config` takes either, and a string would put the capability token in
  * the child's command line — readable by every process on the host for as long
- * as the turn lasts. The file is written 0600 and unlinked when the turn ends.
+ * as the turn lasts. The file is written 0600, in a per-turn directory of its
+ * own, and both are removed when the turn ends.
+ *
+ * The directory is the part that is new, and 0600 is the part that started
+ * meaning something. Both are bounded by the fact that every child in this app
+ * shares one uid: the chat's own turn has to be able to *read* this file, so it
+ * has to be owned by the uid the agents run as, so a work-cycle agent that
+ * reads the path out of `/proc/<pid>/cmdline` can still open it. What is closed
+ * is the enumeration route — the directory does not list, and there is nothing
+ * of ours left in `/tmp`. Closing the rest needs the chat's child to be a
+ * different uid from a work cycle's, which needs a second Claude credential
+ * that install does not have; `docs/security.md` says so rather than implying
+ * this is airtight.
  */
-function writeMcpConfig(token: string): string {
-  const file = path.join(
-    os.tmpdir(),
-    `uf-mcp-${randomBytes(9).toString("hex")}.json`,
+export function writeMcpConfig(token: string): string {
+  const dir = path.join(
+    mcpConfigBase(),
+    `uf-mcp-${randomBytes(9).toString("hex")}`,
   );
+  const file = path.join(dir, "config.json");
   try {
+    fs.mkdirSync(dir, { recursive: false, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
     fs.writeFileSync(
       file,
       JSON.stringify({
@@ -2163,18 +2198,41 @@ function writeMcpConfig(token: string): string {
       }),
       { mode: 0o600 },
     );
+    // Written by the server, read by the child, and they are no longer the same
+    // uid. Both halves: a directory the child cannot enter is a turn with no
+    // tools at all, which reads as a model that chose not to call any.
+    chownForChild(dir);
+    chownForChild(file);
   } catch (err) {
     // A write that fails part-way — ENOSPC, the likeliest of these — leaves the
     // file behind with whatever reached the disk, and what it carries is the
-    // capability token. Nothing else would ever remove it: the unlink in `land`
+    // capability token. Nothing else would ever remove it: the cleanup in `land`
     // is inside a promise this failure never reaches.
-    try {
-      fs.unlinkSync(file);
-    } catch {
-      // Never created, or the same condition that failed the write. The
-      // original error is the one worth reporting.
-    }
+    removeMcpConfig(file);
     throw err;
   }
   return file;
+}
+
+/**
+ * Remove a turn's config and the directory that held it.
+ *
+ * Both, and in that order: the directory is per-turn, so one left behind is a
+ * slow leak in a path nothing else cleans, and `rmdir` after the unlink cannot
+ * take anything that is not ours. Never throws — this runs on the settle path
+ * of every turn, and a turn is not worth failing over a file that is already
+ * gone or a read-only `/tmp`.
+ */
+export function removeMcpConfig(file: string): void {
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    // Never created, or the same condition that failed the write.
+  }
+  try {
+    fs.rmdirSync(path.dirname(file));
+  } catch {
+    // Not empty, never created, or the tmpdir fallback's own parent — none of
+    // which is worth a word.
+  }
 }

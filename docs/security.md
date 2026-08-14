@@ -80,6 +80,16 @@ read — reaches something that is not this run's business.
   without it. An unattended agent can use everything that token can, which is
   why the advice to scope it to the repositories you actually run agents against
   is in `.env.example` rather than here.
+- **A concurrent chat turn's MCP capability, if it can find the path.** The
+  config file carrying it is no longer in `/tmp` — it is 0600 in a 0700 per-turn
+  directory under a base the server owns and nothing else can list, and both go
+  when the turn ends. But `--mcp-config <path>` is on the child's command line
+  and `/proc/<pid>/cmdline` is world-readable, so an agent that catches a turn
+  in flight can still read a capability it did not mint. That closes when a chat
+  turn runs as a different uid from a work cycle, which needs a second Claude
+  credential a subscription install does not have. What it opens is bounded by
+  its subject and dies with the turn: read-mostly tools for a `chat`, and
+  `emit_runs` — inside the block's own folder and fan-out cap — for a `block`.
 
 There is one thing the split *does* close that reads similarly and is worth not
 confusing with the above: an agent can no longer read the **server's**

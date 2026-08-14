@@ -126,9 +126,12 @@ const {
   parseTurnOutput,
   planApprovalBatch,
   planProposal,
+  removeMcpConfig,
   sendChatMessage,
   settleOnExit,
   staleTurn,
+  writeMcpConfig,
+  MCP_CONFIG_BASE,
 } = require("./chat") as typeof import("./chat");
 const { githubSlug } = require("./workspace") as typeof import("./workspace");
 
@@ -1058,4 +1061,68 @@ describe("settleOnExit", () => {
       }
     },
   );
+});
+
+/* ------------------------------------------------------------------ */
+/* Where the capability token is written down                          */
+/* ------------------------------------------------------------------ */
+
+describe("writeMcpConfig — the capability never lands in a shared directory", () => {
+  it("puts the config in a directory of its own, not loose in the tmpdir", () => {
+    // `/tmp/uf-mcp-<random>.json` was the whole defect: 1777 and world
+    // readable, so `ls /tmp/uf-mcp-*.json` found a live capability without
+    // guessing the random name, and any of the concurrent agents could run it.
+    // The random name was never the protection; the directory was the leak.
+    const file = writeMcpConfig("cap-token-abc");
+    try {
+      const dir = path.dirname(file);
+      assert.notEqual(
+        dir,
+        os.tmpdir(),
+        "the config is loose in the shared temp directory again",
+      );
+      assert.equal(path.basename(path.dirname(dir)), path.basename(os.tmpdir()));
+      assert.deepEqual(fs.readdirSync(dir), ["config.json"]);
+
+      // 0600 on the file and 0700 on the directory. Neither excluded anything
+      // while the server and the agents were one uid — which is why this landed
+      // with the split rather than before it.
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+      assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+
+      const written = JSON.parse(fs.readFileSync(file, "utf8"));
+      assert.equal(
+        written.mcpServers.uf.headers.Authorization,
+        "Bearer cap-token-abc",
+      );
+    } finally {
+      removeMcpConfig(file);
+    }
+  });
+
+  it("names a base outside the shared tmpdir when the uids differ", () => {
+    // The test process is not root, so `writeMcpConfig` above took the
+    // unseparated fallback: with one uid there is no boundary to build and
+    // pretending otherwise would be worse than saying so. What the constant
+    // pins is that the separated path is not a directory every agent can list.
+    assert.equal(path.isAbsolute(MCP_CONFIG_BASE), true);
+    assert.notEqual(MCP_CONFIG_BASE, os.tmpdir());
+    assert.equal(MCP_CONFIG_BASE.startsWith(`${os.tmpdir()}/`), false);
+  });
+
+  it("takes the directory with it when the turn ends", () => {
+    // A per-turn directory left behind is a slow leak in a path nothing else
+    // sweeps, and one still holding its file is the original defect with an
+    // extra step. `removeMcpConfig` runs on every settle path, including the
+    // partial-write one inside `writeMcpConfig` itself.
+    const file = writeMcpConfig("cap-token-xyz");
+    const dir = path.dirname(file);
+    removeMcpConfig(file);
+    assert.equal(fs.existsSync(file), false);
+    assert.equal(fs.existsSync(dir), false);
+
+    // Idempotent: `land` can be reached twice (a timeout racing an exit), and a
+    // second removal must not throw out of a settle path.
+    removeMcpConfig(file);
+  });
 });
