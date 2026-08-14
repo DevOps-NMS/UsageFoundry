@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { scanUsage } from "@/lib/transcripts";
-import { buildPeriods, buildSnapshot, resolveTimeZone } from "@/lib/windows";
+import {
+  agentOriginIndex,
+  buildPeriods,
+  buildSnapshot,
+  resolveTimeZone,
+} from "@/lib/windows";
+import { listAgents, listAmbientAgents } from "@/lib/agents";
 import { getSettings, limitConfig } from "@/lib/settings";
 import { readAccountProfile } from "@/lib/account";
 import { planUsage } from "@/lib/planUsage";
@@ -24,12 +30,25 @@ export async function GET(req: Request) {
 
     const now = Date.now();
     const limits = limitConfig(settings);
+    // Read here rather than inside `buildSnapshot`, which is the function the
+    // orchestrator calls before every work cycle: this is a SQLite read and a
+    // directory walk, and it decides nothing — it only annotates a column with
+    // where each agent name's definition lives. Only the user scope of the
+    // ambient set is available, for the reason `GET /api/agents` gives: the
+    // project scope depends on a cwd, and this column covers every transcript
+    // on the machine rather than one checkout. A repository's own agent
+    // therefore reads as `unknown`, and the card says what unmarked means.
+    const agentNames = agentOriginIndex(
+      listAgents().map((a) => a.name),
+      listAmbientAgents().map((a) => a.name),
+    );
     const snapshot = buildSnapshot(
       entries,
       limits,
       now,
       settings.sessionResetOverrideAt,
       plan,
+      agentNames,
     );
 
     // Calendar buckets are wrong at every edge if they are cut in the wrong

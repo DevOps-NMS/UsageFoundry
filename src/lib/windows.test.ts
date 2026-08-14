@@ -5,8 +5,12 @@ import { ZERO_TOKENS } from "./pricing";
 import type { UsageEntry } from "./transcripts";
 import {
   FIVE_HOURS_MS,
+  MAIN_THREAD_BUCKET,
   PERIOD_COUNT,
   WEEK_MS,
+  agentOrigin,
+  agentOriginIndex,
+  agentSpend,
   buildPeriods,
   buildSessionBlocks,
   buildSnapshot,
@@ -531,5 +535,139 @@ describe("calendar periods", () => {
     assert.equal(resolveTimeZone("Mars/Olympus_Mons"), server);
     assert.equal(resolveTimeZone(null), server);
     assert.equal(resolveTimeZone("x".repeat(200)), server);
+  });
+});
+
+/**
+ * Which bucket a turn lands in, and what the card is allowed to say about it.
+ *
+ * Both halves are silent when wrong. A turn that falls out of the rollup leaves
+ * a column that no longer adds up to the window total, which reads as a
+ * perfectly ordinary table of plausible dollar figures — the same failure the
+ * calendar-bucket contiguity test exists to catch one card over. And an
+ * annotation that shifts spend between rows, or that claims the operator's own
+ * saved agent did work a file on disk may have done, is a confident sentence
+ * about who spent the money.
+ */
+describe("agent attribution", () => {
+  const agentEntry = (
+    ts: number,
+    agent: string | undefined,
+    costUSD = 1,
+  ): UsageEntry => ({ ...entry(ts, costUSD), agent });
+
+  it("names where a definition lives, and never moves a bucket", () => {
+    const index = agentOriginIndex(["Reviewer"], ["explorer", "Reviewer"]);
+
+    // Case-folded, because `idx_agents_name` and `getAgentByName` are: the name
+    // the CLI recorded and the name the operator saved are one agent.
+    assert.equal(agentOrigin("reviewer", index), "both");
+    assert.equal(agentOrigin("REVIEWER", index), "both");
+    assert.equal(agentOrigin("Explorer", index), "ambient");
+    // A CLI built-in, a repository's own `.claude/agents`, or one since
+    // deleted — all the same statement: this install has no definition for it.
+    assert.equal(agentOrigin("general-purpose", index), "unknown");
+    assert.equal(agentOrigin(MAIN_THREAD_BUCKET, index), "main");
+
+    // No lookup is "nobody asked", which the guard path never does. It must not
+    // collapse into "asked, and there is no such agent".
+    assert.equal(agentOrigin("Reviewer", null), null);
+    assert.equal(agentOrigin(MAIN_THREAD_BUCKET, null), "main");
+  });
+
+  it("keeps a saved-only name apart from an ambient-only one", () => {
+    const index = agentOriginIndex(["saved-only"], ["disk-only"]);
+    assert.equal(agentOrigin("saved-only", index), "registry");
+    assert.equal(agentOrigin("disk-only", index), "ambient");
+  });
+
+  it("puts every turn in a byAgent bucket, so the column reconciles", () => {
+    const at = now - HOUR;
+    const entries = [
+      agentEntry(at, undefined, 3),
+      agentEntry(at + 1, "Reviewer", 2),
+      agentEntry(at + 2, "Reviewer", 1),
+      agentEntry(at + 3, "general-purpose", 4),
+    ];
+    const snap = buildSnapshot(
+      entries,
+      NO_LIMITS,
+      now,
+      null,
+      null,
+      agentOriginIndex(["Reviewer"], []),
+    );
+
+    const counted = snap.byAgent.reduce((n, r) => n + r.agg.entryCount, 0);
+    const summed = snap.byAgent.reduce((s, r) => s + r.agg.costUSD, 0);
+    assert.equal(counted, entries.length);
+    assert.equal(summed, snap.weekly.costUSD);
+
+    // The unattributed turn is a bucket of its own rather than a remainder.
+    const main = snap.byAgent.find((r) => r.agent === MAIN_THREAD_BUCKET);
+    assert.equal(main?.agg.costUSD, 3);
+    assert.equal(main?.origin, "main");
+
+    const byName = new Map(snap.byAgent.map((r) => [r.agent, r]));
+    assert.equal(byName.get("Reviewer")?.origin, "registry");
+    assert.equal(byName.get("Reviewer")?.agg.costUSD, 3);
+    assert.equal(byName.get("general-purpose")?.origin, "unknown");
+  });
+
+  it("leaves origin unasked when no lookup is supplied", () => {
+    const snap = buildSnapshot([agentEntry(now - HOUR, "Reviewer")], NO_LIMITS, now);
+    assert.equal(snap.byAgent[0].origin, null);
+  });
+
+  it("splits one run's turns without inventing or dropping any", () => {
+    const at = now - HOUR;
+    const spend = agentSpend(
+      [
+        agentEntry(at, undefined, 5),
+        agentEntry(at + 1, "Reviewer", 2),
+        agentEntry(at + 2, "Explorer", 3),
+      ],
+      agentOriginIndex(["Reviewer"], []),
+    );
+
+    assert.equal(spend.costUSD, 10);
+    assert.equal(spend.entryCount, 3);
+    // The complement of the main-thread bucket, so the two always add to the
+    // total — a delegated share is a share of what this run itself spent.
+    assert.equal(spend.delegatedCostUSD, 5);
+    assert.equal(
+      spend.rows.reduce((s, r) => s + r.costUSD, 0),
+      spend.costUSD,
+    );
+    assert.deepEqual(
+      spend.rows.map((r) => r.agent),
+      [MAIN_THREAD_BUCKET, "Explorer", "Reviewer"],
+    );
+    assert.equal(spend.rows.find((r) => r.agent === "Explorer")?.origin, "unknown");
+  });
+
+  it("carries the guard figure beside the displayed one", () => {
+    const at = now - HOUR;
+    const unpriced: UsageEntry = {
+      ...agentEntry(at, "Reviewer", 0),
+      costGuardUSD: 4,
+      unpriced: true,
+    };
+    const spend = agentSpend([agentEntry(at + 1, undefined, 1), unpriced], null);
+
+    // The display figure stays a floor — an unpriced model contributes $0 to it
+    // — while the guard figure charges the fallback rate, which is the gap the
+    // card draws as a hatched band rather than presenting as a correction.
+    assert.equal(spend.costUSD, 1);
+    assert.equal(spend.costGuardUSD, 5);
+    assert.equal(spend.delegatedCostUSD, 0);
+    assert.equal(spend.delegatedCostGuardUSD, 4);
+  });
+
+  it("reports nothing rather than zero for a run with no turns", () => {
+    const spend = agentSpend([], agentOriginIndex([], []));
+    assert.equal(spend.costUSD, 0);
+    assert.equal(spend.entryCount, 0);
+    assert.deepEqual(spend.rows, []);
   });
 });

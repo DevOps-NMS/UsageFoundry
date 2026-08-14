@@ -65,6 +65,21 @@ export interface PlanUsageDTO {
   fetchedAt: number;
 }
 
+/**
+ * Mirror of `AgentOrigin` in `windows.ts` — where the definition behind an
+ * agent bucket lives, as far as this install can see.
+ *
+ * It annotates a transcript-derived bucket and never moves one: the rollup is
+ * the CLI's own `attributionAgent` through the same `groupBy` as every other
+ * column, so the rows still reconcile to the window total whatever this says.
+ */
+export type AgentOriginDTO =
+  | "main"
+  | "registry"
+  | "ambient"
+  | "both"
+  | "unknown";
+
 export interface SessionBlockDTO {
   startsAt: number;
   endsAt: number;
@@ -85,7 +100,12 @@ export interface SnapshotDTO {
   projectedExhaustionAt: number | null;
   byModel: Array<{ model: string; agg: AggregateDTO }>;
   byProject: Array<{ project: string; agg: AggregateDTO }>;
-  byAgent: Array<{ agent: string; agg: AggregateDTO }>;
+  byAgent: Array<{
+    agent: string;
+    agg: AggregateDTO;
+    /** Null when nothing looked the names up — not the same as `unknown`. */
+    origin: AgentOriginDTO | null;
+  }>;
   bySkill: Array<{ skill: string; agg: AggregateDTO }>;
   byEffort: Array<{ effort: string; agg: AggregateDTO }>;
   totalCostUSD: number;
@@ -447,6 +467,54 @@ export interface RunAgentDTO {
   description: string;
   /** Null means the delegated turn ran on the session's own model. */
   model: string | null;
+}
+
+/** Mirror of `AgentSpendRow` in `windows.ts`. */
+export interface AgentSpendRowDTO {
+  agent: string;
+  origin: AgentOriginDTO;
+  costUSD: number;
+  costGuardUSD: number;
+  tokens: number;
+  entryCount: number;
+}
+
+/**
+ * What one run's turns cost, split by who produced them.
+ *
+ * A **fifth** reading of a run's spend and never a correction to any of the
+ * other four. It is our price table over the transcripts this run's session
+ * wrote — the same source, the same dedupe key and the same cache weighting the
+ * dashboard meters use, and the same one `spent_usd_est` already comes from —
+ * scoped to one session id and one time range. `runs.spent_usd` stays a floor of
+ * what the CLI itself measured, telemetry stays Claude Code's own per-request
+ * figure, and no two of the three are ever added: they measure the same work by
+ * different routes, so a sum double-counts it.
+ *
+ * Null on the wire when there is nothing to read — a run with no session id yet,
+ * or an unreadable transcript directory. That is "no reading", which the card
+ * renders as the hatched indeterminate meter; a run whose agents spent nothing
+ * and a run nobody could measure must not look alike.
+ */
+export interface RunAgentSpendDTO {
+  costUSD: number;
+  costGuardUSD: number;
+  tokens: number;
+  entryCount: number;
+  delegatedCostUSD: number;
+  delegatedCostGuardUSD: number;
+  rows: AgentSpendRowDTO[];
+  /** The instants the session was read between, so the card can say what it covers. */
+  from: number;
+  to: number;
+  /**
+   * True when Settings excludes sub-agent turns from the dashboard totals.
+   *
+   * This card counts them regardless — it exists to say what the delegated work
+   * cost, and a card that silently answered $0 because of a setting about the
+   * *meters* would be the worst of both. Carried so the card can say so.
+   */
+  excludedFromTotals: boolean;
 }
 
 /**

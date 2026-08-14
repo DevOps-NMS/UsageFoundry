@@ -1,6 +1,6 @@
 /** Presentation helpers. Client-safe — no node builtins in here. */
 
-import type { RunDependencyDTO, RunDTO } from "./apiTypes";
+import type { AgentOriginDTO, RunDependencyDTO, RunDTO } from "./apiTypes";
 
 /**
  * Badges and notices carry *different* vocabularies — a badge can be `accent`
@@ -302,6 +302,39 @@ export function describeAmbientAgents(
   return ambient.length === 1
     ? `Your own ~/.claude also carries ${list}, in play whatever you pick here`
     : `Your own ~/.claude also carries ${ambient.length} agents (${list}), in play whatever you pick here`;
+}
+
+/**
+ * The chip beside an agent bucket, or null for a bucket that gets none.
+ *
+ * Two rows get no chip and each for its own reason. `(main thread)` is not an
+ * agent at all and the label already says so, and an `unknown` name is the
+ * *ordinary* case rather than a fault — a CLI built-in, a repository's own
+ * `.claude/agents`, an agent since deleted — so chipping it would put a mark on
+ * most of the column and say nothing. What "unmarked" means is stated once, in
+ * the card's own footnote, which is the place a sentence can carry it.
+ *
+ * `both` is a real hazard rather than a curiosity, so it is the one that is not
+ * neutral: a saved agent and a file on disk answering to one name is a state
+ * nothing in this app can resolve — which definition the CLI used is unverified
+ * — and the operator is the only one who can.
+ *
+ * Shared with the run page for `guardBadge`'s reason: two wordings of one fact
+ * are two claims that can drift.
+ */
+export function agentOriginBadge(
+  origin: AgentOriginDTO | null,
+): { text: string; tone: BadgeTone } | null {
+  switch (origin) {
+    case "registry":
+      return { text: "saved", tone: "accent" };
+    case "ambient":
+      return { text: "on disk", tone: "neutral" };
+    case "both":
+      return { text: "name clash", tone: "warn" };
+    default:
+      return null;
+  }
 }
 
 export type Severity = "ok" | "warn" | "danger";

@@ -19,6 +19,8 @@ import type {
   WindowStateDTO,
 } from "@/lib/apiTypes";
 import {
+  agentOriginBadge,
+  type BadgeTone,
   fmtDateTime,
   fmtDuration,
   fmtPct,
@@ -93,6 +95,26 @@ const DIMENSION_OPTIONS = DIMENSIONS.map((value) => ({
   value,
   label: DIMENSION_LABEL[value],
 }));
+
+/**
+ * One row of the breakdown table, whichever slice is showing.
+ *
+ * `mark` is optional because only one dimension has anything to mark: an agent
+ * bucket can say where its definition lives, and a model or a skill cannot.
+ * Named rather than inferred because `satisfies` keeps each key's own narrower
+ * shape, so a `mark` on one dimension is invisible at the call site that renders
+ * all five.
+ */
+interface BreakdownRow {
+  label: string;
+  cost: number;
+  mark?: { text: string; tone: BadgeTone } | null;
+}
+
+interface Breakdown {
+  rows: BreakdownRow[];
+  hint?: string;
+}
 
 /**
  * A Finder-style list view: a bordered, rounded box that owns its own scroll
@@ -324,39 +346,40 @@ export default function Dashboard() {
    * side spent a screen of vertical space saying "there are five ways to slice
    * this" rather than showing any one slice well.
    */
-  const breakdowns = useMemo(() => {
+  const breakdowns = useMemo<Record<Dimension, Breakdown> | null>(() => {
     if (!data) return null;
     const s = data.snapshot;
     return {
       model: {
         rows: s.byModel.map((m) => ({ label: m.model, cost: m.agg.costUSD })),
-        hint: undefined as string | undefined,
       },
       project: {
         rows: s.byProject.map((p) => ({
           label: shortPath(p.project),
           cost: p.agg.costUSD,
         })),
-        hint: undefined,
       },
       effort: {
         rows: s.byEffort.map((r) => ({ label: r.effort, cost: r.agg.costUSD })),
         hint: "Reasoning effort is usually the largest single cost lever.",
       },
       agent: {
-        rows: s.byAgent.map((r) => ({ label: r.agent, cost: r.agg.costUSD })),
+        // The bucket is still whatever the CLI recorded on the turn; the chip
+        // says where this install found a definition for that name. Nothing
+        // about the registry moves a dollar between rows.
+        rows: s.byAgent.map((r) => ({
+          label: r.agent,
+          cost: r.agg.costUSD,
+          mark: agentOriginBadge(r.origin),
+        })),
         hint: data.meta.includeSidechains
-          ? "Sub-agent turns bill separately from the main thread."
+          ? "Unmarked names have no definition here — a Claude Code built-in, a repository's own .claude/agents, or an agent since deleted."
           : "Sub-agent turns are excluded from totals in Settings, so only main-thread work appears here.",
       },
       skill: {
         rows: s.bySkill.map((r) => ({ label: r.skill, cost: r.agg.costUSD })),
-        hint: undefined,
       },
-    } satisfies Record<
-      Dimension,
-      { rows: Array<{ label: string; cost: number }>; hint?: string }
-    >;
+    };
   }, [data]);
 
   // The banner is a live region so a page that has quietly stopped refreshing
@@ -841,7 +864,15 @@ export default function Dashboard() {
                     100% instead of quietly omitting a remainder. */}
                 {current.rows.slice(0, MAX_BREAKDOWN_ROWS).map((r) => (
                   <Tr key={r.label}>
-                    <Td className="mono">{r.label}</Td>
+                    <Td>
+                      <span className="mono">{r.label}</span>
+                      {r.mark && (
+                        <>
+                          {" "}
+                          <Badge tone={r.mark.tone}>{r.mark.text}</Badge>
+                        </>
+                      )}
+                    </Td>
                     <Td num>{fmtUSD(r.cost)}</Td>
                     <Td num>
                       {s.weekly.costUSD > 0

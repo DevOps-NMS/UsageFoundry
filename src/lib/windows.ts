@@ -364,6 +364,177 @@ function buildWindow(
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Agent attribution                                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The bucket a turn with no sub-agent on it lands in.
+ *
+ * Named rather than written out twice, because the classifier below has to
+ * recognise the same string the rollup emits: a turn that fell into this bucket
+ * is main-thread work, not an agent whose definition has gone missing, and the
+ * two must never read alike.
+ */
+export const MAIN_THREAD_BUCKET = "(main thread)";
+
+/**
+ * Where the definition behind an agent bucket lives — as far as this install
+ * can see.
+ *
+ * The rollup itself stays exactly what it was: the transcript's own
+ * `attributionAgent`, through the same `groupBy` as every other column, so the
+ * buckets reconcile to the window total whatever this says. This is an
+ * *annotation* on top of it, and the distinction it draws is a real one — an
+ * agent the operator wrote down and an agent name that came from somewhere else
+ * are different facts, and the card could not tell them apart.
+ *
+ *  - `main`     — no sub-agent on the turn at all.
+ *  - `registry` — a saved agent in this install answers to that name.
+ *  - `ambient`  — no saved agent does, but a definition on disk this app did
+ *                 not write does. Those reach every child this app spawns and
+ *                 always have; see `listAmbientAgents`.
+ *  - `both`     — a saved agent *and* an ambient one share the name. Which of
+ *                 the two the CLI used is not verified (CLAUDE.md records the
+ *                 collision as unverified precisely here), so this says two
+ *                 definitions exist rather than picking one and being quietly
+ *                 wrong about who did the work.
+ *  - `unknown`  — neither. A CLI built-in, a repository's own `.claude/agents`
+ *                 in a checkout this classification cannot see, an agent since
+ *                 deleted, or a turn from another machine's transcripts.
+ *
+ * Never null on a row the dashboard renders; null only when nothing looked the
+ * names up, which is the orchestrator's guard path — see `buildSnapshot`.
+ */
+export type AgentOrigin = "main" | "registry" | "ambient" | "both" | "unknown";
+
+/** Case-folded name → where its definition lives. Built by `agentOriginIndex`. */
+export type AgentOriginIndex = ReadonlyMap<
+  string,
+  "registry" | "ambient" | "both"
+>;
+
+/** One name as both halves of the index key on it: trimmed and case-folded. */
+function agentKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/**
+ * The lookup the classifier wants, out of the two lists a caller can read.
+ *
+ * Case-folded because `idx_agents_name` is and because `getAgentByName` matches
+ * that way: the name the CLI recorded and the name the operator saved are one
+ * agent here for the same reason they are one row there.
+ *
+ * A saved name and an ambient one that collide produce `both` rather than one
+ * winning. Nothing in this app knows which definition the CLI actually used, and
+ * a row claiming the operator's own agent did work that a file on disk may have
+ * done is exactly the quiet wrongness the registry exists to end.
+ */
+export function agentOriginIndex(
+  registry: Iterable<string>,
+  ambient: Iterable<string>,
+): AgentOriginIndex {
+  const index = new Map<string, "registry" | "ambient" | "both">();
+  for (const name of registry) {
+    const key = agentKey(name);
+    if (key) index.set(key, "registry");
+  }
+  for (const name of ambient) {
+    const key = agentKey(name);
+    if (!key) continue;
+    index.set(key, index.has(key) ? "both" : "ambient");
+  }
+  return index;
+}
+
+/**
+ * Which of the five a bucket is, or null when no lookup was supplied.
+ *
+ * Pure, and deliberately unable to change what bucket a turn landed in: it is
+ * handed the key the rollup already produced. A saved agent being renamed moves
+ * nothing here — the transcript recorded the name the CLI registered at the
+ * time, and the annotation simply stops matching, which is the truth.
+ */
+export function agentOrigin(
+  bucket: string,
+  index: AgentOriginIndex | null,
+): AgentOrigin | null {
+  if (bucket === MAIN_THREAD_BUCKET) return "main";
+  if (index === null) return null;
+  return index.get(agentKey(bucket)) ?? "unknown";
+}
+
+/**
+ * One run's own turns, split by who produced them.
+ *
+ * The same `groupBy` and the same buckets as the dashboard column, over the
+ * entries belonging to one session rather than to a window — so a delegated turn
+ * lands in its agent's row and everything else lands in `(main thread)`, and the
+ * rows add up to `costUSD` with nothing omitted.
+ *
+ * This is the **transcript** source scoped to one run, which is the source
+ * `reconcileKilledCycle` already reads for `spent_usd_est`, not a new one. It is
+ * a display figure and only a display figure: it never reaches `runs.spent_usd`,
+ * never reaches `buildSnapshot`, never reaches a budget verdict, and is never
+ * added to what the CLI reported or to what telemetry reported — those two
+ * measure the same run by two other routes and summing any pair of them
+ * double-counts the same work.
+ */
+export interface AgentSpendRow {
+  /** The transcript's own bucket key — never a saved agent's current name. */
+  agent: string;
+  origin: AgentOrigin;
+  costUSD: number;
+  /** The same turns with unpriced models charged the fallback rate. */
+  costGuardUSD: number;
+  tokens: number;
+  entryCount: number;
+}
+
+export interface AgentSpend {
+  costUSD: number;
+  costGuardUSD: number;
+  tokens: number;
+  entryCount: number;
+  /** Everything that is not `(main thread)` — what was handed to a specialist. */
+  delegatedCostUSD: number;
+  delegatedCostGuardUSD: number;
+  /** Cost-descending, main thread included. */
+  rows: AgentSpendRow[];
+}
+
+export function agentSpend(
+  entries: UsageEntry[],
+  index: AgentOriginIndex | null = null,
+): AgentSpend {
+  const rows = groupBy(entries, (e) => e.agent ?? MAIN_THREAD_BUCKET).map(
+    ({ key, agg }): AgentSpendRow => ({
+      agent: key,
+      // Never null on this shape: a caller with no index gets `unknown` for
+      // every named agent, which is the true statement that nothing looked.
+      origin: agentOrigin(key, index) ?? "unknown",
+      costUSD: agg.costUSD,
+      costGuardUSD: agg.costGuardUSD,
+      tokens: totalTokens(agg.tokens),
+      entryCount: agg.entryCount,
+    }),
+  );
+
+  const total = aggregate(entries);
+  const delegated = rows.filter((r) => r.agent !== MAIN_THREAD_BUCKET);
+
+  return {
+    costUSD: total.costUSD,
+    costGuardUSD: total.costGuardUSD,
+    tokens: totalTokens(total.tokens),
+    entryCount: total.entryCount,
+    delegatedCostUSD: delegated.reduce((s, r) => s + r.costUSD, 0),
+    delegatedCostGuardUSD: delegated.reduce((s, r) => s + r.costGuardUSD, 0),
+    rows,
+  };
+}
+
 /** Roll entries up under an arbitrary label, most expensive first. */
 function groupBy(
   entries: UsageEntry[],
@@ -397,8 +568,17 @@ export interface UsageSnapshot {
   projectedExhaustionAt: number | null;
   byModel: Array<{ model: string; agg: Aggregate }>;
   byProject: Array<{ project: string; agg: Aggregate }>;
-  /** Cost by sub-agent, with main-thread work in its own bucket. */
-  byAgent: Array<{ agent: string; agg: Aggregate }>;
+  /**
+   * Cost by sub-agent, with main-thread work in its own bucket, and where each
+   * bucket's definition lives.
+   *
+   * `origin` is null when the caller supplied no lookup — see `buildSnapshot`'s
+   * last argument. Null is "nobody checked", which is a different sentence from
+   * `unknown` ("checked, and this install has no such agent"), and the two must
+   * not collapse: the guard path never checks, and a row there claiming the
+   * operator has no such agent would be an invention.
+   */
+  byAgent: Array<{ agent: string; agg: Aggregate; origin: AgentOrigin | null }>;
   /** Cost by skill, with un-skilled turns in their own bucket. */
   bySkill: Array<{ skill: string; agg: Aggregate }>;
   /** Cost by reasoning effort — usually the largest single lever. */
@@ -420,6 +600,18 @@ export function buildSnapshot(
   now = Date.now(),
   sessionResetAt: number | null = null,
   plan: PlanUsage | null = null,
+  /**
+   * Which agent names this install has a definition for, or null to leave the
+   * question unasked.
+   *
+   * An argument rather than a read, `normalizeWorkflowInput`'s shape and its
+   * reason: this module knows nothing about the registry or the filesystem, and
+   * the one caller that renders the answer (`/api/usage`) is not the one that
+   * calls this before every work cycle. The orchestrator passes nothing, so its
+   * guard path costs neither a SQLite read nor a directory walk per cycle — and
+   * nothing it reads has an `origin` on it to be wrong about.
+   */
+  agentNames: AgentOriginIndex | null = null,
 ): UsageSnapshot {
   // The provider's own reset instant outranks the operator's, because
   // `sessionResetOverrideAt` exists only as a way to hand-correct a boundary
@@ -567,8 +759,12 @@ export function buildSnapshot(
   // sub-agent or skill get an explicit bucket rather than being dropped, so
   // the rows still add up to the window total and a large "(main thread)"
   // share reads as the fact it is instead of a gap in the data.
-  const byAgent = groupBy(weekEntries, (e) => e.agent ?? "(main thread)").map(
-    ({ key, agg }) => ({ agent: key, agg }),
+  // The bucket key stays the name the CLI recorded, always. `origin` says where
+  // this install found a definition for that name, which is a fact about the
+  // registry rather than about the turn — renaming a saved agent moves no spend
+  // between rows, it only stops the annotation matching.
+  const byAgent = groupBy(weekEntries, (e) => e.agent ?? MAIN_THREAD_BUCKET).map(
+    ({ key, agg }) => ({ agent: key, agg, origin: agentOrigin(key, agentNames) }),
   );
   const bySkill = groupBy(weekEntries, (e) => e.skill ?? "(no skill)").map(
     ({ key, agg }) => ({ skill: key, agg }),
