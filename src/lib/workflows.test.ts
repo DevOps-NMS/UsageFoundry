@@ -429,13 +429,13 @@ describe("normalizeWorkflowInput — the agent a block may hand work to", () => 
     assert.match(message, /a-gone/, "and names the id that resolved to nothing");
   });
 
-  it("refuses one that has decayed into what the CLI drops in silence", () => {
+  it("refuses one that has decayed into what the CLI will not register", () => {
     // `rowToAgent` reports rather than repairs, so an unusable row reaches here
-    // as a row that exists. Accepted, it would produce a block whose specialist
-    // is absent with nothing at all saying so.
+    // as a row that exists. Accepted, it would produce a block whose run is
+    // started as an agent the CLI cannot resolve, which fails at the spawn.
     const message = error(graph([node("a", { agentId: "a-broken" })]));
     assert.match(message, /Half a thing/);
-    assert.match(message, /without a word/);
+    assert.match(message, /will not register/);
   });
 
   it("lets an orchestrator block name one for its own deciding turn", () => {

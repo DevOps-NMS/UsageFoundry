@@ -10,7 +10,7 @@ import {
 } from "./apiTypes";
 
 /**
- * Named specialised agents: a role the delegating model may hand a subtask to.
+ * Named agents: the role a run itself takes.
  *
  * An agent is **form input, not a run** — `run_templates`' rule, and this file
  * is modelled on `templates.ts` for that reason. It holds no folder claim,
@@ -18,24 +18,43 @@ import {
  * and deleting one cannot reach a child that has already been spawned, because
  * every spawn writes the whole definition onto its own argv.
  *
- * It reaches a child as one `--agents <json>` flag, verified against the pinned
- * CLI (`@anthropic-ai/claude-code@2.1.226`) rather than read from the docs. See
- * `agentsFlagValue` for the shape and for what that verification found, which is
- * the reason this file validates as strictly as it does.
+ * **It reaches a child as two flags, and that pair is the whole feature.** This
+ * app was built on `--agents <json>` alone, which *offers* a definition to the
+ * session's own main agent as a specialist it may hand a subtask to. What the
+ * operator wants instead is `--agent <name>`, which makes the session itself
+ * that agent — the run's own system prompt, not a role inside it. The two go
+ * together rather than one replacing the other, because a name is only
+ * selectable once something has defined it: measured against the pinned CLI
+ * (`@anthropic-ai/claude-code@2.1.226`), a member supplied on the same argv by
+ * `--agents` joins the set `--agent` resolves against, alongside the built-ins
+ * and whatever is on disk.
+ *
+ *     $ claude --agents '{"uf-probe-agent":{"description":"…","prompt":"…"}}' \
+ *         --agent uf-probe-typo -p hi
+ *     --agent 'uf-probe-typo' not found. Available agents: claude, Explore,
+ *     general-purpose, Plan, statusline-setup, typescript, uf-probe-agent
+ *
+ * So `agentsFlagValue` is still the one encoder and still the one place that
+ * knows the shape; `sessionAgentArgs` is the selection built on top of it. See
+ * both for what the verification found, which is the reason this file validates
+ * as strictly as it does — and note that the singular flag changes the *failure
+ * mode* of getting the shape wrong from silent to loud. A member the CLI will
+ * not register used to cost a run its specialist at exit 0; named on `--agent`
+ * it now fails the spawn outright, with a non-zero exit and no API call.
  *
  * What an agent deliberately does **not** hold:
  *
  * - **A tool list.** `--agents` accepts one; this refuses it at the door. See
- *   `TOOLS_REFUSAL` below — it is the capability decision, and it is the whole
- *   reason this record can safely be reached from a run, a template, the
- *   settings default, a chat proposal and a workflow block.
+ *   `TOOLS_REFUSAL` below — it is the capability decision, and the singular
+ *   flag makes it matter more rather than less, because the run *is* the agent
+ *   now and a list on it would decide what the run may do.
  * - **A permission mode.** There are exactly two routes to `--permission-mode`
  *   in this app (the run form and a template), and `reopenRun` already refuses
  *   to become a third. An agent is not the fourth: it names no mode, no column
  *   holds one, and nothing on the wire could carry one.
  * - **A folder, a budget or an isolation choice.** Those bound a *run*. An
- *   agent is a role inside one, and the run's own guards already cover every
- *   turn it delegates.
+ *   agent is what the run is asked to be, and the run's own guards are
+ *   unchanged by asking it.
  */
 
 /* ------------------------------------------------------------------ */
@@ -44,23 +63,55 @@ import {
 
 export interface SavedAgent {
   id: string;
-  /** The key the CLI registers it under, and the handle `--agent` would take. */
+  /**
+   * The key the CLI registers it under, and the handle `--agent` takes.
+   *
+   * It travels as its own argv word, so a name with a space in it is selected
+   * as it stands — verified: `--agents '{"uf spaced":{…}}' --agent "uf spaced"`
+   * resolves. Nothing here is quoted into a syntax the CLI does not speak,
+   * because nothing here goes through a shell.
+   */
   name: string;
-  /** What the delegating model reads to decide whether to hand it the subtask. */
+  /**
+   * What a person reads on a picker when they choose this agent for a run.
+   *
+   * Under the plural flag this was what the *delegating model* read, and it was
+   * required for that reason. Nothing chooses on it now — the operator does —
+   * but it stays required on a stronger ground than the one it lost: the CLI
+   * will not register a member without one at all, so `--agent` cannot select
+   * it. See `normalizeAgentInput`, which measures that rather than assuming it.
+   */
   description: string;
   /** The agent's own system prompt. */
   prompt: string;
   /**
-   * The model one delegated turn runs on, or null to inherit the session's.
+   * The model the agent asks for, or null to inherit whatever the session has.
    *
-   * This is the one place this file departs from `run_templates`, which holds no
-   * model on the grounds that `settings.defaultModel` is the single place to set
-   * one and a second place is how the two drift. That argument does not reach
-   * here, because this is not the run's model: it is the model a *sub*-turn uses,
-   * which nothing else in this app can express, and setting it is the whole
-   * reason to have a cheap specialist. It changes cost and not capability, and
-   * every cost guard already covers it — a delegated turn's spend lands on the
-   * run's own `result` event and in its telemetry like any other.
+   * **This changed meaning with the flag, and it is the one field that did.**
+   * Under `--agents` alone it was the model a *delegated sub-turn* ran on, which
+   * is why this file departs from `run_templates`' "`settings.defaultModel` is
+   * the single place" rule at all — a sub-turn's model is a thing nothing else
+   * here can express. Selected with `--agent` it is the **session's** model, so
+   * it is now a way of setting the run's own. Measured on the pin, off the
+   * `system`/`init` event, before any request is made:
+   *
+   *     --agents '{"uf-m":{…,"model":"sonnet"}}'                 → claude-opus-5[1m]
+   *     --agents '{"uf-m":{…,"model":"sonnet"}}' --agent uf-m    → claude-sonnet-5
+   *
+   * What keeps that from being a second route to the run's model in the sense
+   * `run_templates` refuses is the next measurement: an explicit `--model`
+   * outranks it, and `buildArgs` passes one whenever the run has one. So the
+   * agent's model fills a gap the run left rather than overriding a choice the
+   * operator made —
+   *
+   *     --model opus  … --agent uf-m  → claude-opus-5
+   *     --model haiku … --agent uf-m  → claude-haiku-4-5-20251001
+   *
+   * — and it still moves cost rather than capability, which is what makes it
+   * tolerable at all: every cost guard already covers it, since the run's spend
+   * lands on its own `result` event and in its telemetry whatever model produced
+   * it. It is worth knowing that a run with no model of its own, started as an
+   * agent that names one, runs on the agent's.
    *
    * Free-form, like `settings.defaultModel`: an alias (`sonnet`), a full id
    * (`claude-opus-5`) and the literal `inherit` are all accepted by the CLI, and
@@ -100,13 +151,26 @@ export type AgentNormalization =
  * Agent names the pinned CLI already answers to.
  *
  * Read off `claude --agent <unknown>` on 2.1.226, which refuses with the list
- * before it makes any API call. Saving one of these is refused because the
- * measured behaviour is silent either way: a `--agents` member named
- * `general-purpose` does not appear as a second entry in that list, so the saved
- * definition either does nothing at all — while the operator believes their
- * specialist is in play — or silently replaces a built-in the main agent
- * delegates to. Which of the two it is was not determined, and that is the
- * point: neither outcome reports anything.
+ * before it makes any API call.
+ *
+ * **The refusal survives the move to the singular flag, and the reason narrows
+ * rather than disappearing.** Under `--agents` alone the argument was that a
+ * member named `general-purpose` either did nothing or silently replaced a
+ * built-in the main thread delegates to, and the CLI did not say which. The
+ * first half of that no longer applies — a name that is selected is plainly in
+ * play — but the second half is now the *whole* run rather than one delegated
+ * subtask, and it is still unanswered. Re-measured on the pin:
+ *
+ *     $ claude --agents '{"Explore":{"description":"shadow","prompt":"p"}}' \
+ *         --agent uf-typo -p hi
+ *     --agent 'uf-typo' not found. Available agents: claude, Explore,
+ *     general-purpose, Plan, statusline-setup, typescript
+ *
+ * One `Explore` in the list, not two. So `--agent Explore` would select *an*
+ * Explore and there is no way to tell from outside whether it is the operator's
+ * prompt or the built-in one — which is now the difference between a run that is
+ * the agent the operator wrote and a run that is something else entirely, under
+ * a name they chose. Refused at the door for that.
  *
  * This list can go stale when the CLI pin moves, and the direction it goes stale
  * in is the cheap one — a name added upstream would be accepted here and shadow
@@ -132,6 +196,16 @@ const BUILT_IN_AGENTS = [
  * emitted spec all name saved records, and `planProposal`'s rule is that prompt
  * text is the one half of a run a model may write. A tool list is the other
  * half.
+ *
+ * **The singular flag strengthens this rather than weakening it, and that is
+ * worth stating because the opposite reading is available.** With `--agents`
+ * alone a `tools` list would have bounded one delegated subtask inside a run
+ * whose own mode and lists still stood over it. Selected with `--agent` the run
+ * *is* this agent, so a list here would be a statement about what the whole
+ * session may do — which is precisely the third route to that decision the
+ * two-routes-to-`--permission-mode` rule exists to prevent, arriving through a
+ * record a chat proposal or a workflow block can name. There is no reading of
+ * the new semantics under which this field becomes safer to store.
  *
  * There is also a concrete failure it would risk. `PROCESS_KILLERS` is a
  * `--disallowedTools` entry, and CLAUDE.md records that deny beats
@@ -170,10 +244,24 @@ const TOOLS_REFUSAL =
  *   - an entry with an empty name registers as an empty entry
  *   - `--agents` that is not JSON at all is ignored, exit 0
  *
- * So a definition that is wrong here does not fail a run — it produces a run
- * whose specialist simply is not there, which is bit-for-bit a run that was
- * never given one. That is the failure this function exists to move to the form,
- * where a person is looking.
+ * **Every one of those refusals is now load-bearing twice over**, and this is
+ * the one place the singular flag makes the app's own behaviour better rather
+ * than merely different. "Dropped" above means dropped from the set `--agent`
+ * resolves against, which was invisible when the member was only being offered
+ * and is a hard start failure when it is being selected. Re-measured on the pin
+ * — a member with no `description`, named on `--agent`:
+ *
+ *     $ claude --agents '{"uf-nodesc":{"prompt":"p"}}' --agent uf-nodesc -p hi
+ *     --agent 'uf-nodesc' not found. Available agents: claude, Explore,
+ *     general-purpose, Plan, statusline-setup, typescript
+ *     $ echo $?
+ *     1
+ *
+ * Non-zero, before any API call, and identically for a missing `prompt` and for
+ * `"model": null`. So a definition that is wrong here no longer produces a run
+ * whose agent is quietly absent — it produces a run whose every work cycle dies
+ * at the spawn. Both are failures worth moving to the form where a person is
+ * looking, which is what this function is; the second is merely louder about it.
  */
 export function normalizeAgentInput(raw: unknown): AgentNormalization {
   const o = (raw ?? {}) as Record<string, unknown>;
@@ -207,9 +295,10 @@ export function normalizeAgentInput(raw: unknown): AgentNormalization {
     return {
       ok: false,
       error:
-        "An agent needs a description. It is the only thing the delegating " +
-        "model reads when it decides whether this is the agent for a subtask, " +
-        "so an agent without one is an agent that never gets chosen.",
+        "An agent needs a description. Claude Code will not register an " +
+        "agent that has none, so a run started as this one would fail the " +
+        "moment it spawned — and it is what you will be reading when you pick " +
+        "this agent for a run.",
     };
   }
   if (description.length > MAX_AGENT_DESCRIPTION) {
@@ -217,9 +306,9 @@ export function normalizeAgentInput(raw: unknown): AgentNormalization {
       ok: false,
       error:
         `An agent description is at most ${MAX_AGENT_DESCRIPTION} ` +
-        `characters. It is carried in the delegating model's context for the ` +
-        `whole session rather than only at the moment of a delegation, so it ` +
-        `is paid for on every request the run makes.`,
+        `characters. It is carried in the session's context for the whole run ` +
+        `rather than only at the moment it is chosen, so it is paid for on ` +
+        `every request the run makes.`,
     };
   }
 
@@ -252,14 +341,18 @@ export function normalizeAgentInput(raw: unknown): AgentNormalization {
 /**
  * The value of `--agents`, or null when there is nothing to attach.
  *
- * One function rather than one per caller. Three modules can carry agents and
- * four callers reach them — `buildArgs` for a work cycle, `runOrchestratorChild`
- * for a chat turn or an orchestrator block, `spawnAssist` for a review or a
- * conflict resolution — and the CLI's failure mode makes a second copy of this
- * shape expensive in a way nothing would report. Two of the four hand one over
- * today: a work cycle and an orchestrator block. `runTurn` withholds one
- * deliberately (see the note above it), and no caller of `startAssist` supplies
- * one, so a review has never been given a specialist. Measured against 2.1.226:
+ * One function rather than one per caller, and it stays one after the move to
+ * `--agent`: this is what *defines* a member, `sessionAgentArgs` below is what
+ * *selects* one, and the selection is built on this rather than beside a second
+ * JSON builder. Three modules can carry agents and four callers reach them —
+ * `buildArgs` for a work cycle, `runOrchestratorChild` for a chat turn or an
+ * orchestrator block, `spawnAssist` for a review or a conflict resolution — and
+ * the CLI's failure mode makes a second copy of this shape expensive in a way
+ * nothing would report. Two of the four hand one over today, and both of those
+ * two now select it: a work cycle and an orchestrator block's deciding turn.
+ * `runTurn` withholds one deliberately (see the note above it), and no caller of
+ * `startAssist` supplies one, so a review has never been given an agent.
+ * Measured against 2.1.226:
  *
  *   `{"<name>": {"description": "…", "prompt": "…", "model": "…"?}}`
  *
@@ -294,10 +387,51 @@ export function agentsFlagValue(agents: AgentDefinition[]): string | null {
   return JSON.stringify(payload);
 }
 
-/** `["--agents", "…"]`, or nothing. Spread into an argv at each spawn site. */
+/**
+ * `["--agents", "…"]`, or nothing — a definition *offered*, not selected.
+ *
+ * This is the plural flag on its own, which hands the session's main agent a
+ * role it may delegate a subtask to. The one caller left on it is `spawnAssist`,
+ * and see the note there for why a review is not given a selected agent.
+ */
 export function agentsArgs(agents: AgentDefinition[]): string[] {
   const value = agentsFlagValue(agents);
   return value === null ? [] : ["--agents", value];
+}
+
+/**
+ * `["--agents", "…", "--agent", "<name>"]`, or nothing: the run **is** this one.
+ *
+ * The singular semantics, and the pair is not redundant. `--agent` takes a name
+ * and resolves it against the built-ins plus whatever is on disk plus whatever
+ * this argv defined, so the definition still has to travel — dropping `--agents`
+ * and sending only the name would select a saved agent this app never wrote down
+ * anywhere the CLI can see, which on a stock install is a spawn that fails by
+ * name. Both flags, from one place, so the shape has one definition.
+ *
+ * Singular in its argument rather than taking a list and picking one, because
+ * the thing it describes is singular: `runs.agent` freezes one definition, a
+ * workflow node names one, and "the first of the array wins" is a rule that
+ * could be quietly wrong the day an array arrived with two in it.
+ *
+ * What it deliberately does **not** do is bound anything. `--agent` sets the
+ * session's system prompt and its model (the latter only where the run named no
+ * model of its own — see `SavedAgent.model`); the permission mode, the allow
+ * list and the deny list are argued at the spawn sites and are untouched by it.
+ * Two measurements on the pin are what make that safe to say, and both are
+ * load-bearing enough that `orchestrator.test.ts` pins the argv they justify:
+ *
+ *   - `--append-system-prompt` still reaches a `--agent` session. The agent's
+ *     own prompt does not swallow it: an agent told to answer with a secret word
+ *     stated only in the appended text answered `BANANA ZEBRA`. That is what
+ *     keeps `SELF_HOSTING_NOTICE` — the `pkill` deny list's explanation — in
+ *     front of a run that has been started as an agent.
+ *   - `--agent` survives `--resume`, so every work cycle after the first still
+ *     gets it. The same probe resumed answered `BANANA ZEBRA` again.
+ */
+export function sessionAgentArgs(agent: AgentDefinition | null | undefined): string[] {
+  if (!agent) return [];
+  return [...agentsArgs([agent]), "--agent", agent.name];
 }
 
 /* ------------------------------------------------------------------ */
@@ -328,25 +462,31 @@ export type AgentKnowledge = ReadonlyMap<string, AgentFacts>;
  * answer: an id that names nothing is **refused**, never quietly dropped. That
  * is `planProposal`'s rule for a template deleted between the proposal and the
  * click, and the reason is the same one that runs through the whole of this
- * file — the operator started the run that said "as the reviewer agent", and a
- * run that silently has no specialist is bit-for-bit a run that was never given
+ * file — the operator started the run that said "as the reviewer", and a run
+ * that silently is not the reviewer is bit-for-bit a run that was never given
  * one. Falling back to none would put this app's own behaviour in the same class
  * as the CLI's silent drop, which is the failure the registry exists to end.
+ *
+ * The second refusal used to say the CLI drops such an agent "without a word",
+ * which was measured and is no longer true of a *selected* one: an unregistrable
+ * member named on `--agent` fails the spawn with a non-zero exit. Refusing here
+ * is still the right answer and for the better reason — this door is in front of
+ * a person who can fix it, where the spawn failure is a run that dies at every
+ * cycle with a message only the event log carries.
  */
 export function agentRefusal(agentId: string, known: AgentKnowledge): string | null {
   const facts = known.get(agentId);
   if (!facts) {
     return (
       `That agent no longer exists (id ${agentId.slice(0, 8)}), so there is ` +
-      `nothing to hand a subtask to. Pick another one, or start with none.`
+      `nothing for the run to be. Pick another one, or start with none.`
     );
   }
   if (!facts.usable) {
     return (
       `The “${facts.name}” agent is missing its description or its prompt, ` +
-      `and Claude Code drops such an agent without a word — the run would ` +
-      `look exactly like one that was never given a specialist. Fix it, or ` +
-      `start with none.`
+      `and Claude Code will not register an agent like that — a run started ` +
+      `as it would fail the moment it spawned. Fix it, or start with none.`
     );
   }
   return null;
@@ -419,7 +559,22 @@ export function parseRunAgent(raw: string | null | undefined): AgentDefinition |
   return { name, description, prompt, model: model === "" ? null : model };
 }
 
-/** `[]` or the one agent this run carries — what the four spawn sites want. */
+/**
+ * `[]` or the one agent this run carries, as the *plural* flag wants it.
+ *
+ * **Nothing calls this any more**, and that is worth stating rather than leaving
+ * to be discovered — `spawnableAgents` below is kept on the same terms. It was
+ * the shape every spawn site took while `--agents` was the only flag; a work
+ * cycle and an orchestrator block now select their agent instead and go through
+ * `parseRunAgent` into `sessionAgentArgs`, which is singular because what it
+ * describes is. The one caller still on the plural flag (`spawnAssist`) is
+ * handed its list by its own caller and does not read a run's column.
+ *
+ * Left in place because removing an export is a decision about the module's
+ * surface and because `agents.test.ts` uses it to pin that a run with no agent
+ * puts no flag on the argv at all — the branch that would otherwise be an empty
+ * JSON object where every existing run had nothing.
+ */
 export function runAgentDefinitions(raw: string | null | undefined): AgentDefinition[] {
   const agent = parseRunAgent(raw);
   return agent ? [agent] : [];

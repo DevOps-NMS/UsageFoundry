@@ -259,10 +259,14 @@ describe("normalizeTemplateInput — the agent", () => {
     );
   });
 
-  it("refuses one the CLI would drop, and names it", () => {
+  it("refuses one the CLI would not register, and names it", () => {
     const message = error({ ...OK, agentId: "a2" });
     assert.match(message, /half-written/);
-    assert.match(message, /without a word/);
+    // One wording for every door, so this is `agentRefusal`'s sentence arriving
+    // here rather than a second copy of it. It changed with the flag: a member
+    // the CLI will not register used to be dropped in silence, and a run that
+    // names one on `--agent` now fails at the spawn.
+    assert.match(message, /will not register/);
   });
 });
 
