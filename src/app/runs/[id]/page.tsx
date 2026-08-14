@@ -40,6 +40,7 @@ import { StatusMark } from "@/components/StatusMark";
 import { cycleOutputs } from "@/lib/cycles";
 import { describeEvent } from "@/lib/logLine";
 import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
+import { RunAgentCost } from "@/components/RunAgentCost";
 import { RunDiff } from "@/components/RunDiff";
 import { RunLand } from "@/components/RunLand";
 import { RunOutput } from "@/components/RunOutput";
@@ -1070,6 +1071,15 @@ export default function RunDetail({
               </ListGroup>
             </Section>
           )}
+
+          {/* Who did the work, and what their share of it cost. The two figures
+              above say what the run spent and neither can say this: only the
+              transcript records which agent produced a turn, which is why this
+              is the same source the dashboard meters come from rather than a
+              fourth one. Its own poll and its own route — see the component. */}
+          <Section title="Agent work">
+            <RunAgentCost runId={run.id} active={active} now={nowTick} />
+          </Section>
 
           {/* A separate measurement, deliberately not folded into the figures
               above. It counts every API request the agent made, including any
