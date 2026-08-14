@@ -1573,8 +1573,15 @@ function seedWorktree(repoRoot: string, slotPath: string): string[] {
       fs.copyFileSync(path.join(repoRoot, e.name), target);
       // The copy is the server's, the checkout is the child's. An `.env` the
       // agent cannot rewrite is worse than one it never had, because it reads
-      // as a configured worktree right up until the first write.
-      chownForChild(target);
+      // as a configured worktree right up until the first write — so a chown
+      // that fails takes the file with it rather than leaving one behind that
+      // `copied` claims is there and usable.
+      try {
+        chownForChild(target);
+      } catch (err) {
+        fs.rmSync(target, { force: true });
+        throw err;
+      }
       copied.push(e.name);
     } catch {
       /* a file we cannot read is not worth failing the run over */
