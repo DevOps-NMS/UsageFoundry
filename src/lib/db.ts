@@ -489,6 +489,23 @@ function migrate(db: Database.Database) {
       revoked_at  INTEGER
     );
 
+    -- Failed sign-ins, per source and one row for the whole install. Durable
+    -- rather than in memory for two reasons: a burst has to still be visible
+    -- after the fact — nothing anywhere recorded that anyone had ever guessed
+    -- at the token — and a lockout that a container restart clears is a lockout
+    -- an attacker can clear by restarting the container.
+    --
+    -- The source column is the client address as reported to us, or '*' for
+    -- the install-wide bucket. See loginLimiter.ts for why the second one has
+    -- to exist at all.
+    CREATE TABLE IF NOT EXISTS login_attempts (
+      source       TEXT PRIMARY KEY,
+      failures     INTEGER NOT NULL,
+      first_at     INTEGER NOT NULL,
+      last_at      INTEGER NOT NULL,
+      locked_until INTEGER
+    );
+
     CREATE TABLE IF NOT EXISTS chat_messages (
       id      TEXT PRIMARY KEY,
       chat_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,

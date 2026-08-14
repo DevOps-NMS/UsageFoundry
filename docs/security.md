@@ -10,6 +10,13 @@ mounted code. Treat it as privileged.
 - Set `UF_AUTH_TOKEN` (`openssl rand -hex 32`). Leaving it blank makes the
   server refuse to start; the only way past that is `UF_ALLOW_NO_AUTH=1`, which
   runs with no authentication and puts a banner on every page saying so.
+- **`/api/login` is rate-limited.** Ten consecutive failures from one address
+  lock that address out for 15 minutes; 100 failures across every address lock
+  sign-in install-wide for 60 seconds, which is what still bounds an attacker
+  who forges `X-Forwarded-For`. A locked-out attempt answers exactly what a
+  wrong token answers, with a `Retry-After`. Failures are kept in the database
+  and **Settings → Failed sign-ins** shows the count and when they started and
+  stopped. A correct token clears both counters.
 - The `uf_session` cookie is a **signed session handle, not the token**: 32
   random bytes naming a row in `auth_sessions`, plus an absolute 24-hour expiry,
   signed with `UF_AUTH_TOKEN`. It cannot be replayed as a bearer credential, and

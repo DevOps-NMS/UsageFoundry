@@ -161,3 +161,91 @@ test("a wrong token is refused", async () => {
   assert.equal(res.status, 401);
   assert.equal(res.headers.get("set-cookie"), null);
 });
+
+test("consecutive failures from one source lock it out", async () => {
+  const { DEFAULT_LIMITER } = await import("../../../lib/loginLimiter");
+  const source = newSource();
+  const max = DEFAULT_LIMITER.maxSourceFailures;
+
+  for (let i = 1; i < max; i++) {
+    assert.equal(
+      (await post("wrong", { source })).status,
+      401,
+      `attempt ${i} is still merely wrong`,
+    );
+  }
+  // The one that reaches the threshold is still answered as a wrong token; the
+  // lockout applies to what comes *after* it.
+  assert.equal((await post("wrong", { source })).status, 401);
+
+  const locked = await post("wrong", { source });
+  assert.equal(locked.status, 429);
+  assert.ok(Number(locked.headers.get("retry-after")) > 0);
+  // Indistinguishable from a wrong token by body — the status is for the
+  // operator, who can wait; the body must tell an attacker nothing.
+  assert.deepEqual(await locked.json(), { error: "Invalid token" });
+
+  // And the correct token is refused too while the lock stands, or the limiter
+  // would be an oracle telling the guesser when they had got it right.
+  const correct = await post(TOKEN, { source });
+  assert.equal(correct.status, 429);
+  assert.equal(correct.headers.get("set-cookie"), null);
+});
+
+test("a lockout does not reach a different source", async () => {
+  const { DEFAULT_LIMITER } = await import("../../../lib/loginLimiter");
+  const locked = newSource();
+  for (let i = 0; i <= DEFAULT_LIMITER.maxSourceFailures; i++) {
+    await post("wrong", { source: locked });
+  }
+  assert.equal((await post("wrong", { source: locked })).status, 429);
+  assert.equal((await post(TOKEN, { source: newSource() })).status, 200);
+});
+
+test("the correct token succeeds once the window has passed", async () => {
+  const { DEFAULT_LIMITER } = await import("../../../lib/loginLimiter");
+  const attempts = await import("../../../lib/loginAttempts");
+  const source = newSource();
+
+  for (let i = 0; i <= DEFAULT_LIMITER.maxSourceFailures; i++) {
+    await post("wrong", { source });
+  }
+  assert.equal((await post(TOKEN, { source })).status, 429);
+
+  // Wind the clock rather than wait fifteen minutes: `checkLoginAllowed` takes
+  // `now`, which is exactly so the expiry is testable.
+  const past = Date.now() + DEFAULT_LIMITER.sourceLockoutMs + 1;
+  assert.equal(attempts.checkLoginAllowed(source, past).allow, true);
+
+  // Clear the recorded lock the way a successful sign-in does, then check the
+  // handler really does let the correct token through again.
+  attempts.clearLoginFailures(source);
+  const res = await post(TOKEN, { source });
+  assert.equal(res.status, 200);
+  assert.ok(res.headers.get("set-cookie"));
+});
+
+test("failures are recorded durably: count, first and last", async () => {
+  const attempts = await import("../../../lib/loginAttempts");
+  const source = newSource();
+
+  const before = attempts.loginFailureSummary().failures;
+  await post("wrong", { source });
+  await post("wrong", { source });
+
+  const summary = attempts.loginFailureSummary();
+  assert.equal(summary.failures, before + 2);
+  assert.ok(summary.firstAt !== null && summary.lastAt !== null);
+  assert.ok(summary.lastAt >= summary.firstAt);
+});
+
+test("a successful sign-in clears the install-wide budget", async () => {
+  const attempts = await import("../../../lib/loginAttempts");
+  await post("wrong", { source: newSource() });
+  assert.ok(attempts.loginFailureSummary().failures > 0);
+
+  // The global bucket refuses the operator as well, so somebody who has just
+  // presented the token must not be left standing behind it.
+  assert.equal((await post(TOKEN, { source: newSource() })).status, 200);
+  assert.equal(attempts.loginFailureSummary().failures, 0);
+});

@@ -18,6 +18,7 @@ import {
   WORKSPACE_ROOT,
   CLAUDE_HOME,
 } from "../../../lib/config";
+import { loginFailureSummary } from "../../../lib/loginAttempts";
 import { activeSessionCount } from "../../../lib/sessions";
 import { FIVE_HOURS_MS } from "../../../lib/windows";
 import { invalidatePlanUsage } from "../../../lib/planUsage";
@@ -41,6 +42,10 @@ export async function GET() {
       // How many browser sign-ins are outstanding — a question that had no
       // answer at all while the cookie was UF_AUTH_TOKEN itself.
       activeSessions: authEnabled() ? activeSessionCount() : 0,
+      // Failed sign-ins, so a burst is visible after it happened. Nothing
+      // anywhere recorded that anybody had ever guessed at the token, which is
+      // half of what made an unbounded login route hard to notice.
+      signIn: loginFailureSummary(),
     },
   });
 }

@@ -539,6 +539,43 @@ function SignOut({ sessions }: { sessions: number }) {
   );
 }
 
+/**
+ * Failed sign-ins, and the row is absent while there have been none.
+ *
+ * It is here because the limiter's record has to be readable by a person: a
+ * burst against the one unauthenticated route in this app used to leave no
+ * trace at all — no counter, no log line, nothing to find afterwards. A row
+ * that said "0" every day is a row nobody would still be reading on the day it
+ * said something else.
+ */
+function FailedSignIns({ summary }: { summary: unknown }) {
+  if (typeof summary !== "object" || summary === null) return null;
+  const s = summary as {
+    failures?: number;
+    firstAt?: number | null;
+    lastAt?: number | null;
+    lockedSources?: number;
+    lockedGlobally?: boolean;
+  };
+  const failures = Number(s.failures ?? 0);
+  if (failures === 0) return null;
+
+  const when = (t: number | null | undefined) =>
+    typeof t === "number" ? new Date(t).toLocaleString() : "—";
+
+  return (
+    <EnvRow label="Failed sign-ins">
+      <Badge tone={s.lockedGlobally ? "danger" : "warn"}>{failures}</Badge>{" "}
+      <span>
+        {when(s.firstAt)} → {when(s.lastAt)}
+        {Number(s.lockedSources ?? 0) > 0 &&
+          ` · ${s.lockedSources} source(s) locked out`}
+        {s.lockedGlobally && " · sign-in locked install-wide"}
+      </span>
+    </EnvRow>
+  );
+}
+
 function EnvRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex gap-2">
@@ -859,6 +896,7 @@ export default function SettingsPage() {
             </>
           )}
         </EnvRow>
+        <FailedSignIns summary={env.signIn} />
       </dl>
 
       {/* Plain anchors rather than `ButtonLink`: the pane is its own scroll

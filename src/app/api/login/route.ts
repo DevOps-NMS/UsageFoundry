@@ -1,8 +1,14 @@
+import { timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
 // Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
 // rewrites the path alias at runtime, so a module a test loads has to import
 // the way src/lib and the chat route already do.
 import { AUTH_TOKEN, COOKIE_SECURE, authEnabled } from "../../../lib/config";
+import {
+  checkLoginAllowed,
+  clearLoginFailures,
+  recordLoginFailure,
+} from "../../../lib/loginAttempts";
 import { createSession } from "../../../lib/sessions";
 import {
   SESSION_COOKIE,
@@ -14,6 +20,42 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const uniformDelay = () => new Promise((r) => setTimeout(r, 400));
+
+/**
+ * Constant-time, because `middleware.ts` goes to the trouble for the same
+ * secret and two paths comparing one token should not differ in how.
+ *
+ * The 400 ms sleep does mask the difference in practice — this is nanoseconds
+ * against that floor — so the reason to fix it is that the app already owns the
+ * primitive, and a `!==` beside a hand-written constant-time helper is an
+ * invitation to copy the wrong one next time.
+ */
+function tokenMatches(offered: unknown): boolean {
+  if (typeof offered !== "string") return false;
+  const a = Buffer.from(offered);
+  const b = Buffer.from(AUTH_TOKEN);
+  // Length is not secret, and `timingSafeEqual` throws on a mismatch.
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * Who is guessing, as far as this process can tell.
+ *
+ * `x-forwarded-for` is set by a reverse proxy and is *also* settable by a
+ * client when there is no proxy in front, so this bucket can be evaded by
+ * rotating the header. That is not a flaw in reading it — there is nothing
+ * better available to a Node process behind an arbitrary terminator — it is the
+ * reason the install-wide budget in `loginLimiter.ts` exists.
+ */
+function clientSource(req: Request): string {
+  const forwarded = req.headers.get("x-forwarded-for") ?? "";
+  const first = forwarded.split(",")[0].trim();
+  if (first) return first.slice(0, 100);
+  const real = (req.headers.get("x-real-ip") ?? "").trim();
+  return real ? real.slice(0, 100) : "unknown";
+}
 
 export async function POST(req: Request) {
   if (!authEnabled()) {
@@ -34,12 +76,36 @@ export async function POST(req: Request) {
     );
   }
 
+  // Before the body is even read, and long before the token is compared: a
+  // caller inside a lockout must learn nothing at all about their guess.
+  const source = clientSource(req);
+  const verdict = checkLoginAllowed(source);
+  if (!verdict.allow) {
+    await uniformDelay();
+    // The same body as a wrong token, on purpose — the two must not be
+    // distinguishable by what an attacker can read out of the response. The
+    // status differs because a caller who *is* the operator needs to know that
+    // waiting will help, and Retry-After is what says how long.
+    return NextResponse.json(
+      { error: "Invalid token" },
+      {
+        status: 429,
+        headers: { "retry-after": String(Math.ceil(verdict.retryAfterMs / 1000)) },
+      },
+    );
+  }
+
   const body = (await req.json().catch(() => ({}))) as { token?: string };
-  if (body.token !== AUTH_TOKEN) {
+  if (!tokenMatches(body.token)) {
+    recordLoginFailure(source);
     // Uniform delay keeps a wrong token from being distinguishable by timing.
-    await new Promise((r) => setTimeout(r, 400));
+    // It is not the rate limit and never was: it is an `await` on a timer, so
+    // it delays one request and serialises nothing.
+    await uniformDelay();
     return NextResponse.json({ error: "Invalid token" }, { status: 401 });
   }
+
+  clearLoginFailures(source);
 
   // A handle, not the secret. The cookie used to be UF_AUTH_TOKEN byte for
   // byte, so the browser jar held a thirty-day copy of the credential that
