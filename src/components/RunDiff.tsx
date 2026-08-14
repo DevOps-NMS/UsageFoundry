@@ -69,7 +69,7 @@ export function RunDiff({ run }: { run: RunDTO }) {
   return (
     // The outcome once a run is over, and a one-line stub while it is still
     // writing — so it leads only when there is something settled to read.
-    <Card emphasis={settled ? "primary" : "quiet"} className="mt-6">
+    <Card emphasis={settled ? "primary" : "quiet"}>
       <CardTitle>
         What changed
         <Button

@@ -273,7 +273,7 @@ export function RunLand({ run }: { run: RunDTO }) {
   if (!state) {
     if (!readError) return null;
     return (
-      <Card emphasis="quiet" className="mt-6">
+      <Card emphasis="quiet">
         <CardTitle>Land this work</CardTitle>
         <div role="alert">
           <Notice tone="danger">{readError}</Notice>
@@ -302,7 +302,7 @@ export function RunLand({ run }: { run: RunDTO }) {
     // Raised only while there is a decision to take. A branch that is already
     // in, or that nothing can be done with yet, is a record rather than a
     // choice, and should not be the loudest thing on the page.
-    <Card emphasis={canLand || canResolve ? "primary" : "default"} className="mt-6">
+    <Card emphasis={canLand || canResolve ? "primary" : "default"}>
       <CardTitle>
         Land this work
         {state.landedAt && <Badge tone="ok">landed</Badge>}

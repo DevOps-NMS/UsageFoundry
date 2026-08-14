@@ -118,7 +118,7 @@ export function RunReview({ run }: { run: RunDTO }) {
   return (
     // Never the lead: a review is optional, billed, and only exists because
     // somebody pressed the button.
-    <Card emphasis="quiet" className="mt-6">
+    <Card emphasis="quiet">
       <CardTitle>
         Review
         <Button
