@@ -4253,14 +4253,62 @@ function handleStreamLine(
 /* ------------------------------------------------------------------ */
 
 /**
+ * Callers sharing one aggregation, the shape `scanUsage` already uses.
+ *
+ * `globalThis`-pinned for the reason every other long-lived value here is: a
+ * fresh module evaluation in dev would silently stop coalescing.
+ */
+const globalSnapshot = globalThis as unknown as {
+  __ufSnapshotInflight?: Promise<UsageSnapshot> | null;
+};
+
+/**
  * A fresh read of the transcripts, as the guard sees it.
  *
  * Exported because a review spawn is billed against the same 5-hour window a
  * work cycle is, and refusing one while that window is already over its ceiling
  * has to use the same numbers the loop does — not a second, subtly different
  * reading of them.
+ *
+ * **Concurrent callers share one aggregation.** `scanUsage` coalesces the file
+ * reads and nothing coalesced what comes after them, which is the expensive
+ * half on a large history: a filter and a full allocation per caller, then
+ * `buildSessionBlocks` plus two more filters plus five `groupBy` rollups over
+ * everything the process has ever parsed. `liveGuardTick` states that property
+ * and works around it by taking one snapshot for every live guard; the pre-cycle
+ * guard is the path every run takes and it had no such sharing, so N runs
+ * reaching a cycle boundary together did N full-history aggregations back to
+ * back, on the one event loop.
+ *
+ * Coalescing on the in-flight promise rather than on a time window is
+ * deliberate, and it is the *only* shape whose staleness is no larger than what
+ * `scanUsage` already accepts: a caller that joins sees the reading as of the
+ * moment that aggregation started, which is exactly "at most one refresh
+ * stale". It is also self-scaling, where a fixed cache window is not — the
+ * slower the aggregation, the wider the window in which arrivals join it, so it
+ * costs nothing on a history small enough not to need it and shares almost
+ * everything on one large enough that a run is waiting on it.
+ *
+ * The snapshot object is therefore shared between callers and must stay
+ * read-only. Nothing has ever written to one; `buildSnapshot`'s output is
+ * derived, and the two things that act on it — `evaluateBudget` and
+ * `evaluateInstanceBudget` — are pure.
  */
-export async function currentSnapshot() {
+export async function currentSnapshot(): Promise<UsageSnapshot> {
+  const running = globalSnapshot.__ufSnapshotInflight;
+  if (running) return running;
+
+  const started = buildCurrentSnapshot().finally(() => {
+    if (globalSnapshot.__ufSnapshotInflight === started) {
+      globalSnapshot.__ufSnapshotInflight = null;
+    }
+  });
+
+  globalSnapshot.__ufSnapshotInflight = started;
+  return started;
+}
+
+async function buildCurrentSnapshot(): Promise<UsageSnapshot> {
   const settings = getSettings();
   // Both are cached and neither throws, so this costs a transcript scan and,
   // at most once every five minutes, one HTTP request. The guard reads the
