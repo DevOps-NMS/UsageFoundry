@@ -456,11 +456,70 @@ export (per-request cost for runs this app spawned). Each is shown as itself.
 
 ---
 
+## Continuous integration
+
+Two workflows, both under [`.github/workflows/`](.github/workflows).
+
+**[`ci.yml`](.github/workflows/ci.yml)** runs on every push and every pull
+request, on **linux/amd64 and linux/arm64 in parallel**, and fails on a
+non-zero exit from any of `NODE_ENV=development npm ci --include=dev`,
+`npm run typecheck`, `npm test` and `npm run build`. Both architectures rather
+than one, because the project nominates no deployment platform: the
+`Dockerfile` branches on `dpkg --print-architecture` and `better-sqlite3`
+either finds a prebuild or compiles from source, so which of the two you are on
+is a real difference and it is the operator's host that decides it. A separate
+job runs `npm audit`, prints every advisory unconditionally, and gates on
+`critical` — the three current high-severity advisories are inside `next`'s own
+subtree, are fixed only by a `next@16` major, and the reasoning for accepting
+them is written out in full beside the step rather than left implied.
+
+**[`docker.yml`](.github/workflows/docker.yml)** runs `docker compose build` on
+both architectures, weekly and on any change to `Dockerfile`,
+`docker-compose.yml`, `.dockerignore`, `package.json` or `package-lock.json` —
+not on every push, because `ci.yml`'s `npm run build` is the same command the
+builder stage runs, so a source change that would break the image already fails
+there. What this covers is what that command cannot see: the apt layers, the
+`gh` release fetch and its checksum, the pinned Claude CLI, and the build
+context.
+
+### What it does not cover
+
+CI **never starts the container and never exercises a run.** It does not sign
+in, does not touch a transcript, does not spawn `claude`, and does not merge
+anything. Nothing here can tell you that a guard fires, that a window boundary
+lands where it should, or that an isolated run commits to its own branch — the
+[verification log](docs/verification.md), and in particular its *"Not yet
+verified"* list, stays the record for everything a human checked by hand. A
+green tick means the tree typechecks, the unit tests pass and both artefacts
+build. It means nothing beyond that.
+
+There is no lint step, because there is no linter: `eslint.ignoreDuringBuilds`
+is on and no config exists to run.
+
+> **A build failure that is not a build failure.** If `npm run build` fails for
+> you with `[TypeError: generate is not a function]` while CI is green, the
+> shell is the difference and not the tree. `.next/standalone/server.js` line 14
+> does `process.env.__NEXT_PRIVATE_STANDALONE_CONFIG = JSON.stringify(nextConfig)`,
+> so every child process of a *running* standalone server inherits it —
+> including an agent this app spawns, which is where five separate audits hit
+> this and concluded the build was broken. Next's `loadConfig` then early-returns
+> `JSON.parse` of that string instead of merging defaults; JSON cannot carry a
+> function, `generateBuildId` is the only function-valued default, and
+> `getBuildId` calls it unconditionally.
+> `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` is the check, and it
+> exits 0 on this tree.
+
+---
+
 ## Contributing
 
 Issues and discussion are welcome. Before opening a PR, read
 [`CLAUDE.md`](CLAUDE.md) — it records *why* the load-bearing decisions were made,
 and most of them encode a failure that was measured rather than a preference.
+
+CI runs the same four commands you should run locally, and nothing more — see
+[Continuous integration](#continuous-integration) above for what that leaves to
+a human.
 
 ---
 
