@@ -394,6 +394,45 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **Every install-wide control, in a browser or against a real fleet.**
+  `fleet.test.ts` drives `stopFleet` against a real database — the four live
+  statuses, the ordering that blocks a waiting run before the run it waits on is
+  stopped, and the `fleet` halt cause on the instance row — and a case per
+  creation site proves the hold suppresses `promoteQueued`,
+  `releaseDependents`, `emitBlockRuns` and `tickSchedules`. `npm run typecheck`
+  and `npm test` both pass. What has **not** happened is any of it against a
+  live child: no run with a real `claude` process has been signalled by
+  `stopFleet` (the test process registers no children, so every live run there
+  answers `cancelled` rather than `signalled`, and the kill ladder itself is
+  `stopRun`'s existing path reached through a new caller), no browser has
+  rendered the Fleet card or its two sheets, and the bulk pick-up has never
+  reopened a real run. The run it was written in has no Docker, so
+  `docker compose up --build` was not run either. Before trusting it: start two
+  or three cheap runs, press **Stop everything**, and confirm each run page says
+  it was stopped *with every run in flight*; then press **Hold new work**,
+  submit a run, and confirm it sits `queued` with the dashboard saying so in
+  words; then **Resume new work** and confirm it starts without a restart.
+- **Per-repository cost, in a browser.** `groupRunSpend` is unit-tested for the
+  two cases that fail silently — two mounts onto one host directory rolling up
+  as one repository, and a run with no repository landing in its own bucket
+  rather than being dropped — plus that the rows add to the total over the same
+  span. No browser has rendered the card, and the figures have never been read
+  against a real multi-repository install. Before trusting them to apportion
+  anything: check the card's total against the sum of `runs.spent_usd` for the
+  same span (`sqlite3 .data/usagefoundry.db "SELECT SUM(spent_usd) FROM runs
+  WHERE created_at >= …"`), and confirm a run started outside a git repository
+  appears in `(not a repository)` rather than nowhere.
+- **The branches page's filter and pager, against a database past 400 runs.**
+  `selectBranchCandidates` is unit-tested for the count over the whole set, for
+  paging by branch rather than by run, for a chain collapsing to one row before
+  the slice and for the cap holding whatever is asked for. What has not
+  happened is a request against a real inventory: no browser has rendered the
+  repository picker or the Previous/Next pair, and the claim that the
+  per-request git cost is unchanged rests on the cap in the code rather than on
+  a measurement. Before trusting it: `curl -s
+  'localhost:3000/api/branches?offset=60' | jq '.branches | length, .total,
+  .notShown'` against a database with more than sixty branches, and the same
+  with `repo=` set to one of the roots in `.repos`.
 - **A failed tool result reaching the run page.** `toolResultFailures` is unit-
   tested and `npm run typecheck` passes, and the `user`/`tool_result` shape it
   reads was taken from real transcripts written by the pinned CLI (2.1.226) —
