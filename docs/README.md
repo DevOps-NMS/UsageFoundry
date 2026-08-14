@@ -1,0 +1,38 @@
+# UsageFoundry documentation
+
+[← Back to the project README](../README.md)
+
+## Start here
+
+- **[Installation and setup](install.md)** — Docker, signing the container in,
+  required environment, Linux `UF_UID`, multiple workspaces, GitHub access.
+- **[Limits and accuracy](limits-and-accuracy.md)** — the two unrelated things
+  called "your Anthropic limits", what the subscription view cannot see, where
+  percentages come from, and how exact each figure is. **Read this before
+  trusting a number.**
+
+## Using it
+
+- **[Runs](runs.md)** — the run loop, the guarantee stated honestly, budget
+  policy, picking a run back up, and two runs on one project.
+- **[Workflows](workflows.md)** — saved graphs of blocks, orchestrator blocks
+  that decide what to run, merge blocks that land it, whole-graph budgets, and
+  schedules.
+- **[The orchestrator chat](orchestrator-chat.md)** — a conversation that
+  proposes runs and workflows; nothing it writes starts until you approve it.
+- **[Reviewing and landing](review-and-land.md)** — diffs, the on-demand
+  reviewer, AI conflict resolution, the merge queue, and branch cleanup.
+
+## Under the hood
+
+- **[Architecture](architecture.md)** — module map and incremental transcript
+  parsing.
+- **[Security](security.md)** — what the container holds and what is scoped away
+  from whom.
+- **[Verification log](verification.md)** — what has been exercised by hand
+  against a real CLI, and an explicit list of what has **not**.
+
+For the reasoning behind the load-bearing design decisions — why a window is
+derived rather than rounded, why a guard charges unpriced models a fallback
+rate, why the folder claim has no `await` in it — see [`CLAUDE.md`](../CLAUDE.md)
+in the repository root.
