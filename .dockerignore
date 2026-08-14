@@ -7,6 +7,10 @@ node_modules
 !.env.example
 .data
 .test-build
+# The builder stage is a `COPY . .`, so without this every backup sitting in the
+# default destination would be sent to the daemon and baked into an image layer
+# — copies of the operator's own database, in a build cache nobody prunes.
+backups
 npm-debug.log*
 README.md
 docker-compose.yml

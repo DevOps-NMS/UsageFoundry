@@ -93,6 +93,20 @@ services:
       # above, and a fresh volume has to be writable by whatever that is.
       - usagefoundry-data:/data
 
+      # Where `scripts/backup-db.mjs` writes, and the one thing here that is
+      # deliberately *not* the named volume above: a snapshot kept inside the
+      # volume dies with `docker compose down -v`, which is the command this
+      # whole path exists to survive. A bind mount, so the backups land in a
+      # directory on the host that whatever backs up your home directory can
+      # see. Nothing writes here unless you run the script — see
+      # docs/backup-and-restore.md.
+      #
+      # The repository ships an empty ./backups so the default works with no
+      # setup. Point UF_BACKUP_DIR somewhere else and the directory has to exist
+      # first: Docker creates a missing bind source as root, and this container
+      # runs as UF_UID.
+      - ${UF_BACKUP_DIR:-./backups}:/backups
+
     restart: unless-stopped
 
 volumes:
