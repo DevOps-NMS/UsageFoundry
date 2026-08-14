@@ -3,6 +3,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import type { RunDTO } from "@/lib/apiTypes";
+import type { BadgeTone } from "@/lib/format";
 import {
   STATUS_TONE,
   fmtCycleInFlight,
@@ -15,7 +16,7 @@ import {
 } from "@/lib/format";
 import { Meter } from "@/components/Meter";
 import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
+import { Button, ButtonLink, ButtonRow } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 
 /**
@@ -78,10 +79,27 @@ const STATUS_GLYPH: Record<RunDTO["status"], ReactNode> = {
   ),
 };
 
+/**
+ * The glyph's own colour, as `currentColor` for the svg inside it.
+ *
+ * Only the text half of `Badge`'s tone map, and only because the mark now leads
+ * the row from outside the badge, where nothing else supplies a colour: eight
+ * shapes all drawn in `--fg` would make a failed run and a completed one differ
+ * only in outline, which is the distinction the badge's tone already makes and
+ * the leading edge should make first.
+ */
+const MARK_TONE: Record<BadgeTone, string> = {
+  neutral: "text-ink-muted",
+  ok: "text-ok",
+  warn: "text-warn",
+  danger: "text-danger",
+  accent: "text-accent",
+};
+
 function StatusMark({ status }: { status: RunDTO["status"] }) {
   return (
-    // aria-hidden: the status word sits immediately beside it inside the same
-    // badge, so announcing the shape would read the state twice.
+    // aria-hidden: the status word sits in the badge at the other end of the
+    // same row, so announcing the shape would read the state twice.
     <svg viewBox="0 0 10 10" className="h-2.5 w-2.5 shrink-0" aria-hidden="true">
       {STATUS_GLYPH[status]}
     </svg>
@@ -201,8 +219,20 @@ export function RunCard({
     : shortPath(run.folder, 2);
 
   return (
-    <Card emphasis={run.status === "running" ? "primary" : "default"}>
-      <div className="flex items-start justify-between gap-3">
+    // Flat, whatever the run is doing. `primary` is the page's one lead card,
+    // and this component renders once per active run — so a screen with four
+    // running runs used to carry four of them, which is the state CLAUDE.md's
+    // design language describes as none of them leading. What separates a
+    // working run from a queued one is the glyph and the tone, not elevation.
+    <Card emphasis="quiet">
+      {/* The state marker leads the row, the way a native list puts it at the
+          leading edge: it is what makes eight rows separable without reading
+          any of them. The word stays in the badge at the other end, because
+          tone and shape are what a screen reader cannot see. */}
+      <div className="flex items-start gap-2.5">
+        <span className={`mt-0.5 shrink-0 ${MARK_TONE[STATUS_TONE[run.status]]}`}>
+          <StatusMark status={run.status} />
+        </span>
         <div className="min-w-0 flex-1">
           <Link
             href={`/runs/${run.id}`}
@@ -223,10 +253,7 @@ export function RunCard({
             </div>
           )}
         </div>
-        <Badge tone={STATUS_TONE[run.status]}>
-          <StatusMark status={run.status} />
-          {run.status}
-        </Badge>
+        <Badge tone={STATUS_TONE[run.status]}>{run.status}</Badge>
       </div>
 
       {/* The task is what distinguishes two runs in the same project, so it is
@@ -277,16 +304,13 @@ export function RunCard({
         </div>
       )}
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
-        {/* Geometry copied from Button/secondary rather than approximated: the
-            two sit side by side, and 2px of difference in height reads as a
-            misalignment rather than as a distinction. */}
-        <Link
-          href={`/runs/${run.id}`}
-          className="rounded-sm border border-line-strong bg-inset px-3.5 py-2 text-sm font-medium text-ink no-underline hover:border-ink-faint hover:no-underline"
-        >
-          Open
-        </Link>
+      {/* An accessory row under a hairline, the way a native list row carries
+          its actions: separated from the reading above rather than floating at
+          the bottom of a box. `ButtonLink` rather than the hand-copied
+          Button/secondary geometry it replaces — two spellings of one control
+          is how the 2px of misalignment got there in the first place. */}
+      <ButtonRow className="mt-4 border-t border-line pt-3">
+        <ButtonLink href={`/runs/${run.id}`}>Open</ButtonLink>
         {run.status === "paused" && (
           <Button
             variant="secondary"
@@ -304,7 +328,7 @@ export function RunCard({
         >
           Stop
         </Button>
-      </div>
+      </ButtonRow>
     </Card>
   );
 }
