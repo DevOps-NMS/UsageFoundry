@@ -117,6 +117,21 @@ export function pctField(f: number | null | undefined): string {
   return String(Math.round(f * 1000) / 10);
 }
 
+/**
+ * What a percentage field puts on the wire: the 0–1 fraction behind it, or
+ * `null` for "no guard". The exact inverse of `pctField`.
+ *
+ * A named function rather than the `Number(field) / 100` written at each call
+ * site, because forgetting it is silent and unbounded: `normalizePolicy`'s and
+ * `normalizeInstanceBudget`'s `frac()` both read a bare number ≤ 1 as an
+ * already-normalised fraction, so a `1` typed into a field labelled % is stored
+ * as the whole window — the smallest value the fields offer, loosened by 100×,
+ * and a guard that never trips reads exactly like one that was never reached.
+ */
+export function pctSubmit(field: string): number | null {
+  return field ? Number(field) / 100 : null;
+}
+
 export function fmtClock(ts: number): string {
   return new Date(ts).toLocaleTimeString([], {
     hour: "2-digit",
