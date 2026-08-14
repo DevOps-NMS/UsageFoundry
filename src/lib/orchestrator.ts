@@ -2505,6 +2505,12 @@ export function dependenciesOf(
  * refused by its *own* guard before its first cycle is `blocked` too, and it has
  * a `work_dir`, so re-planning one through `admitWaiting` would allocate a
  * second checkout slot and orphan the first.
+ *
+ * Which is why the ids are only ids: `reviveBlockedBlocks` asks the identical
+ * question of a workflow's deferred nodes, over the saved graph's own edges
+ * rather than `run_deps`, because such a node has no run and so no dependency
+ * rows yet. One reachability rather than two, for the reason there is one
+ * `topologicalOrder`.
  */
 export function revivableDependents(
   roots: readonly string[],
@@ -2696,6 +2702,13 @@ export function haltedWorkflowOf(runId: string): string | null {
  * workflow run is halted whole: waking one member would put an agent back to
  * work under an instance the page reports as stopped, where the instance budget
  * guard — which acts only on a `started` instance — could no longer stop it.
+ *
+ * The count is of *runs*, and the blocks are counted by the function that
+ * reopens them: half a workflow's graph is not runs at all — a node deferred
+ * behind an orchestrator or a merge block holds a row in
+ * `workflow_instance_blocks` and nothing in the candidate set above can ever
+ * name one — so `reviveBlockedBlocks` is the other half of this same question
+ * and is asked here rather than from a second call site.
  */
 export function reviveBlockedDependents(roots: readonly string[]): number {
   if (roots.length === 0) return 0;
@@ -2708,35 +2721,52 @@ export function reviveBlockedDependents(roots: readonly string[]): number {
       )
       .all() as Array<{ id: string }>
   ).map((r) => r.id);
-  if (candidates.length === 0) return 0;
 
-  const links = db()
-    .prepare("SELECT run_id AS runId, depends_on AS dependsOn, edge FROM run_deps")
-    .all() as DependencyLink[];
+  const woken: string[] = [];
+  if (candidates.length > 0) {
+    const links = db()
+      .prepare("SELECT run_id AS runId, depends_on AS dependsOn, edge FROM run_deps")
+      .all() as DependencyLink[];
 
-  const woken = revivableDependents(roots, candidates, links);
-  let n = 0;
-  for (const id of woken) {
-    const done = db()
-      .prepare(
-        "UPDATE runs SET status='waiting', finished_at=NULL, stop_reason=NULL" +
-          " WHERE id=? AND status='blocked'",
-      )
-      .run(id);
-    if (done.changes !== 1) continue;
-    n += 1;
-    emit({
-      runId: id,
-      ts: Date.now(),
-      kind: "status",
-      payload: {
-        status: "waiting",
-        message:
-          "Waiting again: a run it depends on was picked up, so what blocked it is being decided afresh.",
-      },
-    });
+    for (const id of revivableDependents(roots, candidates, links)) {
+      const done = db()
+        .prepare(
+          "UPDATE runs SET status='waiting', finished_at=NULL, stop_reason=NULL" +
+            " WHERE id=? AND status='blocked'",
+        )
+        .run(id);
+      if (done.changes !== 1) continue;
+      woken.push(id);
+      emit({
+        runId: id,
+        ts: Date.now(),
+        kind: "status",
+        payload: {
+          status: "waiting",
+          message:
+            "Waiting again: a run it depends on was picked up, so what blocked it is being decided afresh.",
+        },
+      });
+    }
   }
-  return n;
+
+  // The deferred half of every workflow those runs belong to, and the runs just
+  // woken are roots for it too: a chain runs through both tables — a node
+  // created from the ledger is an ordinary run, and what is deferred behind it
+  // is not — so a block behind a run this call revived was written off by the
+  // same ending and is the same question again.
+  //
+  // Imported here for `releaseDependents`' reason — `workflows.ts` imports this
+  // module — and not awaited for its reason either. Nothing depends on the
+  // order: what the revive reopens is only decided when the reopened run next
+  // reaches a terminal status, which is the whole of a work cycle away.
+  void import("./workflows")
+    .then((m) => m.reviveBlockedBlocks([...roots, ...woken]))
+    .catch(() => {
+      /* a workflow that cannot be reached is not a reason to refuse a reopen */
+    });
+
+  return woken.length;
 }
 
 /**
