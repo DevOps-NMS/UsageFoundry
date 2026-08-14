@@ -31,6 +31,10 @@ import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
 import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
 import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents";
+// The log's own extraction of what a tool call is about, so the parser retains
+// the same line for a call whose result comes back an error. Client-safe and
+// pure; the dependency runs the permitted way round.
+import { toolArgs } from "./logLine";
 import type { RunDependencyDTO } from "./apiTypes";
 
 /**
@@ -196,6 +200,8 @@ export interface RunEvent {
     /** A turn forwarded by `--forward-subagent-text`. See `handleStreamLine`. */
     | "subagent"
     | "tool"
+    /** A tool call that came back an error. See `toolResultFailures`. */
+    | "tool_error"
     | "iteration"
     | "budget"
     | "result"
@@ -2609,6 +2615,12 @@ export function dependenciesOf(
  * refused by its *own* guard before its first cycle is `blocked` too, and it has
  * a `work_dir`, so re-planning one through `admitWaiting` would allocate a
  * second checkout slot and orphan the first.
+ *
+ * Which is why the ids are only ids: `reviveBlockedBlocks` asks the identical
+ * question of a workflow's deferred nodes, over the saved graph's own edges
+ * rather than `run_deps`, because such a node has no run and so no dependency
+ * rows yet. One reachability rather than two, for the reason there is one
+ * `topologicalOrder`.
  */
 export function revivableDependents(
   roots: readonly string[],
@@ -2800,6 +2812,13 @@ export function haltedWorkflowOf(runId: string): string | null {
  * workflow run is halted whole: waking one member would put an agent back to
  * work under an instance the page reports as stopped, where the instance budget
  * guard — which acts only on a `started` instance — could no longer stop it.
+ *
+ * The count is of *runs*, and the blocks are counted by the function that
+ * reopens them: half a workflow's graph is not runs at all — a node deferred
+ * behind an orchestrator or a merge block holds a row in
+ * `workflow_instance_blocks` and nothing in the candidate set above can ever
+ * name one — so `reviveBlockedBlocks` is the other half of this same question
+ * and is asked here rather than from a second call site.
  */
 export function reviveBlockedDependents(roots: readonly string[]): number {
   if (roots.length === 0) return 0;
@@ -2812,35 +2831,52 @@ export function reviveBlockedDependents(roots: readonly string[]): number {
       )
       .all() as Array<{ id: string }>
   ).map((r) => r.id);
-  if (candidates.length === 0) return 0;
 
-  const links = db()
-    .prepare("SELECT run_id AS runId, depends_on AS dependsOn, edge FROM run_deps")
-    .all() as DependencyLink[];
+  const woken: string[] = [];
+  if (candidates.length > 0) {
+    const links = db()
+      .prepare("SELECT run_id AS runId, depends_on AS dependsOn, edge FROM run_deps")
+      .all() as DependencyLink[];
 
-  const woken = revivableDependents(roots, candidates, links);
-  let n = 0;
-  for (const id of woken) {
-    const done = db()
-      .prepare(
-        "UPDATE runs SET status='waiting', finished_at=NULL, stop_reason=NULL" +
-          " WHERE id=? AND status='blocked'",
-      )
-      .run(id);
-    if (done.changes !== 1) continue;
-    n += 1;
-    emit({
-      runId: id,
-      ts: Date.now(),
-      kind: "status",
-      payload: {
-        status: "waiting",
-        message:
-          "Waiting again: a run it depends on was picked up, so what blocked it is being decided afresh.",
-      },
-    });
+    for (const id of revivableDependents(roots, candidates, links)) {
+      const done = db()
+        .prepare(
+          "UPDATE runs SET status='waiting', finished_at=NULL, stop_reason=NULL" +
+            " WHERE id=? AND status='blocked'",
+        )
+        .run(id);
+      if (done.changes !== 1) continue;
+      woken.push(id);
+      emit({
+        runId: id,
+        ts: Date.now(),
+        kind: "status",
+        payload: {
+          status: "waiting",
+          message:
+            "Waiting again: a run it depends on was picked up, so what blocked it is being decided afresh.",
+        },
+      });
+    }
   }
-  return n;
+
+  // The deferred half of every workflow those runs belong to, and the runs just
+  // woken are roots for it too: a chain runs through both tables — a node
+  // created from the ledger is an ordinary run, and what is deferred behind it
+  // is not — so a block behind a run this call revived was written off by the
+  // same ending and is the same question again.
+  //
+  // Imported here for `releaseDependents`' reason — `workflows.ts` imports this
+  // module — and not awaited for its reason either. Nothing depends on the
+  // order: what the revive reopens is only decided when the reopened run next
+  // reaches a terminal status, which is the whole of a work cycle away.
+  void import("./workflows")
+    .then((m) => m.reviveBlockedBlocks([...roots, ...woken]))
+    .catch(() => {
+      /* a workflow that cannot be reached is not a reason to refuse a reopen */
+    });
+
+  return woken.length;
 }
 
 /**
@@ -2939,6 +2975,16 @@ interface IterationResult {
    */
   subagentNames: Map<string, string>;
   /**
+   * `tool_use` block id → what that call was, for the result that answers it.
+   *
+   * Parser state for `subagentNames`' reason and with its lifetime: a
+   * `tool_result` block names the id of the call and nothing else, so a failure
+   * can only be reported as "Bash: git push …" by something that saw the call.
+   * Bounded per entry rather than per cycle — the tool's name and one clipped
+   * line, never the input itself, which for a `Write` is the whole file.
+   */
+  toolCalls: Map<string, ToolCall>;
+  /**
    * Whether the CLI's terminal `result` event arrived. Cost and tokens come
    * only from that event, so when it is missing — operator stop, crash, OOM —
    * this iteration contributes $0 to the run's totals despite having burned
@@ -2946,6 +2992,24 @@ interface IterationResult {
    * figure as fact.
    */
   sawResult: boolean;
+  /**
+   * `result.subtype` verbatim, and the only machine-readable statement the CLI
+   * makes about *why* a cycle ended.
+   *
+   * Kept because one member of it has to be told apart from a crash:
+   * `error_max_budget_usd` is the cycle reaching the ceiling `buildArgs` gave
+   * it, which is this run's own spending limit arriving a cycle earlier than
+   * the pre-cycle guard would have said it. Everything else about that cycle
+   * looks like a failure — a non-zero exit, `isError` set, and the CLI's own
+   * summary latched into `apiError` — so without the subtype the run is filed
+   * as `Claude Code exited with code 1`, or worse, matched as an allowance
+   * refusal and parked for hours waiting for money that will not arrive.
+   *
+   * Not narrowed to a union. The set is the CLI's and moves with the pin, so a
+   * member this build has never heard of must arrive as itself rather than as
+   * a parse failure.
+   */
+  subtype: string | null;
   /**
    * What the provider refused with, when it refused rather than the agent
    * failing. Claude Code reports API-level errors as an assistant message
@@ -3195,6 +3259,35 @@ export function buildArgs(opts: {
   /** A run with its own checkout and branch, which is told to commit to it. */
   isolated: boolean;
   /**
+   * This run's own spending limit, and what it has already spent against it.
+   *
+   * Together they become `--max-budget-usd`, which is the only thing that
+   * bounds what *one work cycle* may spend. Everything else about
+   * `maxRunCostUSD` is read between cycles, so a run at $34.99 of a $35 limit
+   * used to be authorised for one more cycle of any size at all — the guard
+   * bounded the number of cycles that may start past the threshold and nothing
+   * bounded the amount the one crossing it spent. Concurrency multiplies that:
+   * twenty-five runs whose settings page reads $875 had no upper bound this
+   * app enforced.
+   *
+   * The arithmetic is here rather than at the call site because both ways of
+   * getting it wrong are silent. `spentGuardUSD` is the *guard* figure — the
+   * same `spentUSD + spentEstUSD` the pre-cycle check compares, never
+   * `runs.spent_usd` alone, which is a floor of what the CLI itself measured
+   * and excludes a killed cycle's reconciled estimate. Handing over a ceiling
+   * derived from the floor would give the child more room than the guard
+   * believes the run has left, which is the display-versus-guard split
+   * inverted at the one door where it costs money.
+   *
+   * `Math.max(0, …)` cannot be reached today — the pre-cycle guard blocks at
+   * `>=`, so the remainder is strictly positive by the time anything is
+   * spawned — and it stays because a negative would be a *widening*: the CLI
+   * would take it as no ceiling at all, or reject the argv, and both fail
+   * towards spending.
+   */
+  maxRunCostUSD: number | null;
+  spentGuardUSD: number;
+  /**
    * Specialised agents this run's main thread may delegate to.
    *
    * Attached rather than imposed: `--agents` *offers* these to the delegating
@@ -3238,6 +3331,15 @@ export function buildArgs(opts: {
   args.push("--disallowedTools", ...PROCESS_KILLERS);
   args.push("--append-system-prompt", SELF_HOSTING_NOTICE);
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
+  // A hard stop inside the CLI, the same mechanism a chat turn and an
+  // orchestrator block already carry — and the only one that can bound the
+  // cycle that crosses the threshold rather than the one after it. Per
+  // invocation, so a resumed session is bounded by what is left *now* rather
+  // than by what the conversation has cost since it opened.
+  if (opts.maxRunCostUSD !== null) {
+    const remaining = Math.max(0, opts.maxRunCostUSD - opts.spentGuardUSD);
+    args.push("--max-budget-usd", String(remaining));
+  }
   return args;
 }
 
@@ -3511,9 +3613,11 @@ function runIteration(
       finalText: "",
       isError: false,
       sawResult: false,
+      subtype: null,
       apiError: null,
       stderrTail: "",
       subagentNames: new Map(),
+      toolCalls: new Map(),
     };
 
     let stdoutBuf = "";
@@ -3639,6 +3743,125 @@ function parentToolUseId(
   return null;
 }
 
+/** What a `tool_use` block was, kept so the result answering it can name it. */
+export interface ToolCall {
+  name: string;
+  /** `toolArgs`' one bounded line — the command, the path, the query. */
+  command: string;
+}
+
+/** A tool call that came back an error, as the run's log records it. */
+export interface ToolFailure {
+  /** The call's own tool, or `tool` when the call was not seen this cycle. */
+  name: string;
+  command: string;
+  /** What the tool said, flattened and clipped. */
+  text: string;
+  toolUseId: string;
+  /** Present only for a delegated call — see `parentToolUseId`. */
+  parentToolUseId?: string;
+  subagent?: string;
+}
+
+/**
+ * How much of a failed tool's output is kept.
+ *
+ * Enough to name the failure — a `403 … not accessible by personal access
+ * token`, a compiler's first error — and not enough to be a log of the output.
+ * `run_events` already grows without bound, so a tool result is recorded when
+ * it failed and never otherwise.
+ */
+const TOOL_ERROR_TEXT_CHARS = 600;
+
+/**
+ * A `tool_result`'s own text. A string on the wire for most tools and an array
+ * of content blocks for the ones that answer with several (a `Task`'s report,
+ * anything returning an image beside its text) — both shapes measured against
+ * the pin, which is why neither is inferred from the other.
+ */
+function toolResultText(content: unknown): string {
+  const parts = Array.isArray(content) ? content : [content];
+  const text = parts
+    .map((part) => {
+      if (typeof part === "string") return part;
+      const block = part as { text?: unknown } | null;
+      return typeof block?.text === "string" ? block.text : "";
+    })
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return text.length > TOOL_ERROR_TEXT_CHARS
+    ? `${text.slice(0, TOOL_ERROR_TEXT_CHARS - 1)}…`
+    : text;
+}
+
+/**
+ * The failed tool calls carried by one `user` event, matched to the calls that
+ * produced them.
+ *
+ * A tool's *outcome* arrives on a later event than its call, and until this
+ * existed the whole of it was dropped: a `git push` that a token does not reach
+ * left a `tool` row saying the command was attempted, no record of the 403, and
+ * a run that finished `completed`. The operator's evidence was identical to a
+ * push that worked.
+ *
+ * Errors only, deliberately. `run_events` grows without bound and a full tool
+ * log would multiply it, where a failure is the line somebody is looking for.
+ *
+ * Pure, and separated from `handleStreamLine` for `permissionDenials`' reason:
+ * it reads a shape captured from one CLI build, every field of it is optional
+ * here, and both ways of being wrong are silent — a build that renames
+ * `is_error` must go back to recording nothing rather than filing every
+ * successful result as a failure.
+ */
+export function toolResultFailures(
+  ev: Record<string, unknown>,
+  acc: {
+    toolCalls: ReadonlyMap<string, ToolCall>;
+    subagentNames: ReadonlyMap<string, string>;
+  },
+): ToolFailure[] {
+  const message = ev.message as
+    | (Record<string, unknown> & { content?: unknown })
+    | undefined;
+  const blocks = Array.isArray(message?.content) ? message.content : [];
+
+  // Off the envelope with the message as a fallback, exactly as a forwarded
+  // turn's text is: a sub-agent's failed command must not read as the main
+  // thread's, and a key that moved has to fail towards attributing it.
+  const parent = parentToolUseId(ev, message);
+  const subagent = parent !== null ? acc.subagentNames.get(parent) : undefined;
+
+  const failures: ToolFailure[] = [];
+  for (const block of blocks) {
+    const b = block as Record<string, unknown> | null;
+    // `=== true` rather than truthiness, which is what keeps a renamed or
+    // re-typed field quiet: an undefined here is every successful tool result
+    // in the cycle, and the log would be nothing else.
+    if (b?.type !== "tool_result" || b.is_error !== true) continue;
+
+    const id = typeof b.tool_use_id === "string" ? b.tool_use_id : "";
+    // The call, when it was seen this cycle. A stream this app joined
+    // mid-conversation names the tool `tool` rather than dropping the failure:
+    // the result text is the half an operator acts on.
+    const call = id ? acc.toolCalls.get(id) : undefined;
+
+    failures.push({
+      name: call?.name ?? "tool",
+      command: call?.command ?? "",
+      text: toolResultText(b.content),
+      toolUseId: id,
+      ...(parent !== null
+        ? { parentToolUseId: parent, ...(subagent ? { subagent } : {}) }
+        : {}),
+    });
+  }
+
+  return failures;
+}
+
 /** Interpret one line of Claude Code's `stream-json` output. */
 function handleStreamLine(
   runId: string,
@@ -3740,6 +3963,15 @@ function handleStreamLine(
         if (id && typeof subagentType === "string" && subagentType) {
           acc.subagentNames.set(id, subagentType);
         }
+        // What this call was, for the result that answers it: a `tool_result`
+        // carries the id and nothing else, so a failure can only be reported as
+        // the command it failed on by something that saw the command.
+        if (id) {
+          acc.toolCalls.set(id, {
+            name: String(b.name ?? "tool"),
+            command: toolArgs(b.input),
+          });
+        }
         emit({
           runId,
           ts: Date.now(),
@@ -3772,11 +4004,29 @@ function handleStreamLine(
     return;
   }
 
-  // A forwarded sub-agent *result* — the tool output going back up. Dropped by
-  // name for the reason `thinking` is: these carry whole file reads and command
-  // output, the log already shows the call that produced them, and the main
-  // thread's own user turns have never been rendered either.
-  if (type === "user") return;
+  // Tool output going back up — the main thread's own, and a sub-agent's when
+  // `--forward-subagent-text` is on. A *successful* one is dropped by name for
+  // the reason `thinking` is: these carry whole file reads and command output,
+  // and the log already shows the call that produced them.
+  //
+  // A failed one is the exception and it is the whole of this branch. It is
+  // still not the run's own report and must not be mistaken for one, so it
+  // touches none of the three things a forwarded turn is kept out of:
+  // `finalText`, which the `DONE` test is matched against per line; `apiError`,
+  // which latches on first sight; and the `assistant` kind, which
+  // `cycleOutputs` takes the last of as the cycle's report. It has its own
+  // kind, like a delegated turn, rather than a flag on `tool`.
+  if (type === "user") {
+    for (const failure of toolResultFailures(ev, acc)) {
+      emit({
+        runId,
+        ts: Date.now(),
+        kind: "tool_error",
+        payload: { ...failure },
+      });
+    }
+    return;
+  }
 
   if (type === "result") {
     // Authoritative per-iteration accounting from the CLI itself.
@@ -3792,6 +4042,11 @@ function handleStreamLine(
       n(usage.cache_creation_input_tokens) +
       n(usage.cache_read_input_tokens);
 
+    // Recorded before it is judged. `isError` collapses every non-success
+    // subtype into one boolean, which is the right shape for the exit-code
+    // test and the wrong one for the loop's spend-ceiling branch — that has to
+    // know *which* non-success this was.
+    if (typeof ev.subtype === "string" && ev.subtype) acc.subtype = ev.subtype;
     if (ev.subtype && ev.subtype !== "success") acc.isError = true;
     if (typeof ev.result === "string" && ev.result) acc.finalText = ev.result;
 
@@ -4207,6 +4462,13 @@ export async function startRun(id: string): Promise<void> {
       // already folded into `spent_usd`.
       const cycleStartedAt = Date.now();
 
+      // Frozen here for the same reason: the ceiling this cycle is spawned
+      // with is derived from it, and the two `+=` lines after the cycle
+      // returns move it. Held so the branch that reports a cycle stopped at
+      // its ceiling can say what that ceiling was rather than recomputing it
+      // from a total that now includes the cycle itself.
+      const spentGuardBeforeCycle = spentUSD + spentEstUSD;
+
       // The same fact as the event above, on the row. The event only reaches a
       // page that is streaming this one run's log; everything that renders a
       // run as a *row* — the runs list, the run's own stat block — reads the
@@ -4229,6 +4491,12 @@ export async function startRun(id: string): Promise<void> {
         permissionMode: budget.permissionMode ?? "acceptEdits",
         resumeSessionId: sessionId,
         isolated: run.isolation === "worktree",
+        // Written out as the guard's own expression rather than passed as one
+        // number, because `buildArgs` is where the subtraction is tested and
+        // because the two halves have to be read together: this is the figure
+        // the pre-cycle check compared a few lines up, not `runs.spent_usd`.
+        maxRunCostUSD: policy.maxRunCostUSD,
+        spentGuardUSD: spentGuardBeforeCycle,
         // The run's own frozen copy, so every cycle — including one a restart
         // picks up hours later — is given exactly the specialist the operator
         // started it with, whatever has happened to the registry since.
@@ -4391,6 +4659,52 @@ export async function startRun(id: string): Promise<void> {
         // two call sites run *before* the increment above, and refunding there
         // would discount a cycle that completed.
         if (postCycle.pause) iterations -= 1;
+        break;
+      }
+
+      // This run's own spending limit, reached inside the cycle rather than
+      // between two of them. The ordering is load-bearing in both directions.
+      //
+      // *After* the interrupt check, because an operator stop or a guard kill
+      // that landed while this cycle was finishing is a decision this app made
+      // about the run, and the first interrupt wins everywhere else too.
+      //
+      // *Before* the refusal test, and that is the expensive one to get wrong.
+      // The CLI latches its own summary of a non-success `result` into
+      // `apiError`, so this cycle arrives at that test carrying a sentence
+      // about a budget — and `isUsageLimit` matches "reached your … limit"
+      // loosely on purpose, because the provider's own wall labels its windows
+      // per model and per window. A ceiling this app handed over would then be
+      // read as the subscription allowance running out, and under `live-resume`
+      // the run would park and wait hours for an allowance to refill that has
+      // nothing to do with why it stopped. `isUsageLimit` excludes `spend` and
+      // `credit` by name for that reason; it cannot also exclude every wording
+      // of a budget, and it should not have to when the CLI states the cause in
+      // a field.
+      //
+      // Not a failure and not a retry: the cycle did the work it could afford,
+      // reported its cost through `result` like any other, and stopping is the
+      // whole point. `stopped` is the word the pre-cycle `run_cost` verdict
+      // already ends a run with, and the cycle stays charged to `iterations`
+      // because it happened.
+      if (res.subtype === "error_max_budget_usd") {
+        stopReason =
+          policy.maxRunCostUSD === null
+            ? "Claude Code stopped this work cycle at a spending ceiling of its own."
+            : `This work cycle was given what was left of this run's $${policy.maxRunCostUSD.toFixed(
+                2,
+              )} spending limit after the $${spentGuardBeforeCycle.toFixed(
+                2,
+              )} already spent, and Claude Code stopped it there.`;
+        // Into the log as well as onto the row. Every other way a run ends puts
+        // a sentence in the stream — a refusal emits `error`, a tripped guard
+        // emits `budget` — and a run that simply changed status with the reason
+        // only on the row reads, in the pane the operator is watching, like a
+        // cycle that stopped for no stated reason at all. Not a `budget` event:
+        // that shape is an `evaluateBudget` verdict, and this rule was enforced
+        // by the CLI rather than decided here.
+        log(id, stopReason);
+        finalStatus = "stopped";
         break;
       }
 
@@ -4930,6 +5244,91 @@ function stopSweeper(): void {
   timers.sweep = null;
 }
 
+/* ------------------------------------------------------------------ */
+/* Deciding a parked run's fate — pure, and tested                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Which parked runs this tick decides about.
+ *
+ * A null `resume_at` is due immediately, and that is not a corner case: the
+ * column is a hint about when to look again rather than a promise, so its
+ * absence means "on the next sweep" and never "not yet".
+ *
+ * Separated from the sweep below because it is what buys the scan: nothing due
+ * means no `currentSnapshot()`, and a filter that read a null as "not yet"
+ * would leave those runs parked for ever with the sweeper reporting nothing at
+ * all — the same silence a working sweeper produces between windows.
+ */
+export function duePausedRuns<T extends { resume_at: number | null }>(
+  runs: readonly T[],
+  now: number,
+): T[] {
+  return runs.filter((r) => r.resume_at === null || now >= r.resume_at);
+}
+
+/** What the sweeper should do with one parked run. */
+export type PausedRunPlan =
+  /** Its guard cleared and nothing is in the folder: rejoin the queue. */
+  | { action: "resume" }
+  /** Its guard cleared, but a run started while it waited holds the folder. */
+  | { action: "hold"; reason: string; heldBy: string }
+  /** Still refused, by the one refusal that clears on its own. */
+  | { action: "park"; resumeAt: number }
+  /** Refused by something that can never clear: end it. */
+  | { action: "end"; reason: string };
+
+/**
+ * Why a parked run whose window has cleared is still parked.
+ *
+ * A constant, and that is load-bearing rather than terse: the sweeper's UPDATE
+ * is guarded on `stop_reason IS NOT ?`, so a sentence that varied with the run
+ * in the folder, or with the clock, would rewrite the row and write a log line
+ * every 60 seconds for every parked run. The holder's id travels in the log
+ * payload instead, where it is recorded once. `run_events` has no retention.
+ */
+const FOLDER_TAKEN_REASON =
+  "Its 5-hour window has cleared. Waiting for the folder, which a " +
+  "run started while it waited now holds.";
+
+/**
+ * What to do with one parked run, given the verdict its own guard just
+ * returned and whichever run is in its folder.
+ *
+ * Pure, and separated from the writes below for the same reason
+ * `selectPromotable` and `releasableRuns` are: every way of being wrong here is
+ * silent, lands on disk and throws nothing. Reading a `stop` as a `pause` parks
+ * a run for ever that was out of wall clock; reading a `pause` as a `stop`
+ * kills a fleet that only had to wait; and resuming into an occupied folder is
+ * the two-agents-in-one-working-tree collision the folder claim exists to
+ * prevent, arriving through the one door that is allowed to un-park a run.
+ *
+ * Occupancy is consulted only where the guard already said yes — a refusal is a
+ * fact about this run's own budget, so nothing about who holds the folder may
+ * change the answer to it.
+ */
+export function planPausedRun(
+  verdict: BudgetVerdict,
+  heldBy: string | null,
+): PausedRunPlan {
+  if (verdict.allowed) {
+    // Stay `paused` rather than joining the queue: `paused` is what the restart
+    // grace keys on, and `resume_at` is already in the past, so the next sweep
+    // re-checks and flips the moment the folder is free.
+    if (heldBy !== null) {
+      return { action: "hold", reason: FOLDER_TAKEN_REASON, heldBy };
+    }
+    return { action: "resume" };
+  }
+
+  if (verdict.disposition === "pause") return { action: "park", resumeAt: verdict.resumeAt };
+
+  // A guard that never clears — the clock, this run's own spend, the weekly
+  // window — has caught up with a parked run. End it rather than leave it
+  // holding a folder indefinitely for a resume that can never happen.
+  return { action: "end", reason: verdict.reason };
+}
+
 /**
  * Reconsider every parked run.
  *
@@ -4940,8 +5339,12 @@ function stopSweeper(): void {
  * this app cannot see, with a change to the reserved headroom, and with the
  * operator's own terminal work opening a fresh 5-hour block. The guard that
  * parked a run is the guard that clears it.
+ *
+ * Exported for the same reason the decision above is extracted: without a way
+ * in, the branch that re-queues through `promoteQueued` rather than through
+ * `startRun` cannot be pinned at all.
  */
-async function sweepPaused(): Promise<void> {
+export async function sweepPaused(): Promise<void> {
   if (timers.sweeping) return;
   timers.sweeping = true;
   try {
@@ -4953,9 +5356,7 @@ async function sweepPaused(): Promise<void> {
       return;
     }
 
-    const due = paused.filter(
-      (r) => r.resume_at === null || Date.now() >= r.resume_at,
-    );
+    const due = duePausedRuns(paused, Date.now());
     if (due.length === 0) return; // nothing to decide, so no scan
 
     const snapshot = await currentSnapshot();
@@ -4978,73 +5379,79 @@ async function sweepPaused(): Promise<void> {
         now,
       );
 
-      if (verdict.allowed) {
-        // Its window cleared, but a run admitted while it waited is in the
-        // folder now. Stay `paused` rather than joining the queue: `paused` is
-        // what the restart grace keys on, and `resume_at` is already in the
-        // past, so the next sweep re-checks and flips the moment it is free.
-        const holder = occupantOf(workDirOf(run), run.id, ["running"]);
-        if (holder) {
-          const waiting =
-            "Its 5-hour window has cleared. Waiting for the folder, which a " +
-            "run started while it waited now holds.";
+      // Only where the guard said yes, for the reason `planPausedRun` gives:
+      // occupancy cannot change a refusal, so asking would be a query per
+      // refused run per minute for an answer nothing reads. `running` alone,
+      // because a parked run yields its folder and a queued one is not in it.
+      const heldBy = verdict.allowed
+        ? occupantOf(workDirOf(run), run.id, ["running"])
+        : null;
+      const plan = planPausedRun(verdict, heldBy?.id ?? null);
+
+      switch (plan.action) {
+        case "hold": {
           // Idempotent so the reason is corrected once rather than rewritten,
           // and logged once rather than every 60 seconds.
           const noted = db()
             .prepare(
               "UPDATE runs SET stop_reason=? WHERE id=? AND status='paused' AND stop_reason IS NOT ?",
             )
-            .run(waiting, run.id, waiting);
-          if (noted.changes === 1) log(run.id, waiting, { waitingFor: holder.id });
-          continue;
+            .run(plan.reason, run.id, plan.reason);
+          if (noted.changes === 1) {
+            log(run.id, plan.reason, { waitingFor: plan.heldBy });
+          }
+          break;
         }
 
-        // Re-queue rather than start directly: `promoteQueued` owns FIFO order,
-        // folder reservation and the concurrency cap, and re-implementing any
-        // of that here is how a folder claim gets broken. Ordering by
-        // `created_at` means a resumed run keeps its original place in line.
-        const flip = db()
-          .prepare(
-            "UPDATE runs SET status='queued', resume_at=NULL WHERE id=? AND status='paused'",
-          )
-          .run(run.id);
-        if (flip.changes === 1) {
-          freed = true;
-          emit({
-            runId: run.id,
-            ts: now,
-            kind: "status",
-            payload: {
-              status: "queued",
-              message: "The 5-hour window cleared; rejoining the queue.",
-            },
+        case "resume": {
+          // Re-queue rather than start directly: `promoteQueued` owns FIFO
+          // order, folder reservation and the concurrency cap, and
+          // re-implementing any of that here is how a folder claim gets broken.
+          // Ordering by `created_at` means a resumed run keeps its place in
+          // line. `AND status='paused'` is what lets a concurrent stop win.
+          const flip = db()
+            .prepare(
+              "UPDATE runs SET status='queued', resume_at=NULL WHERE id=? AND status='paused'",
+            )
+            .run(run.id);
+          if (flip.changes === 1) {
+            freed = true;
+            emit({
+              runId: run.id,
+              ts: now,
+              kind: "status",
+              payload: {
+                status: "queued",
+                message: "The 5-hour window cleared; rejoining the queue.",
+              },
+            });
+          }
+          break;
+        }
+
+        case "park": {
+          // Re-derived from the current snapshot, not carried over: the window
+          // that will clear this run is not necessarily the one that closed it.
+          db()
+            .prepare(
+              "UPDATE runs SET resume_at = ? WHERE id = ? AND status='paused'",
+            )
+            .run(plan.resumeAt, run.id);
+          break;
+        }
+
+        case "end": {
+          setStatus(run.id, "stopped", {
+            finished_at: now,
+            stop_reason: plan.reason,
+            resume_at: null,
           });
+          // A parked run that ends here is a settled dependency like any other.
+          releaseDependents();
+          freed = true;
+          break;
         }
-        continue;
       }
-
-      if (verdict.disposition === "pause") {
-        // Re-derived from the current snapshot, not carried over: the window
-        // that will clear this run is not necessarily the one that closed it.
-        db()
-          .prepare(
-            "UPDATE runs SET resume_at = ? WHERE id = ? AND status='paused'",
-          )
-          .run(verdict.resumeAt, run.id);
-        continue;
-      }
-
-      // A guard that never clears — the clock, this run's own spend, the weekly
-      // window — has caught up with a parked run. End it rather than leave it
-      // holding a folder indefinitely for a resume that can never happen.
-      setStatus(run.id, "stopped", {
-        finished_at: now,
-        stop_reason: verdict.reason,
-        resume_at: null,
-      });
-      // A parked run that ends here is a settled dependency like any other.
-      releaseDependents();
-      freed = true;
     }
 
     if (freed) promoteQueued();

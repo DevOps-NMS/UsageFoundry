@@ -25,6 +25,7 @@ import {
   promoteQueued,
   releaseDependents,
   resolveWorkspaceFolder,
+  revivableDependents,
   signalTree,
   stopRun,
   TERMINAL_STATUSES,
@@ -3442,6 +3443,90 @@ function noteBlock(instanceId: string, nodeId: string, line: string): void {
 }
 
 /**
+ * Put every deferred node blocked behind `roots` back to `waiting`, so the next
+ * advance pass decides it again on what is true now.
+ *
+ * `reviveBlockedDependents` for the half of a graph that is not runs yet, and it
+ * exists for that function's reason exactly: a `blocked` ledger row is a
+ * sentence about an ending that reopening a run has just undone, and nothing
+ * else in this app would ever revisit it. `planInstanceStep` skips any node
+ * whose row is not `waiting`, and this is the only writer that puts one back —
+ * so without it a node deferred behind an orchestrator or a merge block is
+ * skipped for ever once anything writes it off, the instance reaches the end of
+ * its graph with the tail missing, and the row still names a failure the
+ * operator has since reversed.
+ *
+ * Deliberately not a release, the same way the run half is not: this reopens the
+ * *question*. `advanceInstance` still answers it, creating the node if the
+ * dependency now satisfies its edge and blocking it again — with a sentence
+ * about the current ending — if it does not. So the worst this can do is
+ * rewrite a stale reason.
+ *
+ * The halt exclusion is the membership condition and it is stated positively:
+ * only an instance still `started` is walked. A `stopping` one is left alone,
+ * whose every open block `haltBlocks` has just written off, and so is a `failed`
+ * one, rolled back as it was created. There is no way back into a halted
+ * workflow through a member, and this must not become one.
+ *
+ * Reachability is `revivableDependents` over the graph's own edges rather than
+ * over `run_deps`: a deferred node has no run, so it has no dependency rows yet.
+ * It walks only through the rows it is reviving, for that function's reason. A
+ * root that is an *emitted* run enters the graph at the block that emitted it —
+ * `emitted_by` — because that block's node is what the edges behind it were
+ * drawn from; the emitted run's own `node_id` names no node in the graph.
+ */
+export function reviveBlockedBlocks(roots: readonly string[]): number {
+  if (roots.length === 0) return 0;
+
+  const rows = db()
+    .prepare(
+      `SELECT w.instance_id AS instanceId,
+              COALESCE(w.emitted_by, w.node_id) AS nodeId
+         FROM workflow_instance_runs w
+         JOIN workflow_instances i ON i.id = w.instance_id
+        WHERE i.status = 'started'
+          AND w.run_id IN (${roots.map(() => "?").join(",")})`,
+    )
+    .all(...roots) as Array<{ instanceId: string; nodeId: string }>;
+  if (rows.length === 0) return 0;
+
+  const byInstance = new Map<string, string[]>();
+  for (const row of rows) {
+    const list = byInstance.get(row.instanceId);
+    if (list) list.push(row.nodeId);
+    else byInstance.set(row.instanceId, [row.nodeId]);
+  }
+
+  const reopen = db().prepare(
+    "UPDATE workflow_instance_blocks SET status='waiting', error=NULL, finished_at=NULL" +
+      " WHERE instance_id=? AND node_id=? AND status='blocked'",
+  );
+
+  let revived = 0;
+  for (const [instanceId, nodes] of byInstance) {
+    const instance = getInstance(instanceId);
+    if (!instance) continue;
+
+    const candidates = instance.blocks
+      .filter((b) => b.status === "blocked")
+      .map((b) => b.nodeId);
+    if (candidates.length === 0) continue;
+
+    const links = instance.graph.edges.map((e) => ({
+      runId: e.to,
+      dependsOn: e.from,
+      edge: e.edge,
+    }));
+    for (const nodeId of revivableDependents(nodes, candidates, links)) {
+      // Guarded on `blocked` for `upsertBlock`'s reason: a row that settled
+      // between the read and the write keeps its own answer.
+      revived += reopen.run(instanceId, nodeId).changes;
+    }
+  }
+  return revived;
+}
+
+/**
  * Move every started instance as far as it can go, right now.
  *
  * Synchronous from end to end, and that is the same requirement `createRun`'s
@@ -4670,6 +4755,63 @@ function blockSystemPrompt(
   ].join("\n");
 }
 
+/** One instance a restart found holding at least one `waiting` block. */
+export interface BootBlockInstance {
+  id: string;
+  status: WorkflowInstanceStatus;
+  /** Its member runs, as this same boot's run reconciler has just left them. */
+  memberStatuses: readonly RunStatus[];
+}
+
+/** What a restart does with each instance's `waiting` blocks. */
+export interface BootBlockPlan {
+  /** Nothing of this instance survived the boot: its blocks are closed out. */
+  abandoned: string[];
+  /** Stopping or failed before the restart: closed out, and told so. */
+  settled: string[];
+  /** A member survived the boot, so the blocks behind it are left waiting. */
+  spared: string[];
+}
+
+/**
+ * Which instances a restart leaves nothing that could ever wake a `waiting`
+ * block, and which it leaves something.
+ *
+ * The whole of `reconcileBlocksOnBoot`'s new question, pure for the reason
+ * `haltPlan` is: every way of getting it wrong typechecks, throws nothing, and
+ * is invisible until a graph settles with its tail missing weeks later. Both
+ * errors are silent and each is expensive in the opposite direction — a block
+ * spared where nothing survived sits `waiting` for ever, and a block closed out
+ * where something did survive destroys the tail of a workflow that was still
+ * working, under a sentence about a predecessor that is not true.
+ *
+ * A member is what decides it, because a member is the only thing that can
+ * still reach `releaseDependents` and so `advanceInstances`. `LIVE_STATUSES` is
+ * the same reading `liveMemberCount` and `reconcileHaltsOnBoot` take, rather
+ * than a test for `paused` — which is the only status that can be live at this
+ * point in the boot, but by way of a rule in `reconcileOnBoot` that this
+ * function must not restate.
+ *
+ * An instance that is not `started` is closed out however live its members are.
+ * Its blocks have no future either way: a `stopping` one is being taken down
+ * and `reconcileHaltsOnBoot` runs behind this on the strength of its members
+ * alone, and a `failed` one is `startWorkflow`'s own rollback, which wrote
+ * every other block off already. Reviving half a graph nobody finished building
+ * is the failure the positive test for `started` exists to have none of.
+ */
+export function bootBlockPlan(
+  instances: readonly BootBlockInstance[],
+): BootBlockPlan {
+  const plan: BootBlockPlan = { abandoned: [], settled: [], spared: [] };
+  for (const instance of instances) {
+    if (instance.status !== "started") plan.settled.push(instance.id);
+    else if (instance.memberStatuses.some((s) => LIVE_STATUSES.includes(s)))
+      plan.spared.push(instance.id);
+    else plan.abandoned.push(instance.id);
+  }
+  return plan;
+}
+
 /**
  * Close out block turns a restart left mid-flight.
  *
@@ -4680,13 +4822,31 @@ function blockSystemPrompt(
  * ever wake it — and re-deciding unattended, hours later, is spend nobody is
  * present to want, which is the queued-run rule arrived at from the other side.
  *
- * Every `waiting` row goes, not only the ones directly behind a `thinking` one,
- * and that is what keeps this consistent with the queued-run rule rather than
- * merely similar to it. A block behind a fan-out whose runs the same boot has
- * just failed could otherwise be released by the next advance — `on-finish` is
- * satisfied by a run that did a cycle and then died with the container — and
- * what that starts is an unattended agent nobody is present to have wanted.
- * Closed out, there is nothing left for a pass to release.
+ * Every `waiting` row of such an instance goes, not only the ones directly
+ * behind a `thinking` one, and that is what keeps this consistent with the
+ * queued-run rule rather than merely similar to it. A block behind a fan-out
+ * whose runs the same boot has just failed could otherwise be released by the
+ * next advance — `on-finish` is satisfied by a run that did a cycle and then
+ * died with the container — and what that starts is an unattended agent nobody
+ * is present to have wanted. Closed out, there is nothing left for a pass to
+ * release.
+ *
+ * **Unless a member survived the same boot**, which is `reconcileOnBoot`'s own
+ * exception rather than a second one: a `paused` run inside
+ * `settings.resumeGraceHours` is kept, because it is a run the operator started
+ * in a mode chosen precisely so it would carry on across a restart, and the
+ * sweeper resumes it. Every premise above fails for the blocks behind it —
+ * nothing it waits for has been closed out, something *will* wake it, and the
+ * agent the next advance starts is the one the operator is already paying for
+ * and waiting on. Closing them out anyway wrote off the tail of a live graph
+ * and recorded a sentence about the paused run that was not true. So the
+ * question is asked per instance, and this pass mirrors that grace rather than
+ * overriding it; the block itself is decided later by `planInstanceStep`, off
+ * what is actually true when the member settles.
+ *
+ * Ordering makes that readable rather than guessed at: `src/instrumentation.ts`
+ * runs `reconcileOnBoot` first, so a run row that is still live here is one that
+ * boot decided to keep.
  */
 export function reconcileBlocksOnBoot(): void {
   const now = Date.now();
@@ -4705,18 +4865,77 @@ export function reconcileBlocksOnBoot(): void {
       "The server restarted while this block was landing branches. Its queued merges were cancelled — check the branches before queueing them again.",
       "The server restarted while this block was deciding what to start.",
     ).changes;
-  const waiting = db()
-    .prepare(
-      "UPDATE workflow_instance_blocks SET status='blocked', finished_at=?," +
-        " error='The server restarted while this block was waiting for another block, and that block was closed out by the same restart.'" +
-        " WHERE status='waiting'",
-    )
-    .run(now).changes;
 
-  if (thinking + waiting === 0) return;
-  console.warn(
-    `[usagefoundry] Closed out ${thinking + waiting} workflow block(s) interrupted by a restart.`,
+  // Read after the sweep above, so a block that was deciding counts as the
+  // decision that will never arrive rather than as something still to come.
+  // One row per member; instances with no `waiting` block are not asked about.
+  const rows = db()
+    .prepare(
+      `SELECT i.id AS id, i.status AS status, r.status AS memberStatus
+         FROM workflow_instances i
+         LEFT JOIN workflow_instance_runs w ON w.instance_id = i.id
+         LEFT JOIN runs r ON r.id = w.run_id
+        WHERE EXISTS (SELECT 1 FROM workflow_instance_blocks b
+                       WHERE b.instance_id = i.id AND b.status = 'waiting')`,
+    )
+    .all() as Array<{
+    id: string;
+    status: WorkflowInstanceStatus;
+    memberStatus: RunStatus | null;
+  }>;
+  const gathered = new Map<
+    string,
+    { status: WorkflowInstanceStatus; memberStatuses: RunStatus[] }
+  >();
+  for (const row of rows) {
+    let entry = gathered.get(row.id);
+    if (!entry) {
+      entry = { status: row.status, memberStatuses: [] };
+      gathered.set(row.id, entry);
+    }
+    if (row.memberStatus) entry.memberStatuses.push(row.memberStatus);
+  }
+  const plan = bootBlockPlan(
+    [...gathered].map(([id, entry]) => ({ id, ...entry })),
   );
+
+  const closeOut = (ids: readonly string[], error: string): number => {
+    if (ids.length === 0) return 0;
+    return db()
+      .prepare(
+        "UPDATE workflow_instance_blocks SET status='blocked', finished_at=?, error=?" +
+          ` WHERE status='waiting' AND instance_id IN (${ids.map(() => "?").join(",")})`,
+      )
+      .run(now, error, ...ids).changes;
+  };
+  const waiting =
+    closeOut(
+      plan.abandoned,
+      "The server restarted while this block was waiting for earlier work, and everything this workflow still had in flight was closed out by the same restart.",
+    ) +
+    closeOut(
+      plan.settled,
+      "The server restarted while this block was waiting for earlier work, and its workflow was no longer running.",
+    );
+
+  if (thinking + waiting > 0) {
+    console.warn(
+      `[usagefoundry] Closed out ${thinking + waiting} workflow block(s) interrupted by a restart.`,
+    );
+  }
+  if (plan.spared.length > 0) {
+    // Every `waiting` row left is one of theirs, both statements above having
+    // run — so this is counted rather than carried through the plan.
+    const left = db()
+      .prepare(
+        "SELECT COUNT(*) AS n FROM workflow_instance_blocks WHERE status='waiting'",
+      )
+      .get() as { n: number };
+    console.warn(
+      `[usagefoundry] Left ${left.n} workflow block(s) waiting in ${plan.spared.length} ` +
+        "instance(s) with a run that survived the restart; they are decided when it settles.",
+    );
+  }
 }
 
 /**

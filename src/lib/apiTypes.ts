@@ -972,6 +972,15 @@ export interface RunEventDTO {
      */
     | "subagent"
     | "tool"
+    /**
+     * A tool call that came back an error, named with the command it failed on.
+     *
+     * Its own kind rather than a flag on `tool` for `subagent`'s reason: a call
+     * and its outcome are two statements, the log sets them differently, and a
+     * failure filed as a call is a row an operator reads as an attempt that
+     * went fine. Errors only — a successful result is not recorded at all.
+     */
+    | "tool_error"
     | "iteration"
     | "budget"
     | "result"
