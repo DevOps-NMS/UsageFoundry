@@ -84,6 +84,11 @@ export async function GET(req: Request) {
         entryCount: entries.length,
         unpricedModels: scan.unpricedModels,
         scannedAt: scan.scannedAt,
+        // Capped for the reason a shortened diff is, and the count is the whole
+        // set so the page can say how much it is not showing. Every figure on
+        // this response is a floor while this is non-empty.
+        readFailures: scan.readFailures.slice(0, 5),
+        readFailureCount: scan.readFailures.length,
         // What this process is holding, and what V8 will let it hold. The
         // transcript cache is the largest thing on this heap by a wide margin
         // and used to grow with every turn ever written, so the two are read

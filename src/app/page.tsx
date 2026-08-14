@@ -710,6 +710,35 @@ export default function Dashboard() {
         </Notice>
       )}
 
+      {/* Loud rather than quiet: every number on this page — and every budget
+          verdict taken since — is short by however much was behind these
+          paths, and the two ordinary reasons are a permissions mismatch on the
+          mounted ~/.claude and a descriptor limit. Neither announces itself
+          anywhere else. */}
+      {meta.readFailureCount > 0 && (
+        <Notice tone="warn">
+          <strong>
+            {meta.readFailureCount.toLocaleString()}{" "}
+            {meta.readFailureCount === 1 ? "path" : "paths"} could not be read:
+          </strong>{" "}
+          {meta.readFailures.map((f, i) => (
+            <span key={f.path}>
+              {i > 0 && ", "}
+              <span className="mono">{f.path}</span> ({f.message})
+            </span>
+          ))}
+          {meta.readFailureCount > meta.readFailures.length && (
+            <>
+              , and {(meta.readFailureCount - meta.readFailures.length).toLocaleString()}{" "}
+              more
+            </>
+          )}
+          . Every figure here is short by whatever those hold, and a run's budget
+          guard reads the same scan — so it is measuring against a total that is
+          too low.
+        </Notice>
+      )}
+
       {/* Shown only while it is true, unlike the blind-spot notice below: this
           one is a state an operator can act on, and it says which way the
           trade went — correctness kept, refresh cost paid. */}

@@ -25,7 +25,7 @@ import {
   evaluateBudget,
   normalizePolicy,
 } from "./budget";
-import { scanUsage, type UsageEntry } from "./transcripts";
+import { lastScanReadFailures, scanUsage, type UsageEntry } from "./transcripts";
 import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
@@ -4307,6 +4307,24 @@ export async function startRun(id: string): Promise<void> {
       }
 
       const snapshot = await currentSnapshot();
+
+      // A scan that could not read part of the tree answers with a short entry
+      // list, and short understates every window below — which is the direction
+      // that lets a guard admit a cycle it should have refused. Say so on the
+      // run's own log, because the `budget` event beneath this one is
+      // indistinguishable from a clean reading of a quiet week.
+      const scanFailures = lastScanReadFailures();
+      if (scanFailures.length > 0) {
+        log(
+          id,
+          `Budget evaluated against a partial transcript scan: ${scanFailures.length} ` +
+            `${scanFailures.length === 1 ? "path" : "paths"} could not be read ` +
+            `(${scanFailures[0].path}: ${scanFailures[0].message}). The window ` +
+            `figures below are a floor.`,
+          { readFailures: scanFailures.length },
+        );
+      }
+
       const verdict: BudgetVerdict = evaluateBudget(
         policy,
         snapshot,

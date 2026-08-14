@@ -173,6 +173,13 @@ export interface UsageResponse {
     unpricedModels: string[];
     scannedAt: number;
     /**
+     * Paths the last scan could not read, capped — `readFailureCount` is the
+     * whole set. Anything here means every cost, token and percentage on this
+     * response is short by an unknown amount.
+     */
+    readFailures: { path: string; message: string }[];
+    readFailureCount: number;
+    /**
      * This process's own footprint, so the heap is readable without attaching a
      * debugger to a container that has usually already died by then.
      */

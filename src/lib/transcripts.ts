@@ -140,24 +140,52 @@ const inflight: Map<string, Promise<FileCacheEntry>> =
   globalInflight.__ufTranscriptInflight ??
   (globalInflight.__ufTranscriptInflight = new Map());
 
+/**
+ * Something under the projects directory could not be read.
+ *
+ * Carried rather than swallowed because every one of these shortens the entry
+ * list a scan answers with, and a short entry list understates every window —
+ * which is the direction that lets `evaluateBudget` admit a run it should have
+ * refused. A file with nothing new in it and a file that could not be opened
+ * both used to look like the same `null`.
+ */
+export interface ScanReadFailure {
+  /** Absolute path of the file or directory. */
+  path: string;
+  message: string;
+}
+
+function failureMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** Recursively collect *.jsonl paths under the projects directory. */
-async function listTranscriptFiles(root: string): Promise<string[]> {
-  const out: string[] = [];
+async function listTranscriptFiles(
+  root: string,
+): Promise<{ files: string[]; failures: ScanReadFailure[] }> {
+  const files: string[] = [];
+  const failures: ScanReadFailure[] = [];
   async function walk(dir: string) {
     let dirents;
     try {
       dirents = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return; // missing or unreadable — treat as empty
+    } catch (err) {
+      // A missing projects directory is the ordinary state of a fresh install
+      // and says nothing; an unreadable one hides however many transcripts are
+      // under it. Reported apart because only the second is a short history.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        failures.push({ path: dir, message: failureMessage(err) });
+      }
+      return;
     }
     for (const d of dirents) {
       const full = path.join(dir, d.name);
       if (d.isDirectory()) await walk(full);
-      else if (d.isFile() && d.name.endsWith(".jsonl")) out.push(full);
+      else if (d.isFile() && d.name.endsWith(".jsonl")) files.push(full);
     }
   }
   await walk(root);
-  return out;
+  return { files, failures };
 }
 
 function readTokens(usage: Record<string, unknown>): TokenCounts {
@@ -336,6 +364,35 @@ export interface ScanResult {
   /** Distinct model strings seen that we have no price for. */
   unpricedModels: string[];
   scannedAt: number;
+  /**
+   * What this scan could not read. Empty is the normal case; anything in it
+   * means `entries` is short by an unknown amount and every figure derived from
+   * it is a floor.
+   */
+  readFailures: ScanReadFailure[];
+}
+
+/** Pinned across hot reloads for the reason the cache is. */
+const globalScanHealth = globalThis as unknown as {
+  __ufScanHealth?: { readFailures: ScanReadFailure[] };
+};
+const scanHealth =
+  globalScanHealth.__ufScanHealth ??
+  (globalScanHealth.__ufScanHealth = { readFailures: [] });
+
+/**
+ * What the most recently completed scan could not read.
+ *
+ * A second way to reach the same field `ScanResult` already carries, for the
+ * callers that are handed a `UsageSnapshot` instead of a scan —
+ * `currentSnapshot()`, and through it the pre-cycle budget guard, which is the
+ * one caller that most needs to know its history was short. Threading a second
+ * return value through that function and its eight call sites would be a wider
+ * change than the fact deserves. Scans are coalesced, so what this answers with
+ * is the scan the caller just awaited or a newer one.
+ */
+export function lastScanReadFailures(): ScanReadFailure[] {
+  return scanHealth.readFailures;
 }
 
 /**
@@ -432,18 +489,76 @@ export function transcriptCacheStats(): TranscriptCacheStats {
   };
 }
 
+/**
+ * Transcript files read at once.
+ *
+ * `readAppended` holds one file descriptor and one `Buffer` sized to the file's
+ * whole unread remainder for the duration of its read, and libuv services the
+ * threadpool roughly FIFO — so every `open` in an unbounded fan-out completes
+ * before the first `close` runs, and both the buffers and the descriptors
+ * coexist. Peak memory was therefore the size of the tree and peak descriptors
+ * its file count, which is what every restart pays: the cache is process-local,
+ * so the first scan after one reads every file from byte 0. Twelve puts the
+ * ceiling at roughly twelve times the largest single transcript and twelve
+ * descriptors, neither of which is a function of how much history is on disk.
+ *
+ * Bounding this is also what stops the failure being silent. Past a 1024-fd
+ * `nofile` — a common container default, and `docker-compose.yml` sets no
+ * `ulimits:` — the opens past the limit simply failed, and the scan answered
+ * with a short entry list that understated every window the guard reads.
+ */
+export const SCAN_CONCURRENCY = 12;
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight, results in input order.
+ *
+ * A worker pool rather than chunked `Promise.all` batches: a batch runs at the
+ * speed of its slowest member and leaves the other eleven slots idle, and
+ * transcript sizes vary by three orders of magnitude.
+ */
+async function mapWithLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+  );
+  return out;
+}
+
 async function runScan(): Promise<ScanResult> {
-  const files = await listTranscriptFiles(PROJECTS_DIR);
+  const { files, failures: walkFailures } = await listTranscriptFiles(PROJECTS_DIR);
 
   // A transcript that is no longer on disk will never be read again, so its
   // records are retention with nothing behind them. Dropped here rather than in
   // `evictToBound`, which is about the bound: this one is free whatever the
   // cache is holding.
-  const present = new Set(files);
-  for (const file of cache.keys()) if (!present.has(file)) cache.delete(file);
+  //
+  // Only when the walk itself was clean, though: a directory that could not be
+  // read is not an empty directory, and pruning against a partial listing would
+  // throw away the records of every file under it — costing a full re-read of
+  // the tree the moment the directory came back.
+  if (walkFailures.length === 0) {
+    const present = new Set(files);
+    for (const file of cache.keys()) if (!present.has(file)) cache.delete(file);
+  }
 
-  const results = await Promise.all(
-    files.map((f) => refreshFile(f).catch(() => null)),
+  const readFailures: ScanReadFailure[] = [...walkFailures];
+  const results = await mapWithLimit(files, SCAN_CONCURRENCY, (f) =>
+    refreshFile(f).catch((err) => {
+      readFailures.push({ path: f, message: failureMessage(err) });
+      return null;
+    }),
   );
 
   // Dedupe across files: a resumed session copies earlier turns into the new
@@ -469,10 +584,13 @@ async function runScan(): Promise<ScanResult> {
   // still in memory when the next one starts.
   evictToBound();
 
+  scanHealth.readFailures = readFailures;
+
   return {
     entries,
     fileCount: files.length,
     unpricedModels: [...unpriced],
     scannedAt: Date.now(),
+    readFailures,
   };
 }
