@@ -98,6 +98,7 @@ rather than with your settings. What each one is bounded by is on
 | Store | Where | Grows with | Kept for |
 |---|---|---|---|
 | Run logs (`run_events`, telemetry) | the `usagefoundry-data` named volume | tool calls, replies, agent stderr | 30 days after a run finishes |
+| Isolated checkouts (`.uf-worktrees`) | **your workspace**, beside your own code | one per concurrent run per repository | 7 days after the run finishes |
 
 The horizons are per store because the media are. Blank means *keep for ever*,
 which is what shipped before this existed. **A run that has not finished is
@@ -111,6 +112,16 @@ agent's own build output comes to, and a stored tool input is cut at 4 KB, so a
 busy single-operator install settles around a few hundred megabytes. Twenty-five
 concurrent runs is ~11,000 tool events an hour: about **1 GB a week** at the
 30-day default, an order of magnitude more without one.
+
+Checkouts are the big one and they are on *your* disk. A Node repository with
+its dependencies installed is 300 MB–1.5 GB, and every concurrent run on a
+repository takes its own — so a day of 25 runs is tens of gigabytes on the
+volume holding your real work. **Reclaiming one removes only the directory**:
+its branch, its commits and anything not yet landed stay in the repository, and
+a checkout an active run holds, or one with uncommitted work in it, or one whose
+branch still carries commits its target does not have, is never touched. What
+you lose by reclaiming is the installed dependency tree the next run in that
+slot would have reused, which is why the horizon is a week rather than a day.
 
 **Backing it up.** The `usagefoundry-data` volume holds the only copy of every
 run's history, every template, every workflow and your settings. Nothing here

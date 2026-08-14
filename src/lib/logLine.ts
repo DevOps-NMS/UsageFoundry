@@ -347,6 +347,18 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
     }
 
     case "land": {
+      // Before `deleted`, and it is deliberately not one: the retention sweep
+      // removes the *directory* and leaves the branch and every commit on it
+      // exactly where they were. A row that read as a deletion would say this
+      // app destroyed work it did not touch.
+      if (p.reclaimed) {
+        return {
+          voice: "system",
+          tone: "neutral",
+          label: "checkout reclaimed",
+          text: `${p.worktreeRemoved} — ${p.branch ?? "the branch"} is untouched`,
+        };
+      }
       if (p.purged) {
         return {
           voice: "system",

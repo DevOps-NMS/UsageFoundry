@@ -85,6 +85,7 @@ const PROBES: Record<keyof Settings, Probe> = {
   killProcessGroup: { send: false },
   chatTurnBudgetUSD: { send: 7 },
   eventRetentionDays: { send: 14 },
+  checkoutRetentionDays: { send: 3 },
   chatDefaultGuards: {
     send: {
       permissionMode: "plan",

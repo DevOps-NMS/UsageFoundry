@@ -1224,6 +1224,16 @@ export function probeIsolation(folder: string): IsolationPlan {
   return { mode: "worktree", repoRoot, base: head.stdout, baseBranch };
 }
 
+/**
+ * The store's own directory name, as a value.
+ *
+ * One spelling, because the retention sweep and the size figure beside it both
+ * name this directory from the mount rather than from a repository — and a
+ * second copy of the literal is a directory this app would create and never
+ * find again.
+ */
+export const WORKTREE_STORE_DIR = ".uf-worktrees";
+
 /** Where a repo's isolated checkouts live: a hidden sibling inside the mount. */
 function worktreeStore(repoRoot: string): string | null {
   const { mountId } = describeFolder(repoRoot);
@@ -1232,7 +1242,27 @@ function worktreeStore(repoRoot: string): string | null {
   // Dotfile-prefixed so `/api/folders` never offers a checkout as a run target,
   // and outside the repo so it cannot show up in `git status` or be swept into
   // a commit as a gitlink.
-  return path.join(realMountPath(mount), ".uf-worktrees");
+  return path.join(realMountPath(mount), WORKTREE_STORE_DIR);
+}
+
+/** Every mount's checkout store, deduplicated by the tree it really names. */
+export function worktreeStores(): Array<{
+  mountId: string;
+  label: string;
+  path: string;
+}> {
+  const seen = new Set<string>();
+  const stores: Array<{ mountId: string; label: string; path: string }> = [];
+  for (const mount of WORKSPACE_MOUNTS) {
+    // Two mounts can be one host directory — compose defaults `UF_WORKSPACE_2..4`
+    // to `${UF_WORKSPACE}` — and a figure that counted such a store twice would
+    // report double the bytes an operator can actually reclaim.
+    const store = path.join(realMountPath(mount), WORKTREE_STORE_DIR);
+    if (seen.has(store)) continue;
+    seen.add(store);
+    stores.push({ mountId: mount.id, label: mount.label, path: store });
+  }
+  return stores;
 }
 
 /**

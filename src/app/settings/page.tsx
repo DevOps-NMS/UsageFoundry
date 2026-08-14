@@ -167,6 +167,7 @@ const EDITABLE_PATHS = [
   "resumeGraceHours",
   "telemetryForRuns",
   "eventRetentionDays",
+  "checkoutRetentionDays",
 ] as const;
 
 /**
@@ -542,7 +543,7 @@ function StorageFigures({
   }
   if (!report) return <Empty>Measuring…</Empty>;
 
-  const { database, lastSweep } = report;
+  const { database, checkouts, lastSweep } = report;
   return (
     <ListGroup
       label="On disk now"
@@ -555,8 +556,9 @@ function StorageFigures({
           {lastSweep && (
             <>
               . Last swept {ago(lastSweep.at)} — {lastSweep.events.toLocaleString()}{" "}
-              log rows and {lastSweep.telemetry.toLocaleString()} telemetry rows
-              discarded
+              log rows, {lastSweep.telemetry.toLocaleString()} telemetry rows and{" "}
+              {lastSweep.checkouts} checkout
+              {lastSweep.checkouts === 1 ? "" : "s"} discarded
             </>
           )}
         </>
@@ -570,6 +572,22 @@ function StorageFigures({
           {fmtBytes(database.bytes + database.walBytes)}
         </span>
       </ListRow>
+
+      {checkouts.map((store) => (
+        <ListRow
+          key={store.path}
+          label={`Checkouts — ${store.label}`}
+          description={`${store.path} — ${store.count} checkout${store.count === 1 ? "" : "s"}`}
+        >
+          <span className="tabular-nums text-sm">
+            {/* "at least", because the walk is bounded: a store of installed
+                dependency trees is millions of files, and a figure that stopped
+                counting has to say so rather than read as the total. */}
+            {store.partial ? "≥ " : ""}
+            {fmtBytes(store.bytes)}
+          </span>
+        </ListRow>
+      ))}
     </ListGroup>
   );
 }
@@ -1873,6 +1891,30 @@ export default function SettingsPage() {
                 onChange={(e) =>
                   patch({
                     eventRetentionDays:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="coret"
+            edited={isEdited("checkoutRetentionDays")}
+            label="Reclaim an idle checkout after"
+            description="A finished run's worktree, once its branch is landed or has no commits of its own. The branch and its commits stay; what goes is the directory, which git rebuilds in seconds — with the installed dependencies that are most of its size"
+          >
+            <div className="w-32">
+              <Input
+                id="coret"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="days"
+                value={numOrEmpty(effective.checkoutRetentionDays)}
+                onChange={(e) =>
+                  patch({
+                    checkoutRetentionDays:
                       e.target.value === "" ? null : Number(e.target.value),
                   })
                 }

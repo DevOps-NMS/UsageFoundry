@@ -269,6 +269,25 @@ export interface Settings {
    */
   eventRetentionDays: number | null;
   /**
+   * How long an idle isolated checkout is kept, in days. Null keeps it always.
+   *
+   * The second horizon, and the one on the operator's *own* disk: checkouts
+   * accumulate in `<mount>/.uf-worktrees`, the slot cap is 64 per repository
+   * and the store is shared per mount, so fifteen repositories have a ceiling
+   * of 960 full checkouts in one directory — with their `node_modules`, which
+   * `git status` cannot see and which is most of the bytes. Nothing removed one
+   * except an operator pressing Delete or Purge on a branch, so "recoverable"
+   * and "leaked" were the same state.
+   *
+   * Shorter than the other two because a checkout is the cheapest of the three
+   * to lose: `worktree add` rebuilds it in seconds from commits that are still
+   * in the repository. What it costs is the dependency tree the next run in
+   * that slot would have reused, which is why this is a week rather than a day
+   * — slot reuse is what makes isolation practical, and a horizon short enough
+   * to break it would trade disk for a re-install per run.
+   */
+  checkoutRetentionDays: number | null;
+  /**
    * What an agent may do when a chat proposal names no template.
    *
    * The chat used to be able to propose only against a saved template, which
@@ -429,6 +448,7 @@ const DEFAULTS: Settings = {
   killProcessGroup: true,
   chatTurnBudgetUSD: 2,
   eventRetentionDays: 30,
+  checkoutRetentionDays: 7,
   chatDefaultGuards: DEFAULT_CHAT_GUARDS,
 };
 

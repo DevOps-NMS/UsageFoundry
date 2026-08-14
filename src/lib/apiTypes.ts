@@ -1272,6 +1272,8 @@ export interface SettingsDTO {
   chatTurnBudgetUSD: number | null;
   /** How long a settled run's event log is kept. Null keeps it for ever. */
   eventRetentionDays: number | null;
+  /** How long an idle isolated checkout is kept. Null keeps it for ever. */
+  checkoutRetentionDays: number | null;
   /** What a chat proposal runs under when it names no template. */
   chatDefaultGuards: RunGuardsDTO;
 }
@@ -1293,10 +1295,21 @@ export interface StorageReportDTO {
     runEvents: number;
     telemetryRows: number;
   };
+  /** One entry per mount's `.uf-worktrees`. */
+  checkouts: Array<{
+    mountId: string;
+    label: string;
+    path: string;
+    count: number;
+    bytes: number;
+    /** The walk hit its budget: `bytes` is a floor, never a total. */
+    partial: boolean;
+  }>;
   lastSweep: {
     at: number;
     events: number;
     telemetry: number;
+    checkouts: number;
   } | null;
 }
 

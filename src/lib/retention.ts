@@ -1,8 +1,18 @@
 import fs from "node:fs";
+import fsp from "node:fs/promises";
+import path from "node:path";
 
 import { DB_PATH } from "./config";
 import { db, getJSON, setJSON } from "./db";
-import { TERMINAL_STATUSES } from "./orchestrator";
+import { git } from "./git";
+import {
+  activeRuns,
+  describeFolder,
+  emitRunEvent,
+  resolveWorkspaceFolder,
+  TERMINAL_STATUSES,
+  worktreeStores,
+} from "./orchestrator";
 import { getSettings } from "./settings";
 
 /**
@@ -64,6 +74,8 @@ export interface RetentionSweep {
   events: number;
   /** Rows removed from `otlp_requests`. */
   telemetry: number;
+  /** Isolated checkouts removed from the mounts' stores. */
+  checkouts: number;
 }
 
 export function lastSweep(): RetentionSweep | null {
@@ -136,6 +148,334 @@ export function sweepRunEvents(now = Date.now()): {
 }
 
 /* ------------------------------------------------------------------ */
+/* Isolated checkouts — the decision, which is pure                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One checkout in a mount's store, as everything that decides about it sees it.
+ *
+ * Assembled from the database first and git second, in that order deliberately:
+ * the two cheap facts — is anything live in it, and is it even old enough —
+ * settle most candidates without a process, and the two that cost a git call
+ * are only asked about what survives.
+ */
+export interface CheckoutCandidate {
+  /** The checkout directory, exactly as `runs.worktree_path` records it. */
+  slotPath: string;
+  /** The newest run recorded in this slot. */
+  runId: string;
+  /** That run's status. */
+  status: string;
+  /** When it finished, or null if it never did. */
+  finishedAt: number | null;
+  /** An active run — `running`, `queued` or `paused` — holds this slot now. */
+  heldByActiveRun: boolean;
+  /** `git status --porcelain` was readable and empty. `slotIsDirty`'s rule. */
+  clean: boolean;
+  /**
+   * The branch it holds carries nothing that is not already in its target:
+   * landed, merged, or never committed to at all.
+   */
+  branchSettled: boolean;
+  /** A run that has not started yet is set to carry that branch on. */
+  chained: boolean;
+}
+
+export type CheckoutVerdict =
+  | { action: "remove" }
+  | { action: "keep"; reason: string };
+
+/**
+ * Whether one checkout may be reclaimed, and the sentence for why not.
+ *
+ * Pure and separated from the `worktree remove` below for `selectPromotable`'s
+ * reason: both ways of being wrong land on somebody's disk and neither throws.
+ * Removing one too eagerly destroys an agent's uncommitted work in a directory
+ * the operator never looks at; removing none leaves `64 × repositories` full
+ * checkouts on the volume that holds their real source, and the first symptom
+ * of that is their own `git checkout` failing to write.
+ *
+ * The order is cheapest-first and the last two are the ones that cost a git
+ * call. Every clause is a *keep*, so a candidate this function has not been
+ * told enough about is never removed.
+ */
+export function planCheckoutReclaim(
+  c: CheckoutCandidate,
+  now: number,
+  cutoff: number | null,
+): CheckoutVerdict {
+  if (cutoff === null) return { action: "keep", reason: "retention is off" };
+
+  // Two separate readings of "a live run is in there", because they can
+  // disagree: the newest row recorded in a slot need not be the run holding it,
+  // since a run released from `waiting` days later takes whatever slot is free.
+  if (c.heldByActiveRun) {
+    return { action: "keep", reason: "an active run holds this checkout" };
+  }
+  if (!(TERMINAL_STATUSES as readonly string[]).includes(c.status)) {
+    return { action: "keep", reason: `run ${c.runId.slice(0, 8)} is ${c.status}` };
+  }
+
+  // A terminal row with no finish time is a run something closed out without
+  // stamping one. There is no age to measure, so there is no horizon to be past.
+  if (c.finishedAt === null) {
+    return { action: "keep", reason: "no finish time recorded" };
+  }
+  if (c.finishedAt > cutoff) {
+    const days = Math.max(1, Math.round((now - c.finishedAt) / DAY_MS));
+    return { action: "keep", reason: `finished ${days} day(s) ago` };
+  }
+
+  // `slotIsDirty`'s rule, and the one this sweep must never weaken: unreadable
+  // counts as dirty, because refusing to reclaim is the recoverable mistake and
+  // `git status` cannot see the gitignored files that are most of the bytes.
+  if (!c.clean) {
+    return { action: "keep", reason: "uncommitted work in the checkout" };
+  }
+
+  // A run that has not started yet is going to want this branch. Removing the
+  // checkout would not take the branch — `worktree remove` leaves the ref
+  // alone, and `ensureWorktree` would attach it to a fresh slot — but it would
+  // throw away the one thing the reuse is for, on behalf of a run that is
+  // already scheduled to want it.
+  if (c.chained) {
+    return { action: "keep", reason: "a run is set to carry its branch on" };
+  }
+
+  // The only clause about work rather than about state, and the reason this is
+  // a *reclaim* rather than a delete: everything in a settled branch's checkout
+  // is either committed to a branch that is going nowhere, or already in the
+  // target. Nothing here removes either.
+  if (!c.branchSettled) {
+    return { action: "keep", reason: "its branch has commits that are not in its target" };
+  }
+
+  return { action: "remove" };
+}
+
+/** Which of these checkouts may go. The list a sweep acts on. */
+export function reclaimableCheckouts(
+  candidates: readonly CheckoutCandidate[],
+  now: number,
+  cutoff: number | null,
+): string[] {
+  return candidates
+    .filter((c) => planCheckoutReclaim(c, now, cutoff).action === "remove")
+    .map((c) => c.slotPath);
+}
+
+/* ------------------------------------------------------------------ */
+/* Isolated checkouts — the sweep, which is not                        */
+/* ------------------------------------------------------------------ */
+
+/** Checkouts examined per sweep. Each costs two git processes at most. */
+const MAX_RECLAIM_PROBES = 40;
+
+/** Re-prove a stored repository path inside its mount, as the run loop does. */
+function repoPathFor(dir: string): string | null {
+  try {
+    const resolved = resolveWorkspaceFolder(dir, describeFolder(dir).mountId);
+    return resolved === dir ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reclaim the checkouts of settled runs whose branches have nowhere left to go.
+ *
+ * `worktree remove` without `--force`, which is deliberate twice over: it is
+ * git's own second opinion on the cleanliness this already checked, and it
+ * removes the *directory* — including the gitignored `node_modules` that made
+ * the store worth sweeping — while leaving the branch and every commit on it
+ * exactly where they were. Nothing here can destroy work that is not already
+ * in the target.
+ *
+ * Bounded per sweep rather than exhaustive: this runs on the same event loop as
+ * the live guard's ticker, and a store that is over its horizon by a hundred
+ * checkouts is over it by sixty after one pass and by nothing after two.
+ */
+export async function sweepCheckouts(now = Date.now()): Promise<{
+  removed: number;
+  bytesUnknown: boolean;
+}> {
+  const cutoff = retentionCutoff(getSettings().checkoutRetentionDays, now);
+  if (cutoff === null) return { removed: 0, bytesUnknown: false };
+
+  const held = new Set(
+    activeRuns()
+      .map((r) => r.worktree_path)
+      .filter((p): p is string => !!p),
+  );
+
+  // Every branch a run that has not started yet is set to carry on. One query
+  // rather than one per candidate: the answer is a small set and the question
+  // is asked of every slot.
+  const chained = new Set(
+    (
+      db()
+        .prepare(
+          `SELECT DISTINCT continues_run AS id FROM runs
+            WHERE continues_run IS NOT NULL
+              AND status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(",")})`,
+        )
+        .all(...TERMINAL_STATUSES) as Array<{ id: string }>
+    ).map((r) => r.id),
+  );
+
+  // The newest run per slot, which is the one whose state describes it. Ordered
+  // newest-first so the first row seen for a path is the one kept.
+  const rows = db()
+    .prepare(
+      `SELECT id, status, finished_at, worktree_path, worktree_branch,
+              worktree_base, worktree_base_branch, repo_root, landed_at, landed_tip
+         FROM runs
+        WHERE isolation = 'worktree' AND worktree_path IS NOT NULL
+          AND repo_root IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 500`,
+    )
+    .all() as Array<{
+    id: string;
+    status: string;
+    finished_at: number | null;
+    worktree_path: string;
+    worktree_branch: string | null;
+    worktree_base: string | null;
+    worktree_base_branch: string | null;
+    repo_root: string;
+    landed_at: number | null;
+    landed_tip: string | null;
+  }>;
+
+  const newest = new Map<string, (typeof rows)[number]>();
+  for (const row of rows) {
+    if (!newest.has(row.worktree_path)) newest.set(row.worktree_path, row);
+  }
+
+  let removed = 0;
+  let probes = 0;
+  const pruned = new Set<string>();
+
+  for (const row of newest.values()) {
+    // The cheap half of the decision, asked before any git process: a candidate
+    // rejected here costs nothing at all.
+    const cheap = planCheckoutReclaim(
+      {
+        slotPath: row.worktree_path,
+        runId: row.id,
+        status: row.status,
+        finishedAt: row.finished_at,
+        heldByActiveRun: held.has(row.worktree_path),
+        // Assumed for the cheap pass, then measured below. Assuming the
+        // *permissive* value here is safe only because the same function is
+        // asked again with the real ones before anything is removed.
+        clean: true,
+        branchSettled: true,
+        chained: chained.has(row.id),
+      },
+      now,
+      cutoff,
+    );
+    if (cheap.action !== "remove") continue;
+    if (!fs.existsSync(row.worktree_path)) continue;
+    if (probes >= MAX_RECLAIM_PROBES) break;
+    probes++;
+
+    const repoRoot = repoPathFor(row.repo_root);
+    if (!repoRoot) continue;
+
+    // `slotIsDirty`'s rule with git run asynchronously: this pass touches up to
+    // `MAX_RECLAIM_PROBES` checkouts and the event loop it shares is the one
+    // carrying every live guard's ticker.
+    const status = await git(row.worktree_path, ["status", "--porcelain"]);
+    const clean = status.ok && status.stdout === "";
+
+    const verdict = planCheckoutReclaim(
+      {
+        slotPath: row.worktree_path,
+        runId: row.id,
+        status: row.status,
+        finishedAt: row.finished_at,
+        heldByActiveRun: false,
+        clean,
+        branchSettled: clean
+          ? await branchIsSettled(repoRoot, row)
+          : false,
+        chained: false,
+      },
+      now,
+      cutoff,
+    );
+    if (verdict.action !== "remove") continue;
+
+    const gone = await git(repoRoot, ["worktree", "remove", row.worktree_path]);
+    if (!gone.ok) continue;
+    pruned.add(repoRoot);
+    removed++;
+
+    // Recorded on the run whose checkout it was, which is where an operator
+    // looking for it would look. The branch is deliberately absent from the
+    // payload's `deleted` shape: nothing was deleted, and a `land` row that
+    // read as one would say this app destroyed a branch it did not touch.
+    emitRunEvent({
+      runId: row.id,
+      ts: now,
+      kind: "land",
+      payload: {
+        branch: row.worktree_branch,
+        reclaimed: true,
+        worktreeRemoved: row.worktree_path,
+      },
+    });
+  }
+
+  // One prune per repository that lost a checkout, so a stale registration
+  // cannot make the next `worktree add` refuse a path that is now free.
+  for (const repoRoot of pruned) await git(repoRoot, ["worktree", "prune"]);
+
+  return { removed, bytesUnknown: probes >= MAX_RECLAIM_PROBES };
+}
+
+/**
+ * Whether a branch carries anything its target does not already have.
+ *
+ * Two readings, because git can only see one of them. A squash rewrites the
+ * commits, so an ancestry test can never call such a branch merged — the tip
+ * recorded at land time is what stands in for it, and it stops being true the
+ * moment the branch gains a commit, which is exactly when reclaiming its
+ * checkout would start throwing away something.
+ */
+async function branchIsSettled(
+  repoRoot: string,
+  row: {
+    worktree_branch: string | null;
+    worktree_base: string | null;
+    worktree_base_branch: string | null;
+    landed_at: number | null;
+    landed_tip: string | null;
+  },
+): Promise<boolean> {
+  const branch = row.worktree_branch;
+  if (!branch) return true; // no branch of its own: nothing to lose
+
+  if (row.landed_at !== null && row.landed_tip) {
+    const tip = await git(repoRoot, ["rev-parse", `refs/heads/${branch}`]);
+    if (tip.ok && tip.stdout === row.landed_tip) return true;
+  }
+
+  const target = row.worktree_base_branch ?? row.worktree_base;
+  if (!target) return false; // no range to measure: never assume it landed
+
+  const ahead = await git(repoRoot, [
+    "rev-list",
+    "--count",
+    `${target}..${branch}`,
+  ]);
+  return ahead.ok && Number(ahead.stdout) === 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* What each store currently holds                                     */
 /* ------------------------------------------------------------------ */
 
@@ -149,6 +489,17 @@ export interface StorageReport {
     runEvents: number;
     telemetryRows: number;
   };
+  /** One entry per mount's `.uf-worktrees`, deduplicated by real path. */
+  checkouts: Array<{
+    mountId: string;
+    label: string;
+    path: string;
+    /** Top-level directories in the store. */
+    count: number;
+    bytes: number;
+    /** The walk hit its budget, so `bytes` is a floor rather than a total. */
+    partial: boolean;
+  }>;
   lastSweep: RetentionSweep | null;
 }
 
@@ -158,6 +509,81 @@ function sizeOf(file: string): number {
   } catch {
     return 0;
   }
+}
+
+/**
+ * Directory entries one walk may visit.
+ *
+ * A checkout with its dependencies installed is tens of thousands of files and
+ * this route can be asked about several stores, so the walk is bounded and says
+ * when it stopped. An unbounded one would be a page load that stats a million
+ * paths — and "the figure took a minute" is how an operator learns not to open
+ * the card that exists to warn them.
+ */
+const MAX_WALK_ENTRIES = 120_000;
+
+/** Bytes under a directory, bounded, following no symlink. */
+async function treeSize(
+  root: string,
+  budget: { left: number },
+): Promise<{ bytes: number; partial: boolean }> {
+  let bytes = 0;
+  let partial = false;
+
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable — reported as nothing rather than as a throw
+    }
+    for (const entry of entries) {
+      if (budget.left <= 0) {
+        partial = true;
+        return;
+      }
+      budget.left--;
+      const full = path.join(dir, entry.name);
+      // `lstat`, and directories are recursed only when they are real ones: a
+      // symlink out of the store must contribute neither its bytes nor a walk.
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) {
+        await walk(full);
+        continue;
+      }
+      try {
+        bytes += (await fsp.lstat(full)).size;
+      } catch {
+        /* removed between the readdir and the stat */
+      }
+    }
+  };
+
+  await walk(root);
+  return { bytes, partial };
+}
+
+/** What each mount's checkout store holds. */
+async function checkoutSizes(): Promise<StorageReport["checkouts"]> {
+  const out: StorageReport["checkouts"] = [];
+  for (const store of worktreeStores()) {
+    let count = 0;
+    try {
+      count = (await fsp.readdir(store.path, { withFileTypes: true })).filter(
+        (e) => e.isDirectory(),
+      ).length;
+    } catch {
+      // No store yet is a real answer — this mount has had no isolated run —
+      // and it reads as zero rather than as a missing figure for that reason.
+      out.push({ ...store, count: 0, bytes: 0, partial: false });
+      continue;
+    }
+    const { bytes, partial } = await treeSize(store.path, {
+      left: MAX_WALK_ENTRIES,
+    });
+    out.push({ ...store, count, bytes, partial });
+  }
+  return out;
 }
 
 /**
@@ -179,6 +605,7 @@ export async function storageReport(): Promise<StorageReport> {
       runEvents: count("SELECT COUNT(*) AS n FROM run_events"),
       telemetryRows: count("SELECT COUNT(*) AS n FROM otlp_requests"),
     },
+    checkouts: await checkoutSizes(),
     lastSweep: lastSweep(),
   };
 }
@@ -208,7 +635,12 @@ export async function runRetentionSweep(
   now = Date.now(),
 ): Promise<RetentionSweep> {
   const events = sweepRunEvents(now);
-  const result: RetentionSweep = { at: now, ...events };
+  const checkouts = await sweepCheckouts(now);
+  const result: RetentionSweep = {
+    at: now,
+    ...events,
+    checkouts: checkouts.removed,
+  };
   setJSON(LAST_SWEEP_KEY, result);
   return result;
 }

@@ -275,6 +275,14 @@ export async function PUT(req: Request) {
     patch.eventRetentionDays = n === null ? null : Math.max(1, Math.floor(n));
   }
 
+  if ("checkoutRetentionDays" in body) {
+    // Same reading as the horizon above. Floored at 1 for a sharper version of
+    // its reason: a 0 here would reclaim a checkout the moment its run ended,
+    // which is the slot the *next* run on that repository was going to reuse.
+    const n = optionalNumber(body.checkoutRetentionDays);
+    patch.checkoutRetentionDays = n === null ? null : Math.max(1, Math.floor(n));
+  }
+
   if ("chatTurnBudgetUSD" in body) {
     // Blank means "no cap", the same reading every switchable budget rule here
     // takes. It is the one guard on a chat turn other than the clock, so an

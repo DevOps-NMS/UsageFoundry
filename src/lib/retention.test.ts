@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -7,6 +10,20 @@ import {
   MAX_TOOL_FIELD_CHARS,
   MAX_TOOL_INPUT_CHARS,
 } from "./logLine";
+
+// The pure decisions below reach no database, but importing them loads
+// `config.ts`, which binds `DATA_DIR` at module load — and on a developer's
+// machine the default is the real one. Named before the require below for the
+// reason `orchestrator.test.ts` gives.
+const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf-ret-")));
+process.env.DATA_DIR = path.join(tmp, "data");
+process.env.CLAUDE_HOME = path.join(tmp, "claude");
+process.env.CLAUDE_CONFIG_DIR = path.join(tmp, "claude");
+process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
+
+// `require`, not `import`: imports are hoisted above the environment above.
+const { planCheckoutReclaim, reclaimableCheckouts, retentionCutoff } =
+  require("./retention") as typeof import("./retention");
 
 /**
  * Covers the pure half of the retention design — what a store is allowed to
@@ -91,5 +108,122 @@ describe("clipToolInput", () => {
     cyclic.self = cyclic;
 
     assert.deepEqual(clipToolInput(cyclic), { input: null });
+  });
+});
+
+/**
+ * Given these runs, these branch states and these slot states, which slot paths
+ * are removable.
+ *
+ * `.uf-worktrees` is on the **workspace bind mount** — the operator's own source
+ * directory — and nothing in this app ever removed a checkout except an operator
+ * pressing Delete or Purge on a branch. The slot cap is 64 per repository and
+ * the store is shared per mount, so fifteen repositories have a ceiling of 960
+ * full checkouts with their dependency trees, and the first symptom of that is
+ * the operator's own `git checkout` failing to write.
+ *
+ * Both ways of being wrong are silent and land on that disk. Reclaiming too
+ * eagerly destroys an agent's uncommitted work in a directory nobody looks at;
+ * reclaiming nothing is the state this replaces. Hence a fixture per clause.
+ */
+const DAY = 24 * 60 * 60 * 1000;
+const AT = 1_786_470_000_000;
+/** A week, matching the shipped `checkoutRetentionDays`. */
+const CUTOFF = retentionCutoff(7, AT);
+
+/** A checkout that every clause says may go, before the case changes one. */
+function candidate(over: Partial<Parameters<typeof planCheckoutReclaim>[0]> = {}) {
+  return {
+    slotPath: "/workspace/.uf-worktrees/repo-1",
+    runId: "11111111-2222-3333-4444-555555555555",
+    status: "completed",
+    finishedAt: AT - 30 * DAY,
+    heldByActiveRun: false,
+    clean: true,
+    branchSettled: true,
+    chained: false,
+    ...over,
+  };
+}
+
+describe("reclaimableCheckouts", () => {
+  it("reclaims a settled run's checkout once its branch has nowhere to go", () => {
+    assert.deepEqual(planCheckoutReclaim(candidate(), AT, CUTOFF), {
+      action: "remove",
+    });
+  });
+
+  it("never removes one an active run holds", () => {
+    // The acceptance criterion, and it is asked two ways because the two can
+    // disagree: a run released from `waiting` days later takes whatever slot is
+    // free, so the newest row recorded in a slot need not be the run in it.
+    for (const status of ["running", "queued", "paused"]) {
+      assert.equal(
+        planCheckoutReclaim(candidate({ status }), AT, CUTOFF).action,
+        "keep",
+        `a ${status} run's checkout was offered for removal`,
+      );
+    }
+    assert.equal(
+      planCheckoutReclaim(candidate({ heldByActiveRun: true }), AT, CUTOFF).action,
+      "keep",
+    );
+  });
+
+  it("never removes one with uncommitted work, or one it could not read", () => {
+    // `slotIsDirty`'s rule, which this sweep must not weaken: unreadable counts
+    // as dirty, because refusing to reclaim is the recoverable mistake.
+    const verdict = planCheckoutReclaim(candidate({ clean: false }), AT, CUTOFF);
+    assert.equal(verdict.action, "keep");
+    assert.match(
+      verdict.action === "keep" ? verdict.reason : "",
+      /uncommitted/,
+    );
+  });
+
+  it("never removes one whose branch still carries commits", () => {
+    assert.equal(
+      planCheckoutReclaim(candidate({ branchSettled: false }), AT, CUTOFF).action,
+      "keep",
+    );
+  });
+
+  it("leaves the slot a run is set to carry the branch on from", () => {
+    assert.equal(
+      planCheckoutReclaim(candidate({ chained: true }), AT, CUTOFF).action,
+      "keep",
+    );
+  });
+
+  it("waits out the horizon, and a run with no finish time for ever", () => {
+    assert.equal(
+      planCheckoutReclaim(candidate({ finishedAt: AT - 2 * DAY }), AT, CUTOFF)
+        .action,
+      "keep",
+      "a checkout two days old is inside a seven-day horizon",
+    );
+    assert.equal(
+      planCheckoutReclaim(candidate({ finishedAt: null }), AT, CUTOFF).action,
+      "keep",
+      "no finish time is no age, and no age is no horizon to be past",
+    );
+  });
+
+  it("removes nothing at all when the horizon is blank", () => {
+    assert.deepEqual(reclaimableCheckouts([candidate()], AT, null), []);
+  });
+
+  it("answers with the paths, in the order it was given them", () => {
+    const removable = reclaimableCheckouts(
+      [
+        candidate({ slotPath: "/ws/.uf-worktrees/a-1" }),
+        candidate({ slotPath: "/ws/.uf-worktrees/a-2", clean: false }),
+        candidate({ slotPath: "/ws/.uf-worktrees/b-1" }),
+        candidate({ slotPath: "/ws/.uf-worktrees/b-2", status: "running" }),
+      ],
+      AT,
+      CUTOFF,
+    );
+    assert.deepEqual(removable, ["/ws/.uf-worktrees/a-1", "/ws/.uf-worktrees/b-1"]);
   });
 });
