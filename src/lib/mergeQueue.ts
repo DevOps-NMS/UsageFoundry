@@ -302,7 +302,10 @@ export type EnqueueOutcome =
  * Put branches in the queue, in the order they were given.
  *
  * The order is the operator's and is recorded as `position`; nothing here
- * sorts. Validation is structural only — that a run has a branch at all, and
+ * sorts. That index is per batch and restarts at 0, so it says nothing about
+ * one batch against another — what orders those is `created_at`, which is why
+ * every row of a batch carries the one timestamp. `nextQueued` is where the two
+ * are read together. Validation is structural only — that a run has a branch at all, and
  * that it is not already queued. Whether it *can* be landed is deliberately not
  * decided here: the queue exists precisely because that answer changes as the
  * branches ahead of it land, and pre-judging it would refuse branches that
@@ -448,11 +451,34 @@ const worker = ((globalThis as unknown as { __ufMergeWorker?: { running: boolean
 
 export const isWorking = () => worker.running;
 
-function nextQueued(): QueueRow | null {
+/**
+ * The next branch to land, across every batch.
+ *
+ * `position` is the operator's order *within* one batch and restarts at 0 for
+ * the next one, so ordering by it first interleaved a batch queued while the
+ * worker was still draining an earlier one: A0, B0, A1, B1, A2, with B's first
+ * branch merging into the operator's checkout between two of A's. What decided
+ * the order across batches was then the accident of how many rows the earlier
+ * one had. `created_at` first drains each batch whole and keeps the operator's
+ * order inside it, which is what this queue has always claimed to do.
+ *
+ * `batch_id` breaks the tie between two batches sharing a millisecond, which is
+ * reachable rather than theoretical: a workflow instance releases its merge
+ * blocks in one synchronous pass, so two of them call `enqueue` on the same
+ * `Date.now()`. Which of those two goes first is arbitrary — nothing can make
+ * it the operator's order, because they were queued at the same instant — but
+ * that they do not interleave is not.
+ *
+ * Exported for the test that pins this sequence. The decision is the SQL, so
+ * anything short of running the query would be a second copy of it, and the
+ * copy is the one that would stay right.
+ */
+export function nextQueued(): QueueRow | null {
   return (
     (db()
       .prepare(
-        "SELECT * FROM merge_queue WHERE status='queued' ORDER BY position, created_at LIMIT 1",
+        "SELECT * FROM merge_queue WHERE status='queued'" +
+          " ORDER BY created_at, batch_id, position LIMIT 1",
       )
       .get() as QueueRow | undefined) ?? null
   );

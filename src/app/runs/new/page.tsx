@@ -1923,8 +1923,8 @@ export default function NewRunPage() {
                   {!costLimited
                     ? "This run is not capped in dollars — only the cycle count, the clock and the two window guards below stop it"
                     : live
-                      ? "Read mid-cycle too, so the run stops near this figure rather than a whole cycle past it"
-                      : "No new cycle starts once this much is spent, so the final figure can be up to one cycle higher"}
+                      ? "Read mid-cycle too, and each cycle carries what is left of it as a ceiling, so the run stops near this figure"
+                      : "Each cycle carries what is left of it as a ceiling, so the run stops near this figure"}
                   {problemFor("cost") && (
                     <Toned tone="danger">
                       <span className="mt-0.5 block">

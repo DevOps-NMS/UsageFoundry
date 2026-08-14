@@ -507,9 +507,15 @@ function migrate(db: Database.Database) {
       ON chat_proposals(chat_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_merge_queue_batch
       ON merge_queue(batch_id, position);
-    -- The worker's own query: the next queued row, across every batch.
-    CREATE INDEX IF NOT EXISTS idx_merge_queue_status
-      ON merge_queue(status, position);
+    -- The worker's own query: the next queued row, across every batch. The
+    -- columns are nextQueued's ORDER BY in its order — one batch at a time,
+    -- oldest first, in the operator's order within it. Its predecessor sorted
+    -- on (status, position), which is the interleaving that ordering caused;
+    -- renamed rather than redefined, because CREATE INDEX IF NOT EXISTS leaves
+    -- an existing index of the same name exactly as it was.
+    CREATE INDEX IF NOT EXISTS idx_merge_queue_next
+      ON merge_queue(status, created_at, batch_id, position);
+    DROP INDEX IF EXISTS idx_merge_queue_status;
     CREATE INDEX IF NOT EXISTS idx_run_reviews_run
       ON run_reviews(run_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_runs_created

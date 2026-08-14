@@ -65,10 +65,15 @@ export async function register() {
         "./lib/workflows"
       );
       // A block deciding what to start when the process died, and every block
-      // behind it. Same rule as a `waiting` run and for the same reason: what
-      // it was waiting for has just been closed out, and re-deciding hours
-      // later, unattended, is spend nobody is present to want. Before the halt
-      // reconciler, so what that one finds live is only the runs.
+      // behind it in an instance this boot left nothing alive in. Same rule as
+      // a `waiting` run and for the same reason: what it was waiting for has
+      // just been closed out, and re-deciding hours later, unattended, is spend
+      // nobody is present to want. After `reconcileOnBoot` for a second reason
+      // as well as the first: that pass keeps a recently `paused` member on
+      // purpose, and this one mirrors that grace rather than overriding it, so
+      // it has to be able to read what survived. Before the halt reconciler, so
+      // what that one finds live is only the runs — a `stopping` instance's
+      // blocks come down here whatever its members are doing.
       reconcileBlocksOnBoot();
       reconcileHaltsOnBoot();
 

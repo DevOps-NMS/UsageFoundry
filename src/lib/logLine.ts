@@ -70,7 +70,16 @@ function clip(s: string): string {
   return flat.length > MAX_ARG ? `${flat.slice(0, MAX_ARG - 1)}…` : flat;
 }
 
-function toolArgs(input: unknown): string {
+/**
+ * What a tool call is about, in one bounded line.
+ *
+ * Exported because the stream parser retains the same string: a `tool_result`
+ * names only the id of the call it answers, so the failure event has to carry
+ * the command with it, and "which field names a call" must have one definition
+ * — two would drift with nothing reporting it, and the second would be the one
+ * an operator reads next to a 403.
+ */
+export function toolArgs(input: unknown): string {
   if (input === null || input === undefined) return "";
   if (typeof input === "string") return clip(input);
   if (typeof input !== "object") return clip(String(input));
@@ -152,6 +161,28 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
           ? `${String(p.subagent ?? "sub-agent")} › ${tool}`
           : tool,
         text: toolArgs(p.input),
+      };
+    }
+
+    case "tool_error": {
+      const tool = String(p.name ?? "tool");
+      // Attributed the way a delegated call is, and for that reason: a failed
+      // `Bash` sitting between two of the main thread's lines otherwise reads
+      // as the main thread's.
+      const who = p.parentToolUseId
+        ? `${String(p.subagent ?? "sub-agent")} › ${tool}`
+        : tool;
+      const command = String(p.command ?? "").trim();
+      // A system row rather than a tool one: the tool voice is a chip and a
+      // muted line with no tone on it, which is what every call that worked
+      // looks like. This is the line the reader came for.
+      return {
+        voice: "system",
+        tone: "danger",
+        label: "tool failed",
+        text: [command ? `${who}: ${command}` : who, String(p.text ?? "").trim()]
+          .filter(Boolean)
+          .join(" — "),
       };
     }
 
