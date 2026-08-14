@@ -442,6 +442,23 @@ through before trusting this unattended:
 - Whether `claude -p` flushes its `result` event on `SIGINT`. If it does, an
   interrupted cycle keeps its measured cost and the transcript reconciliation
   becomes a fallback rather than the norm.
+- **A work cycle actually stopping at its `--max-budget-usd` ceiling.**
+  `buildArgs` now hands each cycle what is left of `maxRunCostUSD`, and the loop
+  ends the run on `result.subtype === "error_max_budget_usd"`. The argv is
+  unit-tested in both directions and `npm run typecheck` and `npm test` pass,
+  but no billed cycle has been run into the ceiling. Two things are reasoned
+  rather than measured: that the pinned CLI honours the flag on a `-p` run at
+  all — evidenced by `chat.ts` passing it to the same binary, and by the subtype
+  already being named in this repository as one it emits — and *how far past*
+  the ceiling a cycle gets before the CLI notices, which the acceptance
+  criterion assumes is one model turn and which nothing here has watched. Also
+  unseen: what the CLI writes into `result.result` when it stops for this
+  reason. Nothing depends on that text — the subtype is what the loop reads,
+  deliberately, and it is read before `isUsageLimit` ever sees the sentence —
+  but it is what the operator ends up reading in the run log. Set
+  `maxRunCostUSD` to something small on a task that will exceed it in one cycle,
+  and confirm the run ends `stopped` naming the spending limit rather than
+  `failed`, and that it does not park.
 - **The chat's `/api/mcp` middleware exemption under an actual `UF_AUTH_TOKEN`.**
   The end-to-end run above was done with auth off, because the sandbox it was
   done in cannot execute Next's edge runtime at all (`EvalError: Code generation
