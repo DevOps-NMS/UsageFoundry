@@ -12,6 +12,13 @@ services:
     #
     # A distinct UF_IMAGE_TAG matters: sharing one tag means each build moves it
     # under the other instance's feet.
+    #
+    # This is not a scaling mechanism, and `docker compose -p` is what makes the
+    # difference: it gives the second instance its own data volume. Two
+    # containers sharing one data directory is not supported and is refused —
+    # only one process may write, because the claim that keeps two agents out of
+    # one folder is atomic by virtue of a single event loop rather than by
+    # anything SQLite enforces. The second gets a read-only server. See README.
     image: usagefoundry:${UF_IMAGE_TAG:-latest}
     container_name: ${UF_CONTAINER_NAME:-usagefoundry}
 

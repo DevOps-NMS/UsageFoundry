@@ -17,6 +17,7 @@ import {
 import { db } from "./db";
 import { chatGuards, getSettings, type RunGuards } from "./settings";
 import { assistRefusal } from "./review";
+import { dataDirRefusal } from "./serverLock";
 import {
   createRun,
   dependencyCycle,
@@ -1418,6 +1419,13 @@ export async function sendChatMessage(
   chatId: string,
   message: string,
 ): Promise<ChatOutcome> {
+  // A turn is a billed child and a claim on a row in a shared table, and the
+  // claim is only a claim because one process makes it. Refused ahead of
+  // everything else, so a second server neither spends nor strands the thread
+  // at `thinking`.
+  const notOwner = dataDirRefusal();
+  if (notOwner) return { ok: false, reason: notOwner };
+
   const chat = getChat(chatId);
   if (!chat) return { ok: false, reason: "No such chat." };
   // Answers the common case without paying for a transcript scan first. It

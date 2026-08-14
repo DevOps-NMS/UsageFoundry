@@ -71,6 +71,7 @@ import type { UsageSnapshot } from "./windows";
 import { chatGuards, getSettings, type RunGuards } from "./settings";
 import { getTemplate, listTemplates, type RunTemplate } from "./templates";
 import { WORKSPACE_MOUNTS, mountById } from "./config";
+import { dataDirRefusal } from "./serverLock";
 import {
   MAX_FAN_OUT,
   MAX_WORKFLOW_NAME,
@@ -2460,6 +2461,13 @@ export function startWorkflow(
   id: string,
   snapshot: UsageSnapshot,
 ): StartOutcome {
+  // Before the instance row exists. `createRun` refuses too, but that refusal
+  // would arrive mid-pass and take the rollback path — an instance recorded
+  // `failed` and a graph half built — where this one is a sentence beside the
+  // button, which is what every other reason a press of Run cannot happen gets.
+  const notOwner = dataDirRefusal();
+  if (notOwner) return { ok: false, reason: notOwner };
+
   const workflow = getWorkflow(id);
   if (!workflow) return { ok: false, reason: "No such workflow." };
 

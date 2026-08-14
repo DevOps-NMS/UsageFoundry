@@ -6,6 +6,7 @@ import { db } from "./db";
 import { git } from "./git";
 import { diffAsText, runDiff, type RunDiff } from "./diff";
 import { agentsArgs, type AgentDefinition } from "./agents";
+import { dataDirRefusal } from "./serverLock";
 import { getSettings } from "./settings";
 import {
   currentSnapshot,
@@ -162,6 +163,13 @@ export type ReviewOutcome =
  * the page polls it, exactly as it polls the run.
  */
 export async function startReview(runId: string): Promise<ReviewOutcome> {
+  // A review is a billed child and a `run_reviews` row, so it is a write like
+  // any other. Refused first, before the diff is rendered: everything below it
+  // costs subprocesses against a repository this process does not own the
+  // database for.
+  const notOwner = dataDirRefusal();
+  if (notOwner) return { ok: false, reason: notOwner };
+
   const run = getRun(runId);
   if (!run) return { ok: false, reason: "No such run." };
   if (assistRunning(runId, "review")) {

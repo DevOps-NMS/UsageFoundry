@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { QuickOpen } from "@/components/shell/QuickOpen";
 import { PANES } from "@/components/shell/panes";
+import { ReadOnlyNotice } from "@/components/shell/ReadOnlyNotice";
 import { Sidebar, readCollapsed, writeCollapsed } from "@/components/shell/Sidebar";
 import { Toolbar } from "@/components/shell/Toolbar";
 import {
@@ -117,6 +118,10 @@ export function AppShell({ children }: { children: ReactNode }) {
               exactly as before — free space is never negative, so nothing
               shrinks either. */}
           <div className="flex min-h-full flex-col px-4 pt-5 pb-12 sm:px-5">
+            {/* Above every page rather than on one of them: a server that
+                cannot write refuses Start, Run, Approve and Land alike, and
+                finding that out one button at a time is what this replaces. */}
+            <ReadOnlyNotice />
             {children}
           </div>
         </main>

@@ -8,6 +8,7 @@ import {
   type LandStrategy,
 } from "./land";
 import { getAssist } from "./review";
+import { dataDirRefusal, mayWriteDataDir } from "./serverLock";
 import { getRun, type RunRow } from "./orchestrator";
 
 /**
@@ -315,6 +316,13 @@ export function enqueue(
   runIds: string[],
   opts: { strategy: LandStrategy; autoResolve: boolean },
 ): EnqueueOutcome {
+  // A merge writes into a directory the operator also works in, and one worker
+  // per process is the whole of what keeps the queue sequential — two processes
+  // draining one table is two merges in one checkout. Refused at the door,
+  // where the answer is a sentence the page already renders.
+  const notOwner = dataDirRefusal();
+  if (notOwner) return { ok: false, reason: notOwner };
+
   const already = queuedRunIds();
   const seen = new Set<string>();
   const items: RunRow[] = [];
@@ -514,6 +522,10 @@ function setStatus(
  * a run.
  */
 export async function startWorker(): Promise<void> {
+  // `enqueue` already refuses, so nothing this process queued can be here — but
+  // the table is shared, and draining a row another server queued is this
+  // process merging into a checkout it was never told about.
+  if (!mayWriteDataDir()) return;
   if (worker.running) return;
   worker.running = true;
 

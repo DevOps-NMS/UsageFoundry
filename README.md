@@ -332,6 +332,45 @@ export (per-request cost for runs this app spawned). Each is shown as itself.
 
 ---
 
+## One process, one data directory
+
+**This runs as exactly one process. It cannot be scaled horizontally**, and a
+second replica behind a load balancer is not a supported deployment.
+
+The reason is the folder claim — the check that keeps two agents out of one
+directory. It is a synchronous check-then-insert, and it is atomic because one
+Node event loop runs it to completion, not because SQLite enforces it. Two
+processes have two event loops: each decides a folder is free, each inserts, and
+two billed agents start work in the same checkout. Nothing reports it.
+
+So exactly one process may write. The first to boot claims `DATA_DIR/server.lock`
+and heartbeats it; any other process sharing that directory is **read-only** —
+it serves every page and refuses every write, naming the owner's pid. You can
+see which one you are looking at:
+
+```bash
+curl -s localhost:3000/api/health    # 200 + "ownsDataDir": true, or 503 with the reason
+```
+
+A read-only second server is deliberately still allowed to boot, because it is
+useful: pointing a development build at the live database to check a change is
+the workflow that found this bug. What it must never do is close out the other
+server's runs, and now it cannot.
+
+**When one container is not enough**, the answer is a second *independent*
+instance, not a second replica — its own data directory, its own workspaces:
+
+```bash
+UF_PORT=3100 UF_CONTAINER_NAME=usagefoundry-b UF_IMAGE_TAG=b \
+  docker compose -p usagefoundry-b up -d --build
+```
+
+`docker compose -p` namespaces the data volume, so the two share no database and
+no folder claim. Point them at different workspaces — two instances against one
+directory tree is the collision above with extra steps.
+
+---
+
 ## Requirements
 
 - Docker and Docker Compose

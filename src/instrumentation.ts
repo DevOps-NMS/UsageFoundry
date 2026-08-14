@@ -87,10 +87,19 @@ export async function register() {
       const { reconcileSchedulesOnBoot } = await import("./lib/schedules");
       reconcileSchedulesOnBoot();
     } else {
+      // Not "starting without closing anything out" any more, which read like a
+      // benign notice on a process that then admitted runs and spawned billed
+      // agents. This server is read-only for as long as it is up: every writer
+      // asks `ownsDataDir()` at the moment it would write, and the same
+      // sentence is on `/api/health` and above every page, because a warning
+      // into a container's stdout is not a signal anybody receives.
       console.warn(
         "[usagefoundry] Another server process already holds this data " +
-          "directory. Starting without closing out any run, review, merge or " +
-          "chat — they belong to that server, and it is still working.",
+          "directory. This one is read-only: it serves every page, and refuses " +
+          "to start, resume, merge or spend anything. Only one process may " +
+          "write to a UsageFoundry data directory — it cannot be scaled to a " +
+          "second replica. Stop the other server and restart this one if that " +
+          "is not what you meant.",
       );
     }
 

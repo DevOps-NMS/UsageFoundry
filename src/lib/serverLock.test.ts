@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   STALE_MS,
   lockVerdict,
+  ownershipRefusal,
   parseLock,
   stillBeating,
   type ServerLock,
@@ -80,6 +81,45 @@ describe("lockVerdict", () => {
 
   it("watches a fresh lock whose pid has gone", () => {
     assert.equal(lockVerdict(held, self, false), "observe");
+  });
+});
+
+describe("ownershipRefusal", () => {
+  // The sentence every writer in the app answers with, so both directions are
+  // silent and expensive. Refuse when we do own the directory and the server
+  // refuses its own operator; permit when we do not and two processes admit
+  // runs against one SQLite file, which is the collision the folder claim
+  // exists to prevent and which nothing afterwards reports.
+  it("permits the owner", () => {
+    assert.equal(ownershipRefusal("owned", null), null);
+  });
+
+  it("permits a process that has never asked", () => {
+    // The claim is made once, at boot. Refusing here would refuse every caller
+    // that reaches this module without a boot in front of it.
+    assert.equal(ownershipRefusal("unclaimed", null), null);
+  });
+
+  it("refuses a second server, naming the pid that holds the directory", () => {
+    const refusal = ownershipRefusal("held", { pid: 4231 });
+    assert.match(refusal ?? "", /process 4231/);
+    assert.match(refusal ?? "", /does not own its data directory/);
+  });
+
+  it("refuses an owner that lost the directory, in different words", () => {
+    // Same answer, different diagnosis: this one is *this* server having
+    // stalled, and telling the operator it was never the owner would send them
+    // looking for a second server that does not exist.
+    const refusal = ownershipRefusal("lost", { pid: 4231 });
+    assert.match(refusal ?? "", /lost its claim/);
+    assert.match(refusal ?? "", /process 4231/);
+  });
+
+  it("still refuses when there is no lock to name", () => {
+    // Reachable: the heartbeat gives ownership up when it cannot write the file
+    // at all, so there is no owner to point at — and that is the case where
+    // carrying on writing would be worst.
+    assert.match(ownershipRefusal("lost", null) ?? "", /another server process/);
   });
 });
 

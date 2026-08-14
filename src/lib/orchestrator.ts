@@ -13,6 +13,7 @@ import {
   type WorkspaceMount,
 } from "./config";
 import { git, gitSync } from "./git";
+import { dataDirRefusal, mayWriteDataDir, requireDataDir } from "./serverLock";
 import { db } from "./db";
 import { getSettings, limitConfig, type PermissionMode } from "./settings";
 import {
@@ -1979,6 +1980,15 @@ function admitDependencies(
  * as it took to work through.
  */
 export function createRun(input: CreateRunInput): RunRow {
+  // Before anything is resolved or written. The claim below is a check-then-
+  // insert that is only atomic because one event loop runs it, so a second
+  // process admitting runs against this database is two agents in one directory
+  // — the collision `db.ts` opens by naming the single process as what prevents
+  // it. This is the door every other door goes through: the API route, the
+  // chat's approval pass, a workflow's instantiation and an orchestrator
+  // block's emission all end up here, so one refusal covers all of them.
+  requireDataDir();
+
   const folder = resolveWorkspaceFolder(input.folder, input.mountId);
   const prompt = String(input.prompt ?? "").trim();
   if (!prompt) throw new Error("Prompt is required");
@@ -2194,6 +2204,13 @@ export function selectPromotable(
  * turn instead of being refused — the queue already exists for exactly that.
  */
 export function promoteQueued(): void {
+  // The one route to `startRun`, so this is the one place a spawn has to be
+  // refused. A process that does not own the data directory leaves the queue
+  // exactly as it found it: the rows belong to the server that does, and it
+  // will promote them itself. Asked here rather than captured at boot, because
+  // the answer moves — the heartbeat clears it if the directory changes hands.
+  if (!mayWriteDataDir()) return;
+
   const cap = getSettings().maxConcurrentRuns;
   for (const id of selectPromotable(activeRuns(), cap)) {
     void startRun(id).catch(() => {
@@ -5347,6 +5364,15 @@ export function planPausedRun(
  * `startRun` cannot be pinned at all.
  */
 export async function sweepPaused(): Promise<void> {
+  // Un-parking a run is starting one. A process that does not own the directory
+  // stops its own timer rather than skipping a tick: the parked rows belong to
+  // the owner, which runs a sweeper of its own, and nothing here will ever be
+  // this process's to decide.
+  if (!mayWriteDataDir()) {
+    stopSweeper();
+    return;
+  }
+
   if (timers.sweeping) return;
   timers.sweeping = true;
   try {
@@ -5464,7 +5490,7 @@ export async function sweepPaused(): Promise<void> {
   }
 }
 
-export type ResumeOutcome = "requeued" | "not-paused";
+export type ResumeOutcome = "requeued" | "not-paused" | "not-owner";
 
 /**
  * Put a parked run back in the queue now, rather than at its next wake.
@@ -5475,6 +5501,12 @@ export type ResumeOutcome = "requeued" | "not-paused";
  * no button.
  */
 export function resumeRun(id: string): ResumeOutcome {
+  // Its own outcome rather than `not-paused`, which would be a false statement
+  // about the row. Refused before the UPDATE, not left to `promoteQueued`: a
+  // parked run flipped to `queued` by a process that cannot promote it is a run
+  // reading "waiting its turn" with nothing that will ever take it.
+  if (!mayWriteDataDir()) return "not-owner";
+
   const flip = db()
     .prepare(
       "UPDATE runs SET status='queued', resume_at=NULL WHERE id=? AND status='paused'",
@@ -5570,6 +5602,12 @@ export function reopenRun(
   budget: unknown,
   followUp?: string,
 ): ReopenOutcome {
+  // Picking a run up is starting one, so it goes through the same door
+  // `createRun` does — reported here rather than thrown, because this function
+  // already answers refusals as a sentence the run page renders.
+  const notOwner = dataDirRefusal();
+  if (notOwner) return { ok: false, reason: notOwner };
+
   const run = getRun(id);
   if (!run) return { ok: false, reason: "No such run." };
 

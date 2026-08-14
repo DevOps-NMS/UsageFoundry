@@ -139,19 +139,46 @@ export function stillBeating(before: ServerLock, after: ServerLock | null): bool
   return after.ownerId !== before.ownerId || after.heartbeatAt > before.heartbeatAt;
 }
 
+/**
+ * What this process has been told about the data directory.
+ *
+ * A boolean could not say the thing that matters, which is the difference
+ * between "we asked and were refused" and "nobody has asked yet". Only the
+ * first is a second writer; the second is every unit test, every script and
+ * every caller that reaches this module without a boot behind it, and refusing
+ * those would be refusing a question nobody put.
+ *
+ * `held` is the answer `claimDataDir` got at boot. `lost` is the same fact
+ * discovered later, by the heartbeat — see `heartbeatVerdict`. They refuse
+ * identically and are separate words because the operator's diagnosis differs:
+ * one is a second server that should not have been started, the other is this
+ * server having stalled long enough for someone else to take the directory.
+ */
+export type DataDirOwnership = "unclaimed" | "owned" | "held" | "lost";
+
 interface LockState {
   ownerId: string;
   startedAt: number;
-  owned: boolean;
+  ownership: DataDirOwnership;
+  /** The lock we were refused by, so a refusal can name a pid. */
+  holder: ServerLock | null;
   timer?: NodeJS.Timeout;
 }
 
-/** `globalThis` for the reason every other long-lived singleton here uses it. */
-const state = ((globalThis as unknown as { __ufServerLock?: LockState })
-  .__ufServerLock ??= {
+/**
+ * `globalThis` for the reason every other long-lived singleton here uses it.
+ *
+ * A new key rather than the old `__ufServerLock`: `??=` only initialises when
+ * absent, so on a dev hot reload a pre-upgrade record carrying `owned: boolean`
+ * would survive and every read of `ownership` would come back undefined — which
+ * is neither "owned" nor "held" and would refuse everything.
+ */
+const state = ((globalThis as unknown as { __ufDataDirLock?: LockState })
+  .__ufDataDirLock ??= {
   ownerId: randomUUID(),
   startedAt: Date.now(),
-  owned: false,
+  ownership: "unclaimed",
+  holder: null,
 });
 
 function lockPath(): string {
@@ -202,11 +229,21 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * Take ownership of `DATA_DIR`, or report that someone else has it.
  *
- * A caller that gets `false` must not close out rows it did not create. It is
- * otherwise left alone deliberately: a second server is usually an agent's dev
- * server, it does nothing but read, and refusing to boot it would break the
- * one workflow — running this app against its own worktree — that found this
- * bug in the first place.
+ * A caller that gets `false` must not close out rows it did not create — and,
+ * since this answer now gates every writer in the app, must not create any
+ * either. What is left is a process that reads: a second server is usually an
+ * agent's dev server checking its work against the live database, and refusing
+ * to boot it would break the one workflow — running this app against its own
+ * worktree — that found this bug in the first place. So it boots, it serves
+ * every page, and `ownershipRefusal` answers everything that would write.
+ *
+ * Asked once, at boot, and never retried. A retry would widen the one window
+ * this whole module exists to keep narrow: a second process that keeps asking
+ * is a second process waiting to claim the directory the moment the owner
+ * stalls past `STALE_MS`, and what it does with it is close out live runs. A
+ * process that finds the directory taken stays read-only until somebody starts
+ * it again, and says so on `/api/health` and in the interface rather than in a
+ * line of container stdout.
  */
 export async function claimDataDir(): Promise<boolean> {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -223,13 +260,102 @@ export async function claimDataDir(): Promise<boolean> {
     verdict = stillBeating(lock, readLock()) ? "held" : "claim";
   }
 
-  if (verdict === "held") return false;
+  if (verdict === "held") {
+    state.ownership = "held";
+    // Re-read rather than reusing `lock`: the observation window above may have
+    // watched it change hands, and the refusal names whoever holds it now.
+    state.holder = readLock() ?? lock;
+    return false;
+  }
 
   writeLock(Date.now());
-  state.owned = true;
+  state.ownership = "owned";
+  state.holder = null;
   state.timer ??= setInterval(beat, HEARTBEAT_MS);
   state.timer.unref?.();
   return true;
+}
+
+/**
+ * Whether this process may write to the database behind `DATA_DIR`.
+ *
+ * Read at the moment of the write rather than captured at boot, because the
+ * answer moves: `heartbeat` clears it the moment the directory changes hands.
+ */
+export function ownsDataDir(): boolean {
+  return state.ownership === "owned";
+}
+
+/** What this process has been told, for a surface that reports it. */
+export function dataDirOwnership(): DataDirOwnership {
+  return state.ownership;
+}
+
+/** Whoever holds the directory, when it is not us. */
+export function dataDirOwner(): ServerLock | null {
+  return state.ownership === "owned" ? null : state.holder;
+}
+
+/**
+ * Why a write is being refused, or `null` if it is not.
+ *
+ * Pure, and separated from the state it is asked about for the reason
+ * `lockVerdict` is: this is the sentence every writer in the app answers with,
+ * and getting it wrong in the permissive direction is silent — two processes
+ * running `createRun` against one SQLite file, each deciding a folder is free
+ * inside its own event-loop turn, which is exactly the collision `db.ts` opens
+ * by saying the single process is what prevents.
+ *
+ * `unclaimed` is deliberately not a refusal. The claim is made once, at boot,
+ * before the first request; a process that has never asked has never been told
+ * no, and refusing there would refuse every caller that reaches this module
+ * without `instrumentation.ts` in front of it.
+ */
+export function ownershipRefusal(
+  ownership: DataDirOwnership,
+  owner: { pid: number } | null,
+): string | null {
+  if (ownership === "owned" || ownership === "unclaimed") return null;
+  const who = owner ? `process ${owner.pid}` : "another server process";
+  return ownership === "lost"
+    ? `This server has lost its claim on the data directory to ${who} and can ` +
+        "no longer start or change anything. Only one process may write to a " +
+        "UsageFoundry data directory; restart this one once the other has stopped."
+    : `This server does not own its data directory — ${who} does — so it can ` +
+        "read but not start or change anything. Only one process may write to " +
+        "a UsageFoundry data directory; it cannot be scaled to a second replica.";
+}
+
+/** `ownershipRefusal` against this process's own state. */
+export function dataDirRefusal(): string | null {
+  return ownershipRefusal(state.ownership, state.holder);
+}
+
+/**
+ * The same question for a caller with nothing to say a refusal to.
+ *
+ * Deliberately not `ownsDataDir()`, and the difference is the `unclaimed` case
+ * `ownershipRefusal` is written around: a process that has never asked has
+ * never been refused. Every background loop here — the promoter, the parked
+ * sweeper, the merge worker — is reachable from a caller with no boot behind
+ * it, and gating those on ownership rather than on refusal would stop them in
+ * every test and every script that ever reaches this module.
+ */
+export function mayWriteDataDir(): boolean {
+  return dataDirRefusal() === null;
+}
+
+/**
+ * Throw unless this process may write.
+ *
+ * For the writers that already have an error channel — `createRun` throws for
+ * an empty prompt, and `POST /api/runs` turns that into a 400 — so a second
+ * replica's run submission is refused where the operator is looking rather than
+ * admitted into a database it does not own.
+ */
+export function requireDataDir(): void {
+  const refusal = dataDirRefusal();
+  if (refusal) throw new Error(refusal);
 }
 
 /**
@@ -238,6 +364,12 @@ export async function claimDataDir(): Promise<boolean> {
  * the next process to boot takes the directory — which is the right outcome for
  * a server that can no longer write to its own data directory, and it is said
  * out loud rather than inferred later from runs that were closed out.
+ *
+ * It gives up ownership at the same moment, and that is the whole point of
+ * saying so here rather than leaving it implied: from now on another process
+ * may claim the directory, so this one carrying on writing is the two-writer
+ * case, reached by a route that has nothing to do with how many servers were
+ * started.
  */
 function beat(): void {
   try {
@@ -245,7 +377,8 @@ function beat(): void {
   } catch (err) {
     if (state.timer) clearInterval(state.timer);
     state.timer = undefined;
-    state.owned = false;
+    state.ownership = "lost";
+    state.holder = null;
     console.warn(
       `[usagefoundry] Could not update ${lockPath()}: ${(err as Error).message}. ` +
         "Another server starting from now on will treat this data directory as free.",
@@ -261,8 +394,8 @@ function beat(): void {
  * already changed hands.
  */
 export function releaseDataDir(): void {
-  if (!state.owned) return;
-  state.owned = false;
+  if (state.ownership !== "owned") return;
+  state.ownership = "unclaimed";
   if (state.timer) clearInterval(state.timer);
   state.timer = undefined;
   try {
