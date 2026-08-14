@@ -4399,6 +4399,14 @@ export async function startRun(id: string): Promise<void> {
               )} spending limit after the $${spentGuardBeforeCycle.toFixed(
                 2,
               )} already spent, and Claude Code stopped it there.`;
+        // Into the log as well as onto the row. Every other way a run ends puts
+        // a sentence in the stream — a refusal emits `error`, a tripped guard
+        // emits `budget` — and a run that simply changed status with the reason
+        // only on the row reads, in the pane the operator is watching, like a
+        // cycle that stopped for no stated reason at all. Not a `budget` event:
+        // that shape is an `evaluateBudget` verdict, and this rule was enforced
+        // by the CLI rather than decided here.
+        log(id, stopReason);
         finalStatus = "stopped";
         break;
       }
