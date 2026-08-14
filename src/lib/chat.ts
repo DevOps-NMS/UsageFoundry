@@ -403,7 +403,7 @@ export function createProposal(
 /* ------------------------------------------------------------------ */
 
 export type ProposalPlan =
-  | { ok: true; input: CreateRunInput }
+  | { ok: true; input: Omit<CreateRunInput, "origin"> }
   | { ok: false; reason: string };
 
 /**
@@ -891,7 +891,16 @@ export function approveProposal(
   }
 
   try {
-    const run = createRun({ ...plan.input, dependsOn: [...dependsOn] });
+    const run = createRun({
+      ...plan.input,
+      dependsOn: [...dependsOn],
+      // The proposal rather than the chat: a thread holds many proposals and
+      // only one of them authorised this run. A plain id, so it keeps reading
+      // true after the chat — and with it, by cascade, the proposal row — has
+      // been deleted.
+      origin: "chat",
+      originRef: proposal.id,
+    });
     markProposal(id, "approved", { runId: run.id });
     return { ok: true, runId: run.id };
   } catch (err) {

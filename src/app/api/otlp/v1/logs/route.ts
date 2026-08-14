@@ -15,6 +15,14 @@ import { parseLogsPayload, recordTelemetry } from "@/lib/otlp";
  * `OTEL_EXPORTER_OTLP_HEADERS`, so an open ingest hole is not required to make
  * telemetry work.
  *
+ * Deliberately **not** wrapped in `auditMutation`. It is the one mutating route
+ * whose callers are this app's own children, delivering at-least-once every few
+ * seconds per run — at 25 runs that is thousands of audit rows an hour saying
+ * nothing an operator would ever read, and it would push the burst somebody is
+ * actually looking for out of a bounded table. What it writes is one
+ * `otlp_requests` row keyed on a request id, and the run page and the status
+ * endpoint both report on that.
+ *
  * The response is always 200. A batch exporter retries on failure, and a
  * malformed or unrecognised record is not something a retry will fix — it
  * would just cost the same batch again on a loop.

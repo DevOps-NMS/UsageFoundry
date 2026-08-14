@@ -886,7 +886,13 @@ async function fireIfDue(schedule: WorkflowSchedule, now: number): Promise<void>
     return;
   }
 
-  const outcome = startWorkflow(schedule.workflowId, await currentSnapshot());
+  // Named as the schedule's, so the runs this fire creates are distinguishable
+  // from the same graph started by hand. This is the one press of Run with
+  // nobody present at all, which is exactly the case an audit column exists for.
+  const outcome = startWorkflow(schedule.workflowId, await currentSnapshot(), {
+    kind: "schedule",
+    scheduleId: schedule.id,
+  });
   if (!outcome.ok) {
     recordOutcome(schedule, "refused", outcome.reason, action.fireAt, null, now);
     return;

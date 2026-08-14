@@ -147,11 +147,41 @@ line**, beside the existing `[usagefoundry] …` prose:
 ```
 
 `run.status`, `run.cycle_started`, `run.cycle_finished`, `run.guard_tripped`,
-`run.error`, `sweep.failed`, `live_guard_tick.failed`, `boot.reconciled`. The
+`run.error`, `sweep.failed`, `live_guard_tick.failed`, `boot.reconciled`,
+`http.mutation`. The
 noisy kinds — the agent's own output, every tool call, every log line — are
 deliberately **not** on stdout; they are in `run_events` and on the run page,
 where they are readable. What is on stdout is projected field by field rather
 than dumped, so no prompt text, folder path or credential reaches it.
+
+### Who started what
+
+Every run records the gate it came through, so the question "who authorised
+this" is one query rather than three joins:
+
+```bash
+sqlite3 "$DATA_DIR/usagefoundry.db" "SELECT origin, count(*) FROM runs GROUP BY origin;"
+```
+
+`form`, `chat`, `workflow`, `orchestrator-block`, `schedule` — the last three
+start an agent with nobody at the keyboard. `origin_ref` names the proposal,
+instance, schedule or block behind it, and survives that record being deleted.
+Picking a finished run up again does **not** rewrite either: it stamps
+`reopened_at`, because a reopen is a second authorisation and not a different
+creation. The run page states it in words.
+
+Every mutating request leaves a line beside it — method, path, status, the id it
+affected, which credential class was used, and the source address:
+
+```bash
+sqlite3 "$DATA_DIR/usagefoundry.db" \
+  "SELECT ts, method, path, status, subject, actor, address FROM request_log
+     ORDER BY id DESC LIMIT 20;"
+```
+
+Never a request body, a query string, a cookie or a token: `actor` says *how* a
+caller authenticated (`session`, `bearer`, `capability`, `open`) and never with
+what. The table keeps its newest 20,000 lines.
 
 ---
 

@@ -30,7 +30,9 @@ import {
   stopRun,
   TERMINAL_STATUSES,
   topologicalOrder,
+  RUN_ORIGINS,
   type CreateRunInput,
+  type RunOrigin,
   type DependencyEdge,
   type DependencyLink,
   type DependencyState,
@@ -1067,7 +1069,7 @@ export function approveWorkflowProposal(id: string): WorkflowApproval {
 /* ------------------------------------------------------------------ */
 
 export type NodePlan =
-  | { ok: true; input: Omit<CreateRunInput, "dependsOn"> }
+  | { ok: true; input: Omit<CreateRunInput, "dependsOn" | "origin"> }
   | { ok: false; reason: string };
 
 /**
@@ -1189,7 +1191,7 @@ export function planEmittedRun(
   template: RunTemplate | null,
   defaults: RunGuards,
   agent: AgentDefinition | null,
-): Omit<CreateRunInput, "dependsOn"> {
+): Omit<CreateRunInput, "dependsOn" | "origin"> {
   const guards = guardsFor(template, defaults);
   const base = node.promptOverride?.trim() || template?.prompt || null;
   return {
@@ -2078,6 +2080,13 @@ export interface WorkflowInstance {
    * blob beside it already follows.
    */
   instanceBudget: InstanceBudgetPolicy;
+  /**
+   * Which press of Run started it, and what authorised that press. Copied onto
+   * every member's own `runs.origin`, and read again when a deferred node
+   * becomes a run hours later. Null on instances written before the column.
+   */
+  origin: RunOrigin | null;
+  originRef: string | null;
   /** What its blocks have spent: a measured floor and the guard's figure. */
   spend: InstanceProgress;
   nodes: WorkflowInstanceNode[];
@@ -2097,6 +2106,8 @@ interface InstanceRow {
   stop_cause: string | null;
   stop_reason: string | null;
   instance_budget: string | null;
+  origin: string | null;
+  origin_ref: string | null;
 }
 
 /**
@@ -2291,6 +2302,10 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
     workflowName: row.workflow_name,
     graph,
     createdAt: row.created_at,
+    origin: (RUN_ORIGINS as readonly string[]).includes(row.origin ?? "")
+      ? (row.origin as RunOrigin)
+      : null,
+    originRef: row.origin_ref,
     // `stopped` is derived rather than stored — see WorkflowInstanceStatus. An
     // unrecognised value reads as `started`, the same forgiving default the
     // graph blob gets: this is a record, and it has to keep rendering.
@@ -2421,6 +2436,19 @@ export type StartOutcome =
   | { ok: false; reason: string };
 
 /**
+ * Who pressed Run.
+ *
+ * A discriminated union rather than an optional schedule id, so the two cases
+ * cannot both be absent and a caller cannot claim a schedule without naming
+ * one. It carries authorisation and nothing else — no guard, no permission
+ * mode, no budget — which is what keeps "a schedule is the same
+ * `startWorkflow`" true.
+ */
+export type WorkflowTrigger =
+  | { kind: "manual" }
+  | { kind: "schedule"; scheduleId: string };
+
+/**
  * Turn a workflow into runs — every block, in one synchronous pass.
  *
  * Synchronous from the first `createRun` to the last, with no `await` between
@@ -2455,10 +2483,18 @@ export type StartOutcome =
  * fraction guard with no ceiling behind it is refused here, where there is an
  * error channel, rather than tripping at the first block's guard check and
  * halting a graph that never should have started.
+ *
+ * `trigger` records *which* press of Run this was, and it grants nothing: there
+ * is still no field on it that can reach a guard, a permission mode or an
+ * isolation choice, so a schedule remains "the same `startWorkflow`, with
+ * nobody present" rather than a second way of starting work. It is copied onto
+ * the instance so a node created hours later, behind an orchestrator block's
+ * decision, records the trigger the instance actually had.
  */
 export function startWorkflow(
   id: string,
   snapshot: UsageSnapshot,
+  trigger: WorkflowTrigger = { kind: "manual" },
 ): StartOutcome {
   const workflow = getWorkflow(id);
   if (!workflow) return { ok: false, reason: "No such workflow." };
@@ -2532,7 +2568,7 @@ export function startWorkflow(
   // plan: it names no template, no mount, no folder and no task, so every
   // refusal `planNode` has is about a field it does not hold.
   const defaults = chatGuards();
-  const plans = new Map<string, Omit<CreateRunInput, "dependsOn">>();
+  const plans = new Map<string, Omit<CreateRunInput, "dependsOn" | "origin">>();
   for (const node of graph.nodes) {
     if (node.kind === "merge") continue;
     const plan = planNode(
@@ -2590,12 +2626,19 @@ export function startWorkflow(
 
   const instanceId = randomUUID();
   const now = Date.now();
+  // A schedule firing and a person pressing Run are the same instantiation with
+  // different authorisation behind them, which is the whole of what `origin`
+  // records. The reference is the schedule, because "which schedule started
+  // this" is the question a scheduled instance raises and the instance id
+  // answers nothing.
+  const origin: RunOrigin = trigger.kind === "schedule" ? "schedule" : "workflow";
+  const originRef = trigger.kind === "schedule" ? trigger.scheduleId : instanceId;
   db()
     .prepare(
       `INSERT INTO workflow_instances
          (id, workflow_id, workflow_name, graph, instance_budget, created_at,
-          status, error)
-       VALUES (?, ?, ?, ?, ?, ?, 'started', NULL)`,
+          status, error, origin, origin_ref)
+       VALUES (?, ?, ?, ?, ?, ?, 'started', NULL, ?, ?)`,
     )
     .run(
       instanceId,
@@ -2607,6 +2650,8 @@ export function startWorkflow(
       // — the same reason the graph blob is copied rather than joined to.
       JSON.stringify(instanceBudget),
       now,
+      origin,
+      originRef,
     );
 
   const addBlock = db().prepare(
@@ -2637,7 +2682,7 @@ export function startWorkflow(
         edge: e.edge,
         continueBranch: e.continueBranch,
       }));
-      const run = createRun({ ...plans.get(nodeId)!, dependsOn });
+      const run = createRun({ ...plans.get(nodeId)!, dependsOn, origin, originRef });
       runIds.set(nodeId, run.id);
       recordMember(instanceId, {
         nodeId,
@@ -3589,7 +3634,17 @@ function advanceInstance(instanceId: string): void {
       continue;
     }
     try {
-      const run = createRun({ ...plan.input, dependsOn: creation.dependsOn });
+      const run = createRun({
+        ...plan.input,
+        dependsOn: creation.dependsOn,
+        // The instance's own, not this moment's: a node created hours after the
+        // press of Run that authorised it belongs to that press, and a
+        // scheduled instance's late nodes are still the schedule's. Rows from
+        // before the column existed read as a manual press, which is what every
+        // instance was until schedules arrived.
+        origin: instance.origin ?? "workflow",
+        originRef: instance.originRef ?? instanceId,
+      });
       // The ledger row held this node's place while it was waiting on a
       // decision, so it carries the position the graph gave it; the row itself
       // goes, because a node in both tables is a block shown twice on the page
@@ -3987,8 +4042,13 @@ export function blockSettlement(
  * wrote the block off changes nothing — the same shape `finishTurn` uses on a
  * chat row, and for the same reason: the answer that got there first is the one
  * the operator was shown.
+ *
+ * Exported for `sweepPaused`'s reason and no other: this is the only door to
+ * `createEmitted`, and its other end is a real child process exiting. Without a
+ * way in, what a block's emission actually writes onto a run cannot be pinned
+ * at all.
  */
-function settleBlock(
+export function settleBlock(
   instanceId: string,
   nodeId: string,
   result: TurnResult,
@@ -4453,6 +4513,13 @@ function createEmitted(
           runId: runIds.get(d.id)!,
           edge: d.edge,
         })),
+        // Not the instance's origin, even inside a scheduled one: what
+        // authorised *this* run is a model's decision taken moments ago, which
+        // is the one origin here that no person chose run by run. The block's
+        // node is the reference, matching `workflow_instance_runs.emitted_by`
+        // and readable without that join.
+        origin: "orchestrator-block",
+        originRef: nodeId,
       });
       runIds.set(spec.id, run.id);
       recordMember(instanceId, {

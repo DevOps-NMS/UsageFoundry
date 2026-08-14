@@ -394,6 +394,24 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **The audit trail in a browser and in SQLite.** All five creation paths and
+  the request wrapper are driven under `npm test` against a throwaway database
+  — including that a body, a query string and a cookie holding a token leave
+  nothing behind — but nothing has been read off a *running* install. What has
+  not happened: the origin line rendered on a run page, and the query the issue
+  names run against a real database. Before trusting it:
+
+  ```
+  sqlite3 "$DATA_DIR/usagefoundry.db" \
+    "SELECT origin, count(*) FROM runs GROUP BY origin;"
+  sqlite3 "$DATA_DIR/usagefoundry.db" \
+    "SELECT ts, method, path, status, subject, actor, address FROM request_log
+       ORDER BY id DESC LIMIT 20;"
+  ```
+
+  and confirm no row of the second carries anything that is not on that list.
+  Runs created before this landed read `origin` NULL, and the run page says so
+  in words rather than guessing.
 - **`/api/status` against a real fleet, and the structured lines on real
   stdout.** The route is driven by `npm test` against a seeded database — the
   counts, the documented keys, the read-only credential, the absence of prompts,

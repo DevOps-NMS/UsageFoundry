@@ -19,6 +19,11 @@ export const dynamic = "force-dynamic";
  * the editor asks the same function the save route asks, with the same
  * knowledge, and shows the sentence it gets back.
  *
+ * A POST that writes nothing, and so deliberately **not** wrapped in
+ * `auditMutation`: it is an advisory check the canvas runs while somebody is
+ * drawing, and an audit line per keystroke would bury the requests that
+ * actually changed something.
+ *
  * It runs `folderRefusal` too, for the reason `POST /api/workflows` does: a
  * block's folder is what its run will use, and it is the one check that is a
  * syscall rather than a decision.

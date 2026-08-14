@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { AUTH_TOKEN, authEnabled } from "@/lib/config";
+import { auditMutation } from "../../../lib/requestLog";
 
 export const runtime = "nodejs";
 
-export async function POST(req: Request) {
+async function postHandler(req: Request) {
   if (!authEnabled()) {
     return NextResponse.json({ ok: true, authDisabled: true });
   }
@@ -27,3 +28,11 @@ export async function POST(req: Request) {
   });
   return res;
 }
+
+/**
+ * Wrapped for the *failures*. A burst of 401s from one address is the earliest
+ * evidence of somebody trying tokens, and it was recorded nowhere. The wrapper
+ * logs the status and the source address and never the body, which on this one
+ * route is the token itself.
+ */
+export const POST = auditMutation(postHandler);

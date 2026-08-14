@@ -19,6 +19,7 @@ import {
 } from "../../../lib/config";
 import { FIVE_HOURS_MS } from "../../../lib/windows";
 import { invalidatePlanUsage } from "../../../lib/planUsage";
+import { auditMutation } from "../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -39,7 +40,7 @@ export async function GET() {
   });
 }
 
-export async function PUT(req: Request) {
+async function putHandler(req: Request) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
   const optionalNumber = (v: unknown): number | null => {
@@ -273,3 +274,6 @@ export async function PUT(req: Request) {
 
   return NextResponse.json({ settings: saveSettings(patch) });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const PUT = auditMutation(putHandler);

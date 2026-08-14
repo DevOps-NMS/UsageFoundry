@@ -18,6 +18,7 @@ import {
   fmtDuration,
   fmtPct,
   fmtRelative,
+  fmtRunOrigin,
   fmtTokens,
   fmtUSD,
   pollFailureMessage,
@@ -758,6 +759,15 @@ export default function RunDetail({
         {run.started_at
           ? `started ${fmtDateTime(run.started_at)}`
           : `created ${fmtDateTime(run.created_at)}`}{" "}
+        ·{" "}
+        {/* Which gate authorised this run. Three of the five start an agent
+            with nobody at the keyboard, so on a page about an unexpected run
+            this is the first question — and it was answerable only by joining
+            three tables, none of which survived deleting the chat or workflow
+            it came from. Picking a run up again is a separate act and says so
+            separately, because it does not change where the run came from. */}
+        {fmtRunOrigin(run.origin)}
+        {run.reopened_at ? ` · picked up again ${fmtRelative(run.reopened_at, nowTick)}` : ""}{" "}
         ·{" "}
         {/* Not a resume: this opens the new-run form pre-filled from this
             run's stored config — same task, same folder, same guards, same

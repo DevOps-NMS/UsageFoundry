@@ -1,3 +1,6 @@
+// Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
+// rewrites the path alias at runtime, so a module a test loads has to import
+// the way src/lib and the chat route already do.
 import { NextResponse } from "next/server";
 import {
   DEPENDENCY_EDGES,
@@ -8,12 +11,13 @@ import {
   queuePosition,
   type DependencyEdge,
   type RunDependencyInput,
-} from "@/lib/orchestrator";
-import { recentOpsEvents } from "@/lib/ops";
-import type { BootReconcileDTO } from "@/lib/apiTypes";
-import { PERMISSION_MODES, type PermissionMode } from "@/lib/settings";
-import { resolveAgentForRun, runAgentDTO } from "@/lib/agents";
-import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
+} from "../../../lib/orchestrator";
+import { recentOpsEvents } from "../../../lib/ops";
+import type { BootReconcileDTO } from "../../../lib/apiTypes";
+import { PERMISSION_MODES, type PermissionMode } from "../../../lib/settings";
+import { resolveAgentForRun, runAgentDTO } from "../../../lib/agents";
+import { ENFORCEMENT_MODES, normalizePolicy } from "../../../lib/budget";
+import { auditMutation, SUBJECT_HEADER } from "../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -126,7 +130,7 @@ function readDependencies(
   return { ok: true, value };
 }
 
-export async function POST(req: Request) {
+async function postHandler(req: Request) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
   // This value reaches `--permission-mode` on a process that edits files, so it
@@ -212,10 +216,18 @@ export async function POST(req: Request) {
       agent: agent.agent,
       budget: policy,
       dependsOn: deps.value,
+      // The one route a person reaches with a form in front of them. There is
+      // no authorising record beyond the request itself, which the request log
+      // holds — see the `x-uf-subject` header set on the response below.
+      origin: "form",
     });
 
     const storedBudget = JSON.parse(run.budget) as Record<string, unknown>;
-    return NextResponse.json({
+    // The audit line's subject. Every other mutating route names the row it
+    // acts on in its own path; this one mints the id inside the handler, and
+    // the wrapper will not read a response body to find it. Stripped before the
+    // response leaves.
+    const response = NextResponse.json({
       run: {
         ...run,
         budget: {
@@ -227,6 +239,8 @@ export async function POST(req: Request) {
         queuePosition: run.status === "queued" ? queuePosition(run.id) : undefined,
       },
     });
+    response.headers.set(SUBJECT_HEADER, run.id);
+    return response;
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -234,3 +248,6 @@ export async function POST(req: Request) {
     );
   }
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

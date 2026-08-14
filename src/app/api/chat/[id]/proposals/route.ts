@@ -12,6 +12,7 @@ import {
 import { approveWorkflowProposal } from "@/lib/workflows";
 import { promoteQueued } from "@/lib/orchestrator";
 import { chatDTO } from "../../dto";
+import { auditMutation } from "../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +46,7 @@ type Ctx = { params: Promise<{ id: string }> };
  * operator is agreeing to a graph a model wrote — and the second gate, the one
  * that turns it into agents, is the press of Run on the workflow page.
  */
-export async function POST(req: Request, ctx: Ctx) {
+async function postHandler(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const chat = getChat(id);
   if (!chat) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -169,3 +170,6 @@ export async function POST(req: Request, ctx: Ctx) {
     chat: chatDTO(getChat(id)!),
   });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

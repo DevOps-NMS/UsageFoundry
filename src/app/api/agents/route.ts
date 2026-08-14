@@ -5,6 +5,7 @@ import {
   listAmbientAgents,
   normalizeAgentInput,
 } from "@/lib/agents";
+import { auditMutation } from "../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -38,7 +39,7 @@ export async function GET() {
   });
 }
 
-export async function POST(req: Request) {
+async function postHandler(req: Request) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
   const parsed = normalizeAgentInput(body);
@@ -57,3 +58,6 @@ export async function POST(req: Request) {
     );
   }
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

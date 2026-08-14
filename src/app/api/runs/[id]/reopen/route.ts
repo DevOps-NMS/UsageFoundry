@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getRun, reopenRun } from "@/lib/orchestrator";
 import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
+import { auditMutation } from "../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,7 +27,7 @@ type Ctx = { params: Promise<{ id: string }> };
  * sibling stop/resume routes use: every one of them names something the
  * operator can change, and the form has to show it.
  */
-export async function POST(req: Request, ctx: Ctx) {
+async function postHandler(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   if (!getRun(id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
@@ -65,3 +66,6 @@ export async function POST(req: Request, ctx: Ctx) {
   }
   return NextResponse.json({ ok: true });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

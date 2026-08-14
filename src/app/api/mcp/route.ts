@@ -49,6 +49,7 @@ import { chatGuards } from "@/lib/settings";
 import { githubRemotes, scanWorkspace } from "@/lib/workspace";
 import { mountById } from "@/lib/config";
 import { fmtUSD } from "@/lib/format";
+import { auditMutation } from "../../../lib/requestLog";
 
 /**
  * What one `get_run_diff` may return.
@@ -619,7 +620,7 @@ function toolsFor(subject: CapabilitySubject) {
     : [...SHARED_TOOLS, ...BLOCK_TOOLS];
 }
 
-export async function POST(req: Request) {
+async function postHandler(req: Request) {
   const header = req.headers.get("authorization") ?? "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
   const subject = subjectForCapability(bearer);
@@ -664,7 +665,8 @@ export async function GET() {
   );
 }
 
-export async function DELETE() {
+// Takes the request it does not read, so the audit wrapper has one to log.
+async function deleteHandler(_req: Request) {
   return new Response(null, { status: 405 });
 }
 
@@ -1606,3 +1608,8 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
       "It is waiting for the operator to approve it; nothing is running.",
   );
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);
+/** Wrapped so the request that changed something is on the audit log. */
+export const DELETE = auditMutation(deleteHandler);

@@ -852,6 +852,67 @@ function migrate(db: Database.Database) {
   addColumn(db, "workflow_instance_blocks", "reply", "TEXT");
   addColumn(db, "workflow_instance_blocks", "notes", "TEXT");
 
+  // Which gate this run came through, and the record that authorised it.
+  //
+  // Runs arrive from five routes and three of them start an agent with nobody
+  // at the keyboard, so "who started this" had no answer at all: provenance was
+  // a deduction across chat_proposals, workflow_instance_runs and
+  // workflow_instance_runs.emitted_by, absence in all three was ambiguous
+  // between the run form and a run picked up by hand, and none of it survived
+  // deleting the chat or workflow it came from.
+  //
+  // Written once, by `createRun`, and never rewritten — `origin` answers "which
+  // route created this", so a query grouped by it over a time range has to keep
+  // meaning that. Picking a finished run up again is a different act and gets
+  // `reopened_at` below rather than overwriting this.
+  //
+  // Plain columns, `emitted_by`'s rule: a proposal id or an instance id here is
+  // a record of where a run came from and must keep reading true after that row
+  // has gone, so neither is a foreign key and neither cascades.
+  addColumn(db, "runs", "origin", "TEXT");
+  addColumn(db, "runs", "origin_ref", "TEXT");
+  // When a person last put this terminal run back in the queue. The other half
+  // of the question `origin` answers: a run created by the form at 09:00 and
+  // reopened at 02:00 is two authorisations, and overwriting the first with the
+  // second would lose the one the column exists for.
+  addColumn(db, "runs", "reopened_at", "INTEGER");
+
+  // The same pair for an instance, so a node created *later* — a deferred one,
+  // behind an orchestrator block's decision — records the trigger the press of
+  // Run had rather than guessing. A scheduled instance's late nodes are still
+  // the schedule's.
+  addColumn(db, "workflow_instances", "origin", "TEXT");
+  addColumn(db, "workflow_instances", "origin_ref", "TEXT");
+
+  // Mutating HTTP requests: what was asked, of what, by whom, from where.
+  //
+  // Nothing recorded an authenticated request anywhere, so a burst of runs
+  // created with a stolen token was indistinguishable from a busy afternoon and
+  // a compromise could not be scoped after the fact.
+  //
+  // What it deliberately does *not* hold: request bodies, query strings,
+  // cookies, tokens, prompts. A body here would carry the prompt of every run
+  // and the password of every login, and a query string is where a credential
+  // ends up when somebody puts one there by mistake. `actor` names *how* a
+  // caller authenticated and never with what.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS request_log (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts          INTEGER NOT NULL,
+      method      TEXT NOT NULL,
+      path        TEXT NOT NULL,
+      status      INTEGER NOT NULL,
+      -- The id the request named, or the one it created. Null where a route
+      -- affects no single row.
+      subject     TEXT,
+      -- 'session' | 'bearer' | 'capability' | 'open' — how, never with what.
+      actor       TEXT NOT NULL,
+      address     TEXT,
+      duration_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_request_log_ts ON request_log(ts);
+  `);
+
   // Things that happened to the *server* rather than to a run.
   //
   // `run_events` is per run and cascades with it, so the one moment there is

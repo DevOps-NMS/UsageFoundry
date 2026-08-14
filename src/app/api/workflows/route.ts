@@ -7,6 +7,7 @@ import {
   normalizeWorkflowInput,
 } from "@/lib/workflows";
 import { workflowDTO } from "./dto";
+import { auditMutation } from "../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +28,7 @@ export async function GET() {
   return NextResponse.json({ workflows: listWorkflows().map(workflowDTO) });
 }
 
-export async function POST(req: Request) {
+async function postHandler(req: Request) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
   const parsed = normalizeWorkflowInput(body, currentKnowledge());
@@ -51,3 +52,6 @@ export async function POST(req: Request) {
     );
   }
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

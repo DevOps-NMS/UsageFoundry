@@ -466,7 +466,25 @@ export interface RunDTO {
    * after that agent has been renamed or deleted.
    */
   agent?: RunAgentDTO | null;
+  /**
+   * Which gate created this run: the form, an approved chat proposal, a press
+   * of Run on a workflow, an orchestrator block's own decision, or a schedule
+   * firing with nobody present. Null on runs created before it was recorded.
+   */
+  origin?: RunOriginDTO | null;
+  /** The record that authorised it — a proposal, an instance, a schedule. */
+  origin_ref?: string | null;
+  /** When an operator last picked this run up again. Never rewrites `origin`. */
+  reopened_at?: number | null;
 }
+
+/** Mirrors `RunOrigin` in `orchestrator.ts`; see the column note in `db.ts`. */
+export type RunOriginDTO =
+  | "form"
+  | "chat"
+  | "workflow"
+  | "orchestrator-block"
+  | "schedule";
 
 /**
  * What a run records about the specialist it carries.

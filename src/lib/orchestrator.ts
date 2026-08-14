@@ -190,7 +190,41 @@ export interface RunRow {
    * the ordinary run. Read through `parseRunAgent`, never parsed at a call site.
    */
   agent: string | null;
+  /**
+   * Which gate this run came through, recorded rather than deduced. Null only
+   * for rows written before the column existed.
+   */
+  origin: RunOrigin | null;
+  /** The record that authorised it: a proposal, an instance, a schedule. */
+  origin_ref: string | null;
+  /** When an operator last put this terminal run back in the queue. */
+  reopened_at: number | null;
 }
+
+/**
+ * The routes a run can arrive from.
+ *
+ * Five, and three of them start an agent with nobody at the keyboard — which is
+ * the whole reason this is a column. Picking a finished run up again is
+ * deliberately *not* a sixth value: `reopenRun` creates nothing, so recording
+ * it here would overwrite the one fact the column exists to hold while
+ * `created_at` went on pointing at the original creation. It lands on
+ * `runs.reopened_at`, and on the request log beside it.
+ */
+export const RUN_ORIGINS = [
+  /** The new-run form: a person filled it in and pressed Start. */
+  "form",
+  /** An approved chat proposal. `origin_ref` is the proposal. */
+  "chat",
+  /** A press of Run on a saved workflow. `origin_ref` is the instance. */
+  "workflow",
+  /** An orchestrator block's own decision. `origin_ref` is the block's node. */
+  "orchestrator-block",
+  /** A schedule firing with nobody present. `origin_ref` is the schedule. */
+  "schedule",
+] as const;
+
+export type RunOrigin = (typeof RUN_ORIGINS)[number];
 
 /** Where the agent runs. Older rows predate `work_dir` and never isolated. */
 export function workDirOf(run: RunRow): string {
@@ -1708,6 +1742,18 @@ export interface CreateRunInput {
    * free, which is every run that existed before this option did.
    */
   dependsOn?: RunDependencyInput[];
+  /**
+   * Which gate this run came through.
+   *
+   * Required rather than defaulted, and stated at the call site rather than
+   * carried on a plan object, because the point of the column is that it is
+   * *recorded* rather than deduced — a default would be a deduction with a
+   * compiler behind it, and the two paths that share a plan function (a press
+   * of Run and a schedule firing) differ in exactly this field.
+   */
+  origin: RunOrigin;
+  /** The authorising record, where one exists: a proposal, instance, schedule. */
+  originRef?: string | null;
 }
 
 /**
@@ -2099,8 +2145,8 @@ export function createRun(input: CreateRunInput): RunRow {
         `INSERT INTO runs
            (id, folder, prompt, model, status, budget, max_iterations, iterations, created_at, spent_usd, spent_tokens,
             work_dir, isolation, repo_root, worktree_path, worktree_branch, worktree_base, worktree_base_branch,
-            continues_run, agent)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            continues_run, agent, origin, origin_ref)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -2123,6 +2169,8 @@ export function createRun(input: CreateRunInput): RunRow {
         plan?.baseBranch ?? null,
         continuesRun,
         agentBlob,
+        input.origin,
+        input.originRef ?? null,
       );
 
     const addLink = db().prepare(
@@ -5762,7 +5810,7 @@ export function reopenRun(
 
   const flip = db()
     .prepare(
-      `UPDATE runs SET status=?, budget=?, max_iterations=?, follow_up=?,
+      `UPDATE runs SET status=?, budget=?, max_iterations=?, follow_up=?, reopened_at=?,
          started_at=NULL, finished_at=NULL, exit_code=NULL, stop_reason=NULL,
          resume_at=NULL WHERE id=? AND status=?`,
     )
@@ -5771,6 +5819,11 @@ export function reopenRun(
       blob,
       policy.maxIterations ?? 0,
       firstPrompt || null,
+      // `origin` is deliberately untouched: it says which route *created* this
+      // run, and rewriting it here would lose that while `created_at` went on
+      // pointing at the original creation. A pick-up is its own act and gets its
+      // own column, with the request that asked for it on the request log.
+      Date.now(),
       id,
       run.status,
     );

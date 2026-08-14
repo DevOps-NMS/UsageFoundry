@@ -160,6 +160,40 @@ export function fmtRelative(ts: number, now = Date.now()): string {
   return delta >= 0 ? `in ${body}` : `${body} ago`;
 }
 
+/**
+ * Which gate started a run, as a person reads it.
+ *
+ * Prose rather than the stored slug, because the distinction that matters to
+ * somebody looking at an unexpected run is *whether a person was present*, and
+ * "orchestrator-block" does not say that where "an orchestrator block decided
+ * it" does. An unrecognised value is reported as itself rather than hidden: a
+ * row written by a newer build saying something this one does not know is still
+ * a true thing about that run.
+ */
+export function fmtRunOrigin(origin: string | null | undefined): string {
+  switch (origin) {
+    case "form":
+      return "started from the run form";
+    case "chat":
+      return "started from an approved chat proposal";
+    case "workflow":
+      return "started by a press of Run on a workflow";
+    case "orchestrator-block":
+      return "started by an orchestrator block's own decision";
+    case "schedule":
+      return "started by a schedule, with nobody present";
+    case null:
+    case undefined:
+    case "":
+      // Every run created before the column existed. Saying "unknown" is the
+      // honest answer; guessing "the run form" would make the audit column a
+      // liability the first time somebody trusted it.
+      return "started before this app recorded where runs came from";
+    default:
+      return `started by ${origin}`;
+  }
+}
+
 export function fmtDuration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
