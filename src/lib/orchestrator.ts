@@ -30,6 +30,7 @@ import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
 import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
+import { agentsArgs, type AgentDefinition } from "./agents";
 import type { RunDependencyDTO } from "./apiTypes";
 
 /**
@@ -3044,10 +3045,28 @@ export function buildArgs(opts: {
   resumeSessionId: string | null;
   /** A run with its own checkout and branch, which is told to commit to it. */
   isolated: boolean;
+  /**
+   * Specialised agents this run's main thread may delegate to.
+   *
+   * Attached rather than imposed: `--agents` *offers* these to the delegating
+   * model, which is what a sub-agent is. The CLI also has `--agent <name>`,
+   * which replaces the session's own main agent, and that is deliberately not
+   * wired here — it is a different feature answering a different question
+   * (which role does the run itself take, rather than which specialists it may
+   * hand a subtask to), and the description a saved agent carries exists only
+   * for the delegation this flag enables.
+   *
+   * They bound nothing. What the run may do is the permission mode and the two
+   * lists below, exactly as before an agent was attached.
+   */
+  agents?: AgentDefinition[];
 }): string[] {
   const args = ["-p", opts.prompt, "--output-format", "stream-json", "--verbose"];
   if (opts.model) args.push("--model", opts.model);
   if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
+  // One encoder for all four spawn sites, because every way of getting this
+  // shape wrong is silent — see `agentsFlagValue`.
+  args.push(...agentsArgs(opts.agents ?? []));
   // Additive: `--allowedTools` names what skips the prompt, and everything else
   // still follows the mode. It is not the allowlist `chat.ts` runs under, where
   // `manual` mode is what makes the same flag exhaustive.

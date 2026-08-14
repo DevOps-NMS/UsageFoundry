@@ -5,6 +5,7 @@ import { CLAUDE_BIN } from "./config";
 import { db } from "./db";
 import { git } from "./git";
 import { diffAsText, runDiff, type RunDiff } from "./diff";
+import { agentsArgs, type AgentDefinition } from "./agents";
 import { getSettings } from "./settings";
 import {
   currentSnapshot,
@@ -213,6 +214,15 @@ export interface AssistRequest {
   counts?: { files: number; shown: number; truncated: boolean };
   /** The files this invocation is about, recorded on the row. Resolutions only. */
   paths?: string[];
+  /**
+   * Specialised agents this invocation may delegate to.
+   *
+   * Offered, never imposed, and it costs this child none of what makes it the
+   * deliberate third kind of process: a review still runs `--permission-mode
+   * plan` so nothing it delegates can write, and a delegated turn's spend still
+   * lands in `run_reviews` rather than in `runs.spent_usd`.
+   */
+  agents?: AgentDefinition[];
   /**
    * Runs after the child exits and before the row is written, so a caller can
    * check what the agent actually did and downgrade a "completed" spawn to a
@@ -452,6 +462,9 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
       permissionMode,
     ];
     if (run.model) args.push("--model", run.model);
+    // One encoder for all four spawn sites — every way of getting this shape
+    // wrong is silent, so there is one place that knows it.
+    args.push(...agentsArgs(req.agents ?? []));
 
     // No shell, as everywhere else here: the prompt carries a diff, which is
     // arbitrary repository content full of quotes and backticks.

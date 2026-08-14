@@ -1081,6 +1081,65 @@ describe("buildArgs", () => {
     }
   }
 
+  /**
+   * A specialised agent reaches a work cycle as one `--agents` pair, and the
+   * branch that matters is the one where there is nothing to attach.
+   *
+   * Both directions are silent. An agent attached wrongly is dropped by the CLI
+   * with a zero exit and no warning, leaving a run that looks exactly like a run
+   * that was never given one; a flag emitted when nothing was chosen is an empty
+   * object where every existing run used to have no flag at all. Neither shows
+   * up in the event log, the cost or the transcript — `attributionAgent` simply
+   * never names it.
+   */
+  it("attaches nothing when no agent was chosen", () => {
+    assert.equal(buildArgs({ ...base, isolated: true }).includes("--agents"), false);
+    assert.equal(
+      buildArgs({ ...base, isolated: true, agents: [] }).includes("--agents"),
+      false,
+    );
+  });
+
+  it("attaches a chosen agent as one --agents pair", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      agents: [
+        { name: "reviewer", description: "reads diffs", prompt: "You review.", model: null },
+      ],
+    });
+    const at = args.indexOf("--agents");
+    assert.notEqual(at, -1);
+    assert.deepEqual(JSON.parse(args[at + 1]), {
+      reviewer: { description: "reads diffs", prompt: "You review." },
+    });
+  });
+
+  /**
+   * An agent is offered, never imposed, and it bounds nothing. The deny list is
+   * what stands between an agent and the process supervising it, and attaching a
+   * specialist must not be a way around it — so the same assertions the modes
+   * above make are made again with one attached.
+   */
+  it("changes none of what bounds the run", () => {
+    const agents = [
+      { name: "reviewer", description: "reads diffs", prompt: "You review.", model: "sonnet" },
+    ];
+    const args = buildArgs({ ...base, isolated: true, agents });
+    assert.deepEqual(
+      args.slice(args.indexOf("--disallowedTools") + 1, args.indexOf("--disallowedTools") + 3),
+      ["Bash(pkill:*)", "Bash(killall:*)"],
+    );
+    assert.deepEqual(
+      args.slice(args.indexOf("--allowedTools") + 1, args.indexOf("--allowedTools") + 3),
+      ["Bash(git add:*)", "Bash(git commit:*)"],
+    );
+    assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
+    // `--agent` sets the session's *own* agent, which is a different feature
+    // and a different decision. Only the plural flag is wired.
+    assert.equal(args.includes("--agent"), false);
+  });
+
   it("still passes the mode, the model and the session to resume", () => {
     const args = buildArgs({
       ...base,

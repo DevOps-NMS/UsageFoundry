@@ -28,6 +28,7 @@ import {
   type RunDependencyInput,
 } from "./orchestrator";
 import { getTemplate, type RunTemplate } from "./templates";
+import { agentsArgs, type AgentDefinition } from "./agents";
 
 /**
  * The orchestrator chat: a conversation that proposes runs.
@@ -1444,6 +1445,15 @@ export interface OrchestratorChildOptions {
    * way, so this widens nothing — it only decides where a bare path resolves.
    */
   cwd?: string;
+  /**
+   * Specialised agents this turn may delegate to.
+   *
+   * Offered, never imposed — `buildArgs` says why `--agent` is not the flag
+   * used. Nothing here widens the turn's boundary: its tool surface is still
+   * whatever `/api/mcp` publishes for its subject, and a delegated turn's spend
+   * still lands inside `--max-budget-usd` below.
+   */
+  agents?: AgentDefinition[];
   /** `--max-budget-usd`, the only thing bounding the spend inside the CLI. */
   maxBudgetUSD: number | null;
   timeoutMs: number;
@@ -1539,6 +1549,10 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
     for (const mount of WORKSPACE_MOUNTS) {
       if (fs.existsSync(mount.path)) args.push("--add-dir", mount.path);
     }
+
+    // One encoder for all four spawn sites — every way of getting this shape
+    // wrong is silent, so there is one place that knows it.
+    args.push(...agentsArgs(o.agents ?? []));
 
     if (o.resumeSessionId) args.push("--resume", o.resumeSessionId);
     if (settings.defaultModel) args.push("--model", settings.defaultModel);
