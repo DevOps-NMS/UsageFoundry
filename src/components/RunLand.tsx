@@ -16,6 +16,7 @@ import { Card, CardTitle } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
+import { Sheet } from "@/components/ui/Sheet";
 import { Spinner } from "@/components/ui/Log";
 import { DiffFileRow, Patch } from "@/components/ui/Patch";
 
@@ -557,7 +558,7 @@ export function RunLand({ run }: { run: RunDTO }) {
                 Delete branch
               </Button>
             )}
-            {canPurge && !confirmPurge && (
+            {canPurge && (
               <Button
                 variant="ghost"
                 className="transition-colors duration-150"
@@ -573,44 +574,41 @@ export function RunLand({ run }: { run: RunDTO }) {
 
       {/* Two presses, and the second one names what goes — with a way back out,
           which the armed single button did not have. Nothing here can put back a
-          commit that was never landed. */}
-      {confirmPurge && (
-        <div className="mt-3 rounded-sm border border-line border-l-[3px] border-l-danger bg-inset p-3">
-          <p className="text-sm font-semibold text-ink">
+          commit that was never landed.
+
+          A Sheet rather than a panel appended under the card: the second press
+          is the one decision on the page at that moment, and a panel that
+          arrives below the fold on a long run page is a confirmation the
+          operator has to go looking for. Modality is the point — Esc is a way
+          out, and nothing behind it can be pressed meanwhile.
+
+          The branch this names and the `confirmBranch` `act` sends are both
+          `state.branch`, unchanged. That echo is not authentication and selects
+          nothing; it is what stops a request aimed at one branch landing on
+          another, and the row still decides what is deleted. */}
+      <Sheet
+        open={confirmPurge}
+        onDismiss={() => setConfirmPurge(false)}
+        title={
+          <>
             Purge <span className="mono">{state.branch}</span>?
-          </p>
-          <p className="mt-1 max-w-[70ch] text-xs leading-snug text-ink-muted">
-            This deletes the branch, its {state.ahead} commit
-            {state.ahead === 1 ? "" : "s"}
-            {state.pending
-              ? ` and ${state.pending.count} uncommitted path${
-                  state.pending.count === 1 ? "" : "s"
-                }`
-              : ""}
-            , and its checkout. None of it is recoverable from here.
-          </p>
-          <ButtonRow className="mt-2.5">
-            <Button
-              variant="danger"
-              className="transition-colors duration-150"
-              onClick={() => act("purge")}
-              disabled={busy}
-            >
-              {busy
-                ? "Purging…"
-                : `Purge ${state.ahead} commit${state.ahead === 1 ? "" : "s"}`}
-            </Button>
-            <Button
-              variant="ghost"
-              className="transition-colors duration-150"
-              onClick={() => setConfirmPurge(false)}
-              disabled={busy}
-            >
-              Keep it
-            </Button>
-          </ButtonRow>
-        </div>
-      )}
+          </>
+        }
+        confirmVariant="danger"
+        confirmLabel={`Purge ${state.ahead} commit${state.ahead === 1 ? "" : "s"}`}
+        onConfirm={() => void act("purge")}
+        cancelLabel="Keep it"
+        busy={busy}
+      >
+        This deletes the branch, its {state.ahead} commit
+        {state.ahead === 1 ? "" : "s"}
+        {state.pending
+          ? ` and ${state.pending.count} uncommitted path${
+              state.pending.count === 1 ? "" : "s"
+            }`
+          : ""}
+        , and its checkout. None of it is recoverable from here.
+      </Sheet>
     </Card>
   );
 }
