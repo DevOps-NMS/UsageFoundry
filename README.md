@@ -291,6 +291,51 @@ the list above as its honest boundary until it does.
 
 ---
 
+## Sizing the container
+
+Every unit of work here is a `claude` child process — a full Node process — and
+a work cycle's agent starts builds, test suites and dev servers of its own
+inside the same container. Two settings bound how many exist at once, and
+`docker-compose.yml` bounds what they may take:
+
+| | Default | Covers |
+|---|---|---|
+| **Settings → Runs at the same time** | 4 | Work cycles. Over the limit a run waits in the queue; queued and parked runs cost nothing and do not count |
+| **Settings → Other Claude processes at the same time** | 2 | A review, a merge-conflict resolution, a chat turn, a workflow orchestrator block's deciding turn. The first three are refused while it is full and say so; a workflow block waits for a slot |
+| `UF_MEM_LIMIT` in `.env` | `10g` | The container's memory ceiling |
+| `UF_PIDS_LIMIT` in `.env` | `2048` | The container's task ceiling — threads, not just processes |
+
+The two settings are the ceiling on Claude processes; the two limits are what
+happens if that ceiling is set higher than the machine can carry. Docker
+OOM-kills the container, `restart: unless-stopped` brings it back, and the runs
+it was carrying are closed out with a reason on each — which is a bad hour
+rather than a host to go and rescue.
+
+**Raising the fleet means raising all four.** The arithmetic, per container:
+
+```
+memory ≈ 1 GiB  (the server)
+       + 1.5 GiB × runs at the same time
+       + 0.5 GiB × other Claude processes
+pids   ≈ 256 × (runs + other Claude processes + 1)
+```
+
+So 25 simultaneous runs with 5 other Claude processes wants roughly
+`UF_MEM_LIMIT=40g` and `UF_PIDS_LIMIT=8192`, on a host with that much to give.
+The per-child figures are estimates rather than measurements — watch
+`docker stats` against your own repositories and adjust, because a work cycle's
+real footprint is mostly whatever *your* build does.
+
+Two notes:
+
+- An install that saved its settings before this version keeps the value it
+  stored, which for **Runs at the same time** was *No limit*. Open Settings and
+  check it; the new default only reaches an install that never saved.
+- Leaving either setting blank still means *no limit*. That is a deliberate
+  opt-out, not the state to leave a fresh install in.
+
+---
+
 ## Documentation
 
 | | |

@@ -171,6 +171,15 @@ export async function PUT(req: Request) {
     patch.maxConcurrentRuns = n === null ? null : Math.max(1, Math.floor(n));
   }
 
+  if ("maxConcurrentAssists" in body) {
+    const n = optionalNumber(body.maxConcurrentAssists);
+    // Same two rules as the cap above, and the floor of 1 matters more here: a
+    // 0 would wedge every review, resolution and chat turn behind a budget
+    // nothing can satisfy, and leave a workflow's deciding blocks `waiting`
+    // for a slot that can never come free.
+    patch.maxConcurrentAssists = n === null ? null : Math.max(1, Math.floor(n));
+  }
+
   if ("isolationCopyGlobs" in body) {
     const raw = body.isolationCopyGlobs;
     const list = Array.isArray(raw)

@@ -149,6 +149,7 @@ const EDITABLE_PATHS = [
   "forwardSubAgentText",
   "defaultPermissionMode",
   "maxConcurrentRuns",
+  "maxConcurrentAssists",
   "isolationCopyGlobs",
   "landStrategy",
   "continuationPrompt",
@@ -1424,7 +1425,7 @@ export default function SettingsPage() {
             htmlFor="conc"
             edited={isEdited("maxConcurrentRuns")}
             label="Runs at the same time"
-            description="Each run carries its own spending limit, so this multiplies the worst case — three runs at $5 can spend $15. A run over the limit waits rather than being refused, and queued or parked runs do not count against it"
+            description="Work cycles only — reviews, chat turns and workflow blocks have their own budget below. Each run carries its own spending limit, so this multiplies the worst case: three runs at $5 can spend $15. A run over the limit waits rather than being refused, and queued or parked runs do not count against it"
           >
             <div className="w-32">
               <Input
@@ -1438,6 +1439,32 @@ export default function SettingsPage() {
                 onChange={(e) =>
                   patch({
                     maxConcurrentRuns: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="concassist"
+            edited={isEdited("maxConcurrentAssists")}
+            label="Other Claude processes at the same time"
+            description="A review, a merge-conflict resolution, an orchestrator chat turn and a workflow orchestrator block's deciding turn share this one budget. The first three are refused while it is full, and say so; a workflow block waits for a slot instead. Together with the limit above, this is the most Claude processes the container will ever carry"
+          >
+            <div className="w-32">
+              <Input
+                id="concassist"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="at once"
+                placeholder="No limit"
+                value={effective.maxConcurrentAssists ?? ""}
+                onChange={(e) =>
+                  patch({
+                    maxConcurrentAssists: e.target.value
                       ? Number(e.target.value)
                       : null,
                   })

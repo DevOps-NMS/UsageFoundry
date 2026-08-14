@@ -74,6 +74,7 @@ const PROBES: Record<keyof Settings, Probe> = {
   includeSidechains: { send: false },
   forwardSubAgentText: { send: false },
   maxConcurrentRuns: { send: 3 },
+  maxConcurrentAssists: { send: 5 },
   isolationCopyGlobs: { send: [".env.local"] },
   isolationPreamble: { send: "CHANGED preamble" },
   continuedWorkPrompt: { send: "CHANGED continued work" },

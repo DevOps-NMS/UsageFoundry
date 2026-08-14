@@ -394,6 +394,33 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **The container's own resource limits.** `docker-compose.yml` now declares
+  `mem_limit: ${UF_MEM_LIMIT:-10g}` and `pids_limit: ${UF_PIDS_LIMIT:-2048}`,
+  and neither has been applied by a real Docker: the run that added them had no
+  Docker at all, so what is here is the compose file parsing correctly by eye
+  and nothing more. The per-child memory figures README's sizing table is built
+  from are **estimates** and not measurements — the reasoning is that a `claude`
+  child is a Node process and a work cycle's agent starts builds inside the same
+  cgroup, which sets the shape of the arithmetic but not its constants. Before
+  trusting the numbers: `docker compose up -d`, then
+  `docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' usagefoundry`
+  to confirm the limits were applied at all, then start runs up to the
+  configured cap and watch `docker stats` for the real per-run footprint. The
+  recovery half is worth exercising once too: set `UF_MEM_LIMIT` deliberately
+  low, fill the fleet, and confirm the container is OOM-killed, restarted by
+  `restart: unless-stopped`, and that `reconcileOnBoot` closes out the runs it
+  was carrying rather than leaving folders claimed.
+- **The process budget refusing a real child.** `liveAssistChildren`,
+  `assistBudgetRefusal` and the deferral of a workflow block are covered by
+  `src/lib/assistBudget.test.ts` against a real database, and `npm run
+  typecheck` and `npm test` pass — but no browser has seen the refusal, and no
+  workflow block has actually been deferred and then woken. The wake is the part
+  worth watching: a block over the budget is left `waiting` rather than failed,
+  and what un-sticks it is `advanceInstances` being called when a review or a
+  chat turn settles. Before trusting it: set *Other Claude processes at the same
+  time* to 1, start a workflow whose orchestrator block is behind something
+  slow, open a chat and send a turn, and confirm the block sits `waiting` while
+  the chat is thinking and starts deciding within a moment of the chat settling.
 - **A failed tool result reaching the run page.** `toolResultFailures` is unit-
   tested and `npm run typecheck` passes, and the `user`/`tool_result` shape it
   reads was taken from real transcripts written by the pinned CLI (2.1.226) —

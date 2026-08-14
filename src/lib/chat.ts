@@ -1914,6 +1914,17 @@ function finishTurn(chatId: string, r: TurnResult): void {
         .run(first.text.replace(/\s+/g, " ").slice(0, 80), chatId);
     }
   }
+
+  // This turn just gave a slot back to the process budget, and a block's
+  // deciding turn deferred by that budget is left `waiting` rather than failed —
+  // so whatever frees a slot has to wake it. `review.ts` carries the same four
+  // lines for the same reason, and for the same reason imports dynamically:
+  // `workflows.ts` imports this module.
+  void import("./workflows")
+    .then((m) => m.advanceInstances())
+    .catch(() => {
+      /* a workflow that cannot be advanced is not a reason to fail a turn */
+    });
 }
 
 /**

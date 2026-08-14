@@ -1255,8 +1255,14 @@ export interface SettingsDTO {
   includeSidechains: boolean;
   /** Put a delegated turn's own words in the run log. */
   forwardSubAgentText: boolean;
-  /** Null means no limit. */
+  /** Work cycles only. Null means no limit. */
   maxConcurrentRuns: number | null;
+  /**
+   * Every `claude` child that is not a work cycle — a review, a conflict
+   * resolution, a chat turn, a workflow block's deciding turn. Null means no
+   * limit.
+   */
+  maxConcurrentAssists: number | null;
   isolationCopyGlobs: string[];
   isolationPreamble: string;
   /** What a run is told when it picks up the branch the run before it had. */

@@ -11,7 +11,7 @@ import {
   type ChatProcess,
   type TurnResult,
 } from "./chat";
-import { assistRefusal } from "./review";
+import { assistBudgetFull, windowRefusal } from "./review";
 import {
   DEPENDENCY_EDGES,
   blockWaitingRun,
@@ -3622,7 +3622,19 @@ function advanceInstance(instanceId: string): void {
 
   // Claimed synchronously, spawned after. The claim is what makes this
   // re-entrant safe; the spawn is what makes it worth doing.
-  const claimed = step.spawn.filter((nodeId) => claimBlock(instanceId, nodeId));
+  //
+  // The budget is asked before each claim rather than once for the batch,
+  // because the claim itself is what fills it: `claimBlock` writes `thinking`,
+  // which is the row `liveAssistChildren` counts, so the next question already
+  // knows about the last answer. A block over the budget is left `waiting` and
+  // not written off — this is a shortage of memory rather than a decision about
+  // the work, and `blocked` here would end the branch of the graph behind it for
+  // a condition that clears in minutes. Whatever frees a slot advances again.
+  const claimed: string[] = [];
+  for (const nodeId of step.spawn) {
+    if (assistBudgetFull()) break;
+    if (claimBlock(instanceId, nodeId)) claimed.push(nodeId);
+  }
   for (const nodeId of claimed) {
     void startBlockTurn(instanceId, nodeId).catch((err) => {
       settleBlock(instanceId, nodeId, {
@@ -3786,8 +3798,10 @@ function claimBlock(instanceId: string, nodeId: string): boolean {
 /**
  * Spawn one block's turn.
  *
- * The gate in front of it is a chat turn's and no more: `assistRefusal()`, the
- * operator's own configured ceiling already spent. There is deliberately no
+ * The gate in front of it is a chat turn's and no more: the host process budget
+ * — taken at `advanceInstance`'s claim rather than here, so a shortage defers
+ * this turn instead of failing it — and `windowRefusal()`, the operator's own
+ * configured ceiling already spent. There is deliberately no
  * `evaluateBudget` here — this is not a work cycle and inventing a per-block
  * fraction would be a threshold nobody set — and the instance's own budget is
  * checked where every other instance-wide decision is, at a member's cycle
@@ -3820,7 +3834,11 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
     }
   }
 
-  const refusal = await assistRefusal();
+  // `windowRefusal` and not `assistRefusal`: the process budget gated this turn
+  // at `advanceInstance`'s claim, and this block's own row has been `thinking`
+  // — and so counted — ever since. Asking the budget again here would have a
+  // block refuse itself whenever it was the one that filled it.
+  const refusal = await windowRefusal();
   if (refusal) {
     settleBlock(instanceId, nodeId, { status: "failed", error: refusal });
     return;
