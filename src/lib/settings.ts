@@ -84,10 +84,64 @@ export interface Settings {
   defaultPermissionMode: PermissionMode;
   /** Default model passed to Claude Code, or null to use its own default. */
   defaultModel: string | null;
+  /**
+   * The saved agent the new-run form starts on, or null for none.
+   *
+   * `defaultModel`'s precedent and its shape: one place for a default the run
+   * form then pre-fills, rather than one per surface. What it is **not** is a
+   * route to anything — an agent carries a description and a prompt, the
+   * registry refuses a tool list at the door and has no column for a permission
+   * mode, so this cannot widen what a run may do any more than `defaultModel`
+   * can. There are still exactly two routes to `--permission-mode`.
+   *
+   * An **id**, `run_templates.agent_id`'s rule and its reason: an operator who
+   * fixes their reviewer's prompt expects the next run to use the fixed one. The
+   * frozen copy is taken where it always is, by `createRun`.
+   *
+   * Deliberately a *seed for a form* rather than something a run door reads, and
+   * that is the whole of why it does not reproduce the CLI's silent drop. It is
+   * refused at **save** when it names no usable agent, which is
+   * `normalizeTemplateInput`'s rule — refuse where the person is. If the agent
+   * is deleted afterwards the form says so and starts with none, because the
+   * alternative is a new-run page nobody can use until they visit Settings. That
+   * is not the "never fall back to none" rule bending: that rule is about a run
+   * whose operator *named* a specialist, and a pre-filled field nobody has
+   * looked at is not a naming. Everything downstream is unchanged — the run door
+   * still refuses a deleted agent by name through `agentRefusal`.
+   */
+  defaultAgentId: string | null;
   /** Prompt used for iterations after the first in a multi-step run. */
   continuationPrompt: string;
   /** Whether to include sub-agent (sidechain) turns in usage totals. */
   includeSidechains: boolean;
+  /**
+   * Put a sub-agent's own words in the run log.
+   *
+   * `--forward-subagent-text`, verified present on the pin (2.1.226) and gated
+   * there on `--print` and `--output-format=stream-json`, which is exactly how
+   * `buildArgs` spawns a work cycle. Without it a delegation is a `Task` tool
+   * call followed by silence for however long the sub-agent takes, and the run
+   * that spent the money has nothing to show for the part of it that was handed
+   * on — which is the half of "make agent work visible" a cost breakdown cannot
+   * cover.
+   *
+   * On by default, and the risk is worth stating rather than absorbing: this
+   * app's `stream-json` parser was captured from one CLI build, and the flag
+   * puts a *new shape* into that stream. So the shape is handled by name rather
+   * than left to fall through — `handleStreamLine` routes a message carrying
+   * `parent_tool_use_id` to its own event kind, which never becomes the cycle's
+   * `finalText`, never latches an API refusal, and is never read by
+   * `cycleOutputs`. The failure this prevents is precise: `finalText` is what
+   * the `DONE` test runs against, matched per *line*, so a sub-agent reporting
+   * "DONE" on a line of its own would end a run whose main thread had not
+   * finished — and the cycle report would quote the wrong voice.
+   *
+   * Off is the escape hatch, and it is a real one: the CLI rejects a flag it
+   * does not know, so if the pin ever moves past this flag every run fails at
+   * the spawn. That is loud rather than quiet, which is the direction to fail
+   * in, but it wants a switch that does not need a rebuild.
+   */
+  forwardSubAgentText: boolean;
   /**
    * How many runs may be active at once. Null means no limit.
    *
@@ -339,8 +393,10 @@ const DEFAULTS: Settings = {
   planUsageFromApi: true,
   defaultPermissionMode: "acceptEdits",
   defaultModel: null,
+  defaultAgentId: null,
   continuationPrompt: DEFAULT_CONTINUATION_PROMPT,
   includeSidechains: true,
+  forwardSubAgentText: true,
   maxConcurrentRuns: null,
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,

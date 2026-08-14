@@ -7,8 +7,14 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { BudgetPolicyDTO, RunGuardsDTO, SettingsDTO } from "@/lib/apiTypes";
-import { fmtTokens, fmtUSD } from "@/lib/format";
+import type {
+  AgentDTO,
+  AmbientAgentDTO,
+  BudgetPolicyDTO,
+  RunGuardsDTO,
+  SettingsDTO,
+} from "@/lib/apiTypes";
+import { describeAmbientAgents, fmtTokens, fmtUSD } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
@@ -139,6 +145,8 @@ const EDITABLE_PATHS = [
   "sessionResetOverrideAt",
   "includeSidechains",
   "defaultModel",
+  "defaultAgentId",
+  "forwardSubAgentText",
   "defaultPermissionMode",
   "maxConcurrentRuns",
   "isolationCopyGlobs",
@@ -512,6 +520,14 @@ export default function SettingsPage() {
   const [calError, setCalError] = useState<string | null>(null);
   /** Non-null only while the globs field is being edited. */
   const [copyGlobsText, setCopyGlobsText] = useState<string | null>(null);
+  // The registry, and the definitions this app did not write. Both are needed
+  // for one row: the picker offers the first, and the sentence beside it has to
+  // declare the second, because `--agents` merges with what the CLI finds on
+  // disk rather than replacing it — so the registry is a part of the set a run
+  // can delegate to and never the whole of it.
+  const [agents, setAgents] = useState<AgentDTO[]>([]);
+  const [ambientAgents, setAmbientAgents] = useState<AmbientAgentDTO[]>([]);
+  const [agentsLoaded, setAgentsLoaded] = useState(false);
   const standalone = useStandalone();
 
   const load = useCallback(async () => {
@@ -540,6 +556,20 @@ export default function SettingsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    // A failed read leaves the picker holding only the stored value, which is
+    // what `agentsLoaded` guards: without it a list that never arrived would
+    // report the saved default as an agent that no longer exists.
+    fetch("/api/agents", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        setAgents(d.agents ?? []);
+        setAmbientAgents(d.ambient ?? []);
+        setAgentsLoaded(true);
+      })
+      .catch(() => void 0);
+  }, []);
 
   // The globs field holds raw text while it is being typed, so the settings
   // object on its own is not what the operator is looking at. Everything —
@@ -1316,6 +1346,63 @@ export default function SettingsPage() {
                 onChange={(e) => patch({ defaultModel: e.target.value || null })}
               />
             </div>
+          </SettingRow>
+
+          {/* Beside the model and deliberately not among the guards below. An
+              agent carries a description and a prompt — the registry refuses a
+              tool list at the door and has no column for a permission mode — so
+              this decides who does part of the work and never what a run is
+              allowed to do. It is an id, so an operator who fixes their
+              reviewer's prompt gets the fixed one on the next run. */}
+          <SettingRow
+            htmlFor="agent"
+            edited={isEdited("defaultAgentId")}
+            label="Default specialist"
+            description={
+              describeAmbientAgents(ambientAgents) ??
+              "Pre-selected on the new-run form, which can change it or clear it"
+            }
+          >
+            <div className="w-64">
+              <Select
+                id="agent"
+                value={effective.defaultAgentId ?? ""}
+                onChange={(e) =>
+                  patch({ defaultAgentId: e.target.value || null })
+                }
+              >
+                <option value="">No specialist</option>
+                {agents.map((a) => (
+                  <option key={a.id} value={a.id} disabled={!a.usable}>
+                    {a.name}
+                    {a.usable ? "" : " — incomplete"}
+                  </option>
+                ))}
+                {/* A default whose agent has been deleted since it was saved.
+                    Kept as an option rather than silently reverting the picker
+                    to "No specialist", which would look like the setting had
+                    never been made — and Save then refuses it by name. */}
+                {agentsLoaded &&
+                  effective.defaultAgentId !== null &&
+                  !agents.some((a) => a.id === effective.defaultAgentId) && (
+                    <option value={effective.defaultAgentId}>
+                      Agent no longer in the registry
+                    </option>
+                  )}
+              </Select>
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            edited={isEdited("forwardSubAgentText")}
+            label="Sub-agent output in the run log"
+            description="Without it a delegation is a Task call followed by silence until it returns. A sub-agent's words are set apart from the run's own, and never become its report"
+          >
+            <Switch
+              checked={effective.forwardSubAgentText}
+              onChange={(v) => patch({ forwardSubAgentText: v })}
+              label="Sub-agent output in the run log"
+            />
           </SettingRow>
 
           <SettingRow

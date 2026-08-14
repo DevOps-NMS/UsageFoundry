@@ -550,6 +550,11 @@ export default function NewRunPage() {
   // state because the loader below closes over the first render: a `useState`
   // value read in there is `false` for ever.
   const permissionTouched = useRef(false);
+  // The same question for the specialist, and it needs its own ref for the same
+  // reason: the settings read and the agent list both land after an arbitrary
+  // delay, so a default arriving late must not overwrite a template's agent or
+  // a pick the operator has already made.
+  const agentTouched = useRef(false);
   // Belt to the disabled attribute's braces: a second submit can only come from
   // a key repeat inside the same tick, which no re-render has happened for yet.
   const inFlight = useRef(false);
@@ -699,6 +704,46 @@ export default function NewRunPage() {
     }
     // Runs once. `applySeed` only calls setters, all of which are stable.
   }, []);
+
+  /**
+   * The default specialist, applied once both reads have landed.
+   *
+   * Two arrivals rather than one, so it cannot be folded into the settings
+   * loader: the id is on `/api/settings` and whether it still names anything is
+   * on `/api/agents`, and applying it before the second would put an id in the
+   * picker that the form could not describe.
+   *
+   * A default whose agent has since been deleted leaves the form on no
+   * specialist and says so. That is not the registry's "never fall back to
+   * none" rule bending — that rule is about a run whose operator *named* a
+   * specialist, and it still holds at the door this form posts to. A pre-filled
+   * field nobody has looked at is not a naming, and the alternative is a
+   * new-run page that refuses every run until somebody visits Settings.
+   */
+  const [defaultAgentGone, setDefaultAgentGone] = useState(false);
+  useEffect(() => {
+    const id = settings?.defaultAgentId ?? null;
+    if (!id || !agentsLoaded) return;
+    // A seeded form has already been told which agent to carry — by a template
+    // or by the run it was copied from — and a global default must not overrule
+    // either, any more than it overrules a pick already made.
+    if (seeded.current || agentTouched.current) return;
+
+    const found = agents.find((a) => a.id === id);
+    if (!found || !found.usable) {
+      setDefaultAgentGone(true);
+      return;
+    }
+    setDefaultAgentGone(false);
+    setAgentId(id);
+    // Into the baseline as well, so the row is not marked as an edit the
+    // operator made. Same treatment `defaultPermissionMode` gets.
+    setBaseline((b) =>
+      b.kind === "defaults"
+        ? { ...b, values: { ...b.values, agentId: id } }
+        : b,
+    );
+  }, [settings, agents, agentsLoaded]);
 
   const activeMount = useMemo(
     () => mounts.find((m) => m.id === mountId) ?? null,
@@ -1088,6 +1133,13 @@ export default function NewRunPage() {
     // /api/runs; a global default landing on top of it a moment later would
     // undo all three.
     permissionTouched.current = true;
+    // Same for the specialist: a template that names one — or names none
+    // deliberately — has answered the question, and the settings default must
+    // not answer it again a moment later.
+    agentTouched.current = true;
+    // The seed decided, so a warning about the *default* being gone no longer
+    // describes this form.
+    setDefaultAgentGone(false);
 
     setTemplateNote(note);
     setTemplateError(null);
@@ -1520,7 +1572,10 @@ export default function NewRunPage() {
                   <Select
                     id="agent"
                     value={agentId}
-                    onChange={(e) => setAgentId(e.target.value)}
+                    onChange={(e) => {
+                      agentTouched.current = true;
+                      setAgentId(e.target.value);
+                    }}
                     aria-invalid={problemFor("agent") ? true : undefined}
                   >
                     <option value="">— no specialist —</option>
@@ -1543,6 +1598,16 @@ export default function NewRunPage() {
               </ListRow>
             )}
           </ListGroup>
+
+          {/* A stated fallback rather than a silent one: the form starts with
+              no specialist, and says which setting to fix. */}
+          {defaultAgentGone && (
+            <Hint tone="warn" className="mb-3.5">
+              The default specialist in Settings is not in the registry any
+              more, so this run starts with none.{" "}
+              <Link href="/settings#runs">Change it</Link>
+            </Hint>
+          )}
 
           {/* Whose folder it is, and who is waiting for it. Under the group
               rather than in a row, because each of these is a condition of the

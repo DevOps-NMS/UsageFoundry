@@ -1140,6 +1140,39 @@ describe("buildArgs", () => {
     assert.equal(args.includes("--agent"), false);
   });
 
+  /**
+   * The flag that puts a sub-agent's own words in the log, and the one that
+   * makes the stream a shape this app has never parsed.
+   *
+   * Pinned in both directions because it is a *stream-shape* switch rather than
+   * a capability: emitted when it was not asked for, every run's log gains a
+   * second voice and this app's reverse-engineered parser starts seeing messages
+   * with `parent_tool_use_id` on them; omitted when it was, the delegation goes
+   * back to being a `Task` call followed by silence. Neither is visible in an
+   * exit code. The CLI gates it on `--print` and `--output-format=stream-json`,
+   * which the first two pairs of the argv supply unconditionally, so it is never
+   * carried into a spawn that would ignore it — that is what the second half of
+   * this asserts.
+   */
+  it("forwards a sub-agent's own words only when asked to", () => {
+    assert.equal(
+      buildArgs({ ...base, isolated: true }).includes("--forward-subagent-text"),
+      false,
+    );
+    assert.equal(
+      buildArgs({ ...base, isolated: true, forwardSubAgentText: false }).includes(
+        "--forward-subagent-text",
+      ),
+      false,
+    );
+
+    const args = buildArgs({ ...base, isolated: true, forwardSubAgentText: true });
+    assert.equal(args.includes("--forward-subagent-text"), true);
+    // The two the CLI gates the flag on. `-p` is `--print`.
+    assert.equal(args[0], "-p");
+    assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+  });
+
   it("still passes the mode, the model and the session to resume", () => {
     const args = buildArgs({
       ...base,

@@ -959,7 +959,18 @@ export interface RunEventDTO {
   kind:
     | "status"
     | "log"
+    /** The main thread's own words. Never a delegated turn's — see `subagent`. */
     | "assistant"
+    /**
+     * What a sub-agent said, forwarded by `--forward-subagent-text`.
+     *
+     * Its own kind rather than an `assistant` event with a flag on it, because
+     * three readers must not be able to disagree about which voice a line is:
+     * `cycleOutputs` takes the last `assistant` text as the cycle's report, the
+     * log sets the two differently, and the orchestrator's `DONE` test runs
+     * against the main thread's text alone.
+     */
+    | "subagent"
     | "tool"
     | "iteration"
     | "budget"
@@ -1212,8 +1223,15 @@ export interface SettingsDTO {
   planUsageFromApi: boolean;
   defaultPermissionMode: string;
   defaultModel: string | null;
+  /**
+   * The saved agent the new-run form starts on. An id, never a definition, and
+   * it carries no capability — see `settings.defaultAgentId`.
+   */
+  defaultAgentId: string | null;
   continuationPrompt: string;
   includeSidechains: boolean;
+  /** Put a delegated turn's own words in the run log. */
+  forwardSubAgentText: boolean;
   /** Null means no limit. */
   maxConcurrentRuns: number | null;
   isolationCopyGlobs: string[];

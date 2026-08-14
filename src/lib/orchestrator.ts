@@ -191,7 +191,10 @@ export interface RunEvent {
   kind:
     | "status"
     | "log"
+    /** The main thread's own words. A delegated turn is `subagent`. */
     | "assistant"
+    /** A turn forwarded by `--forward-subagent-text`. See `handleStreamLine`. */
+    | "subagent"
     | "tool"
     | "iteration"
     | "budget"
@@ -2822,6 +2825,16 @@ interface IterationResult {
   finalText: string;
   isError: boolean;
   /**
+   * `tool_use` block id → the specialist that `Task` call handed work to.
+   *
+   * Parser state rather than a result, and it lives here because this is the
+   * only thing that survives from one line of the stream to the next: the id
+   * arrives on the call and the name is needed again when that sub-agent's own
+   * words come back, which can be many lines later. Per cycle, because a
+   * `tool_use` id is.
+   */
+  subagentNames: Map<string, string>;
+  /**
    * Whether the CLI's terminal `result` event arrived. Cost and tokens come
    * only from that event, so when it is missing — operator stop, crash, OOM —
    * this iteration contributes $0 to the run's totals despite having burned
@@ -3092,10 +3105,22 @@ export function buildArgs(opts: {
    * lists below, exactly as before an agent was attached.
    */
   agents?: AgentDefinition[];
+  /**
+   * Forward what a delegated turn says into this run's own stream.
+   *
+   * Gated by the CLI on `--print` and `--output-format=stream-json`, which the
+   * first line below supplies unconditionally, so this flag is never carried
+   * into a spawn that would ignore it. What it changes is the *shape* of the
+   * stream rather than what the run may do — see `settings.forwardSubAgentText`
+   * for why that is worth a switch, and `handleStreamLine` for the one property
+   * that makes the new shape safe.
+   */
+  forwardSubAgentText?: boolean;
 }): string[] {
   const args = ["-p", opts.prompt, "--output-format", "stream-json", "--verbose"];
   if (opts.model) args.push("--model", opts.model);
   if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
+  if (opts.forwardSubAgentText) args.push("--forward-subagent-text");
   // One encoder for all four spawn sites, because every way of getting this
   // shape wrong is silent — see `agentsFlagValue`.
   args.push(...agentsArgs(opts.agents ?? []));
@@ -3384,6 +3409,7 @@ function runIteration(
       sawResult: false,
       apiError: null,
       stderrTail: "",
+      subagentNames: new Map(),
     };
 
     let stdoutBuf = "";
@@ -3488,6 +3514,27 @@ export function permissionDenials(raw: unknown): string[] {
     .map(([label, n]) => (n > 1 ? `${label} ×${n}` : label));
 }
 
+/**
+ * Which `Task` call a forwarded message belongs to, or null for the main thread.
+ *
+ * `--forward-subagent-text` marks every delegated message with the id of the
+ * `tool_use` block that started it. The SDK's own types put that key on the
+ * envelope; the message object is read as a fallback because the whole point of
+ * this function is that a shape captured from one build must fail *towards*
+ * treating a sub-agent's words as a sub-agent's, and a key that moved would
+ * otherwise silently promote them to the main thread's.
+ */
+function parentToolUseId(
+  ev: Record<string, unknown>,
+  message: Record<string, unknown> | undefined,
+): string | null {
+  for (const source of [ev, message]) {
+    const raw = source?.parent_tool_use_id;
+    if (typeof raw === "string" && raw) return raw;
+  }
+  return null;
+}
+
 /** Interpret one line of Claude Code's `stream-json` output. */
 function handleStreamLine(
   runId: string,
@@ -3522,7 +3569,7 @@ function handleStreamLine(
 
   if (type === "assistant") {
     const message = ev.message as
-      | { content?: unknown[]; model?: unknown }
+      | (Record<string, unknown> & { content?: unknown[]; model?: unknown })
       | undefined;
     const blocks = Array.isArray(message?.content) ? message.content : [];
     // Claude Code writes provider refusals — not logged in, credit exhausted,
@@ -3531,8 +3578,45 @@ function handleStreamLine(
     // last-write-wins by design, so any later text would otherwise erase the
     // one message that says why the cycle ended.
     const synthetic = message?.model === "<synthetic>";
+
+    // A delegated turn, forwarded by `--forward-subagent-text`. It is a
+    // different voice and it is kept apart from the main thread's in all three
+    // places that would otherwise absorb it:
+    //
+    //   `finalText`  — what the `DONE` test is run against, matched per line,
+    //                  so a sub-agent reporting "DONE" would end a run whose
+    //                  main thread had not finished. It is also the cycle's
+    //                  stop reason and its report.
+    //   `apiError`   — latched on first sight and never cleared except by the
+    //                  CLI's own verdict, so a sub-agent that met a wall would
+    //                  park a run whose cycle then completed normally.
+    //   `kind`       — its own, so `cycleOutputs` cannot file it as the cycle's
+    //                  report and the log can set it as somebody else speaking.
+    //                  A report that silently interleaves two voices is worse
+    //                  than one that omits the second.
+    const parent = parentToolUseId(ev, message);
+
     for (const b of blocks as Array<Record<string, unknown>>) {
       if (b.type === "text" && typeof b.text === "string") {
+        if (parent !== null) {
+          emit({
+            runId,
+            ts: Date.now(),
+            kind: "subagent",
+            payload: {
+              text: b.text,
+              parentToolUseId: parent,
+              // The `subagent_type` off the `Task` call that opened it, when
+              // that call was seen this cycle. A name is what makes the line
+              // readable — "sub-agent" alone says only that it is not the main
+              // thread, which the indent already says.
+              ...(acc.subagentNames.get(parent)
+                ? { name: acc.subagentNames.get(parent) }
+                : {}),
+            },
+          });
+          continue;
+        }
         acc.finalText = b.text;
         if (synthetic && acc.apiError === null) acc.apiError = b.text;
         emit({
@@ -3542,16 +3626,53 @@ function handleStreamLine(
           payload: { text: b.text },
         });
       } else if (b.type === "tool_use") {
+        // A `Task` call names the specialist it is handing work to, and its own
+        // block id is what every forwarded message from that sub-agent carries.
+        // Recorded so those messages can be labelled; per cycle, because the
+        // ids are.
+        const id = typeof b.id === "string" ? b.id : "";
+        const subagentType = (b.input as { subagent_type?: unknown } | null)
+          ?.subagent_type;
+        if (id && typeof subagentType === "string" && subagentType) {
+          acc.subagentNames.set(id, subagentType);
+        }
         emit({
           runId,
           ts: Date.now(),
           kind: "tool",
-          payload: { name: b.name, input: b.input },
+          payload: {
+            name: b.name,
+            input: b.input,
+            // A tool call a sub-agent made, rather than one the main thread
+            // made. Same reasoning as the text above: unattributed, a `Grep`
+            // between two of the main thread's lines reads as the main
+            // thread's.
+            ...(parent !== null
+              ? {
+                  parentToolUseId: parent,
+                  ...(acc.subagentNames.get(parent)
+                    ? { subagent: acc.subagentNames.get(parent) }
+                    : {}),
+                }
+              : {}),
+          },
         });
       }
+      // Everything else — `thinking` above all — is deliberately dropped. The
+      // flag forwards a sub-agent's reasoning as well as its text, and a run
+      // that delegates twice would bury its own log in somebody else's working
+      // out. Named here rather than left to fall through, because a shape that
+      // arrives and is silently ignored is indistinguishable from one that
+      // never arrived.
     }
     return;
   }
+
+  // A forwarded sub-agent *result* — the tool output going back up. Dropped by
+  // name for the reason `thinking` is: these carry whole file reads and command
+  // output, the log already shows the call that produced them, and the main
+  // thread's own user turns have never been rendered either.
+  if (type === "user") return;
 
   if (type === "result") {
     // Authoritative per-iteration accounting from the CLI itself.
@@ -4008,6 +4129,11 @@ export async function startRun(id: string): Promise<void> {
         // picks up hours later — is given exactly the specialist the operator
         // started it with, whatever has happened to the registry since.
         agents: runAgentDefinitions(run.agent),
+        // Off the same `settings` read every prompt on this run comes from, so
+        // it is fixed for the segment rather than per cycle. It changes only
+        // what reaches the log — it is not a capability, nothing acts on it,
+        // and the guards are unaffected either way.
+        forwardSubAgentText: settings.forwardSubAgentText,
       });
 
       // A run can last hours, and the working directory was validated once when

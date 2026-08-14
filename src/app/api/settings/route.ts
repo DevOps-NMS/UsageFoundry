@@ -9,6 +9,7 @@ import {
   type Settings,
 } from "../../../lib/settings";
 import { normalizePolicy } from "../../../lib/budget";
+import { agentKnowledgeOf, agentRefusal, getAgent } from "../../../lib/agents";
 import {
   hasAdminKey,
   hasGithubToken,
@@ -120,6 +121,24 @@ export async function PUT(req: Request) {
     patch.defaultModel = typeof v === "string" && v.trim() ? v.trim() : null;
   }
 
+  if ("defaultAgentId" in body) {
+    const raw = body.defaultAgentId;
+    const id = typeof raw === "string" ? raw.trim() : "";
+    if (!id) {
+      patch.defaultAgentId = null;
+    } else {
+      // Refused here rather than stored and discovered later, which is
+      // `normalizeTemplateInput`'s rule: this is the door with a person behind
+      // it and an error channel, and a default that names an agent Claude Code
+      // would drop in silence is a form that pre-fills a specialist no run will
+      // ever have. `agentRefusal` is the one wording, so this says what the run
+      // door and the template door say.
+      const refusal = agentRefusal(id, agentKnowledgeOf(getAgent(id)));
+      if (refusal) return NextResponse.json({ error: refusal }, { status: 400 });
+      patch.defaultAgentId = id;
+    }
+  }
+
   if ("continuationPrompt" in body) {
     const v = String(body.continuationPrompt ?? "").trim();
     if (v) patch.continuationPrompt = v;
@@ -139,6 +158,10 @@ export async function PUT(req: Request) {
 
   if ("includeSidechains" in body) {
     patch.includeSidechains = Boolean(body.includeSidechains);
+  }
+
+  if ("forwardSubAgentText" in body) {
+    patch.forwardSubAgentText = Boolean(body.forwardSubAgentText);
   }
 
   if ("maxConcurrentRuns" in body) {

@@ -15,8 +15,17 @@
 import type { RunEventDTO } from "./apiTypes";
 import { fmtPct, fmtUSD } from "./format";
 
-/** What kind of statement a line is, which is what decides how it is set. */
-export type LogVoice = "agent" | "tool" | "cycle" | "system";
+/**
+ * What kind of statement a line is, which is what decides how it is set.
+ *
+ * `subagent` is prose like `agent` and is deliberately not the same voice: a
+ * delegated turn is somebody else answering a question the main thread asked,
+ * and a log that sets the two identically is a transcript of a conversation
+ * with no speaker labels. It is what the reader has to be able to tell apart —
+ * a report that silently interleaves two voices is worse than one that omits
+ * the second.
+ */
+export type LogVoice = "agent" | "subagent" | "tool" | "cycle" | "system";
 
 export type LogTone = "neutral" | "ok" | "warn" | "danger" | "accent";
 
@@ -112,13 +121,39 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
         : { voice: "agent", tone: "neutral", label: null, text };
     }
 
-    case "tool":
+    case "subagent": {
+      const text = String(p.text ?? "").trim();
+      return text === ""
+        ? null
+        : {
+            voice: "subagent",
+            tone: "neutral",
+            // The specialist's own name when the `Task` call that opened it was
+            // seen this cycle, and the bare word otherwise — a stream the
+            // browser joined late, or a call whose input named no type. Never a
+            // tool-use id: that is an identifier for this app, not a speaker.
+            label: String(p.name ?? "sub-agent"),
+            text,
+          };
+    }
+
+    case "tool": {
+      const tool = String(p.name ?? "tool");
       return {
         voice: "tool",
         tone: "neutral",
-        label: String(p.name ?? "tool"),
+        // A call a sub-agent made is still a tool call and is set as one — but
+        // it is attributed, because a `Grep` sitting between two of the main
+        // thread's lines otherwise reads as the main thread's. The name comes
+        // from the `Task` call that opened it; a delegation whose call was not
+        // seen falls back to the bare word rather than to nothing, since "some
+        // sub-agent" is the true statement and "the main thread" is not.
+        label: p.parentToolUseId
+          ? `${String(p.subagent ?? "sub-agent")} › ${tool}`
+          : tool,
         text: toolArgs(p.input),
       };
+    }
 
     case "budget":
       // A guard is not a fault and must not be dressed as one, so a stop is

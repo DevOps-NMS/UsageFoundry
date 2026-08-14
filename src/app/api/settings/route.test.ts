@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { after, test } from "node:test";
+import { after, before, test } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -66,8 +66,13 @@ const PROBES: Record<keyof Settings, Probe> = {
   planUsageFromApi: { send: false },
   defaultPermissionMode: { send: "plan" },
   defaultModel: { send: "claude-sonnet-5" },
+  // Filled in by the hook below: the route refuses an id that names no usable
+  // agent, so this is the one probe whose value has to exist in the database
+  // before it can be sent.
+  defaultAgentId: { send: null },
   continuationPrompt: { send: "CHANGED continuation" },
   includeSidechains: { send: false },
+  forwardSubAgentText: { send: false },
   maxConcurrentRuns: { send: 3 },
   isolationCopyGlobs: { send: [".env.local"] },
   isolationPreamble: { send: "CHANGED preamble" },
@@ -103,6 +108,26 @@ const PROBES: Record<keyof Settings, Probe> = {
     },
   },
 };
+
+/**
+ * A real saved agent for the one probe that has to name one.
+ *
+ * The route refuses a `defaultAgentId` that names nothing or that names a row
+ * Claude Code would drop, which is the whole point of that branch — so the probe
+ * cannot be a made-up string. The value is patched in rather than written above
+ * because `createAgent` mints the id, and the loop reads `PROBES[key]` inside
+ * each test callback, after this has run.
+ */
+before(async () => {
+  const { createAgent } = await import("../../../lib/agents");
+  const agent = createAgent({
+    name: "probe-reviewer",
+    description: "reads diffs",
+    prompt: "You review.",
+    model: null,
+  });
+  PROBES.defaultAgentId.send = agent.id;
+});
 
 function expected(probe: Probe): unknown {
   return "stored" in probe ? probe.stored : probe.send;

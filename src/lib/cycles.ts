@@ -53,7 +53,18 @@ export function cycleOutputs(events: readonly RunEventDTO[]): CycleOutput[] {
       continue;
     }
 
-    if (e.kind !== "assistant") continue;
+    // The main thread's own words and nothing else. A `subagent` event is a
+    // delegated turn forwarded by `--forward-subagent-text`, and the report is
+    // what *this run* said it had done — a sub-agent's summary of the piece it
+    // was handed, arriving last because it finished last, would be presented as
+    // the run's account of the whole task.
+    //
+    // The kind is the answer, and `parentToolUseId` is checked as well because
+    // the two must not be able to disagree: the orchestrator decides which kind
+    // to emit from exactly that field, so a build that got the routing wrong
+    // still cannot put another voice in the report. It also means this holds for
+    // a stream shape this app has not seen.
+    if (e.kind !== "assistant" || e.payload?.parentToolUseId) continue;
 
     const open = cycles[cycles.length - 1];
     // An assistant turn with no cycle open cannot be attributed to one. The

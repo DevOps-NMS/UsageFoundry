@@ -153,6 +153,28 @@ export function LogLine({
     );
   }
 
+  // Somebody else answering a question the main thread asked. Prose like the
+  // agent's own words, because that is what it is — but indented behind a rule
+  // and named, so it can never be read as the run's own report. The two facts a
+  // reader needs are "this is not the main thread" and "this is who it was",
+  // and neither is carried by colour: the log already spends its tones on
+  // whether something went wrong.
+  if (entry.voice === "subagent") {
+    return (
+      <div className="flex gap-2.5 px-3 py-1.5">
+        <Time at={timestamp} />
+        <div className="min-w-0 flex-1 border-l-2 border-line-strong pl-2.5">
+          <div className="mb-0.5 text-2xs font-semibold uppercase tracking-wide text-ink-faint">
+            {entry.label}
+          </div>
+          <p className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-ink-muted">
+            {entry.text}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (entry.voice === "tool") {
     return (
       <div className="flex gap-2.5 px-3 py-0.5">

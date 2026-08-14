@@ -102,3 +102,70 @@ test("only the assistant kind is read as the agent's own words", () => {
   assert.equal(out.length, 1);
   assert.equal(out[0].text, "The real report.");
 });
+
+/**
+ * `--forward-subagent-text` puts a second voice into the same stream, and this
+ * is the reader that decides which one the operator is shown as the run's own
+ * account of its work. Getting it wrong is silent in the worst way: a sub-agent
+ * finishes its piece and reports on it, that turn arrives after the main
+ * thread's last words because it finished later, and the card then presents one
+ * specialist's summary of one subtask as what the run did.
+ */
+test("a sub-agent's words are never the cycle's report", () => {
+  const out = cycleOutputs([
+    iteration(1, 1),
+    assistant(2, "Delegating the search."),
+    {
+      runId: "r",
+      ts: 3,
+      kind: "subagent",
+      payload: { text: "I found four call sites.", parentToolUseId: "toolu_1" },
+    },
+    assistant(4, "Fixed all four."),
+    {
+      runId: "r",
+      ts: 5,
+      kind: "subagent",
+      payload: { text: "Nothing else to check.", parentToolUseId: "toolu_2" },
+    },
+  ]);
+
+  assert.equal(out.length, 1);
+  assert.equal(out[0].text, "Fixed all four.");
+  assert.equal(out[0].ts, 4);
+});
+
+test("a delegated turn is skipped on its parent id whatever kind it arrives as", () => {
+  // The orchestrator routes on `parent_tool_use_id` and this checks the same
+  // field, so the two cannot disagree about which voice a line is — including
+  // for a stream shape this app has not seen.
+  const out = cycleOutputs([
+    iteration(1, 1),
+    assistant(2, "The real report."),
+    {
+      runId: "r",
+      ts: 3,
+      kind: "assistant",
+      payload: { text: "A sub-agent's summary.", parentToolUseId: "toolu_1" },
+    },
+  ]);
+
+  assert.equal(out.length, 1);
+  assert.equal(out[0].text, "The real report.");
+});
+
+test("a cycle whose only words were a sub-agent's is left out", () => {
+  // Not "reported nothing" dressed up as a report: the run said nothing itself,
+  // and the log above already shows that the delegation happened.
+  const out = cycleOutputs([
+    iteration(1, 1),
+    {
+      runId: "r",
+      ts: 2,
+      kind: "subagent",
+      payload: { text: "Only the specialist spoke.", parentToolUseId: "toolu_1" },
+    },
+  ]);
+
+  assert.deepEqual(out, []);
+});
