@@ -1,23 +1,25 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import type { BudgetPolicyDTO, RunGuardsDTO, SettingsDTO } from "@/lib/apiTypes";
 import { fmtTokens, fmtUSD } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
-import {
-  Field,
-  Input,
-  Select,
-  Subsection,
-  Switch,
-  Textarea,
-  Toggle,
-} from "@/components/ui/Field";
+import { Field, Input, Select, Switch, Textarea } from "@/components/ui/Field";
 import { Hint, type HintTone } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
+import {
+  SegmentedControl,
+  type SegmentedOption,
+} from "@/components/ui/SegmentedControl";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 
 interface CalibrateResponse {
@@ -47,20 +49,68 @@ const WEEKDAYS = [
 /** Mirrors the ceiling `PUT /api/settings` refuses a reset override past. */
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 
-/** Anchors for the section nav; order is the page order. */
+/**
+ * Anchors for the section nav; order is the page order, and the page order is
+ * how often a setting is reached for rather than when it was written.
+ *
+ * The ceilings lead because every meter in the app is read against them and a
+ * fresh install has none; the run defaults are next because they are what the
+ * form most people open every day starts at; the chat's guard set follows,
+ * being what the *app* starts under rather than what a person does; the
+ * unattended settings and the four prompts are at the end because they are
+ * typed once, if ever.
+ */
 const SECTIONS = [
-  { id: "guards", label: "Default guards" },
   { id: "limits", label: "Subscription limits" },
   { id: "runs", label: "Runs" },
-  { id: "prompts", label: "Prompts" },
+  { id: "guards", label: "Default guards" },
   { id: "unattended", label: "Unattended runs" },
+  { id: "prompts", label: "Prompts" },
 ];
 
 /**
  * Least to most permissive, rather than the order the literals happen to be
  * declared in. The list is a scale, so it should read as one.
+ *
+ * Same four, same order and the same words as the new-run form: this is the
+ * default that form is pre-filled from, and two spellings of one choice across
+ * two pages is two things to keep in step.
  */
-const PERMISSION_MODES = ["plan", "default", "acceptEdits", "bypassPermissions"];
+const PERMISSION_OPTIONS: readonly SegmentedOption<string>[] = [
+  { value: "plan", label: "Plan only" },
+  { value: "default", label: "Ask first" },
+  { value: "acceptEdits", label: "Edit files" },
+  { value: "bypassPermissions", label: "Anything" },
+];
+
+/** Where an isolated run writes, in the run form's own words. */
+type IsolationChoice = "worktree" | "direct";
+
+const ISOLATION_OPTIONS: readonly SegmentedOption<IsolationChoice>[] = [
+  { value: "worktree", label: "Own branch" },
+  { value: "direct", label: "This folder" },
+];
+
+const ISOLATION_CONSEQUENCE: Record<IsolationChoice, string> = {
+  worktree:
+    "The run works on its own branch in a separate checkout, so another run can use the same project meanwhile — you land it from Branches once you have read it",
+  direct:
+    "The agent edits the folder you pick, and no other run may touch anything in that tree until it finishes",
+};
+
+type LandStrategy = "merge" | "squash";
+
+const LAND_OPTIONS: readonly SegmentedOption<LandStrategy>[] = [
+  { value: "merge", label: "Merge" },
+  { value: "squash", label: "Squash" },
+];
+
+const LAND_CONSEQUENCE: Record<LandStrategy, string> = {
+  merge:
+    "The run’s own commits go onto your branch, which is what keeps the diff on its page meaningful afterwards",
+  squash:
+    "One commit on your branch. That rewrites the run’s commits, so git can no longer see the merge and this tool tracks the branch by its tip instead",
+};
 
 /**
  * Every path the form can edit, so the page can mark *which* fields are
@@ -140,7 +190,32 @@ const SPEND_READ_AT: Record<BudgetPolicyDTO["enforcement"], string> = {
     "Read on a ticker while a cycle is going, so a run can pass it by about one model turn.",
 };
 
-/** What the selected permission mode lets an agent nobody is watching do. */
+/** Complete class strings per tone, looked up rather than interpolated. */
+const NOTE_TONE: Record<HintTone, string> = {
+  neutral: "",
+  warn: "text-warn",
+  danger: "text-danger",
+};
+
+/** A sentence inside a row's description that has to carry a tone of its own. */
+function Toned({
+  tone = "neutral",
+  children,
+}: {
+  tone?: HintTone;
+  children: ReactNode;
+}) {
+  return <span className={NOTE_TONE[tone]}>{children}</span>;
+}
+
+/**
+ * What the selected permission mode lets an agent nobody is watching do.
+ *
+ * A switch rather than a lookup map, and the unknown case is named rather than
+ * falling through to `acceptEdits`: the control beside this shows the four
+ * modes this app offers, so a fifth arriving from another build selects none of
+ * them and the sentence under it has to be the one that says why.
+ */
 function permissionNote(
   mode: string,
   isolate: boolean,
@@ -165,7 +240,7 @@ function permissionNote(
         ),
         tone: "danger",
       };
-    default:
+    case "acceptEdits":
       return {
         text: isolate ? (
           <>
@@ -183,6 +258,11 @@ function permissionNote(
           </>
         ),
         tone: "neutral",
+      };
+    default:
+      return {
+        text: `“${mode}” is not one of the four modes this app offers — choose one, or the chat's runs are held to whichever it turns out to be`,
+        tone: "danger",
       };
   }
 }
@@ -283,23 +363,60 @@ function Section({
 }
 
 /**
- * A field that says whether it holds something the server has not been told.
+ * One row of a grouped list, plus the two marks that say it holds something the
+ * server has not been told.
  *
- * The marker is an absolutely-positioned rail in the card's gutter and a
- * screen-reader suffix on the label: both are outside flow, so a field that
- * becomes edited — or stops being — does not move a pixel of the form.
+ * This is the reference conversion factored, not a second pattern: it emits the
+ * same `ListRow` + `EditedRail` + screen-reader suffix the "Unattended runs"
+ * group was written with, and it exists because twenty-four rows repeat it
+ * verbatim. Both marks stay outside flow — an absolutely-positioned rail in the
+ * card's gutter and an `sr-only` suffix on the label — so a row that becomes
+ * edited, or stops being, does not move a pixel of the pane.
+ */
+function SettingRow({
+  edited = false,
+  label,
+  description,
+  htmlFor,
+  children,
+}: {
+  edited?: boolean;
+  label: ReactNode;
+  description?: ReactNode;
+  htmlFor?: string;
+  children: ReactNode;
+}) {
+  return (
+    <ListRow
+      htmlFor={htmlFor}
+      label={
+        <>
+          {label}
+          {edited && <span className="sr-only"> — edited, not saved</span>}
+        </>
+      }
+      description={description}
+    >
+      <EditedRail on={edited} />
+      {children}
+    </ListRow>
+  );
+}
+
+/**
+ * A field whose control is a nine-line text region, which has nothing to align
+ * a right edge against — so its label goes above it and the row treatment does
+ * not apply. The same exception the new-run form's task field makes.
  */
 function FormField({
   edited = false,
   label,
-  unit,
   htmlFor,
   className = "",
   children,
 }: {
   edited?: boolean;
   label?: ReactNode;
-  unit?: string;
   htmlFor?: string;
   className?: string;
   children: ReactNode;
@@ -312,9 +429,6 @@ function FormField({
         label === undefined ? undefined : (
           <>
             {label}
-            {unit && (
-              <span className="font-normal text-ink-faint"> ({unit})</span>
-            )}
             {edited && <span className="sr-only"> — edited, not saved</span>}
           </>
         )
@@ -359,7 +473,6 @@ export default function SettingsPage() {
   const [cal, setCal] = useState<CalibrateResponse | null>(null);
   const [calBusy, setCalBusy] = useState(false);
   const [calError, setCalError] = useState<string | null>(null);
-  const [tokenCeilingsOpen, setTokenCeilingsOpen] = useState(false);
   /** Non-null only while the globs field is being edited. */
   const [copyGlobsText, setCopyGlobsText] = useState<string | null>(null);
 
@@ -438,7 +551,7 @@ export default function SettingsPage() {
     setSaved(false);
   }
 
-  async function save() {
+  const save = useCallback(async () => {
     if (!effective) return;
     setBusy(true);
     try {
@@ -464,7 +577,7 @@ export default function SettingsPage() {
     } finally {
       setBusy(false);
     }
-  }
+  }, [effective]);
 
   async function calibrate() {
     setCalBusy(true);
@@ -543,9 +656,6 @@ export default function SettingsPage() {
       sessionTokenLimit: cal.suggestion.sessionTokenLimit,
       weeklyTokenLimit: cal.suggestion.weeklyTokenLimit,
     });
-    // The token ceilings live behind a disclosure, and an unsaved edit the
-    // operator cannot see is worse than one they did not ask for.
-    setTokenCeilingsOpen(true);
   };
 
   const evidence = cal?.evidence ?? {};
@@ -600,6 +710,11 @@ export default function SettingsPage() {
         </EnvRow>
       </dl>
 
+      {/* Plain anchors rather than `ButtonLink`: the pane is its own scroll
+          region and the browser's native hash handling is what scrolls it, so
+          this stays out of the router. Bezeled rather than the recessed chips
+          it was — `--bg-inset` is the well a text field sits in, and a control
+          drawn in it reads as the same object at a glance. */}
       <nav
         aria-label="Settings sections"
         className="mb-6 flex flex-wrap gap-1.5 border-b border-line pb-4"
@@ -608,7 +723,7 @@ export default function SettingsPage() {
           <a
             key={sec.id}
             href={`#${sec.id}`}
-            className="inline-flex min-h-8 items-center rounded-full border border-line bg-inset px-3 text-xs font-medium text-ink-muted no-underline transition-colors duration-150 hover:border-line-strong hover:text-ink hover:no-underline"
+            className="ui-transition inline-flex min-h-[var(--control-h)] items-center rounded-sm border border-line bg-bezel px-2.5 text-xs font-medium text-ink-muted no-underline shadow-e1 hover:border-line-strong hover:bg-bezel-hover hover:text-ink hover:no-underline"
           >
             {sec.label}
           </a>
@@ -616,350 +731,198 @@ export default function SettingsPage() {
       </nav>
 
       <Section
-        id="guards"
-        lead
-        title="Default guard set"
-        lede={
-          <>
-            What an agent may do when the orchestrator chat proposes work
-            without naming a template, and what a template the chat saves is
-            created with. Runs you start yourself take their guards from the
-            new-run form instead. The chat cannot change any of this.
-          </>
-        }
-      >
-        {/* Not a two-column row with the switch beside the select: a Field with
-            no label starts where the other one's label does, so the two
-            controls sit a label's height apart. */}
-        <FormField
-          label="Permission mode"
-          htmlFor="cgpm"
-          edited={isEdited("chatDefaultGuards.permissionMode")}
-        >
-          <Select
-            id="cgpm"
-            className="sm:max-w-72"
-            value={guards.permissionMode}
-            onChange={(e) => patchGuards({ permissionMode: e.target.value })}
-          >
-            {PERMISSION_MODES.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </Select>
-          <Hint tone={modeNote.tone}>{modeNote.text}</Hint>
-        </FormField>
-
-        <FormField edited={isEdited("chatDefaultGuards.isolate")}>
-          <Toggle
-            id="cgiso"
-            checked={guards.isolate}
-            onChange={(v) => patchGuards({ isolate: v })}
-            label={
-              <>
-                Work in its own checkout
-                {isEdited("chatDefaultGuards.isolate") && (
-                  <span className="sr-only"> — edited, not saved</span>
-                )}
-              </>
-            }
-          />
-          <Hint tone={guards.isolate ? "neutral" : "warn"}>
-            {guards.isolate
-              ? "The run works on its own branch in a separate checkout, so another run can use the same project meanwhile — you land it from Branches once you have read it"
-              : "The agent edits the folder you pick, and no other run may touch anything in that tree until it finishes"}
-          </Hint>
-        </FormField>
-
-        <div className="grid gap-x-4 sm:grid-cols-3">
-          <FormField
-            label="Spend limit"
-            unit="USD"
-            htmlFor="cgcost"
-            edited={isEdited("chatDefaultGuards.budget.maxRunCostUSD")}
-          >
-            <Input
-              id="cgcost"
-              type="number"
-              min={0}
-              step="0.5"
-              className="tabular-nums"
-              placeholder="No limit"
-              value={numOrEmpty(guards.budget.maxRunCostUSD)}
-              onChange={(e) =>
-                patchGuardBudget({
-                  maxRunCostUSD:
-                    e.target.value === "" ? null : Number(e.target.value),
-                })
-              }
-            />
-            <Hint>
-              {SPEND_READ_AT[guards.budget.enforcement] ??
-                SPEND_READ_AT["between-cycles"]}{" "}
-              It is per run, so three at once can spend three times it
-            </Hint>
-          </FormField>
-
-          <FormField
-            label="Work cycles"
-            htmlFor="cgcycles"
-            edited={isEdited("chatDefaultGuards.budget.maxIterations")}
-          >
-            <Input
-              id="cgcycles"
-              type="number"
-              min={1}
-              className="tabular-nums"
-              placeholder="No limit"
-              aria-invalid={noTerminus || undefined}
-              aria-describedby="cgcycles-hint"
-              value={numOrEmpty(guards.budget.maxIterations)}
-              onChange={(e) =>
-                patchGuardBudget({
-                  maxIterations:
-                    e.target.value === "" ? null : Number(e.target.value),
-                })
-              }
-            />
-            <Hint tone={noTerminus ? "danger" : "neutral"}>
-              <span id="cgcycles-hint">
-                {noTerminus
-                  ? "Set this or a time limit — a run with neither would never have to end"
-                  : "How many times the agent is sent back in before the run ends. Blank is only allowed alongside a time limit"}
-              </span>
-            </Hint>
-          </FormField>
-
-          <FormField
-            label="Time limit"
-            unit="minutes"
-            htmlFor="cgmins"
-            edited={isEdited("chatDefaultGuards.budget.maxDurationMinutes")}
-          >
-            <Input
-              id="cgmins"
-              type="number"
-              min={1}
-              className="tabular-nums"
-              placeholder="No limit"
-              aria-invalid={noTerminus || undefined}
-              aria-describedby="cgmins-hint"
-              value={numOrEmpty(guards.budget.maxDurationMinutes)}
-              onChange={(e) =>
-                patchGuardBudget({
-                  maxDurationMinutes:
-                    e.target.value === "" ? null : Number(e.target.value),
-                })
-              }
-            />
-            <Hint tone={noTerminus ? "danger" : "neutral"}>
-              <span id="cgmins-hint">
-                {noTerminus
-                  ? "Set this or a work-cycle limit — a run with neither would never have to end"
-                  : "Wall clock, and the only limit that keeps moving whether or not a cycle reports what it spent"}
-              </span>
-            </Hint>
-          </FormField>
-        </div>
-
-        <Subsection title="What one chat message may spend">
-          <FormField
-            label="Orchestrator chat limit"
-            unit="USD per message"
-            htmlFor="chatbudget"
-            edited={isEdited("chatTurnBudgetUSD")}
-            className={FLUSH}
-          >
-            <Input
-              id="chatbudget"
-              type="number"
-              min={0}
-              step="0.5"
-              className="tabular-nums sm:max-w-56"
-              placeholder="No limit"
-              value={effective.chatTurnBudgetUSD ?? ""}
-              onChange={(e) =>
-                patch({
-                  chatTurnBudgetUSD:
-                    e.target.value === "" ? null : Number(e.target.value),
-                })
-              }
-            />
-            <Hint>
-              A chat is not a run and has no guards of its own, so this and a
-              ten-minute timeout are the only two things that stop one message.
-              It is spent on the conversation, never added to a run
-            </Hint>
-          </FormField>
-        </Subsection>
-      </Section>
-
-      <Section
         id="limits"
+        lead
         title="Subscription limits"
         lede="Where the percentages on the dashboard, and every window guard, come from."
       >
-        <FormField edited={isEdited("planUsageFromApi")}>
-          <Toggle
-            id="planusage"
-            checked={effective.planUsageFromApi}
-            onChange={(v) => patch({ planUsageFromApi: v })}
-            label={
+        <ListGroup className="mb-4">
+          <SettingRow
+            htmlFor="planusage"
+            edited={isEdited("planUsageFromApi")}
+            label="Read plan usage from Anthropic"
+            description={
               <>
-                Read plan usage from Anthropic
-                {isEdited("planUsageFromApi") && (
-                  <span className="sr-only"> — edited, not saved</span>
-                )}
+                The figure <span className="mono">/usage</span> shows, for the
+                whole account rather than Claude Code alone, read with the
+                credential the CLI already keeps here. The one percentage on the
+                dashboard that is measured rather than estimated — the ceilings
+                below are what it falls back to
               </>
             }
-          />
-          <Hint>
-            The figure <span className="mono">/usage</span> shows, for the whole
-            account rather than Claude Code alone, read with the credential the
-            CLI already keeps here. The one percentage on the dashboard that is
-            measured rather than estimated — the ceilings below are what it
-            falls back to
-          </Hint>
-        </FormField>
+          >
+            <Switch
+              id="planusage"
+              checked={effective.planUsageFromApi}
+              onChange={(v) => patch({ planUsageFromApi: v })}
+            />
+          </SettingRow>
 
-        <Notice tone="warn">
+          <SettingRow
+            htmlFor="side"
+            edited={isEdited("includeSidechains")}
+            label="Count sub-agent turns in usage totals"
+            description="Sub-agent turns bill normally, so counting them is the accurate default. It moves the dashboard meters and what the scan below measures — exclude only to compare main-thread cost"
+          >
+            <Switch
+              id="side"
+              checked={effective.includeSidechains}
+              onChange={(v) => patch({ includeSidechains: v })}
+            />
+          </SettingRow>
+        </ListGroup>
+
+        {/* Permanently on screen, so the tint rather than full alarm strength —
+            a standing banner drawn as loudly as a conditional one is a banner
+            the eye learns to skip, and it takes the real warnings with it. */}
+        <Notice tone="warn" quiet>
           Anthropic publishes no numeric value for a Pro/Max limit, so anything
           you enter below is an <strong>estimate</strong>. It is what the meters
           and guards fall back to when the reading above is off or unavailable.
         </Notice>
 
-        <div className="grid gap-x-4 sm:grid-cols-2">
-          <FormField
-            label="5-hour ceiling"
-            unit="USD"
+        <ListGroup
+          label="Cost ceilings"
+          footnote={
+            <>
+              Blank leaves that meter hatched rather than showing a percentage,
+              and a guard written as a fraction of it is refused rather than
+              ignored. Cost rather than raw tokens because a Claude Code
+              workload is mostly cache reads, which bill at 0.1× and would
+              otherwise dominate a token count without consuming a comparable
+              share of your plan
+            </>
+          }
+        >
+          <SettingRow
             htmlFor="sessc"
             edited={isEdited("sessionCostLimit")}
+            label="5-hour ceiling"
           >
-            <Input
-              id="sessc"
-              type="number"
-              min={0}
-              step="0.5"
-              className="tabular-nums"
-              placeholder="No ceiling"
-              value={numOrEmpty(effective.sessionCostLimit)}
-              onChange={(e) =>
-                patch({
-                  sessionCostLimit: e.target.value
-                    ? Number(e.target.value)
-                    : null,
-                })
-              }
-            />
-          </FormField>
+            {/* The width is on a wrapper, never on the control: `Input` already
+                states `w-full`, and two width utilities on one element resolve
+                by stylesheet order rather than class order. */}
+            <div className="w-36">
+              <Input
+                id="sessc"
+                type="number"
+                min={0}
+                step="0.5"
+                className="tabular-nums"
+                unit="USD"
+                placeholder="No ceiling"
+                value={numOrEmpty(effective.sessionCostLimit)}
+                onChange={(e) =>
+                  patch({
+                    sessionCostLimit: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
 
-          <FormField
-            label="Weekly ceiling"
-            unit="USD"
+          <SettingRow
             htmlFor="wkc"
             edited={isEdited("weeklyCostLimit")}
+            label="Weekly ceiling"
           >
-            <Input
-              id="wkc"
-              type="number"
-              min={0}
-              step="1"
-              className="tabular-nums"
-              placeholder="No ceiling"
-              value={numOrEmpty(effective.weeklyCostLimit)}
-              onChange={(e) =>
-                patch({
-                  weeklyCostLimit: e.target.value ? Number(e.target.value) : null,
-                })
-              }
-            />
-          </FormField>
-        </div>
-        <Hint className="mb-3.5">
-          Blank leaves that meter hatched rather than showing a percentage, and
-          a guard written as a fraction of it is refused rather than ignored.
-          Cost rather than raw tokens because a Claude Code workload is mostly
-          cache reads, which bill at 0.1× and would otherwise dominate a
-          token count without consuming a comparable share of your plan
-        </Hint>
+            <div className="w-36">
+              <Input
+                id="wkc"
+                type="number"
+                min={0}
+                step="1"
+                className="tabular-nums"
+                unit="USD"
+                placeholder="No ceiling"
+                value={numOrEmpty(effective.weeklyCostLimit)}
+                onChange={(e) =>
+                  patch({
+                    weeklyCostLimit: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
 
-        <FormField
-          label="Reserved headroom"
-          unit="%"
-          htmlFor="head"
-          edited={isEdited("reservedHeadroomFraction")}
-        >
-          <Input
-            id="head"
-            type="number"
-            min={0}
-            max={95}
-            className="tabular-nums sm:max-w-56"
-            placeholder="Reserve nothing"
-            value={
-              effective.reservedHeadroomFraction === null
-                ? ""
-                : String(Math.round(effective.reservedHeadroomFraction * 100))
+          <SettingRow
+            htmlFor="head"
+            edited={isEdited("reservedHeadroomFraction")}
+            label="Reserved headroom"
+            description={
+              <>
+                {effective.planUsageFromApi
+                  ? "Applies to the estimated ceilings only. The reading above already counts Cowork, Desktop and the web app, so nothing is held back from it — subtracting a reserve there would take the same allowance off twice"
+                  : "Cowork, Desktop and the web app share your limits and write no local transcripts, so this tool cannot see them — reserving headroom shrinks every ceiling so guards trip early"}
+                {effectiveCeilings(
+                  effective.reservedHeadroomFraction,
+                  effective.sessionCostLimit,
+                  effective.weeklyCostLimit,
+                ).map((c, i) => (
+                  <span key={c.label}>
+                    {i === 0 ? " · effective " : ", "}
+                    {c.label} ceiling{" "}
+                    <strong className="text-ink tabular-nums">
+                      {fmtUSD(c.effective)}
+                    </strong>{" "}
+                    <span className="tabular-nums">of {fmtUSD(c.raw)}</span>
+                  </span>
+                ))}
+              </>
             }
-            onChange={(e) =>
-              patch({
-                reservedHeadroomFraction: e.target.value
-                  ? Math.min(Number(e.target.value) / 100, 0.95)
-                  : null,
-              })
-            }
-          />
-          <Hint>
-            {effective.planUsageFromApi
-              ? "Applies to the estimated ceilings only. The reading above already counts Cowork, Desktop and the web app, so nothing is held back from it — subtracting a reserve there would take the same allowance off twice"
-              : "Cowork, Desktop and the web app share your limits and write no local transcripts, so this tool cannot see them — reserving headroom shrinks every ceiling so guards trip early"}
-            {effectiveCeilings(
-              effective.reservedHeadroomFraction,
-              effective.sessionCostLimit,
-              effective.weeklyCostLimit,
-            ).map((c, i) => (
-              <span key={c.label}>
-                {i === 0 ? " · effective " : ", "}
-                {c.label} ceiling{" "}
-                <strong className="text-ink tabular-nums">
-                  {fmtUSD(c.effective)}
-                </strong>{" "}
-                <span className="tabular-nums">of {fmtUSD(c.raw)}</span>
-              </span>
-            ))}
-          </Hint>
-        </FormField>
+          >
+            <div className="w-28">
+              <Input
+                id="head"
+                type="number"
+                min={0}
+                max={95}
+                className="tabular-nums"
+                unit="%"
+                placeholder="None"
+                value={
+                  effective.reservedHeadroomFraction === null
+                    ? ""
+                    : String(
+                        Math.round(effective.reservedHeadroomFraction * 100),
+                      )
+                }
+                onChange={(e) =>
+                  patch({
+                    reservedHeadroomFraction: e.target.value
+                      ? Math.min(Number(e.target.value) / 100, 0.95)
+                      : null,
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+        </ListGroup>
 
-        <details
-          className="mb-3.5"
-          open={tokenCeilingsOpen}
-          onToggle={(e) => setTokenCeilingsOpen(e.currentTarget.open)}
+        {/* On screen rather than behind the disclosure this used to be: the two
+            fields are what a scan writes into, and an unsaved edit the operator
+            cannot see is worse than one they did not ask for. */}
+        <ListGroup
+          className="mt-4"
+          label="Raw-token ceilings"
+          footnote="Used only while the matching cost ceiling above is blank"
         >
-          {/* Padding rather than a flex box with a min height: Chrome drops the
-              disclosure triangle the moment `display` stops being `list-item`,
-              and a summary that looks like a sentence is not a control. */}
-          <summary className="cursor-pointer py-2 text-xs text-ink-muted">
-            Raw-token ceilings
-            {(isEdited("sessionTokenLimit") || isEdited("weeklyTokenLimit")) && (
-              <span className="ml-2 text-accent">· edited</span>
-            )}
-          </summary>
-          <Hint className="mb-2.5">
-            Used only while the matching cost ceiling above is blank
-          </Hint>
-          <div className="grid gap-x-4 sm:grid-cols-2">
-            <FormField
-              label="5-hour ceiling"
-              unit="tokens"
-              htmlFor="sess"
-              edited={isEdited("sessionTokenLimit")}
-            >
+          <SettingRow
+            htmlFor="sess"
+            edited={isEdited("sessionTokenLimit")}
+            label="5-hour ceiling"
+          >
+            <div className="w-40">
               <Input
                 id="sess"
                 type="number"
                 min={0}
                 className="tabular-nums"
+                unit="tokens"
                 placeholder="Unused"
                 value={numOrEmpty(effective.sessionTokenLimit)}
                 onChange={(e) =>
@@ -970,18 +933,21 @@ export default function SettingsPage() {
                   })
                 }
               />
-            </FormField>
-            <FormField
-              label="Weekly ceiling"
-              unit="tokens"
-              htmlFor="wk"
-              edited={isEdited("weeklyTokenLimit")}
-            >
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="wk"
+            edited={isEdited("weeklyTokenLimit")}
+            label="Weekly ceiling"
+          >
+            <div className="w-40">
               <Input
                 id="wk"
                 type="number"
                 min={0}
                 className="tabular-nums"
+                unit="tokens"
                 placeholder="Unused"
                 value={numOrEmpty(effective.weeklyTokenLimit)}
                 onChange={(e) =>
@@ -992,98 +958,82 @@ export default function SettingsPage() {
                   })
                 }
               />
-            </FormField>
-          </div>
-        </details>
+            </div>
+          </SettingRow>
+        </ListGroup>
 
-        <div className="grid gap-x-4 sm:grid-cols-2">
-          <FormField
-            label="Weekly reset"
+        <ListGroup className="mt-4" label="When a window turns over">
+          <SettingRow
             htmlFor="anchor"
             edited={isEdited("weeklyAnchor")}
+            label="Weekly reset"
+            description="Rolling means the weekly total decays over days rather than resetting, so no run can wait it out"
           >
-            <Select
-              id="anchor"
-              value={
-                effective.weeklyAnchor
-                  ? String(effective.weeklyAnchor.weekday)
-                  : ""
-              }
-              onChange={(e) =>
-                patch({
-                  weeklyAnchor: e.target.value
-                    ? {
-                        weekday: Number(e.target.value),
-                        hourUTC: effective.weeklyAnchor?.hourUTC ?? 0,
-                      }
-                    : null,
-                })
-              }
-            >
-              <option value="">Rolling 7 days (no fixed reset)</option>
-              {WEEKDAYS.map((d, i) => (
-                <option key={d} value={i}>
-                  Resets {d}
-                </option>
-              ))}
-            </Select>
-            {effective.weeklyAnchor && (
-              <Input
-                type="number"
-                min={0}
-                max={23}
-                className="mt-2 tabular-nums"
-                aria-label="Reset hour, UTC"
-                value={effective.weeklyAnchor.hourUTC}
+            <div className="w-52">
+              <Select
+                id="anchor"
+                value={
+                  effective.weeklyAnchor
+                    ? String(effective.weeklyAnchor.weekday)
+                    : ""
+                }
                 onChange={(e) =>
                   patch({
-                    weeklyAnchor: {
-                      weekday: effective.weeklyAnchor!.weekday,
-                      hourUTC: Number(e.target.value),
-                    },
+                    weeklyAnchor: e.target.value
+                      ? {
+                          weekday: Number(e.target.value),
+                          hourUTC: effective.weeklyAnchor?.hourUTC ?? 0,
+                        }
+                      : null,
                   })
                 }
-              />
+              >
+                <option value="">Rolling 7 days</option>
+                {WEEKDAYS.map((d, i) => (
+                  <option key={d} value={i}>
+                    Resets {d}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            {effective.weeklyAnchor && (
+              <div className="w-28">
+                <Input
+                  type="number"
+                  min={0}
+                  max={23}
+                  className="tabular-nums"
+                  unit="UTC"
+                  aria-label="Reset hour, UTC"
+                  value={effective.weeklyAnchor.hourUTC}
+                  onChange={(e) =>
+                    patch({
+                      weeklyAnchor: {
+                        weekday: effective.weeklyAnchor!.weekday,
+                        hourUTC: Number(e.target.value),
+                      },
+                    })
+                  }
+                />
+              </div>
             )}
-            <Hint>
-              Hour is UTC. Rolling means the weekly total decays over days
-              rather than resetting, so no run can wait it out
-            </Hint>
-          </FormField>
+          </SettingRow>
 
-          <FormField
-            label="5-hour window reset"
+          <SettingRow
             htmlFor="sessreset"
             edited={isEdited("sessionResetOverrideAt")}
-          >
-            <Input
-              id="sessreset"
-              type="datetime-local"
-              className="tabular-nums"
-              aria-invalid={resetTooFarAhead || undefined}
-              aria-describedby="sessreset-hint"
-              value={toLocalInput(effective.sessionResetOverrideAt)}
-              onChange={(e) => {
-                const at = e.target.value
-                  ? new Date(e.target.value).getTime()
-                  : null;
-                patch({
-                  sessionResetOverrideAt:
-                    at !== null && Number.isFinite(at) ? at : null,
-                });
-              }}
-            />
-            <Hint
-              tone={
-                resetTooFarAhead
-                  ? "danger"
-                  : effective.sessionResetOverrideAt !== null &&
-                      Date.now() < effective.sessionResetOverrideAt
-                    ? "warn"
-                    : "neutral"
-              }
-            >
-              <span id="sessreset-hint">
+            label="5-hour window reset"
+            description={
+              <Toned
+                tone={
+                  resetTooFarAhead
+                    ? "danger"
+                    : effective.sessionResetOverrideAt !== null &&
+                        Date.now() < effective.sessionResetOverrideAt
+                      ? "warn"
+                      : "neutral"
+                }
+              >
                 {resetTooFarAhead ? (
                   "No window can reset more than five hours from now — check the date"
                 ) : effective.planUsageFromApi ? (
@@ -1102,172 +1052,173 @@ export default function SettingsPage() {
                 ) : (
                   <>
                     Expired: that window ended{" "}
-                    {new Date(
-                      effective.sessionResetOverrideAt,
-                    ).toLocaleString()}
+                    {new Date(effective.sessionResetOverrideAt).toLocaleString()}
                     . Clear the field to drop the split
                   </>
                 )}
-              </span>
-            </Hint>
-          </FormField>
-        </div>
-
-        <FormField edited={isEdited("includeSidechains")}>
-          <Toggle
-            id="side"
-            checked={effective.includeSidechains}
-            onChange={(v) => patch({ includeSidechains: v })}
-            label={
-              <>
-                Count sub-agent turns in usage totals
-                {isEdited("includeSidechains") && (
-                  <span className="sr-only"> — edited, not saved</span>
-                )}
-              </>
+              </Toned>
             }
-          />
-          <Hint>
-            Sub-agent turns bill normally, so counting them is the accurate
-            default. It moves the dashboard meters and what the scan below
-            measures — exclude only to compare main-thread cost
-          </Hint>
-        </FormField>
-
-        <Subsection title="Where a ceiling can come from">
-          <Hint className="mb-2.5">
-            Nothing publishes your limit, so the least-bad evidence is your own
-            history: a 5-hour block that reached a figure without being cut off
-            proves the ceiling is at least that
-          </Hint>
-          <Button
-            variant="secondary"
-            onClick={() => void calibrate()}
-            disabled={calBusy}
-            aria-busy={calBusy || undefined}
           >
-            {calBusy ? "Scanning every transcript…" : "Scan history"}
-          </Button>
-
-          {calError && (
-            <Notice tone="danger" className="mt-3.5">
-              {calError}
-            </Notice>
-          )}
-
-          {cal && !cal.ok && (
-            <Notice tone="warn" className="mt-3.5">
-              {cal.reason}
-            </Notice>
-          )}
-
-          {cal?.ok && cal.suggestion && (
-            <div className="mt-3.5">
-              <TableWrap>
-                <Table>
-                  <thead>
-                    <tr>
-                      <Th>Ceiling</Th>
-                      <Th num>Set now</Th>
-                      <Th num>Observed peak</Th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <Tr>
-                      <Td>
-                        5-hour
-                        <div className="text-xs text-ink-faint">
-                          {cal.suggestion.sessionTokenLimit === null
-                            ? "no completed block"
-                            : `${fmtTokens(cal.suggestion.sessionTokenLimit)} raw tokens`}
-                        </div>
-                      </Td>
-                      <Td num className="mono">
-                        {effective.sessionCostLimit === null
-                          ? "—"
-                          : fmtUSD(effective.sessionCostLimit)}
-                      </Td>
-                      <Td num className="mono">
-                        {cal.suggestion.sessionCostLimit === null
-                          ? "—"
-                          : fmtUSD(cal.suggestion.sessionCostLimit)}
-                      </Td>
-                    </Tr>
-                    <Tr>
-                      <Td>
-                        Weekly
-                        <div className="text-xs text-ink-faint">
-                          {cal.suggestion.weeklyTokenLimit === null
-                            ? "no full week yet"
-                            : `${fmtTokens(cal.suggestion.weeklyTokenLimit)} raw tokens`}
-                        </div>
-                      </Td>
-                      <Td num className="mono">
-                        {effective.weeklyCostLimit === null
-                          ? "—"
-                          : fmtUSD(effective.weeklyCostLimit)}
-                      </Td>
-                      <Td num className="mono">
-                        {cal.suggestion.weeklyCostLimit === null
-                          ? "—"
-                          : fmtUSD(cal.suggestion.weeklyCostLimit)}
-                      </Td>
-                    </Tr>
-                  </tbody>
-                </Table>
-              </TableWrap>
-
-              <dl className="mt-3.5 grid max-w-[70ch] gap-x-8 gap-y-1.5 text-xs sm:grid-cols-2">
-                <EnvRow label="History">
-                  <span className="tabular-nums">
-                    {evCount("historyDays", "days")}
-                  </span>
-                </EnvRow>
-                <EnvRow label="Confidence">
-                  <Badge
-                    tone={
-                      cal.confidence === "reasonable"
-                        ? "ok"
-                        : cal.confidence === "moderate"
-                          ? "warn"
-                          : "danger"
-                    }
-                  >
-                    {cal.confidence ?? "unknown"}
-                  </Badge>
-                </EnvRow>
-                <EnvRow label="5-hour blocks">
-                  <span className="tabular-nums">
-                    {evCount("closedBlocks", "completed")}
-                  </span>
-                  {ev("blockCostP50") !== null && ev("blockCostP95") !== null && (
-                    <span className="tabular-nums">
-                      {" "}
-                      · median {fmtUSD(ev("blockCostP50") as number)}, 95th{" "}
-                      {fmtUSD(ev("blockCostP95") as number)}
-                    </span>
-                  )}
-                </EnvRow>
-                <EnvRow label="7-day windows">
-                  <span className="tabular-nums">
-                    {evCount("weeklyWindowsSampled", "sampled")}
-                  </span>
-                </EnvRow>
-              </dl>
-
-              <Notice tone="warn" className="mt-3.5">
-                {cal.caveat}
-              </Notice>
-
-              <Button variant="secondary" onClick={applySuggestion}>
-                Copy peaks into the fields above
-              </Button>
-              <Hint>
-                Both metrics at once. Nothing is stored until you save
-              </Hint>
+            <div className="w-56">
+              <Input
+                id="sessreset"
+                type="datetime-local"
+                className="tabular-nums"
+                aria-invalid={resetTooFarAhead || undefined}
+                value={toLocalInput(effective.sessionResetOverrideAt)}
+                onChange={(e) => {
+                  const at = e.target.value
+                    ? new Date(e.target.value).getTime()
+                    : null;
+                  patch({
+                    sessionResetOverrideAt:
+                      at !== null && Number.isFinite(at) ? at : null,
+                  });
+                }}
+              />
             </div>
-          )}
-        </Subsection>
+          </SettingRow>
+        </ListGroup>
+
+        <ListGroup
+          className="mt-4"
+          label="Where a ceiling can come from"
+          footnote="Nothing publishes your limit, so the least-bad evidence is your own history: a 5-hour block that reached a figure without being cut off proves the ceiling is at least that"
+        >
+          <SettingRow
+            label="Estimate from your own history"
+            description={
+              calBusy
+                ? "Reading every transcript on this disk…"
+                : "Reports the highest 5-hour block and 7-day window it can find. Nothing is stored until you save"
+            }
+          >
+            <Button
+              variant="secondary"
+              onClick={() => void calibrate()}
+              busy={calBusy}
+            >
+              Scan history
+            </Button>
+          </SettingRow>
+        </ListGroup>
+
+        {calError && (
+          <Notice tone="danger" className="mt-3.5">
+            {calError}
+          </Notice>
+        )}
+
+        {cal && !cal.ok && (
+          <Notice tone="warn" className="mt-3.5">
+            {cal.reason}
+          </Notice>
+        )}
+
+        {cal?.ok && cal.suggestion && (
+          <div className="mt-3.5">
+            <TableWrap>
+              <Table>
+                <thead>
+                  <tr>
+                    <Th>Ceiling</Th>
+                    <Th num>Set now</Th>
+                    <Th num>Observed peak</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <Tr>
+                    <Td>
+                      5-hour
+                      <div className="text-xs text-ink-faint">
+                        {cal.suggestion.sessionTokenLimit === null
+                          ? "no completed block"
+                          : `${fmtTokens(cal.suggestion.sessionTokenLimit)} raw tokens`}
+                      </div>
+                    </Td>
+                    <Td num className="mono">
+                      {effective.sessionCostLimit === null
+                        ? "—"
+                        : fmtUSD(effective.sessionCostLimit)}
+                    </Td>
+                    <Td num className="mono">
+                      {cal.suggestion.sessionCostLimit === null
+                        ? "—"
+                        : fmtUSD(cal.suggestion.sessionCostLimit)}
+                    </Td>
+                  </Tr>
+                  <Tr>
+                    <Td>
+                      Weekly
+                      <div className="text-xs text-ink-faint">
+                        {cal.suggestion.weeklyTokenLimit === null
+                          ? "no full week yet"
+                          : `${fmtTokens(cal.suggestion.weeklyTokenLimit)} raw tokens`}
+                      </div>
+                    </Td>
+                    <Td num className="mono">
+                      {effective.weeklyCostLimit === null
+                        ? "—"
+                        : fmtUSD(effective.weeklyCostLimit)}
+                    </Td>
+                    <Td num className="mono">
+                      {cal.suggestion.weeklyCostLimit === null
+                        ? "—"
+                        : fmtUSD(cal.suggestion.weeklyCostLimit)}
+                    </Td>
+                  </Tr>
+                </tbody>
+              </Table>
+            </TableWrap>
+
+            <dl className="mt-3.5 grid max-w-[70ch] gap-x-8 gap-y-1.5 text-xs sm:grid-cols-2">
+              <EnvRow label="History">
+                <span className="tabular-nums">
+                  {evCount("historyDays", "days")}
+                </span>
+              </EnvRow>
+              <EnvRow label="Confidence">
+                <Badge
+                  tone={
+                    cal.confidence === "reasonable"
+                      ? "ok"
+                      : cal.confidence === "moderate"
+                        ? "warn"
+                        : "danger"
+                  }
+                >
+                  {cal.confidence ?? "unknown"}
+                </Badge>
+              </EnvRow>
+              <EnvRow label="5-hour blocks">
+                <span className="tabular-nums">
+                  {evCount("closedBlocks", "completed")}
+                </span>
+                {ev("blockCostP50") !== null && ev("blockCostP95") !== null && (
+                  <span className="tabular-nums">
+                    {" "}
+                    · median {fmtUSD(ev("blockCostP50") as number)}, 95th{" "}
+                    {fmtUSD(ev("blockCostP95") as number)}
+                  </span>
+                )}
+              </EnvRow>
+              <EnvRow label="7-day windows">
+                <span className="tabular-nums">
+                  {evCount("weeklyWindowsSampled", "sampled")}
+                </span>
+              </EnvRow>
+            </dl>
+
+            <Notice tone="warn" className="mt-3.5">
+              {cal.caveat}
+            </Notice>
+
+            <Button variant="secondary" onClick={applySuggestion}>
+              Copy peaks into the fields above
+            </Button>
+            <Hint>Both metrics at once. Nothing is stored until you save</Hint>
+          </div>
+        )}
       </Section>
 
       <Section
@@ -1275,126 +1226,372 @@ export default function SettingsPage() {
         title="Runs"
         lede="What the new-run form starts at, and how many runs may work at once."
       >
-        <div className="grid gap-x-4 sm:grid-cols-2">
-          <FormField
-            label="Default model"
+        <ListGroup>
+          <SettingRow
             htmlFor="model"
             edited={isEdited("defaultModel")}
-          >
-            <Input
-              id="model"
-              type="text"
-              placeholder="Claude Code's own default"
-              value={effective.defaultModel ?? ""}
-              onChange={(e) => patch({ defaultModel: e.target.value || null })}
-            />
-            <Hint>
-              e.g. <span className="mono">claude-opus-5</span> or{" "}
-              <span className="mono">claude-sonnet-5</span>
-            </Hint>
-          </FormField>
-
-          <FormField
-            label="Default permission mode"
-            htmlFor="pm"
-            edited={isEdited("defaultPermissionMode")}
-          >
-            <Select
-              id="pm"
-              value={effective.defaultPermissionMode}
-              onChange={(e) => patch({ defaultPermissionMode: e.target.value })}
-            >
-              {PERMISSION_MODES.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </Select>
-            <Hint>
-              Pre-selected on the new-run form, where every run can change it.
-              It does not reach the guard set above
-            </Hint>
-          </FormField>
-        </div>
-
-        <FormField
-          label="Runs at the same time"
-          htmlFor="conc"
-          edited={isEdited("maxConcurrentRuns")}
-        >
-          <Input
-            id="conc"
-            type="number"
-            min={1}
-            className="tabular-nums sm:max-w-56"
-            placeholder="No limit"
-            value={effective.maxConcurrentRuns ?? ""}
-            onChange={(e) =>
-              patch({
-                maxConcurrentRuns: e.target.value
-                  ? Number(e.target.value)
-                  : null,
-              })
+            label="Default model"
+            description={
+              <>
+                e.g. <span className="mono">claude-opus-5</span> or{" "}
+                <span className="mono">claude-sonnet-5</span>
+              </>
             }
-          />
-          <Hint>
-            Each run carries its own spending limit, so this multiplies the
-            worst case — three runs at $5 can spend $15. A run over the limit
-            waits rather than being refused, and queued or parked runs do not
-            count against it
-          </Hint>
-        </FormField>
+          >
+            <div className="w-64">
+              <Input
+                id="model"
+                type="text"
+                placeholder="Claude Code's own default"
+                value={effective.defaultModel ?? ""}
+                onChange={(e) => patch({ defaultModel: e.target.value || null })}
+              />
+            </div>
+          </SettingRow>
 
-        <Subsection title="Isolated runs">
-          <FormField
-            label="Files copied into a new checkout"
+          <SettingRow
+            edited={isEdited("defaultPermissionMode")}
+            label="What a new run may do without asking"
+            description="Pre-selected on the new-run form, where every run can change it. It does not reach the guard set below"
+          >
+            <SegmentedControl
+              options={PERMISSION_OPTIONS}
+              value={effective.defaultPermissionMode}
+              onChange={(v) => patch({ defaultPermissionMode: v })}
+              label="What a new run may do without asking"
+            />
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="conc"
+            edited={isEdited("maxConcurrentRuns")}
+            label="Runs at the same time"
+            description="Each run carries its own spending limit, so this multiplies the worst case — three runs at $5 can spend $15. A run over the limit waits rather than being refused, and queued or parked runs do not count against it"
+          >
+            <div className="w-32">
+              <Input
+                id="conc"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="runs"
+                placeholder="No limit"
+                value={effective.maxConcurrentRuns ?? ""}
+                onChange={(e) =>
+                  patch({
+                    maxConcurrentRuns: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+        </ListGroup>
+
+        <ListGroup className="mt-4" label="Isolated runs">
+          <SettingRow
             htmlFor="copyglobs"
             edited={isEdited("isolationCopyGlobs")}
+            label="Files copied into a new checkout"
+            description={
+              <>
+                A fresh checkout holds committed work only, so a gitignored
+                config file has to be copied in — prefix a pattern with{" "}
+                <span className="mono">!</span> to exclude it. Dependencies are
+                not copied; the agent installs them
+              </>
+            }
           >
             {/* Held as raw text while editing. Splitting on every keystroke
                 drops the separator the moment it is typed, which makes a
                 second pattern impossible to enter. */}
-            <Input
-              id="copyglobs"
-              value={copyGlobsText ?? effective.isolationCopyGlobs.join(", ")}
-              onChange={(e) => setCopyGlobsText(e.target.value)}
-              onBlur={() => {
-                if (copyGlobsText === null) return;
-                patch({ isolationCopyGlobs: parseGlobs(copyGlobsText) });
-                setCopyGlobsText(null);
-              }}
-            />
-            <Hint>
-              A fresh checkout holds committed work only, so a gitignored config
-              file has to be copied in — prefix a pattern with{" "}
-              <span className="mono">!</span> to exclude it. Dependencies are
-              not copied; the agent installs them
-            </Hint>
-          </FormField>
+            <div className="w-72">
+              <Input
+                id="copyglobs"
+                value={copyGlobsText ?? effective.isolationCopyGlobs.join(", ")}
+                onChange={(e) => setCopyGlobsText(e.target.value)}
+                onBlur={() => {
+                  if (copyGlobsText === null) return;
+                  patch({ isolationCopyGlobs: parseGlobs(copyGlobsText) });
+                  setCopyGlobsText(null);
+                }}
+              />
+            </div>
+          </SettingRow>
 
-          <FormField
-            label="Landing a branch"
-            htmlFor="landstrategy"
+          <SettingRow
             edited={isEdited("landStrategy")}
-            className={FLUSH}
+            label="Landing a branch"
+            description={LAND_CONSEQUENCE[effective.landStrategy]}
           >
-            <Select
-              id="landstrategy"
+            <SegmentedControl
+              options={LAND_OPTIONS}
               value={effective.landStrategy}
-              onChange={(e) =>
-                patch({ landStrategy: e.target.value as "merge" | "squash" })
-              }
-            >
-              <option value="merge">Merge, keeping the run&rsquo;s commits</option>
-              <option value="squash">Squash the run into one commit</option>
-            </Select>
-            <Hint>
-              Merging keeps the run page&rsquo;s diff meaningful afterwards.
-              Squashing rewrites the commits, so git can no longer see the merge
-              and this tool tracks the branch by its tip instead
-            </Hint>
-          </FormField>
-        </Subsection>
+              onChange={(v) => patch({ landStrategy: v })}
+              label="Landing a branch"
+            />
+          </SettingRow>
+        </ListGroup>
+      </Section>
+
+      <Section
+        id="guards"
+        title="Default guard set"
+        lede={
+          <>
+            What an agent may do when the orchestrator chat proposes work
+            without naming a template, and what a template the chat saves is
+            created with. Runs you start yourself take their guards from the
+            new-run form instead. The chat cannot change any of this.
+          </>
+        }
+      >
+        <ListGroup>
+          <SettingRow
+            edited={isEdited("chatDefaultGuards.permissionMode")}
+            label="What it may do without asking"
+            description={<Toned tone={modeNote.tone}>{modeNote.text}</Toned>}
+          >
+            <SegmentedControl
+              options={PERMISSION_OPTIONS}
+              value={guards.permissionMode}
+              onChange={(v) => patchGuards({ permissionMode: v })}
+              label="What the chat's runs may do without asking"
+            />
+          </SettingRow>
+
+          <SettingRow
+            edited={isEdited("chatDefaultGuards.isolate")}
+            label="Where Claude writes"
+            description={
+              <Toned tone={guards.isolate ? "neutral" : "warn"}>
+                {ISOLATION_CONSEQUENCE[guards.isolate ? "worktree" : "direct"]}
+              </Toned>
+            }
+          >
+            <SegmentedControl
+              options={ISOLATION_OPTIONS}
+              value={guards.isolate ? "worktree" : "direct"}
+              onChange={(v) => patchGuards({ isolate: v === "worktree" })}
+              label="Where Claude writes"
+            />
+          </SettingRow>
+        </ListGroup>
+
+        <ListGroup className="mt-4" label="Stop conditions">
+          <SettingRow
+            htmlFor="cgcost"
+            edited={isEdited("chatDefaultGuards.budget.maxRunCostUSD")}
+            label="Spend limit"
+            description={
+              <>
+                {SPEND_READ_AT[guards.budget.enforcement] ??
+                  SPEND_READ_AT["between-cycles"]}{" "}
+                It is per run, so three at once can spend three times it
+              </>
+            }
+          >
+            <div className="w-36">
+              <Input
+                id="cgcost"
+                type="number"
+                min={0}
+                step="0.5"
+                className="tabular-nums"
+                unit="USD"
+                placeholder="No limit"
+                value={numOrEmpty(guards.budget.maxRunCostUSD)}
+                onChange={(e) =>
+                  patchGuardBudget({
+                    maxRunCostUSD:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="cgcycles"
+            edited={isEdited("chatDefaultGuards.budget.maxIterations")}
+            label="Work cycles"
+            description={
+              <Toned tone={noTerminus ? "danger" : "neutral"}>
+                {noTerminus
+                  ? "Set this or a time limit — a run with neither would never have to end"
+                  : "How many times the agent is sent back in before the run ends. Blank is only allowed alongside a time limit"}
+              </Toned>
+            }
+          >
+            <div className="w-36">
+              <Input
+                id="cgcycles"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="cycles"
+                placeholder="No limit"
+                aria-invalid={noTerminus || undefined}
+                value={numOrEmpty(guards.budget.maxIterations)}
+                onChange={(e) =>
+                  patchGuardBudget({
+                    maxIterations:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="cgmins"
+            edited={isEdited("chatDefaultGuards.budget.maxDurationMinutes")}
+            label="Time limit"
+            description={
+              <Toned tone={noTerminus ? "danger" : "neutral"}>
+                {noTerminus
+                  ? "Set this or a work-cycle limit — a run with neither would never have to end"
+                  : "Wall clock, and the only limit that keeps moving whether or not a cycle reports what it spent"}
+              </Toned>
+            }
+          >
+            <div className="w-40">
+              <Input
+                id="cgmins"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="minutes"
+                placeholder="No limit"
+                aria-invalid={noTerminus || undefined}
+                value={numOrEmpty(guards.budget.maxDurationMinutes)}
+                onChange={(e) =>
+                  patchGuardBudget({
+                    maxDurationMinutes:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+        </ListGroup>
+
+        <ListGroup className="mt-4" label="What one chat message may spend">
+          <SettingRow
+            htmlFor="chatbudget"
+            edited={isEdited("chatTurnBudgetUSD")}
+            label="Orchestrator chat limit"
+            description="A chat is not a run and has no guards of its own, so this and a ten-minute timeout are the only two things that stop one message. It is spent on the conversation, never added to a run"
+          >
+            <div className="w-36">
+              <Input
+                id="chatbudget"
+                type="number"
+                min={0}
+                step="0.5"
+                className="tabular-nums"
+                unit="USD"
+                placeholder="No limit"
+                value={effective.chatTurnBudgetUSD ?? ""}
+                onChange={(e) =>
+                  patch({
+                    chatTurnBudgetUSD:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+        </ListGroup>
+      </Section>
+
+      <Section
+        id="unattended"
+        title="Unattended runs"
+        lede="What happens while nobody is watching — mid-cycle checks, leftover processes, and a restart."
+      >
+        {/* This was the kit's reference conversion and the rest of the page now
+            follows it. The edited rail still lands in the card's gutter:
+            `SettingRow` is the positioned ancestor and the group does not clip
+            its overflow, which is why it can. */}
+        <ListGroup>
+          <SettingRow
+            htmlFor="livechk"
+            edited={isEdited("liveGuardIntervalSeconds")}
+            label="Live limit check"
+            description="How often a run set to stop mid-cycle re-reads usage. It cannot beat one model turn however low this goes, because usage comes from transcripts written as each turn completes"
+          >
+            <div className="w-36">
+              <Input
+                id="livechk"
+                type="number"
+                min={15}
+                className="tabular-nums"
+                unit="seconds"
+                value={effective.liveGuardIntervalSeconds}
+                onChange={(e) =>
+                  patch({ liveGuardIntervalSeconds: Number(e.target.value) })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="killgroup"
+            edited={isEdited("killProcessGroup")}
+            label="Stopping a run also stops everything it started"
+            description="Builds, test runners and servers the agent launched otherwise hold the working directory open and keep writing into a folder the next run is about to use"
+          >
+            <Switch
+              id="killgroup"
+              checked={effective.killProcessGroup}
+              onChange={(v) => patch({ killProcessGroup: v })}
+            />
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="grace"
+            edited={isEdited("resumeGraceHours")}
+            label="Restart grace"
+            description="A parked run older than this is closed out at boot rather than picked up, so a forgotten run cannot wake up days later and start spending"
+          >
+            <div className="w-32">
+              <Input
+                id="grace"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="hours"
+                value={effective.resumeGraceHours}
+                onChange={(e) =>
+                  patch({ resumeGraceHours: Number(e.target.value) })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="telemetry"
+            edited={isEdited("telemetryForRuns")}
+            label="Let agents report per-request cost over OpenTelemetry"
+            description={
+              <>
+                The only record of what a work cycle killed mid-flight actually
+                cost. Off by default because it changes the child
+                process&rsquo;s behaviour, and it never feeds the meters. One
+                exception: a run whose own spending limit needs it switches it
+                on for itself
+              </>
+            }
+          >
+            <Switch
+              id="telemetry"
+              checked={effective.telemetryForRuns}
+              onChange={(v) => patch({ telemetryForRuns: v })}
+            />
+          </SettingRow>
+        </ListGroup>
       </Section>
 
       <Section
@@ -1476,131 +1673,6 @@ export default function SettingsPage() {
             is already there
           </Hint>
         </FormField>
-      </Section>
-
-      <Section
-        id="unattended"
-        title="Unattended runs"
-        lede="What happens while nobody is watching — mid-cycle checks, leftover processes, and a restart."
-      >
-        {/* The reference conversion for the grouped list. Four settings that
-            each read "this, and here is the control for it" — which is a list,
-            not four stacked forms with a label above every control.
-
-            Nothing else on this page has moved. The rest is still FormField,
-            and a later run converts it; keeping one group as the example is
-            what makes the diff readable against the four sections it did not
-            touch. The edited rail is unchanged and still lands in the card's
-            gutter: ListRow is the positioned ancestor and the group does not
-            clip its overflow, which is why it can. */}
-        <ListGroup>
-          <ListRow
-            htmlFor="livechk"
-            label={
-              <>
-                Live limit check
-                <span className="font-normal text-ink-faint"> (seconds)</span>
-                {isEdited("liveGuardIntervalSeconds") && (
-                  <span className="sr-only"> — edited, not saved</span>
-                )}
-              </>
-            }
-            description="How often a run set to stop mid-cycle re-reads usage. It cannot beat one model turn however low this goes, because usage comes from transcripts written as each turn completes"
-          >
-            <EditedRail on={isEdited("liveGuardIntervalSeconds")} />
-            {/* The width is on a wrapper, never on the control: Input already
-                states `w-full`, and two width utilities on one element resolve
-                by stylesheet order rather than class order. */}
-            <div className="w-24">
-              <Input
-                id="livechk"
-                type="number"
-                min={15}
-                className="tabular-nums"
-                value={effective.liveGuardIntervalSeconds}
-                onChange={(e) =>
-                  patch({ liveGuardIntervalSeconds: Number(e.target.value) })
-                }
-              />
-            </div>
-          </ListRow>
-
-          <ListRow
-            htmlFor="killgroup"
-            label={
-              <>
-                Stopping a run also stops everything it started
-                {isEdited("killProcessGroup") && (
-                  <span className="sr-only"> — edited, not saved</span>
-                )}
-              </>
-            }
-            description="Builds, test runners and servers the agent launched otherwise hold the working directory open and keep writing into a folder the next run is about to use"
-          >
-            <EditedRail on={isEdited("killProcessGroup")} />
-            <Switch
-              id="killgroup"
-              checked={effective.killProcessGroup}
-              onChange={(v) => patch({ killProcessGroup: v })}
-            />
-          </ListRow>
-
-          <ListRow
-            htmlFor="grace"
-            label={
-              <>
-                Restart grace
-                <span className="font-normal text-ink-faint"> (hours)</span>
-                {isEdited("resumeGraceHours") && (
-                  <span className="sr-only"> — edited, not saved</span>
-                )}
-              </>
-            }
-            description="A parked run older than this is closed out at boot rather than picked up, so a forgotten run cannot wake up days later and start spending"
-          >
-            <EditedRail on={isEdited("resumeGraceHours")} />
-            <div className="w-24">
-              <Input
-                id="grace"
-                type="number"
-                min={1}
-                className="tabular-nums"
-                value={effective.resumeGraceHours}
-                onChange={(e) =>
-                  patch({ resumeGraceHours: Number(e.target.value) })
-                }
-              />
-            </div>
-          </ListRow>
-
-          <ListRow
-            htmlFor="telemetry"
-            label={
-              <>
-                Let agents report per-request cost over OpenTelemetry
-                {isEdited("telemetryForRuns") && (
-                  <span className="sr-only"> — edited, not saved</span>
-                )}
-              </>
-            }
-            description={
-              <>
-                The only record of what a work cycle killed mid-flight actually
-                cost. Off by default because it changes the child
-                process&rsquo;s behaviour, and it never feeds the meters. One
-                exception: a run whose own spending limit needs it switches it
-                on for itself
-              </>
-            }
-          >
-            <EditedRail on={isEdited("telemetryForRuns")} />
-            <Switch
-              id="telemetry"
-              checked={effective.telemetryForRuns}
-              onChange={(v) => patch({ telemetryForRuns: v })}
-            />
-          </ListRow>
-        </ListGroup>
       </Section>
 
       {/* Sticky, because one Save commits every field on a page five sections
