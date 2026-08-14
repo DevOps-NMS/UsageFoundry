@@ -118,9 +118,13 @@ export function QuickOpen({
       href: pane.href,
       haystack: pane.label.toLowerCase(),
     }));
+    const needle = query.trim().toLowerCase();
+    // The unfiltered list is cut to the newest few, so the heading says so —
+    // a shortened list that reads like a whole one is the thing this app
+    // refuses to do with a diff, a run table or a telemetry card.
     const runItems = runs.map((run) => ({
       key: `run:${run.id}`,
-      group: "Runs",
+      group: needle ? "Runs" : "Recent runs",
       label: run.id.slice(0, 8),
       detail: `${run.status} · ${shortPath(run.folder, 2)}`,
       href: `/runs/${run.id}`,
@@ -135,7 +139,6 @@ export function QuickOpen({
       haystack: workflow.name.toLowerCase(),
     }));
 
-    const needle = query.trim().toLowerCase();
     if (!needle) {
       return [...paneItems, ...runItems.slice(0, RECENT_RUNS), ...workflowItems];
     }
@@ -266,9 +269,12 @@ export function QuickOpen({
         )}
       </div>
 
+      {/* Not an explanation of the control — a fact about it the operator
+          cannot see, in an app where most lists of runs have a button that
+          spends money beside them. */}
       <p className="mt-3 flex items-center gap-1.5 px-1 text-xs text-ink-faint">
         <Icon name="search" size="sm" />
-        Goes somewhere. Nothing here starts, approves or stops a run.
+        Navigation only — nothing here starts, approves or stops a run
       </p>
     </Sheet>
   );
