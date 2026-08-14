@@ -458,6 +458,70 @@ export interface RunTemplateDTO {
 }
 
 /* ------------------------------------------------------------------ */
+/* Agents: a saved role a run may delegate a subtask to                */
+/* ------------------------------------------------------------------ */
+
+/** Bounded for the reason a template name is: it is picked out of a list. */
+export const MAX_AGENT_NAME = 80;
+
+/**
+ * How long an agent's description may be.
+ *
+ * Not a form-tidiness bound. The description is what the delegating model reads
+ * to choose the agent, so it is carried in that model's context for the whole
+ * session rather than at the moment of a delegation — it is paid for on every
+ * request the run makes, and an unbounded one is a cost multiplier with no
+ * ceiling on a run whose spend guards are all denominated in dollars.
+ */
+export const MAX_AGENT_DESCRIPTION = 1_000;
+
+/**
+ * A saved specialised agent.
+ *
+ * There is deliberately no tool list, no permission mode and no budget here, and
+ * the absence is the design: what an agent may do comes from the guard set on
+ * the run it is delegated inside. The reasoning is in `agents.ts` beside the
+ * refusal that enforces it.
+ */
+export interface AgentDTO {
+  id: string;
+  name: string;
+  description: string;
+  prompt: string;
+  /** Null means the delegated turn inherits the session's model. */
+  model: string | null;
+  /**
+   * Whether this row can actually be attached to a spawn.
+   *
+   * False for a row whose description or prompt is empty — the CLI drops such a
+   * member without a word, so a surface that offered it would be offering a run
+   * a specialist that silently is not there. On the DTO because nothing on the
+   * page can work it out: the row looks complete either way.
+   */
+  usable: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * An agent definition Claude Code finds on disk that this app did not write.
+ *
+ * The operator's `~/.claude/agents/` is bind-mounted into the container and a
+ * repository's own `.claude/agents/` is in an isolated run's worktree, so both
+ * reach every child this app spawns and always have. They are left in play
+ * rather than excluded — see `agents.ts` — which makes the saved registry a
+ * *part* of the set rather than the whole of it, and this is what a surface
+ * reads to say so where an agent is chosen.
+ */
+export interface AmbientAgentDTO {
+  name: string;
+  description: string | null;
+  /** `user` is `~/.claude/agents`; `project` is a repository's own. */
+  scope: "user" | "project";
+  path: string;
+}
+
+/* ------------------------------------------------------------------ */
 /* Workflows: a saved graph of run blocks                              */
 /* ------------------------------------------------------------------ */
 

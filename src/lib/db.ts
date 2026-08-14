@@ -182,6 +182,39 @@ function migrate(db: Database.Database) {
       updated_at      INTEGER NOT NULL
     );
 
+    -- A named specialised agent: a role the delegating model may hand a
+    -- subtask to.
+    --
+    -- The fourth table here that holds *form input, never a run*, after
+    -- run_templates, chat_proposals and workflows: no folder claim, no
+    -- concurrency slot, invisible to activeRuns(), and deleting one cannot
+    -- reach a child that has already been spawned, because every spawn writes
+    -- the whole definition onto its own argv rather than a reference to this
+    -- row.
+    --
+    -- No tools column, no permission_mode column and no budget. What an agent
+    -- may do comes from the guard set on the run it is delegated inside; the
+    -- reasoning is in agents.ts beside the refusal that enforces it, and the
+    -- absence of a column is the strongest form of it — there is nothing on
+    -- the wire that could carry one.
+    --
+    -- model is nullable and means "inherit the session's". It is the one field
+    -- run_templates deliberately refuses to hold, and it is not the same field:
+    -- a template's model would be a second place to set the *run's* model,
+    -- where this is the model one delegated turn runs on, which nothing else
+    -- here can express.
+    CREATE TABLE IF NOT EXISTS agents (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      -- What the delegating model reads to choose this agent. Required by the
+      -- CLI, which drops a member without one and says nothing.
+      description TEXT NOT NULL,
+      prompt      TEXT NOT NULL,
+      model       TEXT,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+
     -- Branches waiting to be landed, one after another.
     --
     -- Landing several branches is several merges and each changes the base for
@@ -498,6 +531,13 @@ function migrate(db: Database.Database) {
     -- database can state outright.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_run_templates_name
       ON run_templates(name COLLATE NOCASE);
+    -- Same rule as a template's name, and one the CLI makes sharper: the name
+    -- is the key of the object the --agents flag takes, so two rows differing
+    -- only in case would be two members of one JSON object that a person reads
+    -- as one agent — and the delegating model picks between them by
+    -- description.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_name
+      ON agents(name COLLATE NOCASE);
     -- Same rule as a template's name, for the same reason: a workflow is picked
     -- out of a list by a person, so two that differ only in case are one
     -- workflow as far as that list is concerned.
