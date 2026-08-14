@@ -312,20 +312,25 @@ function QueueStep({
 }
 
 /**
- * How many branches each row is waiting behind, counted across every batch.
+ * How many branches each row is waiting behind — across every batch, within its
+ * own repository.
  *
- * One press of Land is one batch and the worker is one queue, so a row's real
- * wait is everything unfinished above it — including the batch queued for
- * another repository ten minutes ago. Counting within the batch would tell the
- * second press of Land it was next when five merges stood in front of it.
+ * Both halves are load-bearing and they were arrived at separately. One press of
+ * Land is one batch, so counting within the batch would tell the second press it
+ * was next when five merges stood in front of it. And the queue is drained one
+ * worker *per repository*, so counting across repositories would say the
+ * opposite — sixth in line for a branch that is about to land.
  */
 function aheadByItem(batches: MergeQueueBatchDTO[]): Map<string, number> {
   const ahead = new Map<string, number>();
-  let unfinished = 0;
+  const unfinished = new Map<string, number>();
   for (const batch of batches) {
     for (const item of batch.items) {
-      ahead.set(item.id, unfinished);
-      if (ITEM_ACTIVE.includes(item.status)) unfinished++;
+      const repo = item.repo ?? "";
+      ahead.set(item.id, unfinished.get(repo) ?? 0);
+      if (ITEM_ACTIVE.includes(item.status)) {
+        unfinished.set(repo, (unfinished.get(repo) ?? 0) + 1);
+      }
     }
   }
   return ahead;

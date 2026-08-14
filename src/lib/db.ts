@@ -508,11 +508,13 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_merge_queue_batch
       ON merge_queue(batch_id, position);
     -- The worker's own query: the next queued row, across every batch. The
-    -- columns are nextQueued's ORDER BY in its order — one batch at a time,
+    -- columns are nextQueuedIn's ORDER BY in its order — one batch at a time,
     -- oldest first, in the operator's order within it. Its predecessor sorted
     -- on (status, position), which is the interleaving that ordering caused;
     -- renamed rather than redefined, because CREATE INDEX IF NOT EXISTS leaves
-    -- an existing index of the same name exactly as it was.
+    -- an existing index of the same name exactly as it was. The repository the
+    -- query now also filters on is not a column here: it lives on the runs
+    -- table and is reached by a join, and this index still supplies the order.
     CREATE INDEX IF NOT EXISTS idx_merge_queue_next
       ON merge_queue(status, created_at, batch_id, position);
     DROP INDEX IF EXISTS idx_merge_queue_status;

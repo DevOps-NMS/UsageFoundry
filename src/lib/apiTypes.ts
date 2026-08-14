@@ -1145,6 +1145,15 @@ export interface MergeQueueItemDTO {
   runId: string;
   branch: string | null;
   target: string | null;
+  /**
+   * The repository this branch belongs to.
+   *
+   * On the wire because the queue is drained one worker per repository, so what
+   * a row is waiting behind is the unfinished rows *in its own* repository —
+   * counting the rest would tell an operator their branch is sixth in line when
+   * it is next.
+   */
+  repo: string | null;
   position: number;
   status:
     | "queued"

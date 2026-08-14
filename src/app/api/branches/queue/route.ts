@@ -28,6 +28,8 @@ function toDTO(row: QueueRow) {
     runId: row.run_id,
     branch: run?.worktree_branch ?? null,
     target: run?.worktree_base_branch ?? null,
+    // `repo_root ?? folder` — the key the worker serialises on.
+    repo: run?.repo_root ?? run?.folder ?? null,
     position: row.position,
     status: row.status,
     strategy: row.strategy,

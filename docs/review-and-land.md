@@ -69,21 +69,27 @@ and everything that principle protected is a check rather than a caveat:
   commit per run.
 
 **Several branches can be queued, and a queue is not a batch.** Tick them on the
-Branches page in the order you want them landed and they go through one at a
-time, each re-previewed against git at its own turn rather than against whatever
-the page showed when you queued them — because every landing changes the base for
-the one behind it. Every check above still applies to every one of them, taken
-fresh. Queue a second set — the next repository's branches, say — while the first
-is still going and it waits its turn: batches drain whole, oldest first, so
-nothing you queue later lands between two branches you had already put in order.
+Branches page in the order you want them landed and the branches in one
+repository go through one at a time, each re-previewed against git at its own
+turn rather than against whatever the page showed when you queued them — because
+every landing changes the base for the one behind it. Every check above still
+applies to every one of them, taken fresh. Queue a second set of the *same*
+repository's branches while the first is still going and it waits its turn:
+batches drain whole, oldest first, so nothing you queue later lands between two
+branches you had already put in order.
 
-There is one worker and one queue, so a second press of Land does not start a
-second one — it adds to the back of the same one. The panel shows every batch
-that still has something to do, oldest first, with the three most recent
-finished ones under them, and each batch keeps its own *Cancel*: it drops that
-batch's branches that have not started and leaves the merge in flight to end,
-which is the same rule everywhere here. Nothing is cancelled by pressing Land
-again for another repository.
+**Different repositories land at the same time**, up to four at once. A landing
+in one changes nothing about the base in another, so waiting would only mean a
+clean branch sitting behind somebody else's conflict — which can take twelve
+minutes to resolve. Within any one repository it is still strictly one merge at
+a time, and that is the part that has to hold.
+
+A second press of Land does not start a second queue — it adds to the back of the
+same one. The panel shows every batch that still has something to do, oldest
+first, with the three most recent finished ones under them, and each batch keeps
+its own *Cancel*: it drops that batch's branches that have not started and leaves
+the merge in flight to end, which is the same rule everywhere here. Nothing is
+cancelled by pressing Land again for another repository.
 
 Two failures are told apart deliberately. A branch that cannot be landed is
 reported and the queue carries on to the next. A problem with your *checkout* —
