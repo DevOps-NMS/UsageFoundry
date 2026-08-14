@@ -22,6 +22,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, type CardEmphasis } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
+import { Icon } from "@/components/ui/Icon";
 import { ListGroup } from "@/components/ui/List";
 import { Spinner } from "@/components/ui/Log";
 import { Notice } from "@/components/ui/Notice";
@@ -503,7 +504,7 @@ export default function ChatPage() {
                 JUMP_STATE[showJump ? "shown" : "hidden"]
               }`}
             >
-              <ChevronDownIcon />
+              <Icon name="chevron-down" size="sm" />
               {unseen > 0 ? `${unseen} new` : "Latest"}
             </button>
           </div>
@@ -610,7 +611,6 @@ export default function ChatPage() {
                   <ButtonRow className="mt-3">
                     <Button
                       variant="ghost"
-                      size="compact"
                       disabled={busy}
                       onClick={() =>
                         setSelected(
@@ -871,7 +871,7 @@ function Proposal({
         ) : (
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-ink-muted">
             <span className="inline-flex min-w-0 max-w-full items-center gap-1" title={folder}>
-              <FolderIcon />
+              <Icon name="folder" size="sm" />
               <span className="truncate">{folder}</span>
             </span>
             <span
@@ -880,7 +880,7 @@ function Proposal({
               }`}
               title={proposal.guardsLabel}
             >
-              <GuardIcon />
+              <Icon name="guard" size="sm" />
               <span className="truncate">
                 {missing ? "template deleted" : proposal.guardsLabel}
               </span>
@@ -1073,59 +1073,5 @@ function ChatRow({
         )}
       </span>
     </button>
-  );
-}
-
-/* Inline SVG rather than an icon package, and each one carries information:
-   which of the two facts on a proposal you are reading, and which way the jump
-   control moves the thread. 14px on a 4px grid, stroked in the inherited
-   colour so a tone class covers the mark as well as the words. */
-
-function FolderIcon() {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      className="size-3.5 shrink-0"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinejoin="round"
-    >
-      <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.3a1.5 1.5 0 0 1 1.06.44l.7.7h5A1.5 1.5 0 0 1 14 5.64v5.86A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" />
-    </svg>
-  );
-}
-
-function GuardIcon() {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      className="size-3.5 shrink-0"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinejoin="round"
-    >
-      <path d="M8 2.2 13 4v3.9c0 3-2.1 4.9-5 5.9-2.9-1-5-2.9-5-5.9V4z" />
-    </svg>
-  );
-}
-
-function ChevronDownIcon() {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      aria-hidden="true"
-      className="size-3.5 shrink-0"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M4 6.5 8 10.5l4-4" />
-    </svg>
   );
 }

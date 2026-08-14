@@ -31,6 +31,12 @@ export type IconName =
   // Disclosure.
   | "chevron-right"
   | "chevron-down"
+  // The two facts a chat proposal is decided on: where it runs, and under
+  // whose rules. They were drawn inline on that page, at a different box size
+  // and a different stroke weight — which is the drift this file exists to
+  // stop, and the reason a glyph belongs here rather than beside its caller.
+  | "folder"
+  | "guard"
   // Status and affirmation.
   | "dot"
   | "check"
@@ -101,6 +107,10 @@ const GLYPH: Record<IconName, ReactElement> = {
   ),
   "chevron-right": <path d="M6.25 3.75 10.5 8l-4.25 4.25" />,
   "chevron-down": <path d="M3.75 6.25 8 10.5l4.25-4.25" />,
+  folder: (
+    <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.3a1.5 1.5 0 0 1 1.06.44l.7.7h5A1.5 1.5 0 0 1 14 5.64v5.86A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" />
+  ),
+  guard: <path d="M8 2.2 13 4v3.9c0 3-2.1 4.9-5 5.9-2.9-1-5-2.9-5-5.9V4z" />,
   // Filled, because a status dot is a dot rather than a ring. Stroke is
   // cancelled locally so the shared stroke-width cannot fatten it.
   dot: <circle cx="8" cy="8" r="3.25" fill="currentColor" stroke="none" />,

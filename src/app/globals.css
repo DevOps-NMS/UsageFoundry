@@ -156,6 +156,16 @@
   --fill-hover:  color-mix(in oklab, var(--fg) 8%, transparent);
   --fill-active: color-mix(in oklab, var(--fg) 14%, transparent);
 
+  /* The workflow canvas's ground, read by the `dot-grid` utility below.
+     Translucent for --fill-hover's reason — it has to darken --bg-inset in the
+     light scheme and lighten it in the dark one, which no opaque token does —
+     and a *token* rather than the expression written into the utility, because
+     Lightning CSS emits a fallback declaration for a color-mix it cannot
+     resolve, and that fallback is the first operand at full strength: a grid of
+     solid --fg dots on any browser without color-mix. Behind a var() it has
+     nothing to fall back to and simply resolves. */
+  --canvas-dot:  color-mix(in oklab, var(--fg) 14%, transparent);
+
   /* The shell's geometry: the source list on the left, and the titlebar-height
      strip at the top of the content pane. --toolbar-h is a floor rather than
      the height — under Window Controls Overlay the strip takes
@@ -363,15 +373,14 @@
    reading as a web widget — and it is the only cue that a block has been
    dragged somewhere deliberate rather than laid out by the app.
 
-   Neutral rather than a palette colour, and for --fill-hover's reason: the dot
-   has to darken --bg-inset in the light scheme and lighten it in the dark one,
-   which no single opaque token does. Named for `hatched`'s reason — a
-   background pattern written as an arbitrary value at its call site is a
-   pattern nobody can grep for. */
+   Named for `hatched`'s reason — a background pattern written as an arbitrary
+   value at its call site is a pattern nobody can grep for. The colour is
+   --canvas-dot; see the note beside it for why it is a token and not the
+   expression. */
 @utility dot-grid {
   background-image: radial-gradient(
     circle at 1px 1px,
-    color-mix(in oklab, var(--fg) 14%, transparent) 1px,
+    var(--canvas-dot) 1px,
     transparent 0
   );
   background-size: 16px 16px;
