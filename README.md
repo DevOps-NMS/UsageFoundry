@@ -332,6 +332,67 @@ export (per-request cost for runs this app spawned). Each is shown as itself.
 
 ---
 
+## Sizing the container
+
+One run is one `claude` process, and each of those starts builds, test suites
+and dev servers of its own **inside this container**. Memory is therefore linear
+in how many runs you allow at once, and the number that decides that is
+*Settings → Max concurrent runs* (`maxConcurrentRuns`, **no limit** by default).
+That setting and the container's memory limit are one decision made twice:
+
+```
+mem_limit  =  concurrent work cycles × 1.5 GiB  +  2.5 GiB server  +  headroom
+```
+
+The shipped defaults are sized for **four** concurrent work cycles — 6 GiB of
+agents, 2.5 GiB for the server (a 2 GiB heap ceiling plus what lives outside
+it), 1.5 GiB of headroom for a review or chat turn, git and the page cache:
+
+| `.env` | Default | |
+|---|---|---|
+| `UF_MEM_LIMIT` | `10g` | The container's whole ceiling. |
+| `UF_NODE_HEAP_MB` | `2048` | The server's heap. Stated rather than inherited — left to V8 it is derived from the *host's* RAM, so the one term above that belongs to this process would change with the machine. It does not scale with the fleet. |
+| `UF_PIDS_LIMIT` | `2048` | Tasks, not processes: ~11 per Node process, plus a build per agent. |
+| `UF_CPUS` | unset | No quota. Docker refuses a value larger than the host has, so no positive number is safe to ship; set it to `nproc` minus one or two if you want the machine to stay responsive while several agents compile. |
+
+1.5 GiB per work cycle is a *budget*, not a measurement: `claude --help` on the
+pinned CLI peaks at 309 MB before it has held a conversation or made a request,
+and a real cycle also holds the context window, the transcript it is writing and
+every tool result.
+
+**At 25 concurrent runs**, the same arithmetic gives:
+
+```
+25 work cycles × 1.5 GiB           37.5 GiB
+server (2 GiB heap + off-heap)      2.5 GiB
+headroom                            2.0 GiB
+                                   ---------
+                                   42.0 GiB     UF_MEM_LIMIT=42g
+                                                UF_PIDS_LIMIT=8192
+```
+
+Twenty-five agents each running a build is roughly 2,500 tasks, so the pids
+limit moves with the fleet even though the server's heap does not.
+
+If the machine cannot spare that, the answer is fewer runs rather than a bigger
+number: a limit above what the host can supply is not a limit, and the kernel's
+OOM killer goes back to choosing its victim from *every* process on the machine
+— which may be an unrelated database, or the server that is supposed to be
+guarding the runs. Inside the limit the kill is confined to this container,
+`restart: unless-stopped` brings it back, and the runs it was carrying are
+closed out with a reason on each.
+
+That the limits are actually applied, rather than merely present in the YAML:
+
+```bash
+docker exec usagefoundry cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max
+docker stats --no-stream usagefoundry
+```
+
+`memory.max` reading `max` means no limit is in force.
+
+---
+
 ## Requirements
 
 - Docker and Docker Compose

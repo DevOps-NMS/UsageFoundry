@@ -4,9 +4,10 @@ import path from "node:path";
 import { describe, it } from "node:test";
 
 /**
- * Covers one agreement between `Dockerfile` and `docker-compose.yml`: that the
+ * Covers the deployment agreements nothing else here can see: that the
  * directory compose points `DATA_DIR` at is writable by whatever uid compose
- * runs the container as.
+ * runs the container as, and that the memory ceiling compose gives the
+ * container is a ceiling the server's own stated heap fits inside.
  *
  * It is not a pure function, and it earns its place on the same grounds the
  * rest of this suite does — a failure that is silent, expensive, and invisible
@@ -100,5 +101,75 @@ describe("the image and compose agree on the data volume", () => {
     // bind-mount ownership failure the README describes, so it must not happen
     // quietly either.
     assert.match(compose, /^\s*user:\s*"\$\{UF_UID:-1000\}:\$\{UF_GID:-1000\}"\s*$/m);
+  });
+});
+
+/**
+ * A compose value with its `${VAR:-default}` interpolations resolved to the
+ * default — i.e. what an operator who sets nothing in `.env` actually gets,
+ * which is the only figure this file can reason about.
+ */
+function shippedDefault(key: string): string {
+  const match = new RegExp(`^\\s*${key}:\\s*"?([^"#\\n]+?)"?\\s*$`, "m").exec(compose);
+  assert.ok(match, `docker-compose.yml no longer sets ${key}`);
+  return match[1].replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}/g, "$1");
+}
+
+/** Docker's own byte-size spelling: a number and an optional binary suffix. */
+function bytes(spec: string): number {
+  const match = /^(\d+(?:\.\d+)?)\s*([kmgt])?b?$/i.exec(spec.trim());
+  assert.ok(match, `cannot read "${spec}" as a byte size`);
+  const scale: Record<string, number> = { k: 2 ** 10, m: 2 ** 20, g: 2 ** 30, t: 2 ** 40 };
+  return Number(match[1]) * (match[2] ? scale[match[2].toLowerCase()] : 1);
+}
+
+/** MiB from compose's `NODE_OPTIONS`, which is where the server's heap is set. */
+function heapCeilingBytes(): number {
+  const options = shippedDefault("NODE_OPTIONS");
+  const match = /--max-old-space-size=(\d+)/.exec(options);
+  assert.ok(
+    match,
+    `NODE_OPTIONS is "${options}" and no longer states a heap ceiling. Left to ` +
+      `V8, the server's ceiling is derived from the *host's* RAM, so the ` +
+      `memory limit below stops being sized against anything.`,
+  );
+  return Number(match[1]) * 2 ** 20;
+}
+
+describe("the container's memory ceiling and the server's heap agree", () => {
+  it("leaves the container room for the children it exists to supervise", () => {
+    const limit = bytes(shippedDefault("mem_limit"));
+    const heap = heapCeilingBytes();
+
+    // Half is not a tuning choice, it is the weakest form of the actual
+    // requirement: this container exists to carry a fleet of `claude` children
+    // and their builds, and a server permitted to claim most of the cgroup on
+    // its own has no room for them. Past that point V8 never throws its own
+    // heap error — the cgroup kills the container first, `restart:
+    // unless-stopped` brings it back, and `reconcileOnBoot` fails every run in
+    // flight, so a slow leak becomes a restart loop that re-bills each fleet's
+    // first cycle. Nothing else here notices: it typechecks, it builds, and it
+    // is one `.env` figure away either way.
+    assert.ok(
+      heap * 2 <= limit,
+      `the server may claim ${(heap / 2 ** 30).toFixed(1)} GiB of a ` +
+        `${(limit / 2 ** 30).toFixed(1)} GiB container. Raise mem_limit or ` +
+        `lower --max-old-space-size; README's "Sizing the container" has the ` +
+        `arithmetic both numbers came from.`,
+    );
+  });
+
+  it("states a ceiling that swap cannot quietly double", () => {
+    // Docker defaults the swap limit to twice `mem_limit` when it is not set,
+    // so an unset `memswap_limit` means the number above is a RAM ceiling with
+    // an equal amount of swap behind it. Equal to `mem_limit` is how Docker
+    // spells "no swap", and it is what makes the sizing arithmetic describe the
+    // container rather than half of it.
+    assert.equal(
+      shippedDefault("memswap_limit"),
+      shippedDefault("mem_limit"),
+      "memswap_limit must equal mem_limit, or the container can swap as much " +
+        "again as the memory limit it was given.",
+    );
   });
 });

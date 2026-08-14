@@ -54,6 +54,19 @@ services:
       CLAUDE_HOME: /home/node/.claude
       CLAUDE_CONFIG_DIR: /home/node/.claude
       DATA_DIR: /data
+      # The server's own heap ceiling, stated rather than inherited from the
+      # machine. Left unset, V8 sizes its old space from the *host's* RAM —
+      # around 2.2 GB on a small host and twice that on a 16 GB one — so the one
+      # term of the memory arithmetic below that belongs to this process was a
+      # property of wherever the container happened to land. 2048 MiB is roughly
+      # what V8 was already choosing, so nothing here shrinks: the point is that
+      # `mem_limit` can be derived from a number instead of guessed at.
+      #
+      # All four child environments strip NODE_OPTIONS, so this bounds the
+      # server and not the `claude` children it spawns. An agent inheriting it
+      # would abort a work cycle mid-flight on a figure chosen for something
+      # else, and the run loop would file that as the agent crashing.
+      NODE_OPTIONS: "--max-old-space-size=${UF_NODE_HEAP_MB:-2048}"
 
     volumes:
       # Credentials + transcripts. Read-write because Claude Code writes new
@@ -92,6 +105,69 @@ services:
       # marks that directory world-writable: this container runs as UF_UID
       # above, and a fresh volume has to be writable by whatever that is.
       - usagefoundry-data:/data
+
+    # ------------------------------------------------------------------------
+    # What this container may take from the host before Docker stops it.
+    # ------------------------------------------------------------------------
+    # Without these the container's ceiling is "whatever the host has", so an
+    # over-configured fleet does not fail here — it takes the machine down with
+    # it. The kernel's OOM killer picks its victim by badness score across the
+    # *whole host*, so the process it kills may be an agent, may be the server
+    # that is supposed to be guarding the runs, and may be a database or an
+    # sshd that has nothing to do with this app. A limit does not stop the
+    # fleet being too large; it makes the failure local and recoverable —
+    # Docker kills inside this cgroup, `restart: unless-stopped` below brings
+    # the container back, and `reconcileOnBoot` closes out the runs it was
+    # carrying with a reason on each.
+    #
+    # `mem_limit` is sized as `concurrent work cycles × per-cycle budget +
+    # server + headroom`, and the shipped figure is for **four** concurrent work
+    # cycles:
+    #
+    #     4 work cycles × 1.5 GiB                          6.0 GiB
+    #     server (2 GiB heap ceiling + ~0.5 GiB off-heap)  2.5 GiB
+    #     headroom (a review or chat turn, git, gh, cache) 1.5 GiB
+    #                                                     ---------
+    #                                                     10.0 GiB
+    #
+    # 1.5 GiB per work cycle is a budget rather than a measurement: `claude
+    # --help` on the pinned CLI peaks at 309 MB before it has held a
+    # conversation or made a request, and a real cycle also holds the context
+    # window, the transcript it is writing and every tool result — then starts
+    # builds and test suites of its own inside this same cgroup.
+    #
+    # **Raise this together with `maxConcurrentRuns`, never after the fact.**
+    # An uncapped concurrency and no memory limit are the same decision made
+    # twice; README's "Sizing the container" has the arithmetic and a worked
+    # example at 25 runs. Set it *below* the RAM you are willing to give this
+    # container — a limit above what the host can supply is not a limit.
+    mem_limit: ${UF_MEM_LIMIT:-10g}
+    # Equal to mem_limit, which is how Docker spells "no swap". Left unset it
+    # defaults to twice mem_limit, so the stated ceiling would quietly be a RAM
+    # ceiling with an equal amount of swap behind it — and 10 GiB of swap
+    # thrash starves the host just as effectively as the OOM kill this exists
+    # to confine, only slower and with no log entry.
+    memswap_limit: ${UF_MEM_LIMIT:-10g}
+    # Tasks, not processes: a Node process is ~11 threads before it forks
+    # anything, and `npm ci` inside an agent's checkout starts one worker per
+    # core. The shipped fleet models out at ~400 tasks with every agent
+    # building at once, so 2048 is roughly five times the worst ordinary case
+    # while still being far below a host's own pid_max. It is deliberately
+    # generous: hitting it fails a fork inside an agent's tool call, which is
+    # local and legible, where the runaway it exists to stop — a fork bomb in
+    # agent-authored code — is neither.
+    pids_limit: ${UF_PIDS_LIMIT:-2048}
+    # No quota by default, and that default cannot be a number: Docker refuses
+    # a `cpus` larger than the host's CPU count, so any figure shipped here
+    # would make `docker compose up` fail outright on a smaller machine — a
+    # wrong answer to a correct configuration. 0 is Docker's own "no limit".
+    #
+    # Set UF_CPUS to leave the host a core or two (`nproc` minus one is the
+    # usual choice). What it buys is the host staying responsive while 25
+    # agents compile, so an operator can still reach this app and stop them; it
+    # does not protect the server's event loop from its own children, which
+    # share the same quota.
+    cpus: ${UF_CPUS:-0}
 
     restart: unless-stopped
 

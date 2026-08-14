@@ -41,6 +41,11 @@ export interface GitResult {
  * `CLAUDE_CONFIG_DIR` and `HOME` still pass through, as they do for the agent —
  * git reads `HOME` for its own configuration, and an allowlist here would fail
  * in ways that are tedious to diagnose from inside a container.
+ *
+ * `NODE_OPTIONS` is on the list for the reason `childEnv` gives, and it is not
+ * dead weight here even though git ignores it: the hooks, `textconv` drivers
+ * and `core.fsmonitor` this child can be made to run are repository-controlled
+ * and one of them may well be a Node program.
  */
 export function gitEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
@@ -50,7 +55,8 @@ export function gitEnv(): NodeJS.ProcessEnv {
       k.startsWith("UF_") ||
       k.startsWith("OTEL_") ||
       k === "CLAUDE_CODE_ENABLE_TELEMETRY" ||
-      k === "DATA_DIR"
+      k === "DATA_DIR" ||
+      k === "NODE_OPTIONS"
     ) {
       delete env[k];
     }

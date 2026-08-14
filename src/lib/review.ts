@@ -549,9 +549,10 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
 /**
  * Environment for the reviewer.
  *
- * Same three exclusions the agent gets — this app's own configuration, any
- * inherited telemetry routing, and `DATA_DIR` — for the same reasons, the last
- * of them written out in full over `childEnv` in `orchestrator.ts`. A reviewer
+ * Same four exclusions the agent gets — this app's own configuration, any
+ * inherited telemetry routing, `DATA_DIR`, and the `NODE_OPTIONS` compose sets
+ * to bound *this* process's heap — for the same reasons, the last two of them
+ * written out in full over `childEnv` in `orchestrator.ts`. A reviewer
  * runs `--permission-mode plan` and so cannot start a server itself, but the
  * exclusion is not conditional on that: what it withholds is the address of
  * this app's database, and there is no reading of a diff that needs it.
@@ -568,7 +569,8 @@ function reviewEnv(): NodeJS.ProcessEnv {
       key.startsWith("OTEL_") ||
       key === "ANTHROPIC_ADMIN_KEY" ||
       key === "CLAUDE_CODE_ENABLE_TELEMETRY" ||
-      key === "DATA_DIR"
+      key === "DATA_DIR" ||
+      key === "NODE_OPTIONS"
     ) {
       delete env[key];
     }

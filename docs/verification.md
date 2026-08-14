@@ -394,6 +394,34 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **Every resource limit compose now declares.** `mem_limit`, `memswap_limit`,
+  `pids_limit`, `cpus` and the server's `NODE_OPTIONS` heap ceiling were written
+  and reasoned about, and `deployment.test.ts` pins the heap ceiling against the
+  memory limit — but Docker is not available where this repo's tests run, so no
+  container has ever been started with any of them. Three things to check on the
+  first real deployment, in order:
+
+  ```bash
+  docker compose up -d --build
+  docker exec usagefoundry cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/pids.max
+  docker stats --no-stream usagefoundry
+  ```
+
+  `memory.max` reading `max` means the limit is not in force — most likely
+  cgroup v1, where `mem_limit` lands at `/sys/fs/cgroup/memory/memory.limit_in_bytes`
+  instead. That `cpus: ${UF_CPUS:-0}` is accepted as "no quota" rather than
+  refused as a value is the one syntax question here, and it fails loudly at
+  `docker compose up` either way. Then that the kill is confined — fill memory
+  inside the container and watch where the kill lands:
+
+  ```bash
+  docker exec usagefoundry node -e 'const a=[];for(;;)a.push(Buffer.alloc(1<<26))'
+  docker inspect -f '{{.State.OOMKilled}}' usagefoundry   # expect true
+  dmesg | tail                                            # expect no host process named
+  ```
+
+  `Buffer.alloc` on purpose: it allocates outside V8's old space, so this tests
+  the cgroup limit rather than the `--max-old-space-size` ceiling above it.
 - **A failed tool result reaching the run page.** `toolResultFailures` is unit-
   tested and `npm run typecheck` passes, and the `user`/`tool_result` shape it
   reads was taken from real transcripts written by the pinned CLI (2.1.226) —

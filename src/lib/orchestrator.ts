@@ -3373,6 +3373,16 @@ export function buildArgs(opts: {
  *   is the same failure guarded from the other side, for the routes this does
  *   not cover — a `.env` in the worktree, an agent that sets it by hand.
  *
+ *   `NODE_OPTIONS` — compose sets it to give *this* process a stated heap
+ *   ceiling, so that the container's `mem_limit` can be derived from a number
+ *   rather than from whatever V8 chose off the host's RAM. The CLI is a Node
+ *   program too, so inherited it would silently become every agent's heap
+ *   ceiling as well — a figure with no measurement behind it for a process
+ *   that holds a whole context window, and one whose failure is a fatal
+ *   `heap out of memory` part-way through a billed cycle that the loop then
+ *   files as the agent crashing. Withheld, a child keeps the default it has
+ *   always had.
+ *
  * Everything else passes through. The CLI needs PATH, HOME, CLAUDE_CONFIG_DIR,
  * proxy and CA settings, and locale to function at all, so an allowlist would
  * fail in ways that are tedious to diagnose from inside a container.
@@ -3385,7 +3395,8 @@ function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
       key.startsWith("OTEL_") ||
       key === "ANTHROPIC_ADMIN_KEY" ||
       key === "CLAUDE_CODE_ENABLE_TELEMETRY" ||
-      key === "DATA_DIR"
+      key === "DATA_DIR" ||
+      key === "NODE_OPTIONS"
     ) {
       delete env[key];
     }

@@ -78,6 +78,15 @@ Settings shows whether a token is configured.
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
 | `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid the container runs as; must own the mounts. Default 1000. |
+| `UF_MEM_LIMIT` | What the container may take before Docker kills it. Default `10g`, sized for four concurrent work cycles. |
+| `UF_NODE_HEAP_MB` | The server's own heap ceiling, in MiB. Default 2048. |
+| `UF_PIDS_LIMIT` | Tasks the container may hold. Default 2048. |
+| `UF_CPUS` | CPUs the container may use. Unset means no quota; Docker refuses a value larger than the host has. |
+
+The last four are one decision with *Settings → Max concurrent runs*: memory is
+linear in how many agents run at once, and raising the setting without raising
+the limit gets the container OOM-killed under load. The arithmetic, and a worked
+example at 25 runs, is in README's **Sizing the container**.
 
 Compose also mounts `~/.claude` **read-write** — Claude Code writes new session
 transcripts there as runs execute, so a read-only mount breaks runs.
