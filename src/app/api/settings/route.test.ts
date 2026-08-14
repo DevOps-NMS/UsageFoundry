@@ -80,6 +80,7 @@ const PROBES: Record<keyof Settings, Probe> = {
   telemetryForRuns: { send: true },
   donePushbackPrompt: { send: "CHANGED pushback" },
   liveGuardIntervalSeconds: { send: 90 },
+  maxCycleSilenceMinutes: { send: 45 },
   resumeGraceHours: { send: 12 },
   landStrategy: { send: "squash" },
   killProcessGroup: { send: false },

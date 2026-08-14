@@ -1264,6 +1264,8 @@ export interface SettingsDTO {
   telemetryForRuns: boolean;
   donePushbackPrompt: string;
   liveGuardIntervalSeconds: number;
+  /** How long a work cycle may print nothing before it is ended. Never null. */
+  maxCycleSilenceMinutes: number;
   resumeGraceHours: number;
   /** How an isolated run's branch is brought into the branch it started from. */
   landStrategy: "merge" | "squash";

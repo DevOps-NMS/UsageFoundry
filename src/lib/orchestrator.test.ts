@@ -54,8 +54,10 @@ process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
 const {
   buildArgs,
   conflictKey,
+  cycleSilenceMs,
   dependencyCycle,
   duePausedRuns,
+  interruptOutcome,
   overlaps,
   planPausedRun,
   releasableRuns,
@@ -1403,6 +1405,74 @@ describe("needsLiveSpendTelemetry", () => {
         }),
       ),
       true,
+    );
+  });
+});
+
+/**
+ * Covers how long a work cycle may be silent before it is ended.
+ *
+ * `PUT /api/settings` already floors what it is sent, so what this pins is the
+ * other door: the value is JSON in a settings row that outlives the build which
+ * wrote it and can be edited by hand, and both ways of reading a bad one are
+ * silent. A zero taken at face value switches the deadline off, which is the
+ * defect the whole mechanism exists to end; a zero read as "the smallest
+ * allowed" kills healthy cycles, because the stream goes quiet for the whole of
+ * one model turn and the whole of one tool call.
+ */
+describe("how long a work cycle may be silent", () => {
+  it("takes the default for a value that is not a request", () => {
+    // Off, negative and corrupt are all "this row says nothing usable", not
+    // "the operator asked for the shortest possible deadline".
+    assert.equal(cycleSilenceMs(0), 120 * 60_000);
+    assert.equal(cycleSilenceMs(-30), 120 * 60_000);
+    assert.equal(cycleSilenceMs(NaN), 120 * 60_000);
+  });
+
+  it("floors a request that is too short, and honours one that is not", () => {
+    assert.equal(cycleSilenceMs(1), 5 * 60_000);
+    assert.equal(cycleSilenceMs(45), 45 * 60_000);
+  });
+});
+
+/**
+ * Covers what a run ends as, given why it was interrupted.
+ *
+ * A cycle killed on its deadline reaches the loop's post-cycle checkpoint in
+ * exactly the shape an operator's Stop does — a dead child, a null exit code,
+ * no `result` event — so this mapping is the whole of what tells them apart on
+ * the runs list, and every way of collapsing it typechecks and reads like an
+ * ordinary ending.
+ */
+describe("what an interrupt makes of a run", () => {
+  const at = 1_700_000_000_000;
+
+  it("files a deadline as a failure and a decision as a stop", () => {
+    assert.deepEqual(
+      interruptOutcome({ kind: "deadline", reason: "no output", pause: false, at }),
+      { status: "failed", reason: "no output", resumeAt: null },
+    );
+    // Nobody decided the one above; somebody decided both of these.
+    assert.deepEqual(
+      interruptOutcome({ kind: "operator", reason: "Stopped.", pause: false, at }),
+      { status: "stopped", reason: "Stopped.", resumeAt: null },
+    );
+    assert.deepEqual(
+      interruptOutcome({ kind: "guard", reason: "over budget", pause: false, at }),
+      { status: "stopped", reason: "over budget", resumeAt: null },
+    );
+  });
+
+  it("still parks a live-resume step-aside", () => {
+    assert.deepEqual(
+      interruptOutcome({
+        kind: "guard",
+        reason: "window full",
+        pause: true,
+        resumeAt: at + 60_000,
+        at,
+      }),
+      { status: "paused", reason: "window full", resumeAt: at + 60_000 },
     );
   });
 });

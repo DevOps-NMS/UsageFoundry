@@ -35,6 +35,9 @@ import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents"
 // the same line for a call whose result comes back an error. Client-safe and
 // pure; the dependency runs the permitted way round.
 import { toolArgs } from "./logLine";
+// Same direction, same reason: the cycle deadline says how long it waited in
+// the words the run page already uses for every other span.
+import { fmtDuration } from "./format";
 import type { RunDependencyDTO } from "./apiTypes";
 
 /**
@@ -240,9 +243,15 @@ const procs = ((globalThis as unknown as {
  * Replaces a reason-less `Set` of cancelled ids: with live guards there are now
  * two distinct callers, and filing a guard-driven kill as "Stopped by operator"
  * would be a lie in the one place the operator most needs the truth.
+ *
+ * `deadline` is the third caller and the one that is nobody's decision: the
+ * cycle stopped producing output and this app ended it. It is kept apart from
+ * `guard` rather than folded into it because a guard is a rule a person
+ * configured and this is a fault — see `interruptOutcome`, which is where the
+ * difference becomes something the operator reads.
  */
-interface Interrupt {
-  kind: "operator" | "guard";
+export interface Interrupt {
+  kind: "operator" | "guard" | "deadline";
   reason: string;
   code?: BudgetStopCode;
   /** True only for a live-resume step-aside; the run parks rather than ends. */
@@ -257,6 +266,37 @@ interface Interrupt {
 const interrupts = ((globalThis as unknown as {
   __ufInterrupts?: Map<string, Interrupt>;
 }).__ufInterrupts ??= new Map<string, Interrupt>());
+
+/**
+ * How a run ends, given why it was interrupted.
+ *
+ * Pure and tested because it is the whole of what an operator reads off a
+ * stopped run, and every way of getting it wrong typechecks and looks like an
+ * ordinary ending. A cycle killed on its deadline arrives here as the same
+ * shape as an operator's Stop — a dead child, a null exit code, no `result`
+ * event — so if this collapsed the three kinds into one status the runs list
+ * would say a hung agent had been stopped by somebody, which is the sentence
+ * that stops anyone looking for the cause.
+ *
+ * `failed` for a deadline, and that is the deliberate part: `stopped` is what
+ * this app writes when a person or a rule they configured decided, and nobody
+ * decided this. It is still terminal and still in `REOPENABLE`, so the run can
+ * be picked up by hand exactly as a crashed one can.
+ */
+export function interruptOutcome(it: Interrupt): {
+  status: RunStatus;
+  reason: string;
+  resumeAt: number | null;
+} {
+  if (it.pause) {
+    return { status: "paused", reason: it.reason, resumeAt: it.resumeAt ?? null };
+  }
+  return {
+    status: it.kind === "deadline" ? "failed" : "stopped",
+    reason: it.reason,
+    resumeAt: null,
+  };
+}
 
 /**
  * Runs with a child in flight that asked for live enforcement.
@@ -297,6 +337,33 @@ const timers = ((globalThis as unknown as {
 
 /** How often a paused run is reconsidered. */
 const SWEEP_MS = 60_000;
+
+/** The shortest silence that may end a work cycle. */
+const MIN_CYCLE_SILENCE_MS = 5 * 60_000;
+/** `DEFAULTS.maxCycleSilenceMinutes`, for a row that says nothing usable. */
+const FALLBACK_CYCLE_SILENCE_MINUTES = 120;
+
+/**
+ * How long this run's next cycle may be silent, from what is stored.
+ *
+ * Read-time narrowing, `chatGuards`' rule and for its reason: the settings blob
+ * is JSON in a row that outlives the build which wrote it and can be edited by
+ * hand, so `PUT /api/settings` flooring what it is *sent* is not enough on its
+ * own. Both ways of reading a bad value are silent and each is expensive in the
+ * opposite direction — a zero taken at face value switches the deadline off,
+ * which is the defect this exists to end, and a zero read as "the shortest
+ * allowed" kills healthy cycles, since the stream goes quiet for the whole of
+ * one model turn and the whole of one tool call. So off, negative and corrupt
+ * take the default, being three ways of saying nothing usable rather than a
+ * request for the shortest deadline there is; a positive number below the floor
+ * is a request, and gets the floor.
+ */
+export function cycleSilenceMs(minutes: number): number {
+  const asked = Number(minutes);
+  const wanted =
+    Number.isFinite(asked) && asked > 0 ? asked : FALLBACK_CYCLE_SILENCE_MINUTES;
+  return Math.max(MIN_CYCLE_SILENCE_MS, Math.floor(wanted * 60_000));
+}
 
 /* ------------------------------------------------------------------ */
 /* Persistence helpers                                                 */
@@ -3582,12 +3649,19 @@ export function signalTree(
  * the id is what makes the run resumable, and the events that lose it — a crash,
  * a restart, a kill — are exactly the ones that stop this promise settling at
  * all.
+ *
+ * `silenceMs` is the cycle's deadline, and it is a **required** argument for
+ * `buildArgs`' reason one door over: a caller that could omit it would drop the
+ * deadline by omission, and a dropped deadline is invisible until the day a
+ * child hangs. See the watchdog below for what it measures and why it is
+ * silence rather than wall clock.
  */
-function runIteration(
+export function runIteration(
   runId: string,
   cwd: string,
   args: string[],
   telemetryRequired: boolean,
+  silenceMs: number,
   onSession: (sessionId: string) => void,
 ): Promise<IterationResult> {
   return new Promise((resolve) => {
@@ -3606,6 +3680,15 @@ function runIteration(
     });
 
     procs.set(runId, child);
+
+    /**
+     * When this child last showed a sign of life, for the watchdog below.
+     *
+     * Assignment rather than a call so the two stream handlers stay one line
+     * each: this is the hottest path in the loop, and the timer is armed once
+     * rather than rescheduled per chunk.
+     */
+    let lastOutputAt = Date.now();
 
     const result: IterationResult = {
       exitCode: -1,
@@ -3626,6 +3709,7 @@ function runIteration(
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
+      lastOutputAt = Date.now();
       stdoutBuf += chunk;
       let nl: number;
       while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
@@ -3637,6 +3721,10 @@ function runIteration(
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
+      // Before the empty-text return: a child writing whitespace is still a
+      // child that is running, and the watchdog asks about the process rather
+      // than about the log.
+      lastOutputAt = Date.now();
       const text = chunk.trim();
       if (!text) return;
       log(runId, text, { stream: "stderr" });
@@ -3659,9 +3747,14 @@ function runIteration(
     });
 
     let settled = false;
+    let silenceTimer: NodeJS.Timeout | null = null;
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
+      // Before anything else. `interruptRun` records the interrupt whether or
+      // not there is still a child to signal, so a watchdog that fired after
+      // the cycle had returned would stop a run whose cycle finished normally.
+      if (silenceTimer) clearTimeout(silenceTimer);
       procs.delete(runId);
       if (stdoutBuf.trim())
         handleStreamLine(runId, stdoutBuf.trim(), result, onSession);
@@ -3679,6 +3772,73 @@ function runIteration(
       setTimeout(() => finish(code), 2_000).unref?.();
     });
     child.on("close", (code) => finish(code));
+
+    /**
+     * The deadline, and what "hung" is taken to mean.
+     *
+     * **Silence, not wall clock.** The clock is the time since the last thing
+     * the child printed, and any stdout or stderr chunk resets it. Those are
+     * two different guarantees and only this one is safe to apply to every run:
+     * a cycle that is still reporting is working, however long it has been at
+     * it, and killing one for its *duration* is `maxDurationMinutes` under
+     * `enforcement: "live"` — a mode the operator opts into precisely because
+     * it costs the in-flight cycle's work and turns its measured cost into an
+     * estimate. Deriving this from that limit instead would have made
+     * `between-cycles` a live mode without saying so, and `between-cycles` is
+     * the default and the only mode whose accounting is exact.
+     *
+     * What it buys is the case nothing else here notices at all: this promise
+     * settles only when the child says so, so a `claude` wedged on a socket
+     * read, or an agent's own tool call blocked on a read with no timeout,
+     * leaves it pending for the life of the process. The run stays `running`,
+     * holding its folder against every other run in that subtree, its checkout
+     * slot, and one of `maxConcurrentRuns` — until the container is restarted.
+     * Nothing else looks: the live ticker is registered only for the two
+     * non-default modes, the sweeper selects `paused` rows, and
+     * `reconcileOnBoot` is a restart by definition.
+     *
+     * It goes through `interruptRun` rather than killing the child here, so
+     * there is still exactly one kill path: the `SIGINT`-first ladder gives the
+     * cycle its chance to report its own cost, the loop's post-cycle checkpoint
+     * picks the interrupt up like any other, and `reconcileKilledCycle`
+     * recovers what the cycle spent into `spent_usd_est`. What it deliberately
+     * does *not* do is settle this promise itself: the run's folder is handed
+     * to whatever is queued behind it the moment this function returns, so
+     * resolving while a child might still be writing there would trade a held
+     * slot for two agents in one working tree — the one thing the folder claim
+     * exists to prevent. The ladder ends in `SIGKILL`, which is the strongest
+     * answer there is.
+     */
+    const onSilence = () => {
+      if (settled) return;
+      // Re-armed rather than trusted, because output resets `lastOutputAt`
+      // without touching the timer — cheap on the hot path, one extra wakeup
+      // per busy cycle here.
+      const quietFor = Date.now() - lastOutputAt;
+      if (quietFor < silenceMs) {
+        armSilence(silenceMs - quietFor);
+        return;
+      }
+      interruptRun(runId, {
+        kind: "deadline",
+        reason:
+          `No output from Claude Code for ${fmtDuration(silenceMs)}, so this work ` +
+          `cycle was ended. A cycle that has stopped reporting is not going to ` +
+          `finish on its own, and one left running holds this run's folder and its ` +
+          `place in the queue until the server restarts.`,
+        pause: false,
+        at: Date.now(),
+      });
+    };
+
+    const armSilence = (ms: number) => {
+      silenceTimer = setTimeout(onSilence, ms);
+      // `unref` for the reason every other timer here has it: a deadline must
+      // not be what keeps the process alive.
+      silenceTimer.unref?.();
+    };
+
+    armSilence(silenceMs);
   });
 }
 
@@ -4268,9 +4428,10 @@ export async function startRun(id: string): Promise<void> {
   };
 
   const applyInterrupt = (it: Interrupt) => {
-    stopReason = it.reason;
-    finalStatus = it.pause ? "paused" : "stopped";
-    pausedUntil = it.pause ? (it.resumeAt ?? null) : null;
+    const outcome = interruptOutcome(it);
+    stopReason = outcome.reason;
+    finalStatus = outcome.status;
+    pausedUntil = outcome.resumeAt;
   };
 
   // Everything that can throw belongs inside the try. Parsing the budget blob
@@ -4566,22 +4727,32 @@ export async function startRun(id: string): Promise<void> {
 
       let res: IterationResult;
       try {
-        res = await runIteration(id, workDir, args, liveSpendTelemetry, (sid) => {
-          // A resume that comes back under a different id is recorded rather
-          // than treated as a failure: which of the two Claude Code reports for
-          // a `--resume` is its business, and this app has never observed it
-          // against a real CLI. What is not acceptable is adopting it silently
-          // — every later cycle resumes whatever landed here, and a run that
-          // quietly changed conversation looks, from outside, exactly like one
-          // that restarted.
-          if (resumeTarget && sid !== resumeTarget && sessionId === resumeTarget) {
-            log(
-              id,
-              `This work cycle asked to resume session ${resumeTarget}, and Claude Code reported session ${sid}. Later cycles will continue ${sid}.`,
-            );
-          }
-          adoptSession(sid);
-        });
+        res = await runIteration(
+          id,
+          workDir,
+          args,
+          liveSpendTelemetry,
+          // Off the same `settings` read the prompts come from, so it is fixed
+          // for this stretch of work rather than moving under a cycle already
+          // in flight — `forwardSubAgentText`'s rule one argument over.
+          cycleSilenceMs(settings.maxCycleSilenceMinutes),
+          (sid) => {
+            // A resume that comes back under a different id is recorded rather
+            // than treated as a failure: which of the two Claude Code reports
+            // for a `--resume` is its business, and this app has never observed
+            // it against a real CLI. What is not acceptable is adopting it
+            // silently — every later cycle resumes whatever landed here, and a
+            // run that quietly changed conversation looks, from outside,
+            // exactly like one that restarted.
+            if (resumeTarget && sid !== resumeTarget && sessionId === resumeTarget) {
+              log(
+                id,
+                `This work cycle asked to resume session ${resumeTarget}, and Claude Code reported session ${sid}. Later cycles will continue ${sid}.`,
+              );
+            }
+            adoptSession(sid);
+          },
+        );
       } finally {
         liveGuards.delete(id);
       }

@@ -156,6 +156,7 @@ const EDITABLE_PATHS = [
   "isolationPreamble",
   "continuedWorkPrompt",
   "liveGuardIntervalSeconds",
+  "maxCycleSilenceMinutes",
   "killProcessGroup",
   "resumeGraceHours",
   "telemetryForRuns",
@@ -1690,6 +1691,27 @@ export default function SettingsPage() {
                 value={effective.liveGuardIntervalSeconds}
                 onChange={(e) =>
                   patch({ liveGuardIntervalSeconds: Number(e.target.value) })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="silence"
+            edited={isEdited("maxCycleSilenceMinutes")}
+            label="Silent cycle limit"
+            description="A work cycle that has printed nothing for this long is ended, so a wedged agent gives its folder and its slot back without a restart. Counted from the last line Claude Code printed, not from the start of the cycle, and one tool call can be silent for a long time"
+          >
+            <div className="w-36">
+              <Input
+                id="silence"
+                type="number"
+                min={5}
+                className="tabular-nums"
+                unit="minutes"
+                value={effective.maxCycleSilenceMinutes}
+                onChange={(e) =>
+                  patch({ maxCycleSilenceMinutes: Number(e.target.value) })
                 }
               />
             </div>

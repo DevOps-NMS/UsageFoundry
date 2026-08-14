@@ -208,6 +208,34 @@ export interface Settings {
    */
   liveGuardIntervalSeconds: number;
   /**
+   * How long a work cycle may produce nothing before it is ended.
+   *
+   * A deadline rather than a budget rule, so the "blank disables a guard" rule
+   * does not apply and there is deliberately no way to switch it off: the
+   * absence of one is the defect it exists to fix. `runIteration` settles only
+   * when its child says so, and a `claude` wedged on a socket read never does —
+   * which leaves the run `running` for ever, holding its folder, its checkout
+   * slot and one of `maxConcurrentRuns`, recoverable only by restarting the
+   * container. It is floored rather than allowed to reach zero, and read
+   * defensively at the spawn, for `chatGuards`' reason: this blob is JSON in a
+   * settings row and can be hand-edited.
+   *
+   * **Silence, not wall clock.** The clock is the time since the last line the
+   * child printed, and every stdout line and stderr chunk resets it — a cycle
+   * that is still reporting is working, however long it takes, and killing one
+   * for its duration is what `enforcement: "live"` is for. A cadence-shaped
+   * number rather than a ceiling, so the no-default-numbers rule does not apply
+   * either.
+   *
+   * Two hours by default, which is deliberately generous. The stream falls
+   * silent for the whole of a single model turn and for the whole of one tool
+   * call, so a run whose test suite takes an hour is silent for an hour and is
+   * perfectly healthy; the cost of being wrong is asymmetric, since a killed
+   * working cycle loses paid work while a slot recovered in two hours instead
+   * of one is still recovered the same day.
+   */
+  maxCycleSilenceMinutes: number;
+  /**
    * How stale a parked run's pause may be and still survive a restart.
    *
    * A run waiting on the 5-hour window is preserved across a restart, unlike a
@@ -404,6 +432,7 @@ const DEFAULTS: Settings = {
   telemetryForRuns: false,
   donePushbackPrompt: DEFAULT_DONE_PUSHBACK_PROMPT,
   liveGuardIntervalSeconds: 60,
+  maxCycleSilenceMinutes: 120,
   resumeGraceHours: 24,
   landStrategy: "merge",
   killProcessGroup: true,

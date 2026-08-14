@@ -214,6 +214,17 @@ export async function PUT(req: Request) {
     patch.liveGuardIntervalSeconds = n === null ? 60 : Math.max(15, Math.floor(n));
   }
 
+  if ("maxCycleSilenceMinutes" in body) {
+    const n = optionalNumber(body.maxCycleSilenceMinutes);
+    // Blank restores the default rather than meaning "no deadline", for the
+    // reason above and one more: a work cycle with no deadline is the defect
+    // this setting exists to fix, so there has to be no way to type it. The
+    // floor is what keeps the other failure out — a value of a minute or two
+    // kills healthy cycles, since the stream is silent for the whole of one
+    // model turn and the whole of one tool call.
+    patch.maxCycleSilenceMinutes = n === null ? 120 : Math.max(5, Math.floor(n));
+  }
+
   if ("resumeGraceHours" in body) {
     const n = optionalNumber(body.resumeGraceHours);
     patch.resumeGraceHours = n === null ? 24 : Math.max(1, Math.floor(n));
