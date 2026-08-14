@@ -16,6 +16,7 @@ import {
   freeSpot,
   layoutBounds,
   linkKey,
+  resolveLinkRelease,
   type BlockDraft,
   type LinkDraft,
   type Point,
@@ -36,8 +37,8 @@ import { Empty } from "@/components/ui/Card";
  *
  * Each of the four has both routes:
  *   add     — drag a block off the palette, or press Enter on it
- *   link    — drag from a block's Link handle onto another, or press Enter on
- *             the handle and then Enter on the target
+ *   link    — drag from a block's Link handle onto another, or take the handle
+ *             and then the target in two presses, by pointer or by Enter
  *   unlink  — Delete or Backspace on the link's own control or on the canvas
  *             while it is selected, or Remove in the inspector beside it
  *   remove  — Delete or Backspace on the block's name or on the canvas while it
@@ -198,6 +199,15 @@ export function WorkflowCanvas({
 }) {
   const sheetRef = useRef<HTMLDivElement>(null);
   const handledByPointer = useRef(false);
+  /**
+   * What was armed when the press on a Link handle began.
+   *
+   * A ref rather than state because the press itself arms the handle it is on —
+   * so that a drag out of it draws from the block being dragged from — and the
+   * release still has to be able to tell that gesture from a click on **Link
+   * here**, which completes the link the *other* block armed.
+   */
+  const armedBeforePress = useRef<string | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [place, setPlace] = useState<PlaceState | null>(null);
   const [linkFrom, setLinkFrom] = useState<string | null>(null);
@@ -377,6 +387,11 @@ export function WorkflowCanvas({
     event.stopPropagation();
     handledByPointer.current = false;
     event.currentTarget.setPointerCapture(event.pointerId);
+    // Remembered rather than discarded. The handle arms itself so a drag out of
+    // it draws from this block, and overwriting the armed source with no record
+    // of it is what made a click on **Link here** re-arm the link from the
+    // target instead of completing it.
+    armedBeforePress.current = linkFrom;
     setLinkFrom(id);
     setPointerAt(null);
   }
@@ -386,6 +401,13 @@ export function WorkflowCanvas({
     setPointerAt(pointIn(event.clientX, event.clientY));
   }
 
+  function cancelLink() {
+    // The gesture was taken away, so the press it belonged to is over: a later
+    // release that never had a press in front of it must not read this.
+    armedBeforePress.current = null;
+    setPointerAt(null);
+  }
+
   function endLink(event: ReactPointerEvent<HTMLButtonElement>, id: string) {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -393,18 +415,21 @@ export function WorkflowCanvas({
     setPointerAt(null);
     // Set either way, before anything else: this pointer sequence has already
     // armed the mode at its `pointerdown`, and the `click` that follows would
-    // otherwise reach `toggleLink` and disarm it again — a handle that appears
-    // to do nothing when it is clicked rather than dragged.
+    // otherwise reach `toggleLink` and re-arm a link this release has just
+    // drawn, or disarm one it has just armed.
     handledByPointer.current = true;
+    const armedBefore = armedBeforePress.current;
+    armedBeforePress.current = null;
     // Read off this event rather than off the last move: they are at the same
     // place, and one of them is state that may not have flushed.
-    const target = blockAt(pointIn(event.clientX, event.clientY));
-    // Released on nothing, or back where it started: the mode stays armed, so
-    // one handle answers a click as well as a drag and the keyboard route is
-    // the same state rather than a second one.
-    if (target === null || target === id) return;
-    setLinkFrom(null);
-    onConnect(id, target);
+    const releasedOver = blockAt(pointIn(event.clientX, event.clientY));
+    const gesture = resolveLinkRelease(id, armedBefore, releasedOver);
+    if (gesture.kind === "connect") {
+      setLinkFrom(null);
+      onConnect(gesture.from, gesture.to);
+      return;
+    }
+    setLinkFrom(gesture.kind === "arm" ? gesture.from : null);
   }
 
   /** The keyboard's and assistive technology's route through the handle. */
@@ -726,7 +751,7 @@ export function WorkflowCanvas({
                       onPointerDown={(event) => startLink(event, block.id)}
                       onPointerMove={moveLink}
                       onPointerUp={(event) => endLink(event, block.id)}
-                      onPointerCancel={() => setPointerAt(null)}
+                      onPointerCancel={cancelLink}
                       onClick={() => {
                         if (claimedByPointer()) return;
                         toggleLink(block.id);
