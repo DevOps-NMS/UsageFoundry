@@ -60,7 +60,7 @@ export function Log({
       // Typeface and wrapping are per line rather than set here: the agent's
       // own words are prose and are set as prose, and only the app's lines and
       // the tool arguments are monospace.
-      className="max-h-[560px] overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+      className="max-h-[560px] overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 text-xs"
     >
       {children}
     </div>

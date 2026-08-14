@@ -26,7 +26,12 @@ import { Hint, type HintTone } from "@/components/ui/Hint";
 const CONTROL_BASE =
   "ui-transition rounded-sm border bg-inset px-2.5 text-sm text-ink " +
   "placeholder:text-ink-faint " +
-  "focus:border-accent focus:outline-none focus:shadow-focus " +
+  // No ring here any more. `focus:outline-none focus:shadow-focus` was a text
+  // control's own second focus treatment, and it is the half of the pair that
+  // disagreed with every button on the page; @layer base now draws one halo for
+  // both. The border colour stays, because AppKit tints the border too and that
+  // is not a ring.
+  "focus:border-accent " +
   "disabled:cursor-not-allowed disabled:bg-canvas disabled:text-ink-faint";
 
 /** One line of text in a 36px box, so a control is aimed at, not passed over. */
@@ -371,7 +376,6 @@ export function Toggle({
         disabled={off}
         onClick={() => onChange(!checked)}
         className={`ui-transition relative h-5 w-9 shrink-0 cursor-pointer rounded-full border
-          focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent
           disabled:cursor-not-allowed disabled:opacity-50 ${
             checked
               ? "border-accent bg-accent enabled:hover:brightness-110"

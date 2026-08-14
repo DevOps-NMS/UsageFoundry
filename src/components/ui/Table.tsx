@@ -26,7 +26,11 @@ export function Th({
       // guess, and guesses wrong on any table with a leading label column —
       // which is most of the breakdowns on the dashboard.
       scope={rest.scope ?? "col"}
-      className={`whitespace-nowrap border-b border-line px-2.5 py-2 text-2xs font-semibold uppercase tracking-wide text-ink-faint ${
+      // Sentence case at 12px, one weight step above the cells rather than a
+      // different treatment from them — see CardTitle. `--fg-muted`, not
+      // `--fg-faint`: a column heading is read, and faint is under 4.5:1 at
+      // this size in both schemes.
+      className={`whitespace-nowrap border-b border-line px-2.5 py-2 text-xs font-medium text-ink-muted ${
         num ? "text-right tabular-nums" : "text-left"
       } ${className}`}
       {...rest}

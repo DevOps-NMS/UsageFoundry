@@ -36,21 +36,86 @@
 :root {
   color-scheme: light dark;
 
-  --bg:            light-dark(#f6f8fa, #0d1013);
-  --bg-raised:     light-dark(#ffffff, #14181d);
-  --bg-inset:      light-dark(#eef1f4, #0a0d10);
-  --border:        light-dark(#d8dee4, #232a31);
-  --border-strong: light-dark(#b9c2cc, #323b45);
+  /* macOS surfaces, four steps rather than three. The previous values were
+     GitHub's (#0d1013/#14181d dark, #f6f8fa/#ffffff light), which read as a web
+     dashboard because that is what they were drawn for.
+       --bg         the window background a pane sits on
+       --bg-raised  an elevated content box: a card, a sheet
+       --bg-inset   something recessed *into* a card: a field, a track, a log
+       --bg-grouped a grouped list inside a card — see ui/List.tsx
+     The last one is new, and it moves in opposite directions per scheme on
+     purpose: AppKit lightens a grouped row against a dark window and darkens it
+     against a light one, so one hex pair cannot express it and light-dark() is
+     what carries the difference. */
+  --bg:            light-dark(#f0f0f3, #1e1e20);
+  --bg-raised:     light-dark(#ffffff, #2a2a2d);
+  --bg-inset:      light-dark(#f5f5f7, #161618);
+  --bg-grouped:    light-dark(#f7f7f9, #323235);
 
-  --fg:            light-dark(#1f2328, #e6edf3);
-  --fg-muted:      light-dark(#59636e, #93a1b0);
-  --fg-faint:      light-dark(#848d97, #63707d);
+  /* A hairline, at macOS weight. AppKit's separatorColor is black at 10% on
+     light and white at 15% on dark — far lighter than the #d8dee4 this
+     replaces, which was doing the job a shadow should do. The depth now comes
+     from --shadow-e1; this is only the edge. */
+  --border:        light-dark(#e3e3e6, #3a3a3d);
+  --border-strong: light-dark(#c7c7cc, #4d4d52);
 
-  --accent:        light-dark(#0b6bcb, #4b9fff);
-  --accent-dim:    light-dark(#cfe3fb, #1d3a5c);
-  --ok:            light-dark(#1a7f37, #3fb950);
-  --warn:          light-dark(#9a6700, #d29922);
-  --danger:        light-dark(#cf222e, #f85149);
+  --fg:            light-dark(#1d1d1f, #f5f5f7);
+  --fg-muted:      light-dark(#68686d, #a1a1a6);
+  --fg-faint:      light-dark(#86868b, #8a8a8f);
+
+  /* --accent is the *text* blue and is measured as text: 5.2:1 on --bg-raised
+     and 4.6:1 on --bg in light, 5.1:1 and 5.9:1 in dark. It is never a fill a
+     label sits on — that is --tint below, which is a different colour for
+     exactly that reason. */
+  --accent:        light-dark(#0069d9, #4a9bff);
+  --accent-dim:    light-dark(#d6e4fa, #1f3a5f);
+  --ok:            light-dark(#177d33, #30d158);
+  --warn:          light-dark(#8c5e00, #ff9f0a);
+  --danger:        light-dark(#d70015, #ff6961);
+
+  /* The fill under a label, and the label. Split from --accent because the two
+     are measured against opposite backgrounds: --accent has to clear 4.5:1 on a
+     card, --tint has to clear it *underneath* --tint-fg, and in dark mode no
+     single blue does both — #4a9bff carries white at 2.8:1. So the filled
+     control gets its own, deeper blue and white stays legible at 5.1:1.
+
+     The @supports block below swaps in the operator's own accent where the
+     browser exposes it. AccentColorText is defined as the colour of text placed
+     on AccentColor, so the pair stays legible whatever the operator picked —
+     which is why the system colour is taken as a *pair* and never on its own.
+     Highlight/HighlightText was the other candidate and is rejected: engines
+     return the selection *wash* there, not the accent, and a white label on a
+     pale wash is the failure this split exists to prevent. */
+  --tint:          light-dark(#0069d9, #0a6cd8);
+  --tint-fg:       #ffffff;
+
+  /* A bezeled control — a secondary button, an unselected segment. AppKit
+     draws these as a raised chip rather than a recess, so they are lighter than
+     the window in dark and white in light, which is the opposite of --bg-inset
+     and the reason this is not that token. */
+  --bezel:         light-dark(#ffffff, #48484c);
+  --bezel-hover:   light-dark(#f2f2f4, #545458);
+
+  /* Everything mixed from the accent reads it here, so the @supports swap below
+     reaches the ring and the selection wash as well as the fill. Deliberately
+     the *text* accent rather than --tint: a ring and a wash are drawn on a
+     surface, not under a label, so they want the colour that is legible against
+     the page, and in dark mode the two differ. */
+  --accent-source: var(--accent);
+
+  /* One focus treatment for the whole app: a soft accent halo just outside the
+     control. It used to be two — this shadow on text controls and a solid
+     2px outline on everything else — so a button and the input beside it wore
+     different rings. @layer base now draws the outline for both, in --ring, and
+     the legacy sheet no longer suppresses it on inputs. --shadow-focus is gone
+     with it; a second way of saying this is how the two drifted apart. */
+  --ring:          color-mix(in oklab, var(--accent-source) 45%, transparent);
+  --ring-danger:   color-mix(in oklab, var(--danger) 45%, transparent);
+
+  /* Selected text, and any wash that means "this one". Low alpha on purpose:
+     --fg keeps its own contrast against whatever is behind, so an operator
+     accent this app has never seen cannot make text illegible. */
+  --selection:     color-mix(in oklab, var(--accent-source) 25%, transparent);
 
   /* A hairline that says which tone without being the loudest thing in the
      card. --accent-dim was the only tint that existed, so anything needing a
@@ -89,6 +154,26 @@
   --sans: var(--font-sans);
 }
 
+/* The operator's own accent, where the browser will say what it is.
+   The test names the exact expression the tokens below are built from rather
+   than `(color: AccentColor)` alone, because the two features shipped years
+   apart: a browser that knows the keyword and not color-mix would leave --ring
+   and --selection invalid at computed-value time, which is a focus ring in
+   currentColor — visible, wrong, and silent. Testing the whole expression means
+   such a browser simply keeps the blue.
+
+   The keyword is taken as a *pair*. AccentColorText is specified as the colour
+   of text placed on AccentColor, so a Graphite or Yellow accent stays legible
+   under its own label; --accent is deliberately left alone, because nothing
+   guarantees an arbitrary accent clears 4.5:1 as body text on a card. */
+@supports (color: color-mix(in oklab, AccentColor 45%, transparent)) {
+  :root {
+    --accent-source: AccentColor;
+    --tint:          AccentColor;
+    --tint-fg:       AccentColorText;
+  }
+}
+
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"]  { color-scheme: dark; }
 
@@ -116,6 +201,7 @@
   --color-canvas:      var(--bg);
   --color-surface:     var(--bg-raised);
   --color-inset:       var(--bg-inset);
+  --color-grouped:     var(--bg-grouped);
   --color-line:        var(--border);
   --color-line-strong: var(--border-strong);
   --color-ink:         var(--fg);
@@ -123,6 +209,13 @@
   --color-ink-faint:   var(--fg-faint);
   --color-accent:      var(--accent);
   --color-accent-dim:  var(--accent-dim);
+  --color-tint:        var(--tint);
+  --color-tint-fg:     var(--tint-fg);
+  --color-bezel:       var(--bezel);
+  --color-bezel-hover: var(--bezel-hover);
+  --color-ring:        var(--ring);
+  --color-ring-danger: var(--ring-danger);
+  --color-selection:   var(--selection);
   --color-ok:          var(--ok);
   --color-warn:        var(--warn);
   --color-danger:      var(--danger);
@@ -131,18 +224,27 @@
   --color-danger-line: var(--danger-line);
   --color-accent-line: var(--accent-line);
 
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+  /* -apple-system first, so macOS resolves SF rather than whatever `system-ui`
+     maps to under a remapped default. ui-sans-serif stays behind it as the
+     standard spelling for everything else. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", ui-sans-serif,
+    system-ui, "Segoe UI", Inter, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
 
   /* Replaces ten hardcoded sizes, two of which were half-pixels. 11.5px -> 12
      and 12.5px -> 13 are the only intended visual changes in this commit. */
-  --text-2xs: 0.6875rem;  /* 11 — table headers, badges */
+  --text-2xs: 0.6875rem;  /* 11 — badges, timestamps */
   --text-2xs--line-height: 1.45;
-  --text-xs: 0.75rem;     /* 12 — hints, labels, log */
+  --text-xs: 0.75rem;     /* 12 — hints, labels, log, table headers */
   --text-xs--line-height: 1.45;
+  /* 13 twice, deliberately. AppKit sets a control's own text at body size, so
+     `text-sm` on a button and `text-base` in a paragraph *are* the same size on
+     macOS; the two names are kept apart so a call site still says which of the
+     two things it meant, and so the body step can move again without dragging
+     every control with it. */
   --text-sm: 0.8125rem;   /* 13 — inputs, tables, buttons */
   --text-sm--line-height: 1.5;
-  --text-base: 0.875rem;  /* 14 — body */
+  --text-base: 0.8125rem; /* 13 — body, was 14 */
   --text-base--line-height: 1.5;
   --text-md: 0.9375rem;   /* 15 — section headings, brand */
   --text-md--line-height: 1.4;
@@ -156,22 +258,28 @@
   --radius-sm: 6px;
   --radius-lg: 10px;
 
-  /* The app had no shadows at all; depth was carried entirely by a 1px
-     border, which is why every card read as equally important. */
-  --shadow-e1: 0 1px 2px light-dark(rgb(15 23 32 / .06), rgb(0 0 0 / .40));
-  --shadow-e2: 0 4px 12px -2px light-dark(rgb(15 23 32 / .10), rgb(0 0 0 / .55));
-  --shadow-e3: 0 12px 32px -8px light-dark(rgb(15 23 32 / .16), rgb(0 0 0 / .70));
+  /* Three steps, retuned to what AppKit actually casts. e1 used to be a 1px
+     web-card drop shadow, which put every `default` card a visible distance off
+     the page; on macOS a grouped box is separated by its hairline and sits
+     *on* the window, so e1 is now barely more than a seam and --border does the
+     separating. The order of the two is the point: hairline first, shadow only
+     as much as says which side of it is on top.
+
+     e2 keeps a default card and a `primary` one distinguishable, and e3 is the
+     one real elevation — a sheet in the top layer, where the shadow is what
+     says the pane behind it is inert. Both are two-part: a tight contact
+     shadow plus a wide soft one, because a single blur reads as a glow. */
+  --shadow-e1: 0 0.5px 1px light-dark(rgb(0 0 0 / .05), rgb(0 0 0 / .28));
+  --shadow-e2: 0 1px 2px light-dark(rgb(0 0 0 / .06), rgb(0 0 0 / .38)),
+               0 4px 12px -4px light-dark(rgb(0 0 0 / .07), rgb(0 0 0 / .34));
+  --shadow-e3: 0 2px 6px light-dark(rgb(0 0 0 / .08), rgb(0 0 0 / .44)),
+               0 16px 40px -12px light-dark(rgb(0 0 0 / .22), rgb(0 0 0 / .64));
   /* e2 cast upwards, for a bar pinned to the bottom of the viewport. Depth is
      what separates "floating above the page" from "the card is sliced in
      half", and the direction has to match where the element actually is. */
-  --shadow-bar: 0 -4px 12px -2px light-dark(rgb(15 23 32 / .10), rgb(0 0 0 / .55));
+  --shadow-bar: 0 -1px 2px light-dark(rgb(0 0 0 / .06), rgb(0 0 0 / .38)),
+                0 -4px 12px -4px light-dark(rgb(0 0 0 / .07), rgb(0 0 0 / .34));
 
-  /* The ring a text control wears while it holds focus. A shadow rather than an
-     outline because the legacy sheet still sets `outline: none` on `input:focus`
-     and outranks @layer base — see the note there. Named so the ring is one
-     decision instead of a `ring-[3px] ring-accent-dim` pair repeated per
-     control, which is how the two of them drifted apart in the first place. */
-  --shadow-focus: 0 0 0 3px var(--accent-dim);
   /* A pressed control is *recessed*, not merely darker. Inset, so the button
      does not move and nothing around it reflows. */
   --shadow-press: inset 0 1px 2px light-dark(rgb(15 23 32 / .16), rgb(0 0 0 / .40));
@@ -245,6 +353,22 @@
   to   { background-position: -50% 0; }
 }
 
+/* A sheet arrives from the top of its pane rather than fading in the middle of
+   it, because where it came from is what says it belongs to this window. One
+   shot, never a loop, and @layer base flattens the duration under
+   prefers-reduced-motion — which leaves the panel simply present, which is the
+   correct still frame. Transform is legal here and nowhere else in the kit:
+   `ui-transition` omits it because a *control* must not move between its
+   states, and a sheet is not a control. */
+@utility sheet-enter {
+  animation: uf-sheet-in var(--motion-base) var(--ease-entrance);
+}
+
+@keyframes uf-sheet-in {
+  from { transform: translateY(-16px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
 @layer base {
   body {
     background-color: var(--bg);
@@ -258,12 +382,21 @@
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
 
-  /* There was no focus style on buttons or links at all — `button` even set
-     `border: 1px solid transparent`, so keyboard focus was invisible across
-     the whole run form. Inputs keep their own ring: the legacy layer sets
-     `outline: none` on :focus and outranks this. */
+  /* Selected text takes the operator's accent, at the alpha that leaves --fg
+     reading against it whatever that accent turns out to be. */
+  ::selection { background-color: var(--selection); }
+
+  /* The one focus treatment, for every focusable thing in the app.
+     Geometry is stated here and only here: a component that also set
+     `outline-2 outline-offset-2` would be a second place to keep in step, and
+     the two rings this replaces disagreed for precisely that reason — text
+     controls wore a 3px --accent-dim box-shadow hugging the border while
+     everything else wore a solid accent outline 2px away. The legacy sheet no
+     longer suppresses this on inputs, so a button and the input beside it now
+     wear the same halo. A component may still override the *colour*, which is
+     how Button keeps its per-variant ring. */
   :focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--ring);
     outline-offset: 2px;
   }
 
@@ -358,10 +491,12 @@ h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; }
 
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
+/* Sentence case at 12px, matching ui/Table's Th. macOS does not shout a column
+   heading, and two treatments for the same thing is what this layer exists to
+   stop happening. */
 th {
-  text-align: left; font-weight: 600; font-size: 11px;
-  text-transform: uppercase; letter-spacing: 0.05em;
-  color: var(--fg-faint); padding: 8px 10px;
+  text-align: left; font-weight: 500; font-size: 12px;
+  color: var(--fg-muted); padding: 8px 10px;
   border-bottom: 1px solid var(--border); white-space: nowrap;
 }
 td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
@@ -386,19 +521,23 @@ input[type="text"], input[type="number"], input[type="password"], select, textar
 }
 textarea { font-family: var(--mono); font-size: 12.5px; resize: vertical; min-height: 90px; }
 
+/* `outline: none` and a box-shadow ring used to live here, and between them
+   they were the reason text controls could not share the app's focus style —
+   this rule outranks @layer base, so the outline there never reached an input.
+   Both are gone; the border colour stays, because that is the part AppKit also
+   does and it is not a ring. */
 input:focus, select:focus, textarea:focus {
-  outline: none; border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-dim);
+  border-color: var(--accent);
 }
 
 button {
-  background: var(--accent); color: #fff; border: 1px solid transparent;
+  background: var(--tint); color: var(--tint-fg); border: 1px solid transparent;
   border-radius: var(--radius-sm); padding: 8px 14px;
   font: inherit; font-size: 13px; font-weight: 550; cursor: pointer;
 }
 button:hover:not(:disabled) { filter: brightness(1.1); }
 button:disabled { opacity: .5; cursor: not-allowed; }
-button.secondary { background: var(--bg-inset); color: var(--fg); border-color: var(--border-strong); }
+button.secondary { background: var(--bezel); color: var(--fg); border-color: var(--border); }
 button.danger { background: var(--danger); }
 .btn-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 

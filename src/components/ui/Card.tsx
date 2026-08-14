@@ -51,8 +51,13 @@ export function CardTitle({
     // flex item that cannot shrink below its own text, so without wrapping it
     // does not compress — it escapes the card and takes the page's horizontal
     // scrollbar with it. Measured: 92px past the card edge at 380px wide.
+    // Sentence case at body size, in the primary label colour. It was 11px
+    // uppercase with letter-spacing, which is a web dashboard's idea of a
+    // section header; macOS says a group's title in the same voice as the group
+    // and lets weight carry the difference. Every call site already passes
+    // sentence-case text — the shouting was entirely in the stylesheet.
     <h2
-      className={`mb-3 flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-muted ${className}`}
+      className={`mb-3 flex flex-wrap items-center gap-2 text-sm font-semibold text-ink ${className}`}
     >
       {children}
     </h2>

@@ -20,33 +20,43 @@ export type ButtonSize = "default" | "compact";
  * sort order, which is not a contract. The focus outline colour is in here for
  * the same reason: stated once in a shared string and again per variant, the
  * two would set the same property under the same variant and the winner would
- * be Tailwind's internal order rather than anything written here.
+ * be Tailwind's internal order rather than anything written here. Only the
+ * *colour* is here — the ring's width and offset come from @layer base, so the
+ * app has one geometry and this file is not a second place to keep it in.
+ *
+ * `secondary` is the bezeled control macOS gives every button that is not the
+ * one default action in the pane: a hairline, a raised fill, and the same
+ * contact shadow a grouped box wears. It was `bg-inset`, which is the recess a
+ * text field sits in — the two read as the same object at a glance, and one of
+ * them is clickable.
  */
 const VARIANT: Record<ButtonVariant, string> = {
   primary:
-    "border-transparent bg-accent text-white shadow-e1 focus-visible:outline-accent " +
+    "border-transparent bg-tint text-tint-fg shadow-e1 focus-visible:outline-ring " +
     "enabled:hover:brightness-110 enabled:active:brightness-95 enabled:active:shadow-press",
   secondary:
-    "border-line-strong bg-inset text-ink focus-visible:outline-accent " +
-    "enabled:hover:border-ink-faint enabled:hover:bg-surface enabled:active:shadow-press",
+    "border-line bg-bezel text-ink shadow-e1 focus-visible:outline-ring " +
+    "enabled:hover:border-line-strong enabled:hover:bg-bezel-hover enabled:active:shadow-press",
   // Reads as destructive before it is clicked, and keeps saying so through
   // focus: an accent focus ring on a red button would be the app's "go ahead"
   // colour drawn around the one control that cannot be undone.
   danger:
-    "border-transparent bg-danger text-white shadow-e1 focus-visible:outline-danger " +
+    "border-transparent bg-danger text-white shadow-e1 focus-visible:outline-ring-danger " +
     "enabled:hover:brightness-110 enabled:active:brightness-95 enabled:active:shadow-press",
   ghost:
-    "border-transparent bg-transparent text-ink-muted focus-visible:outline-accent " +
+    "border-transparent bg-transparent text-ink-muted focus-visible:outline-ring " +
     "enabled:hover:bg-inset enabled:hover:text-ink enabled:active:shadow-press",
 };
 
 /**
  * The busy indicator, per variant. A ring in the button's own foreground
  * colour: `border-t-accent` is invisible on an accent-filled button, which is
- * how a "nothing is happening" state gets shipped.
+ * how a "nothing is happening" state gets shipped. `primary` reads --tint-fg
+ * rather than white for the same reason the fill reads --tint: under an
+ * operator accent the pair is whatever the OS says is legible on it.
  */
 const BUSY_RING: Record<ButtonVariant, string> = {
-  primary: "border-white/40 border-t-white",
+  primary: "border-tint-fg/40 border-t-tint-fg",
   secondary: "border-line-strong border-t-accent",
   danger: "border-white/40 border-t-white",
   ghost: "border-line-strong border-t-accent",
@@ -88,7 +98,6 @@ export function Button({
       className={
         "ui-transition relative inline-flex cursor-pointer items-center " +
         "justify-center gap-2 rounded-sm border text-sm font-medium " +
-        "focus-visible:outline-2 focus-visible:outline-offset-2 " +
         "disabled:cursor-not-allowed " +
         // Busy is disabled, but it must not *look* disabled — a dimmed button
         // with a spinner on it reads as "unavailable", not as "working".
