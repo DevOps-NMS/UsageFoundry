@@ -3507,8 +3507,10 @@ const GITHUB_CREDENTIAL_HELPER =
  *
  * The token is deliberately absent from `reviewEnv()` in `review.ts` — it
  * strips the whole `UF_` namespace, and a reviewer that cannot write files has
- * nothing to authenticate. Same for `gitEnv()` in `git.ts`, whose children run
- * repository-controlled hooks.
+ * nothing to authenticate. Same for `gitEnv()` in `git.ts`: hooks are off there
+ * and `core.fsmonitor` is cleared, but a `.gitattributes` driver is still
+ * repository-controlled code in a child this app never reads the output of,
+ * and none of what this app runs git for touches the network.
  *
  * `token` is a parameter so the function is pure and testable; production
  * always uses the process-level value.
