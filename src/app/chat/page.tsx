@@ -22,6 +22,8 @@ import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, type CardEmphasis } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
+import { ListGroup } from "@/components/ui/List";
+import { Spinner } from "@/components/ui/Log";
 import { Notice } from "@/components/ui/Notice";
 
 /**
@@ -62,10 +64,16 @@ const PROPOSAL_TONE = {
  * Complete class strings per state, never interpolated — Tailwind scans source
  * as text, so a computed class name emits nothing at all and does it silently.
  * Same rule the kit's own tone maps follow.
+ *
+ * A wash rather than a border, because these are now rows of one grouped box
+ * and a row that gained a border on selection would shift the two beside it. It
+ * is `--selection` — the app's own "this one" wash, which takes the operator's
+ * accent where the browser exposes it — at an alpha that leaves the row's text
+ * at its own contrast whatever that accent turns out to be.
  */
 const PROPOSAL_ROW: Record<"selected" | "idle", string> = {
-  selected: "border-accent bg-accent-dim/40 shadow-e1",
-  idle: "border-line bg-inset hover:border-line-strong",
+  selected: "bg-selection",
+  idle: "bg-transparent hover:bg-fill-hover",
 };
 
 const GUARD_TONE: Record<"missing" | "set", string> = {
@@ -406,7 +414,7 @@ export default function ChatPage() {
   return (
     <>
       <div className="mb-4 flex flex-wrap items-center gap-3">
-        <h1 className="text-lg font-semibold tracking-tight">Orchestrator</h1>
+        <h1 className="text-xl font-semibold tracking-tight">Orchestrator</h1>
         <div className="ml-auto flex items-center gap-3">
           {chat && chat.costUSD > 0 && (
             <span className="text-xs tabular-nums text-ink-muted">
@@ -491,7 +499,7 @@ export default function ChatPage() {
               onClick={() => scrollToLatest(true)}
               aria-hidden={!showJump}
               tabIndex={showJump ? 0 : -1}
-              className={`absolute right-3 bottom-3 flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 text-xs font-medium text-ink shadow-e2 transition duration-200 ease-out hover:border-ink-faint ${
+              className={`absolute right-3 bottom-3 flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 text-xs font-medium text-ink shadow-e2 transition duration-[var(--motion-base)] ease-standard hover:border-ink-faint ${
                 JUMP_STATE[showJump ? "shown" : "hidden"]
               }`}
             >
@@ -500,38 +508,66 @@ export default function ChatPage() {
             </button>
           </div>
 
+          {/* Pinned to the foot of the pane: the card is a flex column and the
+              thread above it is the only thing that scrolls, so the composer
+              stays where the hand expects it however long the conversation
+              gets. */}
           <div className="mt-4 border-t border-line pt-4">
             <textarea
               ref={composerRef}
               aria-label="Message the orchestrator"
-              className="min-h-[4.5rem] w-full resize-none overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 font-sans text-sm leading-normal text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-[3px] focus:ring-accent-dim"
+              // No focus ring of its own. @layer base draws one halo for every
+              // focusable thing in the app, and the `outline-none` plus 3px
+              // box-shadow that used to be here was the second treatment that
+              // rule exists to have none of.
+              className="ui-transition min-h-[4.5rem] w-full resize-none overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 font-sans text-sm leading-normal text-ink placeholder:text-ink-faint hover:border-line-strong focus:border-accent"
               rows={3}
               placeholder="Ask the orchestrator to look at something and propose runs…"
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
-                // Enter sends, Shift+Enter is a newline. `isComposing` is the
-                // one that is not obvious: an IME takes Enter to accept the
-                // candidate it is showing, and sending there posts half a word.
-                if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+                // Two ways to send and one of them is the platform's. ⌘↩ is the
+                // commit chord this app already uses on the run form, and the
+                // shell's keyboard layer deliberately binds it to nothing so a
+                // field's own can never be swallowed. Enter stays, because it is
+                // what a conversation is typed with everywhere else.
+                //
+                // `isComposing` is the one that is not obvious: an IME takes
+                // Enter to accept the candidate it is showing, and sending there
+                // posts half a word. It cannot apply to ⌘↩, which is why that
+                // branch is tested first.
+                if (e.key !== "Enter") return;
+                if (e.metaKey) {
+                  e.preventDefault();
+                  void send();
+                  return;
+                }
+                if (e.shiftKey || e.nativeEvent.isComposing) return;
                 e.preventDefault();
                 void send();
               }}
             />
             <ButtonRow className="mt-2">
-              <Button onClick={() => void send()} disabled={thinking || busy || !draft.trim()}>
-                Send
-              </Button>
+              <span className="mr-auto text-xs text-ink-faint">
+                {thinking
+                  ? "Stop ends this turn and signals the process answering it"
+                  : "⌘↩ or Enter sends · Shift+Enter for a new line"}
+              </span>
               {thinking && (
                 <Button variant="secondary" disabled={busy} onClick={() => void stop()}>
                   Stop
                 </Button>
               )}
-              <span className="ml-auto text-xs text-ink-muted">
-                {thinking
-                  ? "Stop ends this turn and signals the process answering it"
-                  : "Enter sends · Shift+Enter for a new line"}
-              </span>
+              <Button
+                onClick={() => void send()}
+                disabled={thinking || busy || !draft.trim()}
+                aria-keyshortcuts="Meta+Enter"
+              >
+                Send
+                <span aria-hidden="true" className="text-xs opacity-70">
+                  ⌘↩
+                </span>
+              </Button>
             </ButtonRow>
             {sendError && <Hint tone="danger">{sendError}</Hint>}
           </div>
@@ -548,7 +584,11 @@ export default function ChatPage() {
               <Empty>Nothing waiting for approval.</Empty>
             ) : (
               <>
-                <div className="flex flex-col gap-2">
+                {/* One grouped box, hairlines between the rows: a proposal is
+                    an object in a list of objects, and the stack of separately
+                    bordered cards this replaces read as five unrelated panels
+                    in a 360px column. */}
+                <ListGroup>
                   {pending.map((p) => (
                     <Proposal
                       key={p.id}
@@ -557,25 +597,20 @@ export default function ChatPage() {
                       onToggle={() => toggle(p.id)}
                     />
                   ))}
-                </div>
+                </ListGroup>
                 <div className="mt-3 border-t border-line pt-3">
-                  <ButtonRow>
-                    <Button
-                      disabled={busy || selected.size === 0}
-                      onClick={() => void decide("approve", [...selected])}
-                    >
-                      {selected.size > 0 ? `Approve ${selected.size}` : "Approve"}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      disabled={busy || selected.size === 0}
-                      onClick={() => void decide("reject", [...selected])}
-                    >
-                      Reject
-                    </Button>
+                  <Hint>
+                    {approveConsequence} Runs beyond the concurrency limit queue
+                    rather than being refused.
+                  </Hint>
+                  {/* The default action at the right edge, which is where this
+                      platform puts it and where every sheet in this app already
+                      puts it. Select all is not a decision about the work, so
+                      it sits at the other end as a ghost. */}
+                  <ButtonRow className="mt-3">
                     <Button
                       variant="ghost"
-                      className="ml-auto"
+                      size="compact"
                       disabled={busy}
                       onClick={() =>
                         setSelected(
@@ -585,11 +620,21 @@ export default function ChatPage() {
                     >
                       {allSelected ? "Select none" : "Select all"}
                     </Button>
+                    <Button
+                      variant="secondary"
+                      className="ml-auto"
+                      disabled={busy || selected.size === 0}
+                      onClick={() => void decide("reject", [...selected])}
+                    >
+                      Reject
+                    </Button>
+                    <Button
+                      disabled={busy || selected.size === 0}
+                      onClick={() => void decide("approve", [...selected])}
+                    >
+                      {selected.size > 0 ? `Approve ${selected.size}` : "Approve"}
+                    </Button>
                   </ButtonRow>
-                  <Hint>
-                    {approveConsequence} Runs beyond the concurrency limit queue
-                    rather than being refused.
-                  </Hint>
                   {decideError && <Hint tone="danger">{decideError}</Hint>}
                 </div>
               </>
@@ -650,21 +695,31 @@ export default function ChatPage() {
  * sentence about what the app did, rendered as though the model said it, is a
  * sentence the operator will later attribute to the wrong party.
  *
- * Who is speaking is carried by position and treatment rather than by a label
- * on every turn: the operator's own words sit right in a tinted block, the
- * answer sits left as plain prose at a readable measure, and only the first
- * turn of a run gets a name and a time. Consecutive turns from one speaker are
- * one utterance interrupted by a newline, and repeating the label says nothing.
+ * **Who is speaking is carried by structure, not by colour.** The answer is the
+ * pane: plain prose at a readable measure, with nothing drawn round it, because
+ * it is what the reader came for. The operator's own words are a bezelled block
+ * pulled to the right — a raised chip on a neutral surface, the same treatment
+ * every other secondary control in this app wears. It used to be an
+ * accent-tinted bubble, which is the web-chat idiom and which spent the app's
+ * one accent on saying "a human typed this" — a fact the position and the label
+ * already carry, and one that never needs the emphasis a tint claims for it.
+ *
+ * Only the first turn of a run gets a name and a time: consecutive turns from
+ * one speaker are one utterance interrupted by a newline, and repeating the
+ * label says nothing.
  */
 function Message({ message, grouped }: { message: ChatMessageDTO; grouped: boolean }) {
   const { role, text, ts } = message;
 
   if (role === "system") {
     return (
+      // The kit's quiet notice, in the thread's own rhythm: a hairline box with
+      // a neutral leading edge. Not a `Notice`, only because that component
+      // carries a margin of its own that would fight the run spacing here.
       <div
         className={`${
           grouped ? "mt-1.5" : "mt-5"
-        } max-w-[70ch] rounded-sm border-l-2 border-l-ink-faint bg-inset px-3 py-2 text-xs leading-normal text-ink-muted first:mt-0`}
+        } max-w-[70ch] rounded-sm border border-line border-l-[3px] border-l-line-strong bg-inset px-3 py-2 text-xs leading-normal text-ink-muted first:mt-0`}
       >
         {text}
       </div>
@@ -687,21 +742,28 @@ function Message({ message, grouped }: { message: ChatMessageDTO; grouped: boole
       className={`${grouped ? "mt-1.5" : "mt-5"} flex flex-col items-end first:mt-0`}
     >
       {!grouped && <Speaker name="You" ts={ts} />}
-      <div className="max-w-[85%] rounded-lg bg-accent-dim px-3 py-2 text-sm leading-normal whitespace-pre-wrap text-ink [overflow-wrap:anywhere]">
+      <div className="max-w-[85%] rounded-lg border border-line bg-bezel px-3 py-2 text-sm leading-normal whitespace-pre-wrap text-ink shadow-e1 [overflow-wrap:anywhere]">
         {text}
       </div>
     </div>
   );
 }
 
+/**
+ * Who, and when.
+ *
+ * Sentence case at a weight step rather than 11px uppercase with tracking — the
+ * same correction `CardTitle` documents. macOS does not shout a label, and a
+ * conversation is the last place to start.
+ */
 function Speaker({ name, ts }: { name: string; ts: number }) {
   return (
-    <div className="mb-1 flex items-baseline gap-2 text-2xs tracking-wide uppercase">
-      <span className="font-semibold text-ink-muted">{name}</span>
+    <div className="mb-1 flex items-baseline gap-2 text-xs">
+      <span className="font-semibold text-ink">{name}</span>
       <time
         dateTime={new Date(ts).toISOString()}
         title={fmtDateTime(ts)}
-        className="tabular-nums text-ink-muted"
+        className="tabular-nums text-ink-faint"
       >
         {fmtRelative(ts)}
       </time>
@@ -712,11 +774,16 @@ function Speaker({ name, ts }: { name: string; ts: number }) {
 /**
  * The wait between sending and the first word.
  *
- * The only thing that moves is the elapsed time, which is the only progress
- * there is: nothing here knows how far through a turn is, and a bar or a
- * looping dot would claim otherwise. `role="status"` holds the word alone —
- * the clock beside it is hidden from assistive tech, or the turn would be
- * announced once a second.
+ * Legible frozen, which is the whole constraint: `@layer base` flattens every
+ * animation to one frame under `prefers-reduced-motion`, so a busy state that
+ * only exists while it moves is a busy state half the operators never see. What
+ * says "working" here is a word, a ring and a clock — the ring stops turning
+ * and the other two are unaffected. Nothing claims to know how far through the
+ * turn is, because nothing does; the elapsed time is the only real progress
+ * there is, and a bar would be an invention.
+ *
+ * `role="status"` holds the word alone — the clock beside it is hidden from
+ * assistive tech, or the turn would be announced once a second.
  */
 function Waiting({ since, stale }: { since: number; stale: boolean }) {
   const [now, setNow] = useState(() => Date.now());
@@ -737,11 +804,12 @@ function Waiting({ since, stale }: { since: number; stale: boolean }) {
   }
 
   return (
-    <div className="mt-5 flex items-baseline gap-2">
+    <div className="mt-5 flex items-center gap-2">
+      <Spinner />
       <span role="status" className="text-xs font-medium text-ink-muted">
         Thinking…
       </span>
-      <span aria-hidden="true" className="text-2xs tabular-nums text-ink-muted">
+      <span aria-hidden="true" className="text-2xs tabular-nums text-ink-faint">
         {fmtDuration(Math.max(0, now - since))}
       </span>
     </div>
@@ -774,7 +842,9 @@ function Proposal({
     <label
       // `mb-0 font-normal` for the same reason ChatRow names a background: the
       // legacy sheet still gives every `label` a bottom margin and 500 weight.
-      className={`mb-0 flex cursor-pointer gap-2.5 rounded-sm border p-3 font-normal transition-colors duration-150 ease-out has-[:focus-visible]:border-accent ${
+      // The end rows take the group's corners, because the wash would otherwise
+      // square off a box that `ListGroup` deliberately does not clip.
+      className={`ui-transition mb-0 flex cursor-pointer gap-2.5 p-3 font-normal first:rounded-t-lg last:rounded-b-lg ${
         PROPOSAL_ROW[checked ? "selected" : "idle"]
       }`}
     >
@@ -783,7 +853,7 @@ function Proposal({
         checked={checked}
         onChange={onToggle}
         aria-label={`Select “${proposal.title}”`}
-        className="mt-0.5 size-4 shrink-0 accent-accent"
+        className="mt-0.5 size-4 shrink-0 accent-tint"
       />
       <div className="min-w-0 flex-1">
         <div className="flex items-start gap-2">
@@ -990,7 +1060,7 @@ function ChatRow({
       onClick={onOpen}
       aria-current={current ? "true" : undefined}
       title={entry.title ?? "Untitled"}
-      className={`cursor-pointer rounded-sm border-l-2 px-2 py-1.5 text-left font-normal transition-colors duration-150 ease-out ${
+      className={`ui-transition cursor-pointer rounded-sm border-l-2 px-2 py-1.5 text-left font-normal ${
         CHAT_ROW[current ? "current" : "other"]
       }`}
     >

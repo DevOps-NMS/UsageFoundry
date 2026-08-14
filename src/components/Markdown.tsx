@@ -268,9 +268,14 @@ function inline(text: string, key: string): ReactNode[] {
  * is already an <h2>, so the levels a model writes are a relative outline
  * rather than a place in the page's — hence h3 downwards, and a size that says
  * "section of this answer" rather than competing with the page heading.
+ *
+ * `text-md` on the lead, not `text-base`: the two are 15px and 13px now, and
+ * `text-sm` under it is also 13px — so on the macOS type scale the previous
+ * pair rendered at one size in one weight, which is one tier wearing two names.
+ * A model writing `#` and `###` in the same report got no outline at all.
  */
 const HEADING_CLASS: Record<"lead" | "sub", string> = {
-  lead: "mt-4 mb-1.5 text-base font-semibold tracking-tight text-ink",
+  lead: "mt-4 mb-1.5 text-md font-semibold tracking-tight text-ink",
   sub: "mt-3.5 mb-1 text-sm font-semibold text-ink",
 };
 
