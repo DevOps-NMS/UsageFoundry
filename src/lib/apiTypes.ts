@@ -425,6 +425,28 @@ export interface RunDTO {
    * page from offering a button whose whole answer is a refusal.
    */
   haltedWorkflow?: string | null;
+  /**
+   * The specialised agent this run was started with, or null for the ordinary
+   * run. The run's own frozen copy, so it still names the agent it was given
+   * after that agent has been renamed or deleted.
+   */
+  agent?: RunAgentDTO | null;
+}
+
+/**
+ * What a run records about the specialist it carries.
+ *
+ * The agent's own `prompt` is deliberately absent: it is the system prompt of a
+ * delegated turn, nothing on the run page acts on it, and this payload is polled
+ * every three seconds. The name and the description are what a reader needs —
+ * the description because it is the whole of what the delegating model was told
+ * when it chose, so it is what explains a delegation that happened.
+ */
+export interface RunAgentDTO {
+  name: string;
+  description: string;
+  /** Null means the delegated turn ran on the session's own model. */
+  model: string | null;
 }
 
 /**
@@ -452,6 +474,15 @@ export interface RunTemplateDTO {
   folder: string | null;
   isolate: boolean;
   permissionMode: string;
+  /**
+   * The saved agent a run from this template may delegate to, by id.
+   *
+   * An id rather than a copy, unlike `RunDTO.agent`: a template is applied again
+   * and again, so it should follow the agent as the operator edits it. A form
+   * that cannot find this id in the registry must say so rather than start
+   * without one — the run door refuses it by name either way.
+   */
+  agentId: string | null;
   budget: BudgetPolicyDTO;
   createdAt: number;
   updatedAt: number;

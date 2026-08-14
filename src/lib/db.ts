@@ -626,6 +626,33 @@ function migrate(db: Database.Database) {
   // rather than a guess.
   addColumn(db, "runs", "landed_tip", "TEXT");
 
+  // The specialised agent this run's main thread may hand a subtask to, frozen
+  // as the whole definition rather than as a reference to an `agents` row.
+  //
+  // A reference is what this looks like it wants and it is wrong twice over. A
+  // run spawns a child per work cycle, so an agent deleted between cycle 3 and
+  // cycle 4 would leave cycle 4 with no specialist and nothing saying so — the
+  // one failure shape the whole of agents.ts exists to end, arriving from inside
+  // this app rather than from the CLI. And a run picked up by hand days later
+  // would lose it the same way. So it is a copy, the treatment runs.budget
+  // already gives permissionMode and the reason deleting a template cannot reach
+  // a run started from one.
+  //
+  // Null is the ordinary run. It is display as well as spawn input, and the
+  // display is honest about what the flag does: --agents *offers* a role to the
+  // delegating model, which is what a sub-agent is — it is not --agent, which
+  // would replace the session's own main agent and which nothing here wires.
+  addColumn(db, "runs", "agent", "TEXT");
+
+  // The agent a template names, by id — and this one *is* a reference, which is
+  // the opposite of the column above for a reason. A template is form input
+  // applied again and again, so an operator who fixes their reviewer's prompt
+  // expects the next run from that template to use the fixed one; a run is a
+  // record of work that happened, so it keeps what it was actually given.
+  // A template naming an agent that has since gone is refused at both doors by
+  // name — see `agentRefusal` — rather than falling back to none.
+  addColumn(db, "run_templates", "agent_id", "TEXT");
+
   // The run whose branch this one carries on, so a second agent extends the
   // first one's commits instead of branching from the target again.
   //

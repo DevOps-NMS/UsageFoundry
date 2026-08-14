@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  agentRefusal,
   agentsArgs,
   agentsFlagValue,
   normalizeAgentInput,
   parseAgentFile,
+  parseRunAgent,
   rowToAgent,
+  runAgentDefinitions,
 } from "./agents";
 
 /**
@@ -240,6 +243,108 @@ describe("rowToAgent", () => {
   it("collapses a blank stored model to null, which is what omits the key", () => {
     assert.equal(rowToAgent({ ...stored, model: "" }).model, null);
     assert.equal(rowToAgent({ ...stored, model: "sonnet" }).model, "sonnet");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Naming one on a run                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The refusal every door that starts a run shares.
+ *
+ * It earns a test on the grounds the rest of this file does, with the failure
+ * pointing inwards rather than at the CLI: the alternative to refusing is
+ * *falling back to no agent*, which produces a run the operator believes has a
+ * specialist and which is bit-for-bit a run that was never given one. That is
+ * the CLI's own silent drop, reproduced by this app, at the one door built to
+ * stop it. Both refusals are also the only thing standing between a template
+ * that names a deleted agent and a run started under guards nobody reviewed.
+ */
+describe("agentRefusal", () => {
+  const known = new Map([
+    ["a1", { name: "reviewer", usable: true }],
+    ["a2", { name: "half-written", usable: false }],
+  ]);
+
+  it("passes an agent that is there and complete", () => {
+    assert.equal(agentRefusal("a1", known), null);
+  });
+
+  it("refuses an id that names nothing rather than answering none", () => {
+    const message = agentRefusal("deadbeef-0000", known);
+    assert.match(String(message), /no longer exists/);
+    // The id is named: the agent's own name is exactly what is not available
+    // any more, so the sentence carries the only handle the operator has.
+    assert.match(String(message), /deadbeef/);
+  });
+
+  it("refuses one the CLI would drop in silence, by name", () => {
+    const message = agentRefusal("a2", known);
+    assert.match(String(message), /half-written/);
+    assert.match(String(message), /without a word/);
+  });
+
+  it("refuses everything against an empty registry", () => {
+    assert.notEqual(agentRefusal("a1", new Map()), null);
+  });
+});
+
+/**
+ * Reading back the definition a run froze at creation.
+ *
+ * Total on purpose and narrowing on the way out: the column is written from an
+ * already-validated definition, so the only way it can be wrong is that it
+ * outlived the build that wrote it — `rowToAgent`'s reason — and the least it
+ * could have meant is no agent. Putting a half-formed member on the argv instead
+ * would be handing the CLI exactly the shape it drops without a word.
+ */
+describe("parseRunAgent / runAgentDefinitions", () => {
+  const frozen = JSON.stringify({
+    name: "reviewer",
+    description: "Reads a diff.",
+    prompt: "You review code.",
+    model: "sonnet",
+  });
+
+  it("reads back what createRun froze", () => {
+    assert.deepEqual(parseRunAgent(frozen), {
+      name: "reviewer",
+      description: "Reads a diff.",
+      prompt: "You review code.",
+      model: "sonnet",
+    });
+  });
+
+  it("reads no agent as no agent, without throwing", () => {
+    assert.equal(parseRunAgent(null), null);
+    assert.equal(parseRunAgent(undefined), null);
+    assert.equal(parseRunAgent(""), null);
+    assert.equal(parseRunAgent("{not json"), null);
+    assert.equal(parseRunAgent("[]"), null);
+    assert.equal(parseRunAgent("null"), null);
+  });
+
+  for (const field of ["name", "description", "prompt"] as const) {
+    it(`drops a stored definition with no ${field}, which the CLI would drop anyway`, () => {
+      const damaged = { ...JSON.parse(frozen), [field]: "  " };
+      assert.equal(parseRunAgent(JSON.stringify(damaged)), null);
+    });
+  }
+
+  it("collapses a blank stored model to null, the spelling of inherit", () => {
+    const noModel = JSON.stringify({ ...JSON.parse(frozen), model: "" });
+    assert.equal(parseRunAgent(noModel)?.model, null);
+    // And that null is what keeps the key off the flag entirely.
+    assert.equal(agentsFlagValue(runAgentDefinitions(noModel)), JSON.stringify({
+      reviewer: { description: "Reads a diff.", prompt: "You review code." },
+    }));
+  });
+
+  it("gives the spawn sites a list, empty for the ordinary run", () => {
+    assert.deepEqual(runAgentDefinitions(null), []);
+    assert.deepEqual(agentsArgs(runAgentDefinitions(null)), []);
+    assert.equal(runAgentDefinitions(frozen).length, 1);
   });
 });
 

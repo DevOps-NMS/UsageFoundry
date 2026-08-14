@@ -30,7 +30,7 @@ import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
 import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
-import { agentsArgs, type AgentDefinition } from "./agents";
+import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents";
 import type { RunDependencyDTO } from "./apiTypes";
 
 /**
@@ -172,6 +172,12 @@ export interface RunRow {
    */
   spent_usd_est: number;
   spent_tokens_est: number;
+  /**
+   * The specialised agent this run's main thread may delegate to, as the whole
+   * JSON definition rather than an id — see the column note in `db.ts`. Null is
+   * the ordinary run. Read through `parseRunAgent`, never parsed at a call site.
+   */
+  agent: string | null;
 }
 
 /** Where the agent runs. Older rows predate `work_dir` and never isolated. */
@@ -1513,6 +1519,15 @@ export interface CreateRunInput {
   permissionMode?: PermissionMode;
   /** Give this run its own checkout. Defaults on for a git repository. */
   isolate?: boolean;
+  /**
+   * A specialised agent the run's main thread may hand a subtask to.
+   *
+   * The whole definition, resolved from the registry by the caller — the door is
+   * where an id becomes a definition or a refusal, exactly as it is where a
+   * permission mode becomes one of four literals. Frozen onto the row from here,
+   * so deleting the saved agent afterwards cannot reach this run's next cycle.
+   */
+  agent?: AgentDefinition | null;
   budget: unknown;
   /**
    * Runs that must settle before this one starts, each with the condition it
@@ -1865,6 +1880,11 @@ export function createRun(input: CreateRunInput): RunRow {
     permissionMode: input.permissionMode ?? settings.defaultPermissionMode,
   });
 
+  // Frozen at creation, so an agent deleted or edited afterwards cannot change
+  // what this run's later cycles are given — the same treatment the guards above
+  // get, and the reason deleting a template cannot reach a run started from one.
+  const agentBlob = input.agent ? JSON.stringify(input.agent) : null;
+
   const isolate = input.isolate !== false;
   const { links, waiting, continuesRun } = admitDependencies(
     id,
@@ -1899,8 +1919,8 @@ export function createRun(input: CreateRunInput): RunRow {
         `INSERT INTO runs
            (id, folder, prompt, model, status, budget, max_iterations, iterations, created_at, spent_usd, spent_tokens,
             work_dir, isolation, repo_root, worktree_path, worktree_branch, worktree_base, worktree_base_branch,
-            continues_run)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            continues_run, agent)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1922,6 +1942,7 @@ export function createRun(input: CreateRunInput): RunRow {
         plan?.base ?? null,
         plan?.baseBranch ?? null,
         continuesRun,
+        agentBlob,
       );
 
     const addLink = db().prepare(
@@ -1979,6 +2000,17 @@ export function createRun(input: CreateRunInput): RunRow {
         id,
         `This run carries on run ${shortId(continuesRun)}'s branch rather than starting a new one, so its work builds on that run's commits.`,
         { continuesRun },
+      );
+    }
+    if (input.agent) {
+      // Once, at creation, rather than per cycle: it is a fact about the run
+      // and not about a spawn. "may hand" rather than "runs as" is the literal
+      // truth of `--agents` — it offers the role to the delegating model, which
+      // is what a sub-agent is, and it bounds nothing about what the run may do.
+      log(
+        id,
+        `Claude may hand a subtask to the “${input.agent.name}” agent. It changes who does a piece of the work, not what this run is allowed to do.`,
+        { agent: input.agent.name },
       );
     }
 
@@ -3972,6 +4004,10 @@ export async function startRun(id: string): Promise<void> {
         permissionMode: budget.permissionMode ?? "acceptEdits",
         resumeSessionId: sessionId,
         isolated: run.isolation === "worktree",
+        // The run's own frozen copy, so every cycle — including one a restart
+        // picks up hours later — is given exactly the specialist the operator
+        // started it with, whatever has happened to the registry since.
+        agents: runAgentDefinitions(run.agent),
       });
 
       // A run can last hours, and the working directory was validated once when
@@ -4980,6 +5016,15 @@ export function reopenRun(
       reason: `This run has already used ${spentTokens.toLocaleString()} tokens. Raise the token limit above that to carry on.`,
     };
   }
+
+  // The specialised agent is carried the same way and more simply: the `agent`
+  // column is not touched here at all, and there is no argument on this function
+  // and no field on the reopen route that could reach it. Same reasoning as
+  // `permissionMode` below — the operator answered that question when they
+  // started the run, and picking it up again is not a second chance to answer
+  // it. The definition is the run's own copy, so this is also the one path where
+  // a run whose agent has since been deleted still gets the specialist it ran
+  // with, rather than being refused or quietly losing it.
 
   // Carried from the stored blob rather than accepted from the caller: this
   // value reaches `--permission-mode` on a process that edits files, and

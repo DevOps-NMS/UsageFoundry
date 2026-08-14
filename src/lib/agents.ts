@@ -3,7 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { db } from "./db";
 import { CLAUDE_CONFIG_DIR } from "./config";
-import { MAX_AGENT_DESCRIPTION, MAX_AGENT_NAME } from "./apiTypes";
+import {
+  MAX_AGENT_DESCRIPTION,
+  MAX_AGENT_NAME,
+  type RunAgentDTO,
+} from "./apiTypes";
 
 /**
  * Named specialised agents: a role the delegating model may hand a subtask to.
@@ -278,6 +282,159 @@ export function agentsFlagValue(agents: AgentDefinition[]): string | null {
 export function agentsArgs(agents: AgentDefinition[]): string[] {
   const value = agentsFlagValue(agents);
   return value === null ? [] : ["--agents", value];
+}
+
+/* ------------------------------------------------------------------ */
+/* Attaching a saved agent to a run                                    */
+/* ------------------------------------------------------------------ */
+
+/** Everything a caller needs to know about a saved agent to refuse naming it. */
+export interface AgentFacts {
+  name: string;
+  /** False for a row that has decayed into something the CLI would drop. */
+  usable: boolean;
+}
+
+/**
+ * The registry as a pure validator sees it, keyed by id.
+ *
+ * `WorkflowKnowledge`'s shape and its reason: the doors that decide whether an
+ * agent may be named — a template being saved and a run being started — pass the
+ * *same* knowledge read at two different moments, which is what makes "saved,
+ * then no longer startable" a sentence rather than a surprise.
+ */
+export type AgentKnowledge = ReadonlyMap<string, AgentFacts>;
+
+/**
+ * Why a saved agent cannot be attached to a run, or null when it can.
+ *
+ * Pure, and the single wording for both doors. There is deliberately no third
+ * answer: an id that names nothing is **refused**, never quietly dropped. That
+ * is `planProposal`'s rule for a template deleted between the proposal and the
+ * click, and the reason is the same one that runs through the whole of this
+ * file — the operator started the run that said "as the reviewer agent", and a
+ * run that silently has no specialist is bit-for-bit a run that was never given
+ * one. Falling back to none would put this app's own behaviour in the same class
+ * as the CLI's silent drop, which is the failure the registry exists to end.
+ */
+export function agentRefusal(agentId: string, known: AgentKnowledge): string | null {
+  const facts = known.get(agentId);
+  if (!facts) {
+    return (
+      `That agent no longer exists (id ${agentId.slice(0, 8)}), so there is ` +
+      `nothing to hand a subtask to. Pick another one, or start with none.`
+    );
+  }
+  if (!facts.usable) {
+    return (
+      `The “${facts.name}” agent is missing its description or its prompt, ` +
+      `and Claude Code drops such an agent without a word — the run would ` +
+      `look exactly like one that was never given a specialist. Fix it, or ` +
+      `start with none.`
+    );
+  }
+  return null;
+}
+
+/** The registry as `agentRefusal` wants it. One read, both doors. */
+export function currentAgentKnowledge(): AgentKnowledge {
+  const known = new Map<string, AgentFacts>();
+  for (const agent of listAgents()) {
+    known.set(agent.id, { name: agent.name, usable: agent.usable });
+  }
+  return known;
+}
+
+export type AgentResolution =
+  | { ok: true; agent: AgentDefinition | null }
+  | { ok: false; error: string };
+
+/**
+ * Read the agent named on a request, and refuse one that is not there.
+ *
+ * The door `POST /api/runs` narrows at, the way it narrows `permissionMode`
+ * against its four literals. What crosses the wire is an **id**, never a
+ * definition: a definition off the wire would be a route to an agent nobody
+ * saved, and the registry is the only place an agent comes from precisely so
+ * that what a run may delegate to is something a person wrote down.
+ *
+ * What comes back is the whole definition rather than the id, because that is
+ * what the run stores — see the `agent` column in `db.ts`.
+ */
+export function resolveAgentForRun(raw: unknown): AgentResolution {
+  const id = raw === null || raw === undefined ? "" : String(raw).trim();
+  if (!id) return { ok: true, agent: null };
+
+  const saved = getAgent(id);
+  const known = new Map<string, AgentFacts>();
+  if (saved) known.set(saved.id, { name: saved.name, usable: saved.usable });
+
+  const refusal = agentRefusal(id, known);
+  if (refusal || !saved) return { ok: false, error: refusal ?? "No such agent." };
+
+  return {
+    ok: true,
+    agent: {
+      name: saved.name,
+      description: saved.description,
+      prompt: saved.prompt,
+      model: saved.model,
+    },
+  };
+}
+
+/**
+ * The definition frozen onto a run, read back for its next spawn.
+ *
+ * Total: a column that cannot be read is no agent at all, because the only
+ * alternative is putting a half-formed member on an argv the CLI drops in
+ * silence. It re-applies `rowToAgent`'s narrowing rather than trusting the blob,
+ * for that function's reason — what is on the row outlives the build that wrote
+ * it, and the safe reading of something this build does not understand is the
+ * least it could have meant.
+ */
+export function parseRunAgent(raw: string | null | undefined): AgentDefinition | null {
+  if (!raw) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+
+  const o = parsed as Record<string, unknown>;
+  const name = String(o.name ?? "").trim();
+  const description = String(o.description ?? "").trim();
+  const prompt = String(o.prompt ?? "").trim();
+  const model = String(o.model ?? "").trim();
+  if (!name || !description || !prompt) return null;
+
+  return { name, description, prompt, model: model === "" ? null : model };
+}
+
+/** `[]` or the one agent this run carries — what the four spawn sites want. */
+export function runAgentDefinitions(raw: string | null | undefined): AgentDefinition[] {
+  const agent = parseRunAgent(raw);
+  return agent ? [agent] : [];
+}
+
+/**
+ * The run's frozen agent as the wire carries it — name, description, no prompt.
+ *
+ * Here rather than in either run route because both of them answer with a run,
+ * and two copies of "what a run says about its agent" would be two payloads that
+ * could disagree about the same row.
+ */
+export function runAgentDTO(raw: string | null | undefined): RunAgentDTO | null {
+  const agent = parseRunAgent(raw);
+  if (!agent) return null;
+  return {
+    name: agent.name,
+    description: agent.description,
+    model: agent.model,
+  };
 }
 
 /* ------------------------------------------------------------------ */
