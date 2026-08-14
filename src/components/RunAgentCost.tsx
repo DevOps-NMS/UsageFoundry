@@ -116,7 +116,13 @@ export function RunAgentCost({
               ? "reading…"
               : spend === null
                 ? "no session yet"
-                : "nothing recorded yet"
+                : spend.entryCount === 0
+                  ? "nothing recorded yet"
+                  : // Turns were recorded and our price table placed none of
+                    // them, so there is no denominator to take a share of. Said
+                    // as its own state rather than folded into "nothing yet",
+                    // which would blame the run for a gap in the price table.
+                    "no priced turns"
         }
         detail={
           spend
