@@ -69,6 +69,8 @@ const {
   needsLiveSpendTelemetry,
   nextPrompt,
   permissionDenials,
+  refusalDisposition,
+  refusalKind,
   refusalResumeAt,
   reopenPrompt,
   reopenRun,
@@ -958,6 +960,116 @@ describe("transient API failure classification", () => {
     // The cap is what keeps a broken upstream from holding a folder forever;
     // `startRun` indexes a backoff entry per retry, so it must not be zero.
     assert.equal(MAX_TRANSIENT_RETRIES >= 1, true);
+  });
+});
+
+/**
+ * What the loop does about a refused work cycle.
+ *
+ * Pinned here rather than left inline for the reason `releasableRuns` and
+ * `landRefusal` are: the decision is three-way, every wrong answer typechecks,
+ * and each costs something different — a blip that ends a run holding a live
+ * session, a wall re-spawned into, or a whole fleet ended for the one condition
+ * that refills on its own.
+ */
+describe("what a refused work cycle does next", () => {
+  it("names the wall before it names a blip", () => {
+    // A wall can arrive as a 429, which `isTransientApiError` also matches. If
+    // the order flipped, the run would back off five seconds into an allowance
+    // no backoff refills.
+    assert.equal(refusalKind("API Error: 429 You've hit your weekly limit"), "allowance");
+    assert.equal(refusalKind("API Error: 529 overloaded_error"), "transient");
+    assert.equal(refusalKind("API Error: 401 Invalid API key"), "other");
+  });
+
+  it("parks a wall whatever the enforcement mode is", () => {
+    // The regression. This used to be gated on `enforcement === "live-resume"`,
+    // and the default is `between-cycles` — in the run form, in
+    // `normalizePolicy` and in `DEFAULT_CHAT_GUARDS` — so the ordinary run met
+    // the shared account's wall and was written `failed`, terminally, with the
+    // only way back an HTTP request a person makes. At twenty-five runs sharing
+    // one allowance that is the steady state, not the exception.
+    //
+    // The mode is not an argument at all, which is the strongest form of the
+    // fix: there is nothing here to gate on. Enforcement answers *when guards
+    // are read*; a 5-hour window refilling on its own is a fact about the
+    // provider.
+    assert.deepEqual(
+      refusalDisposition({ kind: "allowance", pauseCount: 0, transientRetries: 0 }),
+      { action: "park" },
+    );
+  });
+
+  it("still stops parking at the lifetime cap, and says it ran out of waits", () => {
+    // `MAX_PAUSES_PER_RUN` survives the fix: a refusal is someone else's claim
+    // about someone else's counter, and a misread one must not park for ever.
+    for (let pauseCount = 0; pauseCount < MAX_PAUSES_PER_RUN; pauseCount++) {
+      assert.deepEqual(
+        refusalDisposition({ kind: "allowance", pauseCount, transientRetries: 0 }),
+        { action: "park" },
+        `pause ${pauseCount} is still within the cap`,
+      );
+    }
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "allowance",
+        pauseCount: MAX_PAUSES_PER_RUN,
+        transientRetries: 0,
+      }),
+      // Not "the allowance is gone" — by now it may well have refilled. What
+      // ran out is how often one run may wait for it unattended, and the
+      // operator's next move differs between the two.
+      { action: "fail", cause: "pauses-spent" },
+    );
+  });
+
+  it("retries a blip up to the ladder's length and then names the attempts", () => {
+    for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
+      assert.deepEqual(
+        refusalDisposition({ kind: "transient", pauseCount: 0, transientRetries: attempt }),
+        { action: "retry", attempt },
+      );
+    }
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "transient",
+        pauseCount: 0,
+        transientRetries: MAX_TRANSIENT_RETRIES,
+      }),
+      { action: "fail", cause: "retries-spent" },
+    );
+  });
+
+  it("never parks or retries anything that is neither", () => {
+    // A revoked key, a malformed request, an exhausted credit balance: three
+    // more attempts buy three more of the same answer, and parking holds a
+    // folder for hours to arrive at it.
+    assert.deepEqual(
+      refusalDisposition({ kind: "other", pauseCount: 0, transientRetries: 0 }),
+      { action: "fail", cause: "other" },
+    );
+  });
+
+  it("does not spend a run's waits on a blip, or its retries on a wall", () => {
+    // The two counters are independent and count different things. A run that
+    // has parked twice must still get its full retry ladder for a dropped
+    // connection, and one that has retried twice must still be allowed to wait.
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "transient",
+        pauseCount: MAX_PAUSES_PER_RUN,
+        transientRetries: 0,
+      }),
+      { action: "retry", attempt: 0 },
+    );
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "allowance",
+        pauseCount: 0,
+        transientRetries: MAX_TRANSIENT_RETRIES,
+      }),
+      { action: "park" },
+    );
   });
 });
 

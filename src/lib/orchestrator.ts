@@ -797,6 +797,34 @@ export function isTransientApiError(text: string): boolean {
   );
 }
 
+/** Which of the three things a refused work cycle actually was. */
+export type RefusalKind =
+  /** The subscription allowance is used up. It refills on its own. */
+  | "allowance"
+  /** A transport or upstream fault that clears by itself in seconds. */
+  | "transient"
+  /** Neither: the CLI refused the request for a reason of its own. */
+  | "other";
+
+/**
+ * Name the refusal, once, so every decision below reads the same answer.
+ *
+ * The two classifiers were called inline and in this order, with `retryable`
+ * carrying a `!limited` of its own to keep them apart. Naming the answer is
+ * what lets the decision beside it be pure and tested: the two predicates are
+ * regex matches over sentences read out of the shipped binary, and the thing
+ * that goes wrong is not the matching but what is done with it.
+ *
+ * The order is load-bearing and unchanged: a wall is tested first, because no
+ * backoff refills an allowance and `isTransientApiError` would otherwise claim
+ * a 429 the provider meant as a wall.
+ */
+export function refusalKind(refusal: string): RefusalKind {
+  if (isUsageLimit(refusal)) return "allowance";
+  if (isTransientApiError(refusal)) return "transient";
+  return "other";
+}
+
 /**
  * An allowance refusal that only ever reached stderr.
  *
@@ -859,6 +887,71 @@ const TRANSIENT_BACKOFF_MS = [5_000, 20_000, 60_000];
  * and unlike `pause_count`: a restart hours later is not "in a row".
  */
 export const MAX_TRANSIENT_RETRIES = TRANSIENT_BACKOFF_MS.length;
+
+/** Why a refused run is being ended rather than retried or parked. */
+export type RefusalCause =
+  /** A wall, met as often as one run may wait one out. */
+  | "pauses-spent"
+  /** Transport faults in a row, with the ladder spent. */
+  | "retries-spent"
+  /** Not a wall and not a blip — nothing here would clear. */
+  | "other";
+
+/** What the loop does about a work cycle the provider refused. */
+export type RefusalPlan =
+  /** Sleep the ladder's entry for `attempt` and re-spawn into the same session. */
+  | { action: "retry"; attempt: number }
+  /** Park and wait the window out. */
+  | { action: "park" }
+  /** End the run, and say which of the three endings it was. */
+  | { action: "fail"; cause: RefusalCause };
+
+/**
+ * What to do about a refused work cycle.
+ *
+ * Extracted from `startRun` and pure for `releasableRuns`' reason: every way of
+ * being wrong here is silent and expensive in one direction or the other — a
+ * blip that ends a run holding a live session, or a wall re-spawned into three
+ * more times, or a fleet ended for a condition that refills on its own.
+ *
+ * **There is no `enforcement` argument, and its absence is the fix.** The gate
+ * used to be `limited && policy.enforcement === "live-resume"`, so on the
+ * default `between-cycles` — which is what the run form starts from, what
+ * `DEFAULT_CHAT_GUARDS` carries, and therefore what every untemplated chat
+ * proposal, orchestrator-block emission and workflow node runs under — a wall
+ * ended the run. That coupled two unrelated facts: `enforcement` is the
+ * operator's answer to *when guards are read*, where the 5-hour window
+ * refilling on its own is a fact about the provider, and the one quantity this
+ * app already reasons about as waitable. Twenty-five runs sharing one account
+ * meet that wall as a matter of course, so the ordinary outcome was a fleet
+ * written `failed`, terminally, needing a run page opened per run. Nothing on
+ * the enforcement control said so, because the control is not about this.
+ *
+ * What still bounds it is unchanged. `MAX_PAUSES_PER_RUN` caps how often one
+ * run may wait — a refusal is someone else's claim about someone else's
+ * counter, and a misread one must not park for ever — and the run's wall clock
+ * is still a terminus it cannot wait out, checked ahead of the window by
+ * `evaluateBudget` at the pre-cycle guard and again by `sweepPaused`, which
+ * ends a parked run on a verdict that can never clear rather than leaving it
+ * holding a folder.
+ */
+export function refusalDisposition(o: {
+  kind: RefusalKind;
+  pauseCount: number;
+  transientRetries: number;
+}): RefusalPlan {
+  if (o.kind === "allowance") {
+    return o.pauseCount < MAX_PAUSES_PER_RUN
+      ? { action: "park" }
+      : { action: "fail", cause: "pauses-spent" };
+  }
+  if (o.kind === "transient") {
+    return o.transientRetries < MAX_TRANSIENT_RETRIES
+      ? { action: "retry", attempt: o.transientRetries }
+      : { action: "fail", cause: "retries-spent" };
+  }
+  return { action: "fail", cause: "other" };
+}
 
 /**
  * Sleep, unless the run is interrupted first.
@@ -4748,18 +4841,19 @@ export async function startRun(id: string): Promise<void> {
       }
 
       if (refusal && !recovered) {
-        const limited = isUsageLimit(refusal);
-        const canWait =
-          limited &&
-          policy.enforcement === "live-resume" &&
-          (run.pause_count ?? 0) < MAX_PAUSES_PER_RUN;
         // A dropped connection is neither the wall nor the agent's doing, and
         // it clears in seconds — so it is retried here rather than parked or
-        // reported as a failure. Tested after `limited` because an exhausted
+        // reported as a failure. The wall is named first because an exhausted
         // allowance is not something backing off five seconds can fix.
-        const retryable = !limited && isTransientApiError(refusal);
-        const retrying = retryable && transientRetries < MAX_TRANSIENT_RETRIES;
-        const backoff = TRANSIENT_BACKOFF_MS[transientRetries];
+        const kind = refusalKind(refusal);
+        const limited = kind === "allowance";
+        const plan = refusalDisposition({
+          kind,
+          pauseCount: run.pause_count ?? 0,
+          transientRetries,
+        });
+        const retrying = plan.action === "retry";
+        const backoff = retrying ? TRANSIENT_BACKOFF_MS[plan.attempt] : 0;
 
         emit({
           runId: id,
@@ -4777,7 +4871,7 @@ export async function startRun(id: string): Promise<void> {
             apiError: refusal,
             exitCode: res.exitCode,
             usageLimit: limited,
-            waiting: canWait,
+            waiting: plan.action === "park",
             retrying,
           },
         });
@@ -4799,7 +4893,7 @@ export async function startRun(id: string): Promise<void> {
           continue;
         }
 
-        if (canWait) {
+        if (plan.action === "park") {
           // Not `snapshot.session.endsAt`. This snapshot predates the cycle, so
           // it is clean of *this* refusal — but a run that woke at an early
           // boundary and was refused again scans a tree that already holds the
@@ -4820,15 +4914,20 @@ export async function startRun(id: string): Promise<void> {
           break;
         }
 
-        stopReason = limited
-          ? `Claude refused the work cycle: ${refusal}`
-          : retryable
-            ? // Reached only with the retries spent, so say that rather than
-              // reporting the last attempt as if it were the only one.
-              `Claude Code hit a transient API error on ${
-                MAX_TRANSIENT_RETRIES + 1
-              } attempts in a row: ${refusal}`
-            : `Claude Code refused the request: ${refusal}`;
+        stopReason =
+          plan.cause === "pauses-spent"
+            ? // Named as attempts rather than as the wall, because those are
+              // different facts and the operator's next move differs. The
+              // allowance may well have refilled by now; what has run out is
+              // how often one run may wait for it without anybody looking.
+              `Claude refused the work cycle for want of allowance again, after this run had already waited out ${MAX_PAUSES_PER_RUN} windows. Out of waits rather than out of allowance: ${refusal}`
+            : plan.cause === "retries-spent"
+              ? // Reached only with the retries spent, so say that rather than
+                // reporting the last attempt as if it were the only one.
+                `Claude Code hit a transient API error on ${
+                  MAX_TRANSIENT_RETRIES + 1
+                } attempts in a row: ${refusal}`
+              : `Claude Code refused the request: ${refusal}`;
         finalStatus = "failed";
         break;
       }
