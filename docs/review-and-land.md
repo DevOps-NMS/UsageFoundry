@@ -75,6 +75,14 @@ the page showed when you queued them — because every landing changes the base 
 the one behind it. Every check above still applies to every one of them, taken
 fresh.
 
+There is one worker and one queue, so a second press of Land does not start a
+second one — it adds to the back of the same one. The panel shows every batch
+that still has something to do, oldest first, with the three most recent
+finished ones under them, and each batch keeps its own *Cancel*: it drops that
+batch's branches that have not started and leaves the merge in flight to end,
+which is the same rule everywhere here. Nothing is cancelled by pressing Land
+again for another repository.
+
 Two failures are told apart deliberately. A branch that cannot be landed is
 reported and the queue carries on to the next. A problem with your *checkout* —
 uncommitted changes, or standing on the wrong branch — would refuse every

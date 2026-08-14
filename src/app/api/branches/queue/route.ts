@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
-import { cancelBatch, enqueue, isWorking, latestBatch } from "@/lib/mergeQueue";
+import {
+  cancelBatch,
+  enqueue,
+  isWorking,
+  queueView,
+  type QueueRow,
+} from "@/lib/mergeQueue";
 import { getRun } from "@/lib/orchestrator";
 import { getSettings } from "@/lib/settings";
 
@@ -15,7 +21,7 @@ export const dynamic = "force-dynamic";
  */
 
 /** One row as the page renders it, with the branch resolved for display. */
-function toDTO(row: ReturnType<typeof latestBatch>[number]) {
+function toDTO(row: QueueRow) {
   const run = getRun(row.run_id);
   return {
     id: row.id,
@@ -34,12 +40,26 @@ function toDTO(row: ReturnType<typeof latestBatch>[number]) {
   };
 }
 
+/**
+ * Every outstanding batch, grouped, plus a short tail of finished ones.
+ *
+ * It answered with the newest batch alone, which the worker has never agreed
+ * with — it drains every queued row whatever batch it is in, so an earlier
+ * batch went on merging into the operator's checkout with nothing on the page
+ * naming it, and `DELETE` takes a `batchId` the page could no longer supply.
+ *
+ * `working` is still the worker's own flag rather than one scoped to this
+ * answer, and that is now honest: the row it can be working on is `landing` or
+ * `resolving`, which is a row `queueView` covers by definition.
+ */
 export async function GET() {
-  const rows = latestBatch();
   return NextResponse.json({
-    batchId: rows[0]?.batch_id ?? null,
     working: isWorking(),
-    items: rows.map(toDTO),
+    batches: queueView().map((batch) => ({
+      batchId: batch.batchId,
+      createdAt: batch.createdAt,
+      items: batch.rows.map(toDTO),
+    })),
   });
 }
 

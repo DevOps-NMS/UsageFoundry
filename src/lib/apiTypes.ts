@@ -1155,11 +1155,25 @@ export interface MergeQueueItemDTO {
   resolveCostUSD: number;
 }
 
-export interface MergeQueueDTO {
-  batchId: string | null;
-  /** True while the worker is between or inside merges. */
-  working: boolean;
+/** One press of Land, and every branch it queued. */
+export interface MergeQueueBatchDTO {
+  batchId: string;
+  createdAt: number;
   items: MergeQueueItemDTO[];
+}
+
+export interface MergeQueueDTO {
+  /**
+   * True while the worker is between or inside merges.
+   *
+   * It is the worker's own flag and says nothing about which batch is in flight
+   * — which is why `batches` carries every outstanding one rather than the
+   * newest: the row being worked is always one of these, so the distinction has
+   * nothing left to hide.
+   */
+  working: boolean;
+  /** Every batch with something still to do, oldest first, then a short tail of finished ones. */
+  batches: MergeQueueBatchDTO[];
 }
 
 export interface BranchSummaryDTO {

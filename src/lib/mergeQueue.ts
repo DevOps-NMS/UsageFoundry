@@ -162,6 +162,73 @@ const isRunActive = (status: RunRow["status"]) =>
   status === "running" || status === "queued" || status === "paused";
 
 /* ------------------------------------------------------------------ */
+/* Which batches the page covers — pure, and tested                    */
+/* ------------------------------------------------------------------ */
+
+/** One batch as the selection sees it: when it was queued, and whether it is done with. */
+export interface BatchSummary {
+  batchId: string;
+  createdAt: number;
+  /** At least one row the worker still owes an answer for. */
+  unfinished: boolean;
+}
+
+/**
+ * How many finished batches stay on the page once nothing in them is outstanding.
+ *
+ * The page used to show exactly one — the newest — which is both too few and the
+ * wrong one: queue a second repository's branches and the first repository's
+ * report of what landed went with it. Three is a working session's worth of
+ * "how did each of those go" without turning the panel into a log of every merge
+ * this install has ever made.
+ */
+const FINISHED_TAIL = 3;
+
+/**
+ * Which batches the queue view covers, oldest first.
+ *
+ * **Every unfinished batch, whatever else is queued.** The worker drains the
+ * whole table rather than one batch, so a batch that scrolled off the page kept
+ * merging into the operator's own checkout with nothing on screen naming it —
+ * and `cancelBatch` is scoped by `batch_id`, so a batch the page cannot name is
+ * a batch the operator cannot stop. That is the whole of this function's reason
+ * to exist, and it is why the cap below applies to *finished* batches only:
+ * bounding the outstanding ones would reintroduce exactly that.
+ *
+ * A batch is kept **whole** rather than trimmed to its unfinished rows, because
+ * what the panel reports is progress — "2 landed · 3 waiting" is a sentence
+ * about a batch, and dropping the landed rows would make a batch half-way
+ * through look like one that had not started.
+ *
+ * Oldest first, `batch_id` breaking a tie, which is `nextQueued`'s own ordering:
+ * two batches can share a millisecond, a workflow instance releasing its merge
+ * blocks in one synchronous pass being the reachable case. Nothing about that
+ * tie is the operator's order, but a list that reshuffles between two polls of
+ * the same unchanged queue is nobody's.
+ *
+ * Pure and total, separated from the SQL for `planItem`'s reason: both ways of
+ * being wrong are silent. A batch left out is a set of merges in flight with no
+ * way to see or stop them; too many kept is a panel that grows without bound.
+ */
+export function selectQueueBatches(
+  batches: readonly BatchSummary[],
+  finishedTail: number,
+): BatchSummary[] {
+  const ordered = [...batches].sort(
+    (a, b) =>
+      a.createdAt - b.createdAt ||
+      (a.batchId < b.batchId ? -1 : a.batchId > b.batchId ? 1 : 0),
+  );
+  const finished = ordered.filter((b) => !b.unfinished);
+  const tail = new Set(
+    finished
+      .slice(Math.max(0, finished.length - Math.max(0, finishedTail)))
+      .map((b) => b.batchId),
+  );
+  return ordered.filter((b) => b.unfinished || tail.has(b.batchId));
+}
+
+/* ------------------------------------------------------------------ */
 /* Reading and writing the queue                                       */
 /* ------------------------------------------------------------------ */
 
@@ -171,12 +238,50 @@ export function batchRows(batchId: string): QueueRow[] {
     .all(batchId) as QueueRow[];
 }
 
-/** The most recent batch, which is the one the page shows. */
-export function latestBatch(): QueueRow[] {
-  const row = db()
-    .prepare("SELECT batch_id FROM merge_queue ORDER BY created_at DESC LIMIT 1")
-    .get() as { batch_id: string } | undefined;
-  return row ? batchRows(row.batch_id) : [];
+/** A batch and its rows, in the operator's own order within it. */
+export interface QueueBatch {
+  batchId: string;
+  createdAt: number;
+  rows: QueueRow[];
+}
+
+/**
+ * What the page shows: every outstanding batch, and a short tail of finished ones.
+ *
+ * The summaries are read first and the rows only for the batches that survive
+ * `selectQueueBatches`, so nothing here reads a table that grows by one row per
+ * branch ever landed. The status test is built from `ACTIVE` rather than spelled
+ * out, so "unfinished" means here what `isQueueActive` means everywhere else.
+ */
+export function queueView(): QueueBatch[] {
+  const marks = ACTIVE.map(() => "?").join(",");
+  const summaries = (
+    db()
+      .prepare(
+        `SELECT batch_id AS batchId, MIN(created_at) AS createdAt,
+                MAX(CASE WHEN status IN (${marks}) THEN 1 ELSE 0 END) AS unfinished
+           FROM merge_queue GROUP BY batch_id`,
+      )
+      .all(...ACTIVE) as { batchId: string; createdAt: number; unfinished: number }[]
+  ).map((s) => ({ ...s, unfinished: s.unfinished === 1 }));
+
+  const chosen = selectQueueBatches(summaries, FINISHED_TAIL);
+  if (chosen.length === 0) return [];
+
+  const rows = db()
+    .prepare(
+      `SELECT * FROM merge_queue WHERE batch_id IN (${chosen.map(() => "?").join(",")})
+        ORDER BY position`,
+    )
+    .all(...chosen.map((b) => b.batchId)) as QueueRow[];
+
+  const byBatch = new Map(chosen.map((b) => [b.batchId, [] as QueueRow[]]));
+  for (const row of rows) byBatch.get(row.batch_id)?.push(row);
+  return chosen.map((b) => ({
+    batchId: b.batchId,
+    createdAt: b.createdAt,
+    rows: byBatch.get(b.batchId) ?? [],
+  }));
 }
 
 /** Run ids with a row the worker still expects to touch. */

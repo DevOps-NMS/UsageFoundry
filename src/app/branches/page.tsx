@@ -12,6 +12,7 @@ import Link from "next/link";
 import type {
   BranchInventoryDTO,
   BranchSummaryDTO,
+  MergeQueueBatchDTO,
   MergeQueueDTO,
   MergeQueueItemDTO,
 } from "@/lib/apiTypes";
@@ -310,18 +311,49 @@ function QueueStep({
   );
 }
 
+/**
+ * How many branches each row is waiting behind, counted across every batch.
+ *
+ * One press of Land is one batch and the worker is one queue, so a row's real
+ * wait is everything unfinished above it — including the batch queued for
+ * another repository ten minutes ago. Counting within the batch would tell the
+ * second press of Land it was next when five merges stood in front of it.
+ */
+function aheadByItem(batches: MergeQueueBatchDTO[]): Map<string, number> {
+  const ahead = new Map<string, number>();
+  let unfinished = 0;
+  for (const batch of batches) {
+    for (const item of batch.items) {
+      ahead.set(item.id, unfinished);
+      if (ITEM_ACTIVE.includes(item.status)) unfinished++;
+    }
+  }
+  return ahead;
+}
+
+/**
+ * The queue, one group per press of Land.
+ *
+ * Grouped rather than run together because Cancel is per batch — `cancelBatch`
+ * is scoped by `batch_id`, and a button that stopped some other press of Land's
+ * branches would be worse than the one that could only reach the newest. The
+ * summary above the groups is the whole queue's, since that is the number the
+ * operator is actually waiting on; each group carries only what identifies it
+ * and the button that stops it.
+ */
 function QueuePanel({
   queue,
   onCancel,
   busy,
 }: {
   queue: MergeQueueDTO;
-  onCancel: () => void;
+  onCancel: (batchId: string) => void;
   busy: boolean;
 }) {
-  const waiting = queue.items.filter((i) => i.status === "queued").length;
-  const spent = queue.items.reduce((n, i) => n + i.resolveCostUSD, 0);
-  const active = queue.items.some((i) => ITEM_ACTIVE.includes(i.status));
+  const items = queue.batches.flatMap((b) => b.items);
+  const spent = items.reduce((n, i) => n + i.resolveCostUSD, 0);
+  const active = items.some((i) => ITEM_ACTIVE.includes(i.status));
+  const ahead = aheadByItem(queue.batches);
 
   return (
     <Card className="mb-4">
@@ -333,20 +365,10 @@ function QueuePanel({
           </Badge>
         )}
         {spent > 0 && <Badge>{fmtUSD(spent)} on conflicts</Badge>}
-        {waiting > 0 && (
-          <Button
-            variant="ghost"
-            className="ml-auto min-w-[144px]"
-            onClick={onCancel}
-            disabled={busy}
-          >
-            Cancel {waiting} waiting
-          </Button>
-        )}
       </CardTitle>
 
       <p className="mb-3 text-sm text-ink-muted" aria-live="polite">
-        {queueSummary(queue.items)}
+        {queueSummary(items)}
         {active && (
           <span className="text-ink-muted">
             {" — "}one at a time, each re-checked against git at its own turn
@@ -354,20 +376,42 @@ function QueuePanel({
         )}
       </p>
 
-      <ol>
-        {queue.items.map((item, i) => (
-          <QueueStep
-            key={item.id}
-            item={item}
-            ahead={
-              queue.items
-                .slice(0, i)
-                .filter((prev) => ITEM_ACTIVE.includes(prev.status)).length
-            }
-            last={i === queue.items.length - 1}
-          />
-        ))}
-      </ol>
+      {queue.batches.map((batch) => {
+        const waiting = batch.items.filter((i) => i.status === "queued").length;
+        return (
+          <section
+            key={batch.batchId}
+            className="border-t border-line pt-3 first:border-0 first:pt-0"
+          >
+            <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="text-xs text-ink-muted">
+                Queued {fmtDateTime(batch.createdAt)}
+              </span>
+              {waiting > 0 && (
+                <Button
+                  variant="ghost"
+                  className="ml-auto min-w-[144px]"
+                  onClick={() => onCancel(batch.batchId)}
+                  disabled={busy}
+                >
+                  Cancel {waiting} waiting
+                </Button>
+              )}
+            </div>
+
+            <ol>
+              {batch.items.map((item, i) => (
+                <QueueStep
+                  key={item.id}
+                  item={item}
+                  ahead={ahead.get(item.id) ?? 0}
+                  last={i === batch.items.length - 1}
+                />
+              ))}
+            </ol>
+          </section>
+        );
+      })}
     </Card>
   );
 }
@@ -471,7 +515,7 @@ export default function Branches() {
       const json = (await res.json().catch(() => ({}))) as Partial<
         MergeQueueDTO & { error: string }
       >;
-      if (!res.ok || !json.items) {
+      if (!res.ok || !json.batches) {
         const detail =
           json.error ?? (res.ok ? "no queue in the response" : null);
         setReadError(pollFailureMessage(res.status, detail));
@@ -490,9 +534,14 @@ export default function Branches() {
     void loadQueue();
   }, [load, loadQueue]);
 
+  const queueItems = useMemo(
+    () => (queue?.batches ?? []).flatMap((b) => b.items),
+    [queue],
+  );
+
   const queueActive =
     !!queue &&
-    (queue.working || queue.items.some((i) => ITEM_ACTIVE.includes(i.status)));
+    (queue.working || queueItems.some((i) => ITEM_ACTIVE.includes(i.status)));
 
   useEffect(() => {
     if (!queueActive) return;
@@ -516,11 +565,11 @@ export default function Branches() {
   const inQueue = useMemo(
     () =>
       new Set(
-        (queue?.items ?? [])
+        queueItems
           .filter((i) => ITEM_ACTIVE.includes(i.status))
           .map((i) => i.runId),
       ),
-    [queue],
+    [queueItems],
   );
 
   /**
@@ -588,15 +637,17 @@ export default function Branches() {
     }
   }
 
-  async function cancelQueue() {
-    if (!queue?.batchId) return;
+  // Takes the batch it is cancelling rather than reading the newest one off the
+  // queue: several presses of Land can be outstanding at once, and each group
+  // has its own button.
+  async function cancelQueue(batchId: string) {
     setQueueBusy(true);
     setNote(null);
     setError(null);
     try {
       const res = await jsonRequest<{ cancelled?: number }>("/api/branches/queue", {
         method: "DELETE",
-        body: { batchId: queue.batchId },
+        body: { batchId },
       });
       // The answer used to be dropped whole, so a cancel that failed left the
       // queue panel standing with every row still in it and nothing said.
@@ -632,7 +683,7 @@ export default function Branches() {
         {error && <Notice tone="danger">{error}</Notice>}
       </div>
 
-      {queue && queue.items.length > 0 && (
+      {queue && queue.batches.length > 0 && (
         <QueuePanel queue={queue} onCancel={cancelQueue} busy={queueBusy} />
       )}
 
