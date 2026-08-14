@@ -380,14 +380,14 @@ describe("normalizeWorkflowInput — templates and mounts", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* Specialists                                                         */
+/* Agents                                                              */
 /* ------------------------------------------------------------------ */
 
 /**
- * Who does a piece of a block's work, which is not what the block may do.
+ * What a block's own child *is*, which is not what that child may do.
  *
  * Every failure here is the one this app's whole agent registry exists to end,
- * arriving from a saved graph rather than from the CLI: a block given a
+ * arriving from a saved graph rather than from the CLI: a block given
  * an agent it does not have is bit-for-bit a block that was never given one,
  * and nothing downstream can tell them apart — not the event log, not the cost,
  * not the transcript's own attribution. So a name that resolves to nothing is
@@ -399,7 +399,7 @@ describe("normalizeWorkflowInput — templates and mounts", () => {
  * accepting it silently would be this app performing the CLI's own silent drop
  * at the one door built to stop it.
  */
-describe("normalizeWorkflowInput — the agent a block may hand work to", () => {
+describe("normalizeWorkflowInput — the agent a block's child is started as", () => {
   it("carries an agent the registry has", () => {
     const v = value(graph([node("a", { agentId: "a-rev" })]));
     assert.equal(v.graph.nodes[0].agentId, "a-rev");
@@ -1212,8 +1212,8 @@ describe("planWorkflowProposal — a graph a model wrote becomes a saved workflo
   });
 
   it("keeps a block's agent, and takes no guard from it", () => {
-    // The chat may name who does a piece of the work. It may not name what the
-    // block is allowed to do — so the saved node carries the agent and every
+    // The chat may name what the block's child is. It may not name what that
+    // child is allowed to do — so the saved node carries the agent and every
     // guard beside it is still the template's id and nothing else.
     const plan = planWorkflowProposal(
       proposal([node("a", { agentId: "a-rev" })]),

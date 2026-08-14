@@ -1282,8 +1282,8 @@ function ProposedGraph({ proposal }: { proposal: ChatProposalDTO }) {
                 {b.guardsLabel}
               </span>
               {/* Its own clause, outside the guard one, for the reason the run
-                  card's is: an agent decides who does part of the work and
-                  never what the block may do. */}
+                  card's is: an agent decides what the block's child *is* and
+                  never what it may do. */}
               {b.agentLabel && (
                 <span
                   className={b.agentLabel === "agent deleted" ? "text-danger" : ""}

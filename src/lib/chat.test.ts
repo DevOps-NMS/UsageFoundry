@@ -36,7 +36,7 @@ import type { RegistryAgent } from "./agents";
  *    in settings. A regression here type-checks perfectly and shows up as an
  *    agent running somewhere nobody chose. The agent is the second thing
  *    a proposal may name and it is on the other side of that line — it decides
- *    who does a piece of the work — so what is pinned about it is both
+ *    who the run *is* — so what is pinned about it is both
  *    directions at once: the whole definition reaches the run, no guard and no
  *    word of the prompt moves, and one that has been deleted is refused **by
  *    name** rather than falling back to none. That fallback is the expensive

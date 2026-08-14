@@ -351,7 +351,7 @@ export interface ProposalInput {
   kind?: ProposalKind;
   /** Null runs it under the operator's untemplated guard set. */
   templateId: string | null;
-  /** A saved agent the run may delegate to, by id. Null is the ordinary run. */
+  /** A saved agent the run is started as, by id. Null is the ordinary run. */
   agentId?: string | null;
   title: string;
   task: string;

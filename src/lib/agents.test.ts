@@ -97,7 +97,7 @@ describe("normalizeAgentInput", () => {
   });
 
   for (const field of ["name", "description", "prompt"] as const) {
-    it(`refuses a missing ${field}, which the CLI would drop without a word`, () => {
+    it(`refuses a missing ${field}, which the CLI will not register`, () => {
       const parsed = normalizeAgentInput({ ...valid, [field]: "" });
       assert.equal(parsed.ok, false);
       assert(!parsed.ok);
@@ -111,11 +111,13 @@ describe("normalizeAgentInput", () => {
 
   /**
    * Measured: a `--agents` member named `general-purpose` does not appear as a
-   * second entry in what `claude --agent <unknown>` lists. So a saved agent
-   * under a built-in's name either does nothing while the operator believes it
-   * is in play, or replaces a built-in the main thread delegates to — and the
-   * CLI does not say which. Refused at the door because neither outcome reports
-   * anything afterwards.
+   * second entry in what `claude --agent <unknown>` lists. So `--agent Explore`
+   * selects *an* Explore with no way to tell from outside whether it is the
+   * operator's prompt or the built-in, and the CLI does not say which. The
+   * reason narrows under the singular flag rather than disappearing: what is at
+   * stake is no longer one delegated subtask but the whole run, which would be
+   * something other than the thing its name says. Refused at the door because
+   * neither outcome reports anything afterwards.
    */
   for (const name of ["general-purpose", "Explore", "GENERAL-PURPOSE"]) {
     it(`refuses “${name}”, a name the CLI already answers to`, () => {
@@ -318,9 +320,11 @@ describe("rowToAgent", () => {
   /**
    * A row can outlive the build that wrote it — `rowToTemplate`'s reason for
    * narrowing on read as well as on save. What it narrows here is the pair the
-   * CLI drops in silence, and it reports rather than repairs: a placeholder
-   * description would produce an agent the delegating model chooses on the
-   * strength of text nobody wrote.
+   * CLI will not register, which named on `--agent` fails the spawn outright,
+   * and it reports rather than repairs: a placeholder description would make
+   * that row registrable again, so the run would start as an agent described by
+   * text nobody wrote instead of being refused in front of the person who can
+   * fix it.
    */
   for (const field of ["name", "description", "prompt"] as const) {
     it(`reports a row with no ${field} as unusable rather than repairing it`, () => {
@@ -389,7 +393,8 @@ describe("agentRefusal", () => {
  * already-validated definition, so the only way it can be wrong is that it
  * outlived the build that wrote it — `rowToAgent`'s reason — and the least it
  * could have meant is no agent. Putting a half-formed member on the argv instead
- * would be handing the CLI exactly the shape it drops without a word.
+ * would be handing the CLI exactly the shape it will not register — which,
+ * selected on `--agent`, is a run whose every cycle dies at the spawn.
  */
 describe("parseRunAgent / runAgentDefinitions", () => {
   const frozen = JSON.stringify({

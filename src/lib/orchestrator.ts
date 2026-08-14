@@ -177,9 +177,9 @@ export interface RunRow {
   spent_usd_est: number;
   spent_tokens_est: number;
   /**
-   * The specialised agent this run's main thread may delegate to, as the whole
-   * JSON definition rather than an id — see the column note in `db.ts`. Null is
-   * the ordinary run. Read through `parseRunAgent`, never parsed at a call site.
+   * The agent this run was started **as**, as the whole JSON definition rather
+   * than an id — see the column note in `db.ts`. Null is the ordinary run. Read
+   * through `parseRunAgent`, never parsed at a call site.
    */
   agent: string | null;
 }

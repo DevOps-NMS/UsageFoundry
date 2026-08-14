@@ -1247,11 +1247,11 @@ function BlockPanel({
               footnote={
                 ambientLine ? (
                   <>
-                    {ambientLine}. An agent changes who does part of the work,
-                    never what this block may do.
+                    {ambientLine}. An agent changes what this block&rsquo;s child
+                    is, never what it may do.
                   </>
                 ) : (
-                  "An agent changes who does part of the work, never what this block may do"
+                  "An agent changes what this block's child is, never what it may do"
                 )
               }
             >

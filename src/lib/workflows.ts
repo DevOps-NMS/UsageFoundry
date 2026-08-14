@@ -3889,9 +3889,10 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
       template,
       instance.workflowName,
       own,
-      // What it may hand an *emitted* run to, which is a different question
-      // from the line above and is answered by the same registry. Read here so
-      // the prompt and `emitBlockRuns`' own check describe one list.
+      // What it may start an *emitted* run as, which is a different question
+      // from the line above — that one is what this turn itself is — and is
+      // answered by the same registry. Read here so the prompt and
+      // `emitBlockRuns`' own check describe one list.
       listAgents(),
     ),
     cwd: safeFolder(node),

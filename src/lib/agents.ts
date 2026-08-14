@@ -513,7 +513,10 @@ export type AgentResolution =
  * against its four literals. What crosses the wire is an **id**, never a
  * definition: a definition off the wire would be a route to an agent nobody
  * saved, and the registry is the only place an agent comes from precisely so
- * that what a run may delegate to is something a person wrote down.
+ * that what a run *is* is something a person wrote down. That mattered while
+ * the definition was only being offered; selected with `--agent` it is the
+ * difference between a run being a role somebody saved and a run being a system
+ * prompt that arrived in a request body.
  *
  * What comes back is the whole definition rather than the id, because that is
  * what the run stores — see the `agent` column in `db.ts`.

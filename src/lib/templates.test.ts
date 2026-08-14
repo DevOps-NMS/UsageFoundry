@@ -37,7 +37,7 @@ const OK = {
  *
  * Passed in rather than read, which is what keeps this function pure — and what
  * lets the two agents below stand for the two things that can be wrong with one:
- * gone, and present but in a shape the CLI drops without a word.
+ * gone, and present but in a shape the CLI will not register.
  */
 const KNOWN: TemplateKnowledge = {
   agents: new Map([
