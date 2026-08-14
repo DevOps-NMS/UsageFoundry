@@ -54,6 +54,39 @@ arrangement this replaced; pinning `user:` back to your own uid while leaving
 `UF_AGENT_UID` set makes the server refuse to boot rather than start without the
 boundary.
 
+## What an agent can still reach
+
+The split is not a sandbox. Three things it does not do are worth sizing before
+you run this unattended, because each is a place where a prompt injection — in a
+GitHub issue, a README, a dependency's source, anything the agent was told to
+read — reaches something that is not this run's business.
+
+- **Your Claude account's own credential.** A work cycle runs as the uid that
+  owns the mounted `~/.claude`, so it can read `.credentials.json`: the OAuth
+  token for the whole subscription, not for one run. This is not a permission
+  that was left open. It is the credential the agent authenticates and bills
+  with, so *any* arrangement in which a run can work is one in which it can read
+  that token; the only real fix is a credential scoped to a run, which Claude
+  Code does not have. `acceptEdits`, the default, auto-approves read-only shell,
+  so a `cat` of it raises no prompt.
+- **Every mount, not just the one the run started in.** Containment
+  (`resolveInMount`, `resolveWorkspaceFolder`) decides the folder a run may be
+  *started* in, and therefore its cwd — that part is sound, checked before any
+  filesystem access and again after symlink resolution. But a `Bash` call is not
+  bounded by cwd, and `--add-dir` names every configured mount. Treat all four
+  workspaces as one blast radius.
+- **`UF_GITHUB_TOKEN`, for as long as the cycle lasts.** It is deliberately
+  handed to work cycles (and the chat), because `git push` and `gh` cannot work
+  without it. An unattended agent can use everything that token can, which is
+  why the advice to scope it to the repositories you actually run agents against
+  is in `.env.example` rather than here.
+
+There is one thing the split *does* close that reads similarly and is worth not
+confusing with the above: an agent can no longer read the **server's**
+environment out of `/proc`, so `UF_AUTH_TOKEN` and `ANTHROPIC_ADMIN_KEY` — the
+app's own master credential and an organisation-wide Admin key, neither of which
+has anything to do with the task the agent was given — are no longer reachable.
+
 ## Everything else
 
 - Compose binds to **`127.0.0.1:3000`**, not `0.0.0.0`. Change that only behind
@@ -63,8 +96,9 @@ boundary.
   and again after symlink resolution. `../`, absolute paths, and symlinks out of
   the tree are all rejected.
 - With several workspaces mounted, containment is checked against **one mount at
-  a time**, never their union. A run is confined to the workspace it started in,
-  so a path valid in one workspace is rejected in another.
+  a time**, never their union, so a path valid in one workspace is rejected in
+  another. That decides which folder a run may be *given*; it does not confine
+  what the agent's shell can then touch — see "What an agent can still reach".
 - The agent is spawned with an argument array and **no shell**, so a prompt
   containing shell metacharacters is inert.
 - `bypassPermissions` lets the agent run any command in the mounted folder

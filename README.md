@@ -66,6 +66,14 @@ in once:
 docker compose exec -it usagefoundry claude   # then: /login
 ```
 
+That login is what every run bills against, and an agent can read it: a work
+cycle runs as the uid that owns the mounted `~/.claude`, which is the only way
+it can authenticate at all. The server runs as a *different* uid from the agents
+so that the app's own secrets — `UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY` — are out
+of their reach, but your Claude account, every mounted workspace and
+`UF_GITHUB_TOKEN` are inside the trust boundary of anything you run unattended.
+**[docs/security.md](docs/security.md)** sizes all of it.
+
 Full setup, including Linux `UF_UID`, multiple workspaces and GitHub access, is
 in **[docs/install.md](docs/install.md)**.
 
