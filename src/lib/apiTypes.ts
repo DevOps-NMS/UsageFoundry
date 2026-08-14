@@ -1223,6 +1223,44 @@ export interface BranchSummaryDTO {
   prompt: string;
 }
 
+/**
+ * What one repository cost over a span.
+ *
+ * A rollup of `runs.spent_usd` and nothing else — reporting, never a guard, and
+ * never summed with the transcript-derived meters or with telemetry: those three
+ * describe overlapping work, so any sum double-counts.
+ */
+export interface RepoSpendRowDTO {
+  key: string;
+  label: string;
+  /** False for the one bucket holding runs that were not in a repository. */
+  isRepository: boolean;
+  runCount: number;
+  /**
+   * A **floor**. A cycle in flight has emitted no `result` and contributes
+   * nothing for its whole duration, so this only ever understates.
+   */
+  spentUSD: number;
+  /**
+   * Killed cycles reconciled from transcripts — carried beside the measured
+   * figure and never inside it, the display-versus-guard split this codebase
+   * makes everywhere else.
+   */
+  spentEstUSD: number;
+  spentTokens: number;
+  spentEstTokens: number;
+}
+
+export interface RepoSpendDTO {
+  /** The span, in days, as the route resolved it. */
+  days: number;
+  since: number;
+  until: number;
+  rows: RepoSpendRowDTO[];
+  /** The same figures over every row, so the columns can be checked against it. */
+  totals: Omit<RepoSpendRowDTO, "key" | "label" | "isRepository">;
+}
+
 /** What the install is doing, and whether new work is held. */
 export interface FleetStateDTO {
   /**

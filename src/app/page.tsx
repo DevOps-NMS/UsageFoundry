@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { LiveTelemetry } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
+import { RepoSpendCard } from "@/components/RepoSpendCard";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
 import { ListGroup, ListRow } from "@/components/ui/List";
@@ -830,6 +831,12 @@ export default function Dashboard() {
         }
         reservedHeadroomFraction={meta.reservedHeadroomFraction}
       />
+
+      {/* After the transcript breakdowns and before the footnotes, because it
+          answers a different question with a different source: those slice the
+          window above by what produced it, this one says what each repository's
+          own runs reported spending. The two are never added — see the card. */}
+      <RepoSpendCard />
 
       <Card className="mb-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
