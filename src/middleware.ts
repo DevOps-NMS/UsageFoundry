@@ -46,6 +46,21 @@ export function middleware(req: NextRequest) {
     return NextResponse.next();
   }
 
+  // The same exemption, for the same reason, for the telemetry a run exports.
+  // The exporter used to authenticate with UF_AUTH_TOKEN — which meant this
+  // app's master credential sat in the agent's own environment, in a variable
+  // `env` prints, for a Claude Code session with `Bash`. It now carries a
+  // capability minted per run, revoked when that run's loop ends, opening
+  // nothing but writes to that run's own telemetry.
+  //
+  // Exemption from *this* gate, not from authentication: the route checks the
+  // capability itself, and needs SQLite and module state to do it, neither of
+  // which exists in the edge runtime. If that check is ever removed, this line
+  // makes `otlp_requests` openly writable — keep the two together.
+  if (pathname === "/api/otlp/v1/logs") {
+    return NextResponse.next();
+  }
+
   const cookie = req.cookies.get(COOKIE)?.value ?? "";
   if (cookie && timingSafeEqual(cookie, token)) return NextResponse.next();
 

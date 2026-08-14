@@ -74,6 +74,7 @@ const {
   reopenRun,
   selectPromotable,
   sweepPaused,
+  telemetryEnv,
   toolResultFailures,
   worktreeSlug,
   MAX_PAUSES_PER_RUN,
@@ -81,6 +82,8 @@ const {
 } = require("./orchestrator") as typeof import("./orchestrator");
 
 const { normalizePolicy } = require("./budget") as typeof import("./budget");
+const { revokeIngestTokens, runForIngestToken } =
+  require("./otlp") as typeof import("./otlp");
 const { db } = require("./db") as typeof import("./db");
 const { saveSettings } = require("./settings") as typeof import("./settings");
 
@@ -1319,6 +1322,91 @@ describe("buildArgs", () => {
     assert.equal(args[args.indexOf("--model") + 1], "claude-opus-5");
     assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
     assert.equal(args[args.indexOf("--resume") + 1], "sess-1");
+  });
+});
+
+describe("telemetryEnv — what the exporter authenticates with", () => {
+  // The app's master credential used to be here, as
+  // `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer $UF_AUTH_TOKEN`, merged
+  // into the child's environment *after* `childEnv` had stripped every `UF_*`
+  // out of it. The child is a Claude Code session with `Bash`; `env` is
+  // read-only shell, which `acceptEdits` auto-approves; and that token opens
+  // `POST /api/runs`, `PUT /api/settings`, every other run's diff and the
+  // approval route. Nothing about the app changes if it comes back — telemetry
+  // works either way — which is why this is pinned rather than left to review.
+  const previous = process.env.UF_AUTH_TOKEN;
+  after(() => {
+    if (previous === undefined) delete process.env.UF_AUTH_TOKEN;
+    else process.env.UF_AUTH_TOKEN = previous;
+  });
+
+  it("never carries UF_AUTH_TOKEN, however it is set", () => {
+    process.env.UF_AUTH_TOKEN = "master-token-that-opens-everything";
+    // `required` so the settings table is not consulted: this is about the
+    // values, and the branch that reads `telemetryForRuns` is one line above.
+    const env = telemetryEnv("run-a", true);
+    for (const [key, value] of Object.entries(env)) {
+      assert.equal(
+        value.includes("master-token-that-opens-everything"),
+        false,
+        `${key} carries UF_AUTH_TOKEN into the agent's own environment`,
+      );
+    }
+  });
+
+  it("authenticates with a per-run capability that resolves to that run", () => {
+    process.env.UF_AUTH_TOKEN = "";
+    const env = telemetryEnv("run-b", true);
+    const header = env.OTEL_EXPORTER_OTLP_HEADERS ?? "";
+    assert.match(
+      header,
+      /^Authorization=Bearer .+/,
+      "the exporter is now unauthenticated, and `middleware.ts` exempts the " +
+        "ingest path — so the route would be the only gate and it would refuse.",
+    );
+    const token = header.slice("Authorization=Bearer ".length);
+    assert.equal(runForIngestToken(token), "run-b");
+
+    // Stable across the cycles of one run: every cycle exports for the same run
+    // id, and a token per cycle would be one more thing to revoke on each of
+    // the paths a cycle can end on.
+    assert.equal(telemetryEnv("run-b", true).OTEL_EXPORTER_OTLP_HEADERS, header);
+
+    // And not another run's. The route takes the run id from the token, so this
+    // is what stops a record claiming a `uf.run_id` it does not hold.
+    const other = (telemetryEnv("run-c", true).OTEL_EXPORTER_OTLP_HEADERS ?? "")
+      .slice("Authorization=Bearer ".length);
+    assert.notEqual(other, token);
+    assert.equal(runForIngestToken(other), "run-c");
+  });
+
+  it("stops ingesting once the run has ended and its grace has passed", () => {
+    const token = (telemetryEnv("run-d", true).OTEL_EXPORTER_OTLP_HEADERS ?? "")
+      .slice("Authorization=Bearer ".length);
+    assert.equal(runForIngestToken(token), "run-d");
+
+    revokeIngestTokens("run-d");
+    // Still believed for the grace window: the exporter batches on a
+    // one-second timer, so revoking on the instant drops the tail of the last
+    // cycle and understates what the run spent.
+    assert.equal(runForIngestToken(token), "run-d");
+
+    const clock = Date.now;
+    try {
+      Date.now = () => clock() + 60_000;
+      assert.equal(runForIngestToken(token), null);
+    } finally {
+      Date.now = clock;
+    }
+    // Swept on the way past, so the map is bounded by live runs.
+    assert.equal(runForIngestToken(token), null);
+  });
+
+  it("refuses an empty or unknown bearer", () => {
+    // `middleware.ts` no longer gates this path, so "no token" must not read as
+    // "no check". An empty string is the shape a missing header arrives in.
+    assert.equal(runForIngestToken(""), null);
+    assert.equal(runForIngestToken("not-a-token"), null);
   });
 });
 

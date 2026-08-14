@@ -113,6 +113,11 @@ has anything to do with the task the agent was given — are no longer reachable
   containing shell metacharacters is inert.
 - `bypassPermissions` lets the agent run any command in the mounted folder
   without asking. The UI warns; the default is `acceptEdits`.
+- A run's telemetry exporter authenticates with a capability minted for that
+  run and revoked when it ends, never with `UF_AUTH_TOKEN`. It used to carry
+  the app's master token, in the agent's own environment, in a variable `env`
+  prints. The ingest route is exempt from the shared-secret gate and checks
+  that capability itself — as `/api/mcp` does, and for the same reason.
 - `UF_GITHUB_TOKEN` is handed to the agent's work cycles and to nothing else.
   The reviewer does not get it (it cannot write), and neither does the git this
   app runs itself — `worktree add` and `merge` execute hooks the repository

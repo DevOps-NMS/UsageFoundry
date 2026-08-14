@@ -30,7 +30,12 @@ import { scanUsage, type UsageEntry } from "./transcripts";
 import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
-import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
+import {
+  ingestTokenFor,
+  revokeIngestTokens,
+  telemetrySpendSince,
+  type TelemetrySpend,
+} from "./otlp";
 import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents";
 // The log's own extraction of what a tool call is about, so the parser retains
 // the same line for a call whose result comes back an error. Client-safe and
@@ -3447,17 +3452,25 @@ export function needsLiveSpendTelemetry(policy: BudgetPolicy): boolean {
  * to this app's own endpoint, and `/api/usage` still gates its card on the
  * setting.
  *
- * When `UF_AUTH_TOKEN` is set the exporter authenticates like any other
- * client, which is why `middleware.ts` needs no exemption for the ingest path.
+ * The exporter authenticates with a capability scoped to this one run, never
+ * with `UF_AUTH_TOKEN`. It used to carry that one: `childEnv` deletes `UF_*`
+ * from the child's environment and this merge put the app's master credential
+ * straight back, inside a variable `env` prints, for a Claude Code session with
+ * `Bash` — and it opens `POST /api/runs`, `PUT /api/settings`, every other run's
+ * diff and the approval route. `ingestTokenFor` mints something that opens one
+ * thing instead: writing telemetry for this run. `middleware.ts` therefore
+ * exempts the ingest path, and the route authenticates itself — the two go
+ * together, exactly as they do for `/api/mcp`.
+ *
+ * Exported for the test that pins the absence: no value returned here may
+ * contain `UF_AUTH_TOKEN`, and there is nothing else in the app that would
+ * notice if one did.
  */
-function telemetryEnv(runId: string, required = false): Record<string, string> {
+export function telemetryEnv(
+  runId: string,
+  required = false,
+): Record<string, string> {
   if (!required && !getSettings().telemetryForRuns) return {};
-
-  const headers: Record<string, string> = process.env.UF_AUTH_TOKEN
-    ? {
-        OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${process.env.UF_AUTH_TOKEN}`,
-      }
-    : {};
 
   return {
     CLAUDE_CODE_ENABLE_TELEMETRY: "1",
@@ -3467,10 +3480,13 @@ function telemetryEnv(runId: string, required = false): Record<string, string> {
     // Well under the default 5s, so a killed iteration loses less of its
     // final batch. It cannot be eliminated: a SIGKILL flushes nothing.
     OTEL_LOGS_EXPORT_INTERVAL: "1000",
-    // Stamped onto every record so a request can be attributed to this run.
-    // Interactive sessions carry no such attribute and stay unattributed.
+    // Stamped onto every record so a captured payload still says which run it
+    // claims to be. It is no longer what *decides* that: the ingest route takes
+    // the run id off the capability below, so a record naming another run
+    // cannot move spend onto it.
     OTEL_RESOURCE_ATTRIBUTES: `uf.run_id=${runId}`,
-    ...headers,
+    // base64url, so no comma or `=` to break this header's own key=value list.
+    OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${ingestTokenFor(runId)}`,
   };
 }
 
@@ -4948,6 +4964,11 @@ export async function startRun(id: string): Promise<void> {
     procs.delete(id);
     interrupts.delete(id);
     liveGuards.delete(id);
+    // The exporter's credential dies with the run's loop, the way the chat's
+    // dies with its turn — on a short grace, because the exporter batches on a
+    // one-second timer and revoking on the instant would drop the tail of the
+    // last cycle and understate what the run spent.
+    revokeIngestTokens(id);
 
     // Spend is only ever read from the CLI's `result` event, so a cycle killed
     // before that event lands contributes $0 to `spent_usd`. Say what was
