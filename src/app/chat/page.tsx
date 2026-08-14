@@ -973,7 +973,7 @@ function Decided({ proposal }: { proposal: ChatProposalDTO }) {
  * 80-character first message clipped away both the time and the waiting count,
  * which are the only two things telling these rows apart. Only the title
  * truncates, and it carries the full string for hover and assistive tech — the
- * pairing RunCard already uses.
+ * pairing the runs list already uses.
  */
 function ChatRow({
   entry,

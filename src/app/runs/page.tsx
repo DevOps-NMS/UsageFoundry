@@ -1,29 +1,29 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { RunDTO } from "@/lib/apiTypes";
 import {
-  STATUS_TONE,
+  fmtCycleInFlight,
   fmtCycles,
   fmtDateTime,
+  fmtRelative,
   fmtTokens,
   fmtUSD,
+  fmtWaitingFor,
   pollFailureMessage,
   shortPath,
 } from "@/lib/format";
-import { RunCard } from "@/components/RunCard";
+import { StatusMark } from "@/components/StatusMark";
 import { Badge } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
+import { Button, ButtonLink } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
-import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
+import {
+  SegmentedControl,
+  type SegmentedOption,
+} from "@/components/ui/SegmentedControl";
+import { Table, Td, Th, Tr } from "@/components/ui/Table";
 
 /**
  * Runs the orchestrator still owns: they will spend again on their own.
@@ -60,96 +60,32 @@ const SERVER_LIMIT = 100;
 
 type Filter = "all" | "completed" | "stopped" | "failed" | "blocked";
 
-const FILTERS: Array<{ id: Filter; label: string }> = [
-  { id: "all", label: "All" },
-  { id: "completed", label: "Completed" },
-  { id: "stopped", label: "Stopped" },
-  { id: "failed", label: "Failed" },
-  { id: "blocked", label: "Blocked" },
+const FILTERS: readonly SegmentedOption<Filter>[] = [
+  { value: "all", label: "All" },
+  { value: "completed", label: "Completed" },
+  { value: "stopped", label: "Stopped" },
+  { value: "failed", label: "Failed" },
+  { value: "blocked", label: "Blocked" },
 ];
 
 /**
- * A shape per status, drawn rather than coloured.
+ * The list view's own box and its pinned header.
  *
- * The word beside it is what a screen reader reads and what makes the state
- * unambiguous; the shape is what lets thirty rows be scanned without reading
- * any of them. Tone cannot do that job on its own here — `paused`, `stopped`
- * and `blocked` are all amber, so in greyscale or to a colour-blind operator
- * the badge would carry no signal at all until it was read word by word.
+ * Deliberately *not* the `overflow-x-auto` wrapper the tables elsewhere use:
+ * a scroll container of its own would make the header stick to a box that
+ * never scrolls, which is a no-op dressed as a feature. Without it the
+ * scrollport is the content pane, so the header pins under the toolbar as the
+ * page scrolls, which is what a Finder list does and the whole point of it.
+ * The cost is a horizontal page scrollbar on a window narrower than this app's
+ * own sidebar plus about 640px.
  */
-const STATUS_MARK: Record<RunDTO["status"], ReactNode> = {
-  running: <circle cx="5" cy="5" r="3.4" fill="currentColor" />,
-  // An arrow stopped by a bar — held behind something, rather than a third
-  // circle competing with `queued` and `blocked`.
-  waiting: (
-    <g fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
-      <path d="M1 5h3.6M3.4 3.2 5.2 5 3.4 6.8" />
-      <path d="M7.4 1.6v6.8" strokeWidth="1.7" />
-    </g>
-  ),
-  queued: (
-    <circle
-      cx="5"
-      cy="5"
-      r="3"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-    />
-  ),
-  paused: (
-    <path
-      d="M3.4 1.8v6.4M6.6 1.8v6.4"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-    />
-  ),
-  completed: (
-    <path
-      d="m1.7 5.2 2.3 2.3 4.3-4.8"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  ),
-  stopped: (
-    <rect x="1.8" y="1.8" width="6.4" height="6.4" rx="1.2" fill="currentColor" />
-  ),
-  failed: (
-    <path
-      d="M2.4 2.4 7.6 7.6M7.6 2.4 2.4 7.6"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-    />
-  ),
-  blocked: (
-    <g fill="none" stroke="currentColor" strokeWidth="1.5">
-      <circle cx="5" cy="5" r="3.2" />
-      <path d="M2.7 7.3 7.3 2.7" />
-    </g>
-  ),
-};
+const LIST_VIEW = "rounded-lg border border-line bg-surface";
 
-function StatusBadge({ status }: { status: RunDTO["status"] }) {
-  return (
-    <Badge tone={STATUS_TONE[status]}>
-      <svg viewBox="0 0 10 10" className="h-2.5 w-2.5 shrink-0" aria-hidden="true">
-        {STATUS_MARK[status]}
-      </svg>
-      {status}
-    </Badge>
-  );
-}
+const STICKY_HEAD =
+  "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
 
 /**
- * Where the run worked, as one line — the same construction `RunCard` uses, so
- * the card band and the table below it name a folder identically.
+ * Where the run worked, as one line.
  *
  * One tone rather than two: the mount used to be drawn in `ink-faint`, which is
  * 3.4:1 on the card surface in light mode, and this is a line a person reads
@@ -158,6 +94,46 @@ function StatusBadge({ status }: { status: RunDTO["status"] }) {
 function folderLabel(run: RunDTO): string {
   if (!run.mountLabel) return shortPath(run.folder, 2);
   return `${run.mountLabel} / ${run.relPath || "."}`;
+}
+
+/**
+ * What a run that is not working is waiting *on*, or null.
+ *
+ * Deliberately silent for `running`: that state's detail is the work cycle it
+ * has open, and `fmtCycleInFlight` is the only thing allowed to say it — in its
+ * own column, in its own words. Two places describing a running run is how one
+ * of them ends up added to the count beside it.
+ *
+ * `exact` is the precise instant behind a relative phrase, for the `title`.
+ */
+function waitingDetail(
+  run: RunDTO,
+  now: number,
+): { text: string; exact?: string } | null {
+  if (run.status === "waiting") {
+    // Always a sentence, even if the list somehow came back empty: a blank line
+    // on the one status whose whole meaning is "waiting for something" would
+    // read as a run that is waiting for nothing.
+    return { text: fmtWaitingFor(run.dependsOn) ?? "waiting for another run" };
+  }
+  if (run.status === "queued") {
+    const ahead = run.queuePosition ?? 0;
+    return {
+      text:
+        ahead === 0
+          ? "next up — starts when the folder frees"
+          : `${ahead} run${ahead === 1 ? "" : "s"} ahead`,
+    };
+  }
+  if (run.status === "paused") {
+    return run.resume_at
+      ? {
+          text: `tries again ${fmtRelative(run.resume_at, now)}`,
+          exact: new Date(run.resume_at).toLocaleString(),
+        }
+      : { text: "waiting for the 5-hour window" };
+  }
+  return null;
 }
 
 function SkeletonBar({ className = "" }: { className?: string }) {
@@ -180,18 +156,28 @@ function Unread() {
 }
 
 /**
- * Placeholder rows in the real grid, so the first poll lands into a table that
+ * Which set of columns a list draws.
+ *
+ * `active` carries the two facts only a live run has — what it is waiting on,
+ * and the work cycle it has open — and the controls that act on it. `history`
+ * carries what it ended up costing. A column that would be a dash in every row
+ * is not drawn, which is why this is two shapes rather than one with holes.
+ */
+type ListKind = "active" | "history";
+
+/**
+ * Placeholder rows in the real grid, so the first poll lands into a list that
  * is already the right shape. The alternative — an empty state until data
  * arrives — told the operator "no runs finished in the last 24 hours" before
  * anything had been read, then replaced it with a table.
  */
-function SkeletonRows() {
+function SkeletonRows({ kind }: { kind: ListKind }) {
   return (
     <>
       {["a", "b", "c"].map((key) => (
         <Tr key={key}>
           <Td aria-hidden="true">
-            <SkeletonBar className="w-14" />
+            <SkeletonBar className="w-16" />
           </Td>
           <Td aria-hidden="true">
             <SkeletonBar className="w-[58%]" />
@@ -201,14 +187,16 @@ function SkeletonRows() {
             <SkeletonBar className="ml-auto w-9" />
           </Td>
           <Td aria-hidden="true">
-            <SkeletonBar className="ml-auto w-10" />
-          </Td>
-          <Td aria-hidden="true">
-            <SkeletonBar className="ml-auto w-8" />
-          </Td>
-          <Td aria-hidden="true">
             <SkeletonBar className="ml-auto w-16" />
           </Td>
+          <Td aria-hidden="true">
+            <SkeletonBar className="ml-auto w-10" />
+          </Td>
+          {kind === "history" && (
+            <Td aria-hidden="true">
+              <SkeletonBar className="ml-auto w-16" />
+            </Td>
+          )}
         </Tr>
       ))}
     </>
@@ -216,101 +204,188 @@ function SkeletonRows() {
 }
 
 /**
- * Finished runs.
+ * The list view.
  *
- * Column order is the order the question is asked: how did it end, what was it,
- * then the three figures that get compared between rows. Every width but the
- * task's is fixed and every value in those columns is nowrap, so a four-second
- * poll cannot move a column edge — the task column absorbs the slack instead.
+ * Column order is the order the question is asked: how is it, what is it, then
+ * the figures that get compared between rows. Every width but the task's is
+ * fixed and every value in those columns is nowrap, so a four-second poll
+ * cannot move a column edge — the task column absorbs the slack instead.
  */
-function RunsTable({
+function RunList({
   runs,
+  kind,
   caption,
+  now,
   loading = false,
+  busyId = null,
+  onStop,
+  onResume,
 }: {
   runs: RunDTO[];
+  kind: ListKind;
   caption: string;
+  now: number;
   loading?: boolean;
+  busyId?: string | null;
+  onStop?: (id: string) => void;
+  onResume?: (id: string) => void;
 }) {
   return (
-    <TableWrap>
+    <div className={LIST_VIEW}>
       <Table>
         <caption className="sr-only">{caption}</caption>
         <thead>
           <tr>
-            <Th scope="col" className="w-[116px]">
+            <Th scope="col" className={`w-[150px] ${STICKY_HEAD}`}>
               Status
             </Th>
-            <Th scope="col" className="w-full">
+            <Th scope="col" className={`w-full ${STICKY_HEAD}`}>
               Run
             </Th>
             <Th
               scope="col"
               num
-              className="w-[104px]"
+              className={`w-[88px] ${STICKY_HEAD}`}
               title="Work cycles that finished, against the run's cap"
             >
               Cycles
             </Th>
-            <Th scope="col" num className="w-[96px]">
+            {kind === "active" ? (
+              <Th scope="col" className={`w-[150px] ${STICKY_HEAD}`}>
+                In flight
+              </Th>
+            ) : (
+              <Th scope="col" num className={`w-[88px] ${STICKY_HEAD}`}>
+                Tokens
+              </Th>
+            )}
+            <Th scope="col" num className={`w-[92px] ${STICKY_HEAD}`}>
               Spent
             </Th>
-            <Th scope="col" num className="w-[88px]">
-              Tokens
-            </Th>
-            <Th scope="col" num className="w-[128px]">
-              Finished
-            </Th>
+            {kind === "history" && (
+              <Th scope="col" num className={`w-[128px] ${STICKY_HEAD}`}>
+                Finished
+              </Th>
+            )}
+            {kind === "active" && (
+              <Th scope="col" className={STICKY_HEAD}>
+                <span className="sr-only">Controls</span>
+              </Th>
+            )}
           </tr>
         </thead>
         <tbody>
           {loading ? (
-            <SkeletonRows />
+            <SkeletonRows kind={kind} />
           ) : (
-            runs.map((r) => (
-              <Tr
-                key={r.id}
-                className="transition-colors duration-150 hover:bg-inset focus-within:bg-inset"
-              >
-                <Td className="align-top">
-                  <StatusBadge status={r.status} />
-                </Td>
-                <Td className="align-top">
-                  {/* The task is what tells two runs in the same project apart,
-                      so it leads and the folder hangs under it. Both truncate;
-                      both keep the whole value in `title`. */}
-                  <Link
-                    href={`/runs/${r.id}`}
-                    className="block max-w-[56ch] truncate font-medium text-ink hover:text-accent"
-                    title={r.prompt}
-                  >
-                    {r.prompt}
-                  </Link>
-                  <div
-                    className="mono mt-0.5 max-w-[56ch] truncate text-ink-muted"
-                    title={r.work_dir ?? r.folder}
-                  >
-                    {folderLabel(r)}
-                  </div>
-                </Td>
-                <Td num className="whitespace-nowrap align-top text-ink-muted">
-                  {fmtCycles(r.iterations, r.max_iterations)}
-                </Td>
-                <Td num className="whitespace-nowrap align-top">
-                  {fmtUSD(r.spent_usd)}
-                </Td>
-                <Td num className="whitespace-nowrap align-top text-ink-muted">
-                  {fmtTokens(r.spent_tokens)}
-                </Td>
-                <Td num className="whitespace-nowrap align-top text-ink-muted">
-                  {fmtDateTime(r.finished_at ?? r.started_at ?? r.created_at)}
-                </Td>
-              </Tr>
-            ))
+            runs.map((r) => {
+              const detail = kind === "active" ? waitingDetail(r, now) : null;
+              return (
+                <Tr
+                  key={r.id}
+                  // The row whose action is in flight is the nearest thing this
+                  // list has to a selection, and it is the one row the operator
+                  // is waiting on. `focus-within` is the keyboard's half of the
+                  // hover tint `Tr` already carries — a separate variant, so
+                  // neither of them is setting a background the other also sets.
+                  className={
+                    busyId === r.id
+                      ? "bg-selection focus-within:bg-inset"
+                      : "focus-within:bg-inset"
+                  }
+                >
+                  <Td className="align-top">
+                    <div className="flex items-center gap-2">
+                      <StatusMark status={r.status} />
+                      <span className="text-ink">{r.status}</span>
+                    </div>
+                    {detail && (
+                      <div
+                        className="mt-0.5 text-xs text-ink-muted"
+                        title={detail.exact}
+                      >
+                        {detail.text}
+                      </div>
+                    )}
+                  </Td>
+                  <Td className="align-top">
+                    {/* The task is what tells two runs in the same project
+                        apart, so it leads and the folder hangs under it. Both
+                        truncate; both keep the whole value in `title`. */}
+                    <Link
+                      href={`/runs/${r.id}`}
+                      className="block max-w-[56ch] truncate font-medium text-ink hover:text-accent"
+                      title={r.prompt}
+                    >
+                      {r.prompt}
+                    </Link>
+                    <div
+                      className="mono mt-0.5 max-w-[56ch] truncate text-ink-muted"
+                      title={r.work_dir ?? r.folder}
+                    >
+                      {folderLabel(r)}
+                    </div>
+                  </Td>
+                  <Td num className="whitespace-nowrap align-top text-ink-muted">
+                    {fmtCycles(r.iterations, r.max_iterations)}
+                  </Td>
+                  {kind === "active" ? (
+                    // Its own column, never folded into the count beside it:
+                    // `fmtCycles` counts cycles that *finished*, so a run reads
+                    // 0/2 for the whole of its first one — which is exactly what
+                    // a run that was marked running and never started reads.
+                    // `fmtCycleInFlight` is the only decider, wording included,
+                    // and it refuses the column on any status but running.
+                    <Td className="whitespace-nowrap align-top text-xs text-ink-muted">
+                      {fmtCycleInFlight(r) ?? "—"}
+                    </Td>
+                  ) : (
+                    <Td num className="whitespace-nowrap align-top text-ink-muted">
+                      {fmtTokens(r.spent_tokens)}
+                    </Td>
+                  )}
+                  <Td num className="whitespace-nowrap align-top">
+                    {fmtUSD(r.spent_usd)}
+                  </Td>
+                  {kind === "history" && (
+                    <Td num className="whitespace-nowrap align-top text-ink-muted">
+                      {fmtDateTime(r.finished_at ?? r.started_at ?? r.created_at)}
+                    </Td>
+                  )}
+                  {kind === "active" && (
+                    <Td className="whitespace-nowrap align-top">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {r.status === "paused" && onResume && (
+                          <Button
+                            variant="secondary"
+                            size="compact"
+                            disabled={busyId === r.id}
+                            onClick={() => onResume(r.id)}
+                          >
+                            Try now
+                          </Button>
+                        )}
+                        {onStop && (
+                          <Button
+                            variant="ghost"
+                            size="compact"
+                            disabled={busyId === r.id}
+                            onClick={() => onStop(r.id)}
+                            className="text-danger hover:bg-inset hover:text-danger"
+                          >
+                            Stop
+                          </Button>
+                        )}
+                      </div>
+                    </Td>
+                  )}
+                </Tr>
+              );
+            })
           )}
         </tbody>
       </Table>
-    </TableWrap>
+    </div>
   );
 }
 
@@ -431,12 +506,9 @@ export default function RunsPage() {
             says the task is done — or until one of your limits is reached.
           </p>
         </div>
-        <Link
-          href="/runs/new"
-          className="rounded-sm border border-transparent bg-accent px-3.5 py-2 text-sm font-medium text-white no-underline transition-[filter] duration-150 hover:brightness-110 hover:no-underline"
-        >
+        <ButtonLink href="/runs/new" variant="primary">
           New run
-        </Link>
+        </ButtonLink>
       </div>
 
       {/* Present even when empty, so the message is announced when it arrives
@@ -446,7 +518,7 @@ export default function RunsPage() {
         {actionError && <Notice tone="danger">{actionError}</Notice>}
       </div>
 
-      <section className="mb-8">
+      <div className="mb-8">
         <CardTitle>
           In flight
           {active.length > 0 && <Badge tone="accent">{active.length}</Badge>}
@@ -457,11 +529,16 @@ export default function RunsPage() {
             : ""}
         </p>
         {!loaded ? (
-          <Card emphasis="quiet">
-            <Empty>
-              <span className="text-ink-muted">Reading runs…</span>
-            </Empty>
-          </Card>
+          <div aria-busy="true">
+            <span className="sr-only">Reading runs…</span>
+            <RunList
+              runs={[]}
+              kind="active"
+              loading
+              now={now}
+              caption="Runs in flight, still loading"
+            />
+          </div>
         ) : blank ? (
           <Card emphasis="quiet">
             <Unread />
@@ -480,34 +557,37 @@ export default function RunsPage() {
             </Empty>
           </Card>
         ) : (
-          // items-start so a short queued card does not stretch to match a tall
-          // running one and leave a block of dead space inside it.
-          <div className="grid items-start gap-4 md:grid-cols-2">
-            {active.map((r) => (
-              <RunCard
-                key={r.id}
-                run={r}
-                now={now}
-                onStop={stop}
-                onResume={resume}
-                busy={busyId === r.id}
-              />
-            ))}
-          </div>
+          <RunList
+            runs={active}
+            kind="active"
+            now={now}
+            busyId={busyId}
+            onStop={stop}
+            onResume={resume}
+            caption="Runs in flight, the ones spending now first"
+          />
         )}
-      </section>
+      </div>
 
-      <section className="mb-8">
+      <div className="mb-8">
         <CardTitle>Finished in the last 24 hours</CardTitle>
-        <Card emphasis="quiet">
-          {!loaded ? (
-            <div aria-busy="true">
-              <span className="sr-only">Reading runs…</span>
-              <RunsTable runs={[]} loading caption="Runs, still loading" />
-            </div>
-          ) : blank ? (
+        {!loaded ? (
+          <div aria-busy="true">
+            <span className="sr-only">Reading runs…</span>
+            <RunList
+              runs={[]}
+              kind="history"
+              loading
+              now={now}
+              caption="Runs, still loading"
+            />
+          </div>
+        ) : blank ? (
+          <Card emphasis="quiet">
             <Unread />
-          ) : recent.length === 0 ? (
+          </Card>
+        ) : recent.length === 0 ? (
+          <Card emphasis="quiet">
             <Empty>
               <div className="font-medium text-ink">Nothing finished today</div>
               <div className="mx-auto mt-1 max-w-[46ch] text-ink-muted">
@@ -515,72 +595,59 @@ export default function RunsPage() {
                 done, ran out of work cycles, or hit a limit.
               </div>
             </Empty>
-          ) : (
-            <RunsTable
-              runs={recent}
-              caption="Runs that finished in the last 24 hours, newest first"
-            />
-          )}
-        </Card>
-      </section>
+          </Card>
+        ) : (
+          <RunList
+            runs={recent}
+            kind="history"
+            now={now}
+            caption="Runs that finished in the last 24 hours, newest first"
+          />
+        )}
+      </div>
 
       {older.length > 0 && (
-        <section>
-          <details>
-            {/* No `display` utility here on purpose: anything but `list-item`
-                drops the native disclosure triangle, and the triangle is the
-                only thing saying this opens. */}
-            <summary className="mb-3 cursor-pointer py-2 text-xs font-semibold uppercase tracking-wider text-ink-muted transition-colors duration-150 marker:text-ink-faint hover:text-ink">
-              Older runs ({older.length})
-            </summary>
+        <details>
+          {/* No `display` utility here on purpose: anything but `list-item`
+              drops the native disclosure triangle, and the triangle is the
+              only thing saying this opens. */}
+          <summary className="ui-transition mb-3 cursor-pointer py-2 text-sm font-semibold text-ink-muted marker:text-ink-faint hover:text-ink">
+            Older runs ({older.length})
+          </summary>
+          <div className="mb-3">
+            <SegmentedControl
+              label="Show older runs by how they ended"
+              options={FILTERS}
+              value={filter}
+              onChange={setFilter}
+            />
+          </div>
+          {olderFiltered.length === 0 ? (
             <Card emphasis="quiet">
-              <div
-                role="group"
-                aria-label="Show older runs by how they ended"
-                className="mb-3 flex flex-wrap gap-1.5"
-              >
-                {FILTERS.map((f) => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    aria-pressed={filter === f.id}
-                    onClick={() => setFilter(f.id)}
-                    className={`cursor-pointer rounded-full border px-3.5 py-2 text-xs font-medium transition-colors duration-150 ${
-                      filter === f.id
-                        ? "border-accent bg-accent-dim text-ink"
-                        : "border-line bg-inset text-ink-muted hover:border-line-strong hover:text-ink"
-                    }`}
-                  >
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-              {olderFiltered.length === 0 ? (
-                <Empty>
-                  <div className="text-ink-muted">
-                    No older run ended that way.
-                  </div>
-                  <div className="mt-2">
-                    <Button variant="secondary" onClick={() => setFilter("all")}>
-                      Show all {older.length}
-                    </Button>
-                  </div>
-                </Empty>
-              ) : (
-                <RunsTable
-                  runs={olderFiltered}
-                  caption="Older runs, newest first"
-                />
-              )}
-              {runs.length >= SERVER_LIMIT && (
-                <div className="mt-3 text-xs text-ink-muted">
-                  Showing the {SERVER_LIMIT} most recent runs — the list route
-                  does not page beyond that yet.
+              <Empty>
+                <div className="text-ink-muted">No older run ended that way.</div>
+                <div className="mt-2">
+                  <Button variant="secondary" onClick={() => setFilter("all")}>
+                    Show all {older.length}
+                  </Button>
                 </div>
-              )}
+              </Empty>
             </Card>
-          </details>
-        </section>
+          ) : (
+            <RunList
+              runs={olderFiltered}
+              kind="history"
+              now={now}
+              caption="Older runs, newest first"
+            />
+          )}
+          {runs.length >= SERVER_LIMIT && (
+            <p className="mt-3 text-xs text-ink-muted">
+              Showing the {SERVER_LIMIT} most recent runs — the list route does
+              not page beyond that yet.
+            </p>
+          )}
+        </details>
       )}
     </>
   );
