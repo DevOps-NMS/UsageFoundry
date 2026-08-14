@@ -976,13 +976,16 @@ export interface ContinuedBranch {
  * would show and land only the last link and leave the earlier agents' commits
  * invisible in every one of them.
  *
- * A continuation that cannot be honoured **throws**. Everything else here
- * degrades to `mode: "none"` with a reason, which is right for a run that
- * merely asked for a checkout: it still does the work the operator asked for,
- * in the folder, serialised. A continuation degraded that way would silently do
- * something else entirely — start from the target branch with the predecessor's
- * commits nowhere in sight, which is the exact failure this mode exists to
- * prevent. So it is a sentence and a refusal, never a downgrade.
+ * A continuation that cannot be honoured **throws**, and so does an ordinary
+ * isolated run on a repository whose checkout slots have run out. What still
+ * degrades to `mode: "none"` with a reason is isolation being *unavailable* —
+ * not a git repository, a bare one, submodules, isolation switched off — where
+ * working in the folder is still the work the operator asked for. Running out
+ * of slots is not one of those: isolation is available and used up, and putting
+ * the run in the folder instead means an agent editing the operator's own
+ * checkout on whatever branch it is standing on, which is the failure isolation
+ * exists to prevent rather than a lesser form of it. So both are a sentence and
+ * a refusal, never a downgrade.
  */
 export function resolveIsolation(o: {
   runId: string;
@@ -998,6 +1001,16 @@ export function resolveIsolation(o: {
   inheritedSlot: string | null;
   /** The next free checkout slot for this repository, or null when none is. */
   freeSlot: string | null;
+  /**
+   * What the allocator saw when `freeSlot` is null, for the refusal to name.
+   *
+   * Required rather than optional so a caller cannot drop it by omission and
+   * silently turn a sentence that says which of the three causes took the slots
+   * into one that says nothing. Null is legitimate and means no allocation was
+   * attempted — a continuation working in the checkout it inherited, or a
+   * folder that cannot be isolated at all.
+   */
+  slotCensus: SlotCensus | null;
 }): IsolationPlan {
   const cont = o.continueFrom;
 
@@ -1014,7 +1027,14 @@ export function resolveIsolation(o: {
   if (!cont) {
     if (o.probe.mode !== "worktree" || !o.probe.repoRoot) return o.probe;
     if (!o.freeSlot) {
-      return { mode: "none", reason: slotExhaustionReason(o.probe.repoRoot) };
+      // The one downgrade that was never an answer. Every other `mode: "none"`
+      // here is isolation being *unavailable* — not a repository, a bare repo,
+      // submodules — where working in the folder is still the work the operator
+      // asked for. This one is isolation being available and used up, and
+      // absorbing it puts an agent in the operator's own checkout on whatever
+      // branch it is standing on, unable even to commit. Same reasoning as the
+      // continuation refusal below, which has said so since it was written.
+      throw new Error(slotExhaustionRefusal(o.probe.repoRoot, o.slotCensus));
     }
     return {
       ...o.probe,
@@ -1056,9 +1076,10 @@ export function resolveIsolation(o: {
 
   const slot = o.inheritedSlot ?? o.freeSlot;
   if (!slot) {
-    // Not `slotExhaustionReason`, which ends "so this run works in the folder
-    // directly and waits its turn" — the sentence for a downgrade, and this is
-    // not one. Working in the folder would put the run on the target branch.
+    // Its own sentence rather than `slotExhaustionRefusal`, which is worded for
+    // a run that merely asked for a checkout: this one names the predecessor,
+    // because what is lost is that run's commits and not just the isolation.
+    // Both refuse — this branch always did, and the ordinary one now does too.
     throw new Error(
       `Set to continue ${name}'s branch (${cont.branch}), but every isolated checkout for this ` +
         "repository still holds uncommitted work and there is nowhere to put this one. Commit or " +
@@ -1118,7 +1139,7 @@ export function worktreeSlug(relPath: string): string {
 }
 
 /** `worktreeSlug` for a repository, however it is named inside its mount. */
-function repoSlug(repoRoot: string): string {
+export function repoSlug(repoRoot: string): string {
   return worktreeSlug(describeFolder(repoRoot).relPath || path.basename(repoRoot));
 }
 
@@ -1210,8 +1231,13 @@ export function probeIsolation(folder: string): IsolationPlan {
   return { mode: "worktree", repoRoot, base: head.stdout, baseBranch };
 }
 
-/** Where a repo's isolated checkouts live: a hidden sibling inside the mount. */
-function worktreeStore(repoRoot: string): string | null {
+/**
+ * Where a repo's isolated checkouts live: a hidden sibling inside the mount.
+ *
+ * Read-only, unlike `prepareWorktreeStore`, which validates and creates — this
+ * is for a caller that wants to look at the store rather than write into it.
+ */
+export function worktreeStore(repoRoot: string): string | null {
   const { mountId } = describeFolder(repoRoot);
   const mount = mountId ? mountById(mountId) : null;
   if (!mount) return null;
@@ -1694,10 +1720,59 @@ function occupantOf(
   return null;
 }
 
+/**
+ * Checkout slots one repository may have at once.
+ *
+ * A ceiling on *checkouts*, which is not the same quantity as
+ * `settings.maxConcurrentRuns` and is deliberately far above it: a slot is
+ * reused, so what consumes this is the number of runs working on the repository
+ * right now **plus** every slot `slotIsDirty` has retired until somebody commits
+ * or deletes what is in it. Only the first term is what the concurrency cap
+ * bounds, and the second has no ceiling of its own and does not decay — so the
+ * headroom between them is the whole of the margin, and running out of it is a
+ * refusal (`slotExhaustionRefusal`) rather than something to absorb.
+ */
+export const MAX_WORKTREE_SLOTS = 64;
+
+/**
+ * What the allocator saw when it could not find a free checkout.
+ *
+ * Carried into the refusal because the three causes want different actions from
+ * the operator and the old sentence asserted one of them ("every checkout still
+ * holds uncommitted work") whatever it had actually found — so a repository
+ * whose slots were simply all in use was reported as one needing cleaning up.
+ */
+export interface SlotCensus {
+  /** Slot numbers examined: `MAX_WORKTREE_SLOTS`, or 0 when the mount is gone. */
+  ceiling: number;
+  /** Held by a run that is queued, running or paused. */
+  heldByRuns: number;
+  /** Holding uncommitted work, or unreadable — `slotIsDirty`'s answer. */
+  dirty: number;
+  /** A checkout of a different repository sharing the store. */
+  foreign: number;
+  /** Where the checkouts live, or null when the mount is gone. */
+  store: string | null;
+}
+
+/**
+ * The allocator's answer: a slot, or why there was not one.
+ *
+ * A union rather than `string | null` beside an always-populated census,
+ * because the walk stops at the first free slot and the counts it has by then
+ * describe nothing.
+ */
+type SlotAllocation = { slot: string } | { slot: null; census: SlotCensus };
+
 /** Lowest checkout slot for this repo that no live run already holds. */
-function allocateSlotPath(repoRoot: string): string | null {
+function allocateSlotPath(repoRoot: string): SlotAllocation {
   const store = worktreeStore(repoRoot);
-  if (!store) return null;
+  if (!store) {
+    return {
+      slot: null,
+      census: { ceiling: 0, heldByRuns: 0, dirty: 0, foreign: 0, store: null },
+    };
+  }
 
   // Named from the repository's path within its mount, not its basename. The
   // folder listing is built for `org/repo` layouts, so two repos called `api`
@@ -1712,28 +1787,84 @@ function allocateSlotPath(repoRoot: string): string | null {
       .filter((p): p is string => !!p),
   );
 
-  for (let slot = 1; slot <= 64; slot++) {
+  const census: SlotCensus = {
+    ceiling: MAX_WORKTREE_SLOTS,
+    heldByRuns: 0,
+    dirty: 0,
+    foreign: 0,
+    store,
+  };
+
+  for (let slot = 1; slot <= MAX_WORKTREE_SLOTS; slot++) {
     const candidate = path.join(store, `${slug}-${slot}`);
+    if (taken.has(candidate)) {
+      census.heldByRuns++;
+      continue;
+    }
     // Skip a slot left dirty by an earlier run: reusing it would either destroy
     // that work or fail at setup. Taking the next number keeps the new run
     // moving and leaves the old one recoverable.
-    if (taken.has(candidate) || slotIsDirty(candidate)) continue;
+    if (slotIsDirty(candidate)) {
+      census.dirty++;
+      continue;
+    }
     // And skip a checkout of a *different* repository, which neither test above
     // can see — it is clean, and nothing holds it — but which `worktree add`
     // refuses outright. Returning it would mean a run that fails at setup with
     // a git error about a path, where taking the next number costs nothing.
-    if (foreignSlotOwner(candidate, repoRoot)) continue;
-    return candidate;
+    if (foreignSlotOwner(candidate, repoRoot)) {
+      census.foreign++;
+      continue;
+    }
+    return { slot: candidate };
   }
-  return null;
+  return { slot: null, census };
 }
 
-/** Directory the operator has to deal with when checkouts stop being reusable. */
-function slotExhaustionReason(repoRoot: string): string {
-  const store = worktreeStore(repoRoot);
+/**
+ * Why an isolated run cannot be given a checkout, in the operator's terms.
+ *
+ * A refusal rather than a reason, and the difference is the whole of what this
+ * sentence is for. It used to end "…so this run works in the folder directly
+ * and waits its turn", which is `mode: "none"` — an agent editing the
+ * operator's own checkout, on whatever branch that checkout is standing on,
+ * with no grant to commit (`buildArgs` gives `git add`/`git commit` to an
+ * isolated run only). The operator asked for isolation and got the one outcome
+ * isolation exists to prevent, announced as though it were a scheduling note.
+ *
+ * So it names what was expected (the ceiling, and where the checkouts live) and
+ * what was seen (which of the three causes actually used the slots up), because
+ * each of the three wants a different thing done: commit or delete what is left
+ * behind, wait for runs to finish, or remove a directory that belongs to
+ * another repository.
+ */
+function slotExhaustionRefusal(repoRoot: string, census: SlotCensus | null): string {
+  if (census && census.ceiling === 0) {
+    return (
+      `This run asked for its own checkout of ${repoRoot}, and the workspace mount that would ` +
+      "hold one is no longer configured, so there is nowhere to put it."
+    );
+  }
+
+  const store = census?.store ?? ".uf-worktrees";
+  const seen = census
+    ? [
+        census.heldByRuns > 0 ? `${census.heldByRuns} held by runs in flight` : null,
+        census.dirty > 0 ? `${census.dirty} still holding uncommitted work` : null,
+        census.foreign > 0
+          ? `${census.foreign} belonging to another repository`
+          : null,
+      ]
+        .filter((part): part is string => part !== null)
+        .join(", ")
+    : "";
+
   return (
-    "Every isolated checkout for this repository still holds uncommitted work, " +
-    `so this run works in the folder directly and waits its turn. Commit or delete what is left in ${store ?? ".uf-worktrees"} to get parallel runs back.`
+    `No checkout is left for ${repoRoot}: all ${census?.ceiling ?? MAX_WORKTREE_SLOTS} slots in ` +
+    `${store} are spoken for${seen ? ` — ${seen}` : ""}. This run asked for one of its own, and ` +
+    "working in the folder instead would put an agent on your branch, so it is refused rather " +
+    "than moved there. Commit or delete what those checkouts hold, or wait for a run to finish, " +
+    "then start this run again."
   );
 }
 
@@ -1783,16 +1914,20 @@ function planWorkspace(
       ? continueFrom.worktree_path
       : null;
 
+  // Not allocated for a continuation that already has its slot: allocation is a
+  // claim, and claiming a second checkout it will not use would take one out of
+  // circulation for every other run on the repository.
+  const allocation =
+    repoRoot && !inheritedSlot ? allocateSlotPath(repoRoot) : null;
+
   const plan = resolveIsolation({
     runId: id,
     isolate,
     probe,
     continueFrom: continueFrom ? continuedBranchOf(continueFrom) : null,
     inheritedSlot,
-    // Not allocated for a continuation that already has its slot: allocation is
-    // a claim, and claiming a second checkout it will not use would take one
-    // out of circulation for every other run on the repository.
-    freeSlot: repoRoot && !inheritedSlot ? allocateSlotPath(repoRoot) : null,
+    freeSlot: allocation?.slot ?? null,
+    slotCensus: allocation && allocation.slot === null ? allocation.census : null,
   });
 
   return {

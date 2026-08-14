@@ -501,6 +501,15 @@ describe("isolation for the three modes", () => {
     worktreePath: "/ws/.uf-worktrees/repo-1",
   };
 
+  /** What the allocator saw with every slot spoken for. */
+  const census = {
+    ceiling: 64,
+    heldByRuns: 25,
+    dirty: 39,
+    foreign: 0,
+    store: "/ws/.uf-worktrees" as string | null,
+  };
+
   const args = {
     runId: "aaaaaaaa-0000-0000-0000-000000000000",
     isolate: true,
@@ -508,6 +517,7 @@ describe("isolation for the three modes", () => {
     continueFrom: null as typeof predecessor | null,
     inheritedSlot: null as string | null,
     freeSlot: "/ws/.uf-worktrees/repo-2" as string | null,
+    slotCensus: null as typeof census | null,
   };
 
   it("cuts a fresh branch from the folder's HEAD when nothing is continued", () => {
@@ -607,15 +617,51 @@ describe("isolation for the three modes", () => {
     }
   });
 
-  it("still downgrades an ordinary run that cannot be isolated", () => {
-    // The other side of that asymmetry, unchanged: these are reasons, not
-    // refusals, and the run works in the folder.
+  it("still downgrades an ordinary run where isolation is unavailable", () => {
+    // The other side of that asymmetry, unchanged: isolation being *unavailable*
+    // here — not a repository, a bare one, submodules — is a reason and not a
+    // refusal, and the run does the work it was given, in the folder.
     const notARepo = { mode: "none" as const, reason: "Not a git repository." };
     assert.deepEqual(resolveIsolation({ ...args, probe: notARepo }), notARepo);
+  });
 
-    const exhausted = resolveIsolation({ ...args, freeSlot: null });
-    assert.equal(exhausted.mode, "none");
-    assert.match(exhausted.reason ?? "", /uncommitted work/);
+  it("refuses an ordinary isolated run when the slots have run out", () => {
+    // This used to be the other half of the test above, and it was the bug: a
+    // run that asked for a checkout and could not have one was moved into the
+    // operator's own checkout, on whatever branch that checkout was standing
+    // on, under `acceptEdits` and without even the `git add`/`git commit` grant
+    // `buildArgs` gives an isolated run — announced as a scheduling note. Slots
+    // running out is isolation being *used up*, not unavailable, and the
+    // downgrade is the exact outcome isolation exists to prevent.
+    assert.throws(
+      () => resolveIsolation({ ...args, freeSlot: null, slotCensus: census }),
+      (err: Error) => {
+        assert.match(err.message, /No checkout is left for \/ws\/repo/);
+        // What was expected, and where to go and look.
+        assert.match(err.message, /all 64 slots in \/ws\/\.uf-worktrees/);
+        // What was seen. The old sentence asserted uncommitted work whatever it
+        // had found, so a repository whose slots were simply all in use read as
+        // one that needed cleaning up.
+        assert.match(err.message, /25 held by runs in flight/);
+        assert.match(err.message, /39 still holding uncommitted work/);
+        return true;
+      },
+    );
+  });
+
+  it("names the mount rather than the slots when the mount has gone", () => {
+    // `worktreeStore` answering null is not exhaustion, and telling the
+    // operator to go and clean up a directory that is not configured any more
+    // sends them looking for something that does not exist.
+    assert.throws(
+      () =>
+        resolveIsolation({
+          ...args,
+          freeSlot: null,
+          slotCensus: { ceiling: 0, heldByRuns: 0, dirty: 0, foreign: 0, store: null },
+        }),
+      /workspace mount that would hold one is no longer configured/,
+    );
   });
 });
 
