@@ -79,6 +79,7 @@ const {
   toolResultFailures,
   worktreeSlug,
   MAX_PAUSES_PER_RUN,
+  MAX_RESUMES_PER_SWEEP,
   MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
 
@@ -1077,9 +1078,25 @@ describe("refusal wake-up time", () => {
   const now = 1_700_000_000_000;
   const min = 5 * 60_000;
   const hour = 3_600_000;
+  /**
+   * The bottom of the spread, so every case below is about what it was about.
+   *
+   * The wait is jittered now — see the fleet cases at the end — and the jitter
+   * is a parameter for exactly this: passed `() => 0` it contributes nothing,
+   * so the ladder, the floor and the cap are still pinned at the same numbers
+   * they were before the spread existed.
+   */
+  const noJitter = () => 0;
+  /** The top of it. `Math.random` never returns 1, so this is the open bound. */
+  const allJitter = () => 1;
 
   it("waits for the window when one is still open, plus the settling margin", () => {
-    const at = refusalResumeAt({ boundary: now + 2 * hour, pauseCount: 0, now });
+    const at = refusalResumeAt({
+      boundary: now + 2 * hour,
+      pauseCount: 0,
+      now,
+      random: noJitter,
+    });
     assert.equal(at > now + 2 * hour, true);
     assert.equal(at <= now + 2 * hour + 2 * 60_000, true);
   });
@@ -1087,34 +1104,62 @@ describe("refusal wake-up time", () => {
   it("backs off when the boundary it can see has already passed", () => {
     // The derived boundary is floored to the hour, so it can be up to an hour
     // early. Trusting it here would re-spawn straight back into the wall.
-    const first = refusalResumeAt({ boundary: now - hour, pauseCount: 0, now });
-    const second = refusalResumeAt({ boundary: now - hour, pauseCount: 1, now });
-    const third = refusalResumeAt({ boundary: now - hour, pauseCount: 2, now });
+    const rung = (pauseCount: number, random: () => number) =>
+      refusalResumeAt({ boundary: now - hour, pauseCount, now, random });
+    const first = rung(0, noJitter);
+    const second = rung(1, noJitter);
+    const third = rung(2, noJitter);
     assert.equal(first > now + min, true);
     assert.equal(second > first, true);
     assert.equal(third > second, true);
     // Three waits have to cover the floor-to-hour error, or the feature never
     // reaches the reset it is waiting for.
     assert.equal(third - now >= hour, true);
+
+    // And it still climbs once the spread is on it — the case that is not
+    // implied by the three above, since a band wider than the gap to the next
+    // rung would leave "the second failure in a row waits longer" true only on
+    // average, which is not a thing to be true on average.
+    assert.equal(rung(1, noJitter) > rung(0, allJitter), true);
+    assert.equal(rung(2, noJitter) > rung(1, allJitter), true);
   });
 
   it("backs off identically when it can see no window at all", () => {
     assert.equal(
-      refusalResumeAt({ boundary: null, pauseCount: 0, now }),
-      refusalResumeAt({ boundary: now - hour, pauseCount: 0, now }),
+      refusalResumeAt({ boundary: null, pauseCount: 0, now, random: noJitter }),
+      refusalResumeAt({
+        boundary: now - hour,
+        pauseCount: 0,
+        now,
+        random: noJitter,
+      }),
     );
   });
 
   it("never re-spawns immediately, whatever the arithmetic says", () => {
-    // A boundary one second out would otherwise mean a spawn per second.
+    // A boundary one second out would otherwise mean a spawn per second. The
+    // floor sits under the spread rather than over it, so the bottom of the
+    // band is the case that has to hold.
     assert.equal(
-      refusalResumeAt({ boundary: now + 1_000, pauseCount: 0, now }) >= now + min,
+      refusalResumeAt({
+        boundary: now + 1_000,
+        pauseCount: 0,
+        now,
+        random: noJitter,
+      }) >= now + min,
       true,
     );
   });
 
   it("never holds a folder for longer than a window plus slack", () => {
-    const at = refusalResumeAt({ boundary: now + 40 * hour, pauseCount: 0, now });
+    // Read at the top of the spread: the jitter is added after the cap, so
+    // this is the assertion that says it is clamped again afterwards.
+    const at = refusalResumeAt({
+      boundary: now + 40 * hour,
+      pauseCount: 0,
+      now,
+      random: allJitter,
+    });
     assert.equal(at <= now + 6 * hour, true);
   });
 
@@ -1126,9 +1171,100 @@ describe("refusal wake-up time", () => {
       boundary: null,
       pauseCount: MAX_PAUSES_PER_RUN,
       now,
+      random: allJitter,
     });
     assert.equal(Number.isFinite(atCap), true);
     assert.equal(atCap <= now + 6 * hour, true);
+  });
+
+  /**
+   * The fleet, which is where this stopped being right.
+   *
+   * Everything above is a statement about one run, and every input to it is
+   * shared: the ladder is a module constant and the boundary comes from a
+   * transcript scan that is *coalesced* across concurrent callers, so
+   * twenty-five runs refused inside the same minute read one boundary and, with
+   * no randomisation anywhere, computed one answer between them — reproduced by
+   * the budgets sweep as literally one distinct `resume_at` across twenty-five
+   * runs. They then woke in one sweep, spawned in one turn, met the same wall
+   * and re-parked together, three times, at which point the cap ended the fleet.
+   */
+  describe("with a fleet sharing one wall", () => {
+    /**
+     * A fixed sequence, so the assertions below are decided by the arithmetic
+     * rather than by which draws this run happened to get. Any generator would
+     * do; this one is the smallest thing that is neither sorted nor repeating,
+     * which is what a real `Math.random` has in common with it.
+     */
+    function lcg(seed: number): () => number {
+      let state = seed >>> 0;
+      return () => {
+        state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+        return state / 4_294_967_296;
+      };
+    }
+
+    /** Twenty-five runs refused in the same instant, a millisecond apart. */
+    function fleet(boundary: number | null, pauseCount = 0): number[] {
+      const random = lcg(20250814);
+      return Array.from({ length: 25 }, (_, i) =>
+        refusalResumeAt({ boundary, pauseCount, now: now + i, random }),
+      );
+    }
+
+    it("does not wake twenty-five runs at one instant", () => {
+      // The reproduction from the issue: one shared boundary, `now` values a
+      // millisecond apart, and before the spread every one of these collapsed
+      // to a single value because the boundary branch discards `now` entirely.
+      const wakes = fleet(now + 2 * hour);
+      const distinct = new Set(wakes).size;
+      assert.equal(
+        distinct >= 24,
+        true,
+        `twenty-five runs produced ${distinct} distinct wake times`,
+      );
+
+      // Distinct is not enough on its own — twenty-five instants a millisecond
+      // apart are also distinct, and the sweeper looks once a minute, so they
+      // would still be one tick and one `promoteQueued()`. What matters is the
+      // width of the band.
+      const spread = Math.max(...wakes) - Math.min(...wakes);
+      assert.equal(
+        spread >= 10 * 60_000,
+        true,
+        `the wake times span ${Math.round(spread / 60_000)} minutes`,
+      );
+    });
+
+    it("spreads the backoff rungs too, not only the boundary", () => {
+      // A refused run whose visible boundary has already passed falls through
+      // to the ladder, which is a module constant — so this is the branch where
+      // the herd is at its most exact. All three rungs are used, because the
+      // second and third collisions are the ones that end the fleet.
+      for (const pauseCount of [0, 1, 2]) {
+        const wakes = fleet(now - hour, pauseCount);
+        const spread = Math.max(...wakes) - Math.min(...wakes);
+        assert.equal(
+          spread >= 5 * 60_000,
+          true,
+          `rung ${pauseCount} spans only ${Math.round(spread / 60_000)} minutes`,
+        );
+      }
+    });
+
+    it("still refuses to wake any of them early, or to hold one past the cap", () => {
+      // The spread is bounded on both sides by the rules that were already
+      // here, so widening it can never buy a re-spawn straight into the wall
+      // or a folder held for a day.
+      // Each run's own `now` is a millisecond later than the last, and both
+      // bounds are relative to it.
+      fleet(now + 1_000).forEach((at, i) => {
+        assert.equal(at >= now + i + min, true);
+      });
+      fleet(now + 40 * hour).forEach((at, i) => {
+        assert.equal(at <= now + i + 6 * hour, true);
+      });
+    });
   });
 });
 
@@ -2150,5 +2286,46 @@ describe("applying the sweeper's decision", () => {
       "stopped",
       "the flip is guarded on `status='paused'`, so the operator's stop wins",
     );
+  });
+
+  it("hands back only so many parked runs per tick", async () => {
+    // The half of the herd the jitter on `resume_at` cannot reach. A fleet
+    // parked before the spread existed, or bunched against the
+    // `MIN_REFUSAL_WAIT_MS` floor, or simply carrying a null, is due in one
+    // tick — and every one of them used to be flipped to `queued` in a single
+    // pass and handed to one `promoteQueued()`, which starts everything
+    // startable in one synchronous turn. `maxConcurrentRuns` ships as `null`,
+    // so nothing downstream bounds that wave either.
+    //
+    // The cap fills the concurrency slot as well, which is what keeps this test
+    // from spawning: with one run already `running` from the case above, the
+    // promotion at the end of the sweep has nothing to start.
+    saveSettings({ maxConcurrentRuns: 1 });
+    const parked = Array.from({ length: MAX_RESUMES_PER_SWEEP + 2 }, (_, i) =>
+      insertRun({ status: "paused", workDir: `${ws}/herd-${i}` }),
+    );
+
+    await sweepPaused();
+
+    const queued = parked.filter((id) => getRun(id)!.status === "queued");
+    assert.equal(
+      queued.length,
+      MAX_RESUMES_PER_SWEEP,
+      "one tick must not queue the whole parked fleet",
+    );
+    assert.deepEqual(
+      queued,
+      parked.slice(0, MAX_RESUMES_PER_SWEEP),
+      "and it must still be the oldest first — the cap is a rate, not a reshuffle",
+    );
+    for (const id of parked.slice(MAX_RESUMES_PER_SWEEP)) {
+      const row = getRun(id)!;
+      assert.equal(row.status, "paused", "the rest wait for the next tick");
+      // Nothing written, so nothing rewritten every 60 seconds into a table
+      // with no retention — `FOLDER_TAKEN_REASON`'s rule, one branch over.
+      assert.equal(row.stop_reason, null);
+    }
+
+    saveSettings({ maxConcurrentRuns: null });
   });
 });

@@ -847,6 +847,76 @@ function refusalInStderr(tail: string): string | null {
   );
 }
 
+/**
+ * How wide a wait is spread, as a fraction of the wait itself.
+ *
+ * One design for every wait in this file, because they all fail the same way.
+ * Nothing here was randomised, and every input to the arithmetic is shared: the
+ * ladders are module constants, and the boundary comes from a `currentSnapshot()`
+ * whose file scan is *coalesced* across concurrent callers, so twenty-five runs
+ * refused inside the same minute read one block boundary and compute one answer
+ * between them. Reproduced by the budgets sweep at exactly that: one distinct
+ * `resume_at` across twenty-five runs. They then wake together, spawn together
+ * and — because the boundary is approximate in both directions — are refused
+ * together, three times, at which point `MAX_PAUSES_PER_RUN` ends the fleet.
+ *
+ * Half the wait, so the band is wide enough to matter and the ladder still
+ * climbs strictly: each rung's floor stays above the one below's ceiling, which
+ * is what keeps "the second failure in a row waits longer" true of every pair
+ * rather than only on average.
+ */
+const JITTER_FRACTION = 0.5;
+
+/**
+ * The most any one wait is lengthened by the spread.
+ *
+ * A parked run is holding a checkout and a folder, so the spread has to be paid
+ * for out of somebody's throughput. A quarter of an hour is enough to put
+ * twenty-five wakes about half a minute apart — the point being that the first
+ * few discover the true boundary and the rest re-park with fresh information —
+ * and small enough beside a five-hour window to be worth that.
+ */
+const MAX_JITTER_MS = 15 * 60_000;
+
+/**
+ * The narrowest useful spread on a wait the *sweeper* serves.
+ *
+ * A parked run does not wake at its `resume_at`; it wakes at the first sweep
+ * after it, and `SWEEP_MS` is 60 seconds. So a band narrower than a tick is
+ * invisible — every run in it is due in the same pass whatever the arithmetic
+ * said. Three ticks is the floor, and it is a property of the sweeper rather
+ * than of the jitter, which is why the caller passes it and the in-process
+ * retry ladder does not.
+ */
+const REFUSAL_JITTER_FLOOR_MS = 3 * SWEEP_MS;
+
+/**
+ * How much to add to one wait so a fleet computing one answer does not act on
+ * it as one.
+ *
+ * Uniform over `[0, width]` and **never negative**: jitter may only ever delay.
+ * Both callers have a floor underneath them that exists for its own reason —
+ * `MIN_REFUSAL_WAIT_MS` so nothing re-spawns straight back into a wall, and the
+ * ladder's own rung so a retry is not a hot loop — and a spread that could
+ * shorten a wait would quietly undo either.
+ *
+ * `random` is a parameter rather than a call to `Math.random` inside, so the
+ * determinism the existing cases pin stays reachable: passed `() => 0` this
+ * contributes nothing and every wait is exactly what it was before.
+ */
+export function jitterMs(
+  wait: number,
+  random: () => number,
+  floorMs = 0,
+): number {
+  const width = Math.min(
+    Math.max(wait * JITTER_FRACTION, floorMs),
+    MAX_JITTER_MS,
+  );
+  if (width <= 0) return 0;
+  return Math.round(random() * width);
+}
+
 /** How long a refused run waits when the boundary it can see has already passed. */
 const REFUSAL_BACKOFF_MS = [20 * 60_000, 40 * 60_000, 60 * 60_000];
 /** Never re-spawn into the same wall immediately, whatever the arithmetic says. */
@@ -994,11 +1064,22 @@ async function waitUnlessInterrupted(id: string, ms: number): Promise<void> {
  * hours into the future for a window that reopens in minutes. Hence the
  * caller's boundary is drawn from the last block with real spend in it, and a
  * boundary in the past falls through to the backoff instead of being trusted.
+ *
+ * All of which is a statement about *one* run, and every input to it is shared
+ * by the fleet — so the answer is spread before it is returned. See
+ * `jitterMs`: the reasoning behind `RESUME_MARGIN_MS`, that waking exactly at a
+ * boundary is risky, is the same reasoning at a fleet's scale. The spread lands
+ * *after* the floor and the cap, so `MIN_REFUSAL_WAIT_MS` still holds and no
+ * run waits past `MAX_REFUSAL_WAIT_MS`; the band collapses only at that cap,
+ * which a real 5-hour boundary cannot reach (`lastSpendingWindowEnd` is at most
+ * five hours out, and the longest rung of the ladder is one).
  */
 export function refusalResumeAt(o: {
   boundary: number | null;
   pauseCount: number;
   now: number;
+  /** Injected so the determinism the cases beside this one pin stays reachable. */
+  random?: () => number;
 }): number {
   const backoff =
     REFUSAL_BACKOFF_MS[Math.min(o.pauseCount, REFUSAL_BACKOFF_MS.length - 1)];
@@ -1006,10 +1087,16 @@ export function refusalResumeAt(o: {
     o.boundary !== null && o.boundary > o.now
       ? o.boundary + RESUME_MARGIN_MS
       : o.now + backoff;
-  return Math.min(
+  const settled = Math.min(
     Math.max(target, o.now + MIN_REFUSAL_WAIT_MS),
     o.now + MAX_REFUSAL_WAIT_MS,
   );
+  const spread = jitterMs(
+    settled - o.now,
+    o.random ?? Math.random,
+    REFUSAL_JITTER_FLOOR_MS,
+  );
+  return Math.min(settled + spread, o.now + MAX_REFUSAL_WAIT_MS);
 }
 
 /**
@@ -5368,6 +5455,31 @@ export function duePausedRuns<T extends { resume_at: number | null }>(
   return runs.filter((r) => r.resume_at === null || now >= r.resume_at);
 }
 
+/**
+ * How many parked runs one sweep may hand back to the queue.
+ *
+ * The other half of the herd, and the half jitter cannot reach: `resume_at`
+ * decides which tick a run is due in, and a whole fleet parked before the
+ * spread existed — or bunched by the `MIN_REFUSAL_WAIT_MS` floor, or simply
+ * carrying a null — is due in one. Every one of them was flipped to `queued` in
+ * a single pass and handed to one `promoteQueued()`, which starts everything
+ * startable in one synchronous turn, so the sweep's own shape re-synchronised
+ * what the backoff had spread.
+ *
+ * A cap here rather than anywhere else because `promoteQueued` must stay the
+ * one owner of FIFO order, the folder claim and the concurrency cap — and
+ * because `maxConcurrentRuns` ships as `null`, so on a stock install nothing
+ * downstream bounds the wave at all. A run over the cap simply stays `paused`
+ * with a `resume_at` already in the past, which is the state the next tick is
+ * built to pick up: nothing is written, so nothing is rewritten every 60
+ * seconds, which is `FOLDER_TAKEN_REASON`'s rule one branch over.
+ *
+ * Four, against a 60-second tick: twenty-five parked runs drain in about six
+ * minutes, and the first wave finds out what the wall is actually doing before
+ * the last one has spent a cycle finding out the same thing.
+ */
+export const MAX_RESUMES_PER_SWEEP = 4;
+
 /** What the sweeper should do with one parked run. */
 export type PausedRunPlan =
   /** Its guard cleared and nothing is in the folder: rejoin the queue. */
@@ -5463,6 +5575,7 @@ export async function sweepPaused(): Promise<void> {
     const snapshot = await currentSnapshot();
     const now = Date.now();
     let freed = false;
+    let resumeSlots = MAX_RESUMES_PER_SWEEP;
 
     for (const run of due) {
       const policy = normalizePolicy(JSON.parse(run.budget));
@@ -5505,6 +5618,12 @@ export async function sweepPaused(): Promise<void> {
         }
 
         case "resume": {
+          // Only so many per tick, for `MAX_RESUMES_PER_SWEEP`'s reason. The
+          // rest keep their `paused` row and a `resume_at` already in the past,
+          // so the next tick reconsiders them from a fresh snapshot — which is
+          // what this loop is for, and cheaper than the alternative of a whole
+          // fleet spawning in one event-loop turn.
+          if (resumeSlots <= 0) break;
           // Re-queue rather than start directly: `promoteQueued` owns FIFO
           // order, folder reservation and the concurrency cap, and
           // re-implementing any of that here is how a folder claim gets broken.
@@ -5516,6 +5635,7 @@ export async function sweepPaused(): Promise<void> {
             )
             .run(run.id);
           if (flip.changes === 1) {
+            resumeSlots -= 1;
             freed = true;
             emit({
               runId: run.id,
