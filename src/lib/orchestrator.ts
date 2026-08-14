@@ -27,6 +27,7 @@ import {
   normalizePolicy,
   planReadingAgeMs,
 } from "./budget";
+import { installBudgetRefusal, installBudgetVerdict } from "./installBudget";
 import { scanUsage, type UsageEntry } from "./transcripts";
 import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
@@ -1984,6 +1985,17 @@ export function createRun(input: CreateRunInput): RunRow {
   const folder = resolveWorkspaceFolder(input.folder, input.mountId);
   const prompt = String(input.prompt ?? "").trim();
   if (!prompt) throw new Error("Prompt is required");
+
+  // The install-wide ceiling, at the one door every run in this app comes
+  // through — the form, the chat's approval batch, a workflow's pass and an
+  // orchestrator block's emission all end here. Refused rather than queued,
+  // because a queued run is a promise to spend as soon as a slot frees and the
+  // whole point of this ceiling is that nothing new starts. Synchronous, like
+  // everything else in this function: the reading is three SQLite sums and
+  // better-sqlite3 has no `await` to offer, so the folder claim's
+  // one-event-loop-turn atomicity is untouched.
+  const installRefusal = installBudgetRefusal();
+  if (installRefusal) throw new Error(installRefusal);
 
   const policy = normalizePolicy(input.budget);
   const settings = getSettings();
@@ -4388,6 +4400,34 @@ export async function startRun(id: string): Promise<void> {
           // mistaken for a completed run.
           finalStatus = iterations === 0 ? "blocked" : "stopped";
         }
+        break;
+      }
+
+      // This run's own guards said yes; the *install* may still say no. Read
+      // here for `enforceInstanceBudget`'s reason one scope wider — this is the
+      // moment the run is about to commit to spending and nothing has been
+      // spawned yet — and ahead of the workflow check because it is the widest
+      // ceiling: a run refused by it would be refused whatever workflow it
+      // belongs to, and halting a whole instance over a limit that is not about
+      // that instance would take down blocks that are not the problem.
+      const installVerdict = installBudgetVerdict();
+      if (installVerdict) {
+        emit({
+          runId: id,
+          ts: Date.now(),
+          kind: "budget",
+          payload: {
+            allowed: false,
+            scope: "install",
+            code: installVerdict.code,
+            reason: installVerdict.reason,
+            disposition: "stop",
+            enforceable: true,
+            meters: installVerdict.meters,
+          },
+        });
+        stopReason = installVerdict.reason;
+        finalStatus = iterations === 0 ? "blocked" : "stopped";
         break;
       }
 

@@ -11,6 +11,7 @@ import { getSettings, limitConfig } from "@/lib/settings";
 import { readAccountProfile } from "@/lib/account";
 import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
+import { installSpendReport } from "@/lib/installBudget";
 import { PROJECTS_DIR } from "@/lib/config";
 
 export const runtime = "nodejs";
@@ -77,6 +78,12 @@ export async function GET(req: Request) {
       snapshot,
       periods,
       telemetry,
+      // Unconditional, unlike `telemetry`: the ceiling is what the operator
+      // typed and the reading is money this app recorded spending, so there is
+      // no setting to gate it on and nothing to leak by reporting it. Its own
+      // key rather than a field on `snapshot`, because it is a fourth reading
+      // over a different span and must never be summed with the meters.
+      install: installSpendReport(now),
       meta: {
         transcriptDir: PROJECTS_DIR,
         fileCount: scan.fileCount,

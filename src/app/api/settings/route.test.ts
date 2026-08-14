@@ -84,6 +84,7 @@ const PROBES: Record<keyof Settings, Probe> = {
   landStrategy: { send: "squash" },
   killProcessGroup: { send: false },
   chatTurnBudgetUSD: { send: 7 },
+  installDailyCostLimitUSD: { send: 250 },
   chatDefaultGuards: {
     send: {
       permissionMode: "plan",

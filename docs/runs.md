@@ -96,6 +96,21 @@ $5. Set **Runs allowed at the same time** in Settings if you want that bounded;
 it is unlimited by default, and a run over the limit waits rather than being
 refused. A parked run does not count against it — it is spending nothing.
 
+A cap on how many runs work at once still says nothing about the total, because
+nothing bounds how many *waves* there are: a slot that frees is refilled
+immediately, a schedule presses Run with nobody present, and an orchestrator
+block starts runs with no approval. **Settings → install limit, rolling 24
+hours** is the one ceiling here that bounds the sum rather than one spender. Once
+it is reached, no new run, workflow, orchestrator turn or chat message starts —
+each refused with a sentence naming the install limit rather than a per-run one —
+until spend ages out of the window or the limit is raised. It counts runs,
+workflow blocks and chat turns together, and a run still going, or one that
+finished inside the window, counts its whole spend: there is no per-hour
+breakdown of a run's cost, so it over-counts rather than under-counts, which is
+the direction a ceiling should err in. The dashboard shows it as its own card,
+and hatched rather than empty when no limit is set. It ships off, because no
+single figure is right for both a laptop and a fleet.
+
 ### Running until the limit rather than until the agent says stop
 
 *When Claude says the task is done* can be switched from ending the run to
@@ -279,10 +294,19 @@ started later, so nothing spawns unattended from a prompt you have forgotten abo
 | `maxIterations` | Cap on iterations. `null` disables it, but only alongside `maxDurationMinutes`. |
 | `maxRunCostUSD` | Stop when this run's own spend reaches it. `null` disables it. |
 | `maxDurationMinutes` | Wall-clock cap, **including time spent parked**. `null` disables it. |
-| `maxWeeklyFraction` | Stop at N% of the weekly window (cost-denominated). **Requires a configured ceiling.** Always ends the run. |
-| `maxSessionFraction` | Stop at N% of the 5-hour window (cost-denominated). **Requires a configured ceiling.** Parks the run instead under `live-resume`. |
+| `maxWeeklyFraction` | Stop at N% of the weekly window (cost-denominated). **Needs a reading** — Anthropic's own percentage, or a ceiling you set. Always ends the run. |
+| `maxSessionFraction` | Stop at N% of the 5-hour window (cost-denominated). **Needs a reading**, as above. Parks the run instead under `live-resume`. |
 | `enforcement` | `between-cycles` \| `live` \| `live-resume` — when a tripped rule is acted on. Under `live-resume` a run also parks when **Claude itself** refuses a cycle for want of allowance, which needs no fraction and no ceiling. |
 | `continueAfterDone` | Ignore the agent's `DONE` and send it back to the same task. |
+
+A fraction guard with **nothing to read** — no ceiling set and Anthropic's own
+percentage unavailable — is refused when you start or reopen the run, where you
+can do something about it. It never ends a run that is already going: on a stock
+install that reading is the account's own percentage, which is discarded after an
+hour without a fresh answer, so acting on its absence would turn an unreachable
+host into every fraction-guarded run in the install stopping at its next cycle
+boundary. The run logs, once, that the guard cannot be enforced and carries on
+under its remaining guards.
 
 `maxRunCostUSD` is the one guard that needs **no ceiling** — it is absolute. Use
 it on day one, before you have enough history to calibrate.

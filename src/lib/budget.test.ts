@@ -7,8 +7,11 @@ import {
   RUN_ENFORCEABLE_CODES,
   enforceableForRun,
   evaluateBudget,
+  evaluateInstallBudget,
   evaluateInstanceBudget,
+  installBudgetIsOff,
   instanceBudgetIsOff,
+  normalizeInstallBudget,
   normalizeInstanceBudget,
   normalizePolicy,
   planReadingAgeMs,
@@ -978,5 +981,97 @@ describe("evaluateInstanceBudget — the cap on everything one press of Run spen
     );
     assert.equal(noReading.allowed, false);
     assert.deepEqual(noReading.meters, []);
+  });
+});
+
+/**
+ * The ceiling on the *installation*, which is the one thing here that bounds
+ * more than one spender.
+ *
+ * `maxRunCostUSD` bounds a run, `maxInstanceCostUSD` one press of Run,
+ * `chatTurnBudgetUSD` one chat turn — and nothing bounded the total or the rate
+ * at which new spenders appear, so twenty-five concurrent runs under a $35 run
+ * limit reads as $875 and is $875 *per wave*, with waves unbounded. Pure and
+ * tested here for `evaluateInstanceBudget`'s reason: the decision is arithmetic
+ * whose failure modes are silent, and what reads the database is the caller.
+ */
+describe("evaluateInstallBudget — the cap on everything this install spends", () => {
+  const spend = (spentUSD: number, spentGuardUSD = spentUSD) => ({
+    spentUSD,
+    spentGuardUSD,
+  });
+
+  it("allows an install under its ceiling", () => {
+    const v = evaluateInstallBudget({ maxInstallCostUSD: 100 }, spend(99.99));
+    assert.equal(v.allowed, true);
+    assert.deepEqual(v.meters, [
+      { label: "Spent by this install", value: 99.99, limit: 100, unit: "usd" },
+    ]);
+  });
+
+  it("stops at the ceiling exactly, not a cent past it", () => {
+    // `>=`, the same comparison every other spend guard here makes. A $100 cap
+    // that only trips at $100.01 is a cap the operator did not set.
+    const v = evaluateInstallBudget({ maxInstallCostUSD: 100 }, spend(100));
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "install_cost");
+    assert.equal(v.allowed === false && v.disposition, "stop");
+    // The reason names the install limit rather than any per-run one, because
+    // an operator meeting it will otherwise go looking at the wrong field.
+    assert.match(v.allowed === false ? v.reason : "", /\$100\.00 limit set in Settings/);
+    assert.match(v.allowed === false ? v.reason : "", /24 hours/);
+  });
+
+  it("compares the guard's figure, not the measured floor", () => {
+    // A cycle in flight has reported nothing, and a killed one never will, so
+    // an install guarding on `spent_usd` alone would read far under its own
+    // total for as long as agents keep working — which is exactly when it
+    // matters. Same display-versus-guard split as everywhere else.
+    const v = evaluateInstallBudget({ maxInstallCostUSD: 100 }, spend(40, 120));
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "install_cost");
+    assert.match(v.allowed === false ? v.reason : "", /\$120\.00/);
+    assert.equal(
+      evaluateInstallBudget({ maxInstallCostUSD: 100 }, spend(40)).allowed,
+      true,
+    );
+  });
+
+  it("is off with no ceiling, however much has been spent", () => {
+    const off = { maxInstallCostUSD: null };
+    assert.equal(installBudgetIsOff(off), true);
+    const v = evaluateInstallBudget(off, spend(10_000));
+    assert.equal(v.allowed, true);
+    // No ceiling, no meter: a bar with no denominator is the "unknown renders
+    // as zero" mistake, and the page draws the indeterminate one instead.
+    assert.deepEqual(v.meters, []);
+  });
+
+  it("reads null, blank, zero and a negative all as off", () => {
+    // `normalizeInstanceBudget`'s rule, for its reason: there is no default
+    // limit to restore, because a limit nobody typed is not a limit. Total and
+    // idempotent, because it runs over a settings value read back on every
+    // door check.
+    for (const raw of [null, undefined, "", 0, "0", -5, "nonsense", {}]) {
+      const policy = normalizeInstallBudget({ maxInstallCostUSD: raw });
+      assert.equal(policy.maxInstallCostUSD, null, String(raw));
+      assert.equal(installBudgetIsOff(policy), true, String(raw));
+    }
+    assert.deepEqual(normalizeInstallBudget(null), { maxInstallCostUSD: null });
+
+    // …and a real figure survives, through a string as the wire sends it.
+    assert.deepEqual(normalizeInstallBudget({ maxInstallCostUSD: "250" }), {
+      maxInstallCostUSD: 250,
+    });
+    assert.deepEqual(
+      normalizeInstallBudget(normalizeInstallBudget({ maxInstallCostUSD: 250 })),
+      { maxInstallCostUSD: 250 },
+    );
+  });
+
+  it("is a code a run may actually be stopped on", () => {
+    // Unlike `no_ceiling`, this is a fact about money that has been spent, so
+    // the pre-cycle guard acts on it rather than logging past it.
+    assert.equal(RUN_ENFORCEABLE_CODES.includes("install_cost"), true);
   });
 });

@@ -144,6 +144,8 @@ export type BudgetStopCode =
   | "duration"
   /** Everything one press of Run on a workflow has spent, across its blocks. */
   | "instance_cost"
+  /** Everything this installation has spent, across every run, block and chat. */
+  | "install_cost"
   | "no_ceiling"
   | "no_terminus";
 
@@ -232,6 +234,7 @@ export const RUN_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
   "session_fraction",
   "iterations",
   "instance_cost",
+  "install_cost",
   "no_terminus",
 ];
 
@@ -874,5 +877,141 @@ export function normalizeInstanceBudget(raw: unknown): InstanceBudgetPolicy {
     maxInstanceCostUSD: num(o.maxInstanceCostUSD),
     maxSessionFraction: frac(o.maxSessionFraction),
     maxWeeklyFraction: frac(o.maxWeeklyFraction),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* The whole of what this installation spends                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How far back the install-wide ceiling looks.
+ *
+ * A **rolling** 24 hours, not a calendar day, and both halves of that are
+ * deliberate. A calendar day would have to be cut in some zone — the container
+ * runs in UTC and the operator does not, which is the failure `zonedMidnight`
+ * already exists to fix for the dashboard's history — and a guard cut in the
+ * wrong zone refuses work for hours or authorises it for hours. It would also
+ * be a cliff every run in the install crosses at the same instant, which is the
+ * lockstep this app already has enough of.
+ *
+ * Fixed rather than configurable: a second field to get wrong, for a period
+ * nobody has asked to vary. The number the operator types is the money.
+ */
+export const INSTALL_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The one limit here that is about the *installation* rather than about a run,
+ * a press of Run, or a chat turn.
+ *
+ * Every other guard in this module bounds one thing that spends: `maxRunCostUSD`
+ * a run, `maxInstanceCostUSD` a workflow instance, `chatTurnBudgetUSD` a turn.
+ * None of them bounds the total, and nothing bounds the *rate* at which new
+ * spenders are created — `promoteQueued` starts the next queued run the instant
+ * a slot frees, a schedule presses Run with nobody present, and an orchestrator
+ * block starts up to `MAX_FAN_OUT` runs with no approval — so the fleet's spend
+ * is `waves × concurrency × per-run limit` with no term under an operator-set
+ * maximum. This is that term.
+ *
+ * It is **not** the calendar rollup wearing a different hat. `buildPeriods`
+ * measures history against a weekly ceiling spread over a day or a month, which
+ * is a threshold nobody set, and `CLAUDE.md` is right that it must never reach a
+ * guard. This is a number the operator typed, meaning what it says, compared
+ * against money this app itself recorded spending.
+ *
+ * One field, so no `no_ceiling` analogue and no terminus question: an install
+ * that has spent nothing is under any limit, and the reading only grows within
+ * the window and only shrinks as spend ages out of it.
+ */
+export interface InstallBudgetPolicy {
+  /** USD across `INSTALL_WINDOW_MS`, for everything. null = no limit. */
+  maxInstallCostUSD: number | null;
+}
+
+export interface InstallProgress {
+  /**
+   * What was measured: every run's `spent_usd`, every orchestrator block's
+   * `cost_usd` and every chat's `cost_usd` inside the window. A **floor**, for
+   * `InstanceProgress.spentUSD`'s reason — a cycle in flight has reported
+   * nothing. Displayed, never guarded on.
+   */
+  spentUSD: number;
+  /**
+   * What the guard acts on: the above, plus every run's reconciled estimate for
+   * cycles killed before they reported, plus what telemetry says the cycles in
+   * flight have cost so far. The same display-versus-guard split `costUSD`/
+   * `costGuardUSD` makes for a window and `instanceSpend` makes for one press of
+   * Run, and for the same reason.
+   */
+  spentGuardUSD: number;
+}
+
+/** Nothing is set, so there is no ceiling to evaluate and no meter to fill. */
+export function installBudgetIsOff(policy: InstallBudgetPolicy): boolean {
+  return policy.maxInstallCostUSD === null;
+}
+
+/**
+ * Whether this installation may start something else that spends.
+ *
+ * Deliberately the same `BudgetVerdict` and the same `BudgetStopCode`
+ * vocabulary as the two guards above — a third set of budget words for the same
+ * kind of decision would be a third thing to keep in step — and pure for
+ * `evaluateInstanceBudget`'s reason: what reads the database is the caller.
+ */
+export function evaluateInstallBudget(
+  policy: InstallBudgetPolicy,
+  progress: InstallProgress,
+): BudgetVerdict {
+  const meters: BudgetMeter[] = [];
+
+  if (policy.maxInstallCostUSD !== null) {
+    meters.push({
+      label: "Spent by this install",
+      // The guard's figure, so a card shows what the decision was made on —
+      // the same choice the run and instance meters make.
+      value: progress.spentGuardUSD,
+      limit: policy.maxInstallCostUSD,
+      unit: "usd",
+    });
+  }
+
+  if (
+    policy.maxInstallCostUSD !== null &&
+    progress.spentGuardUSD >= policy.maxInstallCostUSD
+  ) {
+    return {
+      allowed: false,
+      code: "install_cost",
+      reason:
+        `This install has spent $${progress.spentGuardUSD.toFixed(2)} in the last ` +
+        `${INSTALL_WINDOW_MS / 3_600_000} hours, reaching the $${policy.maxInstallCostUSD.toFixed(2)} ` +
+        "limit set in Settings for everything it runs. Nothing new will start " +
+        "until spend ages out of that window or the limit is raised.",
+      disposition: "stop",
+      meters,
+    };
+  }
+
+  return { allowed: true, meters };
+}
+
+/**
+ * Read the install ceiling off a settings value.
+ *
+ * `normalizeInstanceBudget`'s rules, for its reasons: total, idempotent, and
+ * `null`/`""`/`0`/negative all meaning **off**, which is this app's standing
+ * rule for every budget field — there is no default limit to restore, because a
+ * limit nobody typed is not a limit.
+ */
+export function normalizeInstallBudget(raw: unknown): InstallBudgetPolicy {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const v = o.maxInstallCostUSD;
+  if (v === null || v === undefined || v === "") {
+    return { maxInstallCostUSD: null };
+  }
+  const n = Number(v);
+  return {
+    maxInstallCostUSD: Number.isFinite(n) && n > 0 ? n : null,
   };
 }

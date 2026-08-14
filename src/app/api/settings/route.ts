@@ -271,5 +271,12 @@ export async function PUT(req: Request) {
     patch.chatTurnBudgetUSD = optionalNumber(body.chatTurnBudgetUSD);
   }
 
+  if ("installDailyCostLimitUSD" in body) {
+    // Blank means "no cap", the same reading every switchable budget rule here
+    // takes — and the shipped default, so an operator turning it *on* is the
+    // deliberate act rather than turning it off.
+    patch.installDailyCostLimitUSD = optionalNumber(body.installDailyCostLimitUSD);
+  }
+
   return NextResponse.json({ settings: saveSettings(patch) });
 }

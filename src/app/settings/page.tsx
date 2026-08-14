@@ -135,6 +135,7 @@ const EDITABLE_PATHS = [
   "chatDefaultGuards.budget.maxIterations",
   "chatDefaultGuards.budget.maxDurationMinutes",
   "chatTurnBudgetUSD",
+  "installDailyCostLimitUSD",
   "planUsageFromApi",
   "sessionCostLimit",
   "weeklyCostLimit",
@@ -1655,6 +1656,34 @@ export default function SettingsPage() {
                 onChange={(e) =>
                   patch({
                     chatTurnBudgetUSD:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+        </ListGroup>
+
+        <ListGroup className="mt-4" label="What this whole install may spend">
+          <SettingRow
+            htmlFor="installbudget"
+            edited={isEdited("installDailyCostLimitUSD")}
+            label="Install limit, rolling 24 hours"
+            description="Every other limit here bounds one run, one workflow or one chat turn — this is the only one that bounds the total. Once it is reached, no new run, workflow, orchestrator turn or chat message starts until spend ages out of the window. A run still going, or one that finished inside it, counts its whole spend"
+          >
+            <div className="w-36">
+              <Input
+                id="installbudget"
+                type="number"
+                min={0}
+                step="10"
+                className="tabular-nums"
+                unit="USD"
+                placeholder="No limit"
+                value={effective.installDailyCostLimitUSD ?? ""}
+                onChange={(e) =>
+                  patch({
+                    installDailyCostLimitUSD:
                       e.target.value === "" ? null : Number(e.target.value),
                   })
                 }

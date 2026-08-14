@@ -12,6 +12,7 @@ import {
   type TurnResult,
 } from "./chat";
 import { assistRefusal } from "./review";
+import { installBudgetRefusal } from "./installBudget";
 import {
   DEPENDENCY_EDGES,
   blockWaitingRun,
@@ -2481,6 +2482,14 @@ export function startWorkflow(
     };
   }
 
+  // The install-wide ceiling, before anything else about this workflow is
+  // decided. `createRun` refuses every member individually, which would abort
+  // the pass part-way and record the instance `failed` — a rollback in the
+  // record for a limit that has nothing to do with this graph. Refused here it
+  // is one sentence and no instance at all.
+  const installRefusal = installBudgetRefusal();
+  if (installRefusal) return { ok: false, reason: installRefusal };
+
   const known = currentKnowledge();
   const checked = normalizeWorkflowInput(workflow, known);
   if (!checked.ok) {
@@ -3865,7 +3874,7 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
     }
   }
 
-  const refusal = await assistRefusal();
+  const refusal = (await assistRefusal()) ?? installBudgetRefusal();
   if (refusal) {
     settleBlock(instanceId, nodeId, { status: "failed", error: refusal });
     return;

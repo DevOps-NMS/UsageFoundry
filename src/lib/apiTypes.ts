@@ -226,6 +226,39 @@ export interface UsageResponse {
    * `runs.spent_usd` nor the guard can. Never add it to `snapshot` figures.
    */
   telemetry: TelemetryWindowDTO | null;
+  /**
+   * What this whole installation has spent inside the rolling window the
+   * install-wide ceiling covers, and that ceiling.
+   *
+   * A **fourth** reading on this page and, like the third, never added to the
+   * others: the meters above it are our price table over every transcript on the
+   * machine, and this is the money *this app* recorded spending — one run row,
+   * one block row and one chat row at a time — over a different span. Summing
+   * the two would count the same work twice.
+   *
+   * `limitUSD` is null when no ceiling is configured, and the meter must be the
+   * hatched indeterminate one rather than an empty 0% bar: an install whose
+   * share of a limit is unknown and one that has spent nothing must not look
+   * alike.
+   */
+  install: InstallSpendDTO;
+}
+
+/**
+ * The install-wide ceiling and what has been spent against it.
+ *
+ * `spentUSD` is the measured floor — every figure a CLI itself reported — and
+ * `spentGuardUSD` adds killed cycles' reconciled estimates and what telemetry
+ * says the cycles in flight have cost so far. The same display-versus-guard
+ * split a window, a run and a workflow instance already make, and drawn the same
+ * way: solid fill to the measured figure, hatched band out to the guard's.
+ */
+export interface InstallSpendDTO {
+  spentUSD: number;
+  spentGuardUSD: number;
+  limitUSD: number | null;
+  /** The span the two figures cover. Rolling, not a calendar day. */
+  windowHours: number;
 }
 
 /** One run's first-party total inside the window. */
@@ -1270,6 +1303,12 @@ export interface SettingsDTO {
   killProcessGroup: boolean;
   /** Hard ceiling on one orchestrator-chat turn. Null means no cap. */
   chatTurnBudgetUSD: number | null;
+  /**
+   * Hard ceiling on what this whole install may spend in a rolling 24 hours,
+   * across every run, workflow block and chat turn. Null means no cap, which is
+   * the shipped default — every other limit here bounds one spender.
+   */
+  installDailyCostLimitUSD: number | null;
   /** What a chat proposal runs under when it names no template. */
   chatDefaultGuards: RunGuardsDTO;
 }

@@ -249,6 +249,32 @@ export interface Settings {
    */
   chatTurnBudgetUSD: number | null;
   /**
+   * Hard ceiling on what this whole installation may spend in 24 hours. Null
+   * removes it, which is the shipped default.
+   *
+   * The one limit here that is not about a single spender. `maxRunCostUSD`
+   * bounds a run, `maxInstanceCostUSD` one press of Run, `chatTurnBudgetUSD` one
+   * chat turn — and nothing bounded the total, or the rate at which new spenders
+   * are created: `promoteQueued` starts the next queued run the instant a slot
+   * frees, a schedule presses Run with nobody present, and an orchestrator block
+   * starts runs with no approval. Twenty-five concurrent runs under a $35 run
+   * limit reads as $875 on this page and is $875 *per wave*, with the number of
+   * waves unbounded.
+   *
+   * Not a window ceiling, so the no-default-numbers rule above does not apply
+   * for the usual reason — it is not a guess at a limit Anthropic knows and we
+   * do not, it is a cap on this app's own behaviour. It still ships `null`,
+   * because unlike `chatTurnBudgetUSD` there is no single figure that is right
+   * for both a laptop and a fleet, and a default that refused work on somebody's
+   * first evening would be worse than the absence.
+   *
+   * Measured over a **rolling** 24 hours (`INSTALL_WINDOW_MS`) rather than a
+   * calendar day: the container runs in UTC and the operator does not, and a
+   * calendar boundary would also be a cliff every run in the install crosses at
+   * the same instant.
+   */
+  installDailyCostLimitUSD: number | null;
+  /**
    * What an agent may do when a chat proposal names no template.
    *
    * The chat used to be able to propose only against a saved template, which
@@ -408,6 +434,7 @@ const DEFAULTS: Settings = {
   landStrategy: "merge",
   killProcessGroup: true,
   chatTurnBudgetUSD: 2,
+  installDailyCostLimitUSD: null,
   chatDefaultGuards: DEFAULT_CHAT_GUARDS,
 };
 
