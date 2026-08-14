@@ -5,7 +5,21 @@ export const runtime = "nodejs";
 
 export async function POST(req: Request) {
   if (!authEnabled()) {
-    return NextResponse.json({ ok: true, authDisabled: true });
+    // Deliberately not a success. This used to answer `{ ok: true }` with an
+    // `authDisabled` flag nothing read, so signing in with any string at all
+    // looked exactly like signing in — the one screen in this app whose whole
+    // subject is the credential said nothing about there not being one. There
+    // is no session to issue either: with no token there is nothing for the
+    // gate to compare a cookie against, so a cookie here would be theatre.
+    return NextResponse.json(
+      {
+        authDisabled: true,
+        error:
+          "Authentication is disabled on this server: UF_AUTH_TOKEN is unset, " +
+          "so no token is required and none is being checked.",
+      },
+      { status: 409 },
+    );
   }
 
   const body = (await req.json().catch(() => ({}))) as { token?: string };

@@ -165,6 +165,18 @@ export const DB_PATH = path.join(DATA_DIR, "usagefoundry.db");
 /** Shared secret for the UI. Empty string disables auth entirely. */
 export const AUTH_TOKEN = env("UF_AUTH_TOKEN", "");
 
+/**
+ * The operator's explicit acknowledgement that this install runs with no
+ * authentication at all.
+ *
+ * Not a preference and not a feature: with `UF_AUTH_TOKEN` empty every route
+ * here is open, so the absence of a token must be something somebody chose
+ * rather than something nobody set. `authBootSignal` refuses to start without
+ * one of the two, and the value is compared as an exact string there — see the
+ * note beside it for why truthiness would be the wrong reading.
+ */
+export const ALLOW_NO_AUTH = env("UF_ALLOW_NO_AUTH", "");
+
 /** Admin API key (sk-ant-admin01-...). Optional. */
 export const ADMIN_API_KEY = env("ANTHROPIC_ADMIN_KEY", "");
 

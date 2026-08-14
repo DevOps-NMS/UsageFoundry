@@ -13,6 +13,27 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Before anything else, and before the reconcile guard below, so a dev
+    // server that re-evaluates this module says it again: an install with no
+    // `UF_AUTH_TOKEN` serves every route in this app to anyone who can reach
+    // the port, and the whole of what was wrong with that was that nothing
+    // anywhere said so. Read from `process.env` rather than through
+    // `lib/config` so the refusal cannot be delayed behind a module that
+    // touches the filesystem.
+    const { authBootSignal } = await import("./lib/authGuard");
+    const signal = authBootSignal({
+      token: process.env.UF_AUTH_TOKEN ?? "",
+      allowNoAuth: process.env.UF_ALLOW_NO_AUTH ?? "",
+    });
+    if (signal.kind === "refused") {
+      console.error(signal.message);
+      // Exit rather than throw. A rejected `register()` is logged by Next and
+      // the server carries on listening, which is precisely the state this
+      // refusal exists to make unreachable.
+      process.exit(1);
+    }
+    if (signal.kind === "unauthenticated") console.warn(signal.message);
+
     const g = globalThis as unknown as { __ufReconciled?: boolean };
     if (g.__ufReconciled) return;
     g.__ufReconciled = true;

@@ -7,7 +7,9 @@ mounted code. Treat it as privileged.
 
 - Compose binds to **`127.0.0.1:3000`**, not `0.0.0.0`. Change that only behind
   auth and TLS.
-- Set `UF_AUTH_TOKEN` (`openssl rand -hex 32`) for anything beyond loopback.
+- Set `UF_AUTH_TOKEN` (`openssl rand -hex 32`). Leaving it blank makes the
+  server refuse to start; the only way past that is `UF_ALLOW_NO_AUTH=1`, which
+  runs with no authentication and puts a banner on every page saying so.
 - Folder input is resolved and containment-checked **before** filesystem access,
   and again after symlink resolution. `../`, absolute paths, and symlinks out of
   the tree are all rejected.

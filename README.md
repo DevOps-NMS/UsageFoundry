@@ -52,11 +52,19 @@ git clone https://github.com/Xapicc/UsageFoundry.git
 cd UsageFoundry
 cp .env.example .env
 # edit .env:  UF_WORKSPACE (required — the code you want agents to work on)
-#             UF_AUTH_TOKEN (recommended: openssl rand -hex 32)
+#             UF_AUTH_TOKEN (required: openssl rand -hex 32)
 
 docker compose up --build
 open http://localhost:3000
 ```
+
+**`UF_AUTH_TOKEN` is no longer optional.** With it blank every route here is
+open to whoever can reach the port, including the one that starts billed agents
+with write access to your workspaces — so the server now refuses to start rather
+than serve that without saying so. If you genuinely want no authentication (a
+loopback-bound install on a machine you alone use), set `UF_ALLOW_NO_AUTH=1`
+alongside it: the app then starts, logs a block at boot, and puts a banner on
+every page saying it is unauthenticated. Nothing else accepts that state.
 
 The dashboard works immediately. **Runs need one extra step** — the `~/.claude`
 mount carries your transcripts but not your credentials, so sign the container

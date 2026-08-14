@@ -34,8 +34,18 @@ services:
       - "127.0.0.1:${UF_PORT:-3000}:3000"
 
     environment:
-      # Set to a long random string to require a token in the UI.
+      # Set to a long random string to require a token in the UI. Leaving it
+      # empty makes the container refuse to start unless UF_ALLOW_NO_AUTH below
+      # is set to 1 — an empty token means every route here, including the one
+      # that starts billed agents against your repositories, is open to whoever
+      # can reach the port, and that had been the shipped default with nothing
+      # anywhere reporting it.
       UF_AUTH_TOKEN: "${UF_AUTH_TOKEN:-}"
+      # The explicit "yes, run with no authentication" switch. Only ever right
+      # for a loopback-bound install on a machine you alone use. Passed through
+      # rather than defaulted here on purpose: a default would put the choice
+      # back in this file, where nobody rereads it.
+      UF_ALLOW_NO_AUTH: "${UF_ALLOW_NO_AUTH:-}"
       # Optional: enables the API-account panel. Needs an org Admin key.
       ANTHROPIC_ADMIN_KEY: "${ANTHROPIC_ADMIN_KEY:-}"
       # Optional: what a run uses to push, open a PR, or read an issue. The
