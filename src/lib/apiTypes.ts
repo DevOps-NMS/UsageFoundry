@@ -180,6 +180,13 @@ export interface UsageResponse {
     hasWeeklyCeiling: boolean;
     /** Whether the provider's own reading was asked for at all. */
     planUsageFromApi: boolean;
+    /**
+     * New work is held across the install: nothing starts, nothing in flight is
+     * touched. Said on the dashboard in words, because a held fleet and an idle
+     * one look identical — the meters are the same and the queue simply never
+     * moves.
+     */
+    newWorkPaused: boolean;
     /** Headroom reserved for surfaces this tool cannot observe (0–1). */
     reservedHeadroomFraction: number;
     /**
@@ -924,9 +931,16 @@ export interface WorkflowInstanceDTO {
   error: string | null;
   /** When the halt closed the door — not when the last child died. */
   stoppedAt: number | null;
-  /** What halted it. The third way a member can end — stopped on its own run
-   *  page — is not an instance-level event and is null here. */
-  stopCause: "operator" | "guard" | null;
+  /**
+   * What halted it. The way a member can end that is *not* here — stopped on
+   * its own run page — is not an instance-level event and reads null.
+   *
+   * `fleet` is an operator's stop that was not aimed at this workflow: one
+   * install-wide stop took every run in flight, this one among them. Kept apart
+   * from `operator` because afterwards that is the only difference an operator
+   * can still see.
+   */
+  stopCause: "operator" | "guard" | "fleet" | null;
   /** A guard's verdict in full. Null for an operator's stop, which needs none. */
   stopReason: string | null;
   /** Members that have not finished. Non-zero for as long as `stopping` is. */
@@ -1207,6 +1221,37 @@ export interface BranchSummaryDTO {
   active: boolean;
   landedAt: number | null;
   prompt: string;
+}
+
+/** What the install is doing, and whether new work is held. */
+export interface FleetStateDTO {
+  /**
+   * New work is held: nothing starts, nothing already started is touched.
+   *
+   * On the dashboard in words, because a held fleet and a quiet one look
+   * identical — the meters read the same, the runs list is the same length, and
+   * the only difference is that the queue never moves.
+   */
+  newWorkPaused: boolean;
+  /** Runs not finished, by status. Every key present, including zeroes. */
+  counts: Record<string, number>;
+  /** Workflow instances a stop would still act on. */
+  startedInstances: number;
+}
+
+/** What one install-wide stop did. */
+export interface FleetStopReportDTO {
+  signalled: string[];
+  cancelled: string[];
+  blocked: string[];
+  untouched: string[];
+  instances: Array<{ workflowName: string; acted: boolean; note: string | null }>;
+}
+
+/** What one bulk pick-up did, per run. */
+export interface FleetReopenReportDTO {
+  reopened: string[];
+  refused: Array<{ id: string; reason: string }>;
 }
 
 /** One repository holding branches, for the filter. */

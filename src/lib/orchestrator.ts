@@ -14,7 +14,12 @@ import {
 } from "./config";
 import { git, gitSync } from "./git";
 import { db } from "./db";
-import { getSettings, limitConfig, type PermissionMode } from "./settings";
+import {
+  getSettings,
+  limitConfig,
+  newWorkPaused,
+  type PermissionMode,
+} from "./settings";
 import {
   type BudgetPolicy,
   type BudgetStopCode,
@@ -2164,7 +2169,17 @@ export function createRun(input: CreateRunInput): RunRow {
 export function selectPromotable(
   runs: readonly RunRow[],
   cap: number | null,
+  /**
+   * The install-wide hold. Nothing starts while it is set, and nothing already
+   * running is touched — which is the whole of what this switch means, and why
+   * it belongs here rather than beside the spawn: this is the one function that
+   * decides what starts, so a hold expressed anywhere else would be a second
+   * answer to the same question.
+   */
+  newWorkPaused = false,
 ): string[] {
+  if (newWorkPaused) return [];
+
   const reserved: ConflictKey[] = runs
     .filter((r) => r.status === "running")
     .map((r) => conflictKey(workDirOf(r)));
@@ -2195,7 +2210,7 @@ export function selectPromotable(
  */
 export function promoteQueued(): void {
   const cap = getSettings().maxConcurrentRuns;
-  for (const id of selectPromotable(activeRuns(), cap)) {
+  for (const id of selectPromotable(activeRuns(), cap, newWorkPaused())) {
     void startRun(id).catch(() => {
       /* terminal state is recorded by startRun's own finally block */
     });
@@ -2474,6 +2489,15 @@ export function topologicalOrder(graph: {
 export function releasableRuns(
   runs: readonly DependencyState[],
   links: readonly DependencyLink[],
+  /**
+   * The install-wide hold, which suppresses the release half and only that half.
+   *
+   * A run whose dependencies can never settle is still terminated: `blocked`
+   * costs nothing, spends nothing and is the true thing to say, and holding it
+   * back would leave a chain that can only end when somebody remembers to clear
+   * the pause. What the hold stops is the half that puts an agent to work.
+   */
+  newWorkPaused = false,
 ): { release: string[]; block: Array<{ id: string; reason: string }> } {
   const byId = new Map(runs.map((r) => [r.id, r]));
   const edges = new Map<string, DependencyLink[]>();
@@ -2518,6 +2542,12 @@ export function releasableRuns(
         // down the chain on the next pass.
         byId.set(run.id, { id: run.id, status: "blocked", iterations: 0 });
       } else if (pending) {
+        continue;
+      } else if (newWorkPaused) {
+        // Ready, and deliberately left `waiting` — the status that holds no
+        // folder, no checkout and no place in the queue, so a held run costs
+        // exactly what it did before. It is decided again on the next release
+        // pass, which clearing the hold triggers.
         continue;
       } else {
         release.push(run.id);
@@ -2711,7 +2741,7 @@ function releasePass(): boolean {
     )
     .all() as DependencyState[];
 
-  const { release, block } = releasableRuns(states, links);
+  const { release, block } = releasableRuns(states, links, newWorkPaused());
   let acted = false;
 
   for (const { id, reason } of block) {

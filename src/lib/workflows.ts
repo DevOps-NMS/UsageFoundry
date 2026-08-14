@@ -68,7 +68,12 @@ import {
 } from "./agents";
 import { telemetrySpendSince } from "./otlp";
 import type { UsageSnapshot } from "./windows";
-import { chatGuards, getSettings, type RunGuards } from "./settings";
+import {
+  chatGuards,
+  getSettings,
+  newWorkPaused,
+  type RunGuards,
+} from "./settings";
 import { getTemplate, listTemplates, type RunTemplate } from "./templates";
 import { WORKSPACE_MOUNTS, mountById } from "./config";
 import {
@@ -2007,7 +2012,7 @@ export type WorkflowInstanceStatus =
   | "stopped";
 
 /** What halted an instance. `null` on an instance nobody has stopped. */
-export type HaltCauseKind = "operator" | "guard";
+export type HaltCauseKind = "operator" | "guard" | "fleet";
 
 export interface WorkflowInstanceNode {
   nodeId: string;
@@ -2762,7 +2767,17 @@ function deferredNodes(graph: WorkflowGraph): Set<string> {
 export type HaltCause =
   | { kind: "operator" }
   /** The guard's verdict, in full. Recorded on the instance, once. */
-  | { kind: "guard"; detail: string };
+  | { kind: "guard"; detail: string }
+  /**
+   * Taken down with everything else, by one install-wide stop.
+   *
+   * A third kind rather than `operator` with different words, because the
+   * question it answers afterwards is a different one: an operator who finds
+   * twenty-five stopped runs needs to know whether somebody stopped *this*
+   * workflow or reached for the switch that stops everything, and only the
+   * stored cause can say so once the sentence has scrolled off.
+   */
+  | { kind: "fleet" };
 
 /** One member as the decision sees it: an id, a name, and a status. */
 export interface HaltMember {
@@ -2801,9 +2816,11 @@ export interface HaltMember {
  * whole sentence; for `stop` it is the attribution handed to `stopRun`, which
  * appends the clause saying what the run was doing when the halt landed.
  */
-export type HaltStep =
-  | (HaltMember & { action: "stop" | "block"; reason: string })
-  | (HaltMember & { action: "leave"; reason: null });
+export type HaltStepOf<T> =
+  | (T & { action: "stop" | "block"; reason: string })
+  | (T & { action: "leave"; reason: null });
+
+export type HaltStep = HaltStepOf<HaltMember>;
 
 /** What a halt does to one member, for a caller that wants to name it. */
 export type HaltAction = HaltStep["action"];
@@ -2831,6 +2848,9 @@ export interface HaltDecision {
  * ten member rows where it would read as ten separate findings.
  */
 export function haltCause(cause: HaltCause, workflowName: string): string {
+  if (cause.kind === "fleet") {
+    return `Stopped by the operator with every run in flight, workflow “${workflowName}” among them`;
+  }
   return cause.kind === "operator"
     ? `Stopped by the operator with all of workflow “${workflowName}”`
     : `Stopped by the budget guard on workflow “${workflowName}”`;
@@ -2903,16 +2923,24 @@ export function haltPlan(
     act: true,
     note: null,
     cause: attribution,
-    steps: memberSteps(members, attribution),
+    steps: haltSteps(members, attribution),
   };
 }
 
-/** What happens to each member, given the attribution it will be recorded under. */
-function memberSteps(
-  members: readonly HaltMember[],
+/**
+ * What happens to each row, given the attribution it will be recorded under.
+ *
+ * Generic over the row, and exported, because "which rows does this take down"
+ * now has a second caller: an install-wide stop covers runs that belong to no
+ * workflow at all. A second copy of these three branches would be a second
+ * chance to rewrite a `completed` row as stopped, or to hand `stopRun` a member
+ * that never ran and record it as though it had — and both are silent.
+ */
+export function haltSteps<T extends { status: RunStatus | null }>(
+  members: readonly T[],
   attribution: string,
-): HaltStep[] {
-  return members.map((member) => {
+): Array<HaltStepOf<T>> {
+  return members.map((member): HaltStepOf<T> => {
     if (member.status === null) {
       return { ...member, action: "leave" as const, reason: null };
     }
@@ -2929,6 +2957,9 @@ function memberSteps(
     return { ...member, action: "leave" as const, reason: null };
   });
 }
+
+/** Statuses a run has not finished in — it will spend, or is waiting to. */
+export { LIVE_STATUSES };
 
 /** What a halt did, per member, for the caller to report. */
 export interface HaltReport {
@@ -3209,11 +3240,15 @@ export function reconcileHaltsOnBoot(): void {
       continue;
     }
     const cause = haltCause(
-      row.stop_cause === "guard" ? { kind: "guard", detail: "" } : { kind: "operator" },
+      row.stop_cause === "guard"
+        ? { kind: "guard", detail: "" }
+        : row.stop_cause === "fleet"
+          ? { kind: "fleet" }
+          : { kind: "operator" },
       row.workflow_name,
     );
     walkMembers(
-      memberSteps(members, cause),
+      haltSteps(members, cause),
       cause,
       {
         instanceId: row.id,
@@ -4577,6 +4612,24 @@ export function emitBlockRuns(
   }
   if (block.status !== "thinking") {
     return { ok: false, reason: "This block's turn has already ended." };
+  }
+  // The install-wide hold, at this block's door rather than inside
+  // `planEmission`: it is a fact about the machine and not about the specs, the
+  // same class of refusal as the two above it. Recorded through `noteBlock` for
+  // the reason a rejected emission is, and the turn is told plainly — a model
+  // that reads "refused" with no cause tries again in a different shape.
+  if (newWorkPaused()) {
+    noteBlock(
+      instanceId,
+      nodeId,
+      "It tried to emit runs while new work was held across the install, and was refused.",
+    );
+    return {
+      ok: false,
+      reason:
+        "New work is held across this install, so nothing can be started from " +
+        "here. Say in your reply what you would have started.",
+    };
   }
   if (block.emitted_specs !== null) {
     noteBlock(

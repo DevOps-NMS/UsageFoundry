@@ -7,7 +7,7 @@ import {
   resolveTimeZone,
 } from "@/lib/windows";
 import { listAgents, listAmbientAgents } from "@/lib/agents";
-import { getSettings, limitConfig } from "@/lib/settings";
+import { getSettings, limitConfig, newWorkPaused } from "@/lib/settings";
 import { readAccountProfile } from "@/lib/account";
 import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
@@ -100,6 +100,11 @@ export async function GET(req: Request) {
         // from "on, but the provider did not answer" — the second is worth a
         // sentence and the first is not.
         planUsageFromApi: settings.planUsageFromApi,
+        // On the dashboard because a held fleet and a quiet one are identical
+        // here otherwise: the meters read the same, and the only difference is
+        // that nothing new ever starts. One boolean off a settings row rather
+        // than a second poll — this route is already the page's heartbeat.
+        newWorkPaused: newWorkPaused(),
         reservedHeadroomFraction: settings.reservedHeadroomFraction ?? 0,
         // What the user typed, so the meters can name it alongside the reduced
         // ceiling they are actually measured against.

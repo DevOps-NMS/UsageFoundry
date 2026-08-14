@@ -28,9 +28,10 @@ import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 const POLL_MS = 10_000;
 
 /** Who halted it, in the same words the member runs' own reasons use. */
-const CAUSE_LABEL: Record<"operator" | "guard", string> = {
+const CAUSE_LABEL: Record<"operator" | "guard" | "fleet", string> = {
   operator: "You stopped this run",
   guard: "Its budget guard stopped this run",
+  fleet: "You stopped everything in flight, this run among it",
 };
 
 type BlockStatus = WorkflowInstanceDTO["blocks"][number]["status"];

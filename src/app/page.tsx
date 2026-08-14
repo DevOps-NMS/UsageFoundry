@@ -388,6 +388,19 @@ export default function Dashboard() {
   const banner = (
     <div aria-live="polite">
       {pollError && <Notice tone="danger">{pollError}</Notice>}
+      {/* In words, because a held fleet and a quiet one are identical on this
+          page otherwise: every meter reads the same and the only difference is
+          that the queue never moves. It sits with the poll failure rather than
+          among the cards for the same reason — it is a fact about whether what
+          is below can still change. */}
+      {data?.meta?.newWorkPaused && (
+        <Notice tone="warn">
+          <strong>New work is held.</strong> Nothing starts — queued runs stay
+          queued, dependents stay waiting, schedules do not fire and an
+          orchestrator block cannot emit. Work already in flight carries on.{" "}
+          <Link href="/runs">Resume it on the runs page</Link>.
+        </Notice>
+      )}
     </div>
   );
 

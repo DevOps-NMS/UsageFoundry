@@ -437,6 +437,38 @@ export function saveSettings(patch: Partial<Settings>): Settings {
 }
 
 /**
+ * Whether new work is held: nothing starts, nothing already started is touched.
+ *
+ * Persisted rather than a process variable, because the usual reason it gets set
+ * is the restart it has to survive — an operator who stems the flow at 02:00 and
+ * then bounces the container must not find twenty-five agents back at work.
+ *
+ * A settings row of its **own**, deliberately not a key of `Settings`. The
+ * settings page sends the whole object on Save, so a field in that blob is one
+ * an unrelated edit from a tab opened before the pause would silently clear —
+ * which for a preference is a nuisance and for the fleet's kill switch is the
+ * failure it exists to prevent. `SETTINGS_KEYS` and the route's per-key
+ * narrowing therefore do not cover it, and the only doors to it are the fleet
+ * route and this pair.
+ *
+ * What it suppresses is *starting*, not recording: rows may still be created —
+ * a press of Run on a workflow still writes its graph out — they simply never
+ * leave the queue. Four call sites read it and each is separate: `promoteQueued`
+ * through `selectPromotable`, `releaseDependents` through `releasableRuns`,
+ * `tickSchedules` through `decideSchedule`, and `emitBlockRuns` at its door. A
+ * fix that misses one is silent, which is why there is a test per site.
+ */
+const PAUSE_KEY = "fleet.newWorkPaused";
+
+export function newWorkPaused(): boolean {
+  return getJSON<boolean>(PAUSE_KEY, false) === true;
+}
+
+export function setNewWorkPaused(paused: boolean): void {
+  setJSON(PAUSE_KEY, paused === true);
+}
+
+/**
  * Ceilings as the rest of the app should see them — reserved headroom already
  * subtracted.
  *
