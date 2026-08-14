@@ -82,7 +82,9 @@ services:
       # `user:` back to "${UF_UID:-1000}:${UF_GID:-1000}" and take the shared-uid
       # behaviour whole — the server refuses to boot if it is asked to drop a
       # child while holding no privilege to do it, rather than starting without
-      # the boundary and saying nothing.
+      # the boundary and saying nothing. A UF_UID of 0 is the one case that is
+      # neither: there is no separable uid on such a host, so it runs as it did
+      # before and the boot log says the boundary is absent.
       UF_AGENT_UID: "${UF_UID:-1000}"
       UF_AGENT_GID: "${UF_GID:-1000}"
 

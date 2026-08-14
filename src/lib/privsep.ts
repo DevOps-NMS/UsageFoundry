@@ -87,13 +87,13 @@ export function resolveChildCredentials(o: {
   if (!wanted) return null;
 
   const uid = parseId(wanted, "UF_AGENT_UID");
-  if (uid === 0) {
-    throw new Error(
-      "UF_AGENT_UID is 0. Dropping a child to root is not a boundary — it is " +
-        "the server's own identity, which is what the split exists to keep " +
-        "away from an agent.",
-    );
-  }
+  // Root asked for, so there is no boundary to build: dropping a child to the
+  // server's own identity is the arrangement the split replaced. This is not a
+  // typo to refuse — compose fills it from `UF_UID`, and an operator whose host
+  // uid really is 0 has root-owned bind mounts and no separable uid to run an
+  // agent as. Refusing would take a working install down over something they
+  // cannot change; `describeSeparation()` says the boundary is absent instead.
+  if (uid === 0) return null;
 
   const gidRaw = (o.agentGid ?? "").trim();
   if (!gidRaw) {

@@ -43,12 +43,15 @@ describe("resolveChildCredentials", () => {
     );
   });
 
-  it("refuses to run children as root", () => {
-    // Not a boundary: it is the server's own identity, which is the thing the
-    // split exists to keep away from an agent.
-    assert.throws(
-      () => resolveChildCredentials({ serverUid: 0, agentUid: "0", agentGid: "0" }),
-      /UF_AGENT_UID is 0/,
+  it("asks for nothing when the agent uid is root", () => {
+    // Not a boundary — it is the server's own identity — but not a typo to
+    // refuse either: compose fills this from `UF_UID`, so a host whose own uid
+    // is 0 has root-owned bind mounts and no separable uid to run an agent as.
+    // Throwing would take that install down over something it cannot change,
+    // where `null` is the pre-split arrangement, which the boot log names.
+    assert.equal(
+      resolveChildCredentials({ serverUid: 0, agentUid: "0", agentGid: "0" }),
+      null,
     );
   });
 
