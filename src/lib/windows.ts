@@ -473,9 +473,16 @@ export function agentOrigin(
  * One run's own turns, split by who produced them.
  *
  * The same `groupBy` and the same buckets as the dashboard column, over the
- * entries belonging to one session rather than to a window — so a delegated turn
- * lands in its agent's row and everything else lands in `(main thread)`, and the
- * rows add up to `costUSD` with nothing omitted.
+ * entries belonging to one session rather than to a window — so a turn carrying
+ * an agent name lands in that agent's row, a turn carrying none lands in
+ * `(main thread)`, and the rows add up to `costUSD` with nothing omitted.
+ *
+ * Which turns carry a name is the CLI's business and this infers nothing. That
+ * used to be the same statement as "a delegated turn"; since a run can be
+ * *started as* an agent it is not, and whether such a session names itself on
+ * its own turns is unmeasured — so a run whose every row sits under one agent
+ * and a run whose every row sits under `(main thread)` are both this function
+ * working. Nothing here branches on the answer; the two cards say so in words.
  *
  * This is the **transcript** source scoped to one run, which is the source
  * `reconcileKilledCycle` already reads for `spent_usd_est`, not a new one. It is
@@ -501,7 +508,17 @@ export interface AgentSpend {
   costGuardUSD: number;
   tokens: number;
   entryCount: number;
-  /** Everything that is not `(main thread)` — what was handed to a specialist. */
+  /**
+   * Everything that is not `(main thread)`, whatever put it in another bucket.
+   *
+   * The name is historical and the doc is the definition: it was coined when a
+   * bucket key could only have come from a turn the main thread handed off, and
+   * the arithmetic — every row that is not `MAIN_THREAD_BUCKET` — never encoded
+   * that reading and does not now. Kept rather than renamed because it is on the
+   * wire (`RunAgentSpendDTO`), and because the one label a reader sees was moved
+   * off it instead: the meter says "Outside the main thread", which is what the
+   * figure is under either flag.
+   */
   delegatedCostUSD: number;
   delegatedCostGuardUSD: number;
   /** Cost-descending, main thread included. */

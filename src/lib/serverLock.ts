@@ -17,10 +17,15 @@ import { DATA_DIR } from "./config";
  * out three runs whose agents were mid-cycle and carried on working. The row
  * said the server had restarted; nothing had.
  *
- * `childEnv` withholding `DATA_DIR` is what stops that particular route. This
- * is the check that does not depend on remembering to: whatever a second
+ * `childEnv` withholding `DATA_DIR` is what stops that particular route, and
+ * the uid split is what makes the withholding enforceable — a child cannot read
+ * the variable out of `/proc/<server>/environ` any more, and cannot open the
+ * directory even knowing the path, because it belongs to the server at 0700.
+ * This is still the check that does not depend on either: whatever a second
  * process is and however it found the file, it does not get to close out rows
- * belonging to a server that is still running.
+ * belonging to a server that is still running. It is also the one that survives
+ * an unseparated install — `npm run dev` on a laptop, where the lock and the
+ * variable are all there is.
  *
  * The lock is a file rather than a row because it has to answer a question
  * about the database from outside it, and because a heartbeat every second is

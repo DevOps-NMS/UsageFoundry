@@ -105,8 +105,8 @@ export interface Settings {
    * is deleted afterwards the form says so and starts with none, because the
    * alternative is a new-run page nobody can use until they visit Settings. That
    * is not the "never fall back to none" rule bending: that rule is about a run
-   * whose operator *named* a specialist, and a pre-filled field nobody has
-   * looked at is not a naming. Everything downstream is unchanged — the run door
+   * whose operator *named* an agent, and a pre-filled field nobody has looked
+   * at is not a naming. Everything downstream is unchanged — the run door
    * still refuses a deleted agent by name through `agentRefusal`.
    */
   defaultAgentId: string | null;
@@ -143,15 +143,59 @@ export interface Settings {
    */
   forwardSubAgentText: boolean;
   /**
-   * How many runs may be active at once. Null means no limit.
+   * How many **work cycles** may be running at once. Null means no limit.
    *
    * A concurrency knob, not a usage ceiling — the no-default-ceilings rule
    * above does not apply, because unlike a limit this number is not a guess at
    * something Anthropic knows and we do not. It does move the spend bound
    * though: each run carries its own `maxRunCostUSD`, so N runs can overshoot
    * by N work cycles rather than one.
+   *
+   * It ships as a **number**, and that is the difference between this and every
+   * ceiling in this file. A ceiling is left null because we would be guessing at
+   * a figure Anthropic publishes nowhere; there is no guess in a *host* limit —
+   * how many Node processes a container can carry is a property of the machine,
+   * and `null` meant a fresh install had no bound on the fleet at all. 4 is
+   * chosen against the memory limit `docker-compose.yml` now ships (10 GiB) at
+   * roughly 1.5 GiB for a work cycle — the CLI child plus the builds, test
+   * suites and dev servers the agent starts inside it — leaving room for the
+   * server and for `maxConcurrentAssists` below. That per-child figure is
+   * reasoned rather than measured, and README's sizing table carries the
+   * arithmetic for raising it. `null` is still available and is now what it
+   * always read as: an explicit opt-out.
+   *
+   * What it does **not** cover is the other three kinds of `claude` child, which
+   * are `maxConcurrentAssists`. Splitting them rather than sharing one number is
+   * what keeps a chat turn from eating a run's slot, and it is why the ceiling
+   * on this container is the *sum* of the two.
    */
   maxConcurrentRuns: number | null;
+  /**
+   * How many `claude` children that are **not** work cycles may run at once.
+   * Null means no limit.
+   *
+   * Four callers, one budget: a review, a merge-conflict resolution, an
+   * orchestrator-chat turn and a workflow orchestrator block's deciding turn.
+   * They already share one door — `assistRefusal()` in `review.ts`, which every
+   * one of them passes through — so the count is read there rather than in four
+   * places that would drift.
+   *
+   * A cap that covered work cycles alone did not bound the host: a fleet of 25
+   * runs can carry an orchestrator turn per `thinking` block and a turn per open
+   * chat on top of it, each a full Node process. 2 is chosen against the same
+   * 10 GiB compose limit at roughly 0.5 GiB each — cheaper than a work cycle
+   * because none of the four builds anything (a review runs `--permission-mode
+   * plan` and cannot write at all).
+   *
+   * The three kinds with a person in front of them are **refused** when it is
+   * full, because they have an error channel and a sentence is what a person
+   * needs. A block's deciding turn is instead left `waiting` for the next
+   * advance, because failing it ends the branch of the graph behind it — and a
+   * transient shortage of memory is not a decision about the work. Whatever
+   * frees a slot wakes it: `settleBlock` already advances, and `review.ts` and
+   * `chat.ts` advance when their own children settle.
+   */
+  maxConcurrentAssists: number | null;
   /**
    * Gitignored files copied into a fresh checkout, newest-wins glob order.
    *
@@ -207,6 +251,34 @@ export interface Settings {
    * one model turn, and the UI says so.
    */
   liveGuardIntervalSeconds: number;
+  /**
+   * How long a work cycle may produce nothing before it is ended.
+   *
+   * A deadline rather than a budget rule, so the "blank disables a guard" rule
+   * does not apply and there is deliberately no way to switch it off: the
+   * absence of one is the defect it exists to fix. `runIteration` settles only
+   * when its child says so, and a `claude` wedged on a socket read never does —
+   * which leaves the run `running` for ever, holding its folder, its checkout
+   * slot and one of `maxConcurrentRuns`, recoverable only by restarting the
+   * container. It is floored rather than allowed to reach zero, and read
+   * defensively at the spawn, for `chatGuards`' reason: this blob is JSON in a
+   * settings row and can be hand-edited.
+   *
+   * **Silence, not wall clock.** The clock is the time since the last line the
+   * child printed, and every stdout line and stderr chunk resets it — a cycle
+   * that is still reporting is working, however long it takes, and killing one
+   * for its duration is what `enforcement: "live"` is for. A cadence-shaped
+   * number rather than a ceiling, so the no-default-numbers rule does not apply
+   * either.
+   *
+   * Two hours by default, which is deliberately generous. The stream falls
+   * silent for the whole of a single model turn and for the whole of one tool
+   * call, so a run whose test suite takes an hour is silent for an hour and is
+   * perfectly healthy; the cost of being wrong is asymmetric, since a killed
+   * working cycle loses paid work while a slot recovered in two hours instead
+   * of one is still recovered the same day.
+   */
+  maxCycleSilenceMinutes: number;
   /**
    * How stale a parked run's pause may be and still survive a restart.
    *
@@ -423,13 +495,15 @@ const DEFAULTS: Settings = {
   continuationPrompt: DEFAULT_CONTINUATION_PROMPT,
   includeSidechains: true,
   forwardSubAgentText: true,
-  maxConcurrentRuns: null,
+  maxConcurrentRuns: 4,
+  maxConcurrentAssists: 2,
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,
   continuedWorkPrompt: DEFAULT_CONTINUED_WORK_PROMPT,
   telemetryForRuns: false,
   donePushbackPrompt: DEFAULT_DONE_PUSHBACK_PROMPT,
   liveGuardIntervalSeconds: 60,
+  maxCycleSilenceMinutes: 120,
   resumeGraceHours: 24,
   landStrategy: "merge",
   killProcessGroup: true,
