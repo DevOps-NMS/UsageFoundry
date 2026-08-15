@@ -66,6 +66,13 @@ loopback-bound install on a machine you alone use), set `UF_ALLOW_NO_AUTH=1`
 alongside it: the app then starts, logs a block at boot, and puts a banner on
 every page saying it is unauthenticated. Nothing else accepts that state.
 
+The port is published on `127.0.0.1` for the same reason. To reach the app from
+another machine on your network, set `UF_BIND_ADDRESS=0.0.0.0` — with a token
+set, `UF_ALLOW_NO_AUTH` blank, and `UF_COOKIE_SECURE=0`, since a browser never
+returns a `Secure` cookie over plain HTTP. [Reaching it from another
+machine](docs/install.md#reaching-it-from-another-machine) has the whole of it,
+including what a shared secret over HTTP does and does not buy.
+
 The dashboard works immediately. **Runs need one extra step** — the `~/.claude`
 mount carries your transcripts but not your credentials, so sign the container
 in once:

@@ -98,6 +98,7 @@ Settings shows whether a token is configured.
 | `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. Absolute path; compose refuses to start without it. |
 | `UF_AUTH_TOKEN` | Shared secret for the UI. Blank makes the server **refuse to start** unless `UF_ALLOW_NO_AUTH=1` is also set. |
 | `UF_ALLOW_NO_AUTH` | `1` to run with no authentication at all. Only for a loopback-bound install on a machine you alone use; every page then says so. |
+| `UF_BIND_ADDRESS` | Which host interface the port is published on. Default `127.0.0.1` — this machine only. See *Reaching it from another machine* below. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
 | `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only, and every repository. |
 | `UF_GITHUB_TOKENS` | Optional. `folder=token` entries separated by `\|`, narrowing the credential to the repository a run is working in. |
@@ -188,6 +189,35 @@ That volume is the only copy of every run, every cost, every template, workflow
 and schedule, and nothing backs it up on its own — take a snapshot before you
 try either of the commands above, and put one in cron afterwards:
 **[Backup and restore](backup-and-restore.md)**.
+
+## Reaching it from another machine
+
+Compose publishes the port on `127.0.0.1` by default, so the app answers on the
+machine it runs on and nowhere else. `UF_BIND_ADDRESS` moves it — but it is
+three settings, not one, and the other two fail silently:
+
+```bash
+UF_BIND_ADDRESS=0.0.0.0
+UF_AUTH_TOKEN=…      # openssl rand -hex 32; UF_ALLOW_NO_AUTH must be blank
+UF_COOKIE_SECURE=0   # 1 here means sign-in appears to work and then does not
+```
+
+Then `docker compose up -d` — a port binding is fixed when the container is
+created, so a restart does not pick this up. Other machines reach it at
+`http://<this machine's LAN address>:3000` and are asked for the token.
+
+`UF_COOKIE_SECURE=0` is not a relaxation you can skip: a browser never returns a
+`Secure` cookie over plain HTTP, so at `1` the sign-in POST succeeds, the cookie
+is set, and every request after it arrives without one — a redirect loop back to
+`/login` with nothing anywhere saying why.
+
+What this is and is not: the token now crosses the network in clear, so anyone
+who can watch the traffic has it, and with it the routes that start billed
+agents holding write access to your workspaces. That is a defensible trade on a
+home or office network you control. It is not one on a network you share with
+strangers, and `UF_BIND_ADDRESS` must never name an interface a router forwards
+a port to — for anything reachable from outside, put a TLS terminator in front
+and set `UF_COOKIE_SECURE` back to blank.
 
 ## Multiple workspaces
 

@@ -474,6 +474,21 @@ Built and exercised against real transcripts:
   caller), and an orchestrator block whose node names none. It is recorded rather
   than declared; see the entry below for why and for what declaring it would
   take.
+- **`UF_BIND_ADDRESS` off loopback, and the two settings that fail silently
+  beside it.** Against a running container recreated with
+  `UF_BIND_ADDRESS=0.0.0.0`, `UF_AUTH_TOKEN` set, `UF_ALLOW_NO_AUTH` blank and
+  `UF_COOKIE_SECURE=0`: `docker compose ps` reported `0.0.0.0:3000->3000/tcp`
+  rather than `127.0.0.1:3000->3000/tcp`, and requests to the host's own LAN
+  address (not `localhost`) answered `/api/health` **200**, `/` **307** to
+  `/login`, `/api/usage` **401** with no credential and **200** under
+  `Authorization: Bearer $UF_AUTH_TOKEN`. `POST /api/login` with the token
+  answered 200 and its `Set-Cookie` read
+  `uf_session=…; Path=/; Expires=…; Max-Age=86400; HttpOnly; SameSite=lax` —
+  **no `Secure`**, which is the flag whose presence would have made that sign-in
+  succeed and every request after it anonymous. The recreate matters and is part
+  of what was checked: a port binding is fixed when the container is created, so
+  `docker compose restart` leaves the old one in place.
+  What this does **not** establish is in the next section.
 
 ## Not yet verified by hand
 
@@ -482,6 +497,23 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **A second machine actually reaching a LAN-published install, and a browser
+  staying signed in to it.** Every check in the entry above was made *from the
+  host running the container*, at its own LAN address. That proves Docker
+  published on a non-loopback interface and that the gate and the cookie flags
+  are right; it says nothing about whether anything else on the network can open
+  the socket, because an access point isolating its clients sits entirely
+  outside what a request to yourself traverses. (`lsof -nP -iTCP:3000
+  -sTCP:LISTEN` did show Docker on `*:3000` rather than `127.0.0.1:3000`, and
+  the macOS application firewall was confirmed disabled, so the two host-side
+  causes are ruled out — the network between the two machines is not.) Nor has a browser
+  completed the flow — the `Secure`-flag failure this is guarding against is
+  specifically one `curl` cannot see, since curl returns the cookie either way
+  and only a browser enforces the rule. Before trusting it: from a different
+  machine, `curl -sf http://<host>:3000/api/health`, then open the app, sign in
+  with the token, and reload a page — a redirect back to `/login` after an
+  apparently successful sign-in means `UF_COOKIE_SECURE` is `1` (or blank behind
+  something setting `X-Forwarded-Proto: https`) and not `0`.
 - **Checkout-slot exhaustion end to end, and the store inventory behind it.**
   `resolveIsolation`'s refusal is unit-tested in both directions (it was seen to
   fail against the old downgrade and to pass against the refusal), and

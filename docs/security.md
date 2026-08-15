@@ -99,8 +99,12 @@ has anything to do with the task the agent was given — are no longer reachable
 
 ## Everything else
 
-- Compose binds to **`127.0.0.1:3000`**, not `0.0.0.0`. Change that only behind
-  auth and TLS.
+- Compose binds to **`127.0.0.1:3000`**, not `0.0.0.0`. `UF_BIND_ADDRESS` moves
+  it, and moving it is three settings rather than one: `UF_AUTH_TOKEN` set,
+  `UF_ALLOW_NO_AUTH` blank, and `UF_COOKIE_SECURE` at `0` rather than `1` unless
+  there is TLS in front. On a LAN that is a shared secret crossing plain HTTP —
+  defensible on a network you control, not a substitute for TLS, and never on an
+  interface a router forwards to.
 - Set `UF_AUTH_TOKEN` (`openssl rand -hex 32`). Leaving it blank makes the
   server refuse to start; the only way past that is `UF_ALLOW_NO_AUTH=1`, which
   runs with no authentication and puts a banner on every page saying so.
