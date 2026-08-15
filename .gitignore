@@ -19,3 +19,10 @@ next-env.d.ts
 
 # Compiled output for `npm test`.
 .test-build/
+
+# The default backup destination, which compose bind-mounts at /backups. The
+# directory itself is tracked (through .gitkeep) so that mount has a host
+# source the container's uid can write to; what lands in it is a copy of the
+# operator's own database and never belongs in the repository.
+backups/*
+!backups/.gitkeep
