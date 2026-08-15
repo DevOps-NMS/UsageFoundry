@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
-import { getRun, reopenRun } from "@/lib/orchestrator";
-import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
+import { currentSnapshot, getRun, reopenRun } from "@/lib/orchestrator";
+import {
+  ENFORCEMENT_MODES,
+  normalizePolicy,
+  windowGuardRefusal,
+} from "@/lib/budget";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -57,6 +61,16 @@ export async function POST(req: Request, ctx: Ctx) {
       },
       { status: 400 },
     );
+  }
+
+  // The other door, and the same refusal for the same reason: a fraction guard
+  // with nothing to read is answered where there is a person, because the
+  // pre-cycle guard no longer ends a run over it. Refused before `reopenRun`
+  // touches the row, so a run whose guard cannot be read is left exactly as it
+  // was rather than flickering queued → stopped.
+  if (policy.maxWeeklyFraction !== null || policy.maxSessionFraction !== null) {
+    const refusal = windowGuardRefusal(policy, await currentSnapshot());
+    if (refusal) return NextResponse.json({ error: refusal }, { status: 400 });
   }
 
   const outcome = reopenRun(id, policy, String(body.followUp ?? ""));

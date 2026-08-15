@@ -21,8 +21,17 @@ import type { UsageSnapshot, WindowState } from "./windows";
  *   the agent when one trips. That trades the in-flight cycle's work — and its
  *   self-reported cost — for a tighter bound: one model turn plus one check
  *   interval plus the kill, rather than a whole cycle. It is still not a hard
- *   cap, because usage is read from transcripts Claude Code flushes as each
- *   turn completes.
+ *   cap, and the staleness that makes it one is worth stating in full rather
+ *   than as "transcripts are flushed as each turn completes", which describes
+ *   the *fallback* source. The window fractions prefer the provider's own
+ *   percentage (`planUsage.ts`), which is cached: five minutes in the ordinary
+ *   case, and up to an hour while requests are being refused. What keeps that
+ *   from being the guard's real resolution is that `guardFraction` also takes
+ *   the derived reading, recomputed from the transcripts on every check, and
+ *   uses whichever is worse — so locally observed spend inside a refresh
+ *   interval still moves the number a run is stopped on, wherever a ceiling is
+ *   configured for it to be measured against. A verdict reached on a reading
+ *   older than `STALE_PLAN_READING_MS` says so in as many words.
  * - `live-resume` is `live`, except that the one rule which comes back on its
  *   own — the 5-hour window — parks the run instead of ending it.
  *
@@ -135,6 +144,8 @@ export type BudgetStopCode =
   | "duration"
   /** Everything one press of Run on a workflow has spent, across its blocks. */
   | "instance_cost"
+  /** Everything this installation has spent, across every run, block and chat. */
+  | "install_cost"
   | "no_ceiling"
   | "no_terminus";
 
@@ -189,6 +200,50 @@ export const LIVE_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
 ];
 
 /**
+ * Codes a run may actually be *ended* on, once it exists.
+ *
+ * `INSTANCE_ENFORCEABLE_CODES`' reasoning, one level down, and the argument is
+ * the same one word for word — which is why this list exists rather than a
+ * second policy: `no_ceiling` is checked **at the door**, where there is a
+ * person and an error channel (`POST /api/runs`, and the reopen route), and is
+ * deliberately not acted on afterwards. `fraction` going null under a run in
+ * flight is not the operator having failed to set a ceiling. On a stock install
+ * ceilings ship null by design and that reading comes from the provider, which
+ * is discarded after an hour without a fresh answer — so an unreachable
+ * Anthropic host would otherwise end every fraction-guarded run at its next
+ * cycle boundary, block every queued one (cascading `blocked` down every chain
+ * behind it) and let the sweeper end every parked one. Turning a provider
+ * outage into a stopped fleet is a worse failure than the one the refusal
+ * exists to prevent, and recovery is one manual reopen per run.
+ *
+ * It is not silently ignored either. The run whose check found it logs that the
+ * guard has nothing to read — once per segment, the same answer this app
+ * already gives for a live spending limit whose telemetry never arrived and for
+ * an instance limit that could not be read — and carries on under its remaining
+ * guards, which are per-run and still bind.
+ *
+ * `no_terminus` stays on this list and is not a second configuration code to
+ * treat the same way: it says nothing would ever end the run, so ignoring it
+ * would leave an agent nothing stops. It is also refused at the same door.
+ */
+export const RUN_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
+  "duration",
+  "run_cost",
+  "run_tokens",
+  "weekly_fraction",
+  "session_fraction",
+  "iterations",
+  "instance_cost",
+  "install_cost",
+  "no_terminus",
+];
+
+/** Whether a refusal is one a run in flight may be ended on. */
+export function enforceableForRun(verdict: BudgetVerdict): boolean {
+  return verdict.allowed || RUN_ENFORCEABLE_CODES.includes(verdict.code);
+}
+
+/**
  * Slack past the window boundary before a parked run tries again.
  *
  * The boundary comes from transcripts, which are flushed as turns complete, so
@@ -197,7 +252,54 @@ export const LIVE_ENFORCEABLE_CODES: readonly BudgetStopCode[] = [
  */
 export const RESUME_MARGIN_MS = 60_000;
 
+/**
+ * How old the provider's own percentage may be before a verdict reached on it
+ * says how old it was.
+ *
+ * The same 5 minutes as `planUsage.REFRESH_MS`, written out here rather than
+ * imported: that module reads the filesystem and this one is pure and
+ * synchronous, and one number restated with the reason beside it is cheaper
+ * than an import that drags `node:fs` into every caller of this file. Past
+ * this the reading has aged beyond the point where the source itself would
+ * still call it current, which is exactly when the difference between "the
+ * window is at 61%" and "the window was at 61% fifty-eight minutes ago" starts
+ * to matter — a distinction neither the guard nor the run log could make.
+ *
+ * It is a *disclosure* threshold and deliberately not a refusal one. Discarding
+ * a stale reading would leave the guard with nothing to read, and a percentage
+ * that is behind reality is still a floor under it; what is unsafe is acting on
+ * one while believing it is fresh.
+ */
+export const STALE_PLAN_READING_MS = 300_000;
+
 const pct = (n: number) => `${(n * 100).toFixed(1)}%`;
+
+/**
+ * How old the provider reading behind a window's fraction is, or null.
+ *
+ * Null covers both "this window's fraction is derived, so there is no cached
+ * reading behind it" and "the provider never answered" — in neither case is
+ * there an age to disclose. `fractionMetric` is what says which of the two
+ * sources the number came from, so it is what this reads.
+ */
+export function planReadingAgeMs(
+  snapshot: UsageSnapshot,
+  window: WindowState,
+  now: number,
+): number | null {
+  const plan = snapshot.plan ?? null;
+  if (plan === null || window.fractionMetric !== "plan") return null;
+  return Math.max(0, now - plan.fetchedAt);
+}
+
+/** What a verdict adds when the reading it was reached on had aged. */
+function stalenessNote(ageMs: number | null): string {
+  if (ageMs === null || ageMs < STALE_PLAN_READING_MS) return "";
+  const minutes = Math.round(ageMs / 60_000);
+  return ` The provider's own reading was ${minutes} ${
+    minutes === 1 ? "minute" : "minutes"
+  } old when this was decided.`;
+}
 
 /**
  * Where one window stands against one fraction threshold.
@@ -237,6 +339,62 @@ export function readWindowGuard(
   if (window.fraction === null) return { state: "no-ceiling" };
   const at = window.guardFraction ?? 0;
   return at >= threshold ? { state: "over", at } : { state: "under", at };
+}
+
+/**
+ * What a fraction guard with nothing to read is told, in one place.
+ *
+ * Two readers — the door, which refuses, and the pre-cycle guard, which now
+ * only logs — so the wording lives here rather than at either. It names both
+ * causes because there are two and they need different actions: the provider's
+ * own utilisation is what a stock install measures against, and it can simply
+ * be unavailable for a while, where a typed ceiling is a thing to go and set.
+ */
+const NO_READING_REASON: Record<"weekly" | "session", string> = {
+  weekly:
+    "A weekly-fraction guard is set but that window has no reading to " +
+    "measure against: the provider's own utilisation was not available and " +
+    "no weekly ceiling is configured. Set one in Settings (or run Calibrate), " +
+    "or wait for the provider's reading to come back.",
+  session:
+    "A session-fraction guard is set but the 5-hour window has no reading to " +
+    "measure against: the provider's own utilisation was not available and " +
+    "no 5-hour ceiling is configured. Set one in Settings (or run Calibrate), " +
+    "or wait for the provider's reading to come back.",
+};
+
+/**
+ * The refusal a fraction guard with nothing to read earns **at a door**.
+ *
+ * `RUN_ENFORCEABLE_CODES` moves this condition out of the pre-cycle guard, so
+ * something has to say it where there is still a person: `POST /api/runs` and
+ * the reopen route both call this before anything is created. Separate from
+ * `evaluateBudget` rather than a mode of it, because the door has no progress
+ * to evaluate — no cycles used, no clock running, no spend — and putting a
+ * zeroed `RunProgress` through the full guard would answer about limits that
+ * cannot have been reached yet. It reads exactly what the guard reads,
+ * `readWindowGuard`, so the two cannot disagree about whether a window has a
+ * reading.
+ */
+export function windowGuardRefusal(
+  policy: BudgetPolicy,
+  snapshot: UsageSnapshot,
+): string | null {
+  if (
+    policy.maxWeeklyFraction !== null &&
+    readWindowGuard(snapshot.weekly, policy.maxWeeklyFraction).state ===
+      "no-ceiling"
+  ) {
+    return NO_READING_REASON.weekly;
+  }
+  if (
+    policy.maxSessionFraction !== null &&
+    readWindowGuard(snapshot.session, policy.maxSessionFraction).state ===
+      "no-ceiling"
+  ) {
+    return NO_READING_REASON.session;
+  }
+  return null;
 }
 
 export function evaluateBudget(
@@ -378,23 +536,22 @@ export function evaluateBudget(
   }
 
   // A fraction-of-limit rule is only meaningful when there is a reading to
-  // measure against. Refusing to start is the safe reading of "stop at 80% of
-  // my weekly limit" when we have no idea what 100% is — silently ignoring the
-  // rule would let a run proceed under a guard the user believes is active.
+  // measure against, and the verdict says so rather than passing silently: a
+  // run proceeding under a guard the user believes is active is the failure
+  // this refusal exists to prevent. What is done with it is the caller's, and
+  // it is deliberately not "end the run" — see `RUN_ENFORCEABLE_CODES`, which
+  // moves this one code to the door and leaves a log line here.
   // Which field answers which question is `readWindowGuard`'s business.
   if (policy.maxWeeklyFraction !== null) {
     const weekly = readWindowGuard(snapshot.weekly, policy.maxWeeklyFraction);
     if (weekly.state === "no-ceiling") {
-      return block(
-        "no_ceiling",
-        "A weekly-fraction guard is set but no weekly ceiling is configured. " +
-          "Set one in Settings (or run Calibrate) before using this guard.",
-      );
+      return block("no_ceiling", NO_READING_REASON.weekly);
     }
     if (weekly.state === "over") {
       return block(
         "weekly_fraction",
-        `Weekly window is at ${pct(weekly.at)}, at or past the ${pct(policy.maxWeeklyFraction)} guard.`,
+        `Weekly window is at ${pct(weekly.at)}, at or past the ${pct(policy.maxWeeklyFraction)} guard.` +
+          stalenessNote(planReadingAgeMs(snapshot, snapshot.weekly, now)),
       );
     }
   }
@@ -402,15 +559,12 @@ export function evaluateBudget(
   if (policy.maxSessionFraction !== null) {
     const session = readWindowGuard(snapshot.session, policy.maxSessionFraction);
     if (session.state === "no-ceiling") {
-      return block(
-        "no_ceiling",
-        "A session-fraction guard is set but no 5-hour ceiling is configured. " +
-          "Set one in Settings (or run Calibrate) before using this guard.",
-      );
+      return block("no_ceiling", NO_READING_REASON.session);
     }
     if (session.state === "over") {
       const at = pct(session.at);
       const guard = pct(policy.maxSessionFraction);
+      const aged = stalenessNote(planReadingAgeMs(snapshot, snapshot.session, now));
       // A full 5-hour window is the one tripped guard that comes back on its
       // own, so it is the one a run can wait out. Every check above measures
       // something that only moves one way — cycles used, wall clock, this run's
@@ -420,13 +574,14 @@ export function evaluateBudget(
       if (policy.enforcement === "live-resume") {
         return park(
           `5-hour window is at ${at}, at or past the ${guard} guard. ` +
-            "Waiting for the next 5-hour window.",
+            "Waiting for the next 5-hour window." +
+            aged,
           snapshot.session.endsAt + RESUME_MARGIN_MS,
         );
       }
       return block(
         "session_fraction",
-        `5-hour window is at ${at}, at or past the ${guard} guard.`,
+        `5-hour window is at ${at}, at or past the ${guard} guard.` + aged,
       );
     }
   }
@@ -722,5 +877,141 @@ export function normalizeInstanceBudget(raw: unknown): InstanceBudgetPolicy {
     maxInstanceCostUSD: num(o.maxInstanceCostUSD),
     maxSessionFraction: frac(o.maxSessionFraction),
     maxWeeklyFraction: frac(o.maxWeeklyFraction),
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* The whole of what this installation spends                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How far back the install-wide ceiling looks.
+ *
+ * A **rolling** 24 hours, not a calendar day, and both halves of that are
+ * deliberate. A calendar day would have to be cut in some zone — the container
+ * runs in UTC and the operator does not, which is the failure `zonedMidnight`
+ * already exists to fix for the dashboard's history — and a guard cut in the
+ * wrong zone refuses work for hours or authorises it for hours. It would also
+ * be a cliff every run in the install crosses at the same instant, which is the
+ * lockstep this app already has enough of.
+ *
+ * Fixed rather than configurable: a second field to get wrong, for a period
+ * nobody has asked to vary. The number the operator types is the money.
+ */
+export const INSTALL_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The one limit here that is about the *installation* rather than about a run,
+ * a press of Run, or a chat turn.
+ *
+ * Every other guard in this module bounds one thing that spends: `maxRunCostUSD`
+ * a run, `maxInstanceCostUSD` a workflow instance, `chatTurnBudgetUSD` a turn.
+ * None of them bounds the total, and nothing bounds the *rate* at which new
+ * spenders are created — `promoteQueued` starts the next queued run the instant
+ * a slot frees, a schedule presses Run with nobody present, and an orchestrator
+ * block starts up to `MAX_FAN_OUT` runs with no approval — so the fleet's spend
+ * is `waves × concurrency × per-run limit` with no term under an operator-set
+ * maximum. This is that term.
+ *
+ * It is **not** the calendar rollup wearing a different hat. `buildPeriods`
+ * measures history against a weekly ceiling spread over a day or a month, which
+ * is a threshold nobody set, and `CLAUDE.md` is right that it must never reach a
+ * guard. This is a number the operator typed, meaning what it says, compared
+ * against money this app itself recorded spending.
+ *
+ * One field, so no `no_ceiling` analogue and no terminus question: an install
+ * that has spent nothing is under any limit, and the reading only grows within
+ * the window and only shrinks as spend ages out of it.
+ */
+export interface InstallBudgetPolicy {
+  /** USD across `INSTALL_WINDOW_MS`, for everything. null = no limit. */
+  maxInstallCostUSD: number | null;
+}
+
+export interface InstallProgress {
+  /**
+   * What was measured: every run's `spent_usd`, every orchestrator block's
+   * `cost_usd` and every chat's `cost_usd` inside the window. A **floor**, for
+   * `InstanceProgress.spentUSD`'s reason — a cycle in flight has reported
+   * nothing. Displayed, never guarded on.
+   */
+  spentUSD: number;
+  /**
+   * What the guard acts on: the above, plus every run's reconciled estimate for
+   * cycles killed before they reported, plus what telemetry says the cycles in
+   * flight have cost so far. The same display-versus-guard split `costUSD`/
+   * `costGuardUSD` makes for a window and `instanceSpend` makes for one press of
+   * Run, and for the same reason.
+   */
+  spentGuardUSD: number;
+}
+
+/** Nothing is set, so there is no ceiling to evaluate and no meter to fill. */
+export function installBudgetIsOff(policy: InstallBudgetPolicy): boolean {
+  return policy.maxInstallCostUSD === null;
+}
+
+/**
+ * Whether this installation may start something else that spends.
+ *
+ * Deliberately the same `BudgetVerdict` and the same `BudgetStopCode`
+ * vocabulary as the two guards above — a third set of budget words for the same
+ * kind of decision would be a third thing to keep in step — and pure for
+ * `evaluateInstanceBudget`'s reason: what reads the database is the caller.
+ */
+export function evaluateInstallBudget(
+  policy: InstallBudgetPolicy,
+  progress: InstallProgress,
+): BudgetVerdict {
+  const meters: BudgetMeter[] = [];
+
+  if (policy.maxInstallCostUSD !== null) {
+    meters.push({
+      label: "Spent by this install",
+      // The guard's figure, so a card shows what the decision was made on —
+      // the same choice the run and instance meters make.
+      value: progress.spentGuardUSD,
+      limit: policy.maxInstallCostUSD,
+      unit: "usd",
+    });
+  }
+
+  if (
+    policy.maxInstallCostUSD !== null &&
+    progress.spentGuardUSD >= policy.maxInstallCostUSD
+  ) {
+    return {
+      allowed: false,
+      code: "install_cost",
+      reason:
+        `This install has spent $${progress.spentGuardUSD.toFixed(2)} in the last ` +
+        `${INSTALL_WINDOW_MS / 3_600_000} hours, reaching the $${policy.maxInstallCostUSD.toFixed(2)} ` +
+        "limit set in Settings for everything it runs. Nothing new will start " +
+        "until spend ages out of that window or the limit is raised.",
+      disposition: "stop",
+      meters,
+    };
+  }
+
+  return { allowed: true, meters };
+}
+
+/**
+ * Read the install ceiling off a settings value.
+ *
+ * `normalizeInstanceBudget`'s rules, for its reasons: total, idempotent, and
+ * `null`/`""`/`0`/negative all meaning **off**, which is this app's standing
+ * rule for every budget field — there is no default limit to restore, because a
+ * limit nobody typed is not a limit.
+ */
+export function normalizeInstallBudget(raw: unknown): InstallBudgetPolicy {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const v = o.maxInstallCostUSD;
+  if (v === null || v === undefined || v === "") {
+    return { maxInstallCostUSD: null };
+  }
+  const n = Number(v);
+  return {
+    maxInstallCostUSD: Number.isFinite(n) && n > 0 ? n : null,
   };
 }

@@ -188,23 +188,25 @@ guard that instance is measured against either: the limits are copied onto the
 instance when Run is pressed, exactly as the graph is.
 
 **When they are checked, and by how much a workflow can overshoot.** Before a
-block starts a work cycle, never during one — the analogue of the per-run
-*between cycles* mode, and the only accounting here that is exact. Blocks are
-usually one cycle each, so in practice that is between one block and the next.
-The cost is stated rather than hidden: **a block already working carries on until
-some block reaches a cycle boundary**, so the total can overshoot by up to one
-work cycle for each block running at the time, and blocks running at once
-multiply that. There is deliberately no live mode: killing every block mid-cycle
-would turn each one's measured cost into a reconciled estimate, in exchange for a
-bound that is already one cycle in the ordinary case.
+block starts a work cycle, and again as each block finishes — never during one,
+which is the analogue of the per-run *between cycles* mode and the only
+accounting here that is exact. Blocks are usually one cycle each, so in practice
+that is between one block and the next. The cost is stated rather than hidden:
+**a block already working carries on until it or another block reaches one of
+those boundaries**, so the total can overshoot by up to one work cycle for each
+block running at the time, and blocks running at once multiply that. There is
+deliberately no live mode: killing every block mid-cycle would turn each one's
+measured cost into a reconciled estimate, in exchange for a bound that is already
+one cycle in the ordinary case.
 
-The limiting case is worth stating plainly. A graph of blocks that all start at
-once, each running a single work cycle, has no boundary between them at all —
-every block is already working before any of them has spent anything, so the
-guard has nothing to stop. **Settings → maximum concurrent runs is the lever for
-that**, and it is the same one that bounds a per-run spending limit's worst case:
-with a cap of one, a five-block graph checks its workflow-wide limits five times,
-once before each block starts.
+The second boundary is why a block finishing is checked at all. A graph of blocks
+that all start at once, each running a single work cycle, has no boundary
+*before* any of them — every block is already working before any has spent
+anything, so a check made only before a cycle starts had nothing to compare and
+the workflow-wide limit could not fire. The first block to finish is the boundary
+that case needs. **Settings → maximum concurrent runs** still narrows the
+overshoot: with a cap of one, a five-block graph is checked before and after each
+block rather than five times against zero.
 
 When one trips, the workflow is halted through the same door *Stop all* uses, and
 the instance records that its **budget guard** stopped it rather than you.
