@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import type { RunDTO } from "@/lib/apiTypes";
+import type { BootReconcileDTO, RunDTO } from "@/lib/apiTypes";
 import {
   fmtCycleInFlight,
   fmtCycles,
@@ -14,6 +14,7 @@ import {
   pollFailureMessage,
   shortPath,
 } from "@/lib/format";
+import { FleetControls } from "@/components/FleetControls";
 import { StatusMark } from "@/components/StatusMark";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -52,6 +53,25 @@ const ACTIVE_ORDER: Record<"running" | "paused" | "queued" | "waiting", number> 
   // another run in this band.
   waiting: 3,
 };
+
+/**
+ * Statuses the *bulk* pick-up offers, which is narrower than `reopenRun` accepts.
+ *
+ * `reopenRun` also takes `completed`, and rightly — the agent's judgement that
+ * a task is finished is not the operator's. But `completed` is what a run that
+ * used up its cycle cap is written as *and* what a run that reported DONE is
+ * written as, so a fleet control that swept it in would restart every run that
+ * worked. That is a per-run decision with a per-run prompt behind it
+ * (`reopenPrompt`), so it keeps the button on its own page.
+ *
+ * `blocked` is absent for a different reason: it splits two ways and only one
+ * is an ordinary pick-up, the other rejoining a chain at `waiting`. A bulk
+ * control must not choose between them on somebody's behalf.
+ *
+ * Duplicated rather than imported from `orchestrator.ts`, which reaches
+ * `node:fs` — and it is a different list, so importing would be wrong anyway.
+ */
+const REOPENABLE: ReadonlySet<RunDTO["status"]> = new Set(["failed", "stopped"]);
 
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -405,6 +425,7 @@ function RunList({
 
 export default function RunsPage() {
   const [runs, setRuns] = useState<RunDTO[]>([]);
+  const [boot, setBoot] = useState<BootReconcileDTO | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -429,6 +450,7 @@ export default function RunsPage() {
       // throw would report a reachable server as an unreachable one.
       const data = (await res.json().catch(() => ({}))) as {
         runs?: RunDTO[];
+        lastBootReconcile?: BootReconcileDTO | null;
         error?: string;
       };
       if (!res.ok || !data.runs) {
@@ -437,6 +459,7 @@ export default function RunsPage() {
         return;
       }
       setRuns(data.runs);
+      setBoot(data.lastBootReconcile ?? null);
       setPollError(null);
     } catch (err) {
       const cause = err instanceof Error ? err.message : String(err);
@@ -509,6 +532,22 @@ export default function RunsPage() {
   /** Empty because nothing arrived, as against empty because nothing is there. */
   const blank = runs.length === 0 && pollError !== null;
 
+  /**
+   * The finished runs a bulk pick-up would act on: exactly the ones this page
+   * is displaying, in the order it displays them.
+   *
+   * Derived here and handed down rather than read inside the control, because
+   * the rule is about *what somebody looked at* — a run that failed between the
+   * render and the click is not on this list and is not swept in.
+   */
+  const reopenable = useMemo(
+    () =>
+      runs
+        .filter((r) => REOPENABLE.has(r.status))
+        .map((r) => ({ id: r.id, status: r.status })),
+    [runs],
+  );
+
   return (
     <>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
@@ -531,6 +570,30 @@ export default function RunsPage() {
         {pollError && <Notice tone="danger">{pollError}</Notice>}
         {actionError && <Notice tone="danger">{actionError}</Notice>}
       </div>
+
+      {/* A restart ends every run it finds and each one needs picking up by
+          hand, which used to be one line on container stdout — leaving a screen
+          of `failed` runs with nothing here saying they died together. Bounded
+          to the same 24 hours this page already calls recent: within a day it
+          is the explanation for what is below it, and after that it is noise
+          the status endpoint still carries. `quiet`, because it is context
+          rather than something to act on now. */}
+      {boot !== null && boot.closed > 0 && now - boot.at < RECENT_WINDOW_MS && (
+        <Notice tone="warn" quiet>
+          The server restarted {fmtRelative(boot.at, now)} and closed out{" "}
+          <strong className="font-semibold text-ink">
+            {boot.closed} run{boot.closed === 1 ? "" : "s"}
+          </strong>{" "}
+          that were in progress
+          {boot.kept > 0
+            ? `, keeping ${boot.kept} paused run${boot.kept === 1 ? "" : "s"} to resume on their own`
+            : ""}
+          . Nothing restarts on its own — pick one up from its own page if it is
+          still wanted.
+        </Notice>
+      )}
+
+      <FleetControls reopenable={reopenable} onChanged={loadRuns} />
 
       <div className="mb-8">
         <CardTitle>

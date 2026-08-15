@@ -11,6 +11,7 @@ import {
   updateWorkflow,
 } from "@/lib/workflows";
 import { instanceDTO, workflowDTO } from "../dto";
+import { auditMutation } from "../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,7 +30,7 @@ export async function GET(_req: Request, ctx: Ctx) {
   });
 }
 
-export async function PUT(req: Request, ctx: Ctx) {
+async function putHandler(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   if (!getWorkflow(id)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -67,7 +68,7 @@ export async function PUT(req: Request, ctx: Ctx) {
  * them. Nothing is stopped on their behalf: ending a run is the Runs page's
  * decision, not a side effect of tidying a list.
  */
-export async function DELETE(_req: Request, ctx: Ctx) {
+async function deleteHandler(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const workflow = getWorkflow(id);
   if (!workflow) {
@@ -92,3 +93,8 @@ export async function DELETE(_req: Request, ctx: Ctx) {
 
   return NextResponse.json({ deleted: deleteWorkflow(id) });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const PUT = auditMutation(putHandler);
+/** Wrapped so the request that changed something is on the audit log. */
+export const DELETE = auditMutation(deleteHandler);

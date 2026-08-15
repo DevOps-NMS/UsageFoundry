@@ -306,6 +306,19 @@ export function UsagePeriods({
             <Link href="/settings">weekly</Link> window above.
           </>
         )}
+        {series.completeFrom !== null && (
+          <>
+            {" "}
+            {/* The one thing the buckets themselves cannot say. Transcripts are
+                pruned on their own horizon, and a bucket that predates the
+                cutoff is priced from files that are no longer there — so it
+                reads low rather than reading as missing. */}
+            Anything before{" "}
+            {new Date(series.completeFrom).toLocaleDateString()} is incomplete:
+            transcripts are pruned on the{" "}
+            <Link href="/settings#storage">retention horizon</Link>.
+          </>
+        )}
       </div>
     </Card>
   );

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { AppShell } from "@/components/shell/AppShell";
+import { authEnabled } from "@/lib/config";
 
 export const metadata: Metadata = {
   title: {
@@ -92,7 +93,10 @@ export default function RootLayout({
         >
           Skip to content
         </a>
-        <AppShell>{children}</AppShell>
+        {/* Read here rather than polled: this is a server component, so the
+            state is on the page from the first byte, on every page, with no
+            request that can fail and leave the banner off. */}
+        <AppShell authDisabled={!authEnabled()}>{children}</AppShell>
       </body>
     </html>
   );

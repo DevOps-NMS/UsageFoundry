@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getChat, sendChatMessage } from "@/lib/chat";
 import { chatDTO } from "../../dto";
+import { auditMutation } from "../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +16,7 @@ type Ctx = { params: Promise<{ id: string }> };
  * with a 400 are the ones a person can act on — a turn already in flight, or a
  * window already past the ceiling they set.
  */
-export async function POST(req: Request, ctx: Ctx) {
+async function postHandler(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
@@ -27,3 +28,6 @@ export async function POST(req: Request, ctx: Ctx) {
   const chat = getChat(id);
   return NextResponse.json({ chat: chat ? chatDTO(chat) : null });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

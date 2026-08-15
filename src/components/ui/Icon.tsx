@@ -22,6 +22,7 @@ export type IconName =
   | "chat"
   | "runs"
   | "workflows"
+  | "agents"
   | "branches"
   | "account"
   | "settings"
@@ -69,6 +70,17 @@ const GLYPH: Record<IconName, ReactElement> = {
       <rect x="2.25" y="2.75" width="4" height="3.5" rx="1" />
       <rect x="9.75" y="9.75" width="4" height="3.5" rx="1" />
       <path d="M4.25 6.25v4.25a1 1 0 0 0 1 1h4.5" />
+    </>
+  ),
+  // A figure with a mark on it: a specialist is the same worker under a name
+  // somebody wrote down. Deliberately not `account`'s bare figure — that one is
+  // the Anthropic organisation, and two destinations drawn alike are two rows
+  // the eye has to read to tell apart.
+  agents: (
+    <>
+      <circle cx="6.25" cy="6.4" r="2.4" />
+      <path d="M2.5 13.1a3.9 3.9 0 0 1 7.5 0" />
+      <path d="M12.4 2.4 13.1 4.2 14.9 4.9 13.1 5.6 12.4 7.4 11.7 5.6 9.9 4.9 11.7 4.2Z" />
     </>
   ),
   branches: (

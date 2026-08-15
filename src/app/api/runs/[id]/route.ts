@@ -12,6 +12,7 @@ import {
 import { telemetryForRun } from "@/lib/otlp";
 import { runAgentDTO } from "@/lib/agents";
 import { normalizePolicy } from "@/lib/budget";
+import { auditMutation } from "../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,7 +75,7 @@ export async function GET(req: Request, ctx: Ctx) {
   });
 }
 
-export async function DELETE(_req: Request, ctx: Ctx) {
+async function deleteHandler(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const run = getRun(id);
   if (!run) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -84,3 +85,6 @@ export async function DELETE(_req: Request, ctx: Ctx) {
   const outcome = stopRun(id);
   return NextResponse.json({ ok: outcome !== "not-active", outcome });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const DELETE = auditMutation(deleteHandler);

@@ -86,9 +86,19 @@ const ACTIVE: QueueStatus[] = ["queued", "landing", "resolving"];
 export const isQueueActive = (status: QueueStatus): boolean =>
   ACTIVE.includes(status);
 
-/** How long the worker waits for one conflict resolution to settle. */
-const RESOLVE_TIMEOUT_MS = 12 * 60_000;
-/** How often it looks. The row is written by a child process, not by us. */
+/**
+ * How often the worker looks. The row is written by a child process, not by us.
+ *
+ * There is deliberately no deadline beside it. A resolution is a step in
+ * merging a branch and the only thing that can honestly end one is the
+ * resolution itself: giving up at twelve minutes failed the item, and the row
+ * then said the branch could not be merged when what had actually happened was
+ * that this loop stopped watching — while the child carried on spending, and
+ * `after` committed or rolled back a merge nothing was waiting for any more.
+ * The escapes are unchanged and each is somebody's decision rather than a
+ * clock's: the resolution settles either way, `cancelBatch` takes the rest of
+ * the queue, and the process ending ends the child with it.
+ */
 const RESOLVE_POLL_MS = 2_000;
 
 /* ------------------------------------------------------------------ */
@@ -582,9 +592,10 @@ function setStatus(
  * Synchronous from the read to the claim — no `await` between `queuedRepos()`
  * and the `active.add` — which is the property `createRun`'s folder claim
  * already documents and the reason two calls to this cannot both start a worker
- * on one repository. Everything after the claim is a detached loop: a queue with
- * a conflict in it runs for minutes, and the rows are what report on it, exactly
- * as they do for a run.
+ * on one repository. Everything after the claim is a detached loop, not awaited
+ * by the caller: a queue with a conflict in it runs for as long as reconciling
+ * that conflict takes, and the rows are what report on it — the page polls
+ * them, exactly as it polls a run.
  */
 export function startWorker(): void {
   for (const repo of queuedRepos()) {
@@ -742,7 +753,6 @@ async function resolveWithClaude(runId: string): Promise<ResolveOutcome> {
   // was spawned. Nothing to wait for and nothing was billed.
   if (!started.assistId) return { ok: true, reason: started.message, costUSD: 0 };
 
-  const deadline = Date.now() + RESOLVE_TIMEOUT_MS;
   for (;;) {
     const assist = getAssist(started.assistId);
     if (!assist) {
@@ -756,13 +766,6 @@ async function resolveWithClaude(runId: string): Promise<ResolveOutcome> {
             reason: assist.error ?? "The conflict resolution failed.",
             costUSD: assist.cost_usd,
           };
-    }
-    if (Date.now() > deadline) {
-      return {
-        ok: false,
-        reason: "Its conflict resolution did not finish in time.",
-        costUSD: assist.cost_usd,
-      };
     }
     await new Promise((r) => setTimeout(r, RESOLVE_POLL_MS));
   }

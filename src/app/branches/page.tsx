@@ -12,6 +12,7 @@ import Link from "next/link";
 import type {
   BranchInventoryDTO,
   BranchSummaryDTO,
+  CheckoutStoreDTO,
   MergeQueueBatchDTO,
   MergeQueueDTO,
   MergeQueueItemDTO,
@@ -28,7 +29,7 @@ import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
 import { Spinner } from "@/components/ui/Log";
-import { Toggle } from "@/components/ui/Field";
+import { Select, Toggle } from "@/components/ui/Field";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 
 /**
@@ -421,6 +422,99 @@ function QueuePanel({
   );
 }
 
+/**
+ * Checkout slots, which is what decides whether the next isolated run starts.
+ *
+ * A run that asks for its own checkout and cannot have one is **refused** — it
+ * is not quietly moved into your own checkout, which is what it used to do —
+ * so the number that matters on this page is not the branch count but the slots
+ * behind it. A checkout holding uncommitted work is retired until somebody
+ * deals with it and nothing reclaims one on its own, so this is a figure that
+ * only goes one way.
+ *
+ * Shown only when there is something to act on: every slot free or in use is
+ * the healthy state and needs no row. One retired checkout brings the table up,
+ * which is a long way before the last slot goes.
+ */
+function CheckoutStores({ stores }: { stores: CheckoutStoreDTO[] }) {
+  const notable = stores.filter(
+    (s) => s.dirty.length > 0 || s.free === 0 || s.free === null,
+  );
+  if (notable.length === 0) return null;
+  const exhausted = notable.filter((s) => s.free === 0);
+
+  return (
+    <Card>
+      <CardTitle>Checkout slots</CardTitle>
+      {exhausted.length > 0 && (
+        <Notice tone="danger">
+          <strong>
+            {exhausted.length === 1
+              ? `${exhausted[0].repoLabel} has no checkout left.`
+              : `${exhausted.length} repositories have no checkout left.`}
+          </strong>{" "}
+          An isolated run there is refused rather than started in your own
+          checkout. Commit or purge what the checkouts below hold to free them.
+        </Notice>
+      )}
+      <TableWrap>
+        <Table>
+          <thead>
+            <Tr>
+              <Th>Repository</Th>
+              <Th num>Free</Th>
+              <Th num>In use</Th>
+              <Th>Holding uncommitted work</Th>
+            </Tr>
+          </thead>
+          <tbody>
+            {notable.map((s) => (
+              <Tr key={s.repoRoot}>
+                <Td>
+                  <div className="font-medium text-ink">{s.repoLabel}</div>
+                  <div className="mono mt-0.5 text-xs text-ink-muted">
+                    {s.store}
+                  </div>
+                </Td>
+                <Td num>
+                  {s.free === null ? (
+                    // Not zero. The probe cap stopped the walk, so this says
+                    // nothing about how many are left.
+                    <span className="text-ink-muted">not counted</span>
+                  ) : (
+                    <span className={s.free === 0 ? "font-medium text-danger" : ""}>
+                      {s.free} of {s.ceiling}
+                    </span>
+                  )}
+                </Td>
+                <Td num>{s.heldByRuns}</Td>
+                <Td>
+                  {s.dirty.length === 0 ? (
+                    <span className="text-ink-muted">none</span>
+                  ) : (
+                    <ul className="space-y-0.5">
+                      {s.dirty.map((d) => (
+                        <li key={d.name} className="text-xs">
+                          <span className="mono">{d.name}</span>{" "}
+                          <span className="text-ink-muted">
+                            {d.uncommitted === null
+                              ? "— could not be read"
+                              : `— ${d.uncommitted} path${d.uncommitted === 1 ? "" : "s"}`}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </Td>
+              </Tr>
+            ))}
+          </tbody>
+        </Table>
+      </TableWrap>
+    </Card>
+  );
+}
+
 function SkeletonBar({ className = "" }: { className?: string }) {
   return <div className={`h-3 rounded-full bg-line ${className}`} />;
 }
@@ -480,6 +574,12 @@ export default function Branches() {
   const [queue, setQueue] = useState<MergeQueueDTO | null>(null);
   const [queueBusy, setQueueBusy] = useState(false);
 
+  // Which slice of the inventory is being asked for. Held here rather than read
+  // back off the answer so pressing Next twice in a row is two pages forward
+  // and not two requests for the same one.
+  const [repo, setRepo] = useState<string>("");
+  const [offset, setOffset] = useState(0);
+
   /**
    * Both reads used to drop a non-ok answer on the floor and neither had a
    * `catch`. A signed-out session or a restarting container therefore left the
@@ -491,7 +591,10 @@ export default function Branches() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/branches", { cache: "no-store" });
+      const query = new URLSearchParams();
+      if (repo) query.set("repo", repo);
+      if (offset > 0) query.set("offset", String(offset));
+      const res = await fetch(`/api/branches?${query}`, { cache: "no-store" });
       // Parsed before the status check: a 500 carries no JSON, and letting that
       // throw would report a reachable server as an unreachable one.
       const json = (await res.json().catch(() => ({}))) as Partial<
@@ -512,7 +615,7 @@ export default function Branches() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [repo, offset]);
 
   const loadQueue = useCallback(async () => {
     try {
@@ -534,10 +637,16 @@ export default function Branches() {
     }
   }, []);
 
+  // Two effects rather than one: `load` changes identity whenever the filter or
+  // the page does, and re-reading the queue for a page change would poll a route
+  // this page is deliberately careful about.
   useEffect(() => {
     void load();
+  }, [load]);
+
+  useEffect(() => {
     void loadQueue();
-  }, [load, loadQueue]);
+  }, [loadQueue]);
 
   const queueItems = useMemo(
     () => (queue?.batches ?? []).flatMap((b) => b.items),
@@ -692,17 +801,16 @@ export default function Branches() {
         <QueuePanel queue={queue} onCancel={cancelQueue} busy={queueBusy} />
       )}
 
-      {data && data.notShown > 0 && (
-        <Notice tone="warn">
-          <strong>{data.notShown} older branches are not listed.</strong> Working
-          out how far each one is ahead costs a git call, so this page stops at
-          the most recent 60.
-        </Notice>
-      )}
+      {/* Above the table rather than in it: a repository with no slot left
+          refuses the next isolated run on it, which is a fact about the machine
+          and not about any branch on this page. The count of branches this page
+          does not show is the pager's job now — it says which sixty of how many
+          are listed, where this notice could only say that some were missing. */}
+      {data && <CheckoutStores stores={data.checkouts ?? []} />}
 
       <Card>
         <CardTitle>
-          {branches.length} branch{branches.length === 1 ? "" : "es"}
+          {data ? `${data.total} branch${data.total === 1 ? "" : "es"}` : "Branches"}
           <Button
             variant="secondary"
             className="ml-auto min-w-[104px]"
@@ -712,6 +820,68 @@ export default function Branches() {
             {loading ? "Reading…" : "Refresh"}
           </Button>
         </CardTitle>
+
+        {/* The filter and the pager together, because they answer one question:
+            which sixty of them this request pays git for. The count in the title
+            is the whole set — it is counted over every branch-bearing run rather
+            than over a page, which is the difference between a page that stops
+            at sixty and a page that has stopped counting. */}
+        <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3">
+          <label className="flex items-center gap-2 text-sm text-ink-muted">
+            Repository
+            <Select
+              value={repo}
+              onChange={(e) => {
+                setRepo(e.target.value);
+                setOffset(0);
+                // The selection is the merge order and it survives everything
+                // else, but a branch the operator can no longer see is one they
+                // cannot take back out — so changing what is on screen clears it.
+                setSelected([]);
+              }}
+              className="w-[34ch] max-w-full"
+            >
+              <option value="">All repositories</option>
+              {(data?.repos ?? []).map((r) => (
+                <option key={r.repoRoot} value={r.repoRoot}>
+                  {r.repoLabel} ({r.branches})
+                </option>
+              ))}
+            </Select>
+          </label>
+
+          {data && data.total > 0 && (
+            <div className="ml-auto flex items-center gap-3">
+              <span className="text-sm tabular-nums text-ink-muted">
+                {data.offset + 1}–{data.offset + branches.length} of {data.total}
+              </span>
+              <ButtonRow>
+                <Button
+                  variant="secondary"
+                  disabled={loading || data.offset === 0}
+                  onClick={() => {
+                    setOffset(Math.max(0, data.offset - data.limit));
+                    setSelected([]);
+                  }}
+                >
+                  Previous
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={
+                    loading || data.offset + data.limit >= data.total
+                  }
+                  onClick={() => {
+                    setOffset(data.offset + data.limit);
+                    setSelected([]);
+                  }}
+                >
+                  Next
+                </Button>
+              </ButtonRow>
+            </div>
+          )}
+        </div>
 
         {loading && !data ? (
           <div aria-busy="true">
@@ -727,9 +897,25 @@ export default function Branches() {
               Nothing could be read from the repositories.
             </span>
           </Empty>
+        ) : branches.length === 0 && data.total > 0 ? (
+          // The selection found branches and none of them could be listed, which
+          // means their repositories no longer resolve inside a configured
+          // mount. Saying "no branches yet" here would be the same lie the
+          // notice above exists to stop, one step further in.
+          <Empty>
+            <div className="font-medium text-ink">
+              {data.total} branch{data.total === 1 ? "" : "es"} could not be read
+            </div>
+            <div className="mx-auto mt-1 max-w-[52ch] text-ink-muted">
+              Their repositories are no longer inside a configured workspace
+              mount, so nothing here can look at them.
+            </div>
+          </Empty>
         ) : branches.length === 0 ? (
           <Empty>
-            <div className="font-medium text-ink">No branches yet</div>
+            <div className="font-medium text-ink">
+              {repo ? "No branches in this repository" : "No branches yet"}
+            </div>
             <div className="mx-auto mt-1 max-w-[52ch] text-ink-muted">
               A run given its own checkout puts its work on a branch, and it
               appears here for you to land. A run that works directly in your

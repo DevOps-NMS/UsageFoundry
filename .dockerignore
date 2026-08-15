@@ -1,12 +1,20 @@
 node_modules
 .next
 .git
+# `.git` does not match `.github` — separate entry, or the builder stage's
+# `COPY . .` layer is invalidated by every workflow edit, for files that have
+# no business in the image.
+.github
 .gitignore
 .env
 .env.*
 !.env.example
 .data
 .test-build
+# The builder stage is a `COPY . .`, so without this every backup sitting in the
+# default destination would be sent to the daemon and baked into an image layer
+# — copies of the operator's own database, in a build cache nobody prunes.
+backups
 npm-debug.log*
 README.md
 docker-compose.yml

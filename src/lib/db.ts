@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import Database from "better-sqlite3";
 import { DATA_DIR, DB_PATH } from "./config";
+import { heldByAnotherProcess } from "./serverLock";
 
 /**
  * SQLite persistence. Single-writer, single-process — matching the fact that
@@ -48,17 +49,90 @@ const CHAT_PROPOSALS_TABLE = `
       error       TEXT
     );`;
 
+/**
+ * What this build's `migrate()` produces, written to `PRAGMA user_version`.
+ *
+ * Not a migration framework and deliberately not one — the ~50 `addColumn`
+ * calls stay idempotent by reading the live schema, which is the correct check
+ * for an additive change and which a version number could not replace without
+ * one number per column. What this records is the two states reading the schema
+ * cannot tell you: that a *rebuild* has completed, and that the file was last
+ * written by a build newer than this one. Bump it whenever a migration is
+ * something other than an added column or an `IF NOT EXISTS`.
+ *
+ * 1 is the first version. Everything shipped before it reads 0, which is also
+ * what a brand-new file reads — the two are indistinguishable and it does not
+ * matter, since `migrate()` is idempotent either way.
+ */
+export const SCHEMA_VERSION = 1;
+
+export type SchemaVerdict = "unversioned" | "current" | "upgrade" | "downgrade";
+
+/**
+ * What the file's own version says about the build that is opening it.
+ *
+ * Pure, because the interesting case cannot be produced by running this build:
+ * a `downgrade` is a rollback to an older image after a failed deploy, and what
+ * it costs is that `migrate()` is about to run against a schema it does not
+ * know. It is reported rather than refused — an older build's migrate is
+ * additive and its rebuild guard is a live-schema read, so it leaves a newer
+ * file alone — but a state nothing can name is a state nobody debugs.
+ */
+export function schemaVerdict(file: number, code: number): SchemaVerdict {
+  if (file === 0) return "unversioned";
+  if (file === code) return "current";
+  return file < code ? "upgrade" : "downgrade";
+}
+
+/**
+ * May this process write the schema?
+ *
+ * `open()` runs on the first `db()` call in *any* process, which is how a
+ * second server — an agent's `next dev` against its own worktree, pointed at
+ * the live database by an inherited `DATA_DIR` — was entitled to rebuild a
+ * table under the server that owns it. `serverLock.ts` already answers who owns
+ * the directory; this is the same claim gating the one write that is not
+ * additive.
+ *
+ * The empty-file exception is what keeps that from being a new failure. A
+ * process that owns nothing and finds no schema has nothing to destroy, and
+ * refusing there would leave it with a database that has no tables and every
+ * query throwing until a restart. The hazard is a rebuild against *existing
+ * data*, and an empty file has none.
+ */
+function shouldMigrate(db: Database.Database): boolean {
+  if (!heldByAnotherProcess()) return true;
+  if (!tableExists(db, "settings")) return true;
+  console.warn(
+    `[usagefoundry] Another server process holds ${DATA_DIR}. Leaving the ` +
+      "schema exactly as it is — migrations belong to the process that owns " +
+      "this directory.",
+  );
+  return false;
+}
+
 function open(): Database.Database {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const db = new Database(DB_PATH);
   // WAL keeps the dashboard's frequent reads from blocking on run writes.
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  migrate(db);
+  if (shouldMigrate(db)) migrate(db);
   return db;
 }
 
 function migrate(db: Database.Database) {
+  const found = Number(db.pragma("user_version", { simple: true }));
+  if (schemaVerdict(found, SCHEMA_VERSION) === "downgrade") {
+    console.error(
+      `[usagefoundry] This database was written by a newer build (schema ` +
+        `${found}; this build knows ${SCHEMA_VERSION}). Migrating anyway — ` +
+        `every step below is additive or guarded by the live schema — but a ` +
+        `rollback has no defined behaviour here and anything the newer build ` +
+        `added is invisible to this one.`,
+    );
+  }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
@@ -182,8 +256,8 @@ function migrate(db: Database.Database) {
       updated_at      INTEGER NOT NULL
     );
 
-    -- A named specialised agent: a role the delegating model may hand a
-    -- subtask to.
+    -- A named agent: the role a run itself takes, carried onto a spawn as an
+    -- --agents definition and an --agent selection.
     --
     -- The fourth table here that holds *form input, never a run*, after
     -- run_templates, chat_proposals and workflows: no folder claim, no
@@ -192,22 +266,24 @@ function migrate(db: Database.Database) {
     -- the whole definition onto its own argv rather than a reference to this
     -- row.
     --
-    -- No tools column, no permission_mode column and no budget. What an agent
-    -- may do comes from the guard set on the run it is delegated inside; the
+    -- No tools column, no permission_mode column and no budget. What a run may
+    -- do comes from its own guard set and never from the role it takes — which
+    -- matters more since --agent, because the run *is* this record; the
     -- reasoning is in agents.ts beside the refusal that enforces it, and the
     -- absence of a column is the strongest form of it — there is nothing on
     -- the wire that could carry one.
     --
-    -- model is nullable and means "inherit the session's". It is the one field
-    -- run_templates deliberately refuses to hold, and it is not the same field:
-    -- a template's model would be a second place to set the *run's* model,
-    -- where this is the model one delegated turn runs on, which nothing else
-    -- here can express.
+    -- model is nullable and means "keep whatever model the run already had".
+    -- It is the one field run_templates deliberately refuses to hold, and what
+    -- keeps it from being the second place to set the run's model is measured
+    -- rather than structural: an explicit --model outranks it on the pin, so it
+    -- fills a gap the run left.
     CREATE TABLE IF NOT EXISTS agents (
       id          TEXT PRIMARY KEY,
       name        TEXT NOT NULL,
-      -- What the delegating model reads to choose this agent. Required by the
-      -- CLI, which drops a member without one and says nothing.
+      -- What a person reads on a picker when they choose this agent. Required
+      -- by the CLI, which will not register a member without one — so --agent
+      -- cannot select it and the spawn fails.
       description TEXT NOT NULL,
       prompt      TEXT NOT NULL,
       model       TEXT,
@@ -473,6 +549,39 @@ function migrate(db: Database.Database) {
       error       TEXT
     );
 
+    -- Browser sign-ins. One row per issued uf_session cookie, so a session has
+    -- a server-side referent at all: the cookie used to *be* UF_AUTH_TOKEN, so
+    -- there was nothing to count, nothing to revoke, and no answer to "how many
+    -- sessions exist" short of changing the environment and restarting.
+    --
+    -- The id is the random handle inside the cookie, never the signature and
+    -- never the token. expires_at is the same instant the cookie carries in its
+    -- signed payload, kept here so a revocation sweep can drop rows that can no
+    -- longer be presented.
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+      id          TEXT PRIMARY KEY,
+      created_at  INTEGER NOT NULL,
+      expires_at  INTEGER NOT NULL,
+      revoked_at  INTEGER
+    );
+
+    -- Failed sign-ins, per source and one row for the whole install. Durable
+    -- rather than in memory for two reasons: a burst has to still be visible
+    -- after the fact — nothing anywhere recorded that anyone had ever guessed
+    -- at the token — and a lockout that a container restart clears is a lockout
+    -- an attacker can clear by restarting the container.
+    --
+    -- The source column is the client address as reported to us, or '*' for
+    -- the install-wide bucket. See loginLimiter.ts for why the second one has
+    -- to exist at all.
+    CREATE TABLE IF NOT EXISTS login_attempts (
+      source       TEXT PRIMARY KEY,
+      failures     INTEGER NOT NULL,
+      first_at     INTEGER NOT NULL,
+      last_at      INTEGER NOT NULL,
+      locked_until INTEGER
+    );
+
     CREATE TABLE IF NOT EXISTS chat_messages (
       id      TEXT PRIMARY KEY,
       chat_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
@@ -540,10 +649,10 @@ function migrate(db: Database.Database) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_run_templates_name
       ON run_templates(name COLLATE NOCASE);
     -- Same rule as a template's name, and one the CLI makes sharper: the name
-    -- is the key of the object the --agents flag takes, so two rows differing
-    -- only in case would be two members of one JSON object that a person reads
-    -- as one agent — and the delegating model picks between them by
-    -- description.
+    -- is the key of the object --agents takes *and* the word --agent is handed
+    -- to select one, so two rows differing only in case would be two members of
+    -- one JSON object that a person reads as one agent — and which of them a
+    -- run was started as would be whichever the CLI resolved.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_name
       ON agents(name COLLATE NOCASE);
     -- Same rule as a template's name, for the same reason: a workflow is picked
@@ -567,8 +676,11 @@ function migrate(db: Database.Database) {
 
   // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already
   // exists, and `ALTER TABLE ADD COLUMN` throws "duplicate column name" on the
-  // second boot. With no version table, checking the live schema is the only
-  // idempotent option.
+  // second boot. Checking the live schema is the idempotent option, and it
+  // stays the right one for these: `PRAGMA user_version` records that a
+  // *rebuild* completed (see `SCHEMA_VERSION`), which is the state a schema
+  // read cannot answer, but keying fifty additive columns on one number would
+  // mean fifty numbers or an ordering nobody can change.
   addColumn(db, "runs", "session_id", "TEXT");
   addColumn(db, "runs", "work_dir", "TEXT");
   addColumn(db, "runs", "isolation", "TEXT");
@@ -634,22 +746,22 @@ function migrate(db: Database.Database) {
   // rather than a guess.
   addColumn(db, "runs", "landed_tip", "TEXT");
 
-  // The specialised agent this run's main thread may hand a subtask to, frozen
-  // as the whole definition rather than as a reference to an `agents` row.
+  // The agent this run was started **as**, frozen as the whole definition
+  // rather than as a reference to an `agents` row.
   //
-  // A reference is what this looks like it wants and it is wrong twice over. A
-  // run spawns a child per work cycle, so an agent deleted between cycle 3 and
-  // cycle 4 would leave cycle 4 with no specialist and nothing saying so — the
-  // one failure shape the whole of agents.ts exists to end, arriving from inside
-  // this app rather than from the CLI. And a run picked up by hand days later
-  // would lose it the same way. So it is a copy, the treatment runs.budget
-  // already gives permissionMode and the reason deleting a template cannot reach
-  // a run started from one.
+  // A reference is what this looks like it wants and it is wrong twice over,
+  // more so since --agent. A run spawns a child per work cycle, so an agent
+  // deleted between cycle 3 and cycle 4 would leave cycle 4 selecting a name
+  // nothing on its argv defines — which the CLI refuses at the spawn, so the run
+  // stops being what it was started as and then stops running at all. And a run
+  // picked up by hand days later would lose it the same way. So it is a copy,
+  // the treatment runs.budget already gives permissionMode and the reason
+  // deleting a template cannot reach a run started from one.
   //
   // Null is the ordinary run. It is display as well as spawn input, and the
-  // display is honest about what the flag does: --agents *offers* a role to the
-  // delegating model, which is what a sub-agent is — it is not --agent, which
-  // would replace the session's own main agent and which nothing here wires.
+  // display is honest about what the flag does: sessionAgentArgs emits both
+  // --agents (the definition) and --agent (the selection), so the saved prompt
+  // is this run's own system prompt and not a role inside it.
   addColumn(db, "runs", "agent", "TEXT");
 
   // The agent a template names, by id — and this one *is* a reference, which is
@@ -734,7 +846,7 @@ function migrate(db: Database.Database) {
   addColumn(db, "chat_proposals", "graph", "TEXT");
   addColumn(db, "chat_proposals", "workflow_id", "TEXT");
 
-  // The saved agent a proposed run may hand a subtask to, by id — and an **id**
+  // The saved agent a proposed run is started as, by id — and an **id**
   // rather than the frozen copy `runs.agent` holds, for `run_templates`'
   // reason: a proposal is form input that a person reads and decides on, so it
   // should still name the agent as it stands at the click rather than as it
@@ -744,8 +856,8 @@ function migrate(db: Database.Database) {
   // Not a foreign key, exactly as `template_id` above is not: an agent deleted
   // between the proposal and the approval must fail the approval with a
   // sentence naming it, not silently take the row the operator is looking at
-  // with it — and never fall back to no specialist, which is bit-for-bit the
-  // run the whole registry exists to stop.
+  // with it — and never fall back to no agent, which is bit-for-bit the run the
+  // whole registry exists to stop.
   //
   // It carries no capability. An agent holds no tool list and no permission
   // mode, so this is not a route to `--permission-mode` reached by a model;
@@ -853,6 +965,98 @@ function migrate(db: Database.Database) {
   // the model.
   addColumn(db, "workflow_instance_blocks", "reply", "TEXT");
   addColumn(db, "workflow_instance_blocks", "notes", "TEXT");
+
+  // Which gate this run came through, and the record that authorised it.
+  //
+  // Runs arrive from five routes and three of them start an agent with nobody
+  // at the keyboard, so "who started this" had no answer at all: provenance was
+  // a deduction across chat_proposals, workflow_instance_runs and
+  // workflow_instance_runs.emitted_by, absence in all three was ambiguous
+  // between the run form and a run picked up by hand, and none of it survived
+  // deleting the chat or workflow it came from.
+  //
+  // Written once, by `createRun`, and never rewritten — `origin` answers "which
+  // route created this", so a query grouped by it over a time range has to keep
+  // meaning that. Picking a finished run up again is a different act and gets
+  // `reopened_at` below rather than overwriting this.
+  //
+  // Plain columns, `emitted_by`'s rule: a proposal id or an instance id here is
+  // a record of where a run came from and must keep reading true after that row
+  // has gone, so neither is a foreign key and neither cascades.
+  addColumn(db, "runs", "origin", "TEXT");
+  addColumn(db, "runs", "origin_ref", "TEXT");
+  // When a person last put this terminal run back in the queue. The other half
+  // of the question `origin` answers: a run created by the form at 09:00 and
+  // reopened at 02:00 is two authorisations, and overwriting the first with the
+  // second would lose the one the column exists for.
+  addColumn(db, "runs", "reopened_at", "INTEGER");
+
+  // The same pair for an instance, so a node created *later* — a deferred one,
+  // behind an orchestrator block's decision — records the trigger the press of
+  // Run had rather than guessing. A scheduled instance's late nodes are still
+  // the schedule's.
+  addColumn(db, "workflow_instances", "origin", "TEXT");
+  addColumn(db, "workflow_instances", "origin_ref", "TEXT");
+
+  // Mutating HTTP requests: what was asked, of what, by whom, from where.
+  //
+  // Nothing recorded an authenticated request anywhere, so a burst of runs
+  // created with a stolen token was indistinguishable from a busy afternoon and
+  // a compromise could not be scoped after the fact.
+  //
+  // What it deliberately does *not* hold: request bodies, query strings,
+  // cookies, tokens, prompts. A body here would carry the prompt of every run
+  // and the password of every login, and a query string is where a credential
+  // ends up when somebody puts one there by mistake. `actor` names *how* a
+  // caller authenticated and never with what.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS request_log (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts          INTEGER NOT NULL,
+      method      TEXT NOT NULL,
+      path        TEXT NOT NULL,
+      status      INTEGER NOT NULL,
+      -- The id the request named, or the one it created. Null where a route
+      -- affects no single row.
+      subject     TEXT,
+      -- 'session' | 'bearer' | 'capability' | 'open' — how, never with what.
+      actor       TEXT NOT NULL,
+      address     TEXT,
+      duration_ms INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_request_log_ts ON request_log(ts);
+  `);
+
+  // Things that happened to the *server* rather than to a run.
+  //
+  // `run_events` is per run and cascades with it, so the one moment there is
+  // nothing to attach to is the moment worth recording: a restart that closed
+  // out every run it found. That was one `console.warn` into a stream nobody
+  // tails — twenty-five runs terminated, each needing a manual reopen, reported
+  // once and then unanswerable. This is where it is kept so a page can say it.
+  //
+  // `detail` is JSON and holds counts, never prose about a folder or a prompt:
+  // the status endpoint is read by a monitor, and rows here are what it reads.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ops_events (
+      id     INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts     INTEGER NOT NULL,
+      level  TEXT NOT NULL,
+      event  TEXT NOT NULL,
+      detail TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ops_events_event ON ops_events(event, ts);
+  `);
+
+  // Anything still wearing the rebuild suffix after the one rebuild above has
+  // run. Last, so a leftover this boot has just completed is not reported as
+  // one it left behind.
+  reportOrphanTables(db);
+
+  // Stamped only once everything above has returned, which is what makes it
+  // mean "a build of this version finished migrating this file" rather than
+  // "one started".
+  db.pragma(`user_version = ${SCHEMA_VERSION}`);
 }
 
 /**
@@ -866,7 +1070,135 @@ function migrate(db: Database.Database) {
  * its indexes along under their own names, so `CREATE INDEX` would collide with
  * the copy still attached to the old table until that table is dropped.
  */
-function relaxProposalTemplate(db: Database.Database) {
+/**
+ * The columns a proposal had before any of this — the ones a table left behind
+ * by an interrupted rebuild is guaranteed to hold, and therefore the only ones
+ * either the rebuild or the recovery may name. Everything added since
+ * (`prompt_override`, `kind`, `spec_id`, …) arrives through `addColumn` and is
+ * null on a row this moves.
+ */
+const PROPOSAL_BASE_COLUMNS = [
+  "id",
+  "chat_id",
+  "created_at",
+  "template_id",
+  "title",
+  "task",
+  "mount_id",
+  "folder",
+  "status",
+  "run_id",
+  "decided_at",
+  "error",
+] as const;
+
+function tableExists(db: Database.Database, name: string): boolean {
+  return (
+    db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(name) !== undefined
+  );
+}
+
+/**
+ * Rows stranded in `chat_proposals_old` by a rebuild that was interrupted
+ * before this function was transactional.
+ *
+ * The interruption that matters is the one after the `RENAME`. `migrate`'s own
+ * `CREATE TABLE IF NOT EXISTS` then recreates `chat_proposals` empty on the
+ * next boot, `relaxProposalTemplate` reads the new schema, sees the NOT NULL
+ * already gone and returns — so the guard that makes the migration idempotent
+ * is also what makes the loss permanent. Every decided proposal, which is the
+ * record of what the operator approved and which run it became, is still on
+ * disk and is unreachable by every query in `chat.ts`.
+ *
+ * Completed rather than reported, because completing it is unambiguous: the
+ * rows are the same rows, `INSERT OR IGNORE` cannot overwrite anything the app
+ * has written since, and the alternative is a database that boots into an empty
+ * table for ever. A leftover whose shape this build does not recognise is the
+ * one case that cannot be completed, and that one is said out loud and left
+ * alone — see below.
+ */
+function recoverStrandedProposals(db: Database.Database) {
+  if (!tableExists(db, "chat_proposals_old")) return;
+
+  const cols = new Set(
+    (
+      db.prepare("PRAGMA table_info(chat_proposals_old)").all() as {
+        name: string;
+      }[]
+    ).map((c) => c.name),
+  );
+  const missing = PROPOSAL_BASE_COLUMNS.filter((c) => !cols.has(c));
+  if (missing.length > 0) {
+    // Loud, and not fatal. A table this build cannot read is not one it can
+    // safely drop either, and refusing to boot over it would strand the whole
+    // install rather than one table — where leaving it in place costs nothing
+    // but the disk it is already using.
+    console.error(
+      `[usagefoundry] chat_proposals_old is present and does not have the ` +
+        `columns this build knows (missing: ${missing.join(", ")}). It has ` +
+        `been left alone; nothing in the app reads it. This is the residue of ` +
+        `an interrupted migration and needs a hand.`,
+    );
+    return;
+  }
+
+  const list = PROPOSAL_BASE_COLUMNS.join(", ");
+  const moved = db.transaction(() => {
+    // OR IGNORE rather than a plain INSERT: a boot interrupted between the
+    // INSERT and the DROP leaves both tables populated, and re-running must be
+    // a no-op rather than a primary-key failure that stops every later boot.
+    const res = db
+      .prepare(
+        `INSERT OR IGNORE INTO chat_proposals (${list})
+         SELECT ${list} FROM chat_proposals_old`,
+      )
+      .run();
+    db.exec("DROP TABLE chat_proposals_old");
+    // A rename carries the table's indexes with it under their own names, so
+    // `migrate`'s own `CREATE INDEX IF NOT EXISTS` earlier in this same boot
+    // found the name taken by the *old* table and did nothing — and the DROP
+    // above has just taken it away. Recreated here rather than left to the next
+    // boot, which is the shape the rebuild itself uses and for the same reason.
+    db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_chat_proposals_chat
+         ON chat_proposals(chat_id, created_at)`,
+    );
+    return res.changes;
+  })();
+
+  console.warn(
+    `[usagefoundry] Recovered ${moved} chat proposal(s) stranded in ` +
+      `chat_proposals_old by an interrupted migration.`,
+  );
+}
+
+/**
+ * Drop the NOT NULL from `chat_proposals.template_id`, preserving the rows.
+ *
+ * The alternative — dropping the table and letting it be recreated — would take
+ * the decided proposals with it, which are the record of what the operator
+ * approved and what came of it. A rebuild costs fifteen lines and keeps that.
+ *
+ * **One transaction, and that is the whole of issue #94.** `db.exec` maps to
+ * `sqlite3_exec`, which runs each statement in autocommit: the four statements
+ * used to commit independently, so a crash, an OOM kill or a `docker compose
+ * down` between the first and the last left the rows in an orphan table that no
+ * query in this app reads, permanently — see `recoverStrandedProposals` for why
+ * the next boot could not notice. DDL is transactional in SQLite, so the
+ * statements below either all land or none of them do. The steps stay separate
+ * `exec` calls rather than one blob because a transaction is only worth having
+ * if a failure part-way through is a real state, and this is the shape that
+ * lets the test put one there.
+ *
+ * The index is recreated at the end rather than before: renaming a table brings
+ * its indexes along under their own names, so `CREATE INDEX` would collide with
+ * the copy still attached to the old table until that table is dropped.
+ */
+export function relaxProposalTemplate(db: Database.Database) {
+  recoverStrandedProposals(db);
+
   const column = (
     db.prepare("PRAGMA table_info(chat_proposals)").all() as {
       name: string;
@@ -875,19 +1207,44 @@ function relaxProposalTemplate(db: Database.Database) {
   ).find((c) => c.name === "template_id");
   if (!column || column.notnull === 0) return;
 
-  db.exec(`
-    ALTER TABLE chat_proposals RENAME TO chat_proposals_old;
-    ${CHAT_PROPOSALS_TABLE}
-    INSERT INTO chat_proposals
-      (id, chat_id, created_at, template_id, title, task, mount_id, folder,
-       status, run_id, decided_at, error)
-    SELECT id, chat_id, created_at, template_id, title, task, mount_id, folder,
-           status, run_id, decided_at, error
-      FROM chat_proposals_old;
-    DROP TABLE chat_proposals_old;
-    CREATE INDEX IF NOT EXISTS idx_chat_proposals_chat
-      ON chat_proposals(chat_id, created_at);
-  `);
+  const list = PROPOSAL_BASE_COLUMNS.join(", ");
+  const steps = [
+    "ALTER TABLE chat_proposals RENAME TO chat_proposals_old",
+    CHAT_PROPOSALS_TABLE,
+    `INSERT INTO chat_proposals (${list}) SELECT ${list} FROM chat_proposals_old`,
+    "DROP TABLE chat_proposals_old",
+    `CREATE INDEX IF NOT EXISTS idx_chat_proposals_chat
+       ON chat_proposals(chat_id, created_at)`,
+  ];
+
+  db.transaction(() => {
+    for (const sql of steps) db.exec(sql);
+  })();
+}
+
+/**
+ * Every `*_old` table this build did not just create, named on stdout.
+ *
+ * `recoverStrandedProposals` completes the one interrupted rebuild this app has
+ * ever shipped. Anything else wearing that suffix is either a future migration
+ * that was interrupted or a table somebody made by hand, and neither is
+ * something to drop — so this reports and boots. Reporting rather than refusing
+ * for the reason `configCheck.ts` gives about a mount: a state worth a person's
+ * attention is not the same as a state worth taking the install away over.
+ */
+function reportOrphanTables(db: Database.Database) {
+  const rows = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%\\_old' ESCAPE '\\'",
+    )
+    .all() as { name: string }[];
+  for (const row of rows) {
+    console.error(
+      `[usagefoundry] ${row.name} is present and nothing in this app reads it. ` +
+        `It is the residue of an interrupted migration — the rows in it are not ` +
+        `visible anywhere in the UI.`,
+    );
+  }
 }
 
 function addColumn(

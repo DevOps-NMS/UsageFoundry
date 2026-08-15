@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { PROJECTS_DIR } from "./config";
+import { PROJECTS_DIR, TRANSCRIPT_CACHE_MAX_ENTRIES } from "./config";
 import {
   type TokenCounts,
   costOf,
@@ -25,6 +25,16 @@ import {
  *  2. Files are append-only, so we track a byte offset per file and parse only
  *     the newly written bytes on each refresh. A full re-parse of a busy
  *     ~/.claude is slow enough to be noticeable in a polling dashboard.
+ *
+ *  3. What (2) buys is paid for in memory, so the retention is bounded. Holding
+ *     every record ever parsed is what made the offset cheap, and it is also a
+ *     heap that only grows: at ~330 bytes a turn it reaches V8's default limit
+ *     and aborts the process. Past `TRANSCRIPT_CACHE_MAX_ENTRIES` the coldest
+ *     files are dropped whole — records *and* offset — so a later scan re-reads
+ *     them and derives the same records again. Never the other way round:
+ *     keeping the offset and discarding the records would be cheaper and would
+ *     silently understate every window, which is the one direction a budget
+ *     guard must not fail in.
  */
 
 export interface UsageEntry {
@@ -81,15 +91,29 @@ interface FileCacheEntry {
   size: number;
   cwd: string;
   entries: UsageEntry[];
+  /**
+   * Newest timestamp in `entries`, or 0 when it holds none.
+   *
+   * Only eviction reads it, and it is kept here rather than derived because the
+   * array is the thing being measured: a scan that walked every entry of every
+   * file to decide what to drop would be paying the cost the cache exists to
+   * avoid.
+   */
+  lastTs: number;
 }
 
 // Persist across hot reloads in dev; a fresh Map per module evaluation would
 // silently re-parse every transcript on each request.
 const globalCache = globalThis as unknown as {
   __ufTranscriptCache?: Map<string, FileCacheEntry>;
+  __ufTranscriptCacheStats?: { evictions: number };
 };
 const cache: Map<string, FileCacheEntry> =
   globalCache.__ufTranscriptCache ?? (globalCache.__ufTranscriptCache = new Map());
+/** Pinned beside the cache it counts, for that Map's reason. */
+const cacheStats =
+  globalCache.__ufTranscriptCacheStats ??
+  (globalCache.__ufTranscriptCacheStats = { evictions: 0 });
 
 /**
  * In-flight refreshes, keyed by file, so overlapping scans never parse the same
@@ -116,24 +140,52 @@ const inflight: Map<string, Promise<FileCacheEntry>> =
   globalInflight.__ufTranscriptInflight ??
   (globalInflight.__ufTranscriptInflight = new Map());
 
+/**
+ * Something under the projects directory could not be read.
+ *
+ * Carried rather than swallowed because every one of these shortens the entry
+ * list a scan answers with, and a short entry list understates every window —
+ * which is the direction that lets `evaluateBudget` admit a run it should have
+ * refused. A file with nothing new in it and a file that could not be opened
+ * both used to look like the same `null`.
+ */
+export interface ScanReadFailure {
+  /** Absolute path of the file or directory. */
+  path: string;
+  message: string;
+}
+
+function failureMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /** Recursively collect *.jsonl paths under the projects directory. */
-async function listTranscriptFiles(root: string): Promise<string[]> {
-  const out: string[] = [];
+async function listTranscriptFiles(
+  root: string,
+): Promise<{ files: string[]; failures: ScanReadFailure[] }> {
+  const files: string[] = [];
+  const failures: ScanReadFailure[] = [];
   async function walk(dir: string) {
     let dirents;
     try {
       dirents = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return; // missing or unreadable — treat as empty
+    } catch (err) {
+      // A missing projects directory is the ordinary state of a fresh install
+      // and says nothing; an unreadable one hides however many transcripts are
+      // under it. Reported apart because only the second is a short history.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        failures.push({ path: dir, message: failureMessage(err) });
+      }
+      return;
     }
     for (const d of dirents) {
       const full = path.join(dir, d.name);
       if (d.isDirectory()) await walk(full);
-      else if (d.isFile() && d.name.endsWith(".jsonl")) out.push(full);
+      else if (d.isFile() && d.name.endsWith(".jsonl")) files.push(full);
     }
   }
   await walk(root);
-  return out;
+  return { files, failures };
 }
 
 function readTokens(usage: Record<string, unknown>): TokenCounts {
@@ -240,7 +292,7 @@ async function readAppended(file: string): Promise<FileCacheEntry> {
   const base: FileCacheEntry =
     prev && !rotated
       ? prev
-      : { offset: 0, size: 0, cwd: "", entries: [] };
+      : { offset: 0, size: 0, cwd: "", entries: [], lastTs: 0 };
 
   if (stat.size === start) {
     base.size = stat.size;
@@ -273,7 +325,9 @@ async function readAppended(file: string): Promise<FileCacheEntry> {
   for (const line of complete.split("\n")) {
     if (!line) continue;
     const entry = parseLine(line, cwdRef);
-    if (entry) base.entries.push(entry);
+    if (!entry) continue;
+    base.entries.push(entry);
+    if (entry.ts > base.lastTs) base.lastTs = entry.ts;
   }
 
   // Backfill cwd onto entries parsed before the first record that carried it.
@@ -310,6 +364,35 @@ export interface ScanResult {
   /** Distinct model strings seen that we have no price for. */
   unpricedModels: string[];
   scannedAt: number;
+  /**
+   * What this scan could not read. Empty is the normal case; anything in it
+   * means `entries` is short by an unknown amount and every figure derived from
+   * it is a floor.
+   */
+  readFailures: ScanReadFailure[];
+}
+
+/** Pinned across hot reloads for the reason the cache is. */
+const globalScanHealth = globalThis as unknown as {
+  __ufScanHealth?: { readFailures: ScanReadFailure[] };
+};
+const scanHealth =
+  globalScanHealth.__ufScanHealth ??
+  (globalScanHealth.__ufScanHealth = { readFailures: [] });
+
+/**
+ * What the most recently completed scan could not read.
+ *
+ * A second way to reach the same field `ScanResult` already carries, for the
+ * callers that are handed a `UsageSnapshot` instead of a scan —
+ * `currentSnapshot()`, and through it the pre-cycle budget guard, which is the
+ * one caller that most needs to know its history was short. Threading a second
+ * return value through that function and its eight call sites would be a wider
+ * change than the fact deserves. Scans are coalesced, so what this answers with
+ * is the scan the caller just awaited or a newer one.
+ */
+export function lastScanReadFailures(): ScanReadFailure[] {
+  return scanHealth.readFailures;
 }
 
 /**
@@ -334,11 +417,148 @@ export function scanUsage(): Promise<ScanResult> {
   return started;
 }
 
-async function runScan(): Promise<ScanResult> {
-  const files = await listTranscriptFiles(PROJECTS_DIR);
+/** Parsed turns currently held across every cached file. */
+function retainedEntries(): number {
+  let n = 0;
+  for (const e of cache.values()) n += e.entries.length;
+  return n;
+}
 
-  const results = await Promise.all(
-    files.map((f) => refreshFile(f).catch(() => null)),
+/**
+ * Drop whole files until the retained turn count is back under the bound.
+ *
+ * Coldest first, where cold is "newest turn is oldest": a transcript is written
+ * while its session is live and never touched again, so the file whose last turn
+ * is furthest back is both the least likely to gain bytes and the least likely
+ * to be inside the 5-hour or weekly window a guard reads. A file with nothing
+ * parsed out of it frees nothing and is skipped, and one with a refresh in
+ * flight is left alone — that refresh is holding the offset it read and would
+ * write the record straight back.
+ *
+ * A dropped file loses its byte offset along with its records, which is what
+ * makes this lossless: the next scan reads it from byte 0 and parses exactly the
+ * same turns out of it. The cost is a re-read, so an install whose live history
+ * sits permanently over the bound re-parses the excess on every scan — slow, and
+ * the answer to it is a larger bound or fewer transcripts on disk, not a cache
+ * that quietly reports less than it was asked about.
+ *
+ * Called after a scan has taken its result, never during one: what it evicts is
+ * retention, and the entries the caller is holding are unaffected.
+ */
+function evictToBound(): void {
+  let retained = retainedEntries();
+  if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return;
+
+  const candidates = [...cache.entries()]
+    .filter(([file, e]) => e.entries.length > 0 && !inflight.has(file))
+    .sort((a, b) => a[1].lastTs - b[1].lastTs);
+
+  for (const [file, e] of candidates) {
+    if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return;
+    cache.delete(file);
+    retained -= e.entries.length;
+    cacheStats.evictions += 1;
+  }
+}
+
+/** What the cache is holding, so an operator can read it off `/api/usage`. */
+export interface TranscriptCacheStats {
+  /** Transcript files with a cached byte offset. */
+  files: number;
+  /** Parsed turns held across those files. */
+  entries: number;
+  /** The bound `entries` is kept at or below. */
+  maxEntries: number;
+  /** Files dropped to stay under that bound since this process started. */
+  evictions: number;
+}
+
+/**
+ * A reading of the retention this module holds.
+ *
+ * Exported because the heap it bounds is otherwise only visible by attaching a
+ * debugger to a container, which is not a thing an operator does before the
+ * process has already died.
+ */
+export function transcriptCacheStats(): TranscriptCacheStats {
+  return {
+    files: cache.size,
+    entries: retainedEntries(),
+    maxEntries: TRANSCRIPT_CACHE_MAX_ENTRIES,
+    evictions: cacheStats.evictions,
+  };
+}
+
+/**
+ * Transcript files read at once.
+ *
+ * `readAppended` holds one file descriptor and one `Buffer` sized to the file's
+ * whole unread remainder for the duration of its read, and libuv services the
+ * threadpool roughly FIFO — so every `open` in an unbounded fan-out completes
+ * before the first `close` runs, and both the buffers and the descriptors
+ * coexist. Peak memory was therefore the size of the tree and peak descriptors
+ * its file count, which is what every restart pays: the cache is process-local,
+ * so the first scan after one reads every file from byte 0. Twelve puts the
+ * ceiling at roughly twelve times the largest single transcript and twelve
+ * descriptors, neither of which is a function of how much history is on disk.
+ *
+ * Bounding this is also what stops the failure being silent. Past a 1024-fd
+ * `nofile` — a common container default, and `docker-compose.yml` sets no
+ * `ulimits:` — the opens past the limit simply failed, and the scan answered
+ * with a short entry list that understated every window the guard reads.
+ */
+export const SCAN_CONCURRENCY = 12;
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight, results in input order.
+ *
+ * A worker pool rather than chunked `Promise.all` batches: a batch runs at the
+ * speed of its slowest member and leaves the other eleven slots idle, and
+ * transcript sizes vary by three orders of magnitude.
+ */
+async function mapWithLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+  );
+  return out;
+}
+
+async function runScan(): Promise<ScanResult> {
+  const { files, failures: walkFailures } = await listTranscriptFiles(PROJECTS_DIR);
+
+  // A transcript that is no longer on disk will never be read again, so its
+  // records are retention with nothing behind them. Dropped here rather than in
+  // `evictToBound`, which is about the bound: this one is free whatever the
+  // cache is holding.
+  //
+  // Only when the walk itself was clean, though: a directory that could not be
+  // read is not an empty directory, and pruning against a partial listing would
+  // throw away the records of every file under it — costing a full re-read of
+  // the tree the moment the directory came back.
+  if (walkFailures.length === 0) {
+    const present = new Set(files);
+    for (const file of cache.keys()) if (!present.has(file)) cache.delete(file);
+  }
+
+  const readFailures: ScanReadFailure[] = [...walkFailures];
+  const results = await mapWithLimit(files, SCAN_CONCURRENCY, (f) =>
+    refreshFile(f).catch((err) => {
+      readFailures.push({ path: f, message: failureMessage(err) });
+      return null;
+    }),
   );
 
   // Dedupe across files: a resumed session copies earlier turns into the new
@@ -359,19 +579,40 @@ async function runScan(): Promise<ScanResult> {
 
   entries.sort((a, b) => a.ts - b.ts);
 
+  // After the result is built, never before it: this scan answers with
+  // everything it read, and what eviction decides is only how much of that is
+  // still in memory when the next one starts.
+  evictToBound();
+
+  scanHealth.readFailures = readFailures;
+
   return {
     entries,
     fileCount: files.length,
     unpricedModels: [...unpriced],
     scannedAt: Date.now(),
+    readFailures,
   };
 }
 
-/** Drop cached offsets so the next scan re-reads every file from byte 0. */
-export function invalidateTranscriptCache(): void {
-  cache.clear();
-  // In-flight refreshes still hold the offsets they read before the clear, so
-  // drop them too rather than letting one write a pre-invalidation offset back.
-  inflight.clear();
-  globalInflight.__ufScanInflight = null;
+/**
+ * Forget files that are no longer on disk, without touching the rest.
+ *
+ * The retention sweep's counterpart, and deliberately not a whole-cache clear:
+ * dropping every offset makes the next scan re-read the whole tree from byte 0,
+ * which is the expensive pass this cache exists to avoid. A removed file would
+ * otherwise keep its parsed entries for the life of the process — `runScan`
+ * re-derives the file list every time, so nothing would ever revisit them — and
+ * the dashboard would go on showing spend from transcripts that are gone until
+ * the next restart, disagreeing with the very cutoff the period card had just
+ * been told about.
+ *
+ * In-flight refreshes are dropped alongside the cached entry, rather than left
+ * to write a pre-removal offset back over it.
+ */
+export function forgetTranscriptFiles(files: readonly string[]): void {
+  for (const file of files) {
+    cache.delete(file);
+    inflight.delete(file);
+  }
 }

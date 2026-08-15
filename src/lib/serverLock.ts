@@ -17,10 +17,15 @@ import { DATA_DIR } from "./config";
  * out three runs whose agents were mid-cycle and carried on working. The row
  * said the server had restarted; nothing had.
  *
- * `childEnv` withholding `DATA_DIR` is what stops that particular route. This
- * is the check that does not depend on remembering to: whatever a second
+ * `childEnv` withholding `DATA_DIR` is what stops that particular route, and
+ * the uid split is what makes the withholding enforceable — a child cannot read
+ * the variable out of `/proc/<server>/environ` any more, and cannot open the
+ * directory even knowing the path, because it belongs to the server at 0700.
+ * This is still the check that does not depend on either: whatever a second
  * process is and however it found the file, it does not get to close out rows
- * belonging to a server that is still running.
+ * belonging to a server that is still running. It is also the one that survives
+ * an unseparated install — `npm run dev` on a laptop, where the lock and the
+ * variable are all there is.
  *
  * The lock is a file rather than a row because it has to answer a question
  * about the database from outside it, and because a heartbeat every second is
@@ -197,6 +202,34 @@ function ownerAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Is a *live* other process holding this data directory, right now?
+ *
+ * Synchronous, and deliberately narrower than `claimDataDir`: it answers only
+ * the `held` verdict — someone else's pid, alive, beating recently — and reads
+ * an undecided lock (`observe`) as not held. `db.ts` is the caller, and it has
+ * to ask before it migrates, from a code path that cannot await: `open()` runs
+ * on the first `db()` call in *any* process, which is how a second server ended
+ * up entitled to rebuild a table against the live database.
+ *
+ * Reading `observe` as free is the right direction for that caller. Refusing to
+ * migrate when nobody is actually there would leave a schema unbuilt and every
+ * query throwing, where running a migration a fraction of a second before the
+ * lock changes hands costs nothing — the migration is idempotent and the
+ * destructive one is now transactional.
+ */
+export function heldByAnotherProcess(): boolean {
+  const lock = readLock();
+  if (!lock) return false;
+  return (
+    lockVerdict(
+      lock,
+      { pid: process.pid, now: Date.now() },
+      ownerAlive(lock.pid),
+    ) === "held"
+  );
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
@@ -251,6 +284,20 @@ function beat(): void {
         "Another server starting from now on will treat this data directory as free.",
     );
   }
+}
+
+/**
+ * Does this process hold `DATA_DIR` right now?
+ *
+ * Read from the in-memory claim rather than re-read from the file, deliberately:
+ * the question a health probe is asking is "may this server's reconcilers and
+ * sweepers act", and that is decided by `state.owned`. It goes false when the
+ * heartbeat cannot be written, which is exactly the case worth reporting — a
+ * server that is alive, answering requests, and has silently given up the right
+ * to close out its own rows.
+ */
+export function ownsDataDir(): boolean {
+  return state.owned;
 }
 
 /**

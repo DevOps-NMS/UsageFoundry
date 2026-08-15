@@ -48,6 +48,10 @@ function series(over: Partial<PeriodSeriesDTO> = {}): PeriodSeriesDTO {
     granularity: "day",
     timeZone: "Europe/Berlin",
     limitBasis: "prorated",
+    // "nobody asked", which is what `/api/usage` sends when the transcript
+    // horizon falls outside every bucket on screen, and what every case here
+    // but the incompleteness one is about.
+    completeFrom: null,
     buckets: [bucket()],
     ...over,
   };

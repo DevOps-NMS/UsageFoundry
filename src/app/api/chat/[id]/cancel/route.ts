@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { cancelChatTurn, getChat } from "@/lib/chat";
 import { chatDTO } from "../../dto";
+import { auditMutation } from "../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,7 +20,7 @@ type Ctx = { params: Promise<{ id: string }> };
  * same round trip the click made — the operator's next action is almost always
  * to re-send.
  */
-export async function POST(_req: Request, ctx: Ctx) {
+async function postHandler(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const res = cancelChatTurn(id);
   if (!res.ok) {
@@ -34,3 +35,6 @@ export async function POST(_req: Request, ctx: Ctx) {
     chat: chat ? chatDTO(chat) : null,
   });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

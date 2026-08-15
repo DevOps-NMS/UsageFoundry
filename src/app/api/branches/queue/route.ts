@@ -8,6 +8,7 @@ import {
 } from "@/lib/mergeQueue";
 import { getRun } from "@/lib/orchestrator";
 import { getSettings } from "@/lib/settings";
+import { auditMutation } from "../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -73,7 +74,7 @@ export async function GET() {
  * itself. Returns as soon as the rows exist; the worker outlives the request,
  * for the same reason a review does.
  */
-export async function POST(req: Request) {
+async function postHandler(req: Request) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
   const runIds = Array.isArray(body.runIds)
@@ -101,7 +102,7 @@ export async function POST(req: Request) {
 }
 
 /** Drop everything still waiting. What is in flight is left to finish. */
-export async function DELETE(req: Request) {
+async function deleteHandler(req: Request) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
   const batchId = typeof body.batchId === "string" ? body.batchId : null;
   if (!batchId) {
@@ -110,3 +111,8 @@ export async function DELETE(req: Request) {
   const dropped = cancelBatch(batchId);
   return NextResponse.json({ ok: true, cancelled: dropped });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);
+/** Wrapped so the request that changed something is on the audit log. */
+export const DELETE = auditMutation(deleteHandler);
