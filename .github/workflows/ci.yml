@@ -1,0 +1,163 @@
+name: CI
+
+# Push *and* pull request, deliberately. A branch here is normally landed
+# through this app's own merge queue rather than through a GitHub pull
+# request, so a `pull_request`-only trigger would leave the branch that
+# actually lands unchecked — which is the gap this workflow exists to close.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Read-only. Nothing here needs to write to the repository, and a workflow
+# that runs on every push from every branch is the wrong place to hold a
+# token that could.
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push to the same ref supersedes the older one: these checks answer
+  # a question about a tree, and once that tree has moved the answer is about
+  # something nobody is landing.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    # Both architectures the image can be built for, rather than one nominated
+    # as "the" deployment platform — which this project does not have. The
+    # `Dockerfile` branches on `dpkg --print-architecture` for amd64 and arm64
+    # when it fetches `gh`, and `better-sqlite3` either finds a prebuild for
+    # the platform or compiles from source on it; neither is the same fact
+    # twice. Which one a given install runs on is the operator's host, and
+    # every audit of this repository so far has run on linux/arm64 in a
+    # sandbox, so linux/amd64 had never been exercised at all.
+    #
+    #   ubuntu-latest      → linux/amd64
+    #   ubuntu-24.04-arm   → linux/arm64  (GitHub-hosted, free for public repos)
+    name: checks · ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          # `package.json` says `>=22`; both the `deps` and `runner` stages of
+          # `Dockerfile` are `node:22-bookworm-slim`. Track the image rather
+          # than the newest release, or CI stops describing what is deployed.
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        # `NODE_ENV=development` is load-bearing, not decoration. A bare
+        # `npm ci` under an inherited `NODE_ENV=production` exits 0 while
+        # silently skipping devDependencies — after which `typecheck` and
+        # `test` fail with exit 127 because `tsc` is not there, and `build`
+        # fails on Tailwind's PostCSS plugin, which is the devDependency
+        # `Dockerfile` already comments on for the same reason. All three
+        # failures point at the code and none of them is about the code.
+        #
+        # GitHub's runners do not set `NODE_ENV` today. The prefix is what
+        # keeps that from being a fact this workflow silently depends on.
+        run: NODE_ENV=development npm ci --include=dev
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        # The step the whole workflow exists for. `Dockerfile`'s builder stage
+        # runs exactly this command, so until now the deployment artefact was
+        # the one thing in the project that nothing verified: the loop
+        # CLAUDE.md prescribes — typecheck plus test — passes cleanly whatever
+        # the build does, and `docker compose up --build` is the real
+        # deployment path.
+        #
+        # If this passes here and fails by hand with
+        # `[TypeError: generate is not a function]`, the shell is the
+        # difference and not the tree. `.next/standalone/server.js` sets
+        # `__NEXT_PRIVATE_STANDALONE_CONFIG` in its own environment, so every
+        # child process of a *running* standalone server inherits it —
+        # including an agent this app spawns. `loadConfig` then takes its
+        # early-return branch and `JSON.parse`s that string instead of merging
+        # defaults; JSON has no way to carry a function, `generateBuildId` is
+        # the only function-valued default, and `getBuildId` calls it
+        # unconditionally. `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
+        # build` is the check. A runner has no such parent, which is why this
+        # job is the trustworthy answer to that question.
+        run: npm run build
+
+  audit:
+    # Advisories are a schedule problem rather than a diff problem — a tree
+    # that changed nothing can acquire one overnight — but this is fast enough
+    # that running it per push costs less than remembering to look.
+    name: npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: NODE_ENV=development npm ci --include=dev
+
+      - name: Report every advisory
+        # Always printed and never gated. The point of this job is that
+        # somebody is *told*; a step that only speaks when it fails is a step
+        # whose output nobody reads.
+        run: npm audit || true
+
+      - name: Fail on a critical advisory
+        # The gate is `critical`, not `high`, and that is a decision about
+        # three specific advisories rather than a shrug.
+        #
+        # As of 2026-08-14 `npm audit` reports exactly three high-severity
+        # advisories in this tree. All three are inside `next`'s own
+        # dependency subtree, and the only fix `npm` offers for any of them is
+        # `next@16.3.1` — a semver-major move this project has not made, and
+        # not one to make sideways: `Dockerfile` pins the Claude CLI because
+        # the `stream-json` and OTLP contracts were captured from one build,
+        # and a framework major here is a decision with the same shape.
+        #
+        #   postcss <=8.5.22 — GHSA-qx2v-qp2m-jg93, GHSA-6g55-p6wh-862q,
+        #   GHSA-fxqj-rqcc-2cmp, GHSA-r28c-9q8g-f849, reached at
+        #   `node_modules/next/node_modules/postcss`. Every one of the four is
+        #   about CSS an attacker supplies: an unescaped `</style>` surviving
+        #   stringify, and a `sourceMappingURL` comment steering a source-map
+        #   read out of the tree. postcss runs here only at build time, over
+        #   `src/app/globals.css` and Tailwind's output, and that file sets
+        #   `source(none)` with an explicit `@source` — so what is scanned is a
+        #   fixed list this repository owns. No untrusted CSS reaches postcss
+        #   at build time, and none reaches it at run time because it is not
+        #   in the runtime image at all.
+        #
+        #   sharp <0.35.0 — GHSA-f88m-g3jw-g9cj, libvips CVEs inherited by
+        #   Next's optional image-optimisation dependency. Nothing under
+        #   `src/` imports `next/image`, so the only route to sharp is the
+        #   built-in `/_next/image` optimiser; `images.remotePatterns` and
+        #   `images.domains` both default to empty, so it will not fetch a
+        #   remote URL, and the local files it can reach are the five icons in
+        #   `public/` that `scripts/make-icons.py` generated.
+        #
+        # So: accepted, on the record, and revisited when this project moves
+        # to `next@16`. Gating at `high` would leave this job red every day
+        # for three advisories a human has already read, which is how a gate
+        # stops being read at all. The unconditional report above is what
+        # keeps `critical` from being a silent pass.
+        run: npm audit --audit-level=critical

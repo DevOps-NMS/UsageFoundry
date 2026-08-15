@@ -182,8 +182,8 @@ function migrate(db: Database.Database) {
       updated_at      INTEGER NOT NULL
     );
 
-    -- A named specialised agent: a role the delegating model may hand a
-    -- subtask to.
+    -- A named agent: the role a run itself takes, carried onto a spawn as an
+    -- --agents definition and an --agent selection.
     --
     -- The fourth table here that holds *form input, never a run*, after
     -- run_templates, chat_proposals and workflows: no folder claim, no
@@ -192,22 +192,24 @@ function migrate(db: Database.Database) {
     -- the whole definition onto its own argv rather than a reference to this
     -- row.
     --
-    -- No tools column, no permission_mode column and no budget. What an agent
-    -- may do comes from the guard set on the run it is delegated inside; the
+    -- No tools column, no permission_mode column and no budget. What a run may
+    -- do comes from its own guard set and never from the role it takes — which
+    -- matters more since --agent, because the run *is* this record; the
     -- reasoning is in agents.ts beside the refusal that enforces it, and the
     -- absence of a column is the strongest form of it — there is nothing on
     -- the wire that could carry one.
     --
-    -- model is nullable and means "inherit the session's". It is the one field
-    -- run_templates deliberately refuses to hold, and it is not the same field:
-    -- a template's model would be a second place to set the *run's* model,
-    -- where this is the model one delegated turn runs on, which nothing else
-    -- here can express.
+    -- model is nullable and means "keep whatever model the run already had".
+    -- It is the one field run_templates deliberately refuses to hold, and what
+    -- keeps it from being the second place to set the run's model is measured
+    -- rather than structural: an explicit --model outranks it on the pin, so it
+    -- fills a gap the run left.
     CREATE TABLE IF NOT EXISTS agents (
       id          TEXT PRIMARY KEY,
       name        TEXT NOT NULL,
-      -- What the delegating model reads to choose this agent. Required by the
-      -- CLI, which drops a member without one and says nothing.
+      -- What a person reads on a picker when they choose this agent. Required
+      -- by the CLI, which will not register a member without one — so --agent
+      -- cannot select it and the spawn fails.
       description TEXT NOT NULL,
       prompt      TEXT NOT NULL,
       model       TEXT,
@@ -571,10 +573,10 @@ function migrate(db: Database.Database) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_run_templates_name
       ON run_templates(name COLLATE NOCASE);
     -- Same rule as a template's name, and one the CLI makes sharper: the name
-    -- is the key of the object the --agents flag takes, so two rows differing
-    -- only in case would be two members of one JSON object that a person reads
-    -- as one agent — and the delegating model picks between them by
-    -- description.
+    -- is the key of the object --agents takes *and* the word --agent is handed
+    -- to select one, so two rows differing only in case would be two members of
+    -- one JSON object that a person reads as one agent — and which of them a
+    -- run was started as would be whichever the CLI resolved.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_name
       ON agents(name COLLATE NOCASE);
     -- Same rule as a template's name, for the same reason: a workflow is picked
@@ -665,22 +667,22 @@ function migrate(db: Database.Database) {
   // rather than a guess.
   addColumn(db, "runs", "landed_tip", "TEXT");
 
-  // The specialised agent this run's main thread may hand a subtask to, frozen
-  // as the whole definition rather than as a reference to an `agents` row.
+  // The agent this run was started **as**, frozen as the whole definition
+  // rather than as a reference to an `agents` row.
   //
-  // A reference is what this looks like it wants and it is wrong twice over. A
-  // run spawns a child per work cycle, so an agent deleted between cycle 3 and
-  // cycle 4 would leave cycle 4 with no specialist and nothing saying so — the
-  // one failure shape the whole of agents.ts exists to end, arriving from inside
-  // this app rather than from the CLI. And a run picked up by hand days later
-  // would lose it the same way. So it is a copy, the treatment runs.budget
-  // already gives permissionMode and the reason deleting a template cannot reach
-  // a run started from one.
+  // A reference is what this looks like it wants and it is wrong twice over,
+  // more so since --agent. A run spawns a child per work cycle, so an agent
+  // deleted between cycle 3 and cycle 4 would leave cycle 4 selecting a name
+  // nothing on its argv defines — which the CLI refuses at the spawn, so the run
+  // stops being what it was started as and then stops running at all. And a run
+  // picked up by hand days later would lose it the same way. So it is a copy,
+  // the treatment runs.budget already gives permissionMode and the reason
+  // deleting a template cannot reach a run started from one.
   //
   // Null is the ordinary run. It is display as well as spawn input, and the
-  // display is honest about what the flag does: --agents *offers* a role to the
-  // delegating model, which is what a sub-agent is — it is not --agent, which
-  // would replace the session's own main agent and which nothing here wires.
+  // display is honest about what the flag does: sessionAgentArgs emits both
+  // --agents (the definition) and --agent (the selection), so the saved prompt
+  // is this run's own system prompt and not a role inside it.
   addColumn(db, "runs", "agent", "TEXT");
 
   // The agent a template names, by id — and this one *is* a reference, which is
@@ -765,7 +767,7 @@ function migrate(db: Database.Database) {
   addColumn(db, "chat_proposals", "graph", "TEXT");
   addColumn(db, "chat_proposals", "workflow_id", "TEXT");
 
-  // The saved agent a proposed run may hand a subtask to, by id — and an **id**
+  // The saved agent a proposed run is started as, by id — and an **id**
   // rather than the frozen copy `runs.agent` holds, for `run_templates`'
   // reason: a proposal is form input that a person reads and decides on, so it
   // should still name the agent as it stands at the click rather than as it
@@ -775,8 +777,8 @@ function migrate(db: Database.Database) {
   // Not a foreign key, exactly as `template_id` above is not: an agent deleted
   // between the proposal and the approval must fail the approval with a
   // sentence naming it, not silently take the row the operator is looking at
-  // with it — and never fall back to no specialist, which is bit-for-bit the
-  // run the whole registry exists to stop.
+  // with it — and never fall back to no agent, which is bit-for-bit the run the
+  // whole registry exists to stop.
   //
   // It carries no capability. An agent holds no tool list and no permission
   // mode, so this is not a route to `--permission-mode` reached by a model;

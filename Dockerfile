@@ -73,13 +73,22 @@ ENV NODE_ENV=production \
 #   less              — git's pager. Absent, `git log` still works but prints a
 #                       broken-pager warning the agent then reasons about.
 #
+#   sqlite3           — the recovery procedures in the docs are written in it,
+#                       and they were unrunnable: `docker exec … sqlite3` was
+#                       `command not found`, so the only documented way out of a
+#                       stuck row failed at the first word. Roughly 2 MB. The
+#                       backup and restore scripts below do not need it — they
+#                       go through better-sqlite3, which is guaranteed present
+#                       because the app depends on it — but somebody holding a
+#                       backup file at 3am wants a shell they can inspect it in.
+#
 # This costs roughly 250 MB, nearly all of it g++. A compiler in the runtime
 # image is a deliberate trade: the alternative is an agent that cannot install
 # dependencies, and a run that fails at step one is worth less than the layer.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git ripgrep ca-certificates tini \
-      python3 make g++ curl procps less \
+      python3 make g++ curl procps less sqlite3 \
  && rm -rf /var/lib/apt/lists/*
 
 # Two things git cannot work out for itself inside a container, both of which
@@ -140,6 +149,14 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" && npm cach
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
+
+# The backup and restore scripts. In the image rather than left in the
+# repository because the database only exists inside the container, and the two
+# moments they are wanted are a scheduled `docker compose exec` and a restore
+# run through `docker compose run` against a volume the app is not holding.
+# They resolve `better-sqlite3` out of the standalone bundle's own node_modules,
+# which is the same build of the same addon the server uses.
+COPY scripts/backup-db.mjs scripts/restore-db.mjs ./scripts/
 
 # /data is the one path here whose permissions are the *image's* problem rather
 # than the host's, because it is a named volume. Docker initialises a fresh
