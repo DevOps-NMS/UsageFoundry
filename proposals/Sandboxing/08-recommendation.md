@@ -1,14 +1,14 @@
 # Recommendation
 
-**Sandbox the child with the CLI's own bubblewrap layer, pinned by an
-admin-owned managed-settings file the agents cannot write, scoped per run by a
-`--settings` overlay at each spawn site.** Option B, `02x-option-cli-sandbox.md`.
+**Sandbox the child with the CLI's own bubblewrap layer, pinned by an admin-owned
+managed-settings file the agents cannot write, scoped per run by a `--settings`
+overlay at each spawn site.** Option B, `02x-option-cli-sandbox.md`.
 
 ## Why this one, from the constraints rather than from preference
 
 `01-constraints.md` lists five things that cross every candidate boundary and six
-architecture properties that break silently. This is the only option in the
-survey that crosses **none** of them.
+architecture properties that break silently. This is the only option in the survey
+that crosses **none** of them.
 
 Metering is the sharpest test. The transcript scan feeds every window and every
 budget guard (`src/lib/transcripts.ts:3`, `src/lib/config.ts:62`), and its failure
@@ -21,18 +21,18 @@ condition (`docs/agent/environment.md:17`).
 Telemetry is the second. `src/middleware.ts:66`/`:81` exempt `/api/mcp` and the
 OTLP path from the shared-secret gate on the argument that each authenticates
 itself with a capability — an argument written for a *loopback* surface
-(`src/lib/config.ts:108`, `:127`). Every structural option moves it onto a
-network, which has to be re-argued in `middleware.ts`; Option B does not touch it.
-The single-writer rule decides the rest: `createRun` is atomic because one event
-loop covers it (`docs/agent/concurrency-and-ownership.md:10`), which is why the
-MCP tools run in-process (`src/lib/config.ts:120`), and Option B adds no process.
+(`src/lib/config.ts:108`, `:127`). Every structural option moves it onto a network,
+which has to be re-argued in `middleware.ts`; Option B does not touch it. The
+single-writer rule decides the rest: `createRun` is atomic because one event loop
+covers it (`docs/agent/concurrency-and-ownership.md:10`), which is why the MCP
+tools run in-process (`src/lib/config.ts:120`), and Option B adds no process.
 
 And loudness. This repository refuses boundaries that disappear with the page
 looking identical — `describeSeparation()` (`src/lib/privsep.ts:180`) exists for
 that. The pinned binary has the matching key in its own strings: *"Exit with an
 error at startup if `sandbox.enabled` is true but the sandbox cannot start."* A
-vendor-supplied version of this codebase's own rule, and the reason Option B is
-the only positive loudness score in `07-comparison.md`.
+vendor-supplied version of this codebase's own rule, and the reason Option B is the
+only positive loudness score in `07-comparison.md`.
 
 What it delivers is not small: per-run filesystem confinement to the run's own
 worktree, a network allowlist enforced inside a namespace rather than by an
@@ -47,33 +47,28 @@ per-spawn settings overlay beside `buildArgs` repeated in `review.ts` and
 
 The real cost is elsewhere. **Docker's default seccomp profile has to be relaxed**
 so bubblewrap can create a user namespace — verified: `unshare --user
---map-root-user id` returns `Operation not permitted` in the shipped container,
-and `CapBnd` is `00000000a80425fb`, Docker's default set with no `CAP_SYS_ADMIN`.
-The relaxation is a custom profile permitting `unshare`/`clone` with
-`CLONE_NEWUSER`, which widens the container's own syscall surface. It is much
-smaller than `--cap-add SYS_ADMIN`, far smaller than `--privileged`, and not
-comparable to Option E's Docker socket — but it is a real trade and belongs in
-`docs/security.md` in those words. Second, it adds the CLI's sandbox settings
-schema to what `Dockerfile:194`'s version pin protects: a renamed key would leave
-runs unsandboxed, and `failIfUnavailable` would not catch it, because a sandbox
-never asked for is not one that failed.
+--map-root-user id` returns `Operation not permitted` in the shipped container, and
+`CapBnd` is `00000000a80425fb`, Docker's default set with no `CAP_SYS_ADMIN`. The
+fix is a custom profile permitting `unshare`/`clone` with `CLONE_NEWUSER`, which
+widens the container's own syscall surface: much smaller than `--cap-add
+SYS_ADMIN`, far smaller than `--privileged`, not comparable to Option E's Docker
+socket — but a real trade, and it belongs in `docs/security.md` in those words.
+Second, it adds the CLI's sandbox settings schema to what `Dockerfile:194`'s
+version pin protects: a renamed key would leave runs unsandboxed, and
+`failIfUnavailable` would not catch it, because a sandbox never asked for is not
+one that failed.
 
 ## What it does not contain
 
-In the habit of `docs/security.md:57`:
-
-**The credential, from the CLI process.** A work cycle bills against the account
-token, so the process making the request must read it. A `files` deny entry takes
-it from the run's *shell*, not from the session, and a model that decides to print
-it has a tool that is not Bash. The only real fix is a run-scoped credential,
-which does not exist.
-
-**The repository, as opposed to the checkout.** A worktree's `.git` is a pointer
-into the main repository (`01-constraints.md`), so the writable set must include
-`<repo>/.git`, and two runs on one repository can still rewrite each other's refs.
-Closing that needs a per-run clone — a different proposal, costing disk and time
-on every run.
-
+In the habit of `docs/security.md:57`. **The credential, from the CLI process**: a
+work cycle bills against the account token, so the process making the request must
+read it. A `files` deny entry takes it from the run's *shell*, not from the
+session, and a model that decides to print it has a tool that is not Bash; the only
+real fix is a run-scoped credential, which does not exist. **The repository, as
+opposed to the checkout**: a worktree's `.git` is a pointer into the main
+repository (`01-constraints.md`), so the writable set must include `<repo>/.git`,
+and two runs on one repository can still rewrite each other's refs — closing that
+needs a per-run clone, a different proposal costing disk and time on every run.
 **The CLI's own file tools**, assumed and the largest assumption here: the sandbox
 wraps commands, so `Edit`/`Write` sit outside it. **The kernel**: 25 sandboxes on
 one kernel, and only Option F moves that. **The database and the server's
@@ -93,8 +88,8 @@ rather than by a file mode.
 session — the assumption named above — then a compromised *model*, as opposed to a
 compromised subprocess, is unconfined by B, and the confinement must come from
 outside the CLI process. Option D is the shape that provides it, and Phase 1 of
-`09-implementation-sketch.md` is written to answer that before anything is built
-on the answer.
+`09-implementation-sketch.md` is written to answer that before anything is built on
+the answer.
 
 **Option C alone — a runner container without per-run sandboxes — is rejected by
 name.** It is the operator's sketch minus its second half and does not close the

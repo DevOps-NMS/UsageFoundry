@@ -48,16 +48,16 @@ sandbox promotes Option D to a live decision.
 
 ## Phase 2 — the image and the immovable policy
 
-`Dockerfile`: one apt line for `bubblewrap` beside the existing block
-(`:88`–`92`), and `/etc/claude-code/managed-settings.json` written root-owned 0644
-with `sandbox.enabled`, `sandbox.failIfUnavailable: true`, a conservative
+`Dockerfile`: one apt line for `bubblewrap` beside the existing block (`:88`–`92`),
+and `/etc/claude-code/managed-settings.json` written root-owned 0644 with
+`sandbox.enabled`, `sandbox.failIfUnavailable: true`, a conservative
 `sandbox.filesystem` and `sandbox.network`, and a `sandbox.credentials.files` deny
 entry for `~/.claude/.credentials.json`. Root ownership is the point: agents are
 `UF_AGENT_UID` and cannot write `/etc`, and the binary's own strings say a managed
 `sandbox.filesystem` cannot be switched off by project settings — which matters
 because a repository's `.claude/settings.json` is agent-writable.
-`docker-compose.yml`: the `security_opt` line, commented in the register of the
-file's existing ones, saying what it widens and what it does not.
+`docker-compose.yml` takes the `security_opt` line, commented in the register of
+the file's existing ones, saying what it widens and what it does not.
 
     docker compose up --build
     docker compose exec --user "${UF_UID:-1000}" usagefoundry \
@@ -115,17 +115,13 @@ which is why Phase 4 comes before this is called finished.
 ## Open questions this run could not determine
 
 **Whether the CLI's sandbox wraps the session or only Bash.** Read out of the
-binary's strings, not executed. Phase 1, question 3.
-
-**Whether `sandbox.credentials` can mask the Anthropic OAuth credential** rather
-than only deny it. The masking machinery in the strings is sigv4-shaped and its
-re-signing proxy is described in AWS terms. Assumed not.
-
-**Whether a per-uid boundary is enforced on Docker Desktop's `fakeowner`
-filesystem.** Affects Option A only, and cannot be answered from a container
-holding no privilege to change uid.
-
-**What `sandbox.seccomp` filters**, and **the platform in general**: this install
-is macOS Docker Desktop (`fakeowner` over `/run/host_mark/Users`, linuxkit 6.12.76
-aarch64), but `docs/install.md` supports Linux too, and Option E's host-root
-objection and Option F's availability both differ by platform.
+binary's strings, not executed — Phase 1, question 3. **Whether
+`sandbox.credentials` can mask the Anthropic OAuth credential** rather than only
+deny it; the masking machinery in the strings is sigv4-shaped and its re-signing
+proxy is described in AWS terms, so assumed not. **Whether a per-uid boundary is
+enforced on Docker Desktop's `fakeowner` filesystem**, which affects Option A only
+and cannot be answered from a container holding no privilege to change uid. **What
+`sandbox.seccomp` filters.** And **the platform in general**: this install is macOS
+Docker Desktop (`fakeowner` over `/run/host_mark/Users`, linuxkit 6.12.76 aarch64),
+but `docs/install.md` supports Linux too, and Option E's host-root objection and
+Option F's availability both differ by platform.

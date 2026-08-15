@@ -16,10 +16,9 @@ can make non-overridable. The evidence, since everything below rests on it —
 and three of its own sentences: *"Exit with an error at startup if
 `sandbox.enabled` is true but the sandbox cannot start … When false (default), a
 warning is shown and commands run unsandboxed"*; *"bubblewrap is required for
-subprocess env scrubbing and isolation"*; and *"project settings … are ignored.
-If managed settings configure `sandbox.filesystem` at all, or list any
+subprocess env scrubbing and isolation"*; and *"project settings … are ignored. If
+managed settings configure `sandbox.filesystem` at all, or list any
 `sandbox.credentials.files` deny entry, only managed settings can set this."*
-
 There is no `--sandbox` flag on this pin, though the string is in the binary and
 would mislead a later reader: `claude --sandbox mcp list` → `error: unknown option
 '--sandbox'`. It is configured by settings, and `--settings <file-or-json>` is real
@@ -31,11 +30,10 @@ One container, one image plus `bubblewrap`, plus a root-owned
 `/etc/claude-code/managed-settings.json` enabling `sandbox.enabled`,
 `sandbox.failIfUnavailable`, a filesystem write allowlist and a network domain
 allowlist. That file is the one policy surface a run cannot edit — including via
-`.claude/settings.json` in the repository it is working on, which is
-agent-writable and would otherwise be the hole. Per-run scoping is a `--settings`
-overlay built beside `buildArgs` (`src/lib/orchestrator.ts:4396`), on top of a
-managed file it cannot weaken. Four kinds of child stay four, each with one more
-argument.
+`.claude/settings.json` in the repository it is working on, which is agent-writable
+and would otherwise be the hole. Per-run scoping is a `--settings` overlay built
+beside `buildArgs` (`src/lib/orchestrator.ts:4396`), on top of a managed file it
+cannot weaken. Four kinds of child stay four, each with one more argument.
 
 ## Isolation gained
 
@@ -43,8 +41,8 @@ Filesystem, per run: a bubblewrap mount namespace whose writable set is this run
 worktree plus the repository's `.git`, everything else read-only or absent — which
 closes the between-runs case for the shell and drops three of four mounts out of
 reach. Network, per run: `sandbox.network.allowedDomains`, enforced inside the
-namespace rather than by an environment variable, which is the difference between
-a policy and a suggestion. Process: a bwrap namespace normally carries its own
+namespace rather than by an environment variable, which is the difference between a
+policy and a suggestion. Process: a bwrap namespace normally carries its own
 `/proc`, so today's `/proc/<pid>/cmdline` capability leak stops being visible from
 a sandboxed command; a PID namespace is **assumed**, not determinable from
 `strings`, as is `sandbox.seccomp` narrowing rather than widening.
@@ -59,8 +57,8 @@ dependency's build script, weaker against an agent simply told the wrong thing.
 
 ## The five it must not break
 
-**The credential.** `sandbox.credentials` has `files` deny and mask entries, with
-a proxy that re-signs masked ones; the re-signing machinery in the strings is
+**The credential.** `sandbox.credentials` has `files` deny and mask entries, with a
+proxy that re-signs masked ones; the re-signing machinery in the strings is
 sigv4-shaped, so masking the Anthropic OAuth token is **assumed unavailable**. A
 `files` **deny** entry over `~/.claude/.credentials.json` is available — the CLI
 keeps reading it, the run's shell cannot. First option here that makes a `cat` of
@@ -69,13 +67,12 @@ it fail.
 **Metering.** Untouched, and this is where it is strongest: same process, same
 `CLAUDE_CONFIG_DIR`, same transcripts under `PROJECTS_DIR`, same root server
 reading them. The one thing to get right is that `~/.claude` stays *writable* by
-the CLI — an allowlist that forgets it produces the silent zero
-`01-constraints.md` warns about, and it is the most important line in the
-verification plan.
+the CLI — an allowlist that forgets it produces the silent zero `01-constraints.md`
+warns about, and it is the most important line in the verification plan.
 
 **Telemetry.** Untouched: same container, same namespace, same loopback
-`OTLP_SELF_URL`, and the exporter sits in the CLI process, outside the
-per-command sandbox under the assumption above.
+`OTLP_SELF_URL`, and the exporter sits in the CLI process, outside the per-command
+sandbox under the assumption above.
 
 **The work.** Untouched — same uid, same worktree, same `chownForChild`, same
 commits at the operator's uid. The `.git` pointer (`01-constraints.md`) forces the
@@ -126,6 +123,6 @@ failed.
 
 `Dockerfile` (one apt line, one managed-settings file), `docker-compose.yml` (one
 `security_opt`), a per-run settings overlay beside `buildArgs` repeated for
-`review.ts` and `chat.ts`, a boot line in the manner of `describeSeparation()`.
-Two or three days of code. The real cost is the verification, because none of the
+`review.ts` and `chat.ts`, a boot line in the manner of `describeSeparation()`. Two
+or three days of code. The real cost is the verification, because none of the
 behaviour above has been executed — only read out of the binary.

@@ -50,20 +50,16 @@ in build cost and in a second way for metering to read zero.
 Reading the interesting cells rather than the totals: **B scores 3 on filesystem
 and network** because `sandbox.filesystem.write.allowOnly` and
 `sandbox.network.allowedDomains` are per-session policy inside a namespace — finer
-than a per-container network, stronger than a proxy environment variable — and
-**2 rather than 3 between two runs** because the sandbox is assumed to wrap
-commands rather than the whole session (`02x-option-cli-sandbox.md`). **B is the
-only positive on loudness**, on one string from the pinned binary:
-`sandbox.failIfUnavailable` exits at startup rather than warning. Every structural
-option scores negative there, because each introduces at least one new way for the
-transcript scan to read zero with nothing thrown. **C scores 0 on fit** rather than
-negative: it changes the loopback endpoints and adds a fifth kind of child, but it
-also improves the memory arithmetic by splitting the limits, and those roughly
-cancel. **E's −3 on host posture** is the Docker socket, unrecoverable by careful
-calling code; its −1 on credential containment is that 25 containers hold
-`~/.claude` where one does today. **F's −2 on run cost** is the unmeasured build
-and git penalty under gVisor, against a workload that is nothing but builds and
-git.
+than a per-container network, stronger than a proxy environment variable — and **2
+rather than 3 between two runs** because the sandbox is assumed to wrap commands
+rather than the whole session (`02x-option-cli-sandbox.md`). **B is the only
+positive on loudness**, on `sandbox.failIfUnavailable`; every structural option
+scores negative there, because each adds a way for the transcript scan to read zero
+with nothing thrown. **C scores 0 on fit** rather than negative: it changes the
+loopback endpoints and adds a fifth kind of child, but it also splits the memory
+limits, and those roughly cancel. **E's −3 on host posture** is the Docker socket,
+unrecoverable by careful calling code, and its −1 on credential containment is that
+25 containers hold `~/.claude` where one does today.
 
 ## One candidate not given a file
 

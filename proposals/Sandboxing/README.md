@@ -10,20 +10,18 @@ socket, no change to the loopback telemetry and MCP endpoints, no change to the
 metering path.
 
 It is recommended because the pinned CLI — 2.1.226, `Dockerfile:194` — already
-implements it, and because it is the only candidate that crosses none of the five
-things a sandbox boundary here has to leave working. It carries a
-`sandbox.failIfUnavailable` key that exits at startup rather than silently running
-unsandboxed, which is this repository's own rule about disappearing boundaries,
+implements it; because it is the only candidate that crosses none of the five
+things a sandbox boundary here has to leave working; and because its
+`sandbox.failIfUnavailable` key exits at startup rather than silently running
+unsandboxed, which is this repository's own rule about disappearing boundaries
 supplied by the vendor. Its central mechanism was **read out of the pinned binary
 and not executed**: Phase 1 of `09-implementation-sketch.md` is a measurement, and
 its third question — whether the sandbox wraps the session or only Bash — is the
-fact that would promote the runner-up.
-
-The runner-up is the operator's own sketch in full: a runner container holding
-per-run sandboxes (`04`). The operator's sketch *without* its second half — a
-runner container alone (`03`) — is rejected by name: same container, same uid,
-same mounts, so a run can still write a concurrent run's checkout, which is the
-gap the whole exercise was reached for.
+fact that would promote the runner-up, which is the operator's own sketch in full
+(`04`). The operator's sketch *without* its second half — a runner container alone
+(`03`) — is rejected by name: same container, same uid, same mounts, so a run can
+still write a concurrent run's checkout, the gap the whole exercise was reached
+for.
 
 ## What a run can reach today, measured
 
