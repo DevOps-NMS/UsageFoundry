@@ -615,6 +615,57 @@ export interface UsageSnapshot {
   plan: PlanUsage | null;
 }
 
+/**
+ * The provider's reading, carried forward by the work that landed after it.
+ *
+ * The provider's percentage is *cached* — `planUsage.ts` refreshes it at most
+ * every five minutes and keeps serving the last good one for up to an hour
+ * while requests are being refused — so with several runs sharing one account,
+ * every cycle that starts inside a refresh interval is authorised by the same
+ * frozen number, and the window can be walked from under the guard to over it
+ * without the guard seeing a figure that moved. Locally observed spend is the
+ * only current evidence there is, so it has to be able to raise the guard.
+ *
+ * What it must not do is arrive in someone else's units. This used to take
+ * `max(planFraction, costGuardUSD / typedCeiling)`, and that comparison is
+ * wrong twice over. The two terms are fractions of *different denominators* —
+ * one of the account's real allowance, which Anthropic publishes no number
+ * for, the other of a ceiling the operator guessed — which is the exact error
+ * `planUsage.ts` exists to end ("the arithmetic was never the problem; the
+ * denominator was"). And the derived term counts the window's spend from its
+ * start, all of which the provider's own percentage has *already counted*, so
+ * the same work was charged to the guard twice. Measured against a live Max
+ * account mid-window: $2,388 of derived weekly spend that the provider called
+ * 70%, so any ceiling in the range an operator would plausibly type read
+ * between 2.4x and 24x the true figure and painted the whole gap as a hatched
+ * band on the weekly meter.
+ *
+ * So only the spend that landed *after* the reading was taken carries it
+ * forward, and it is converted at the rate that reading itself implies: if
+ * this window's own turns cost $X at fetch time and the provider called that
+ * P%, then one percent of the allowance is $X/P, whatever the plan actually
+ * is. Both terms are then fractions of the same thing, no configured ceiling
+ * is consulted, and a window with no spend since the fetch — the ordinary case
+ * between refreshes — returns the provider's figure unchanged.
+ *
+ * It can only ever raise the reading, never lower it.
+ */
+function planFractionCarriedForward(
+  planFraction: number,
+  windowCostGuardUSD: number,
+  sinceFetchCostGuardUSD: number,
+): number {
+  if (sinceFetchCostGuardUSD <= 0) return planFraction;
+
+  // What this window had spent when the provider last looked. At or below
+  // zero there is no baseline to scale from — the reading described a window
+  // this disk has no turns for — and inventing a rate is what got us here.
+  const atFetch = windowCostGuardUSD - sinceFetchCostGuardUSD;
+  if (planFraction <= 0 || atFetch <= 0) return planFraction;
+
+  return planFraction * (windowCostGuardUSD / atFetch);
+}
+
 export function buildSnapshot(
   entries: UsageEntry[],
   limits: LimitConfig,
@@ -658,6 +709,11 @@ export function buildSnapshot(
     planWindow: PlanWindow | null,
     /** Worst of every wall on this window; defaults to the window's own. */
     planGuard: number | null = null,
+    /**
+     * What this window has spent since the provider's reading was taken — the
+     * only part of the derived figure that reading has not already counted.
+     */
+    sinceFetchCostGuardUSD = 0,
   ): WindowState => {
     const derived = buildWindow(startsAt, endsAt, agg, costLimit, tokenLimit);
     const planFraction = planWindow ? planWindow.utilization : null;
@@ -674,24 +730,26 @@ export function buildSnapshot(
       planFraction,
       fraction: planFraction,
       fractionMetric: "plan",
-      // The worst of every reading of this window, and the third operand is
-      // the one that is easy to leave out. The provider's percentage is
-      // *cached* — `planUsage.ts` refreshes it at most every five minutes and
-      // keeps serving the last good one for up to an hour while requests are
-      // being refused — so with several runs sharing one account every cycle
-      // that starts inside a refresh interval is authorised by the identical
-      // frozen number, and the window can be walked from under the guard to
-      // over it without the guard ever seeing a figure that moved. The derived
-      // reading is recomputed from the transcripts on every single guard, so it
-      // is the only evidence here that is current, and taking the maximum is
-      // what lets it *raise* the guard without ever lowering it. It does carry
-      // the unpriced-model markup, which is a deliberate over-estimate — that
-      // is the safe direction for the number a run is stopped on, and it stays
-      // out of `fraction`, which is what the meter shows.
+      // The worst of every wall on this window, in one set of units.
+      //
+      // The provider's own reading carried forward by the spend it has not yet
+      // seen (see `planFractionCarriedForward`, which is where the reason this
+      // is not `derived.guardFraction` is written down), against every
+      // model-scoped weekly wall — because being cut off by the Opus week is
+      // being cut off. Both are fractions of a provider allowance. The typed
+      // ceiling is deliberately absent: it is a guess at a denominator the
+      // provider has just supplied the numerator for, and mixing the two is
+      // what made this meter read double.
+      //
+      // `fraction` stays the provider's figure alone, so the carried-forward
+      // part shows up as `Meter`'s hatched band rather than moving the bar.
       guardFraction: Math.max(
-        planFraction,
+        planFractionCarriedForward(
+          planFraction,
+          agg.costGuardUSD,
+          sinceFetchCostGuardUSD,
+        ),
         planGuard ?? 0,
-        derived.guardFraction ?? 0,
       ),
       // Nothing to describe: the provider names a percentage, not a ceiling.
       limit: null,
@@ -728,6 +786,21 @@ export function buildSnapshot(
   const weekEntries = entries.filter((e) => e.ts >= wkStart);
   const weeklyAgg = aggregate(weekEntries);
 
+  // What each window has spent since the provider's reading was taken, in one
+  // pass over the entries already filtered for the week. `fetchedAt` is at or
+  // before `now` and `wkStart` is too, so a turn newer than the fetch is
+  // always inside `weekEntries` — the session slice cannot be missing turns
+  // that fall outside it.
+  let weeklySinceFetch = 0;
+  let sessionSinceFetch = 0;
+  if (plan) {
+    for (const e of weekEntries) {
+      if (e.ts < plan.fetchedAt) continue;
+      weeklySinceFetch += e.costGuardUSD;
+      if (e.ts >= sessionStart) sessionSinceFetch += e.costGuardUSD;
+    }
+  }
+
   const session = makeWindow(
     "5-hour session",
     sessionStart,
@@ -736,6 +809,8 @@ export function buildSnapshot(
     limits.sessionCostLimit,
     limits.sessionTokenLimit,
     plan?.session ?? null,
+    null,
+    sessionSinceFetch,
   );
 
   const weekly = makeWindow(
@@ -749,6 +824,7 @@ export function buildSnapshot(
     limits.weeklyTokenLimit,
     plan?.weekly ?? null,
     plan ? Math.max(0, ...plan.scopedWeekly.map((s) => s.window.utilization)) : null,
+    weeklySinceFetch,
   );
 
   // Burn rate over the trailing hour, which tracks a bursty agent workload far

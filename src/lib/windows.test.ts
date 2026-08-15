@@ -288,7 +288,8 @@ describe("provider-reported utilisation", () => {
       label: string;
       window: { utilization: number; resetsAt: number | null };
     }> = [],
-  ) => ({ session, weekly, scopedWeekly, fetchedAt: now });
+    fetchedAt: number = now,
+  ) => ({ session, weekly, scopedWeekly, fetchedAt });
 
   // One turn costing $10 inside the current window: 10% of the typed $100
   // ceiling, against whatever the provider says.
@@ -329,38 +330,73 @@ describe("provider-reported utilisation", () => {
 
   /**
    * The provider's percentage is cached — five minutes in the ordinary case,
-   * up to an hour while requests are being refused — and it used to replace
-   * the derived reading for the *guard* as well as for the meter. With several
-   * runs sharing one account, every cycle any of them started inside a refresh
-   * interval was then authorised by one identical frozen number, and the
-   * window could be walked from under the guard to over it without the guard
-   * ever seeing a figure that moved. The derived reading is recomputed on every
-   * single pre-cycle check, at real cost, and was thrown away.
+   * up to an hour while requests are being refused. With several runs sharing
+   * one account, every cycle any of them starts inside a refresh interval is
+   * authorised by one identical frozen number, and the window can be walked
+   * from under the guard to over it without the guard ever seeing a figure
+   * that moved. Locally observed spend is recomputed on every single pre-cycle
+   * check and is the only current evidence there is, so it has to be able to
+   * carry the reading forward.
    *
-   * Both directions are pinned here because both are silent: the derived
-   * reading must be able to *raise* the guard, and must never be able to lower
-   * it below what the provider said.
+   * What it may carry forward is only the spend the reading has *not already
+   * counted*, converted at the rate that reading implies — never a fraction of
+   * a typed ceiling, which is a different denominator for the same window and
+   * is the bug the case below pins.
    */
-  it("lets locally observed spend raise the guard above a frozen reading", () => {
-    const frozen = plan({ utilization: 0.4, resetsAt: null });
-    const quiet = buildSnapshot([entry(now - HOUR, 10)], CEILINGS, now, null, frozen);
-    const busy = buildSnapshot(
-      [{ ...entry(now - HOUR, 10), costGuardUSD: 70 }],
-      CEILINGS,
-      now,
-      null,
-      frozen,
-    );
+  it("carries a frozen reading forward on the spend it has not yet seen", () => {
+    // Read an hour ago, when this window held $30 of turns and the provider
+    // called it 40% — so 1% of the allowance is $0.75, whatever the plan is.
+    // $10 has landed since, which is 13.3 points more.
+    const frozen = plan({ utilization: 0.4, resetsAt: null }, null, [], now - HOUR);
+    const entries = [entry(now - 2 * HOUR, 30), entry(now - 30 * 60_000, 10)];
+    const busy = buildSnapshot(entries, CEILINGS, now, null, frozen);
 
-    // One cached reading, two different local pictures, two different guards.
+    assert.ok(Math.abs(busy.session.guardFraction! - 0.5333333) < 1e-6);
+
+    // Same reading, same window, nothing since the fetch: the provider's
+    // figure stands rather than being scaled by an invented rate.
+    const quiet = buildSnapshot([entry(now - 2 * HOUR, 30)], CEILINGS, now, null, frozen);
     assert.equal(quiet.session.guardFraction, 0.4);
-    assert.equal(busy.session.guardFraction, 0.7);
     assert.ok(busy.session.guardFraction! > quiet.session.guardFraction!);
 
-    // And the meter is unmoved: the provider's percentage is still what is
-    // shown, which is the whole of the display-versus-guard split.
+    // And the meter is unmoved either way: the provider's percentage is still
+    // what is shown, which is the whole of the display-versus-guard split.
     assert.equal(quiet.session.fraction, 0.4);
     assert.equal(busy.session.fraction, 0.4);
+  });
+
+  /**
+   * The reported bug, with the numbers it was measured on.
+   *
+   * A live Max account mid-window: $2,388 of derived weekly spend that the
+   * provider called 70%. The guard used to take `max(planFraction,
+   * costGuardUSD / weeklyCostLimit)`, so a typed $1,000 ceiling read 238.8% —
+   * and `Meter` drew the whole gap between 70% and 238.8% as a hatched band,
+   * which is what "the striped bar goes to almost double" was. The two terms
+   * are fractions of different denominators, and the derived one re-counts
+   * spend the provider's own percentage already includes.
+   *
+   * No ceiling an operator can type may move this number, in either direction.
+   */
+  it("does not re-count spend the provider's reading already includes", () => {
+    const heavy = [entry(now - 2 * HOUR, 2388)];
+    const reading = plan(null, { utilization: 0.7, resetsAt: null });
+
+    const snap = buildSnapshot(heavy, CEILINGS, now, null, reading);
+    assert.equal(snap.weekly.fraction, 0.7);
+    assert.equal(snap.weekly.guardFraction, 0.7);
+
+    // The typed ceiling is 24x out at $100 and absent at null. Neither shows.
+    for (const weeklyCostLimit of [100, 1000, null]) {
+      const other = buildSnapshot(
+        heavy,
+        { ...CEILINGS, weeklyCostLimit },
+        now,
+        null,
+        reading,
+      );
+      assert.equal(other.weekly.guardFraction, 0.7);
+    }
   });
 
   it("never lets the derived reading lower the provider's own", () => {
