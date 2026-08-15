@@ -291,6 +291,83 @@ move ahead of the phases whose failures it is the only way to see.
 
 ---
 
+## Gaps
+
+Three of these are folded into the sections above; the fourth is new.
+
+**An option the survey missed: Landlock.** Six options were given files and a
+seventh (hosted execution) was excluded with a reason. Landlock was not
+considered, and it is not a marginal omission — it is the one filesystem
+primitive on this kernel that needs **no capability, no user namespace and
+therefore no seccomp relaxation**, which is the single trade
+`08-recommendation.md:48`–`55` calls Option B's real cost and the only reason B
+scores −1 on host posture. Measured, not assumed:
+
+```
+$ zcat /proc/config.gz | grep -E 'CONFIG_SECURITY_LANDLOCK|CONFIG_LSM=|CONFIG_USER_NS='
+CONFIG_USER_NS=y
+CONFIG_SECURITY_LANDLOCK=y
+CONFIG_LSM="yama,loadpin,safesetid,integrity,bpf,landlock"
+$ zcat /proc/config.gz | head -2
+# Linux/arm64 6.12.76 Kernel Configuration
+```
+
+Compiled in *and* in the active LSM list, on the linuxkit kernel this install
+runs. (`CONFIG_USER_NS=y` is worth reading beside it: it is a third independent
+confirmation that the `unshare` refusal is the seccomp profile and not the
+kernel.) Three properties make it worth a file of its own:
+
+- **It is immune to the question that would flip the recommendation.** A Landlock
+  ruleset is inherited across `execve` and by every descendant, and cannot be
+  dropped by the restricted process. Whether the confinement wraps "the session"
+  or "only Bash" — `08-recommendation.md:87`, and Phase 1's question 3 — is not a
+  question you can ask of it. It wraps the process that installs it and
+  everything below.
+- **It does not add a kind of child.** The shape is an exec-wrapper: install the
+  ruleset, then `execve` the CLI. Same pid, same stdio, same process group, same
+  `signalTree`, same stream parsing — so `docs/agent/architecture.md:102`'s "four
+  kinds and a fifth is a decision" is untouched, which no other structural option
+  in this survey can say.
+- **It reaches the network too**, from ABI v4 (kernel 6.7; this is 6.12) —
+  but by TCP port, not by host. That is strictly weaker than
+  `sandbox.network.allowedDomains` and is the first of two reasons it does not
+  displace Option B.
+
+The second reason is sharper and is the same property as its first strength:
+because the ruleset is inherited and cannot be relaxed below, Landlock **cannot
+deny `~/.claude/.credentials.json` to the run's shell while still letting the CLI
+read it**. That distinction is Option B's one headline credential win
+(`08-recommendation.md:39`), and it needs a boundary *between* the CLI and its
+children, which is exactly what inheritance forbids. Add that this app would own
+the ruleset code rather than inheriting the vendor's, and would have to build its
+own `failIfUnavailable` equivalent, and the total is a genuinely attractive
+complement to Option B rather than a replacement for it: Landlock for the
+filesystem floor with no host-posture trade, the CLI's own layer for the
+credential deny and the domain allowlist. **It does not move the recommendation.
+It should have had a file, and the ordering was reached without it.**
+
+**A constraint nobody wrote down.** Three, in the walkthrough above: `~/.claude`
+must be writable for metering and must not be writable for policy integrity;
+`/backups` is a host directory no allowlist in the proposal accounts for; and
+`sandbox.filesystem` silently drops glob entries on Linux while
+`isolationCopyGlobs` is spelled in globs. A fourth is about the machine rather
+than the proposal — `memory.max` is 10 GiB against a `MemTotal` of 7.75 GiB, so
+the shipped default already exceeds what this host can supply.
+
+**A phase that cannot be done in the order given.** Phase 4 — the run event
+separating "the policy refused it" from "the agent gave up" — is the only way to
+see the failures Phases 2 and 3 introduce, and it ships last. Marked in
+`09-implementation-sketch.md`.
+
+**Irreversible on an existing install.** Phase 2 bakes
+`sandbox.failIfUnavailable: true` into the image while the seccomp relaxation
+lives in `docker-compose.yml`. An operator whose Docker drops or rejects the
+`security_opt` profile gets a fleet in which every `claude` invocation exits
+non-zero, install-wide, with no off switch short of a rebuild. Also marked there.
+The ownership surgery on `~/.claude` in the same phase runs against a
+**bind-mounted host directory** the operator uses outside the container, which is
+the other thing on this path that is not cheap to undo.
+
 ## What this validation did not check
 
 Not a clean bill of health. Nothing here was executed against a running sandbox.
@@ -320,6 +397,11 @@ Not a clean bill of health. Nothing here was executed against a running sandbox.
   not adversarially.** Their claims about second containers, sockets and
   alternate runtimes were not tested, because none of that exists on this machine
   to test against.
+- **Landlock was established as *available*, not as *sufficient*.** `/proc/config.gz`
+  says the kernel carries it and lists it as an active LSM; no ruleset was
+  installed and no ABI version was queried. The check is
+  `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`, which
+  returns the ABI level — v4 or above is what the network claim above needs.
 - **Only the pinned version was examined.** Everything in #2, #3 and #4 is a
   property of 2.1.226 and can move on any bump, which is `02x:116`–`120`'s point
   and now has a second vendor contract attached to it.

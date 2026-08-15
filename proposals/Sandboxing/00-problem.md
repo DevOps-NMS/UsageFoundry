@@ -118,10 +118,17 @@ refuses. It is seccomp, and only seccomp:
     $ cat /proc/sys/user/max_user_namespaces →  31734                     (kernel permits them)
     $ grep -E 'CapEff|Seccomp' /proc/self/status
       CapEff: 0000000000000000  Seccomp: 2  Seccomp_filters: 1
+    $ zcat /proc/config.gz | grep -E 'CONFIG_USER_NS|CONFIG_SECURITY_LANDLOCK|CONFIG_LSM='
+      CONFIG_USER_NS=y   CONFIG_SECURITY_LANDLOCK=y
+      CONFIG_LSM="yama,loadpin,safesetid,integrity,bpf,landlock"
 
 So the lever the options below reach for is `security_opt`, not `cap_add` — and
 `CapEff` being zero is worth reading beside `CapBnd`, which is what the process
-*may* acquire rather than what it holds.
+*may* acquire rather than what it holds. The kernel config settles it a third
+way: user namespaces are compiled in, so nothing about this refusal is the
+kernel's. It also names the primitive the survey missed — Landlock is present and
+active, and it is the one filesystem boundary here that needs neither a namespace
+nor a capability nor a profile change (`07-comparison.md`, `10-validation.md`).
 
 ## The threat this is actually about
 

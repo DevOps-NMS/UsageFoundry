@@ -76,7 +76,25 @@ limits, and those roughly cancel. **E's −3 on host posture** is the Docker soc
 unrecoverable by careful calling code, and its −1 on credential containment is that
 25 containers hold `~/.claude` where one does today.
 
-## One candidate not given a file
+## Two candidates not given a file
+
+**Landlock**, added by `10-validation.md` and the survey's one real omission. It
+is compiled into this kernel and in its active LSM list — `CONFIG_SECURITY_LANDLOCK=y`,
+`CONFIG_LSM="…,landlock"`, measured from `/proc/config.gz` — and it needs no
+capability, no user namespace and therefore **none of the `security_opt`
+relaxation that is the whole of Option B's −1 on host posture**. Two more
+properties it alone has: its ruleset is inherited across `execve` and by every
+descendant, so the open question about whether the CLI's sandbox wraps the session
+or only Bash cannot be asked of it; and the shape is an exec-wrapper rather than a
+supervisor, so `docs/agent/architecture.md:102`'s four kinds of child stay four
+with no argument about a fifth. It is not scored above because it does not
+displace B on the two axes B wins: its network control is by TCP port rather than
+by host, and its inheritance — the same property that confines the session — makes
+it unable to deny `~/.claude/.credentials.json` to the run's shell while the CLI
+still reads it. Read as a **complement** to B rather than a rival: a filesystem
+floor that costs no host posture, under a CLI layer that supplies the credential
+deny and the domain allowlist. It should have had a file, and the scores above
+were reached without it.
 
 A **hosted or remote execution target** — the pinned CLI exposes `--cloud` and
 `--environment ccpool_…` (`claude --help`) — would remove the agent from the

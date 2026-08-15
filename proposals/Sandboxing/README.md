@@ -12,6 +12,13 @@ per-run confinement is decorative until the ownership of that directory changes.
 The recommendation is unmoved because every one of those findings lands on the
 runner-up too — Option D reaches confinement through the same CLI mechanism.
 
+The survey also missed an option: **Landlock**, which this kernel carries and lists
+as an active LSM, and which needs no capability, no user namespace and none of the
+seccomp relaxation that is Option B's one host-posture trade. It does not displace
+B — it cannot deny the credential to the shell while the CLI still reads it, and
+its network control is by port rather than by host — but it is a complement worth
+a file, and the comparison was scored without it (`07-comparison.md`).
+
 ## The recommendation
 
 **Sandbox the child with the CLI's own bubblewrap layer**, enabled and pinned by a
