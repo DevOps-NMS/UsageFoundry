@@ -14,6 +14,7 @@ import {
   pollFailureMessage,
   shortPath,
 } from "@/lib/format";
+import { FleetControls } from "@/components/FleetControls";
 import { StatusMark } from "@/components/StatusMark";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
@@ -52,6 +53,25 @@ const ACTIVE_ORDER: Record<"running" | "paused" | "queued" | "waiting", number> 
   // another run in this band.
   waiting: 3,
 };
+
+/**
+ * Statuses the *bulk* pick-up offers, which is narrower than `reopenRun` accepts.
+ *
+ * `reopenRun` also takes `completed`, and rightly — the agent's judgement that
+ * a task is finished is not the operator's. But `completed` is what a run that
+ * used up its cycle cap is written as *and* what a run that reported DONE is
+ * written as, so a fleet control that swept it in would restart every run that
+ * worked. That is a per-run decision with a per-run prompt behind it
+ * (`reopenPrompt`), so it keeps the button on its own page.
+ *
+ * `blocked` is absent for a different reason: it splits two ways and only one
+ * is an ordinary pick-up, the other rejoining a chain at `waiting`. A bulk
+ * control must not choose between them on somebody's behalf.
+ *
+ * Duplicated rather than imported from `orchestrator.ts`, which reaches
+ * `node:fs` — and it is a different list, so importing would be wrong anyway.
+ */
+const REOPENABLE: ReadonlySet<RunDTO["status"]> = new Set(["failed", "stopped"]);
 
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -512,6 +532,22 @@ export default function RunsPage() {
   /** Empty because nothing arrived, as against empty because nothing is there. */
   const blank = runs.length === 0 && pollError !== null;
 
+  /**
+   * The finished runs a bulk pick-up would act on: exactly the ones this page
+   * is displaying, in the order it displays them.
+   *
+   * Derived here and handed down rather than read inside the control, because
+   * the rule is about *what somebody looked at* — a run that failed between the
+   * render and the click is not on this list and is not swept in.
+   */
+  const reopenable = useMemo(
+    () =>
+      runs
+        .filter((r) => REOPENABLE.has(r.status))
+        .map((r) => ({ id: r.id, status: r.status })),
+    [runs],
+  );
+
   return (
     <>
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
@@ -556,6 +592,8 @@ export default function RunsPage() {
           still wanted.
         </Notice>
       )}
+
+      <FleetControls reopenable={reopenable} onChanged={loadRuns} />
 
       <div className="mb-8">
         <CardTitle>

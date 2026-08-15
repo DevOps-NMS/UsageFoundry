@@ -54,8 +54,10 @@ process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
 const {
   buildArgs,
   conflictKey,
+  cycleSilenceMs,
   dependencyCycle,
   duePausedRuns,
+  interruptOutcome,
   overlaps,
   planPausedRun,
   releasableRuns,
@@ -63,24 +65,34 @@ const {
   revivableDependents,
   getRun,
   githubEnv,
+  isRateLimited,
   isTransientApiError,
   isUsageLimit,
+  maxRetriesFor,
+  transientBackoffMs,
   matchesCopyGlobs,
   needsLiveSpendTelemetry,
   nextPrompt,
   permissionDenials,
+  refusalDisposition,
+  refusalKind,
   refusalResumeAt,
   reopenPrompt,
   reopenRun,
   selectPromotable,
   sweepPaused,
+  telemetryEnv,
   toolResultFailures,
   worktreeSlug,
   MAX_PAUSES_PER_RUN,
+  MAX_RATE_LIMIT_RETRIES,
+  MAX_RESUMES_PER_SWEEP,
   MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
 
 const { normalizePolicy } = require("./budget") as typeof import("./budget");
+const { revokeIngestTokens, runForIngestToken } =
+  require("./otlp") as typeof import("./otlp");
 const { db } = require("./db") as typeof import("./db");
 const { saveSettings } = require("./settings") as typeof import("./settings");
 
@@ -961,13 +973,324 @@ describe("transient API failure classification", () => {
   });
 });
 
+/**
+ * A rate limit is a transient failure, and it is not the same transient
+ * failure.
+ *
+ * At one run a 429 is a burst and 5/20/60 seconds is generous. At twenty-five
+ * concurrent runs against one account it is the provider describing this app's
+ * own steady-state request rate — so it lasts as long as the fleet keeps
+ * asking, the three fast retries become three twenty-five-wide waves into the
+ * condition that caused it, and the whole fleet is `failed` inside ninety
+ * seconds with every dependent chain `blocked` behind it.
+ */
+describe("rate limits, apart from the rest", () => {
+  it("recognises the two shapes a rate limit arrives in", () => {
+    assert.equal(isRateLimited("API Error: 429 Too Many Requests"), true);
+    assert.equal(
+      isRateLimited('{"type":"error","error":{"type":"rate_limit_error"}}'),
+      true,
+    );
+    assert.equal(isRateLimited(""), false);
+    assert.equal(isRateLimited("API Error: 529 overloaded_error"), false);
+  });
+
+  it("is a strict subset of the transient set, so it widens nothing", () => {
+    // The classification was never what was wrong, and `isTransientApiError` is
+    // pinned against sentences read out of the shipped binary. Everything this
+    // matches was already retried; all this decides is which ladder and which
+    // sentence. Anything it matched that the wider predicate did not would be a
+    // new retry nobody argued for.
+    for (const text of [
+      "API Error: 429 Too Many Requests",
+      '{"type":"error","error":{"type":"rate_limit_error"}}',
+    ]) {
+      assert.equal(isRateLimited(text) && isTransientApiError(text), true, text);
+    }
+  });
+
+  it("is asked after the wall and before the general blip", () => {
+    // A wall can arrive as a 429 and no backoff refills an allowance, so
+    // `isUsageLimit` still wins. And the general predicate matches every 429
+    // too, so asking it first would file every rate limit under the ladder
+    // written for a dropped socket.
+    assert.equal(refusalKind("API Error: 429 You've hit your weekly limit"), "allowance");
+    assert.equal(refusalKind("API Error: 429 Too Many Requests"), "rate-limit");
+    assert.equal(refusalKind("API Error: 503 Service Unavailable"), "transient");
+  });
+
+  it("outlasts more than the ninety seconds that killed the fleet", () => {
+    // The acceptance test from the issue: a sustained rate limit must not end
+    // every run inside two minutes. Measured at the floor of the spread, since
+    // that is the shortest the ladder can ever be.
+    const floor = Array.from({ length: MAX_RATE_LIMIT_RETRIES }, (_, attempt) =>
+      transientBackoffMs({ attempt, kind: "rate-limit", random: () => 0 }),
+    ).reduce((a, b) => a + b, 0);
+    assert.equal(
+      floor >= 10 * 60_000,
+      true,
+      `the rate-limit ladder tolerates only ${Math.round(floor / 1000)}s`,
+    );
+
+    // And the ladder written for a dropped socket is untouched: that fault
+    // really does clear in seconds, and minutes of backoff for it would hold a
+    // folder and a live session for nothing.
+    const transientFloor = Array.from(
+      { length: MAX_TRANSIENT_RETRIES },
+      (_, attempt) =>
+        transientBackoffMs({ attempt, kind: "transient", random: () => 0 }),
+    ).reduce((a, b) => a + b, 0);
+    assert.equal(transientFloor, 85_000);
+  });
+
+  it("ends a rate-limited run with a different sentence from a dead upstream", () => {
+    // The operator's response is the opposite in the two cases — wait, versus
+    // reduce how many runs share this account — so the two endings must not
+    // collapse into one `cause`.
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "rate-limit",
+        pauseCount: 0,
+        transientRetries: MAX_RATE_LIMIT_RETRIES,
+      }),
+      { action: "fail", cause: "rate-limited" },
+    );
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "transient",
+        pauseCount: 0,
+        transientRetries: MAX_TRANSIENT_RETRIES,
+      }),
+      { action: "fail", cause: "retries-spent" },
+    );
+  });
+
+  it("climbs its own ladder, not the other one", () => {
+    for (let attempt = 0; attempt < MAX_RATE_LIMIT_RETRIES; attempt++) {
+      assert.deepEqual(
+        refusalDisposition({ kind: "rate-limit", pauseCount: 0, transientRetries: attempt }),
+        { action: "retry", attempt, kind: "rate-limit" },
+      );
+    }
+    assert.equal(maxRetriesFor("rate-limit"), MAX_RATE_LIMIT_RETRIES);
+    assert.equal(maxRetriesFor("transient"), MAX_TRANSIENT_RETRIES);
+  });
+});
+
+/**
+ * The retry schedule, which was `TRANSIENT_BACKOFF_MS[transientRetries]`.
+ *
+ * A constant lookup on a per-run counter that starts at 0 for every run, so
+ * twenty-five runs meeting one failure at one instant retried at exactly the
+ * same three instants — each wave twenty-five simultaneous spawns, which is the
+ * condition a rate limit is describing in the first place.
+ */
+describe("the retry backoff schedule", () => {
+  const noJitter = () => 0;
+  const allJitter = () => 1;
+
+  for (const kind of ["transient", "rate-limit"] as const) {
+    describe(kind, () => {
+      it("grows, and keeps growing once the spread is on it", () => {
+        for (let attempt = 1; attempt < maxRetriesFor(kind); attempt++) {
+          const lower = transientBackoffMs({
+            attempt: attempt - 1,
+            kind,
+            random: allJitter,
+          });
+          const upper = transientBackoffMs({ attempt, kind, random: noJitter });
+          assert.equal(
+            upper > lower,
+            true,
+            `rung ${attempt} at the bottom of its band (${upper}ms) must still ` +
+              `exceed rung ${attempt - 1} at the top of its (${lower}ms) — the ` +
+              "second failure in a row waiting longer is not a thing to be true " +
+              "on average",
+          );
+        }
+      });
+
+      it("never comes back sooner than the rung it was written as", () => {
+        // Jitter may only ever delay. The rung is what keeps a retry from
+        // being a hot loop, and a spread that could shorten it would undo that
+        // silently.
+        for (let attempt = 0; attempt < maxRetriesFor(kind); attempt++) {
+          const floor = transientBackoffMs({ attempt, kind, random: noJitter });
+          for (const random of [noJitter, allJitter, () => 0.5]) {
+            assert.equal(transientBackoffMs({ attempt, kind, random }) >= floor, true);
+          }
+        }
+      });
+
+      it("gives two runs at the same attempt two different delays", () => {
+        // The regression, at its smallest: the same attempt index and two
+        // randomness sources have to disagree, because the attempt index is
+        // exactly what twenty-five runs share.
+        assert.notEqual(
+          transientBackoffMs({ attempt: 0, kind, random: () => 0.1 }),
+          transientBackoffMs({ attempt: 0, kind, random: () => 0.9 }),
+        );
+      });
+
+      it("spreads twenty-five runs meeting one failure at one instant", () => {
+        // The same shape the parked fleet is pinned at, one path over: distinct
+        // is not enough on its own, the band has to be wide enough that the
+        // waves stop being waves.
+        let state = 20250814;
+        const random = () => {
+          state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+          return state / 4_294_967_296;
+        };
+        const delays = Array.from({ length: 25 }, () =>
+          transientBackoffMs({ attempt: 0, kind, random }),
+        );
+        assert.equal(new Set(delays).size >= 24, true);
+
+        const base = transientBackoffMs({ attempt: 0, kind, random: noJitter });
+        const spread = Math.max(...delays) - Math.min(...delays);
+        assert.equal(
+          spread >= base * 0.4,
+          true,
+          `twenty-five delays span ${spread}ms against a ${base}ms rung`,
+        );
+      });
+    });
+  }
+});
+
+/**
+ * What the loop does about a refused work cycle.
+ *
+ * Pinned here rather than left inline for the reason `releasableRuns` and
+ * `landRefusal` are: the decision is three-way, every wrong answer typechecks,
+ * and each costs something different — a blip that ends a run holding a live
+ * session, a wall re-spawned into, or a whole fleet ended for the one condition
+ * that refills on its own.
+ */
+describe("what a refused work cycle does next", () => {
+  it("names the wall before it names a blip", () => {
+    // A wall can arrive as a 429, which `isTransientApiError` also matches. If
+    // the order flipped, the run would back off five seconds into an allowance
+    // no backoff refills.
+    assert.equal(refusalKind("API Error: 429 You've hit your weekly limit"), "allowance");
+    assert.equal(refusalKind("API Error: 529 overloaded_error"), "transient");
+    assert.equal(refusalKind("API Error: 401 Invalid API key"), "other");
+  });
+
+  it("parks a wall whatever the enforcement mode is", () => {
+    // The regression. This used to be gated on `enforcement === "live-resume"`,
+    // and the default is `between-cycles` — in the run form, in
+    // `normalizePolicy` and in `DEFAULT_CHAT_GUARDS` — so the ordinary run met
+    // the shared account's wall and was written `failed`, terminally, with the
+    // only way back an HTTP request a person makes. At twenty-five runs sharing
+    // one allowance that is the steady state, not the exception.
+    //
+    // The mode is not an argument at all, which is the strongest form of the
+    // fix: there is nothing here to gate on. Enforcement answers *when guards
+    // are read*; a 5-hour window refilling on its own is a fact about the
+    // provider.
+    assert.deepEqual(
+      refusalDisposition({ kind: "allowance", pauseCount: 0, transientRetries: 0 }),
+      { action: "park" },
+    );
+  });
+
+  it("still stops parking at the lifetime cap, and says it ran out of waits", () => {
+    // `MAX_PAUSES_PER_RUN` survives the fix: a refusal is someone else's claim
+    // about someone else's counter, and a misread one must not park for ever.
+    for (let pauseCount = 0; pauseCount < MAX_PAUSES_PER_RUN; pauseCount++) {
+      assert.deepEqual(
+        refusalDisposition({ kind: "allowance", pauseCount, transientRetries: 0 }),
+        { action: "park" },
+        `pause ${pauseCount} is still within the cap`,
+      );
+    }
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "allowance",
+        pauseCount: MAX_PAUSES_PER_RUN,
+        transientRetries: 0,
+      }),
+      // Not "the allowance is gone" — by now it may well have refilled. What
+      // ran out is how often one run may wait for it unattended, and the
+      // operator's next move differs between the two.
+      { action: "fail", cause: "pauses-spent" },
+    );
+  });
+
+  it("retries a blip up to the ladder's length and then names the attempts", () => {
+    for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
+      assert.deepEqual(
+        refusalDisposition({ kind: "transient", pauseCount: 0, transientRetries: attempt }),
+        { action: "retry", attempt, kind: "transient" },
+      );
+    }
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "transient",
+        pauseCount: 0,
+        transientRetries: MAX_TRANSIENT_RETRIES,
+      }),
+      { action: "fail", cause: "retries-spent" },
+    );
+  });
+
+  it("never parks or retries anything that is neither", () => {
+    // A revoked key, a malformed request, an exhausted credit balance: three
+    // more attempts buy three more of the same answer, and parking holds a
+    // folder for hours to arrive at it.
+    assert.deepEqual(
+      refusalDisposition({ kind: "other", pauseCount: 0, transientRetries: 0 }),
+      { action: "fail", cause: "other" },
+    );
+  });
+
+  it("does not spend a run's waits on a blip, or its retries on a wall", () => {
+    // The two counters are independent and count different things. A run that
+    // has parked twice must still get its full retry ladder for a dropped
+    // connection, and one that has retried twice must still be allowed to wait.
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "transient",
+        pauseCount: MAX_PAUSES_PER_RUN,
+        transientRetries: 0,
+      }),
+      { action: "retry", attempt: 0, kind: "transient" },
+    );
+    assert.deepEqual(
+      refusalDisposition({
+        kind: "allowance",
+        pauseCount: 0,
+        transientRetries: MAX_TRANSIENT_RETRIES,
+      }),
+      { action: "park" },
+    );
+  });
+});
+
 describe("refusal wake-up time", () => {
   const now = 1_700_000_000_000;
   const min = 5 * 60_000;
   const hour = 3_600_000;
+  /**
+   * The bottom of the spread, so every case below is about what it was about.
+   *
+   * The wait is jittered now — see the fleet cases at the end — and the jitter
+   * is a parameter for exactly this: passed `() => 0` it contributes nothing,
+   * so the ladder, the floor and the cap are still pinned at the same numbers
+   * they were before the spread existed.
+   */
+  const noJitter = () => 0;
+  /** The top of it. `Math.random` never returns 1, so this is the open bound. */
+  const allJitter = () => 1;
 
   it("waits for the window when one is still open, plus the settling margin", () => {
-    const at = refusalResumeAt({ boundary: now + 2 * hour, pauseCount: 0, now });
+    const at = refusalResumeAt({
+      boundary: now + 2 * hour,
+      pauseCount: 0,
+      now,
+      random: noJitter,
+    });
     assert.equal(at > now + 2 * hour, true);
     assert.equal(at <= now + 2 * hour + 2 * 60_000, true);
   });
@@ -975,34 +1298,62 @@ describe("refusal wake-up time", () => {
   it("backs off when the boundary it can see has already passed", () => {
     // The derived boundary is floored to the hour, so it can be up to an hour
     // early. Trusting it here would re-spawn straight back into the wall.
-    const first = refusalResumeAt({ boundary: now - hour, pauseCount: 0, now });
-    const second = refusalResumeAt({ boundary: now - hour, pauseCount: 1, now });
-    const third = refusalResumeAt({ boundary: now - hour, pauseCount: 2, now });
+    const rung = (pauseCount: number, random: () => number) =>
+      refusalResumeAt({ boundary: now - hour, pauseCount, now, random });
+    const first = rung(0, noJitter);
+    const second = rung(1, noJitter);
+    const third = rung(2, noJitter);
     assert.equal(first > now + min, true);
     assert.equal(second > first, true);
     assert.equal(third > second, true);
     // Three waits have to cover the floor-to-hour error, or the feature never
     // reaches the reset it is waiting for.
     assert.equal(third - now >= hour, true);
+
+    // And it still climbs once the spread is on it — the case that is not
+    // implied by the three above, since a band wider than the gap to the next
+    // rung would leave "the second failure in a row waits longer" true only on
+    // average, which is not a thing to be true on average.
+    assert.equal(rung(1, noJitter) > rung(0, allJitter), true);
+    assert.equal(rung(2, noJitter) > rung(1, allJitter), true);
   });
 
   it("backs off identically when it can see no window at all", () => {
     assert.equal(
-      refusalResumeAt({ boundary: null, pauseCount: 0, now }),
-      refusalResumeAt({ boundary: now - hour, pauseCount: 0, now }),
+      refusalResumeAt({ boundary: null, pauseCount: 0, now, random: noJitter }),
+      refusalResumeAt({
+        boundary: now - hour,
+        pauseCount: 0,
+        now,
+        random: noJitter,
+      }),
     );
   });
 
   it("never re-spawns immediately, whatever the arithmetic says", () => {
-    // A boundary one second out would otherwise mean a spawn per second.
+    // A boundary one second out would otherwise mean a spawn per second. The
+    // floor sits under the spread rather than over it, so the bottom of the
+    // band is the case that has to hold.
     assert.equal(
-      refusalResumeAt({ boundary: now + 1_000, pauseCount: 0, now }) >= now + min,
+      refusalResumeAt({
+        boundary: now + 1_000,
+        pauseCount: 0,
+        now,
+        random: noJitter,
+      }) >= now + min,
       true,
     );
   });
 
   it("never holds a folder for longer than a window plus slack", () => {
-    const at = refusalResumeAt({ boundary: now + 40 * hour, pauseCount: 0, now });
+    // Read at the top of the spread: the jitter is added after the cap, so
+    // this is the assertion that says it is clamped again afterwards.
+    const at = refusalResumeAt({
+      boundary: now + 40 * hour,
+      pauseCount: 0,
+      now,
+      random: allJitter,
+    });
     assert.equal(at <= now + 6 * hour, true);
   });
 
@@ -1014,9 +1365,100 @@ describe("refusal wake-up time", () => {
       boundary: null,
       pauseCount: MAX_PAUSES_PER_RUN,
       now,
+      random: allJitter,
     });
     assert.equal(Number.isFinite(atCap), true);
     assert.equal(atCap <= now + 6 * hour, true);
+  });
+
+  /**
+   * The fleet, which is where this stopped being right.
+   *
+   * Everything above is a statement about one run, and every input to it is
+   * shared: the ladder is a module constant and the boundary comes from a
+   * transcript scan that is *coalesced* across concurrent callers, so
+   * twenty-five runs refused inside the same minute read one boundary and, with
+   * no randomisation anywhere, computed one answer between them — reproduced by
+   * the budgets sweep as literally one distinct `resume_at` across twenty-five
+   * runs. They then woke in one sweep, spawned in one turn, met the same wall
+   * and re-parked together, three times, at which point the cap ended the fleet.
+   */
+  describe("with a fleet sharing one wall", () => {
+    /**
+     * A fixed sequence, so the assertions below are decided by the arithmetic
+     * rather than by which draws this run happened to get. Any generator would
+     * do; this one is the smallest thing that is neither sorted nor repeating,
+     * which is what a real `Math.random` has in common with it.
+     */
+    function lcg(seed: number): () => number {
+      let state = seed >>> 0;
+      return () => {
+        state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+        return state / 4_294_967_296;
+      };
+    }
+
+    /** Twenty-five runs refused in the same instant, a millisecond apart. */
+    function fleet(boundary: number | null, pauseCount = 0): number[] {
+      const random = lcg(20250814);
+      return Array.from({ length: 25 }, (_, i) =>
+        refusalResumeAt({ boundary, pauseCount, now: now + i, random }),
+      );
+    }
+
+    it("does not wake twenty-five runs at one instant", () => {
+      // The reproduction from the issue: one shared boundary, `now` values a
+      // millisecond apart, and before the spread every one of these collapsed
+      // to a single value because the boundary branch discards `now` entirely.
+      const wakes = fleet(now + 2 * hour);
+      const distinct = new Set(wakes).size;
+      assert.equal(
+        distinct >= 24,
+        true,
+        `twenty-five runs produced ${distinct} distinct wake times`,
+      );
+
+      // Distinct is not enough on its own — twenty-five instants a millisecond
+      // apart are also distinct, and the sweeper looks once a minute, so they
+      // would still be one tick and one `promoteQueued()`. What matters is the
+      // width of the band.
+      const spread = Math.max(...wakes) - Math.min(...wakes);
+      assert.equal(
+        spread >= 10 * 60_000,
+        true,
+        `the wake times span ${Math.round(spread / 60_000)} minutes`,
+      );
+    });
+
+    it("spreads the backoff rungs too, not only the boundary", () => {
+      // A refused run whose visible boundary has already passed falls through
+      // to the ladder, which is a module constant — so this is the branch where
+      // the herd is at its most exact. All three rungs are used, because the
+      // second and third collisions are the ones that end the fleet.
+      for (const pauseCount of [0, 1, 2]) {
+        const wakes = fleet(now - hour, pauseCount);
+        const spread = Math.max(...wakes) - Math.min(...wakes);
+        assert.equal(
+          spread >= 5 * 60_000,
+          true,
+          `rung ${pauseCount} spans only ${Math.round(spread / 60_000)} minutes`,
+        );
+      }
+    });
+
+    it("still refuses to wake any of them early, or to hold one past the cap", () => {
+      // The spread is bounded on both sides by the rules that were already
+      // here, so widening it can never buy a re-spawn straight into the wall
+      // or a folder held for a day.
+      // Each run's own `now` is a millisecond later than the last, and both
+      // bounds are relative to it.
+      fleet(now + 1_000).forEach((at, i) => {
+        assert.equal(at >= now + i + min, true);
+      });
+      fleet(now + 40 * hour).forEach((at, i) => {
+        assert.equal(at <= now + i + 6 * hour, true);
+      });
+    });
   });
 });
 
@@ -1160,50 +1602,66 @@ describe("buildArgs", () => {
   }
 
   /**
-   * A specialised agent reaches a work cycle as one `--agents` pair, and the
-   * branch that matters is the one where there is nothing to attach.
+   * A chosen agent reaches a work cycle as **two** flags, and the branch that
+   * matters is still the one where there is nothing to attach.
    *
-   * Both directions are silent. An agent attached wrongly is dropped by the CLI
-   * with a zero exit and no warning, leaving a run that looks exactly like a run
-   * that was never given one; a flag emitted when nothing was chosen is an empty
-   * object where every existing run used to have no flag at all. Neither shows
-   * up in the event log, the cost or the transcript — `attributionAgent` simply
-   * never names it.
+   * The pair is not redundant and neither half can be dropped. `--agents`
+   * defines the member and `--agent` selects it, and a name that nothing on the
+   * argv defined is not merely ignored — measured on the pin, `claude --agent
+   * <unregistered>` exits non-zero before making any API call, so a work cycle
+   * that emitted only the name would die at the spawn on every iteration.
+   *
+   * The empty branch is the other direction and is still silent: a flag emitted
+   * when nothing was chosen is an empty object where every existing run had no
+   * flag at all, and under the singular semantics it would be worse than that —
+   * `--agent` with no name is an argv the CLI rejects.
    */
+  const reviewer = {
+    name: "reviewer",
+    description: "reads diffs",
+    prompt: "You review.",
+    model: null,
+  };
+
   it("attaches nothing when no agent was chosen", () => {
-    assert.equal(buildArgs({ ...base, isolated: true }).includes("--agents"), false);
-    assert.equal(
-      buildArgs({ ...base, isolated: true, agents: [] }).includes("--agents"),
-      false,
-    );
+    for (const agent of [undefined, null]) {
+      const args = buildArgs({ ...base, isolated: true, agent });
+      assert.equal(args.includes("--agents"), false);
+      assert.equal(args.includes("--agent"), false);
+    }
   });
 
-  it("attaches a chosen agent as one --agents pair", () => {
-    const args = buildArgs({
-      ...base,
-      isolated: true,
-      agents: [
-        { name: "reviewer", description: "reads diffs", prompt: "You review.", model: null },
-      ],
-    });
-    const at = args.indexOf("--agents");
-    assert.notEqual(at, -1);
-    assert.deepEqual(JSON.parse(args[at + 1]), {
+  it("defines the chosen agent and selects it as the session's own", () => {
+    const args = buildArgs({ ...base, isolated: true, agent: reviewer });
+
+    const defined = args.indexOf("--agents");
+    assert.notEqual(defined, -1, "the definition has to travel for the name to resolve");
+    assert.deepEqual(JSON.parse(args[defined + 1]), {
       reviewer: { description: "reads diffs", prompt: "You review." },
     });
+
+    // The half that is the whole point of the change: the run *is* the agent
+    // rather than being offered it as a specialist to delegate to.
+    const selected = args.indexOf("--agent");
+    assert.notEqual(selected, -1, "the run must be started as the agent, not offered it");
+    assert.equal(args[selected + 1], "reviewer");
+    // The name it selects must be the name it defined, or the spawn fails.
+    assert.deepEqual(Object.keys(JSON.parse(args[defined + 1])), [args[selected + 1]]);
   });
 
   /**
-   * An agent is offered, never imposed, and it bounds nothing. The deny list is
-   * what stands between an agent and the process supervising it, and attaching a
-   * specialist must not be a way around it — so the same assertions the modes
-   * above make are made again with one attached.
+   * Selecting an agent bounds nothing, and that is the assertion this whole
+   * feature rests on. The deny list is what stands between an agent and the
+   * process supervising it; the isolation grant is what lets an isolated run
+   * obey the preamble ordering it to commit. Neither is the agent's to move, so
+   * the same assertions the modes above make are made again with one selected.
    */
   it("changes none of what bounds the run", () => {
-    const agents = [
-      { name: "reviewer", description: "reads diffs", prompt: "You review.", model: "sonnet" },
-    ];
-    const args = buildArgs({ ...base, isolated: true, agents });
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      agent: { ...reviewer, model: "sonnet" },
+    });
     assert.deepEqual(
       args.slice(args.indexOf("--disallowedTools") + 1, args.indexOf("--disallowedTools") + 3),
       ["Bash(pkill:*)", "Bash(killall:*)"],
@@ -1213,9 +1671,74 @@ describe("buildArgs", () => {
       ["Bash(git add:*)", "Bash(git commit:*)"],
     );
     assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
-    // `--agent` sets the session's *own* agent, which is a different feature
-    // and a different decision. Only the plural flag is wired.
-    assert.equal(args.includes("--agent"), false);
+  });
+
+  /**
+   * The one field whose *meaning* the singular flag changed.
+   *
+   * An agent's `model` was the model a delegated sub-turn ran on; selected with
+   * `--agent` it is the session's, which would make it a second place to set the
+   * run's model — the thing `run_templates` refuses on the grounds that
+   * `settings.defaultModel` is the single one. What stops it being that is
+   * measured off the `init` event: an explicit `--model` outranks the agent's,
+   * so the agent's fills a gap the run left rather than overriding a choice the
+   * operator made. This pins our half — that a run with a model of its own still
+   * emits it, and emits it unchanged, when an agent naming another is selected.
+   */
+  it("still sends the run's own model when the agent names a different one", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      model: "opus",
+      agent: { ...reviewer, model: "sonnet" },
+    });
+    assert.equal(args[args.indexOf("--model") + 1], "opus");
+    // And the agent's own model still travels inside the definition, which is
+    // what a run that named no model of its own would then run on.
+    const defined = JSON.parse(args[args.indexOf("--agents") + 1]);
+    assert.equal(defined.reviewer.model, "sonnet");
+  });
+
+  /**
+   * The one that would be expensive and silent, and the reason this argv was
+   * measured against the pin rather than reasoned about.
+   *
+   * `--append-system-prompt` carries `SELF_HOSTING_NOTICE` — the explanation of
+   * the `pkill` deny list *and the safe recipe that replaces it* — and an agent
+   * carries a system prompt of its own. If selecting one displaced the appended
+   * text, a run started as an agent would be a run that had never been told why
+   * a name-matched kill is denied or what to do instead, which is the failure
+   * that ended a container and fourteen runs. Verified on 2.1.226: an agent
+   * asked to echo a secret word stated only in the appended text answered with
+   * it, so the two coexist. This pins our half — that the flag is still emitted,
+   * and still emitted with the notice on it, when an agent is selected.
+   */
+  it("still carries the self-hosting notice when the run is an agent", () => {
+    for (const agent of [null, reviewer]) {
+      const args = buildArgs({ ...base, isolated: true, agent });
+      const at = args.indexOf("--append-system-prompt");
+      assert.notEqual(at, -1, "the notice must survive being started as an agent");
+      assert.match(args[at + 1], /next-server/);
+      assert.match(args[at + 1], /pgrep -P/);
+    }
+  });
+
+  /**
+   * Cycle 2 and every cycle after it. The loop resumes a session rather than
+   * opening one, and an agent that only reached the first cycle would be a run
+   * that silently stopped being the thing it was started as, part-way through.
+   * Verified on the pin that `--agent` and `--resume` coexist; this pins that
+   * both are emitted together.
+   */
+  it("selects the agent on a resumed cycle too", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      agent: reviewer,
+      resumeSessionId: "sess-1",
+    });
+    assert.equal(args[args.indexOf("--resume") + 1], "sess-1");
+    assert.equal(args[args.indexOf("--agent") + 1], "reviewer");
   });
 
   /**
@@ -1322,6 +1845,91 @@ describe("buildArgs", () => {
   });
 });
 
+describe("telemetryEnv — what the exporter authenticates with", () => {
+  // The app's master credential used to be here, as
+  // `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer $UF_AUTH_TOKEN`, merged
+  // into the child's environment *after* `childEnv` had stripped every `UF_*`
+  // out of it. The child is a Claude Code session with `Bash`; `env` is
+  // read-only shell, which `acceptEdits` auto-approves; and that token opens
+  // `POST /api/runs`, `PUT /api/settings`, every other run's diff and the
+  // approval route. Nothing about the app changes if it comes back — telemetry
+  // works either way — which is why this is pinned rather than left to review.
+  const previous = process.env.UF_AUTH_TOKEN;
+  after(() => {
+    if (previous === undefined) delete process.env.UF_AUTH_TOKEN;
+    else process.env.UF_AUTH_TOKEN = previous;
+  });
+
+  it("never carries UF_AUTH_TOKEN, however it is set", () => {
+    process.env.UF_AUTH_TOKEN = "master-token-that-opens-everything";
+    // `required` so the settings table is not consulted: this is about the
+    // values, and the branch that reads `telemetryForRuns` is one line above.
+    const env = telemetryEnv("run-a", true);
+    for (const [key, value] of Object.entries(env)) {
+      assert.equal(
+        value.includes("master-token-that-opens-everything"),
+        false,
+        `${key} carries UF_AUTH_TOKEN into the agent's own environment`,
+      );
+    }
+  });
+
+  it("authenticates with a per-run capability that resolves to that run", () => {
+    process.env.UF_AUTH_TOKEN = "";
+    const env = telemetryEnv("run-b", true);
+    const header = env.OTEL_EXPORTER_OTLP_HEADERS ?? "";
+    assert.match(
+      header,
+      /^Authorization=Bearer .+/,
+      "the exporter is now unauthenticated, and `middleware.ts` exempts the " +
+        "ingest path — so the route would be the only gate and it would refuse.",
+    );
+    const token = header.slice("Authorization=Bearer ".length);
+    assert.equal(runForIngestToken(token), "run-b");
+
+    // Stable across the cycles of one run: every cycle exports for the same run
+    // id, and a token per cycle would be one more thing to revoke on each of
+    // the paths a cycle can end on.
+    assert.equal(telemetryEnv("run-b", true).OTEL_EXPORTER_OTLP_HEADERS, header);
+
+    // And not another run's. The route takes the run id from the token, so this
+    // is what stops a record claiming a `uf.run_id` it does not hold.
+    const other = (telemetryEnv("run-c", true).OTEL_EXPORTER_OTLP_HEADERS ?? "")
+      .slice("Authorization=Bearer ".length);
+    assert.notEqual(other, token);
+    assert.equal(runForIngestToken(other), "run-c");
+  });
+
+  it("stops ingesting once the run has ended and its grace has passed", () => {
+    const token = (telemetryEnv("run-d", true).OTEL_EXPORTER_OTLP_HEADERS ?? "")
+      .slice("Authorization=Bearer ".length);
+    assert.equal(runForIngestToken(token), "run-d");
+
+    revokeIngestTokens("run-d");
+    // Still believed for the grace window: the exporter batches on a
+    // one-second timer, so revoking on the instant drops the tail of the last
+    // cycle and understates what the run spent.
+    assert.equal(runForIngestToken(token), "run-d");
+
+    const clock = Date.now;
+    try {
+      Date.now = () => clock() + 60_000;
+      assert.equal(runForIngestToken(token), null);
+    } finally {
+      Date.now = clock;
+    }
+    // Swept on the way past, so the map is bounded by live runs.
+    assert.equal(runForIngestToken(token), null);
+  });
+
+  it("refuses an empty or unknown bearer", () => {
+    // `middleware.ts` no longer gates this path, so "no token" must not read as
+    // "no check". An empty string is the shape a missing header arrives in.
+    assert.equal(runForIngestToken(""), null);
+    assert.equal(runForIngestToken("not-a-token"), null);
+  });
+});
+
 describe("needsLiveSpendTelemetry", () => {
   // Every wrong answer here is silent. False when it should be true leaves the
   // spend guard reading a number frozen for the whole cycle, so a run asked to
@@ -1403,6 +2011,74 @@ describe("needsLiveSpendTelemetry", () => {
         }),
       ),
       true,
+    );
+  });
+});
+
+/**
+ * Covers how long a work cycle may be silent before it is ended.
+ *
+ * `PUT /api/settings` already floors what it is sent, so what this pins is the
+ * other door: the value is JSON in a settings row that outlives the build which
+ * wrote it and can be edited by hand, and both ways of reading a bad one are
+ * silent. A zero taken at face value switches the deadline off, which is the
+ * defect the whole mechanism exists to end; a zero read as "the smallest
+ * allowed" kills healthy cycles, because the stream goes quiet for the whole of
+ * one model turn and the whole of one tool call.
+ */
+describe("how long a work cycle may be silent", () => {
+  it("takes the default for a value that is not a request", () => {
+    // Off, negative and corrupt are all "this row says nothing usable", not
+    // "the operator asked for the shortest possible deadline".
+    assert.equal(cycleSilenceMs(0), 120 * 60_000);
+    assert.equal(cycleSilenceMs(-30), 120 * 60_000);
+    assert.equal(cycleSilenceMs(NaN), 120 * 60_000);
+  });
+
+  it("floors a request that is too short, and honours one that is not", () => {
+    assert.equal(cycleSilenceMs(1), 5 * 60_000);
+    assert.equal(cycleSilenceMs(45), 45 * 60_000);
+  });
+});
+
+/**
+ * Covers what a run ends as, given why it was interrupted.
+ *
+ * A cycle killed on its deadline reaches the loop's post-cycle checkpoint in
+ * exactly the shape an operator's Stop does — a dead child, a null exit code,
+ * no `result` event — so this mapping is the whole of what tells them apart on
+ * the runs list, and every way of collapsing it typechecks and reads like an
+ * ordinary ending.
+ */
+describe("what an interrupt makes of a run", () => {
+  const at = 1_700_000_000_000;
+
+  it("files a deadline as a failure and a decision as a stop", () => {
+    assert.deepEqual(
+      interruptOutcome({ kind: "deadline", reason: "no output", pause: false, at }),
+      { status: "failed", reason: "no output", resumeAt: null },
+    );
+    // Nobody decided the one above; somebody decided both of these.
+    assert.deepEqual(
+      interruptOutcome({ kind: "operator", reason: "Stopped.", pause: false, at }),
+      { status: "stopped", reason: "Stopped.", resumeAt: null },
+    );
+    assert.deepEqual(
+      interruptOutcome({ kind: "guard", reason: "over budget", pause: false, at }),
+      { status: "stopped", reason: "over budget", resumeAt: null },
+    );
+  });
+
+  it("still parks a live-resume step-aside", () => {
+    assert.deepEqual(
+      interruptOutcome({
+        kind: "guard",
+        reason: "window full",
+        pause: true,
+        resumeAt: at + 60_000,
+        at,
+      }),
+      { status: "paused", reason: "window full", resumeAt: at + 60_000 },
     );
   });
 });
@@ -1577,7 +2253,7 @@ describe("failed tool results", () => {
     assert.equal(onMessage.parentToolUseId, "toolu_task");
 
     // The main thread's own failure carries neither key, so nothing downstream
-    // can attribute it to a specialist that was never asked.
+    // can attribute it to a sub-agent that was never asked.
     const [own] = toolResultFailures(userEvent(block), delegated);
     assert.equal(own.parentToolUseId, undefined);
     assert.equal(own.subagent, undefined);
@@ -1928,7 +2604,6 @@ describe("the parked sweeper's decision", () => {
       "iterations",
       "duration",
       "instance_cost",
-      "no_ceiling",
       "no_terminus",
     ];
 
@@ -1946,6 +2621,44 @@ describe("the parked sweeper's decision", () => {
         action: "end",
         reason: "Out of time.",
       });
+    });
+
+    /**
+     * `no_ceiling` was on the list above and is deliberately no longer: it is
+     * the one refusal here that is not about this run at all. On a stock
+     * install ceilings ship null by design and the fraction guard's reading is
+     * the provider's own percentage, discarded after an hour without a fresh
+     * answer — so an unreachable Anthropic host made this branch end every
+     * parked run in the install, 60 seconds after the pre-cycle guard had
+     * already ended every running one. That is the outcome
+     * `INSTANCE_ENFORCEABLE_CODES` refuses one level up, in as many words, and
+     * `RUN_ENFORCEABLE_CODES` is the same list for a run.
+     *
+     * It resumes rather than parking, because there is nothing here to wait
+     * for: `resume_at` exists for a window that refills on a schedule, and a
+     * reading that has gone comes back when it comes back. The run rejoins the
+     * queue and `startRun`'s own pre-cycle check logs, once, that the guard has
+     * nothing to read.
+     */
+    it("resumes a run whose fraction guard has nothing to read", () => {
+      assert.deepEqual(
+        planPausedRun(stops("no_ceiling", "No reading for that window."), null),
+        { action: "resume" },
+      );
+    });
+
+    it("still asks who holds the folder before resuming on an unreadable guard", () => {
+      // The occupancy read is only made where the verdict clears the pause, so
+      // a new clearing case that skipped it would resume straight into an
+      // occupied working tree — the collision the folder claim exists to
+      // prevent, arriving through the one door allowed to un-park a run.
+      const plan = planPausedRun(
+        stops("no_ceiling", "No reading for that window."),
+        "holder-1",
+      );
+      assert.equal(plan.action, "hold");
+      if (plan.action !== "hold") return;
+      assert.equal(plan.heldBy, "holder-1");
     });
   });
 });
@@ -2038,5 +2751,46 @@ describe("applying the sweeper's decision", () => {
       "stopped",
       "the flip is guarded on `status='paused'`, so the operator's stop wins",
     );
+  });
+
+  it("hands back only so many parked runs per tick", async () => {
+    // The half of the herd the jitter on `resume_at` cannot reach. A fleet
+    // parked before the spread existed, or bunched against the
+    // `MIN_REFUSAL_WAIT_MS` floor, or simply carrying a null, is due in one
+    // tick — and every one of them used to be flipped to `queued` in a single
+    // pass and handed to one `promoteQueued()`, which starts everything
+    // startable in one synchronous turn. `maxConcurrentRuns` ships as `null`,
+    // so nothing downstream bounds that wave either.
+    //
+    // The cap fills the concurrency slot as well, which is what keeps this test
+    // from spawning: with one run already `running` from the case above, the
+    // promotion at the end of the sweep has nothing to start.
+    saveSettings({ maxConcurrentRuns: 1 });
+    const parked = Array.from({ length: MAX_RESUMES_PER_SWEEP + 2 }, (_, i) =>
+      insertRun({ status: "paused", workDir: `${ws}/herd-${i}` }),
+    );
+
+    await sweepPaused();
+
+    const queued = parked.filter((id) => getRun(id)!.status === "queued");
+    assert.equal(
+      queued.length,
+      MAX_RESUMES_PER_SWEEP,
+      "one tick must not queue the whole parked fleet",
+    );
+    assert.deepEqual(
+      queued,
+      parked.slice(0, MAX_RESUMES_PER_SWEEP),
+      "and it must still be the oldest first — the cap is a rate, not a reshuffle",
+    );
+    for (const id of parked.slice(MAX_RESUMES_PER_SWEEP)) {
+      const row = getRun(id)!;
+      assert.equal(row.status, "paused", "the rest wait for the next tick");
+      // Nothing written, so nothing rewritten every 60 seconds into a table
+      // with no retention — `FOLDER_TAKEN_REASON`'s rule, one branch over.
+      assert.equal(row.stop_reason, null);
+    }
+
+    saveSettings({ maxConcurrentRuns: null });
   });
 });

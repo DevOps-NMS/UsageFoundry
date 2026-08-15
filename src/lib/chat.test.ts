@@ -34,13 +34,13 @@ import type { RegistryAgent } from "./agents";
  *    isolation choice, because the whole approval gate rests on those coming
  *    from something a person wrote — a template, or the untemplated guard set
  *    in settings. A regression here type-checks perfectly and shows up as an
- *    agent running somewhere nobody chose. The specialist is the second thing
+ *    agent running somewhere nobody chose. The agent is the second thing
  *    a proposal may name and it is on the other side of that line — it decides
- *    who does a piece of the work — so what is pinned about it is both
+ *    who the run *is* — so what is pinned about it is both
  *    directions at once: the whole definition reaches the run, no guard and no
  *    word of the prompt moves, and one that has been deleted is refused **by
  *    name** rather than falling back to none. That fallback is the expensive
- *    one, because a run given a specialist it does not have is bit-for-bit a
+ *    one, because a run that is not the agent it was proposed as is bit-for-bit a
  *    run that was never given one, and nothing downstream can tell them apart.
  *  - `planApprovalBatch` has no agent dimension by construction — `BatchProposal`
  *    carries a label, a title and its edges and nothing else — which is why
@@ -126,9 +126,12 @@ const {
   parseTurnOutput,
   planApprovalBatch,
   planProposal,
+  removeMcpConfig,
   sendChatMessage,
   settleOnExit,
   staleTurn,
+  writeMcpConfig,
+  MCP_CONFIG_BASE,
 } = require("./chat") as typeof import("./chat");
 const { githubSlug } = require("./workspace") as typeof import("./workspace");
 
@@ -412,7 +415,7 @@ describe("planProposal", () => {
   it("carries the named agent's whole definition onto the run", () => {
     // The definition rather than the id, because that is what `createRun`
     // freezes onto the row: an id there would leave cycle 4 of this run with no
-    // specialist the moment somebody tidies the registry, which is the CLI's own
+    // agent the moment somebody tidies the registry, which is the CLI's own
     // silent drop performed by this app.
     const plan = planProposal(
       proposal({ agent_id: "agent1" }),
@@ -456,7 +459,7 @@ describe("planProposal", () => {
   });
 
   it("refuses a proposal whose agent has been deleted, by name", () => {
-    // Never a fallback to no specialist: the operator approved the card that
+    // Never a fallback to no agent: the operator approved the card that
     // said "and hand the review to the reviewer", and a run that quietly has
     // none is bit-for-bit a run that was never given one.
     const plan = planProposal(
@@ -473,7 +476,7 @@ describe("planProposal", () => {
   it("refuses an agent the CLI would drop, naming it", () => {
     // `rowToAgent` reports rather than repairs, so a decayed row arrives here
     // resolvable and unusable — and sending it is the one outcome with no
-    // symptom at all: exit 0, nothing on stderr, no specialist.
+    // symptom at all: a spawn the CLI refuses by name, cycle after cycle.
     const plan = planProposal(
       proposal({ agent_id: "agent1" }),
       template,
@@ -1058,4 +1061,68 @@ describe("settleOnExit", () => {
       }
     },
   );
+});
+
+/* ------------------------------------------------------------------ */
+/* Where the capability token is written down                          */
+/* ------------------------------------------------------------------ */
+
+describe("writeMcpConfig — the capability never lands in a shared directory", () => {
+  it("puts the config in a directory of its own, not loose in the tmpdir", () => {
+    // `/tmp/uf-mcp-<random>.json` was the whole defect: 1777 and world
+    // readable, so `ls /tmp/uf-mcp-*.json` found a live capability without
+    // guessing the random name, and any of the concurrent agents could run it.
+    // The random name was never the protection; the directory was the leak.
+    const file = writeMcpConfig("cap-token-abc");
+    try {
+      const dir = path.dirname(file);
+      assert.notEqual(
+        dir,
+        os.tmpdir(),
+        "the config is loose in the shared temp directory again",
+      );
+      assert.equal(path.basename(path.dirname(dir)), path.basename(os.tmpdir()));
+      assert.deepEqual(fs.readdirSync(dir), ["config.json"]);
+
+      // 0600 on the file and 0700 on the directory. Neither excluded anything
+      // while the server and the agents were one uid — which is why this landed
+      // with the split rather than before it.
+      assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+      assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+
+      const written = JSON.parse(fs.readFileSync(file, "utf8"));
+      assert.equal(
+        written.mcpServers.uf.headers.Authorization,
+        "Bearer cap-token-abc",
+      );
+    } finally {
+      removeMcpConfig(file);
+    }
+  });
+
+  it("names a base outside the shared tmpdir when the uids differ", () => {
+    // The test process is not root, so `writeMcpConfig` above took the
+    // unseparated fallback: with one uid there is no boundary to build and
+    // pretending otherwise would be worse than saying so. What the constant
+    // pins is that the separated path is not a directory every agent can list.
+    assert.equal(path.isAbsolute(MCP_CONFIG_BASE), true);
+    assert.notEqual(MCP_CONFIG_BASE, os.tmpdir());
+    assert.equal(MCP_CONFIG_BASE.startsWith(`${os.tmpdir()}/`), false);
+  });
+
+  it("takes the directory with it when the turn ends", () => {
+    // A per-turn directory left behind is a slow leak in a path nothing else
+    // sweeps, and one still holding its file is the original defect with an
+    // extra step. `removeMcpConfig` runs on every settle path, including the
+    // partial-write one inside `writeMcpConfig` itself.
+    const file = writeMcpConfig("cap-token-xyz");
+    const dir = path.dirname(file);
+    removeMcpConfig(file);
+    assert.equal(fs.existsSync(file), false);
+    assert.equal(fs.existsSync(dir), false);
+
+    // Idempotent: `land` can be reached twice (a timeout racing an exit), and a
+    // second removal must not throw out of a settle path.
+    removeMcpConfig(file);
+  });
 });

@@ -109,7 +109,7 @@ test("only the assistant kind is read as the agent's own words", () => {
  * account of its work. Getting it wrong is silent in the worst way: a sub-agent
  * finishes its piece and reports on it, that turn arrives after the main
  * thread's last words because it finished later, and the card then presents one
- * specialist's summary of one subtask as what the run did.
+ * sub-agent's summary of one subtask as what the run did.
  */
 test("a sub-agent's words are never the cycle's report", () => {
   const out = cycleOutputs([
@@ -163,7 +163,7 @@ test("a cycle whose only words were a sub-agent's is left out", () => {
       runId: "r",
       ts: 2,
       kind: "subagent",
-      payload: { text: "Only the specialist spoke.", parentToolUseId: "toolu_1" },
+      payload: { text: "Only the sub-agent spoke.", parentToolUseId: "toolu_1" },
     },
   ]);
 

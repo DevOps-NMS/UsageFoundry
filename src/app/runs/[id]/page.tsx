@@ -1070,16 +1070,23 @@ export default function RunDetail({
             </ListGroup>
           </Section>
 
-          {/* Beside the guards and deliberately not among them. `--agents`
-              offers a role to the delegating model — it carries no tool list
-              and no permission mode, so a row inside the group above would say
-              it bounds something it does not. What it says instead is what was
-              sent: the run's own frozen copy, so it still names the agent even
-              after that agent has been renamed or deleted. */}
+          {/* Beside the guards and deliberately not among them — re-decided
+              under `--agent` rather than carried over, because the obvious
+              reading of "the run *is* the agent" is that it has been promoted
+              into the guard group. It has not. That flag sets the session's
+              system prompt, and its model where the run named none; the
+              permission mode, the isolation grant and the deny list are all
+              argued at the spawn and are untouched by it, which
+              `orchestrator.test.ts` asserts again with one selected. A row
+              inside the group above would claim it bounds something, and it
+              bounds strictly nothing — a bigger fact than it was, and still
+              not that kind of fact. What it says is what was sent: the run's
+              own frozen copy, so it still names the agent after that agent has
+              been renamed or deleted. */}
           {run.agent && (
-            <Section title="Specialist">
-              <ListGroup footnote="Offered to the main thread, which may hand it a subtask. It changes who does part of the work, not what this run was allowed to do.">
-                <ListRow label="Agent" description={run.agent.description}>
+            <Section title="Agent">
+              <ListGroup footnote="This run was started as it, so the saved prompt is the run's own. It changes who the run is, not what it was allowed to do.">
+                <ListRow label="Started as" description={run.agent.description}>
                   <GuardValue>{run.agent.name}</GuardValue>
                 </ListRow>
                 <ListRow label="Its model">
@@ -1095,9 +1102,23 @@ export default function RunDetail({
               above say what the run spent and neither can say this: only the
               transcript records which agent produced a turn, which is why this
               is the same source the dashboard meters come from rather than a
-              fourth one. Its own poll and its own route — see the component. */}
+              fourth one. Its own poll and its own route — see the component.
+
+              `startedAs` changes nothing about the arithmetic and only what the
+              card is allowed to say. Under `--agent` this split has two readings
+              an operator would otherwise take for a bug: every row under the
+              agent's name and nothing in `(main thread)`, or the reverse, on a
+              page whose section above says the run is the reviewer. Which one
+              the CLI writes is unmeasured and no branch here depends on it, so
+              the card names the run's agent and lets the rows say what they
+              say. */}
           <Section title="Agent work">
-            <RunAgentCost runId={run.id} active={active} now={nowTick} />
+            <RunAgentCost
+              runId={run.id}
+              active={active}
+              now={nowTick}
+              startedAs={run.agent?.name ?? null}
+            />
           </Section>
 
           {/* A separate measurement, deliberately not folded into the figures

@@ -4,7 +4,7 @@ import {
   getAgent,
   normalizeAgentInput,
   updateAgent,
-} from "@/lib/agents";
+} from "../../../../lib/agents";
 import { auditMutation } from "../../../../lib/requestLog";
 
 export const runtime = "nodejs";
