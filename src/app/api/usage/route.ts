@@ -11,7 +11,9 @@ import { getSettings, limitConfig, newWorkPaused } from "@/lib/settings";
 import { readAccountProfile } from "@/lib/account";
 import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
+import { installSpendReport } from "@/lib/installBudget";
 import { PROJECTS_DIR } from "@/lib/config";
+import { configProblems } from "@/lib/configCheck";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,6 +79,12 @@ export async function GET(req: Request) {
       snapshot,
       periods,
       telemetry,
+      // Unconditional, unlike `telemetry`: the ceiling is what the operator
+      // typed and the reading is money this app recorded spending, so there is
+      // no setting to gate it on and nothing to leak by reporting it. Its own
+      // key rather than a field on `snapshot`, because it is a fourth reading
+      // over a different span and must never be summed with the meters.
+      install: installSpendReport(now),
       meta: {
         transcriptDir: PROJECTS_DIR,
         fileCount: scan.fileCount,
@@ -120,6 +128,11 @@ export async function GET(req: Request) {
         entrypoints: [
           ...new Set(entries.map((e) => e.entrypoint).filter(Boolean)),
         ] as string[],
+        // Cached from the boot probe, so this costs a property read rather than
+        // a stat per mount on a ten-second poll. On this page because a wrongly
+        // pointed mount and a wrongly pointed CLAUDE_HOME both present as the
+        // zeros above it, which is also what a quiet week looks like.
+        configProblems: configProblems(),
       },
     });
   } catch (err) {

@@ -79,10 +79,13 @@ import { Notice } from "@/components/ui/Notice";
  * something no per-block guard can see — ten blocks under a $5 block limit is a
  * $50 workflow.
  *
- * The specialist picker is not a second exception, and its placement says so:
- * it sits with the work rather than in the guards group, because a saved agent
- * holds no tool list and no permission mode — it decides who does a piece of the
- * work and never what the block may do. It is the block's own and never its
+ * The agent picker is not a second exception, and its placement says so: it
+ * sits with the work rather than in the guards group, because a saved agent
+ * holds no tool list and no permission mode — it decides who the block's child
+ * *is* and never what it may do. That is a larger claim than it was while the
+ * flag was `--agents`, and it survives the move for the same reason it was made:
+ * `--agent` sets a system prompt and a fallback model, and every guard on the
+ * block is argued somewhere else. It is the block's own and never its
  * template's, for the reason the workspace picker is; `WorkflowNode.agentId`
  * has it in full. Beside it is the sentence the run form also carries: the
  * registry is a *part* of the set of agents in play and never the whole of it,
@@ -798,15 +801,11 @@ export function WorkflowEditor({
             </Field>
 
             <Hint>
-              Checked before a block starts a work cycle, never during one — a
-              block already working carries on until some block reaches a cycle
-              boundary, so the total can overshoot by up to one work cycle per
-              block running at the time, and blocks running at once multiply
-              that
-            </Hint>
-            <Hint>
-              Blocks that all start at once have no boundary between them, so
-              the maximum concurrent runs in Settings is what bounds this
+              Checked before a block starts a work cycle and again as each block
+              finishes, never during one — a block already working carries on
+              until it or another reaches one of those boundaries, so the total
+              can overshoot by up to one work cycle per block running at the
+              time, and blocks running at once multiply that
             </Hint>
           </Card>
         </div>
@@ -852,9 +851,9 @@ export function WorkflowEditor({
  *
  * The controls under it are how it is changed; this is what it *says*, and it
  * is the copy a press of Run is approved against — which guard set applies (or
- * that it is the untemplated one from Settings), where it runs, which
- * specialist it may hand a subtask to, how many runs a deciding block may start
- * with nobody looking, and whether a merge block may pay a model to reconcile a
+ * that it is the untemplated one from Settings), where it runs, which saved
+ * agent its child is started as, how many runs a deciding block may start with
+ * nobody looking, and whether a merge block may pay a model to reconcile a
  * conflict. Every one of those is a fact somebody would otherwise have to
  * assemble by reading five separate pickers.
  *
@@ -866,20 +865,23 @@ function BlockStatement({
   block,
   guards,
   where,
-  specialist,
+  asAgent,
 }: {
   block: BlockDraft;
   guards: ReactNode;
   where: ReactNode;
   /**
-   * The agent this block's own child may hand a subtask to, or null.
+   * The agent this block's own child is started as, or null.
    *
    * Stated rather than implied, because this sentence is what a press of Run is
    * approved against — and stated *outside* the guard clause, because an agent
    * bounds nothing: it holds no tool list and no permission mode, and a phrase
-   * inside "under …" would claim it does.
+   * inside "under …" would claim it does. That placement was re-decided when
+   * the flag became `--agent`, not carried over: being the run rather than a
+   * helper inside it makes this a bigger fact and not a different *kind* of
+   * fact, so it belongs in its own clause and still not under "under".
    */
-  specialist: ReactNode | null;
+  asAgent: ReactNode | null;
 }) {
   if (block.kind === "merge") {
     return (
@@ -917,9 +919,7 @@ function BlockStatement({
           </strong>
         )}{" "}
         with no approval — each under {guards}.
-        {specialist && (
-          <> While it decides it may hand a subtask to {specialist}.</>
-        )}
+        {asAgent && <> It decides as {asAgent}.</>}
       </p>
     );
   }
@@ -927,7 +927,7 @@ function BlockStatement({
   return (
     <p className="mb-3.5 text-sm leading-normal text-ink-muted">
       Runs in {where}, under {guards}
-      {specialist ? <>, and may hand a subtask to {specialist}</> : null}.
+      {asAgent ? <>, as {asAgent}</> : null}.
     </p>
   );
 }
@@ -993,16 +993,16 @@ function BlockPanel({
   );
 
   // Null on a block that names none, which is the ordinary block: a sentence
-  // saying "and no specialist" would put a permanent phrase on every graph in
-  // the app to describe the absence of an option most of them never take.
-  const specialist: ReactNode | null =
+  // saying "and as no agent" would put a permanent phrase on every graph in the
+  // app to describe the absence of an option most of them never take.
+  const asAgent: ReactNode | null =
     block.agentId === "" ? null : missingAgent ? (
       <strong className="font-semibold text-danger">
         an agent that has been deleted
       </strong>
     ) : agent && !agent.usable ? (
       <strong className="font-semibold text-danger">
-        {agent.name}, which Claude Code would drop
+        {agent.name}, which Claude Code will not register
       </strong>
     ) : (
       <strong className="font-semibold text-ink">
@@ -1016,7 +1016,7 @@ function BlockPanel({
         block={block}
         guards={guards}
         where={where}
-        specialist={specialist}
+        asAgent={asAgent}
       />
 
       <ListGroup className="mb-4">
@@ -1243,16 +1243,16 @@ function BlockPanel({
               footnote={
                 ambientLine ? (
                   <>
-                    {ambientLine}. An agent changes who does part of the work,
-                    never what this block may do.
+                    {ambientLine}. An agent changes what this block&rsquo;s child
+                    is, never what it may do.
                   </>
                 ) : (
-                  "An agent changes who does part of the work, never what this block may do"
+                  "An agent changes what this block's child is, never what it may do"
                 )
               }
             >
               <ListRow
-                label={orchestrator ? "Specialist for this turn" : "Specialist"}
+                label={orchestrator ? "This turn is" : "This run is"}
                 htmlFor={`${block.id}-agent`}
                 description={
                   missingAgent ? (
@@ -1262,13 +1262,13 @@ function BlockPanel({
                     </span>
                   ) : agent && !agent.usable ? (
                     <span role="alert" className="text-danger">
-                      {agent.name} is missing its description or its prompt, and
-                      Claude Code drops such an agent without a word
+                      {agent.name} is missing its description or its prompt, so
+                      Claude Code will not register it and the spawn would fail
                     </span>
                   ) : agent ? (
                     agent.description
                   ) : orchestrator ? (
-                    "For this block's own deciding turn — the runs it starts name their own"
+                    "What this block's own deciding turn is started as — the runs it starts name their own"
                   ) : undefined
                 }
               >
@@ -1279,7 +1279,7 @@ function BlockPanel({
                     aria-invalid={missingAgent || undefined}
                     onChange={(e) => onChange({ agentId: e.target.value })}
                   >
-                    <option value="">No specialist</option>
+                    <option value="">No agent</option>
                     {agents.map((a) => (
                       <option key={a.id} value={a.id}>
                         {a.name}

@@ -155,6 +155,18 @@ export interface PeriodSeriesDTO {
   buckets: PeriodBucketDTO[];
 }
 
+/**
+ * One thing the boot found wrong with the environment this process was given.
+ *
+ * The client mirror of `ConfigProblem` in `configCheck.ts`, which imports
+ * `node:fs` and so cannot be reached from a `"use client"` file.
+ */
+export interface ConfigProblemDTO {
+  severity: "refuse" | "warn";
+  variable: string;
+  message: string;
+}
+
 export interface UsageResponse {
   snapshot: SnapshotDTO;
   /**
@@ -222,6 +234,18 @@ export interface UsageResponse {
      * is a normal state — never an error, and never a ceiling.
      */
     account: AccountProfileDTO;
+    /**
+     * What the boot made of this process's own configuration — a mount that is
+     * not a directory, a `CLAUDE_HOME` with no transcripts under it, a variable
+     * set to the empty string.
+     *
+     * Only ever warnings in practice: a refusal exits the process before it
+     * serves, so nothing that reads this can be looking at one. It rides on the
+     * usage payload because that is the page an operator is on when the figures
+     * are zero, and "the mount is empty" is the answer to the question they are
+     * about to ask. Computed once at boot, not per request.
+     */
+    configProblems: ConfigProblemDTO[];
   };
   /**
    * What runs have reported over their own telemetry inside the same 5-hour
@@ -233,6 +257,39 @@ export interface UsageResponse {
    * `runs.spent_usd` nor the guard can. Never add it to `snapshot` figures.
    */
   telemetry: TelemetryWindowDTO | null;
+  /**
+   * What this whole installation has spent inside the rolling window the
+   * install-wide ceiling covers, and that ceiling.
+   *
+   * A **fourth** reading on this page and, like the third, never added to the
+   * others: the meters above it are our price table over every transcript on the
+   * machine, and this is the money *this app* recorded spending — one run row,
+   * one block row and one chat row at a time — over a different span. Summing
+   * the two would count the same work twice.
+   *
+   * `limitUSD` is null when no ceiling is configured, and the meter must be the
+   * hatched indeterminate one rather than an empty 0% bar: an install whose
+   * share of a limit is unknown and one that has spent nothing must not look
+   * alike.
+   */
+  install: InstallSpendDTO;
+}
+
+/**
+ * The install-wide ceiling and what has been spent against it.
+ *
+ * `spentUSD` is the measured floor — every figure a CLI itself reported — and
+ * `spentGuardUSD` adds killed cycles' reconciled estimates and what telemetry
+ * says the cycles in flight have cost so far. The same display-versus-guard
+ * split a window, a run and a workflow instance already make, and drawn the same
+ * way: solid fill to the measured figure, hatched band out to the guard's.
+ */
+export interface InstallSpendDTO {
+  spentUSD: number;
+  spentGuardUSD: number;
+  limitUSD: number | null;
+  /** The span the two figures cover. Rolling, not a calendar day. */
+  windowHours: number;
 }
 
 /** One run's first-party total inside the window. */
@@ -461,18 +518,18 @@ export interface RunDTO {
 }
 
 /**
- * What a run records about the specialist it carries.
+ * What a run records about the agent it was started as.
  *
- * The agent's own `prompt` is deliberately absent: it is the system prompt of a
- * delegated turn, nothing on the run page acts on it, and this payload is polled
- * every three seconds. The name and the description are what a reader needs —
- * the description because it is the whole of what the delegating model was told
- * when it chose, so it is what explains a delegation that happened.
+ * The agent's own `prompt` is deliberately absent: it is the run's own system
+ * prompt, nothing on the run page acts on it, and this payload is polled every
+ * three seconds. The name and the description are what a reader needs — the
+ * description because it is what the operator read when they chose, so it is
+ * what explains the run they are looking at.
  */
 export interface RunAgentDTO {
   name: string;
   description: string;
-  /** Null means the delegated turn ran on the session's own model. */
+  /** Null means the session ran on the run's own model. */
   model: string | null;
 }
 
@@ -508,6 +565,7 @@ export interface RunAgentSpendDTO {
   costGuardUSD: number;
   tokens: number;
   entryCount: number;
+  /** Everything outside `(main thread)` — a historical name, see `AgentSpend`. */
   delegatedCostUSD: number;
   delegatedCostGuardUSD: number;
   rows: AgentSpendRowDTO[];
@@ -517,9 +575,12 @@ export interface RunAgentSpendDTO {
   /**
    * True when Settings excludes sub-agent turns from the dashboard totals.
    *
-   * This card counts them regardless — it exists to say what the delegated work
-   * cost, and a card that silently answered $0 because of a setting about the
-   * *meters* would be the worst of both. Carried so the card can say so.
+   * This card counts them regardless — it exists to say what the work outside
+   * the main thread cost, and a card that silently answered $0 because of a
+   * setting about the *meters* would be the worst of both. Carried so the card
+   * can say so. That setting keys on the transcript's own `isSidechain`, which
+   * is a genuinely delegated turn and is a different question from which agent
+   * name a turn carries — so it is untouched by the move to `--agent`.
    */
   excludedFromTotals: boolean;
 }
@@ -550,7 +611,7 @@ export interface RunTemplateDTO {
   isolate: boolean;
   permissionMode: string;
   /**
-   * The saved agent a run from this template may delegate to, by id.
+   * The saved agent a run from this template is started as, by id.
    *
    * An id rather than a copy, unlike `RunDTO.agent`: a template is applied again
    * and again, so it should follow the agent as the operator edits it. A form
@@ -564,7 +625,7 @@ export interface RunTemplateDTO {
 }
 
 /* ------------------------------------------------------------------ */
-/* Agents: a saved role a run may delegate a subtask to                */
+/* Agents: a saved role a run is started as                            */
 /* ------------------------------------------------------------------ */
 
 /** Bounded for the reason a template name is: it is picked out of a list. */
@@ -573,20 +634,19 @@ export const MAX_AGENT_NAME = 80;
 /**
  * How long an agent's description may be.
  *
- * Not a form-tidiness bound. The description is what the delegating model reads
- * to choose the agent, so it is carried in that model's context for the whole
- * session rather than at the moment of a delegation — it is paid for on every
- * request the run makes, and an unbounded one is a cost multiplier with no
- * ceiling on a run whose spend guards are all denominated in dollars.
+ * Not a form-tidiness bound. A registered agent's description is carried in the
+ * session's context for the whole run — it is paid for on every request the run
+ * makes, and an unbounded one is a cost multiplier with no ceiling on a run
+ * whose spend guards are all denominated in dollars.
  */
 export const MAX_AGENT_DESCRIPTION = 1_000;
 
 /**
- * A saved specialised agent.
+ * A saved agent: a role a run is started as.
  *
  * There is deliberately no tool list, no permission mode and no budget here, and
- * the absence is the design: what an agent may do comes from the guard set on
- * the run it is delegated inside. The reasoning is in `agents.ts` beside the
+ * the absence is the design: what a run may do comes from its own guard set and
+ * never from the role it takes. The reasoning is in `agents.ts` beside the
  * refusal that enforces it.
  */
 export interface AgentDTO {
@@ -594,15 +654,15 @@ export interface AgentDTO {
   name: string;
   description: string;
   prompt: string;
-  /** Null means the delegated turn inherits the session's model. */
+  /** Null means the session keeps whatever model the run already had. */
   model: string | null;
   /**
    * Whether this row can actually be attached to a spawn.
    *
-   * False for a row whose description or prompt is empty — the CLI drops such a
-   * member without a word, so a surface that offered it would be offering a run
-   * a specialist that silently is not there. On the DTO because nothing on the
-   * page can work it out: the row looks complete either way.
+   * False for a row whose description or prompt is empty — the CLI will not
+   * register such a member, so a run started as it fails at the spawn. On the
+   * DTO because nothing on the page can work it out: the row looks complete
+   * either way.
    */
   usable: boolean;
   createdAt: number;
@@ -699,17 +759,17 @@ export interface WorkflowNodeDTO {
    */
   promptOverride: string | null;
   /**
-   * A saved agent this block's own child may hand a subtask to, by id.
+   * A saved agent this block's own child is started as, by id.
    *
    * On the *work* side of the block, beside the mount, the folder and the task,
    * and never on the guard side: an agent holds no tool list and no permission
-   * mode, so what it changes is who does a piece of the work and never what the
-   * block may do. It is the block's own rather than its template's — the reason
-   * is in `WorkflowNode.agentId`.
+   * mode, so what it changes is who the child *is* and never what the block may
+   * do. It is the block's own rather than its template's — the reason is in
+   * `WorkflowNode.agentId`.
    *
    * Null on a merge block always, and naming one there is refused rather than
-   * dropped: that block spawns no child, so there would be nothing to hand a
-   * subtask to.
+   * dropped: that block spawns no child, so there is nothing for the agent to
+   * be.
    */
   agentId: string | null;
   /**
@@ -1359,8 +1419,14 @@ export interface SettingsDTO {
   includeSidechains: boolean;
   /** Put a delegated turn's own words in the run log. */
   forwardSubAgentText: boolean;
-  /** Null means no limit. */
+  /** Work cycles only. Null means no limit. */
   maxConcurrentRuns: number | null;
+  /**
+   * Every `claude` child that is not a work cycle — a review, a conflict
+   * resolution, a chat turn, a workflow block's deciding turn. Null means no
+   * limit.
+   */
+  maxConcurrentAssists: number | null;
   isolationCopyGlobs: string[];
   isolationPreamble: string;
   /** What a run is told when it picks up the branch the run before it had. */
@@ -1368,12 +1434,20 @@ export interface SettingsDTO {
   telemetryForRuns: boolean;
   donePushbackPrompt: string;
   liveGuardIntervalSeconds: number;
+  /** How long a work cycle may print nothing before it is ended. Never null. */
+  maxCycleSilenceMinutes: number;
   resumeGraceHours: number;
   /** How an isolated run's branch is brought into the branch it started from. */
   landStrategy: "merge" | "squash";
   killProcessGroup: boolean;
   /** Hard ceiling on one orchestrator-chat turn. Null means no cap. */
   chatTurnBudgetUSD: number | null;
+  /**
+   * Hard ceiling on what this whole install may spend in a rolling 24 hours,
+   * across every run, workflow block and chat turn. Null means no cap, which is
+   * the shipped default — every other limit here bounds one spender.
+   */
+  installDailyCostLimitUSD: number | null;
   /** What a chat proposal runs under when it names no template. */
   chatDefaultGuards: RunGuardsDTO;
 }
@@ -1412,12 +1486,12 @@ export interface ProposedBlockDTO {
   /** The template's name, or the untemplated guard set written out. */
   guardsLabel: string;
   /**
-   * The specialist this block may hand a subtask to, or null for none.
+   * The agent this block's child is started as, or null for none.
    *
    * Beside the guards and never inside them: an agent holds no tool list and no
-   * permission mode, so it says who does part of the work rather than what the
-   * block may do. `"agent deleted"` for an id the registry no longer has, which
-   * approval refuses by name.
+   * permission mode, so it says who the child is rather than what the block may
+   * do. `"agent deleted"` for an id the registry no longer has, which approval
+   * refuses by name.
    */
   agentLabel: string | null;
   /** Where it runs. Null on a merge block, which names no workspace. */
@@ -1451,19 +1525,19 @@ export interface ChatProposalDTO {
   /** The chat wrote this run's prompt instead of taking the template's. */
   promptRewritten: boolean;
   /**
-   * The saved specialist this run would be handed, by name, or null for none.
+   * The saved agent this run would be started as, by name, or null for none.
    *
    * Null when the id names nothing, because the row holds only an id — the card
    * then says the agent is gone from `agentMissing` rather than inventing a
    * name. The two are separate fields for the same reason `guardsSource` is
-   * separate from `guardsLabel`: "no specialist was asked for" and "the one
-   * that was asked for is gone" are different facts, and approval refuses only
-   * the second.
+   * separate from `guardsLabel`: "no agent was asked for" and "the one that was
+   * asked for is gone" are different facts, and approval refuses only the
+   * second.
    */
   agentName: string | null;
   /**
-   * This proposal names an agent that is gone, or one the CLI would drop.
-   * Approval refuses it by name rather than starting the run without one.
+   * This proposal names an agent that is gone, or one the CLI will not
+   * register. Approval refuses it by name rather than starting the run as none.
    */
   agentMissing: boolean;
   title: string;

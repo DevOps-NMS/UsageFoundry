@@ -37,7 +37,7 @@ const OK = {
  *
  * Passed in rather than read, which is what keeps this function pure — and what
  * lets the two agents below stand for the two things that can be wrong with one:
- * gone, and present but in a shape the CLI drops without a word.
+ * gone, and present but in a shape the CLI will not register.
  */
 const KNOWN: TemplateKnowledge = {
   agents: new Map([
@@ -230,7 +230,7 @@ describe("normalizeTemplateInput — target", () => {
  * form that caused it. What makes it worth a test rather than a comment is that
  * the *other* reading is silent — a template naming a deleted agent, quietly
  * saved with none, starts runs that look exactly like runs that were never given
- * a specialist, which is the one shape the whole agent registry exists to end.
+ * an agent, which is the one shape the whole agent registry exists to end.
  */
 describe("normalizeTemplateInput — the agent", () => {
   it("names none by default, and reads blank as none", () => {
@@ -259,10 +259,14 @@ describe("normalizeTemplateInput — the agent", () => {
     );
   });
 
-  it("refuses one the CLI would drop, and names it", () => {
+  it("refuses one the CLI would not register, and names it", () => {
     const message = error({ ...OK, agentId: "a2" });
     assert.match(message, /half-written/);
-    assert.match(message, /without a word/);
+    // One wording for every door, so this is `agentRefusal`'s sentence arriving
+    // here rather than a second copy of it. It changed with the flag: a member
+    // the CLI will not register used to be dropped in silence, and a run that
+    // names one on `--agent` now fails at the spawn.
+    assert.match(message, /will not register/);
   });
 });
 
@@ -339,7 +343,7 @@ describe("rowToTemplate", () => {
    * The one narrowing this function deliberately does *not* do. An agent that
    * has since been deleted is still what the template says, and the doors that
    * instantiate it refuse it by name; repairing it to null here would turn that
-   * refusal into a run quietly started with no specialist, which is exactly the
+   * refusal into a run quietly started as no agent, which is exactly the
    * failure the refusal exists to prevent.
    */
   it("keeps an agent id whose agent may be gone, rather than repairing it", () => {
