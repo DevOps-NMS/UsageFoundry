@@ -29,6 +29,10 @@ import { Icon } from "@/components/ui/Icon";
 import { ListGroup } from "@/components/ui/List";
 import { Spinner } from "@/components/ui/Log";
 import { Notice } from "@/components/ui/Notice";
+import {
+  SegmentedControl,
+  type SegmentedOption,
+} from "@/components/ui/SegmentedControl";
 
 /**
  * The orchestrator chat.
@@ -167,6 +171,23 @@ const PROPOSALS_EMPHASIS: Record<"waiting" | "clear", CardEmphasis> = {
   clear: "default",
 };
 
+/**
+ * The three lists that stand beside the conversation, one at a time.
+ *
+ * They used to be three cards stacked in a 360px column, and a column is the
+ * one arrangement that cannot bound them: proposals accumulate for as long as
+ * nobody decides, decided ones accumulate for ever, and conversations do too —
+ * so "which thread am I in" ended up several screens below a panel whose top
+ * half was work already dealt with. One box with a tab bar is the same trade
+ * the run page already makes for its five panes, and it is offered on the same
+ * two rules: a tab exists only when there is something behind it, and **nothing
+ * switches tabs on its own** — a proposal arriving while somebody is reading
+ * another list must not move them. What that costs is a pending count nobody
+ * can see from the other two tabs, which is why the badge beside the control is
+ * drawn from any tab rather than on the Proposals segment.
+ */
+type SideTab = "proposals" | "decided" | "chats";
+
 function prefersReducedMotion(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -189,6 +210,7 @@ export default function ChatPage() {
   const [pollError, setPollError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [side, setSide] = useState<SideTab>("proposals");
   const [atBottom, setAtBottom] = useState(true);
   const [unseen, setUnseen] = useState(0);
   // The registry the composer completes from, and the definitions on disk this
@@ -516,6 +538,26 @@ export default function ChatPage() {
   const allSelected = pending.length > 0 && selected.size === pending.length;
   const showJump = !atBottom && messageCount > 0;
 
+  // Proposals is always offered, empty or not: it is what the panel is for, and
+  // a tab bar that appeared only once the chat had proposed something would
+  // move the other two under the reader on the first turn.
+  const sideTabs: SegmentedOption<SideTab>[] = [
+    { value: "proposals", label: "Proposals" },
+    ...(decided.length > 0
+      ? [{ value: "decided" as const, label: "Decided" }]
+      : []),
+    // The current thread is one of these, so a lone conversation is a list with
+    // nothing to choose from — the same rule that used to hide the whole card.
+    ...(chats.length > 1 ? [{ value: "chats" as const, label: "Chats" }] : []),
+  ];
+  // Derived rather than corrected in an effect: opening a thread with nothing
+  // decided while the Decided tab is selected must fall back on the render that
+  // drops the tab, not one frame later.
+  const activeSide = sideTabs.some((t) => t.value === side) ? side : "proposals";
+  const waitingBadge = pending.length > 0 && (
+    <Badge tone="accent">{pending.length} waiting</Badge>
+  );
+
   const lastMessage = messageCount > 0 ? chat?.messages[messageCount - 1] : undefined;
   // A turn that ends badly is written to the row *and* appended to the thread,
   // so rendering both says it twice. This is the belt for the case where only
@@ -569,7 +611,7 @@ export default function ChatPage() {
 
   return (
     <>
-      <div className="mb-4 flex flex-wrap items-center gap-3">
+      <div className="mb-3 flex flex-wrap items-center gap-3">
         <h1 className="text-xl font-semibold tracking-tight">Orchestrator</h1>
         <div className="ml-auto flex items-center gap-3">
           {chat && chat.costUSD > 0 && (
@@ -583,22 +625,38 @@ export default function ChatPage() {
         </div>
       </div>
 
+      {/* Two paragraphs of standing context stood between the heading and a box
+          that fills what is left of the pane, and everything they cost came off
+          the box — which is how the composer at the foot of it ended up under
+          the fold on a short window. What stays visible is the sentence that
+          has to be read before anything on this page is pressed: hiding *that*
+          would be trading a safety claim for a few lines of room, and the rule
+          is that a disclosure holds what some readers need rather than what all
+          of them do. The rest is read once, and is a press away with its
+          subject named on the summary. */}
       <Notice tone="info" quiet>
         <p>
-          <strong>Nothing here starts a run.</strong> The chat can only propose
-          work; each proposal waits for you to approve it, and it then runs under
-          the guards of the template it names, or under the default guard set in{" "}
-          <Link href="/settings">Settings</Link> when it names none — never under
-          anything the chat chose.
+          <strong>Nothing here starts a run.</strong> Each proposal waits for
+          you, and then runs under the guards of the template it names — never
+          under anything the chat chose.
         </p>
-        <p className="mt-2">
-          The chat itself runs with no tool restrictions, so it can read, run
-          commands and reach GitHub while it works out what to propose; the
-          instruction not to do the work, rather than a permission mode, is what
-          keeps it out of your checkouts. Its turns spend against the same
-          5-hour window as everything else, and that cost is shown here only —
-          never added to a run&rsquo;s, or to the dashboard meters.
-        </p>
+        <details className="mt-1.5">
+          <summary className="ui-transition cursor-pointer marker:text-ink-faint hover:text-ink">
+            What the chat itself may do, and what its turns cost
+          </summary>
+          <p className="mt-2">
+            A proposal that names no template runs under the default guard set
+            in <Link href="/settings">Settings</Link>.
+          </p>
+          <p className="mt-2">
+            The chat itself runs with no tool restrictions, so it can read, run
+            commands and reach GitHub while it works out what to propose; the
+            instruction not to do the work, rather than a permission mode, is
+            what keeps it out of your checkouts. Its turns spend against the
+            same 5-hour window as everything else, and that cost is shown here
+            only — never added to a run&rsquo;s, or to the dashboard meters.
+          </p>
+        </details>
       </Notice>
 
       {pollError && <Notice tone="danger">{pollError}</Notice>}
@@ -611,11 +669,21 @@ export default function ChatPage() {
 
           Only at `lg`, where the proposals sit *beside* the thread. Stacked
           under it there is a second column of content below the fold and the
-          page is meant to scroll, so the card stays a bounded box there. */}
-      <div className="grid gap-4 lg:min-h-[26rem] lg:flex-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+          page is meant to scroll, so the card stays a bounded box there.
+
+          The floor is 22rem rather than 26: a minimum is the one thing here
+          that can still push the composer out of the pane, and it does it on
+          exactly the short window that can least afford it. Below the floor the
+          thread is small; past it the page scrolls again. */}
+      <div className="grid gap-4 lg:min-h-[22rem] lg:flex-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+        {/* `max-h` in rem and not vh, for the reason a box inside the pane is
+            never sized in viewport units: the pane is the window less the
+            toolbar less its own padding less everything above this row, so
+            60vh was a cap that could sit either side of the edge depending on
+            the window and never on the box it was capping. */}
         <Card
           emphasis="primary"
-          className="flex min-h-[26rem] max-h-[60vh] flex-col lg:max-h-none lg:min-h-0"
+          className="flex max-h-[34rem] min-h-[22rem] flex-col lg:max-h-none lg:min-h-0"
         >
           <div className="relative min-h-0 flex-1">
             <div ref={threadRef} onScroll={onScroll} className="h-full overflow-y-auto pr-1">
@@ -847,24 +915,52 @@ export default function ChatPage() {
           </div>
         </Card>
 
-        {/* Its own scroll region, for the reason the thread beside it has one:
-            the row's height is the pane's now, so a column of twenty proposals
-            has to scroll somewhere, and the page is no longer that somewhere. */}
-        <div className="flex flex-col gap-4 lg:min-h-0 lg:overflow-y-auto">
-          <Card emphasis={PROPOSALS_EMPHASIS[pending.length > 0 ? "waiting" : "clear"]}>
+        {/* One box the height of the row, holding one list at a time. Three
+            stacked cards each grew without limit, so the column was taller than
+            the pane whatever the pane did — and the two lists nobody is acting
+            on were what you scrolled past to reach the one you were.
+
+            The card is the scroll container's parent rather than the scroll
+            container: what scrolls is the list, so the tab bar stays on screen
+            and so does the row that approves things. */}
+        <Card
+          emphasis={PROPOSALS_EMPHASIS[pending.length > 0 ? "waiting" : "clear"]}
+          className="flex max-h-[34rem] flex-col lg:max-h-none lg:min-h-0"
+        >
+          {/* A radiogroup with one option is a chip that does nothing, which is
+              what a fresh install would open on — so until there is a second
+              list to reach, this is the title it always was.
+
+              The count sits beside the control rather than on the Proposals
+              segment either way: a number only visible from the tab it belongs
+              to is one nobody reads from the other two, and this is the one on
+              the page that means somebody is waiting on a decision. */}
+          {sideTabs.length > 1 ? (
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <SegmentedControl
+                label="What to show beside the conversation"
+                options={sideTabs}
+                value={activeSide}
+                onChange={setSide}
+              />
+              {waitingBadge}
+            </div>
+          ) : (
             <CardTitle>
               Proposals
-              {pending.length > 0 && <Badge tone="accent">{pending.length} waiting</Badge>}
+              {waitingBadge}
             </CardTitle>
+          )}
 
-            {pending.length === 0 ? (
-              <Empty>Nothing waiting for approval.</Empty>
-            ) : (
-              <>
-                {/* One grouped box, hairlines between the rows: a proposal is
-                    an object in a list of objects, and the stack of separately
-                    bordered cards this replaces read as five unrelated panels
-                    in a 360px column. */}
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+            {activeSide === "proposals" &&
+              (pending.length === 0 ? (
+                <Empty>Nothing waiting for approval.</Empty>
+              ) : (
+                // One grouped box, hairlines between the rows: a proposal is an
+                // object in a list of objects, and the stack of separately
+                // bordered cards this replaces read as five unrelated panels in
+                // a 360px column.
                 <ListGroup>
                   {pending.map((p) => (
                     <Proposal
@@ -875,51 +971,9 @@ export default function ChatPage() {
                     />
                   ))}
                 </ListGroup>
-                <div className="mt-3 border-t border-line pt-3">
-                  <Hint>
-                    {approveConsequence} Runs beyond the concurrency limit queue
-                    rather than being refused.
-                  </Hint>
-                  {/* The default action at the right edge, which is where this
-                      platform puts it and where every sheet in this app already
-                      puts it. Select all is not a decision about the work, so
-                      it sits at the other end as a ghost. */}
-                  <ButtonRow className="mt-3">
-                    <Button
-                      variant="ghost"
-                      disabled={busy}
-                      onClick={() =>
-                        setSelected(
-                          allSelected ? new Set() : new Set(pending.map((p) => p.id)),
-                        )
-                      }
-                    >
-                      {allSelected ? "Select none" : "Select all"}
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      className="ml-auto"
-                      disabled={busy || selected.size === 0}
-                      onClick={() => void decide("reject", [...selected])}
-                    >
-                      Reject
-                    </Button>
-                    <Button
-                      disabled={busy || selected.size === 0}
-                      onClick={() => void decide("approve", [...selected])}
-                    >
-                      {selected.size > 0 ? `Approve ${selected.size}` : "Approve"}
-                    </Button>
-                  </ButtonRow>
-                  {decideError && <Hint tone="danger">{decideError}</Hint>}
-                </div>
-              </>
-            )}
-          </Card>
+              ))}
 
-          {decided.length > 0 && (
-            <Card emphasis="quiet">
-              <CardTitle>Decided</CardTitle>
+            {activeSide === "decided" && (
               <div className="flex flex-col divide-y divide-line">
                 {decided
                   .slice()
@@ -928,15 +982,12 @@ export default function ChatPage() {
                     <Decided key={p.id} proposal={p} />
                   ))}
               </div>
-            </Card>
-          )}
+            )}
 
-          {chats.length > 1 && (
-            <Card emphasis="quiet">
-              <CardTitle>Conversations</CardTitle>
-              {/* The current thread is in this list rather than filtered out of
-                  it, because "which one am I in" is the first thing the list has
-                  to answer and a row missing from a list cannot answer it. */}
+            {/* The current thread is in this list rather than filtered out of
+                it, because "which one am I in" is the first thing the list has
+                to answer and a row missing from a list cannot answer it. */}
+            {activeSide === "chats" && (
               <div className="flex flex-col gap-0.5">
                 {chats.map((c) => (
                   <ChatRow
@@ -955,9 +1006,54 @@ export default function ChatPage() {
                   />
                 ))}
               </div>
-            </Card>
+            )}
+          </div>
+
+          {/* Outside the scroll region: what the click starts, counted, has to
+              be on screen beside the button that starts it — a twentieth
+              proposal must not push the sentence off the top of the list it is
+              about. */}
+          {activeSide === "proposals" && pending.length > 0 && (
+            <div className="mt-3 shrink-0 border-t border-line pt-3">
+              <Hint>
+                {approveConsequence} Runs beyond the concurrency limit queue
+                rather than being refused.
+              </Hint>
+              {/* The default action at the right edge, which is where this
+                  platform puts it and where every sheet in this app already
+                  puts it. Select all is not a decision about the work, so it
+                  sits at the other end as a ghost. */}
+              <ButtonRow className="mt-3">
+                <Button
+                  variant="ghost"
+                  disabled={busy}
+                  onClick={() =>
+                    setSelected(
+                      allSelected ? new Set() : new Set(pending.map((p) => p.id)),
+                    )
+                  }
+                >
+                  {allSelected ? "Select none" : "Select all"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  className="ml-auto"
+                  disabled={busy || selected.size === 0}
+                  onClick={() => void decide("reject", [...selected])}
+                >
+                  Reject
+                </Button>
+                <Button
+                  disabled={busy || selected.size === 0}
+                  onClick={() => void decide("approve", [...selected])}
+                >
+                  {selected.size > 0 ? `Approve ${selected.size}` : "Approve"}
+                </Button>
+              </ButtonRow>
+              {decideError && <Hint tone="danger">{decideError}</Hint>}
+            </div>
           )}
-        </div>
+        </Card>
       </div>
     </>
   );
