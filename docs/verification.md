@@ -386,6 +386,74 @@ Built and exercised against real transcripts:
   `/workflows/<id>` and `/workflows/<id>/edit` all answered 200, and the
   canvas — the palette, the empty state and the selection panel — is in the
   server-rendered HTML of `/workflows/new`.
+- **The two agent flags, probed by hand against the pin
+  (`@anthropic-ai/claude-code@2.1.226`).** Seven probes, each deciding a design
+  question rather than confirming one. Four of them refuse before any API call,
+  which is how `BUILT_IN_AGENTS` was derived in the first place.
+  - `--agent` **can select a definition supplied on the same argv** by
+    `--agents`, which is what made the feature wirable at all — the alternative
+    was writing agent files into the operator's mounted `~/.claude` or into a
+    checkout. `claude --agents '{"uf-probe-agent":{…}}' --agent uf-probe-typo -p
+    hi` answered `--agent 'uf-probe-typo' not found. Available agents: claude,
+    Explore, general-purpose, Plan, statusline-setup, typescript,
+    uf-probe-agent`. That same line settles the merge from the other side:
+    `typescript` is not a built-in but a definition on that machine's disk, so
+    the resolution set is the built-ins *and* the disk *and* this argv.
+  - **An unregistrable member fails the spawn rather than being dropped.**
+    `--agents '{"uf-nodesc":{"prompt":"p"}}' --agent uf-nodesc -p hi` answered
+    `--agent 'uf-nodesc' not found` and **exited 1**, identically for a missing
+    `prompt` and for `"model": null`. Under the plural flag each of those cost a
+    run its specialist at exit 0 with nothing on stderr; named on `--agent` the
+    failure is loud. The empty name and the non-JSON payload were **not**
+    re-measured — see below.
+  - **A member named after a built-in shows once, not twice.**
+    `--agents '{"Explore":{…}}'` still listed a single `Explore`, so
+    `--agent Explore` selects *an* Explore with no way to tell whose.
+  - **`--append-system-prompt` still reaches a `--agent` session.** An agent told
+    to reply with a secret word stated only in the appended text replied
+    `BANANA ZEBRA`. That flag carries `SELF_HOSTING_NOTICE` — the `pkill` deny
+    list's explanation and the safe recipe that replaces it — so the alternative
+    was a run started as an agent that had never been told either.
+  - **`--agent` survives `--resume`**: the same probe resumed replied
+    `BANANA ZEBRA` again, `subtype=success`. Without it a run would stop being
+    what it was started as at cycle 2.
+  - **The run's own `--model` outranks the agent's**, read off the `system`/`init`
+    event before any request: the definition alone reported `claude-opus-5[1m]`,
+    `--agent uf-m` reported `claude-sonnet-5`, `--model opus … --agent uf-m`
+    reported `claude-opus-5`, `--model haiku …` reported
+    `claude-haiku-4-5-20251001`.
+  - **A name with a space registers and resolves** —
+    `--agents '{"uf spaced":{…}}' --agent "uf spaced"` — which holds only
+    because nothing here goes through a shell.
+- **The `agent` key in `settings.json` selects a session agent, and this app
+  neither passes it nor says it exists.** `claude --help` describes `--agent` as
+  overriding "the 'agent' setting"; nothing here had established whether that
+  setting was real, and the operator's own `~/.claude` is bind-mounted into every
+  child this app spawns. Four probes on the pin against a throwaway
+  `CLAUDE_CONFIG_DIR` holding a copy of the real credentials, one ambient
+  definition (`uf-set-probe`, whose whole prompt was "reply with exactly the
+  single word BANANA"), a second (`uf-set-probe2`, CHERRY) and the same prompt
+  each time, `-p "Say hello." --max-budget-usd 0.20`:
+
+  | settings.json | argv | answer |
+  |---|---|---|
+  | no `agent` key | — | `Hello! 👋 What can I help you with today?` |
+  | `"agent": "uf-set-probe"` | — | `BANANA` |
+  | `"agent": "uf-set-probe"` | `--agent uf-set-probe2` | `CHERRY` |
+  | `"agent": "uf-set-probe"` | `--agents '{"uf-offered":{…}}'` | `BANANA` |
+  | `"agent": "uf-set-typo"` | — | `Hello! 👋 …`, exit 0 |
+
+  So the key is real, the flag outranks it as documented, the **plural** flag
+  does not, and an unresolvable value is *silently ignored* — the opposite
+  direction from `--agent`, which answered `--agent 'uf-set-typo' not found.
+  Available agents: claude, Explore, general-purpose, Plan, statusline-setup,
+  uf-set-probe` and exited 1 before any API call against the same directory.
+  What that leaves: every door in this app that names an agent emits `--agent`
+  and wins, so what the key reaches is every child started as *nobody* — an
+  agentless run, every chat turn, every review (`spawnAssist` is the plural-flag
+  caller), and an orchestrator block whose node names none. It is recorded rather
+  than declared; see the entry below for why and for what declaring it would
+  take.
 
 ## Not yet verified by hand
 
@@ -413,6 +481,33 @@ through before trusting this unattended:
   with **Silent cycle limit** set to five minutes, and confirm the run ends
   `failed` naming the deadline, that its folder frees, and that a queued run
   behind it starts.
+- **The container's own resource limits.** `docker-compose.yml` now declares
+  `mem_limit: ${UF_MEM_LIMIT:-10g}` and `pids_limit: ${UF_PIDS_LIMIT:-2048}`,
+  and neither has been applied by a real Docker: the run that added them had no
+  Docker at all, so what is here is the compose file parsing correctly by eye
+  and nothing more. The per-child memory figures README's sizing table is built
+  from are **estimates** and not measurements — the reasoning is that a `claude`
+  child is a Node process and a work cycle's agent starts builds inside the same
+  cgroup, which sets the shape of the arithmetic but not its constants. Before
+  trusting the numbers: `docker compose up -d`, then
+  `docker inspect --format '{{.HostConfig.Memory}} {{.HostConfig.PidsLimit}}' usagefoundry`
+  to confirm the limits were applied at all, then start runs up to the
+  configured cap and watch `docker stats` for the real per-run footprint. The
+  recovery half is worth exercising once too: set `UF_MEM_LIMIT` deliberately
+  low, fill the fleet, and confirm the container is OOM-killed, restarted by
+  `restart: unless-stopped`, and that `reconcileOnBoot` closes out the runs it
+  was carrying rather than leaving folders claimed.
+- **The process budget refusing a real child.** `liveAssistChildren`,
+  `assistBudgetRefusal` and the deferral of a workflow block are covered by
+  `src/lib/assistBudget.test.ts` against a real database, and `npm run
+  typecheck` and `npm test` pass — but no browser has seen the refusal, and no
+  workflow block has actually been deferred and then woken. The wake is the part
+  worth watching: a block over the budget is left `waiting` rather than failed,
+  and what un-sticks it is `advanceInstances` being called when a review or a
+  chat turn settles. Before trusting it: set *Other Claude processes at the same
+  time* to 1, start a workflow whose orchestrator block is behind something
+  slow, open a chat and send a turn, and confirm the block sits `waiting` while
+  the chat is thinking and starts deciding within a moment of the chat settling.
 - **A failed tool result reaching the run page.** `toolResultFailures` is unit-
   tested and `npm run typecheck` passes, and the `user`/`tool_result` shape it
   reads was taken from real transcripts written by the pinned CLI (2.1.226) —
@@ -777,9 +872,19 @@ through before trusting this unattended:
   come back as the list the card renders, whether the commit satisfies
   `ensureWorktree`'s reuse check on the next run into that slot, and whether a
   purged slot is re-created cleanly rather than tripping the "checkout is gone"
-  guard for a run that had already worked in it. `next build` could not be run
-  here at all — it fails with `TypeError: generate is not a function` on the
-  unmodified tree too, so it says nothing either way about these changes.
+  guard for a run that had already worked in it. That entry used to add that
+  `next build` could not be run at all, failing with `TypeError: generate is not
+  a function` on the unmodified tree — which was true and was **not** about this
+  repository. That error is `config.generateBuildId` being undefined, and it is
+  undefined because a run started from inside a UsageFoundry container inherits
+  `__NEXT_PRIVATE_STANDALONE_CONFIG` from the server supervising it: `loadConfig`
+  returns that JSON verbatim instead of loading `next.config.ts` and applying
+  defaults, and a serialized config cannot carry a function. `env -u
+  __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` builds cleanly, standalone
+  output included. Worth knowing before reading a build failure in any run this
+  app spawns as evidence about the tree — the same class of trap as the bare
+  `npm ci` that silently skips devDependencies under this image's
+  `NODE_ENV=production`.
 - **The Live from runs card in a browser, fed by a real telemetry-enabled run.**
   Its query was driven against a real database through the real ingest route and
   its markup was rendered and read, but the batches were synthesised from the
@@ -887,11 +992,62 @@ through before trusting this unattended:
   run. The cheapest way to exercise it is to delete a mount from
   `WORKSPACE_ROOTS` between the pre-flight and the pass, which is not a thing an
   operator can do; short of that, read it rather than trust it.
+- **Everything about a saved agent that is not one of the seven probes above.**
+  No `claude` child has ever been spawned with either flag *from this app*: the
+  probes were run by hand, outside it. No browser has rendered the run form's
+  *Agent* row, the Settings default, the canvas inspector, the chat's `@`
+  popover, the *Agent work* card or the dashboard's origin marks, and no request
+  has created, edited or deleted a row over HTTP — which matters more than usual,
+  because `/api/agents` is the only way to define one at all. Four specific
+  things are still open, each of which changes what a page says rather than what
+  it does:
+  - **The two remaining drops.** An empty name registering as an empty entry, and
+    a `--agents` value that is not JSON being ignored outright, were both
+    measured under `--agents` alone and have not been re-checked under `--agent`.
+    Wrong either way, the refusal is stricter than it needs to be — the safe
+    direction, and still a form saying no for a reason that has stopped being
+    true.
+  - **Whether a `--agent` session records that agent's name on its own turns**,
+    or leaves them in `(main thread)`. `byAgent` and `agentSpend` report whatever
+    the transcript says and infer nothing, so this decides what the two cards
+    read and no branch depends on the answer. Both now say so in words rather
+    than waiting on it: the run's *Agent work* card names what the run was
+    started as and states that the rows may sit wholly under that name or wholly
+    under `(main thread)`, and the dashboard's column is *Agent* rather than
+    *Sub-agent* with a footnote saying `(main thread)` is a turn carrying no
+    agent name. Either answer leaves both correct, which is the point — what
+    would have been wrong is a card whose wording only made sense under one.
+  - **Whether a `--agent` session delegates at all.** If it does, the forwarding
+    and the split cover it unchanged; if it does not, that machinery goes quiet
+    rather than wrong. The ambient definitions reach it either way.
+  - **Whether a member's own `tools` list would beat the `PROCESS_KILLERS` deny.**
+    Deny is verified to beat `--permission-mode` for the main thread and has been
+    watched against nothing else. It is why the field is refused at save rather
+    than stored and narrowed, under either flag.
+- **Declaring the `settings.json` `agent` key, which is measured (see *Verified*)
+  and deliberately not built.** The fact belongs in the same sentence the ambient
+  definitions get — the registry is a part of the set and not the whole of it —
+  and it is more than a sentence, which is why it is written down instead. What
+  it would take: a read of `$CLAUDE_CONFIG_DIR/settings.json` in `agents.ts`
+  beside `listAmbientAgents` (try/catch to null, that function's rule, since it
+  feeds copy rather than a decision); a field on `GET /api/agents` beside
+  `agents` and `ambient`, and its DTO; a second argument on
+  `describeAmbientAgents` and its four call sites. The awkward half is the copy
+  rather than the plumbing: that sentence sits under a *picker*, and choosing an
+  agent there is exactly what overrides the key — so it would have to be
+  conditional on the control's current value to avoid being false half the time,
+  while the two children where the key actually bites, a chat turn and a review,
+  have no picker to hang it on. The cheap first move is probably not the picker
+  at all but the Settings page, where the app already declares the ambient set
+  once and where "your `~/.claude` starts every agentless child as *X*" is a true
+  sentence with no control to contradict it.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
-work cycle spawns with, the GitHub credentials handed to a work cycle, how a
+work cycle spawns with, the GitHub credentials handed to a work cycle, that a
+work cycle started as a saved agent both defines and selects it and moves none of
+what bounds the run, how a
 run's diff is parsed and budgeted, whether a saved graph of run blocks can run at
 all and the order its runs are created in, when a branch may be landed, what a
 queued merge does with the branch it reaches, what counts as a conflict marker — both

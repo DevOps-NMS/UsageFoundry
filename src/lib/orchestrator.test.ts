@@ -1162,50 +1162,66 @@ describe("buildArgs", () => {
   }
 
   /**
-   * A specialised agent reaches a work cycle as one `--agents` pair, and the
-   * branch that matters is the one where there is nothing to attach.
+   * A chosen agent reaches a work cycle as **two** flags, and the branch that
+   * matters is still the one where there is nothing to attach.
    *
-   * Both directions are silent. An agent attached wrongly is dropped by the CLI
-   * with a zero exit and no warning, leaving a run that looks exactly like a run
-   * that was never given one; a flag emitted when nothing was chosen is an empty
-   * object where every existing run used to have no flag at all. Neither shows
-   * up in the event log, the cost or the transcript — `attributionAgent` simply
-   * never names it.
+   * The pair is not redundant and neither half can be dropped. `--agents`
+   * defines the member and `--agent` selects it, and a name that nothing on the
+   * argv defined is not merely ignored — measured on the pin, `claude --agent
+   * <unregistered>` exits non-zero before making any API call, so a work cycle
+   * that emitted only the name would die at the spawn on every iteration.
+   *
+   * The empty branch is the other direction and is still silent: a flag emitted
+   * when nothing was chosen is an empty object where every existing run had no
+   * flag at all, and under the singular semantics it would be worse than that —
+   * `--agent` with no name is an argv the CLI rejects.
    */
+  const reviewer = {
+    name: "reviewer",
+    description: "reads diffs",
+    prompt: "You review.",
+    model: null,
+  };
+
   it("attaches nothing when no agent was chosen", () => {
-    assert.equal(buildArgs({ ...base, isolated: true }).includes("--agents"), false);
-    assert.equal(
-      buildArgs({ ...base, isolated: true, agents: [] }).includes("--agents"),
-      false,
-    );
+    for (const agent of [undefined, null]) {
+      const args = buildArgs({ ...base, isolated: true, agent });
+      assert.equal(args.includes("--agents"), false);
+      assert.equal(args.includes("--agent"), false);
+    }
   });
 
-  it("attaches a chosen agent as one --agents pair", () => {
-    const args = buildArgs({
-      ...base,
-      isolated: true,
-      agents: [
-        { name: "reviewer", description: "reads diffs", prompt: "You review.", model: null },
-      ],
-    });
-    const at = args.indexOf("--agents");
-    assert.notEqual(at, -1);
-    assert.deepEqual(JSON.parse(args[at + 1]), {
+  it("defines the chosen agent and selects it as the session's own", () => {
+    const args = buildArgs({ ...base, isolated: true, agent: reviewer });
+
+    const defined = args.indexOf("--agents");
+    assert.notEqual(defined, -1, "the definition has to travel for the name to resolve");
+    assert.deepEqual(JSON.parse(args[defined + 1]), {
       reviewer: { description: "reads diffs", prompt: "You review." },
     });
+
+    // The half that is the whole point of the change: the run *is* the agent
+    // rather than being offered it as a specialist to delegate to.
+    const selected = args.indexOf("--agent");
+    assert.notEqual(selected, -1, "the run must be started as the agent, not offered it");
+    assert.equal(args[selected + 1], "reviewer");
+    // The name it selects must be the name it defined, or the spawn fails.
+    assert.deepEqual(Object.keys(JSON.parse(args[defined + 1])), [args[selected + 1]]);
   });
 
   /**
-   * An agent is offered, never imposed, and it bounds nothing. The deny list is
-   * what stands between an agent and the process supervising it, and attaching a
-   * specialist must not be a way around it — so the same assertions the modes
-   * above make are made again with one attached.
+   * Selecting an agent bounds nothing, and that is the assertion this whole
+   * feature rests on. The deny list is what stands between an agent and the
+   * process supervising it; the isolation grant is what lets an isolated run
+   * obey the preamble ordering it to commit. Neither is the agent's to move, so
+   * the same assertions the modes above make are made again with one selected.
    */
   it("changes none of what bounds the run", () => {
-    const agents = [
-      { name: "reviewer", description: "reads diffs", prompt: "You review.", model: "sonnet" },
-    ];
-    const args = buildArgs({ ...base, isolated: true, agents });
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      agent: { ...reviewer, model: "sonnet" },
+    });
     assert.deepEqual(
       args.slice(args.indexOf("--disallowedTools") + 1, args.indexOf("--disallowedTools") + 3),
       ["Bash(pkill:*)", "Bash(killall:*)"],
@@ -1215,9 +1231,74 @@ describe("buildArgs", () => {
       ["Bash(git add:*)", "Bash(git commit:*)"],
     );
     assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
-    // `--agent` sets the session's *own* agent, which is a different feature
-    // and a different decision. Only the plural flag is wired.
-    assert.equal(args.includes("--agent"), false);
+  });
+
+  /**
+   * The one field whose *meaning* the singular flag changed.
+   *
+   * An agent's `model` was the model a delegated sub-turn ran on; selected with
+   * `--agent` it is the session's, which would make it a second place to set the
+   * run's model — the thing `run_templates` refuses on the grounds that
+   * `settings.defaultModel` is the single one. What stops it being that is
+   * measured off the `init` event: an explicit `--model` outranks the agent's,
+   * so the agent's fills a gap the run left rather than overriding a choice the
+   * operator made. This pins our half — that a run with a model of its own still
+   * emits it, and emits it unchanged, when an agent naming another is selected.
+   */
+  it("still sends the run's own model when the agent names a different one", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      model: "opus",
+      agent: { ...reviewer, model: "sonnet" },
+    });
+    assert.equal(args[args.indexOf("--model") + 1], "opus");
+    // And the agent's own model still travels inside the definition, which is
+    // what a run that named no model of its own would then run on.
+    const defined = JSON.parse(args[args.indexOf("--agents") + 1]);
+    assert.equal(defined.reviewer.model, "sonnet");
+  });
+
+  /**
+   * The one that would be expensive and silent, and the reason this argv was
+   * measured against the pin rather than reasoned about.
+   *
+   * `--append-system-prompt` carries `SELF_HOSTING_NOTICE` — the explanation of
+   * the `pkill` deny list *and the safe recipe that replaces it* — and an agent
+   * carries a system prompt of its own. If selecting one displaced the appended
+   * text, a run started as an agent would be a run that had never been told why
+   * a name-matched kill is denied or what to do instead, which is the failure
+   * that ended a container and fourteen runs. Verified on 2.1.226: an agent
+   * asked to echo a secret word stated only in the appended text answered with
+   * it, so the two coexist. This pins our half — that the flag is still emitted,
+   * and still emitted with the notice on it, when an agent is selected.
+   */
+  it("still carries the self-hosting notice when the run is an agent", () => {
+    for (const agent of [null, reviewer]) {
+      const args = buildArgs({ ...base, isolated: true, agent });
+      const at = args.indexOf("--append-system-prompt");
+      assert.notEqual(at, -1, "the notice must survive being started as an agent");
+      assert.match(args[at + 1], /next-server/);
+      assert.match(args[at + 1], /pgrep -P/);
+    }
+  });
+
+  /**
+   * Cycle 2 and every cycle after it. The loop resumes a session rather than
+   * opening one, and an agent that only reached the first cycle would be a run
+   * that silently stopped being the thing it was started as, part-way through.
+   * Verified on the pin that `--agent` and `--resume` coexist; this pins that
+   * both are emitted together.
+   */
+  it("selects the agent on a resumed cycle too", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      agent: reviewer,
+      resumeSessionId: "sess-1",
+    });
+    assert.equal(args[args.indexOf("--resume") + 1], "sess-1");
+    assert.equal(args[args.indexOf("--agent") + 1], "reviewer");
   });
 
   /**
@@ -1647,7 +1728,7 @@ describe("failed tool results", () => {
     assert.equal(onMessage.parentToolUseId, "toolu_task");
 
     // The main thread's own failure carries neither key, so nothing downstream
-    // can attribute it to a specialist that was never asked.
+    // can attribute it to a sub-agent that was never asked.
     const [own] = toolResultFailures(userEvent(block), delegated);
     assert.equal(own.parentToolUseId, undefined);
     assert.equal(own.subagent, undefined);

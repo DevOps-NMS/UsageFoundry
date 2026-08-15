@@ -105,8 +105,8 @@ export interface Settings {
    * is deleted afterwards the form says so and starts with none, because the
    * alternative is a new-run page nobody can use until they visit Settings. That
    * is not the "never fall back to none" rule bending: that rule is about a run
-   * whose operator *named* a specialist, and a pre-filled field nobody has
-   * looked at is not a naming. Everything downstream is unchanged — the run door
+   * whose operator *named* an agent, and a pre-filled field nobody has looked
+   * at is not a naming. Everything downstream is unchanged — the run door
    * still refuses a deleted agent by name through `agentRefusal`.
    */
   defaultAgentId: string | null;
@@ -143,15 +143,59 @@ export interface Settings {
    */
   forwardSubAgentText: boolean;
   /**
-   * How many runs may be active at once. Null means no limit.
+   * How many **work cycles** may be running at once. Null means no limit.
    *
    * A concurrency knob, not a usage ceiling — the no-default-ceilings rule
    * above does not apply, because unlike a limit this number is not a guess at
    * something Anthropic knows and we do not. It does move the spend bound
    * though: each run carries its own `maxRunCostUSD`, so N runs can overshoot
    * by N work cycles rather than one.
+   *
+   * It ships as a **number**, and that is the difference between this and every
+   * ceiling in this file. A ceiling is left null because we would be guessing at
+   * a figure Anthropic publishes nowhere; there is no guess in a *host* limit —
+   * how many Node processes a container can carry is a property of the machine,
+   * and `null` meant a fresh install had no bound on the fleet at all. 4 is
+   * chosen against the memory limit `docker-compose.yml` now ships (10 GiB) at
+   * roughly 1.5 GiB for a work cycle — the CLI child plus the builds, test
+   * suites and dev servers the agent starts inside it — leaving room for the
+   * server and for `maxConcurrentAssists` below. That per-child figure is
+   * reasoned rather than measured, and README's sizing table carries the
+   * arithmetic for raising it. `null` is still available and is now what it
+   * always read as: an explicit opt-out.
+   *
+   * What it does **not** cover is the other three kinds of `claude` child, which
+   * are `maxConcurrentAssists`. Splitting them rather than sharing one number is
+   * what keeps a chat turn from eating a run's slot, and it is why the ceiling
+   * on this container is the *sum* of the two.
    */
   maxConcurrentRuns: number | null;
+  /**
+   * How many `claude` children that are **not** work cycles may run at once.
+   * Null means no limit.
+   *
+   * Four callers, one budget: a review, a merge-conflict resolution, an
+   * orchestrator-chat turn and a workflow orchestrator block's deciding turn.
+   * They already share one door — `assistRefusal()` in `review.ts`, which every
+   * one of them passes through — so the count is read there rather than in four
+   * places that would drift.
+   *
+   * A cap that covered work cycles alone did not bound the host: a fleet of 25
+   * runs can carry an orchestrator turn per `thinking` block and a turn per open
+   * chat on top of it, each a full Node process. 2 is chosen against the same
+   * 10 GiB compose limit at roughly 0.5 GiB each — cheaper than a work cycle
+   * because none of the four builds anything (a review runs `--permission-mode
+   * plan` and cannot write at all).
+   *
+   * The three kinds with a person in front of them are **refused** when it is
+   * full, because they have an error channel and a sentence is what a person
+   * needs. A block's deciding turn is instead left `waiting` for the next
+   * advance, because failing it ends the branch of the graph behind it — and a
+   * transient shortage of memory is not a decision about the work. Whatever
+   * frees a slot wakes it: `settleBlock` already advances, and `review.ts` and
+   * `chat.ts` advance when their own children settle.
+   */
+  maxConcurrentAssists: number | null;
   /**
    * Gitignored files copied into a fresh checkout, newest-wins glob order.
    *
@@ -425,7 +469,8 @@ const DEFAULTS: Settings = {
   continuationPrompt: DEFAULT_CONTINUATION_PROMPT,
   includeSidechains: true,
   forwardSubAgentText: true,
-  maxConcurrentRuns: null,
+  maxConcurrentRuns: 4,
+  maxConcurrentAssists: 2,
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,
   continuedWorkPrompt: DEFAULT_CONTINUED_WORK_PROMPT,

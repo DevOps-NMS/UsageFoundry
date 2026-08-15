@@ -130,8 +130,8 @@ export async function PUT(req: Request) {
       // Refused here rather than stored and discovered later, which is
       // `normalizeTemplateInput`'s rule: this is the door with a person behind
       // it and an error channel, and a default that names an agent Claude Code
-      // would drop in silence is a form that pre-fills a specialist no run will
-      // ever have. `agentRefusal` is the one wording, so this says what the run
+      // will not register is a form that pre-fills a run which dies at the
+      // spawn. `agentRefusal` is the one wording, so this says what the run
       // door and the template door say.
       const refusal = agentRefusal(id, agentKnowledgeOf(getAgent(id)));
       if (refusal) return NextResponse.json({ error: refusal }, { status: 400 });
@@ -169,6 +169,15 @@ export async function PUT(req: Request) {
     // Blank means no limit, matching every other switchable rule. Floor at 1 so
     // a typed 0 cannot wedge every run behind a cap nothing can satisfy.
     patch.maxConcurrentRuns = n === null ? null : Math.max(1, Math.floor(n));
+  }
+
+  if ("maxConcurrentAssists" in body) {
+    const n = optionalNumber(body.maxConcurrentAssists);
+    // Same two rules as the cap above, and the floor of 1 matters more here: a
+    // 0 would wedge every review, resolution and chat turn behind a budget
+    // nothing can satisfy, and leave a workflow's deciding blocks `waiting`
+    // for a slot that can never come free.
+    patch.maxConcurrentAssists = n === null ? null : Math.max(1, Math.floor(n));
   }
 
   if ("isolationCopyGlobs" in body) {

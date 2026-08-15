@@ -82,12 +82,20 @@ function ceilingDetail(
 const DIMENSIONS = ["model", "project", "effort", "agent", "skill"] as const;
 type Dimension = (typeof DIMENSIONS)[number];
 
-/** One name per slice, read by the picker and by the table's own column head. */
+/**
+ * One name per slice, read by the picker and by the table's own column head.
+ *
+ * `agent` was "Sub-agent" while the only way a name reached `attributionAgent`
+ * was a turn the main thread handed off. A run can now be *started as* an agent,
+ * so a name in this column need not be a sub-agent at all — and the word has to
+ * stop asserting that it is, because the arithmetic underneath cannot tell the
+ * two apart and never tries to. It groups on whatever the CLI wrote.
+ */
 const DIMENSION_LABEL: Record<Dimension, string> = {
   model: "Model",
   project: "Project",
   effort: "Effort",
-  agent: "Sub-agent",
+  agent: "Agent",
   skill: "Skill",
 };
 
@@ -366,15 +374,22 @@ export default function Dashboard() {
       agent: {
         // The bucket is still whatever the CLI recorded on the turn; the chip
         // says where this install found a definition for that name. Nothing
-        // about the registry moves a dollar between rows.
+        // about the registry moves a dollar between rows, and neither does
+        // starting a run as an agent — this app never infers a bucket.
         rows: s.byAgent.map((r) => ({
           label: r.agent,
           cost: r.agg.costUSD,
           mark: agentOriginBadge(r.origin),
         })),
+        // `(main thread)` is the bucket whose meaning moved. It was "not an
+        // agent"; it is now "no agent name on the turn", which a run started as
+        // one may or may not land in — unmeasured, and nothing here branches on
+        // the answer. Saying so is what stops a column of agent names reading as
+        // proof of delegation, and an all-main-thread column reading as proof
+        // that no run was ever started as anything.
         hint: data.meta.includeSidechains
-          ? "Unmarked names have no definition here — a Claude Code built-in, a repository's own .claude/agents, or an agent since deleted."
-          : "Sub-agent turns are excluded from totals in Settings, so only main-thread work appears here.",
+          ? "Unmarked names have no definition here — a Claude Code built-in, a repository's own .claude/agents, or an agent since deleted. (main thread) is a turn Claude Code recorded no agent name on, which may include a run started as one."
+          : "Sub-agent turns are excluded from totals in Settings. A name can still appear here: a session started as an agent may record that name on its own turns.",
       },
       skill: {
         rows: s.bySkill.map((r) => ({ label: r.skill, cost: r.agg.costUSD })),

@@ -32,8 +32,8 @@ import {
   agentDefinition,
   agentKnowledgeOf,
   agentRefusal,
-  agentsArgs,
   getAgent,
+  sessionAgentArgs,
   type AgentDefinition,
   type RegistryAgent,
 } from "./agents";
@@ -154,12 +154,12 @@ export interface ChatProposalRow {
   /** Null when the proposal runs under `settings.chatDefaultGuards` instead. */
   template_id: string | null;
   /**
-   * The saved agent this run may hand a subtask to, by id, or null.
+   * The saved agent this run is started as, by id, or null.
    *
    * An id rather than a copy — see the column note in `db.ts` — and on the
    * *work* side of the proposal beside the task and the folder, never on the
    * guard side: an agent holds no tool list and no permission mode, so naming
-   * one decides who does a piece of the work and never what the run may do.
+   * one decides who the run *is* and never what the run may do.
    */
   agent_id: string | null;
   title: string;
@@ -351,7 +351,7 @@ export interface ProposalInput {
   kind?: ProposalKind;
   /** Null runs it under the operator's untemplated guard set. */
   templateId: string | null;
-  /** A saved agent the run may delegate to, by id. Null is the ordinary run. */
+  /** A saved agent the run is started as, by id. Null is the ordinary run. */
   agentId?: string | null;
   title: string;
   task: string;
@@ -428,16 +428,16 @@ export type ProposalPlan =
  * *is* the half of a run a model may write. A proposal can therefore replace
  * the template's prompt for one run, and the card says when it did.
  *
- * **The specialist is the second exception and is not one either.** A saved
- * agent is a description and a prompt: the registry refuses a tool list at the
- * door and has no column for a permission mode, so naming one is the same class
- * of act as writing the task text beside it — it decides *who* does a piece of
- * the work, and every guard below still comes from the template or from
- * settings. It is resolved by the caller for the reason the template is, so this
- * function stays pure, and a named agent that has gone is refused **by name**
- * rather than falling back to none: the operator approved the card that said
- * "and hand the review to the reviewer", and a run that silently has no
- * specialist is bit-for-bit a run that was never given one.
+ * **The agent is the second exception and is not one either.** A saved agent is
+ * a description and a prompt: the registry refuses a tool list at the door and
+ * has no column for a permission mode, so naming one is the same class of act as
+ * writing the task text beside it — it decides *who the run is*, and every guard
+ * below still comes from the template or from settings. It is resolved by the
+ * caller for the reason the template is, so this function stays pure, and a
+ * named agent that has gone is refused **by name** rather than falling back to
+ * none: the operator approved the card that said "as the reviewer", and a run
+ * that silently is not the reviewer is bit-for-bit a run that was never given
+ * one.
  */
 export function planProposal(
   proposal: Pick<
@@ -1500,14 +1500,20 @@ export interface OrchestratorChildOptions {
    */
   cwd?: string;
   /**
-   * Specialised agents this turn may delegate to.
+   * The agent this turn **is**, or null.
    *
-   * Offered, never imposed — `buildArgs` says why `--agent` is not the flag
-   * used. Nothing here widens the turn's boundary: its tool surface is still
-   * whatever `/api/mcp` publishes for its subject, and a delegated turn's spend
-   * still lands inside `--max-budget-usd` below.
+   * Selected rather than offered — `sessionAgentArgs` emits the definition and
+   * picks it by name, so the saved prompt is the turn's own. Nothing here widens
+   * the turn's boundary: its tool surface is still whatever `/api/mcp` publishes
+   * for its subject, `--strict-mcp-config` and the capability token are
+   * untouched, and the spend still lands inside `--max-budget-usd` below.
+   *
+   * Only one of this function's two callers ever passes one. A workflow's
+   * orchestrator block hands over the agent its node names, which is the whole
+   * point of that field; `runTurn` withholds one, and the note there is the
+   * reason rather than an omission.
    */
-  agents?: AgentDefinition[];
+  agent?: AgentDefinition | null;
   /** `--max-budget-usd`, the only thing bounding the spend inside the CLI. */
   maxBudgetUSD: number | null;
   timeoutMs: number;
@@ -1604,9 +1610,12 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
       if (fs.existsSync(mount.path)) args.push("--add-dir", mount.path);
     }
 
-    // One encoder for all four spawn sites — every way of getting this shape
-    // wrong is silent, so there is one place that knows it.
-    args.push(...agentsArgs(o.agents ?? []));
+    // One encoder for every spawn site, so there is one place that knows the
+    // shape — silent when a member is only offered, a failed spawn when it is
+    // selected. The appended system prompt above still reaches a session started
+    // this way (measured on the pin), which is what keeps the boundary this
+    // child is bounded by in front of it.
+    args.push(...sessionAgentArgs(o.agent));
 
     if (o.resumeSessionId) args.push("--resume", o.resumeSessionId);
     if (settings.defaultModel) args.push("--model", settings.defaultModel);
@@ -1676,44 +1685,45 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
 }
 
 /**
- * One chat turn: the shared child, wired to this chat's row.
+ * One chat turn: the shared child, wired to this chat's row — and the one caller
+ * of `runOrchestratorChild` that names no agent.
  *
- * Everything that decides what the child *is* now lives in
- * `runOrchestratorChild`; what is left here is what makes it a conversation —
- * the session to resume, the registry an operator's Stop reaches into, and the
- * row the answer lands on.
+ * Everything that decides what the child *is* lives in `runOrchestratorChild`;
+ * what is left here is what makes it a conversation — the session to resume, the
+ * registry an operator's Stop reaches into, and the row the answer lands on.
  *
- * **No `agents` is passed, and that is a decision rather than an omission.**
- * The plumbing is right there — `runOrchestratorChild` takes them, and a
- * workflow's orchestrator block hands it the one its node names — so what
- * follows is why the chat does not.
+ * **The withholding is deliberate, and the singular flag makes it more so.** The
+ * plumbing is right there: `runOrchestratorChild` takes an `agent`, and a
+ * workflow's orchestrator block hands it the one its node names.
  *
- * This is the only child in the app whose boundary is *prose*. It runs
- * `bypassPermissions` with no allowlist, so the paragraph in `systemPrompt`
- * saying look-do-not-build is the whole of what stands between an orchestrator
- * and an agent that fixes the bug it was asked to write a proposal about. That
- * paragraph travels as `--append-system-prompt`, which is the *main thread's*
- * system prompt; a `--agents` member carries a system prompt of its own for the
- * turn it is delegated, and whether the appended text reaches that turn as well
- * is **not verified against the pin**. Every other child can absorb the
- * question, because what bounds it is a permission mode and two tool lists that
- * a delegated turn plainly does inherit — this one cannot, and the safe reading
- * of an unverified inheritance is that it does not hold.
+ * While the flag was `--agents` the reason was a doubt — a member carries a
+ * system prompt of its own, and whether `--append-system-prompt` also reached
+ * the turn it was delegated was not verified against the pin, which mattered
+ * here and nowhere else because this is the only child whose boundary is
+ * *prose*. That doubt is now measured and gone: an agent told to reply with a
+ * secret word stated only in the appended text replied with it, so the appended
+ * prompt reaches a `--agent` session alongside the agent's own.
  *
- * The second half is that there is no work here for a specialist to do. A chat
- * turn looks and proposes; it produces a `chat_proposals` row and a sentence.
- * What an agent would change is how the orchestrator *thinks*, which is the one
- * thing `systemPrompt` fixes deliberately — so the feature would be a second,
- * unreviewed system prompt inside the child that has no other boundary, bought
- * for no capability the turn is missing.
+ * What replaces it is the stronger half of the same argument, and it is not a
+ * doubt. This child runs `bypassPermissions` with no allowlist, so
+ * `systemPrompt()`'s look-do-not-build paragraph is the whole of what stands
+ * between an orchestrator and an agent that fixes the bug it was asked to write
+ * a proposal about. Selecting an agent here would make some saved prompt the
+ * orchestrator's own role — reachable from a registry a chat proposal can
+ * name — which is precisely what that paragraph exists to prevent, and no
+ * measurement can make it safe.
+ *
+ * The second half is unchanged: there is no work here for one to do. A chat turn
+ * looks and proposes; it produces a `chat_proposals` row and a sentence, so what
+ * an agent would change is how the orchestrator *thinks*.
  *
  * A workflow's orchestrator block is not the counter-example it looks like: its
  * agent is one field on a graph a person saved and read as a whole, and what
  * that turn may *do* with it is bounded by `planEmission` and by guards off a
  * template rather than by prose. The `@`-mention in the composer is the answer
- * to what an operator actually wants here — it names the specialist the
- * proposed **run** carries, which is a fact about work that is approved before
- * it happens.
+ * to what an operator actually wants here — it names the agent the proposed
+ * **run** is started as, which is a fact about work that is approved before it
+ * happens.
  */
 function runTurn(chat: ChatRow, prompt: string): void {
   const settings = getSettings();
@@ -1914,6 +1924,17 @@ function finishTurn(chatId: string, r: TurnResult): void {
         .run(first.text.replace(/\s+/g, " ").slice(0, 80), chatId);
     }
   }
+
+  // This turn just gave a slot back to the process budget, and a block's
+  // deciding turn deferred by that budget is left `waiting` rather than failed —
+  // so whatever frees a slot has to wake it. `review.ts` carries the same four
+  // lines for the same reason, and for the same reason imports dynamically:
+  // `workflows.ts` imports this module.
+  void import("./workflows")
+    .then((m) => m.advanceInstances())
+    .catch(() => {
+      /* a workflow that cannot be advanced is not a reason to fail a turn */
+    });
 }
 
 /**
@@ -2008,9 +2029,9 @@ function systemPrompt(): string {
     "- list_workflows: the saved graphs the operator already has. Read it before",
     "  proposing a new one — the work may already be a workflow, and one running",
     "  now is worth mentioning rather than duplicating.",
-    "- list_agents: the saved specialists a run may hand a subtask to, and the",
-    "  agent definitions on this machine that this app did not save. The second",
-    "  group is in play for every run whatever you name and cannot be named.",
+    "- list_agents: the saved agents a run can be started AS, and the agent",
+    "  definitions on this machine that this app did not save. The second group",
+    "  is in play for every run whatever you name and cannot be named.",
     "",
     "When the operator writes @something in their message, they are naming a",
     "saved agent from that list: propose the work under it, using its agentId.",
@@ -2028,13 +2049,14 @@ function systemPrompt(): string {
     "- promptOverride replaces the template's prompt for that one run when it",
     "  does not fit. Use it rather than contradicting the template inside the",
     "  task, and say that you rewrote it.",
-    "- agentId names a saved specialist the run's Claude may hand a subtask to.",
-    "  Use it when the operator names one with @, or when a saved agent plainly",
-    "  fits the work; say which you used and why. It decides who does part of",
-    "  the work and never what the run may do — every guard is still the",
-    "  template's or the default set, so do not describe it as narrowing or",
-    "  widening anything. An agent that has been deleted is refused by name",
-    "  rather than dropped, so re-read list_agents rather than guessing an id.",
+    "- agentId names the saved agent the run is STARTED AS: that agent's prompt",
+    "  becomes the run's own, so the run does the whole job as it rather than",
+    "  handing part of the job to it. Use it when the operator names one with @,",
+    "  or when a saved agent plainly fits the work; say which you used and why.",
+    "  It decides who the run is and never what the run may do — every guard is",
+    "  still the template's or the default set, so do not describe it as",
+    "  narrowing or widening anything. An agent that has been deleted is refused",
+    "  by name rather than dropped, so re-read list_agents rather than guessing.",
     "- save_template writes a template's name and prompt back for reuse. It",
     "  cannot touch guards: creating one takes the default guard set, and",
     "  updating one keeps the guards it already has. Tell the operator to adjust",
@@ -2074,9 +2096,9 @@ function systemPrompt(): string {
     "  a graph, and the workflow is saved with no workflow-wide budget — tell the",
     "  operator to set one in the editor, because a workflow cannot be put on a",
     "  schedule without it.",
-    "- A block may name an agentId, the same specialist a proposed run may name",
-    "  and with the same effect: who does part of the work, never what the block",
-    "  may do. A merge block starts no agent, so naming one there is refused.",
+    "- A block may name an agentId, the same way a proposed run may and with the",
+    "  same effect: what that block's child is started as, never what the block",
+    "  may do. A merge block starts no child, so naming one there is refused.",
     "- Say what each block does and, for any orchestrator block, how many runs it",
     "  may start. That is the number the operator is agreeing to.",
     "",

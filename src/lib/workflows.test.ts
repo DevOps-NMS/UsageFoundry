@@ -62,7 +62,7 @@ const KNOWN: WorkflowKnowledge = {
   // The registry as a saved graph is measured against it. `a-broken` is the row
   // that has decayed into something the CLI would drop in silence — `rowToAgent`
   // reports rather than repairs, so a graph naming it has to be refused here
-  // too, or the block starts with a specialist that is simply not there.
+  // too, or the block starts as an agent the CLI cannot resolve.
   agents: new Map([
     ["a-rev", { name: "Reviewer", usable: true }],
     ["a-broken", { name: "Half a thing", usable: false }],
@@ -380,26 +380,26 @@ describe("normalizeWorkflowInput — templates and mounts", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* Specialists                                                         */
+/* Agents                                                              */
 /* ------------------------------------------------------------------ */
 
 /**
- * Who does a piece of a block's work, which is not what the block may do.
+ * What a block's own child *is*, which is not what that child may do.
  *
  * Every failure here is the one this app's whole agent registry exists to end,
- * arriving from a saved graph rather than from the CLI: a block given a
- * specialist it does not have is bit-for-bit a block that was never given one,
+ * arriving from a saved graph rather than from the CLI: a block given
+ * an agent it does not have is bit-for-bit a block that was never given one,
  * and nothing downstream can tell them apart — not the event log, not the cost,
  * not the transcript's own attribution. So a name that resolves to nothing is
  * refused rather than dropped, and it is refused *at save*, where a person is
  * looking, as well as at every Run afterwards.
  *
  * The merge case is the same fault in its cheapest form. That block spawns no
- * child at all, so a specialist named on it can never be handed anything —
+ * child at all, so an agent named on it has nothing to be —
  * accepting it silently would be this app performing the CLI's own silent drop
  * at the one door built to stop it.
  */
-describe("normalizeWorkflowInput — the agent a block may hand work to", () => {
+describe("normalizeWorkflowInput — the agent a block's child is started as", () => {
   it("carries an agent the registry has", () => {
     const v = value(graph([node("a", { agentId: "a-rev" })]));
     assert.equal(v.graph.nodes[0].agentId, "a-rev");
@@ -429,13 +429,13 @@ describe("normalizeWorkflowInput — the agent a block may hand work to", () => 
     assert.match(message, /a-gone/, "and names the id that resolved to nothing");
   });
 
-  it("refuses one that has decayed into what the CLI drops in silence", () => {
+  it("refuses one that has decayed into what the CLI will not register", () => {
     // `rowToAgent` reports rather than repairs, so an unusable row reaches here
-    // as a row that exists. Accepted, it would produce a block whose specialist
-    // is absent with nothing at all saying so.
+    // as a row that exists. Accepted, it would produce a block whose run is
+    // started as an agent the CLI cannot resolve, which fails at the spawn.
     const message = error(graph([node("a", { agentId: "a-broken" })]));
     assert.match(message, /Half a thing/);
-    assert.match(message, /without a word/);
+    assert.match(message, /will not register/);
   });
 
   it("lets an orchestrator block name one for its own deciding turn", () => {
@@ -446,7 +446,7 @@ describe("normalizeWorkflowInput — the agent a block may hand work to", () => 
   it("refuses one on a merge block, which spawns no child to hand it to", () => {
     // Refused rather than dropped, unlike the template on the same block: a
     // template there decides nothing because no agent runs under it, where a
-    // specialist named here is one the operator believes is in play.
+    // agent named here is one the operator believes is in play.
     const message = error(
       graph([node("a"), merger("m", { agentId: "a-rev" })], [edge("a", "m")]),
     );
@@ -1211,9 +1211,9 @@ describe("planWorkflowProposal — a graph a model wrote becomes a saved workflo
     ]);
   });
 
-  it("keeps a block's specialist, and takes no guard from it", () => {
-    // The chat may name who does a piece of the work. It may not name what the
-    // block is allowed to do — so the saved node carries the agent and every
+  it("keeps a block's agent, and takes no guard from it", () => {
+    // The chat may name what the block's child is. It may not name what that
+    // child is allowed to do — so the saved node carries the agent and every
     // guard beside it is still the template's id and nothing else.
     const plan = planWorkflowProposal(
       proposal([node("a", { agentId: "a-rev" })]),
@@ -1227,7 +1227,7 @@ describe("planWorkflowProposal — a graph a model wrote becomes a saved workflo
   it("refuses an agent deleted since the proposal was written, by name", () => {
     // The template's rule one field over, and the same window: the model wrote
     // the card, the operator tidied the registry, then clicked. Falling back to
-    // no specialist would start the run the card described as the reviewer's
+    // no agent would start the run the card described as the reviewer's
     // with nothing to say it had not been.
     const gone: WorkflowKnowledge = { ...KNOWN, agents: new Map() };
     const plan = planWorkflowProposal(
@@ -1240,8 +1240,8 @@ describe("planWorkflowProposal — a graph a model wrote becomes a saved workflo
 
   it("refuses an agent the CLI would drop, and one named on a merge block", () => {
     // Both are the same failure arriving from different directions: a block
-    // whose specialist is silently absent, and a block that has no child to
-    // hand a subtask to at all.
+    // whose agent the CLI will not register, and a block with no child for
+    // an agent to be at all.
     const decayed = planWorkflowProposal(
       proposal([node("a", { agentId: "a-broken" })]),
       KNOWN,
@@ -1317,10 +1317,10 @@ describe("summarizeProposedGraph — what the approval card has to show", () => 
     assert.equal(a.guardsLabel, "template deleted");
   });
 
-  it("names the specialist a block may hand a subtask to, apart from its guards", () => {
+  it("names the agent a block's child is started as, apart from its guards", () => {
     // Two fields rather than one string, because an agent bounds nothing: read
     // inside the guard clause it would claim to narrow what the block may do,
-    // which is the one thing about a specialist that is not true.
+    // which is the one thing about an agent that is not true.
     const [a] = summarizeProposedGraph(
       value(graph([node("a", { agentId: "a-rev" })])).graph,
       KNOWN,
@@ -1330,7 +1330,7 @@ describe("summarizeProposedGraph — what the approval card has to show", () => 
     assert.equal(a.guardsLabel, "Isolated");
   });
 
-  it("says nothing about a specialist where none was named", () => {
+  it("says nothing about an agent where none was named", () => {
     const [a] = summarizeProposedGraph(
       value(graph([node("a")])).graph,
       KNOWN,
@@ -1498,17 +1498,17 @@ describe("planEmission — which specs become runs", () => {
   });
 
   /* ---------------------------------------------------------------- */
-  /* …and who they may hand a subtask to                               */
+  /* …and who each of them is started as                              */
   /* ---------------------------------------------------------------- */
 
-  it("accepts a specialist the registry has, in the registry's own spelling", () => {
+  it("accepts an agent the registry has, in the registry's own spelling", () => {
     // The name is the key of the object `--agents` takes and the string a
     // transcript attributes a delegated turn to, so what reaches the run is
     // what the operator saved rather than the turn's approximation of it.
     assert.equal(emitted([spec("a", { agent: "reviewer" })])[0].agent, "Reviewer");
   });
 
-  it("refuses a specialist this install does not have, by the name it asked for", () => {
+  it("refuses an agent this install does not have, by the name it asked for", () => {
     // Refused rather than dropped, beside the cap and the loop and for the same
     // reason: there is no person between this answer and the spawn, and a run
     // emitted "as the reviewer" that starts without one cannot be told
@@ -1524,7 +1524,7 @@ describe("planEmission — which specs become runs", () => {
     assert.match(reason, /missing its description or its prompt/);
   });
 
-  it("takes no specialist as the ordinary run", () => {
+  it("takes no agent as the ordinary run", () => {
     assert.equal(emitted([spec("a")])[0].agent, null);
     assert.equal(emitted([spec("a", { agent: "" })])[0].agent, null);
   });

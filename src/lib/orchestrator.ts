@@ -30,7 +30,7 @@ import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
 import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
-import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents";
+import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
 // The log's own extraction of what a tool call is about, so the parser retains
 // the same line for a call whose result comes back an error. Client-safe and
 // pure; the dependency runs the permitted way round.
@@ -180,9 +180,9 @@ export interface RunRow {
   spent_usd_est: number;
   spent_tokens_est: number;
   /**
-   * The specialised agent this run's main thread may delegate to, as the whole
-   * JSON definition rather than an id — see the column note in `db.ts`. Null is
-   * the ordinary run. Read through `parseRunAgent`, never parsed at a call site.
+   * The agent this run was started **as**, as the whole JSON definition rather
+   * than an id — see the column note in `db.ts`. Null is the ordinary run. Read
+   * through `parseRunAgent`, never parsed at a call site.
    */
   agent: string | null;
 }
@@ -1693,7 +1693,7 @@ export interface CreateRunInput {
   /** Give this run its own checkout. Defaults on for a git repository. */
   isolate?: boolean;
   /**
-   * A specialised agent the run's main thread may hand a subtask to.
+   * The saved agent this run is started **as**.
    *
    * The whole definition, resolved from the registry by the caller — the door is
    * where an id becomes a definition or a refusal, exactly as it is where a
@@ -2184,12 +2184,13 @@ export function createRun(input: CreateRunInput): RunRow {
     }
     if (input.agent) {
       // Once, at creation, rather than per cycle: it is a fact about the run
-      // and not about a spawn. "may hand" rather than "runs as" is the literal
-      // truth of `--agents` — it offers the role to the delegating model, which
-      // is what a sub-agent is, and it bounds nothing about what the run may do.
+      // and not about a spawn. "runs as" is now the literal truth —
+      // `sessionAgentArgs` defines the member *and* selects it with `--agent`,
+      // so the saved prompt is this session's own. It still bounds nothing
+      // about what the run may do, which is the second sentence's whole job.
       log(
         id,
-        `Claude may hand a subtask to the “${input.agent.name}” agent. It changes who does a piece of the work, not what this run is allowed to do.`,
+        `This run is started as the “${input.agent.name}” agent, so its prompt is the run's own. It changes who the run is, not what this run is allowed to do.`,
         { agent: input.agent.name },
       );
     }
@@ -3032,7 +3033,7 @@ interface IterationResult {
   finalText: string;
   isError: boolean;
   /**
-   * `tool_use` block id → the specialist that `Task` call handed work to.
+   * `tool_use` block id → the sub-agent that `Task` call handed work to.
    *
    * Parser state rather than a result, and it lives here because this is the
    * only thing that survives from one line of the stream to the next: the id
@@ -3355,20 +3356,26 @@ export function buildArgs(opts: {
   maxRunCostUSD: number | null;
   spentGuardUSD: number;
   /**
-   * Specialised agents this run's main thread may delegate to.
+   * The agent this run **is**, or null for an ordinary run.
    *
-   * Attached rather than imposed: `--agents` *offers* these to the delegating
-   * model, which is what a sub-agent is. The CLI also has `--agent <name>`,
-   * which replaces the session's own main agent, and that is deliberately not
-   * wired here — it is a different feature answering a different question
-   * (which role does the run itself take, rather than which specialists it may
-   * hand a subtask to), and the description a saved agent carries exists only
-   * for the delegation this flag enables.
+   * This used to be a list, offered to the run's own main thread as specialists
+   * it might delegate to (`--agents` alone). It is now the session's own agent:
+   * `sessionAgentArgs` emits the definition *and* selects it by name, so the
+   * saved prompt is what this run opens with rather than a role it may hand a
+   * subtask to.
    *
-   * They bound nothing. What the run may do is the permission mode and the two
-   * lists below, exactly as before an agent was attached.
+   * **It bounds nothing, and the two measurements that make that true are worth
+   * having in front of anyone editing this function.** The permission mode, the
+   * isolation grant and the deny list below are unchanged by it, and the
+   * appended system prompt still arrives — verified on the pin, because the
+   * failure if it did not would be silent and expensive in both directions: an
+   * isolated run whose preamble stopped arriving finishes `completed` on a
+   * branch with no commits, and a run that never saw `SELF_HOSTING_NOTICE` is
+   * one that has not been told why `pkill` is denied or what to do instead.
+   * `--agent` also survives `--resume`, which is what makes it true of every
+   * cycle rather than only the first.
    */
-  agents?: AgentDefinition[];
+  agent?: AgentDefinition | null;
   /**
    * Forward what a delegated turn says into this run's own stream.
    *
@@ -3385,9 +3392,12 @@ export function buildArgs(opts: {
   if (opts.model) args.push("--model", opts.model);
   if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
   if (opts.forwardSubAgentText) args.push("--forward-subagent-text");
-  // One encoder for all four spawn sites, because every way of getting this
-  // shape wrong is silent — see `agentsFlagValue`.
-  args.push(...agentsArgs(opts.agents ?? []));
+  // One encoder for every spawn site, because every way of getting the shape
+  // wrong is silent when a member is merely offered and fails the spawn outright
+  // when it is selected — see `agentsFlagValue` and `sessionAgentArgs`. This
+  // sits above `--allowedTools` and `--append-system-prompt` rather than below
+  // for no reason but reading order; the CLI takes the flags in any order.
+  args.push(...sessionAgentArgs(opts.agent));
   // Additive: `--allowedTools` names what skips the prompt, and everything else
   // still follows the mode. It is not the allowlist `chat.ts` runs under, where
   // `manual` mode is what makes the same flag exhaustive.
@@ -4115,7 +4125,7 @@ function handleStreamLine(
           payload: { text: b.text },
         });
       } else if (b.type === "tool_use") {
-        // A `Task` call names the specialist it is handing work to, and its own
+        // A `Task` call names the sub-agent it is handing work to, and its own
         // block id is what every forwarded message from that sub-agent carries.
         // Recorded so those messages can be labelled; per cycle, because the
         // ids are.
@@ -4661,9 +4671,13 @@ export async function startRun(id: string): Promise<void> {
         maxRunCostUSD: policy.maxRunCostUSD,
         spentGuardUSD: spentGuardBeforeCycle,
         // The run's own frozen copy, so every cycle — including one a restart
-        // picks up hours later — is given exactly the specialist the operator
-        // started it with, whatever has happened to the registry since.
-        agents: runAgentDefinitions(run.agent),
+        // picks up hours later — opens as exactly the agent the operator started
+        // it with, whatever has happened to the registry since. A copy rather
+        // than an id is what makes that true, and it matters more now than it
+        // did while the definition was merely being offered: an agent deleted
+        // between cycle 3 and cycle 4 would leave cycle 4 selecting a name
+        // nothing defines, which the CLI refuses at the spawn.
+        agent: parseRunAgent(run.agent),
         // Off the same `settings` read every prompt on this run comes from, so
         // it is fixed for the segment rather than per cycle. It changes only
         // what reaches the log — it is not a capability, nothing acts on it,
@@ -5827,14 +5841,14 @@ export function reopenRun(
     };
   }
 
-  // The specialised agent is carried the same way and more simply: the `agent`
-  // column is not touched here at all, and there is no argument on this function
-  // and no field on the reopen route that could reach it. Same reasoning as
+  // The agent is carried the same way and more simply: the `agent` column is
+  // not touched here at all, and there is no argument on this function and no
+  // field on the reopen route that could reach it. Same reasoning as
   // `permissionMode` below — the operator answered that question when they
   // started the run, and picking it up again is not a second chance to answer
   // it. The definition is the run's own copy, so this is also the one path where
-  // a run whose agent has since been deleted still gets the specialist it ran
-  // with, rather than being refused or quietly losing it.
+  // a run whose agent has since been deleted is still picked up *as* the agent
+  // it ran as, rather than being refused or quietly losing it.
 
   // Carried from the stored blob rather than accepted from the caller: this
   // value reaches `--permission-mode` on a process that edits files, and
