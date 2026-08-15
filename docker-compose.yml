@@ -201,6 +201,21 @@ services:
       # reclaims it on every boot.
       - usagefoundry-data:/data
 
+      # Go's module and build cache (GOPATH and GOCACHE, both pointed here by
+      # the image). A named volume because the alternative is not "a slower
+      # first build" but the same download on every container: the default
+      # location is inside the writable layer, which `docker compose up --build`
+      # discards, so every agent working on a Go repository would re-fetch every
+      # dependency of every module after each upgrade — minutes of a billed work
+      # cycle, spent again each time.
+      #
+      # Not a bind mount, and not inside /data. A bind mount would put container
+      # uids on a host directory for a cache the operator never reads, and /data
+      # is root-owned 0700 precisely to keep the agents out — while this is the
+      # one directory they must be able to write. `down -v` destroys it, which is
+      # the correct treatment of a cache and the reason backups are not here.
+      - usagefoundry-gocache:/home/node/go
+
       # Where `scripts/backup-db.mjs` writes, and the one thing here that is
       # deliberately *not* the named volume above: a snapshot kept inside the
       # volume dies with `docker compose down -v`, which is the command this
@@ -296,3 +311,4 @@ services:
 
 volumes:
   usagefoundry-data:
+  usagefoundry-gocache:

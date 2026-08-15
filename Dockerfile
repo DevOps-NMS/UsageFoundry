@@ -136,6 +136,54 @@ RUN set -eux; \
     rm -rf /tmp/gh_*; \
     gh --version
 
+# Go, for the same reason as the compiler and `gh`: an agent pointed at a Go
+# repository otherwise discovers `go: command not found` inside a tool call, and
+# the run loop reads that as the agent deciding not to build. Installing it by
+# hand in a shell is not the fix it looks like — the writable layer survives a
+# `docker restart` and is discarded by the `docker compose up --build` this
+# project is deployed with, so the toolchain disappears on the next upgrade and
+# takes a working agent with it.
+#
+# Same shape as the `gh` block above and for the same reasons: the release
+# tarball rather than Debian's `golang` (which is versions behind and pulls a
+# second gcc toolchain), one layer, and a checksum verified against Google's
+# own published digest because this container holds credentials. The digest is
+# fetched per version rather than pinned here so `--build-arg GO_VERSION=` is
+# genuinely usable; `go.dev/dl/…` serves HTML for that path, `dl.google.com/go/`
+# serves the bare hash.
+ARG GO_VERSION=1.26.6
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) goarch=amd64 ;; \
+      arm64) goarch=arm64 ;; \
+      *) echo "no go release for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    cd /tmp; \
+    tarball="go${GO_VERSION}.linux-${goarch}.tar.gz"; \
+    curl -fsSL -O "https://dl.google.com/go/${tarball}"; \
+    sha="$(curl -fsSL "https://dl.google.com/go/${tarball}.sha256")"; \
+    echo "${sha}  ${tarball}" | sha256sum --check -; \
+    tar -C /usr/local -xzf "${tarball}"; \
+    rm "${tarball}"; \
+    /usr/local/go/bin/go version
+
+# Where Go keeps the two things it must not re-fetch on every run.
+#
+# Both default under `$HOME`, and `$HOME` here is the image's writable layer, so
+# an agent's first `go build` in a fresh container downloads every module of
+# every dependency again — minutes of a billed work cycle, repeated after each
+# `up --build`. Compose mounts a named volume over this directory to keep them.
+# `GOCACHE` is stated rather than left at `$HOME/.cache/go-build` so that one
+# mount covers both.
+#
+# `GOTOOLCHAIN` is left at its default (`auto`) on purpose: a repository whose
+# go.mod requires a newer Go than this image ships then fetches it itself, into
+# the same persisted module cache, rather than failing the cycle on a version
+# nobody here can predict.
+ENV PATH="/usr/local/go/bin:${PATH}" \
+    GOPATH=/home/node/go \
+    GOCACHE=/home/node/go/build-cache
+
 # The agent runs inside this container, so Claude Code has to be in the image.
 #
 # Pinned because the run loop parses this CLI's `stream-json` output and its
@@ -186,7 +234,15 @@ COPY scripts/backup-db.mjs scripts/restore-db.mjs ./scripts/
 # The other four are the bind mounts' mount points and still belong to `node`
 # (uid 1000): the host's own ownership covers them the moment compose mounts
 # over them, and 1000 is the default the children are dropped to.
+#
+# `/home/node/go` is the second named volume and carries the *opposite*
+# requirement to /data's: the children are the only thing that writes it, so it
+# ships owned by `node` — which is right exactly while `UF_AGENT_UID` is the
+# 1000 assumed here. `docker-entrypoint.sh` corrects it when it is not, for the
+# same reason it reclaims /data: the ownership a volume is created with is never
+# revisited.
 RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.claude \
+      /home/node/go/build-cache \
  && chown -R node:node /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
  && chown root:root /data \
  && chmod 0700 /data

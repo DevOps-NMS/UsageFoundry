@@ -24,4 +24,30 @@ if ! chown 0:0 /data 2>/dev/null || ! chmod 0700 /data 2>/dev/null; then
        "See docs/security.md." >&2
 fi
 
+# The same named-volume mechanics one requirement inverted: `/home/node/go` is
+# Go's module and build cache, and the *children* are what write it. The image
+# ships that directory owned by `node` (uid 1000), so a fresh volume is correct
+# only while UF_AGENT_UID is 1000 — set it to anything else and every `go build`
+# an agent runs fails on a cache directory it cannot write, inside a tool call
+# nothing here reads, which the run loop then files as the agent giving up.
+#
+# Guarded on the current ownership rather than run unconditionally, because this
+# one has to be recursive: a populated module cache is tens of thousands of
+# read-only files, and chowning them on every boot would sit in front of the
+# healthcheck's start period on every routine restart. Comparing the volume
+# root's uid:gid first makes the ordinary case a single stat.
+#
+# Skipped entirely when UF_AGENT_UID is unset, which is the "no privilege
+# separation" arrangement: the children are root there and root writes this
+# regardless of who owns it.
+GO_CACHE_VOLUME=/home/node/go
+if [ -n "${UF_AGENT_UID:-}" ] && [ -d "$GO_CACHE_VOLUME" ]; then
+  want="${UF_AGENT_UID}:${UF_AGENT_GID:-$UF_AGENT_UID}"
+  have="$(stat -c '%u:%g' "$GO_CACHE_VOLUME" 2>/dev/null || echo '')"
+  if [ "$have" != "$want" ] && ! chown -R "$want" "$GO_CACHE_VOLUME" 2>/dev/null; then
+    echo "[usagefoundry] cannot give $GO_CACHE_VOLUME to $want — an agent's" \
+         "\`go build\` will fail on a cache it cannot write." >&2
+  fi
+fi
+
 exec "$@"

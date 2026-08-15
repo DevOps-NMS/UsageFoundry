@@ -489,6 +489,22 @@ Built and exercised against real transcripts:
   of what was checked: a port binding is fixed when the container is created, so
   `docker compose restart` leaves the old one in place.
   What this does **not** establish is in the next section.
+- **Go in the image, and the cache volume that has to outlive a rebuild.**
+  `docker compose build` on an arm64 host: the release tarball downloaded, the
+  digest fetched from `dl.google.com/go/…` and `sha256sum --check` passed, and
+  the image answered `go version go1.26.6 linux/arm64` with `go env` reporting
+  `GOPATH=/home/node/go`, `GOMODCACHE=/home/node/go/pkg/mod`,
+  `GOCACHE=/home/node/go/build-cache` and `GOTOOLCHAIN=auto` — so one volume
+  covers both caches. The entrypoint's half was driven against a fresh named
+  volume with `UF_AGENT_UID=1001`: the first boot took the volume from
+  `1000:1000` to `1001:1001`, the second left it alone (the `stat` guard, which
+  is what keeps a populated cache off the boot path), and a `go build` run
+  `--user 1001:1001` against that volume compiled and ran, leaving 35 MB of
+  build cache behind in it. The `/data` warning printed by that last run is the
+  pre-existing one — `--user 1001` is not root — and not this.
+  What that leaves unchecked: the **amd64** branch of the arch case and its
+  digest, since the build ran on Apple silicon; and a real agent mid-cycle
+  building a Go repository, as opposed to a shell in the same image.
 
 ## Not yet verified by hand
 
