@@ -11,12 +11,15 @@ import {
 import { normalizePolicy } from "../../../lib/budget";
 import { agentKnowledgeOf, agentRefusal, getAgent } from "../../../lib/agents";
 import {
+  authEnabled,
   hasAdminKey,
   hasGithubToken,
   WORKSPACE_MOUNTS,
   WORKSPACE_ROOT,
   CLAUDE_HOME,
 } from "../../../lib/config";
+import { loginFailureSummary } from "../../../lib/loginAttempts";
+import { activeSessionCount } from "../../../lib/sessions";
 import { FIVE_HOURS_MS } from "../../../lib/windows";
 import { invalidatePlanUsage } from "../../../lib/planUsage";
 
@@ -35,6 +38,14 @@ export async function GET() {
       // tool call, so the only cheap way to know beforehand is to say here
       // whether the container was given a credential at all.
       githubTokenConfigured: hasGithubToken(),
+      authEnabled: authEnabled(),
+      // How many browser sign-ins are outstanding — a question that had no
+      // answer at all while the cookie was UF_AUTH_TOKEN itself.
+      activeSessions: authEnabled() ? activeSessionCount() : 0,
+      // Failed sign-ins, so a burst is visible after it happened. Nothing
+      // anywhere recorded that anybody had ever guessed at the token, which is
+      // half of what made an unbounded login route hard to notice.
+      signIn: loginFailureSummary(),
     },
   });
 }
@@ -130,8 +141,8 @@ export async function PUT(req: Request) {
       // Refused here rather than stored and discovered later, which is
       // `normalizeTemplateInput`'s rule: this is the door with a person behind
       // it and an error channel, and a default that names an agent Claude Code
-      // would drop in silence is a form that pre-fills a specialist no run will
-      // ever have. `agentRefusal` is the one wording, so this says what the run
+      // will not register is a form that pre-fills a run which dies at the
+      // spawn. `agentRefusal` is the one wording, so this says what the run
       // door and the template door say.
       const refusal = agentRefusal(id, agentKnowledgeOf(getAgent(id)));
       if (refusal) return NextResponse.json({ error: refusal }, { status: 400 });
@@ -169,6 +180,15 @@ export async function PUT(req: Request) {
     // Blank means no limit, matching every other switchable rule. Floor at 1 so
     // a typed 0 cannot wedge every run behind a cap nothing can satisfy.
     patch.maxConcurrentRuns = n === null ? null : Math.max(1, Math.floor(n));
+  }
+
+  if ("maxConcurrentAssists" in body) {
+    const n = optionalNumber(body.maxConcurrentAssists);
+    // Same two rules as the cap above, and the floor of 1 matters more here: a
+    // 0 would wedge every review, resolution and chat turn behind a budget
+    // nothing can satisfy, and leave a workflow's deciding blocks `waiting`
+    // for a slot that can never come free.
+    patch.maxConcurrentAssists = n === null ? null : Math.max(1, Math.floor(n));
   }
 
   if ("isolationCopyGlobs" in body) {
@@ -212,6 +232,17 @@ export async function PUT(req: Request) {
     // Code writes to it. Not a breach of "blank disables a guard" — that rule
     // is about budget rules, and this is a cadence.
     patch.liveGuardIntervalSeconds = n === null ? 60 : Math.max(15, Math.floor(n));
+  }
+
+  if ("maxCycleSilenceMinutes" in body) {
+    const n = optionalNumber(body.maxCycleSilenceMinutes);
+    // Blank restores the default rather than meaning "no deadline", for the
+    // reason above and one more: a work cycle with no deadline is the defect
+    // this setting exists to fix, so there has to be no way to type it. The
+    // floor is what keeps the other failure out — a value of a minute or two
+    // kills healthy cycles, since the stream is silent for the whole of one
+    // model turn and the whole of one tool call.
+    patch.maxCycleSilenceMinutes = n === null ? 120 : Math.max(5, Math.floor(n));
   }
 
   if ("resumeGraceHours" in body) {
@@ -298,6 +329,13 @@ export async function PUT(req: Request) {
     // takes. It is the one guard on a chat turn other than the clock, so an
     // operator turning it off should have to type the blank themselves.
     patch.chatTurnBudgetUSD = optionalNumber(body.chatTurnBudgetUSD);
+  }
+
+  if ("installDailyCostLimitUSD" in body) {
+    // Blank means "no cap", the same reading every switchable budget rule here
+    // takes — and the shipped default, so an operator turning it *on* is the
+    // deliberate act rather than turning it off.
+    patch.installDailyCostLimitUSD = optionalNumber(body.installDailyCostLimitUSD);
   }
 
   return NextResponse.json({ settings: saveSettings(patch) });

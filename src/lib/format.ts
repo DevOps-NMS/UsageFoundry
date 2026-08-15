@@ -302,11 +302,15 @@ export function guardBadge(
 /**
  * What the operator's own `~/.claude` puts in play whatever a picker picks.
  *
- * The saved registry is a *part* of the set of agents a child can delegate to
- * and never the whole of it: the mounted config directory reaches every child
- * this app spawns, and `--agents` merges with it rather than replacing it. So
- * every surface that offers a choice has to say so, or the picker reads as the
- * complete answer to "which specialists exist here".
+ * The saved registry is a *part* of the set of agents in play and never the
+ * whole of it: the mounted config directory reaches every child this app spawns,
+ * `--agents` merges with it rather than replacing it, and `--agent` resolves its
+ * name against the merged set — so starting a run as a saved agent withdraws
+ * none of them. Every surface that offers a choice has to say so, or the picker
+ * reads as the complete answer to "which agents exist here". The wording stays
+ * "in play whatever you pick here" rather than anything about delegation for
+ * exactly that reason: what these definitions do inside a run is the CLI's
+ * business, and what this sentence knows is that they are still there.
  *
  * One sentence rather than one per surface, for the reason `GET /api/agents`
  * answers with `ambient` beside `agents`: the run form and the workflow canvas
@@ -328,8 +332,11 @@ export function describeAmbientAgents(
 /**
  * The chip beside an agent bucket, or null for a bucket that gets none.
  *
- * Two rows get no chip and each for its own reason. `(main thread)` is not an
- * agent at all and the label already says so, and an `unknown` name is the
+ * Two rows get no chip and each for its own reason. `(main thread)` is the
+ * bucket for a turn carrying no agent name at all, so there is no name to look
+ * up — which is a narrower claim than "not an agent" since a session started as
+ * one may or may not name itself on its own turns, and the card's footnote is
+ * where that is said. An `unknown` name is the
  * *ordinary* case rather than a fault — a CLI built-in, a repository's own
  * `.claude/agents`, an agent since deleted — so chipping it would put a mark on
  * most of the column and say nothing. What "unmarked" means is stated once, in

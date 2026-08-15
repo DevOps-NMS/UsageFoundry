@@ -9,6 +9,7 @@ import {
   parseMergeTree,
   parseStatusZ,
   purgeRefusal,
+  selectBranchCandidates,
   unresolvedFiles,
   type CheckoutState,
   type ConflictFile,
@@ -687,5 +688,146 @@ describe("conflict markers", () => {
       ]),
       ["gone.ts", "bad.ts"],
     );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Which branches a request examines                                   */
+/* ------------------------------------------------------------------ */
+
+describe("selectBranchCandidates", () => {
+  /**
+   * The selection is where a branch stops being reachable, and it fails in
+   * silence: a branch dropped here is committed work with no route in the UI
+   * that reaches it, and the count that ought to say so used to be computed
+   * from the same truncated list — so the page could not report what nothing
+   * had looked at.
+   *
+   * Runs are handed in newest-first, as the query that feeds it orders them.
+   */
+  const run = (
+    id: string,
+    repoRoot: string,
+    branch: string,
+    status: import("./land").BranchCandidate["status"] = "completed",
+    iterations = 1,
+  ) => ({ id, status, iterations, repoRoot, branch });
+
+  /** N branches in one repository, newest first. */
+  const many = (repoRoot: string, n: number, from = 0) =>
+    Array.from({ length: n }, (_, i) =>
+      run(`r${repoRoot}-${from + i}`, repoRoot, `uf/b${from + i}`),
+    );
+
+  it("counts every branch, not only the ones it can afford to examine", () => {
+    // 450 branches, a page of 60. The other 390 are counted rather than
+    // forgotten, and the number is what makes this the defect rather than the
+    // cap: the candidates used to come off the newest 400 *runs*, so branches
+    // beyond that window were dropped before `notShown` was computed and the
+    // page could not say they existed — nothing had looked.
+    const sel = selectBranchCandidates(many("/w/a", 450));
+    assert.equal(sel.total, 450);
+    assert.equal(sel.examined.length, 60);
+    assert.equal(sel.notShown, 390);
+  });
+
+  it("reaches a branch past the cap through the offset", () => {
+    const runs = many("/w/a", 150);
+    const page3 = selectBranchCandidates(runs, { offset: 120 });
+    assert.equal(page3.examined.length, 30);
+    assert.equal(page3.offset, 120);
+    assert.equal(page3.examined[0].branch, "uf/b120");
+    assert.equal(page3.examined.at(-1)?.branch, "uf/b149");
+
+    // Every branch is on exactly one page, and every page is examinable.
+    const seen = new Set<string>();
+    for (let offset = 0; offset < 150; offset += 60) {
+      for (const r of selectBranchCandidates(runs, { offset }).examined) {
+        assert.equal(seen.has(r.branch), false, `${r.branch} listed twice`);
+        seen.add(r.branch);
+      }
+    }
+    assert.equal(seen.size, 150);
+  });
+
+  it("gives one repository its own page instead of a share of a global 60", () => {
+    // The failure at fleet scale: fourteen busy repositories push the
+    // fifteenth's branches off a global newest-60 before anyone looks at them.
+    const runs = [...many("/w/busy", 100), ...many("/w/quiet", 3, 900)];
+    const unfiltered = selectBranchCandidates(runs);
+    assert.equal(
+      unfiltered.examined.some((r) => r.repoRoot === "/w/quiet"),
+      false,
+    );
+
+    const quiet = selectBranchCandidates(runs, { repo: "/w/quiet" });
+    assert.equal(quiet.total, 3);
+    assert.equal(quiet.notShown, 0);
+    assert.deepEqual(
+      quiet.examined.map((r) => r.branch),
+      ["uf/b900", "uf/b901", "uf/b902"],
+    );
+  });
+
+  it("counts every repository for the picker, whatever the filter is", () => {
+    // A filter that hides the repositories you would use to change it is a
+    // filter you cannot get out of.
+    const runs = [...many("/w/a", 4), ...many("/w/b", 2, 50)];
+    const filtered = selectBranchCandidates(runs, { repo: "/w/a" });
+    assert.deepEqual(
+      [...filtered.repos].sort((x, y) => x.repoRoot.localeCompare(y.repoRoot)),
+      [
+        { repoRoot: "/w/a", branches: 4 },
+        { repoRoot: "/w/b", branches: 2 },
+      ],
+    );
+  });
+
+  it("counts a chain as one branch and pages by branches, not runs", () => {
+    // `oneRunPerBranch` runs before the slice: three links sharing a ref must
+    // not consume three rows of somebody's page, and the row kept is the
+    // chain's owner so the page and the Land button agree.
+    const runs = [
+      run("c3", "/w/a", "uf/chain"),
+      run("c2", "/w/a", "uf/chain"),
+      run("c1", "/w/a", "uf/chain"),
+      run("solo", "/w/a", "uf/solo"),
+    ];
+    const sel = selectBranchCandidates(runs);
+    assert.equal(sel.total, 2);
+    assert.deepEqual(
+      sel.examined.map((r) => r.branch),
+      ["uf/chain", "uf/solo"],
+    );
+    // Oldest-first is the chain order, so the last link owns it.
+    assert.equal(sel.examined[0].id, "c3");
+    assert.deepEqual(sel.repos, [{ repoRoot: "/w/a", branches: 2 }]);
+  });
+
+  it("keeps the per-request git cost bounded whatever is asked for", () => {
+    // The cap is what makes this page affordable; the filter and the offset
+    // move which branches are paid for and must never raise how many.
+    const runs = many("/w/a", 500);
+    assert.equal(selectBranchCandidates(runs, { limit: 5000 }).examined.length, 60);
+    assert.equal(selectBranchCandidates(runs, { limit: 10 }).examined.length, 10);
+    assert.equal(selectBranchCandidates(runs, { limit: 0 }).examined.length, 60);
+    assert.equal(selectBranchCandidates(runs, { limit: -3 }).examined.length, 60);
+  });
+
+  it("clamps an offset past the end rather than answering an empty page", () => {
+    // What pressing Next on a page that shrank under you produces. An honest
+    // total with the last page on screen beats a blank table.
+    const sel = selectBranchCandidates(many("/w/a", 10), { offset: 400 });
+    assert.equal(sel.total, 10);
+    assert.equal(sel.offset, 9);
+    assert.equal(sel.examined.length, 1);
+    assert.equal(sel.notShown, 9);
+  });
+
+  it("tells two repositories with the same branch name apart", () => {
+    const runs = [run("a", "/w/a", "uf/x"), run("b", "/w/b", "uf/x")];
+    const sel = selectBranchCandidates(runs);
+    assert.equal(sel.total, 2);
+    assert.equal(selectBranchCandidates(runs, { repo: "/w/b" }).examined[0].id, "b");
   });
 });

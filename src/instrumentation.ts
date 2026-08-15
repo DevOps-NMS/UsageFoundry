@@ -13,11 +13,66 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Before anything else, and before the reconcile guard below, so a dev
+    // server that re-evaluates this module says it again: an install with no
+    // `UF_AUTH_TOKEN` serves every route in this app to anyone who can reach
+    // the port, and the whole of what was wrong with that was that nothing
+    // anywhere said so. Read from `process.env` rather than through
+    // `lib/config` so the refusal cannot be delayed behind a module that
+    // touches the filesystem.
+    const { authBootSignal } = await import("./lib/authGuard");
+    const signal = authBootSignal({
+      token: process.env.UF_AUTH_TOKEN ?? "",
+      allowNoAuth: process.env.UF_ALLOW_NO_AUTH ?? "",
+    });
+    if (signal.kind === "refused") {
+      console.error(signal.message);
+      // Exit rather than throw. A rejected `register()` is logged by Next and
+      // the server carries on listening, which is precisely the state this
+      // refusal exists to make unreachable.
+      process.exit(1);
+    }
+    if (signal.kind === "unauthenticated") console.warn(signal.message);
+
     const g = globalThis as unknown as { __ufReconciled?: boolean };
     if (g.__ufReconciled) return;
     g.__ufReconciled = true;
 
+    // Before anything opens the database or claims the directory it lives in.
+    // `configCheck.ts` carries the reasoning for which of these refuses and
+    // which warns; what is decided here is only what a refusal *does*.
+    //
+    // It exits rather than throwing. A rejected `register()` is logged by Next
+    // and the server then serves anyway, which for a `DATA_DIR` this process
+    // cannot write — or one it was never given — means a container that answers
+    // /login and writes every row to a file the next rebuild deletes. Exiting
+    // is what makes "refuses to start" true; `restart: unless-stopped` turns it
+    // into a visible restart loop with this message at the top of every attempt,
+    // which is louder than any log line and is the point.
+    const { configProblems } = await import("./lib/configCheck");
+    const problems = configProblems();
+    for (const p of problems.filter((x) => x.severity === "warn")) {
+      console.warn(`[usagefoundry] Configuration: ${p.message}`);
+    }
+    const refusals = problems.filter((p) => p.severity === "refuse");
+    if (refusals.length > 0) {
+      for (const p of refusals) {
+        console.error(`[usagefoundry] Refusing to start. ${p.message}`);
+      }
+      process.exit(1);
+    }
+
     const { reconcileOnBoot, killAllAgents } = await import("./lib/orchestrator");
+
+    // Which arrangement this install is in, said once, before anything spawns.
+    // The unseparated case is a *silent* absence of a boundary — the app looks
+    // and behaves identically — and an operator who has pinned `user:` back to
+    // their own uid, or who runs this outside the container, has no other way
+    // to find out that `/proc`, `DATA_DIR` and the capability file are reachable
+    // by every agent. A misconfiguration throws instead, out of this same call,
+    // so it stops the boot rather than the first run.
+    const { describeSeparation } = await import("./lib/privsep");
+    console.warn(`[usagefoundry] ${describeSeparation()}`);
 
     // Every reconciler below reads "this row says running, therefore the
     // process that owned it died with my predecessor". That inference is only

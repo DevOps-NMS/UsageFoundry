@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   DEPENDENCY_EDGES,
   createRun,
+  currentSnapshot,
   dependenciesOf,
   describeFolder,
   listRuns,
@@ -11,7 +12,11 @@ import {
 } from "@/lib/orchestrator";
 import { PERMISSION_MODES, type PermissionMode } from "@/lib/settings";
 import { resolveAgentForRun, runAgentDTO } from "@/lib/agents";
-import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
+import {
+  ENFORCEMENT_MODES,
+  normalizePolicy,
+  windowGuardRefusal,
+} from "@/lib/budget";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -185,6 +190,21 @@ export async function POST(req: Request) {
   // allowance, which needs no percentage and no configured ceiling. Requiring
   // one now would reject exactly the setup that needs this mode most — the
   // default one, where no ceiling is known and the wall arrives unannounced.
+
+  // A fraction guard with nothing to read is refused **here**, and nowhere
+  // after: `RUN_ENFORCEABLE_CODES` keeps the pre-cycle guard from ending a run
+  // over it, because the reading it needs is the provider's own percentage and
+  // an unreachable Anthropic host would otherwise stop every fraction-guarded
+  // run in the install at its next cycle boundary. This is the moment with a
+  // person and an error channel, which is what makes refusing right here and
+  // logging everywhere else the same decision `startWorkflow` already makes for
+  // an instance. The snapshot is awaited before `createRun` rather than inside
+  // it: that function runs from entry to INSERT with no `await` at all, and one
+  // here would silently reintroduce two agents in one directory.
+  if (policy.maxWeeklyFraction !== null || policy.maxSessionFraction !== null) {
+    const refusal = windowGuardRefusal(policy, await currentSnapshot());
+    if (refusal) return NextResponse.json({ error: refusal }, { status: 400 });
+  }
 
   try {
     // createRun admits or queues the run and starts whatever is now startable.

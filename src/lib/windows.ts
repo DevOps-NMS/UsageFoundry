@@ -247,10 +247,14 @@ export interface WindowState {
    * what could have been. The dashboard renders the gap rather than letting
    * the two silently disagree.
    *
-   * On the provider's own figure the same split still applies, for a different
-   * reason: the weekly meter reports the all-model window it is labelled with,
+   * On the provider's own figure the same split still applies, for two further
+   * reasons. The weekly meter reports the all-model window it is labelled with,
    * while this takes the worst of that and every model-scoped weekly wall,
-   * because being cut off by the Opus week is being cut off.
+   * because being cut off by the Opus week is being cut off. And the provider's
+   * percentage is *cached* — five minutes in the ordinary case, up to an hour
+   * while requests are being refused — so the derived reading, which is
+   * recomputed on every guard, is taken as well and the worst of the three
+   * wins. The provider's figure can only be raised by that, never lowered.
    */
   guardFraction: number | null;
   /**
@@ -469,9 +473,16 @@ export function agentOrigin(
  * One run's own turns, split by who produced them.
  *
  * The same `groupBy` and the same buckets as the dashboard column, over the
- * entries belonging to one session rather than to a window — so a delegated turn
- * lands in its agent's row and everything else lands in `(main thread)`, and the
- * rows add up to `costUSD` with nothing omitted.
+ * entries belonging to one session rather than to a window — so a turn carrying
+ * an agent name lands in that agent's row, a turn carrying none lands in
+ * `(main thread)`, and the rows add up to `costUSD` with nothing omitted.
+ *
+ * Which turns carry a name is the CLI's business and this infers nothing. That
+ * used to be the same statement as "a delegated turn"; since a run can be
+ * *started as* an agent it is not, and whether such a session names itself on
+ * its own turns is unmeasured — so a run whose every row sits under one agent
+ * and a run whose every row sits under `(main thread)` are both this function
+ * working. Nothing here branches on the answer; the two cards say so in words.
  *
  * This is the **transcript** source scoped to one run, which is the source
  * `reconcileKilledCycle` already reads for `spent_usd_est`, not a new one. It is
@@ -497,7 +508,17 @@ export interface AgentSpend {
   costGuardUSD: number;
   tokens: number;
   entryCount: number;
-  /** Everything that is not `(main thread)` — what was handed to a specialist. */
+  /**
+   * Everything that is not `(main thread)`, whatever put it in another bucket.
+   *
+   * The name is historical and the doc is the definition: it was coined when a
+   * bucket key could only have come from a turn the main thread handed off, and
+   * the arithmetic — every row that is not `MAIN_THREAD_BUCKET` — never encoded
+   * that reading and does not now. Kept rather than renamed because it is on the
+   * wire (`RunAgentSpendDTO`), and because the one label a reader sees was moved
+   * off it instead: the meter says "Outside the main thread", which is what the
+   * figure is under either flag.
+   */
   delegatedCostUSD: number;
   delegatedCostGuardUSD: number;
   /** Cost-descending, main thread included. */
@@ -653,11 +674,25 @@ export function buildSnapshot(
       planFraction,
       fraction: planFraction,
       fractionMetric: "plan",
-      // The unpriced-model fallback has nothing to say about a first-party
-      // figure: it exists because our price table can fail to place a model,
-      // and the provider's own accounting cannot. Only another of the
-      // provider's own walls can raise this.
-      guardFraction: Math.max(planFraction, planGuard ?? 0),
+      // The worst of every reading of this window, and the third operand is
+      // the one that is easy to leave out. The provider's percentage is
+      // *cached* — `planUsage.ts` refreshes it at most every five minutes and
+      // keeps serving the last good one for up to an hour while requests are
+      // being refused — so with several runs sharing one account every cycle
+      // that starts inside a refresh interval is authorised by the identical
+      // frozen number, and the window can be walked from under the guard to
+      // over it without the guard ever seeing a figure that moved. The derived
+      // reading is recomputed from the transcripts on every single guard, so it
+      // is the only evidence here that is current, and taking the maximum is
+      // what lets it *raise* the guard without ever lowering it. It does carry
+      // the unpriced-model markup, which is a deliberate over-estimate — that
+      // is the safe direction for the number a run is stopped on, and it stays
+      // out of `fraction`, which is what the meter shows.
+      guardFraction: Math.max(
+        planFraction,
+        planGuard ?? 0,
+        derived.guardFraction ?? 0,
+      ),
       // Nothing to describe: the provider names a percentage, not a ceiling.
       limit: null,
       limitMetric: "plan",

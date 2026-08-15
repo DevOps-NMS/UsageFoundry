@@ -74,12 +74,14 @@ const PROBES: Record<keyof Settings, Probe> = {
   includeSidechains: { send: false },
   forwardSubAgentText: { send: false },
   maxConcurrentRuns: { send: 3 },
+  maxConcurrentAssists: { send: 5 },
   isolationCopyGlobs: { send: [".env.local"] },
   isolationPreamble: { send: "CHANGED preamble" },
   continuedWorkPrompt: { send: "CHANGED continued work" },
   telemetryForRuns: { send: true },
   donePushbackPrompt: { send: "CHANGED pushback" },
   liveGuardIntervalSeconds: { send: 90 },
+  maxCycleSilenceMinutes: { send: 45 },
   resumeGraceHours: { send: 12 },
   landStrategy: { send: "squash" },
   killProcessGroup: { send: false },
@@ -87,6 +89,7 @@ const PROBES: Record<keyof Settings, Probe> = {
   eventRetentionDays: { send: 14 },
   checkoutRetentionDays: { send: 3 },
   transcriptRetentionDays: { send: 45 },
+  installDailyCostLimitUSD: { send: 250 },
   chatDefaultGuards: {
     send: {
       permissionMode: "plan",

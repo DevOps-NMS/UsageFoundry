@@ -8,7 +8,7 @@ Getting the container running, signed in, and pointed at your code.
 
 ```bash
 cp .env.example .env
-# edit .env:  UF_AUTH_TOKEN (recommended), UF_WORKSPACE (required),
+# edit .env:  UF_AUTH_TOKEN (required), UF_WORKSPACE (required),
 #             UF_WORKSPACE_2… (optional, for more than one workspace)
 
 docker compose up --build
@@ -74,13 +74,44 @@ Settings shows whether a token is configured.
 | Variable | Purpose |
 |---|---|
 | `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. Absolute path; compose refuses to start without it. |
-| `UF_AUTH_TOKEN` | Shared secret for the UI. Blank disables auth — only acceptable on loopback. |
+| `UF_AUTH_TOKEN` | Shared secret for the UI. Blank makes the server **refuse to start** unless `UF_ALLOW_NO_AUTH=1` is also set. |
+| `UF_ALLOW_NO_AUTH` | `1` to run with no authentication at all. Only for a loopback-bound install on a machine you alone use; every page then says so. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
 | `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only. |
-| `UF_UID` / `UF_GID` | **Linux only.** The uid the container runs as; must own the mounts. Default 1000. |
+| `UF_UID` / `UF_GID` | **Linux only.** The uid every spawned agent runs as; must own the mounts. The server itself runs as root and drops to this. Default 1000. |
 
 Compose also mounts `~/.claude` **read-write** — Claude Code writes new session
 transcripts there as runs execute, so a read-only mount breaks runs.
+
+## What the boot checks, and what each failure looks like
+
+The variables above are the ones you set. These are the ones the app *reads*,
+and it checks them once, before it serves anything — every one of these used to
+present the same way, as a container that starts, answers `/login` and shows an
+empty dashboard, which is also what a quiet week looks like.
+
+| Variable | Required | Wrong value | What happens |
+|---|---|---|---|
+| `DATA_DIR` | **yes** | blank, not a directory, or not writable | **The container exits**, naming the path and the uid. Compose sets it to `/data`. |
+| `WORKSPACE_ROOTS` | yes (compose composes it) | an entry whose path is not a directory | Warned at boot and on the dashboard. That workspace's folder picker is empty and no run can start in it. |
+| `CLAUDE_HOME` | yes | no `projects/` directory under it | Warned. Every usage figure reads zero; runs, workflows and the merge queue still work. |
+| `UF_AUTH_TOKEN` | no | — | Blank means **auth off**. Never reported. |
+| `ANTHROPIC_ADMIN_KEY` | no | — | Blank means the API-account page says "not configured". Never reported. |
+| `UF_GITHUB_TOKEN` | no | — | Blank means runs cannot use GitHub. Never reported. |
+| anything else | no | set to the empty string | Warned. A blank value is read as unset and takes the default, which is a value nobody chose. |
+
+`DATA_DIR` is the one that refuses because it is the one that decides where your
+only copy of anything lives — a boot that carries on writing to a directory you
+did not name is manufacturing the loss, and in the shipped image the default is
+inside the container's writable layer, which `docker compose up --build`
+destroys. A missing workspace only warns because compose mounts four slots
+unconditionally, a bind source can be temporarily unavailable, and taking the
+dashboard away over an empty folder picker is worse than the empty picker.
+
+Writability is tested by an actual write. `mkdirSync(recursive: true)` reports
+success for a directory it cannot write to, which is why an ownership mismatch
+used to surface later, as an `EACCES` from the server lock rather than as a
+statement about the configuration — see `UF_UID` below.
 
 ## On Linux, set `UF_UID` and `UF_GID`
 
@@ -99,30 +130,31 @@ echo "UF_GID=$(id -g)" >> .env
 Run compose as yourself, not under `sudo`: `$HOME` comes from your shell, and
 `sudo` would point the credential mount at root's home.
 
-**The database volume is handled in the image, not here.** `/data` is a named
-volume rather than a bind mount, so it does not carry your host's ownership the
-way the other two mounts do: Docker copies the ownership and mode of `/data`
-*in the image* onto the volume root the first time it creates it. That used to
-be uid 1000, mode 0755 — unwritable by the uid you have just set, which meant
-the app could not create its SQLite file and every data route failed. The image
-now marks that one directory world-writable, so a fresh volume works under any
-`UF_UID`. Nothing to configure.
+**The database volume is handled in the image, not here, and it is deliberately
+not yours.** `/data` is a named volume rather than a bind mount, so it does not
+carry your host's ownership the way the other two mounts do: Docker copies the
+ownership and mode of `/data` *in the image* onto the volume root the first time
+it creates it. The image ships it root-owned, mode `0700`, and the server — which
+is the only thing in the container running as root — creates the database there.
+Every agent is dropped to the `UF_UID`/`UF_GID` you have just set, so none of
+them can read or write it. That is the point: the database holds the settings
+every guard reads, the budget and status on every run, and the lock that decides
+whether a second writer exists. Nothing to configure.
 
-**Changing `UF_UID` on an install that already has data** is the one case that
-still needs a hand. Docker only initialises a volume once, so an existing
-`usagefoundry-data` keeps the files uid 1000 wrote, and the new uid cannot write
-them. Hand the volume over once:
+It used to be world-writable, because the whole container ran as your uid and a
+fresh volume had to be writable by whatever that was. If your install predates
+that change, the existing volume is still `node:node 0777` — Docker initialises
+a volume once and never again — and the container's entrypoint reclaims it on
+every boot. Nothing to do, and no `chown` to run: `UF_UID` no longer has
+anything to do with who owns `/data`.
 
-```bash
-docker compose down
-docker compose run --rm --user 0:0 --entrypoint sh usagefoundry \
-  -c "chown -R $(id -u):$(id -g) /data"
-docker compose up -d
-```
+If you would rather start clean, `docker compose down -v` destroys the volume
+along with your run history and settings.
 
-Double quotes, so `$(id -u)` is expanded by your shell rather than inside the
-container. If you do not mind losing run history and settings, `docker compose
-down -v` and starting again does the same thing by destroying the volume.
+That volume is the only copy of every run, every cost, every template, workflow
+and schedule, and nothing backs it up on its own — take a snapshot before you
+try either of the commands above, and put one in cron afterwards:
+**[Backup and restore](backup-and-restore.md)**.
 
 ## Multiple workspaces
 
