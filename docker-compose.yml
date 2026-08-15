@@ -15,16 +15,31 @@ services:
     image: usagefoundry:${UF_IMAGE_TAG:-latest}
     container_name: ${UF_CONTAINER_NAME:-usagefoundry}
 
-    # The container writes to two bind mounts — your ~/.claude (credentials and
-    # new transcripts) and your workspaces (the agent's edits, plus the
-    # .uf-worktrees checkouts) — so it has to run as a uid that owns them.
+    # The *server* runs as root and every child it spawns — the work cycle, the
+    # reviewer, the chat, an orchestrator block's turn, and the git this app runs
+    # itself — is dropped to UF_AGENT_UID:UF_AGENT_GID below, which is still your
+    # own uid. Nothing about your files changes: the processes that touch the
+    # bind mounts are the same uid they always were.
     #
-    # macOS Docker Desktop remaps bind-mount ownership onto the container user,
-    # so 1000 is right there whatever your host uid is. Linux preserves the host
-    # uid, and a mismatch is silent in the worst way: git refuses every
-    # repository, `claude /login` cannot persist its credentials, and runs fail
-    # on the first write. Set UF_UID=$(id -u) / UF_GID=$(id -g) in .env there.
-    user: "${UF_UID:-1000}:${UF_GID:-1000}"
+    # What changes is that they are no longer the *server's* uid, which is what
+    # makes three of this app's defences mean anything. `/proc/<server>/environ`
+    # is mode 0400 owned by the server, so `childEnv` stripping UF_AUTH_TOKEN,
+    # ANTHROPIC_ADMIN_KEY and UF_GITHUB_TOKEN from an agent's environment is now
+    # enforced rather than advised; /data is root-owned 0700, so an agent cannot
+    # rewrite a budget, a status or a permission mode straight in the database;
+    # and the MCP capability file's 0600 excludes something. Shared, all three
+    # were decorative — one `tr '\0' '\n' < /proc/7/environ` handed back every
+    # secret the container holds. See docs/security.md for what it still does
+    # *not* buy.
+    #
+    # Root here is the supervisor, not the agents: it is one process, running
+    # code from this repository, against twenty-five unattended children whose
+    # prompts come out of repositories nobody here reviewed. It has to be this
+    # way round — the child must own the workspace, because an isolated run is
+    # ordered to commit into your own .git, and the server must be able to read
+    # ~/.claude/.credentials.json, which the CLI keeps 0600 owned by that same
+    # uid. Both cannot be it.
+    user: "0:0"
 
     # Bound to loopback on purpose. This container holds Claude credentials and
     # can run an agent with write access to mounted code — publishing it on
@@ -34,8 +49,22 @@ services:
       - "127.0.0.1:${UF_PORT:-3000}:3000"
 
     environment:
-      # Set to a long random string to require a token in the UI.
+      # Set to a long random string to require a token in the UI. Leaving it
+      # empty makes the container refuse to start unless UF_ALLOW_NO_AUTH below
+      # is set to 1 — an empty token means every route here, including the one
+      # that starts billed agents against your repositories, is open to whoever
+      # can reach the port, and that had been the shipped default with nothing
+      # anywhere reporting it.
       UF_AUTH_TOKEN: "${UF_AUTH_TOKEN:-}"
+      # The explicit "yes, run with no authentication" switch. Only ever right
+      # for a loopback-bound install on a machine you alone use. Passed through
+      # rather than defaulted here on purpose: a default would put the choice
+      # back in this file, where nobody rereads it.
+      UF_ALLOW_NO_AUTH: "${UF_ALLOW_NO_AUTH:-}"
+      # Forces the session cookie's Secure flag on ("1") or off ("0"). Blank
+      # follows the request, which is right behind a terminator that sets
+      # X-Forwarded-Proto and right on loopback HTTP.
+      UF_COOKIE_SECURE: "${UF_COOKIE_SECURE:-}"
       # Optional: enables the API-account panel. Needs an org Admin key.
       ANTHROPIC_ADMIN_KEY: "${ANTHROPIC_ADMIN_KEY:-}"
       # Optional: what a run uses to push, open a PR, or read an issue. The
@@ -60,6 +89,24 @@ services:
       CLAUDE_HOME: /home/node/.claude
       CLAUDE_CONFIG_DIR: /home/node/.claude
       DATA_DIR: /data
+      # The uid every spawned child is dropped to — the same UF_UID/UF_GID the
+      # `user:` line above used to carry, so an existing .env needs no edit and
+      # the processes that write your files are the uid they always were. The
+      # two names are separate because they now mean different things: UF_UID is
+      # "the uid that owns my bind mounts", and this is "who the agents are",
+      # which is the same answer for a reason (they have to write those mounts)
+      # and not the same question.
+      #
+      # Clearing these switches the split off: everything runs as root, which is
+      # strictly worse than the arrangement this replaced. Set them, or set
+      # `user:` back to "${UF_UID:-1000}:${UF_GID:-1000}" and take the shared-uid
+      # behaviour whole — the server refuses to boot if it is asked to drop a
+      # child while holding no privilege to do it, rather than starting without
+      # the boundary and saying nothing. A UF_UID of 0 is the one case that is
+      # neither: there is no separable uid on such a host, so it runs as it did
+      # before and the boot log says the boundary is absent.
+      UF_AGENT_UID: "${UF_UID:-1000}"
+      UF_AGENT_GID: "${UF_GID:-1000}"
 
     volumes:
       # Credentials + transcripts. Read-write because Claude Code writes new
@@ -94,10 +141,55 @@ services:
       # bind mount, so `docker compose -p <project>` namespaces it and two
       # instances do not share one database — but it also means its root
       # ownership and mode are copied from /data *in the image* when Docker
-      # first creates it, not taken from the host. That is why the Dockerfile
-      # marks that directory world-writable: this container runs as UF_UID
-      # above, and a fresh volume has to be writable by whatever that is.
+      # first creates it, not taken from the host. The image ships that
+      # directory root-owned 0700, which is the whole of what keeps an agent out
+      # of the database, the settings the guards read and the server lock. A
+      # volume created by an earlier release is `node:node 0777` and stays that
+      # way through any number of image pulls, so `docker-entrypoint.sh`
+      # reclaims it on every boot.
       - usagefoundry-data:/data
+
+      # Where `scripts/backup-db.mjs` writes, and the one thing here that is
+      # deliberately *not* the named volume above: a snapshot kept inside the
+      # volume dies with `docker compose down -v`, which is the command this
+      # whole path exists to survive. A bind mount, so the backups land in a
+      # directory on the host that whatever backs up your home directory can
+      # see. Nothing writes here unless you run the script — see
+      # docs/backup-and-restore.md.
+      #
+      # The repository ships an empty ./backups so the default works with no
+      # setup. Point UF_BACKUP_DIR somewhere else and the directory has to exist
+      # first: Docker creates a missing bind source as root, and this container
+      # runs as UF_UID.
+      - ${UF_BACKUP_DIR:-./backups}:/backups
+
+    # What this container may take from the host before Docker stops it.
+    #
+    # It supervises a fleet of `claude` children — one Node process per work
+    # cycle, plus one per review, conflict resolution, chat turn and workflow
+    # orchestrator block — and each work cycle's agent starts builds, test
+    # suites and dev servers of its own inside the same cgroup. With no limit,
+    # an over-configured fleet does not fail here: it takes the host down with
+    # it, and the first thing starved is the server process that is supposed to
+    # be supervising and guarding the runs.
+    #
+    # So the failure is made local and recoverable instead. Docker OOM-kills the
+    # container, `restart: unless-stopped` above brings it back, and
+    # `reconcileOnBoot` closes out the runs it was carrying with a reason on
+    # each — a bad hour, rather than a host to go and rescue.
+    #
+    # The defaults are sized for the shipped settings (4 work cycles + 2 other
+    # Claude processes): ~1.5 GiB per work cycle, ~0.5 GiB for the rest, ~1 GiB
+    # for the server, with headroom. Raise both **with** the settings, never
+    # after the fact — README's "Sizing the container" has the arithmetic.
+    #
+    # pids_limit counts tasks, not processes: a Node process is ~10 threads
+    # before it forks anything, and `npm ci` inside an agent's checkout is
+    # dozens more. It is the cheaper of the two limits to hit, and hitting it
+    # fails a command inside an agent's tool call rather than killing the
+    # container, so it is set generously.
+    mem_limit: ${UF_MEM_LIMIT:-10g}
+    pids_limit: ${UF_PIDS_LIMIT:-2048}
 
     restart: unless-stopped
 

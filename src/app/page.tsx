@@ -5,8 +5,10 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { LiveTelemetry } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
+import { RepoSpendCard } from "@/components/RepoSpendCard";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
+import { Hint } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
@@ -82,12 +84,20 @@ function ceilingDetail(
 const DIMENSIONS = ["model", "project", "effort", "agent", "skill"] as const;
 type Dimension = (typeof DIMENSIONS)[number];
 
-/** One name per slice, read by the picker and by the table's own column head. */
+/**
+ * One name per slice, read by the picker and by the table's own column head.
+ *
+ * `agent` was "Sub-agent" while the only way a name reached `attributionAgent`
+ * was a turn the main thread handed off. A run can now be *started as* an agent,
+ * so a name in this column need not be a sub-agent at all — and the word has to
+ * stop asserting that it is, because the arithmetic underneath cannot tell the
+ * two apart and never tries to. It groups on whatever the CLI wrote.
+ */
 const DIMENSION_LABEL: Record<Dimension, string> = {
   model: "Model",
   project: "Project",
   effort: "Effort",
-  agent: "Sub-agent",
+  agent: "Agent",
   skill: "Skill",
 };
 
@@ -366,15 +376,22 @@ export default function Dashboard() {
       agent: {
         // The bucket is still whatever the CLI recorded on the turn; the chip
         // says where this install found a definition for that name. Nothing
-        // about the registry moves a dollar between rows.
+        // about the registry moves a dollar between rows, and neither does
+        // starting a run as an agent — this app never infers a bucket.
         rows: s.byAgent.map((r) => ({
           label: r.agent,
           cost: r.agg.costUSD,
           mark: agentOriginBadge(r.origin),
         })),
+        // `(main thread)` is the bucket whose meaning moved. It was "not an
+        // agent"; it is now "no agent name on the turn", which a run started as
+        // one may or may not land in — unmeasured, and nothing here branches on
+        // the answer. Saying so is what stops a column of agent names reading as
+        // proof of delegation, and an all-main-thread column reading as proof
+        // that no run was ever started as anything.
         hint: data.meta.includeSidechains
-          ? "Unmarked names have no definition here — a Claude Code built-in, a repository's own .claude/agents, or an agent since deleted."
-          : "Sub-agent turns are excluded from totals in Settings, so only main-thread work appears here.",
+          ? "Unmarked names have no definition here — a Claude Code built-in, a repository's own .claude/agents, or an agent since deleted. (main thread) is a turn Claude Code recorded no agent name on, which may include a run started as one."
+          : "Sub-agent turns are excluded from totals in Settings. A name can still appear here: a session started as an agent may record that name on its own turns.",
       },
       skill: {
         rows: s.bySkill.map((r) => ({ label: r.skill, cost: r.agg.costUSD })),
@@ -388,6 +405,35 @@ export default function Dashboard() {
   const banner = (
     <div aria-live="polite">
       {pollError && <Notice tone="danger">{pollError}</Notice>}
+      {/* Above the meters rather than under them with the other notices, and
+          that is the whole distinction: those explain a number the reader has
+          just looked at, where this one says the numbers may be describing the
+          wrong machine. A mount that is not a directory and a CLAUDE_HOME with
+          no transcripts under it both render as the zeros below — which is also
+          what a quiet week looks like. A refusal never reaches here (the boot
+          exits on one), but it is rendered as danger rather than dropped, so a
+          route that somehow serves one still shows it. */}
+      {data?.meta.configProblems.map((p) => (
+        <Notice
+          key={`${p.variable}:${p.message}`}
+          tone={p.severity === "refuse" ? "danger" : "warn"}
+        >
+          <strong className="mono">{p.variable}</strong> {p.message}
+        </Notice>
+      ))}
+      {/* In words, because a held fleet and a quiet one are identical on this
+          page otherwise: every meter reads the same and the only difference is
+          that the queue never moves. It sits with the poll failure rather than
+          among the cards for the same reason — it is a fact about whether what
+          is below can still change. */}
+      {data?.meta?.newWorkPaused && (
+        <Notice tone="warn">
+          <strong>New work is held.</strong> Nothing starts — queued runs stay
+          queued, dependents stay waiting, schedules do not fire and an
+          orchestrator block cannot emit. Work already in flight carries on.{" "}
+          <Link href="/runs">Resume it on the runs page</Link>.
+        </Notice>
+      )}
     </div>
   );
 
@@ -403,7 +449,7 @@ export default function Dashboard() {
     );
   }
 
-  const { snapshot: s, meta, periods, telemetry } = data;
+  const { snapshot: s, meta, periods, telemetry, install } = data;
   const noCeilings = !meta.hasSessionCeiling && !meta.hasWeeklyCeiling;
   // Read off the windows rather than off the setting: the setting says we
   // asked, this says we were answered.
@@ -801,6 +847,53 @@ export default function Dashboard() {
           page's telemetry card follows. */}
       {telemetry && <LiveTelemetry telemetry={telemetry} now={s.now} />}
 
+      {/* The one ceiling on this page that is about the *install* rather than
+          about a window Anthropic enforces, so it sits below the meters and
+          outside them: its span is a rolling 24 hours, its figures are money
+          this app recorded spending rather than our price table over every
+          transcript on the machine, and the two must never be added. Always
+          shown — with no ceiling configured the meter is the hatched
+          indeterminate one, which is this app's standing answer to a reading
+          with no denominator, and the hint is where the operator finds out the
+          limit exists at all. */}
+      <Card emphasis="quiet" className="mb-4">
+        <CardTitle>This install, last {install.windowHours} hours</CardTitle>
+        <Meter
+          label="Spent by everything this app runs"
+          fraction={
+            install.limitUSD === null ? null : install.spentUSD / install.limitUSD
+          }
+          upperFraction={
+            install.limitUSD === null
+              ? null
+              : install.spentGuardUSD / install.limitUSD
+          }
+          unknownHint="no install limit set"
+          detail={
+            install.limitUSD === null
+              ? `${fmtUSD(install.spentGuardUSD)} spent`
+              : `${fmtUSD(install.spentGuardUSD)} of ${fmtUSD(install.limitUSD)}`
+          }
+        />
+        <Hint>
+          {install.limitUSD === null ? (
+            <>
+              Every guard in this app bounds one run, one workflow or one chat
+              turn. Nothing bounds the total until you{" "}
+              <Link href="/settings">set an install limit</Link>.
+            </>
+          ) : (
+            <>
+              Runs, workflow blocks and chat turns together. A run still going,
+              or one that finished inside the window, counts its whole spend —
+              which over-counts rather than under-counts, because this is a
+              ceiling. Not comparable with the meters above: those measure every
+              transcript on this machine against Anthropic&rsquo;s windows.
+            </>
+          )}
+        </Hint>
+      </Card>
+
       {/* Four equally-weighted bordered boxes said these four readings were as
           important as the meters above them, which none of them is. As a
           grouped list they read as what they are: derived figures about the
@@ -875,6 +968,12 @@ export default function Dashboard() {
         }
         reservedHeadroomFraction={meta.reservedHeadroomFraction}
       />
+
+      {/* After the transcript breakdowns and before the footnotes, because it
+          answers a different question with a different source: those slice the
+          window above by what produced it, this one says what each repository's
+          own runs reported spending. The two are never added — see the card. */}
+      <RepoSpendCard />
 
       <Card className="mb-4">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">

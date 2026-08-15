@@ -511,7 +511,9 @@ export default function WorkflowPage() {
                             <Badge tone="warn">stopped</Badge>{" "}
                             {inst.stopCause === "guard"
                               ? "by its budget guard"
-                              : "by you"}
+                              : inst.stopCause === "fleet"
+                                ? "with everything in flight"
+                                : "by you"}
                           </>
                         )}
                       </Td>
