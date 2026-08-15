@@ -6,9 +6,36 @@ import os from "node:os";
  * environment; user-editable preferences live in the settings table instead.
  */
 
+const strictNames: string[] = [];
+
+/**
+ * Read a variable whose *blank* value is a mistake rather than an answer.
+ *
+ * The fallback still applies to one — a blank line in an env file and an
+ * orchestrator rendering `value: ""` both reach here, and refusing to produce a
+ * value at all would leave callers with nothing usable. What changed is that
+ * the name is recorded, so `configCheck.ts` can say at boot that the default
+ * being used was never asked for. That distinction is the whole of issue #98:
+ * `DATA_DIR=` is not a request for `./.data`, it is a typo that puts the
+ * database inside the image's writable layer where the next rebuild destroys it.
+ */
 function env(name: string, fallback: string): string {
+  if (!strictNames.includes(name)) strictNames.push(name);
   const v = process.env[name];
   return v === undefined || v === "" ? fallback : v;
+}
+
+/**
+ * Read a variable where blank *is* the answer: it means "off".
+ *
+ * Three of them, each a documented decision, and they must never be swept into
+ * a validation failure — which is precisely why this check belongs in the app,
+ * which knows which is which, rather than in compose, which does not. Note that
+ * `docker-compose.yml` renders all three as `${VAR:-}`, so a stock install has
+ * all three explicitly blank.
+ */
+function optionalEnv(name: string): string {
+  return process.env[name] ?? "";
 }
 
 /** Root of the Claude Code state directory (transcripts + credentials). */
@@ -16,6 +43,31 @@ export const CLAUDE_HOME = env("CLAUDE_HOME", path.join(os.homedir(), ".claude")
 
 /** Where transcripts live: one subdirectory per project, *.jsonl inside. */
 export const PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
+
+/**
+ * Most parsed transcript turns held in memory at once.
+ *
+ * `transcripts.ts` keeps the records it parses out of each file so the next scan
+ * only has to read the bytes appended since the last one. Nothing bounded that,
+ * so the heap grew with every turn ever written under `CLAUDE_HOME` and the
+ * process eventually died on V8's own limit — weeks on a busy fleet, months on a
+ * laptop, and never on a machine restarted daily, which is why it survived this
+ * long. Past this bound the coldest files are dropped *whole*, byte offset
+ * included, so the next scan that needs them re-reads them from disk and derives
+ * exactly the same records: what the bound costs is CPU, never accuracy.
+ *
+ * Process-level rather than a setting, because what it bounds is the heap this
+ * process was given rather than anything the user is choosing. Roughly 330 bytes
+ * are retained per turn, so the default is ~165 MB against V8's ~2 GB default
+ * limit. Raise it alongside `--max-old-space-size` on a larger host; lower it on
+ * a smaller one. A value that is not a positive number falls back to the
+ * default, which is the safe direction for a figure only an operator tuning
+ * memory ever sets.
+ */
+export const TRANSCRIPT_CACHE_MAX_ENTRIES = ((): number => {
+  const raw = Number(env("UF_TRANSCRIPT_CACHE_MAX_ENTRIES", ""));
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 500_000;
+})();
 
 /**
  * Where the Claude CLI keeps its own config and credential files.
@@ -163,10 +215,29 @@ export const DATA_DIR = env("DATA_DIR", path.join(process.cwd(), ".data"));
 export const DB_PATH = path.join(DATA_DIR, "usagefoundry.db");
 
 /** Shared secret for the UI. Empty string disables auth entirely. */
-export const AUTH_TOKEN = env("UF_AUTH_TOKEN", "");
+export const AUTH_TOKEN = optionalEnv("UF_AUTH_TOKEN");
+
+/**
+ * The operator's explicit acknowledgement that this install runs with no
+ * authentication at all.
+ *
+ * Not a preference and not a feature: with `UF_AUTH_TOKEN` empty every route
+ * here is open, so the absence of a token must be something somebody chose
+ * rather than something nobody set. `authBootSignal` refuses to start without
+ * one of the two, and the value is compared as an exact string there — see the
+ * note beside it for why truthiness would be the wrong reading.
+ */
+export const ALLOW_NO_AUTH = env("UF_ALLOW_NO_AUTH", "");
+
+/**
+ * Override for the session cookie's `Secure` flag: `"1"` forces it on, `"0"`
+ * off, anything else leaves the request to decide. See `cookieIsSecure` — the
+ * two directions exist for different failures, and neither is a preference.
+ */
+export const COOKIE_SECURE = env("UF_COOKIE_SECURE", "");
 
 /** Admin API key (sk-ant-admin01-...). Optional. */
-export const ADMIN_API_KEY = env("ANTHROPIC_ADMIN_KEY", "");
+export const ADMIN_API_KEY = optionalEnv("ANTHROPIC_ADMIN_KEY");
 
 /**
  * GitHub credential handed to spawned agents, or empty when unset.
@@ -183,7 +254,7 @@ export const ADMIN_API_KEY = env("ANTHROPIC_ADMIN_KEY", "");
  * the token: it is the agent's `git push`, `gh pr create` and `gh issue view`
  * that fail without one.
  */
-export const GITHUB_TOKEN = env("UF_GITHUB_TOKEN", "");
+export const GITHUB_TOKEN = optionalEnv("UF_GITHUB_TOKEN");
 
 /** Path to the Claude Code executable inside the container. */
 export const CLAUDE_BIN = env("CLAUDE_BIN", "claude");
@@ -194,6 +265,24 @@ export const GIT_BIN = env("GIT_BIN", "git");
 export const ANTHROPIC_API_BASE = env("ANTHROPIC_API_BASE", "https://api.anthropic.com");
 
 export const USER_AGENT = "UsageFoundry/0.1.0";
+
+/**
+ * Every variable this process actually read through `env()`, in the order it
+ * read them.
+ *
+ * Collected rather than listed, so a variable added to this file cannot be
+ * forgotten here — and it is only the ones a *this* configuration reached:
+ * `WORKSPACE_ROOT` is read solely when no mount is configured, and a boot that
+ * never consulted it has no business reporting on it.
+ */
+export const STRICT_ENV_VARS: readonly string[] = strictNames;
+
+/** The three where an explicitly blank value is a documented "off" switch. */
+export const BLANK_MEANINGFUL_ENV_VARS = [
+  "UF_AUTH_TOKEN",
+  "ANTHROPIC_ADMIN_KEY",
+  "UF_GITHUB_TOKEN",
+] as const;
 
 export const hasAdminKey = () => ADMIN_API_KEY.length > 0;
 export const hasGithubToken = () => GITHUB_TOKEN.length > 0;

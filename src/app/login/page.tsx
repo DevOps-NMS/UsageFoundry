@@ -22,6 +22,16 @@ export default function LoginPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ token }),
       });
+      // A server with no token configured answers 409 and says so. Reported
+      // rather than redirected past: the banner above this card already states
+      // it, and a "signed in" that checked nothing is the lie this screen
+      // would otherwise be telling.
+      if (res.status === 409) {
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        throw new Error(body.error ?? "Authentication is disabled");
+      }
       if (!res.ok) throw new Error("Invalid token");
       router.push("/");
       router.refresh();

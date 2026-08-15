@@ -24,6 +24,14 @@ import { fmtPct, fmtUSD } from "./format";
  * with no speaker labels. It is what the reader has to be able to tell apart —
  * a report that silently interleaves two voices is worse than one that omits
  * the second.
+ *
+ * That is the turn a session **delegated**, which since the move to `--agent` is
+ * a different thing from the agent a session **is**. Nothing here reads the
+ * run's own agent: the split is `parent_tool_use_id` and only that, so a run
+ * started as the reviewer still sets its own words as `agent` and only what it
+ * hands off as `subagent`. Whether a `--agent` session delegates at all is
+ * unmeasured; if it never does, this voice goes quiet rather than wrong, and it
+ * still covers the ambient definitions that reach every child regardless.
  */
 export type LogVoice = "agent" | "subagent" | "tool" | "cycle" | "system";
 
@@ -92,6 +100,108 @@ export function toolArgs(input: unknown): string {
   return clip(JSON.stringify(input) ?? "");
 }
 
+/** Serialised length a stored tool input is cut to. Documented in Settings. */
+export const MAX_TOOL_INPUT_CHARS = 4_000;
+
+/**
+ * Longest log line stored, before it is cut and marked.
+ *
+ * The other unbounded write into `run_events`: every stderr chunk an agent's
+ * child produces becomes a row, so a run that builds anything writes its whole
+ * build output into the database one chunk at a time. Larger than a tool input
+ * because this is prose a person reads rather than a structure only
+ * `toolArgs` looks at, and because the app's own sentences go through the same
+ * door and must never be the thing that gets cut.
+ */
+export const MAX_LOG_CHARS = 8_000;
+
+/** Longest single string value kept inside one, before it is cut. */
+export const MAX_TOOL_FIELD_CHARS = 1_000;
+
+/**
+ * A tool call's input, bounded, for storage rather than for display.
+ *
+ * `run_events` keeps `b.input` whole, and for a `Write` or an `Edit` that input
+ * *is* the file — `old_string` and `new_string` in full — so the log grows at
+ * the byte volume of everything the agents write. Nothing ever read it whole:
+ * `describeEvent` renders `toolArgs(input)`, one clipped line, and always has.
+ *
+ * So the cut is made where the bytes are, and it is made in an order that keeps
+ * the line the reader sees: the headline fields go in first, exactly the ones
+ * `toolArgs` picks between and in its order, then whatever else fits. Each
+ * string is cut at `MAX_TOOL_FIELD_CHARS` — well under the total — so the field
+ * that names the call can never be the one the budget runs out on.
+ *
+ * `truncatedFrom` is the serialised length before any of that, and it is
+ * returned rather than folded into the object because it belongs on the event
+ * payload beside the input: a short input and a shortened one must not look
+ * alike, which is the same reason `runEvents` reports `dropped` on a replay it
+ * cut and `diff.ts` counts the files it left out.
+ *
+ * Here rather than beside the sweep for `toolArgs`' own reason — this is the
+ * second reader of "which field names a call", and two lists would drift with
+ * nothing reporting it.
+ */
+export function clipToolInput(input: unknown): {
+  input: unknown;
+  truncatedFrom?: number;
+} {
+  // A value that will not serialise is recorded as the call with no arguments,
+  // which is the true statement about it. Nothing off the stream can be one —
+  // it arrives from `JSON.parse` — but this is on the path of every tool call
+  // of every cycle, and `emit` is on the path of every status transition, so a
+  // throw here would take a run's whole log with it and then the run.
+  const raw = serialise(input);
+  if (raw === undefined) return { input: null };
+  if (raw.length <= MAX_TOOL_INPUT_CHARS) return { input };
+
+  if (typeof input !== "object" || input === null) {
+    // A bare string or number that is somehow this long: cut the value itself,
+    // since there are no fields to choose between.
+    return {
+      input: typeof input === "string" ? cutTo(input, MAX_TOOL_FIELD_CHARS) : input,
+      truncatedFrom: raw.length,
+    };
+  }
+
+  const fields = input as Record<string, unknown>;
+  const rest = Object.keys(fields).filter(
+    (k) => !(HEADLINE_FIELDS as readonly string[]).includes(k),
+  );
+
+  const kept: Record<string, unknown> = {};
+  let spent = 2; // the braces
+  for (const key of [...HEADLINE_FIELDS, ...rest]) {
+    if (!(key in fields)) continue;
+    const value = fields[key];
+    const cut = typeof value === "string" ? cutTo(value, MAX_TOOL_FIELD_CHARS) : value;
+    const serialised = serialise(cut);
+    // A value that will not serialise at all (a function, undefined) is left
+    // out rather than stored as the string "undefined".
+    if (serialised === undefined) continue;
+    const cost = key.length + serialised.length + 4;
+    if (spent + cost > MAX_TOOL_INPUT_CHARS) continue;
+    kept[key] = cut;
+    spent += cost;
+  }
+
+  return { input: kept, truncatedFrom: raw.length };
+}
+
+/** Cut a string to `max` characters, marking that something followed. */
+function cutTo(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max)}…`;
+}
+
+/** JSON, or undefined for a value that cannot be one. Never throws. */
+function serialise(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
 /** How loudly a hand-driven transition should read. */
 function statusTone(status: unknown): LogTone {
   if (status === "failed") return "danger";
@@ -137,7 +247,7 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
         : {
             voice: "subagent",
             tone: "neutral",
-            // The specialist's own name when the `Task` call that opened it was
+            // The sub-agent's own name when the `Task` call that opened it was
             // seen this cycle, and the bare word otherwise — a stream the
             // browser joined late, or a call whose input named no type. Never a
             // tool-use id: that is an identifier for this app, not a speaker.
@@ -148,6 +258,12 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
 
     case "tool": {
       const tool = String(p.name ?? "tool");
+      // What was stored is bounded (see `clipToolInput`), so the line says when
+      // it is looking at a shortened input. A short call and a shortened one
+      // reading alike is the failure `runEvents` already avoids on a replay it
+      // had to cut.
+      const args = toolArgs(p.input);
+      const shortened = typeof p.truncatedFrom === "number";
       return {
         voice: "tool",
         tone: "neutral",
@@ -160,7 +276,9 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
         label: p.parentToolUseId
           ? `${String(p.subagent ?? "sub-agent")} › ${tool}`
           : tool,
-        text: toolArgs(p.input),
+        text: shortened
+          ? [args, "input shortened for storage"].filter(Boolean).join(" · ")
+          : args,
       };
     }
 
@@ -237,6 +355,18 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
     }
 
     case "land": {
+      // Before `deleted`, and it is deliberately not one: the retention sweep
+      // removes the *directory* and leaves the branch and every commit on it
+      // exactly where they were. A row that read as a deletion would say this
+      // app destroyed work it did not touch.
+      if (p.reclaimed) {
+        return {
+          voice: "system",
+          tone: "neutral",
+          label: "checkout reclaimed",
+          text: `${p.worktreeRemoved} — ${p.branch ?? "the branch"} is untouched`,
+        };
+      }
       if (p.purged) {
         return {
           voice: "system",
@@ -328,9 +458,18 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
 
     case "log": {
       const message = String(p.message ?? "");
-      return message === "" || message.startsWith("system:")
-        ? null
-        : { voice: "system", tone: "neutral", label: null, text: message };
+      if (message === "" || message.startsWith("system:")) return null;
+      // Same mark as a tool input, for the same reason: an agent's build output
+      // arrives here one stderr chunk per row and is cut at `MAX_LOG_CHARS`.
+      return {
+        voice: "system",
+        tone: "neutral",
+        label: null,
+        text:
+          typeof p.truncatedFrom === "number"
+            ? `${message} · line shortened for storage`
+            : message,
+      };
     }
 
     // Consumed by the stream reader as a marker; never a line.

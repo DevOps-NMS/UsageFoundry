@@ -310,11 +310,12 @@ describe("provider-reported utilisation", () => {
     assert.equal(snap.session.limitMetric, "plan");
   });
 
-  it("guards on the provider's fraction too, with no unpriced-model markup", () => {
+  it("keeps the unpriced-model markup out of the displayed fraction", () => {
     // costGuardUSD is deliberately higher than costUSD here, the shape an
-    // unpriced model leaves behind. That markup exists because our price table
-    // can fail to place a model; the provider's own accounting cannot, so it
-    // must not inflate a first-party figure.
+    // unpriced model leaves behind. That markup is a deliberate over-estimate,
+    // so it must not reach the meter — the provider's own accounting cannot
+    // fail to place a model, and the displayed number is the honest one. It
+    // does reach `guardFraction`, which is the case below.
     const unpriced: UsageEntry[] = [
       { ...entry(now - HOUR, 10), costGuardUSD: 50 },
     ];
@@ -322,6 +323,55 @@ describe("provider-reported utilisation", () => {
       utilization: 0.4,
       resetsAt: null,
     }));
+    assert.equal(snap.session.fraction, 0.4);
+    assert.equal(snap.session.fractionMetric, "plan");
+  });
+
+  /**
+   * The provider's percentage is cached — five minutes in the ordinary case,
+   * up to an hour while requests are being refused — and it used to replace
+   * the derived reading for the *guard* as well as for the meter. With several
+   * runs sharing one account, every cycle any of them started inside a refresh
+   * interval was then authorised by one identical frozen number, and the
+   * window could be walked from under the guard to over it without the guard
+   * ever seeing a figure that moved. The derived reading is recomputed on every
+   * single pre-cycle check, at real cost, and was thrown away.
+   *
+   * Both directions are pinned here because both are silent: the derived
+   * reading must be able to *raise* the guard, and must never be able to lower
+   * it below what the provider said.
+   */
+  it("lets locally observed spend raise the guard above a frozen reading", () => {
+    const frozen = plan({ utilization: 0.4, resetsAt: null });
+    const quiet = buildSnapshot([entry(now - HOUR, 10)], CEILINGS, now, null, frozen);
+    const busy = buildSnapshot(
+      [{ ...entry(now - HOUR, 10), costGuardUSD: 70 }],
+      CEILINGS,
+      now,
+      null,
+      frozen,
+    );
+
+    // One cached reading, two different local pictures, two different guards.
+    assert.equal(quiet.session.guardFraction, 0.4);
+    assert.equal(busy.session.guardFraction, 0.7);
+    assert.ok(busy.session.guardFraction! > quiet.session.guardFraction!);
+
+    // And the meter is unmoved: the provider's percentage is still what is
+    // shown, which is the whole of the display-versus-guard split.
+    assert.equal(quiet.session.fraction, 0.4);
+    assert.equal(busy.session.fraction, 0.4);
+  });
+
+  it("never lets the derived reading lower the provider's own", () => {
+    // $1 of a $100 ceiling is 1% derived against 40% reported. The provider's
+    // superior denominator is the reason it is preferred at all, so it stays a
+    // floor under the guard.
+    const snap = buildSnapshot([entry(now - HOUR, 1)], CEILINGS, now, null, plan({
+      utilization: 0.4,
+      resetsAt: null,
+    }));
+    assert.equal(snap.session.costFraction, 0.01);
     assert.equal(snap.session.guardFraction, 0.4);
   });
 
@@ -633,7 +683,9 @@ describe("agent attribution", () => {
     assert.equal(spend.costUSD, 10);
     assert.equal(spend.entryCount, 3);
     // The complement of the main-thread bucket, so the two always add to the
-    // total — a delegated share is a share of what this run itself spent.
+    // total. Named `delegated` historically and asserted as what it is: every
+    // row carrying an agent name, whatever put the name there — a turn the
+    // session handed off, or, under `--agent`, possibly its own.
     assert.equal(spend.delegatedCostUSD, 5);
     assert.equal(
       spend.rows.reduce((s, r) => s + r.costUSD, 0),

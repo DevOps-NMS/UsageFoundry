@@ -105,8 +105,8 @@ export interface Settings {
    * is deleted afterwards the form says so and starts with none, because the
    * alternative is a new-run page nobody can use until they visit Settings. That
    * is not the "never fall back to none" rule bending: that rule is about a run
-   * whose operator *named* a specialist, and a pre-filled field nobody has
-   * looked at is not a naming. Everything downstream is unchanged — the run door
+   * whose operator *named* an agent, and a pre-filled field nobody has looked
+   * at is not a naming. Everything downstream is unchanged — the run door
    * still refuses a deleted agent by name through `agentRefusal`.
    */
   defaultAgentId: string | null;
@@ -143,15 +143,59 @@ export interface Settings {
    */
   forwardSubAgentText: boolean;
   /**
-   * How many runs may be active at once. Null means no limit.
+   * How many **work cycles** may be running at once. Null means no limit.
    *
    * A concurrency knob, not a usage ceiling — the no-default-ceilings rule
    * above does not apply, because unlike a limit this number is not a guess at
    * something Anthropic knows and we do not. It does move the spend bound
    * though: each run carries its own `maxRunCostUSD`, so N runs can overshoot
    * by N work cycles rather than one.
+   *
+   * It ships as a **number**, and that is the difference between this and every
+   * ceiling in this file. A ceiling is left null because we would be guessing at
+   * a figure Anthropic publishes nowhere; there is no guess in a *host* limit —
+   * how many Node processes a container can carry is a property of the machine,
+   * and `null` meant a fresh install had no bound on the fleet at all. 4 is
+   * chosen against the memory limit `docker-compose.yml` now ships (10 GiB) at
+   * roughly 1.5 GiB for a work cycle — the CLI child plus the builds, test
+   * suites and dev servers the agent starts inside it — leaving room for the
+   * server and for `maxConcurrentAssists` below. That per-child figure is
+   * reasoned rather than measured, and README's sizing table carries the
+   * arithmetic for raising it. `null` is still available and is now what it
+   * always read as: an explicit opt-out.
+   *
+   * What it does **not** cover is the other three kinds of `claude` child, which
+   * are `maxConcurrentAssists`. Splitting them rather than sharing one number is
+   * what keeps a chat turn from eating a run's slot, and it is why the ceiling
+   * on this container is the *sum* of the two.
    */
   maxConcurrentRuns: number | null;
+  /**
+   * How many `claude` children that are **not** work cycles may run at once.
+   * Null means no limit.
+   *
+   * Four callers, one budget: a review, a merge-conflict resolution, an
+   * orchestrator-chat turn and a workflow orchestrator block's deciding turn.
+   * They already share one door — `assistRefusal()` in `review.ts`, which every
+   * one of them passes through — so the count is read there rather than in four
+   * places that would drift.
+   *
+   * A cap that covered work cycles alone did not bound the host: a fleet of 25
+   * runs can carry an orchestrator turn per `thinking` block and a turn per open
+   * chat on top of it, each a full Node process. 2 is chosen against the same
+   * 10 GiB compose limit at roughly 0.5 GiB each — cheaper than a work cycle
+   * because none of the four builds anything (a review runs `--permission-mode
+   * plan` and cannot write at all).
+   *
+   * The three kinds with a person in front of them are **refused** when it is
+   * full, because they have an error channel and a sentence is what a person
+   * needs. A block's deciding turn is instead left `waiting` for the next
+   * advance, because failing it ends the branch of the graph behind it — and a
+   * transient shortage of memory is not a decision about the work. Whatever
+   * frees a slot wakes it: `settleBlock` already advances, and `review.ts` and
+   * `chat.ts` advance when their own children settle.
+   */
+  maxConcurrentAssists: number | null;
   /**
    * Gitignored files copied into a fresh checkout, newest-wins glob order.
    *
@@ -208,6 +252,34 @@ export interface Settings {
    */
   liveGuardIntervalSeconds: number;
   /**
+   * How long a work cycle may produce nothing before it is ended.
+   *
+   * A deadline rather than a budget rule, so the "blank disables a guard" rule
+   * does not apply and there is deliberately no way to switch it off: the
+   * absence of one is the defect it exists to fix. `runIteration` settles only
+   * when its child says so, and a `claude` wedged on a socket read never does —
+   * which leaves the run `running` for ever, holding its folder, its checkout
+   * slot and one of `maxConcurrentRuns`, recoverable only by restarting the
+   * container. It is floored rather than allowed to reach zero, and read
+   * defensively at the spawn, for `chatGuards`' reason: this blob is JSON in a
+   * settings row and can be hand-edited.
+   *
+   * **Silence, not wall clock.** The clock is the time since the last line the
+   * child printed, and every stdout line and stderr chunk resets it — a cycle
+   * that is still reporting is working, however long it takes, and killing one
+   * for its duration is what `enforcement: "live"` is for. A cadence-shaped
+   * number rather than a ceiling, so the no-default-numbers rule does not apply
+   * either.
+   *
+   * Two hours by default, which is deliberately generous. The stream falls
+   * silent for the whole of a single model turn and for the whole of one tool
+   * call, so a run whose test suite takes an hour is silent for an hour and is
+   * perfectly healthy; the cost of being wrong is asymmetric, since a killed
+   * working cycle loses paid work while a slot recovered in two hours instead
+   * of one is still recovered the same day.
+   */
+  maxCycleSilenceMinutes: number;
+  /**
    * How stale a parked run's pause may be and still survive a restart.
    *
    * A run waiting on the 5-hour window is preserved across a restart, unlike a
@@ -248,6 +320,95 @@ export interface Settings {
    * issue in the repository" can spend a lot inside ten minutes.
    */
   chatTurnBudgetUSD: number | null;
+  /**
+   * How long a finished run's event log is kept, in days. Null keeps it always.
+   *
+   * The first of the three retention horizons, and the one furthest from the
+   * operator: `run_events` holds every assistant block, every tool call with
+   * its whole input, and every stderr chunk, so it grows at roughly the byte
+   * volume of the agents' own traffic — measured at ~13 MB per thousand tool
+   * events with a 4 KB payload — into a named volume with no size limit. What
+   * is discarded is the *evidence*; the run's own row, with its spend, its
+   * cycle count and its stop reason, is never touched. A run that has not
+   * settled keeps all of it however old the rows are, because a log the page is
+   * showing must not lose lines under the reader.
+   *
+   * Not a window ceiling, so the no-default-numbers rule does not apply: it
+   * bounds this app's own storage rather than guessing at a limit Anthropic
+   * knows and we do not. It needs a default because the failure it prevents is
+   * a full volume, at which point every SQLite write fails at once and runs
+   * simply stop being admitted with nothing on any page saying why.
+   */
+  eventRetentionDays: number | null;
+  /**
+   * How long an idle isolated checkout is kept, in days. Null keeps it always.
+   *
+   * The second horizon, and the one on the operator's *own* disk: checkouts
+   * accumulate in `<mount>/.uf-worktrees`, the slot cap is 64 per repository
+   * and the store is shared per mount, so fifteen repositories have a ceiling
+   * of 960 full checkouts in one directory — with their `node_modules`, which
+   * `git status` cannot see and which is most of the bytes. Nothing removed one
+   * except an operator pressing Delete or Purge on a branch, so "recoverable"
+   * and "leaked" were the same state.
+   *
+   * Shorter than the other two because a checkout is the cheapest of the three
+   * to lose: `worktree add` rebuilds it in seconds from commits that are still
+   * in the repository. What it costs is the dependency tree the next run in
+   * that slot would have reused, which is why this is a week rather than a day
+   * — slot reuse is what makes isolation practical, and a horizon short enough
+   * to break it would trade disk for a re-install per run.
+   */
+  checkoutRetentionDays: number | null;
+  /**
+   * How long a session transcript is kept, in days. Null keeps it always.
+   *
+   * The third horizon, on the mount that also holds `.credentials.json`.
+   * Claude Code writes one `.jsonl` per session into `~/.claude/projects` and
+   * nothing in this app, its Dockerfile or its compose file ever pruned them or
+   * configured the CLI to — 233 MB in four days was measured well under the
+   * concurrency this is judged at. A full disk there does not announce itself:
+   * a work cycle fails inside the CLI with a non-zero exit, and a credential
+   * rewrite that runs out of space presents as an authentication failure.
+   *
+   * Two things follow from pruning, and both are handled rather than absorbed.
+   * A removed transcript takes its session with it, so the sweep clears
+   * `runs.session_id` on the terminal runs it belonged to — `--resume` against
+   * a file that is gone fails a pick-up outright, where a null session id is
+   * already this app's documented restart. And it shortens the dashboard's own
+   * calendar history, which `PeriodSeries.completeFrom` carries onto the card
+   * rather than letting the buckets quietly understate.
+   *
+   * 30 days rather than longer because the store is the operator's home
+   * directory; longer than the checkout horizon because a transcript is the
+   * only thing `--resume` can continue and it cannot be rebuilt.
+   */
+  transcriptRetentionDays: number | null;
+  /**
+   * Hard ceiling on what this whole installation may spend in 24 hours. Null
+   * removes it, which is the shipped default.
+   *
+   * The one limit here that is not about a single spender. `maxRunCostUSD`
+   * bounds a run, `maxInstanceCostUSD` one press of Run, `chatTurnBudgetUSD` one
+   * chat turn — and nothing bounded the total, or the rate at which new spenders
+   * are created: `promoteQueued` starts the next queued run the instant a slot
+   * frees, a schedule presses Run with nobody present, and an orchestrator block
+   * starts runs with no approval. Twenty-five concurrent runs under a $35 run
+   * limit reads as $875 on this page and is $875 *per wave*, with the number of
+   * waves unbounded.
+   *
+   * Not a window ceiling, so the no-default-numbers rule above does not apply
+   * for the usual reason — it is not a guess at a limit Anthropic knows and we
+   * do not, it is a cap on this app's own behaviour. It still ships `null`,
+   * because unlike `chatTurnBudgetUSD` there is no single figure that is right
+   * for both a laptop and a fleet, and a default that refused work on somebody's
+   * first evening would be worse than the absence.
+   *
+   * Measured over a **rolling** 24 hours (`INSTALL_WINDOW_MS`) rather than a
+   * calendar day: the container runs in UTC and the operator does not, and a
+   * calendar boundary would also be a cliff every run in the install crosses at
+   * the same instant.
+   */
+  installDailyCostLimitUSD: number | null;
   /**
    * What an agent may do when a chat proposal names no template.
    *
@@ -397,17 +558,23 @@ const DEFAULTS: Settings = {
   continuationPrompt: DEFAULT_CONTINUATION_PROMPT,
   includeSidechains: true,
   forwardSubAgentText: true,
-  maxConcurrentRuns: null,
+  maxConcurrentRuns: 4,
+  maxConcurrentAssists: 2,
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,
   continuedWorkPrompt: DEFAULT_CONTINUED_WORK_PROMPT,
   telemetryForRuns: false,
   donePushbackPrompt: DEFAULT_DONE_PUSHBACK_PROMPT,
   liveGuardIntervalSeconds: 60,
+  maxCycleSilenceMinutes: 120,
   resumeGraceHours: 24,
   landStrategy: "merge",
   killProcessGroup: true,
   chatTurnBudgetUSD: 2,
+  eventRetentionDays: 30,
+  checkoutRetentionDays: 7,
+  transcriptRetentionDays: 30,
+  installDailyCostLimitUSD: null,
   chatDefaultGuards: DEFAULT_CHAT_GUARDS,
 };
 
@@ -434,6 +601,38 @@ export function saveSettings(patch: Partial<Settings>): Settings {
   const next = { ...getSettings(), ...patch };
   setJSON(KEY, next);
   return next;
+}
+
+/**
+ * Whether new work is held: nothing starts, nothing already started is touched.
+ *
+ * Persisted rather than a process variable, because the usual reason it gets set
+ * is the restart it has to survive — an operator who stems the flow at 02:00 and
+ * then bounces the container must not find twenty-five agents back at work.
+ *
+ * A settings row of its **own**, deliberately not a key of `Settings`. The
+ * settings page sends the whole object on Save, so a field in that blob is one
+ * an unrelated edit from a tab opened before the pause would silently clear —
+ * which for a preference is a nuisance and for the fleet's kill switch is the
+ * failure it exists to prevent. `SETTINGS_KEYS` and the route's per-key
+ * narrowing therefore do not cover it, and the only doors to it are the fleet
+ * route and this pair.
+ *
+ * What it suppresses is *starting*, not recording: rows may still be created —
+ * a press of Run on a workflow still writes its graph out — they simply never
+ * leave the queue. Four call sites read it and each is separate: `promoteQueued`
+ * through `selectPromotable`, `releaseDependents` through `releasableRuns`,
+ * `tickSchedules` through `decideSchedule`, and `emitBlockRuns` at its door. A
+ * fix that misses one is silent, which is why there is a test per site.
+ */
+const PAUSE_KEY = "fleet.newWorkPaused";
+
+export function newWorkPaused(): boolean {
+  return getJSON<boolean>(PAUSE_KEY, false) === true;
+}
+
+export function setNewWorkPaused(paused: boolean): void {
+  setJSON(PAUSE_KEY, paused === true);
 }
 
 /**

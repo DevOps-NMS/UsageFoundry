@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
+// Relative rather than aliased, which is what every route with a test here
+// does: `node --test` runs the compiled output, and nothing resolves `@/` there.
 import {
   createAgent,
   listAgents,
   listAmbientAgents,
   normalizeAgentInput,
-} from "@/lib/agents";
+} from "../../../lib/agents";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
