@@ -98,6 +98,7 @@ const task = {
   mountId: null,
   prompt: "do the thing",
   budget: { maxIterations: 1 },
+  origin: "form" as const,
 };
 
 describe("a process that does not own the data directory", () => {

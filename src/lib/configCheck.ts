@@ -104,7 +104,7 @@ export interface ConfigView {
  *
  * Takes the map and the names rather than reading `process.env` and
  * `STRICT_ENV_VARS`, so the one case that matters can be asserted directly: the
- * three variables where blank means "off" are not in `names` and can never
+ * variables where blank is a documented answer are not in `names` and can never
  * appear here however they are set.
  */
 export function explicitlyBlank(
@@ -215,8 +215,9 @@ export function checkConfig(view: ConfigView): ConfigProblem[] {
       variable: name,
       message:
         `${name} is set to the empty string, which is read as unset and takes ` +
-        `the default. Only ${BLANK_MEANINGFUL_ENV_VARS.join(", ")} treat blank ` +
-        `as "switched off"; for anything else it is a value nobody chose.`,
+        `the default. Blank is a documented answer — "off", or "take the ` +
+        `default" — only for ${BLANK_MEANINGFUL_ENV_VARS.join(", ")}; for ` +
+        `anything else it is a value nobody chose.`,
     });
   }
 

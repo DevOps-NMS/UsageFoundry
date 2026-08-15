@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { MOUNTED_WORKSPACE_SLOTS } from "./config";
+import { BLANK_MEANINGFUL_ENV_VARS, MOUNTED_WORKSPACE_SLOTS } from "./config";
 
 /**
  * Covers the agreement between `Dockerfile` and `docker-compose.yml` about who
@@ -423,6 +423,122 @@ describe("the container's memory ceiling and the server's heap agree", () => {
       shippedDefault("mem_limit"),
       "memswap_limit must equal mem_limit, or the container can swap as much " +
         "again as the memory limit it was given.",
+    );
+  });
+});
+
+/**
+ * The agreement that decides whether a *correct* install accuses itself.
+ *
+ * Compose cannot omit an environment key conditionally, so every optional
+ * variable is rendered `${VAR:-}` and is explicitly blank on a deployment where
+ * the operator set nothing. `config.ts` decides what that blank means, one
+ * variable at a time: `env()` records the name in `STRICT_ENV_VARS`, and
+ * `checkConfig` then warns that it "is a value nobody chose" — on the dashboard,
+ * above the meters, on every boot. So each blank-by-default key in that block is
+ * one edit away from being a permanent warning on every stock deployment,
+ * naming a variable the operator never wrote.
+ *
+ * Which is exactly what happened, three times, and it is the reason this is
+ * pinned rather than described: the block grew — `UF_GITHUB_TOKENS`,
+ * `UF_TRANSCRIPT_CACHE_MAX_ENTRIES`, `UF_UNMOUNTED_WORKSPACES` — and
+ * `BLANK_MEANINGFUL_ENV_VARS` did not, so three warnings stood on every compose
+ * install at once. Nothing noticed, and nothing could: it typechecks, it boots,
+ * every page works, and the only symptom is a banner that is *always* on, which
+ * is how a banner stops being read at all. `UF_UNMOUNTED_WORKSPACES` is the one
+ * that shows the cost has no floor — it is computed by compose from the slots it
+ * could not mount, blank is its success case, and any non-blank value refuses
+ * the boot, so there was no `.env` edit that could clear the warning it raised.
+ *
+ * The two halves are one line away from each other in different files and
+ * neither typechecks against the other.
+ */
+describe("compose's blank-by-default variables and config.ts's own env split", () => {
+  const configSource = fs.readFileSync(path.join(root, "src", "lib", "config.ts"), "utf8");
+
+  /**
+   * The names read through each door, off the source rather than off
+   * `STRICT_ENV_VARS`.
+   *
+   * That constant is collected as the module runs, so it holds only what *this*
+   * process reached — `WORKSPACE_ROOT` is read solely when no mount is
+   * configured — and a variable read on a branch the tests do not take would
+   * pass this silently, which is the failure mode being pinned. `\benv\(` cannot
+   * match `optionalEnv(` (the capital E is not `env`, and `l` leaves no word
+   * boundary), and neither matches the declarations, whose first argument is not
+   * a quoted literal.
+   */
+  function namesRead(door: "env" | "optionalEnv"): Set<string> {
+    const pattern = new RegExp(`\\b${door}\\(\\s*"([A-Z0-9_]+)"`, "g");
+    return new Set([...configSource.matchAll(pattern)].map((m) => m[1]));
+  }
+
+  /** The service's `environment:` block, key by key. */
+  function environmentBlock(): Map<string, string> {
+    const start = /^ {4}environment:$/m.exec(compose);
+    assert.ok(start, "docker-compose.yml no longer has an environment: block");
+    const rest = compose.slice(start.index + start[0].length);
+    const end = /^ {4}\S/m.exec(rest);
+    const block = end ? rest.slice(0, end.index) : rest;
+
+    const entries = new Map<string, string>();
+    for (const [, key, value] of block.matchAll(/^ {6}([A-Z][A-Z0-9_]*):\s*(.*)$/gm)) {
+      entries.set(key, value.trim().replace(/^"(.*)"$/, "$1"));
+    }
+    assert.ok(entries.size > 0, "no environment keys were found to check");
+    return entries;
+  }
+
+  /**
+   * What an operator who sets nothing in `.env` actually gets, which is the only
+   * install this file can reason about — and the one every deployment starts as.
+   *
+   * `${X:-default}` yields its default, `${X:+word}` yields nothing (that form
+   * exists precisely to say "only when X is set"), a bare `${X}` yields nothing,
+   * and `${X:?message}` aborts `docker compose up` rather than substituting, so
+   * it can never reach the app blank.
+   */
+  function resolvedWithEmptyEnv(value: string): string {
+    return value
+      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^}]*\}/g, "<aborts>")
+      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}/g, "$1")
+      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:\+[^}]*\}/g, "")
+      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g, "");
+  }
+
+  it("reads every one of them through the door that treats blank as an answer", () => {
+    const strict = namesRead("env");
+    const blank = [...environmentBlock()]
+      .filter(([, value]) => resolvedWithEmptyEnv(value) === "")
+      .map(([key]) => key);
+
+    assert.ok(blank.length > 0, "no blank-by-default keys were found to check");
+
+    const misread = blank.filter((key) => strict.has(key));
+    assert.deepEqual(
+      misread,
+      [],
+      `docker-compose.yml sets ${misread.join(", ")} to the empty string on an ` +
+        `install that configures nothing, and config.ts reads ${
+          misread.length === 1 ? "it" : "them"
+        } through env(), which reports blank as a value nobody chose. Every ` +
+        `correct deployment would carry that warning on its dashboard for ever. ` +
+        `Read ${misread.length === 1 ? "it" : "them"} through optionalEnv() and ` +
+        `add ${misread.length === 1 ? "it" : "them"} to ` +
+        `BLANK_MEANINGFUL_ENV_VARS — or, if blank really is a mistake there, ` +
+        `give the compose entry a non-blank default.`,
+    );
+  });
+
+  it("keeps the exported list identical to what optionalEnv actually reads", () => {
+    // The list is what `checkConfig`'s sentence enumerates, so a name that is
+    // read through `optionalEnv` and missing from it makes that sentence claim
+    // blank is a mistake for a variable this app deliberately treats as set —
+    // and one in the list that nothing reads that way is a name the warning
+    // excuses and `env()` still reports. Neither typechecks.
+    assert.deepEqual(
+      [...namesRead("optionalEnv")].sort(),
+      [...BLANK_MEANINGFUL_ENV_VARS].sort(),
     );
   });
 });

@@ -269,6 +269,7 @@ describe("what the install-wide ceiling is measured from", () => {
           mountId: null,
           prompt: "do something expensive",
           budget: { maxIterations: 1 },
+          origin: "form",
         }),
       /limit set in Settings/,
       "refused rather than queued: a queued run is a promise to spend",

@@ -508,20 +508,6 @@ function standDown(to: DataDirOwnership, holder: ServerLock | null): void {
 }
 
 /**
- * Does this process hold `DATA_DIR` right now?
- *
- * Read from the in-memory claim rather than re-read from the file, deliberately:
- * the question a health probe is asking is "may this server's reconcilers and
- * sweepers act", and that is decided by `state.owned`. It goes false when the
- * heartbeat cannot be written, which is exactly the case worth reporting — a
- * server that is alive, answering requests, and has silently given up the right
- * to close out its own rows.
- */
-export function ownsDataDir(): boolean {
-  return state.owned;
-}
-
-/**
  * Give the directory up on a clean exit, so the next boot claims it without
  * waiting out `STALE_MS` or watching a dead pid.
  *

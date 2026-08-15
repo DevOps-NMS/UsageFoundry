@@ -6,10 +6,14 @@ import { describe, it } from "node:test";
 
 import {
   ADMIN_API_KEY,
+  ALLOW_NO_AUTH,
   AUTH_TOKEN,
   BLANK_MEANINGFUL_ENV_VARS,
+  COOKIE_SECURE,
   GITHUB_TOKEN,
+  GITHUB_TOKENS,
   STRICT_ENV_VARS,
+  TRANSCRIPT_CACHE_MAX_ENTRIES,
   authEnabled,
   hasAdminKey,
   hasGithubToken,
@@ -235,23 +239,23 @@ describe("explicitlyBlank", () => {
     assert.deepEqual(explicitlyBlank({}, ["DATA_DIR"]), []);
   });
 
-  it("never reports the three where blank is the documented answer", () => {
-    // `docker-compose.yml` renders all three as `${VAR:-}`, so every stock
-    // install has them explicitly blank. They are not in the strict list, and
-    // this is what says a change to that list cannot sweep them in: blank means
-    // auth off, the API-account panel off and GitHub off, each a decision.
-    const env = {
-      UF_AUTH_TOKEN: "",
-      ANTHROPIC_ADMIN_KEY: "",
-      UF_GITHUB_TOKEN: "",
-      DATA_DIR: "",
-    };
+  it("never reports the variables where blank is the documented answer", () => {
+    // `docker-compose.yml` renders every one of them as `${VAR:-}`, so a stock
+    // install has them all explicitly blank. They are not in the strict list,
+    // and this is what says a change to that list cannot sweep them in: blank
+    // means auth off, the API-account panel off, GitHub off, no acknowledgement,
+    // the request deciding the cookie flag, the shipped cache bound, and — for
+    // UF_UNMOUNTED_WORKSPACES — every configured slot actually mounted.
+    const env = Object.fromEntries([
+      ...BLANK_MEANINGFUL_ENV_VARS.map((name) => [name, ""]),
+      ["DATA_DIR", ""],
+    ]);
     assert.deepEqual(explicitlyBlank(env, ["DATA_DIR"]), ["DATA_DIR"]);
   });
 });
 
 describe("config.ts's own env split", () => {
-  it("reads every strict variable and none of the blank-meaningful three", () => {
+  it("reads every strict variable and none of the blank-meaningful ones", () => {
     // The strict list is collected by `env()` as the module runs, so this also
     // proves the collection happens at all — an empty list would make every
     // blank-variable warning unreachable and nothing else would notice.
@@ -265,23 +269,23 @@ describe("config.ts's own env split", () => {
     }
   });
 
-  it("reports a blank DATA_DIR and none of the three, against the real list", () => {
-    // The stock install: compose renders all three as `${VAR:-}`, so every one
-    // of them is explicitly blank on a machine that is configured correctly.
-    // Run against the collected `STRICT_ENV_VARS` rather than a stub, because
-    // what would break this is someone moving one of the three back onto
-    // `env()` — which changes no behaviour and starts calling a correct install
-    // misconfigured.
-    const env = {
-      UF_AUTH_TOKEN: "",
-      ANTHROPIC_ADMIN_KEY: "",
-      UF_GITHUB_TOKEN: "",
-      DATA_DIR: "",
-    };
+  it("reports a blank DATA_DIR and nothing else, against the real list", () => {
+    // The stock install, and the case this whole split exists for: compose
+    // renders every blank-meaningful variable as `${VAR:-}`, so all of them are
+    // explicitly blank on a machine that is configured correctly. Run against
+    // the collected `STRICT_ENV_VARS` rather than a stub, because what would
+    // break this is someone moving one of them back onto `env()` — which
+    // changes no behaviour and starts calling a correct install misconfigured.
+    // Three of them were on that side for months, so every compose deployment
+    // carried three warnings naming variables nobody had written.
+    const env = Object.fromEntries([
+      ...BLANK_MEANINGFUL_ENV_VARS.map((name) => [name, ""]),
+      ["DATA_DIR", ""],
+    ]);
     assert.deepEqual(explicitlyBlank(env, STRICT_ENV_VARS), ["DATA_DIR"]);
   });
 
-  it("blank still means off for the three", () => {
+  it("blank still means off for the three credentials", () => {
     // Unset and blank both have to reach the same "" — that is the documented
     // behaviour, and it is what says the switch to `optionalEnv` changed
     // nothing an operator can see.
@@ -293,6 +297,22 @@ describe("config.ts's own env split", () => {
       assert.equal(value, process.env[name] ?? "", name);
       assert.equal(enabled, value.length > 0, name);
     }
+  });
+
+  it("blank still takes the default for the four that moved", () => {
+    // The same claim for the ones moved off `env()` later, where the risk is the
+    // other way round: `env()` supplied a fallback and `optionalEnv` does not,
+    // so anything whose fallback was not `""` would change meaning silently.
+    // All four fell back to `""` already, and these are the four readings of
+    // that empty string that anything downstream actually makes.
+    assert.equal(ALLOW_NO_AUTH, process.env.UF_ALLOW_NO_AUTH ?? "");
+    assert.equal(COOKIE_SECURE, process.env.UF_COOKIE_SECURE ?? "");
+    if (!(process.env.UF_GITHUB_TOKENS ?? "")) assert.equal(GITHUB_TOKENS.size, 0);
+    if (!(process.env.UF_TRANSCRIPT_CACHE_MAX_ENTRIES ?? "")) {
+      assert.equal(TRANSCRIPT_CACHE_MAX_ENTRIES, 500_000);
+    }
+    // The fourth is asserted by this module having loaded at all: a non-blank
+    // UF_UNMOUNTED_WORKSPACES throws out of `config.ts` at import.
   });
 });
 

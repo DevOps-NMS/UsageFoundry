@@ -26,13 +26,30 @@ function env(name: string, fallback: string): string {
 }
 
 /**
- * Read a variable where blank *is* the answer: it means "off".
+ * Read a variable where blank *is* the answer.
  *
- * Three of them, each a documented decision, and they must never be swept into
- * a validation failure — which is precisely why this check belongs in the app,
- * which knows which is which, rather than in compose, which does not. Note that
- * `docker-compose.yml` renders all three as `${VAR:-}`, so a stock install has
- * all three explicitly blank.
+ * Two kinds, and the split is worth naming because only one of them was here
+ * originally: blank is an **off switch** for the three credentials
+ * (`UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY`, `UF_GITHUB_TOKEN`, and
+ * `UF_GITHUB_TOKENS` beside it), and blank is **"take the default"** for the
+ * three that carry a value only an operator tuning something ever sets
+ * (`UF_ALLOW_NO_AUTH`, `UF_COOKIE_SECURE`, `UF_TRANSCRIPT_CACHE_MAX_ENTRIES`)
+ * plus `UF_UNMOUNTED_WORKSPACES`, which is not an operator value at all. Either
+ * way the operator chose it, so it must never be swept into a validation
+ * failure — which is precisely why this check belongs in the app, which knows
+ * which is which, rather than in compose, which does not.
+ *
+ * **The pairing with `docker-compose.yml` is what this has to be read against.**
+ * Compose cannot omit an environment key conditionally, so every one of these is
+ * rendered `${VAR:-}` (or, for `UF_UNMOUNTED_WORKSPACES`, computed from `:+`
+ * expansions that produce nothing) and a stock install has all of them
+ * explicitly blank. A variable added to that block and read through `env()` is
+ * therefore a warning on the dashboard of *every* correct deployment, naming a
+ * variable the operator never wrote — and for `UF_UNMOUNTED_WORKSPACES` one they
+ * cannot unset from `.env` at all, because any non-blank value there refuses the
+ * boot. That is how three of these got here: the block grew and the list did
+ * not. `deployment.test.ts` pins the two against each other so the next one
+ * cannot.
  */
 function optionalEnv(name: string): string {
   return process.env[name] ?? "";
@@ -65,7 +82,7 @@ export const PROJECTS_DIR = path.join(CLAUDE_HOME, "projects");
  * memory ever sets.
  */
 export const TRANSCRIPT_CACHE_MAX_ENTRIES = ((): number => {
-  const raw = Number(env("UF_TRANSCRIPT_CACHE_MAX_ENTRIES", ""));
+  const raw = Number(optionalEnv("UF_TRANSCRIPT_CACHE_MAX_ENTRIES"));
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 500_000;
 })();
 
@@ -228,7 +245,9 @@ export function unmountedWorkspaceRefusal(forwarded: string): string | null {
   );
 }
 
-const unmountedWorkspaces = unmountedWorkspaceRefusal(env("UF_UNMOUNTED_WORKSPACES", ""));
+const unmountedWorkspaces = unmountedWorkspaceRefusal(
+  optionalEnv("UF_UNMOUNTED_WORKSPACES"),
+);
 if (unmountedWorkspaces) throw new Error(unmountedWorkspaces);
 
 function legacyMount(): WorkspaceMount {
@@ -276,14 +295,14 @@ export const AUTH_TOKEN = optionalEnv("UF_AUTH_TOKEN");
  * one of the two, and the value is compared as an exact string there — see the
  * note beside it for why truthiness would be the wrong reading.
  */
-export const ALLOW_NO_AUTH = env("UF_ALLOW_NO_AUTH", "");
+export const ALLOW_NO_AUTH = optionalEnv("UF_ALLOW_NO_AUTH");
 
 /**
  * Override for the session cookie's `Secure` flag: `"1"` forces it on, `"0"`
  * off, anything else leaves the request to decide. See `cookieIsSecure` — the
  * two directions exist for different failures, and neither is a preference.
  */
-export const COOKIE_SECURE = env("UF_COOKIE_SECURE", "");
+export const COOKIE_SECURE = optionalEnv("UF_COOKIE_SECURE");
 
 /** Admin API key (sk-ant-admin01-...). Optional. */
 export const ADMIN_API_KEY = optionalEnv("ANTHROPIC_ADMIN_KEY");
@@ -344,7 +363,7 @@ function parseGithubTokens(spec: string): Map<string, string> {
 }
 
 export const GITHUB_TOKENS: ReadonlyMap<string, string> = parseGithubTokens(
-  env("UF_GITHUB_TOKENS", ""),
+  optionalEnv("UF_GITHUB_TOKENS"),
 );
 
 /**
@@ -449,11 +468,33 @@ export const USER_AGENT = "UsageFoundry/0.1.0";
  */
 export const STRICT_ENV_VARS: readonly string[] = strictNames;
 
-/** The three where an explicitly blank value is a documented "off" switch. */
+/**
+ * Every variable where an explicitly blank value is a documented answer rather
+ * than a mistake — the exact set `optionalEnv` reads, and the set
+ * `configCheck.ts` must never report.
+ *
+ * Listed rather than collected, unlike `STRICT_ENV_VARS`: this one is a
+ * *decision* about each name, and a list built by whichever function happened to
+ * be called would make that decision by accident. `deployment.test.ts` is what
+ * holds it to `docker-compose.yml`, and `configCheck.test.ts` is what holds it
+ * against the strict list — the two must stay disjoint.
+ */
 export const BLANK_MEANINGFUL_ENV_VARS = [
+  // Blank is an "off" switch: no auth, no API-account panel, no GitHub.
   "UF_AUTH_TOKEN",
   "ANTHROPIC_ADMIN_KEY",
   "UF_GITHUB_TOKEN",
+  "UF_GITHUB_TOKENS",
+  // Blank is "take the default": no acknowledgement, let the request decide the
+  // cookie flag, and the shipped transcript cache bound.
+  "UF_ALLOW_NO_AUTH",
+  "UF_COOKIE_SECURE",
+  "UF_TRANSCRIPT_CACHE_MAX_ENTRIES",
+  // Blank is the *success* case, and it is not an operator value at all:
+  // compose computes it from the workspace slots it could not mount, so any
+  // non-blank value here refuses the boot. There is no `.env` edit that clears
+  // it, which is what made reporting it a warning nobody could act on.
+  "UF_UNMOUNTED_WORKSPACES",
 ] as const;
 
 export const hasAdminKey = () => ADMIN_API_KEY.length > 0;

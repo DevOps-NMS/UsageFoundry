@@ -161,7 +161,13 @@ describe("POST /api/agents — the refusal paths", () => {
     const body = await read(res);
 
     assert.equal(res.status, 400);
-    assert.match(body.error ?? "", /never gets chosen/);
+    // The ground the field stands on moved with the singular `--agent` flag:
+    // nothing chooses on a description any more, but the CLI will not register
+    // a member without one, so the run fails at the spawn rather than quietly
+    // starting as nobody. The sentence has to say that, not the old one about
+    // a specialist never being picked.
+    assert.match(body.error ?? "", /will not register/);
+    assert.match(body.error ?? "", /fail the moment it spawned/);
   });
 
   it("refuses a missing prompt", async () => {

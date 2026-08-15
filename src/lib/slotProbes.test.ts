@@ -139,6 +139,7 @@ function admit(folder: string): { spawns: number; run: RunRow } {
     folder,
     prompt: "measure the admission path",
     budget: { maxIterations: 1 },
+    origin: "form",
   });
   return { spawns: syncSpawns, run };
 }

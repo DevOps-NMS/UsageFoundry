@@ -154,6 +154,7 @@ describe("shutting down with a work cycle in flight", () => {
       // Two, so a loop that carried on rather than stopping would spawn again —
       // which is the other half of what the flag in `shutdownRuns` prevents.
       budget: { maxIterations: 2 },
+      origin: "form",
     });
 
     await waitFor(
