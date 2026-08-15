@@ -1,0 +1,85 @@
+name: Image
+
+# Its own workflow rather than a job in `ci.yml`, because GitHub's `paths:`
+# filter is per *workflow* and not per job: the image build is the one check
+# here that is too slow to want on every push, and the only way to say so is
+# to give it a file.
+#
+# What it runs on is the honest reading of what can break it. `npm run build`
+# in `ci.yml` is the *same command* the builder stage runs, so a change under
+# `src/` that would break the image already fails there — what this covers is
+# everything that command cannot see: the apt layers, the `gh` release fetch
+# and its checksum, the pinned Claude CLI, `better-sqlite3` compiling from
+# source under a different base image, the `/data` mode, and the build context
+# itself. Those move when these files move, or when an upstream layer does,
+# which is what the schedule is for.
+on:
+  push:
+    paths:
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - ".dockerignore"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - ".dockerignore"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/docker.yml"
+  # Weekly, on the default branch. An image that built last month is not an
+  # image that builds today: `node:22-bookworm-slim`, the Debian package set
+  # and the `gh` release URL all move underneath a Dockerfile that has not.
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Both architectures, for `ci.yml`'s reason and one more that only bites
+    # here: `Dockerfile`'s `gh` step is the single place in this project with
+    # an explicit `case "$(dpkg --print-architecture)"`, and its arm64 arm had
+    # never been executed by anything. A checksum mismatch or a moved release
+    # asset fails that step loudly, which is the point.
+    name: docker compose build · ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the image compose actually deploys
+        # `docker compose build` rather than `docker build`, because the thing
+        # worth verifying is the path `CLAUDE.md` names as the real deployment
+        # loop — `docker compose up --build` — and that reads the compose file
+        # as well as the Dockerfile.
+        #
+        # Compose resolves the whole project model whatever the subcommand, so
+        # the two `${VAR:?message}` guards in `docker-compose.yml` are checked
+        # even though nothing is mounted here. `HOME` is already set on a
+        # runner; `UF_WORKSPACE` is not, and it has no default on purpose —
+        # every way it can be wrong at deploy time is silent, which is why the
+        # guard exists. Pointing it at the checkout satisfies the guard
+        # without asserting anything: no container is started, so no bind
+        # mount is ever made.
+        env:
+          UF_WORKSPACE: ${{ github.workspace }}
+        run: docker compose build

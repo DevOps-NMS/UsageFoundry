@@ -135,7 +135,7 @@ const ROW_FIELDS: Record<RowId, ReadonlyArray<keyof FormValues>> = {
 const ROW_LABEL: Record<RowId, string> = {
   task: "the task",
   where: "the workspace and folder",
-  agent: "the specialist",
+  agent: "the agent",
   isolate: "isolation",
   permission: "the permission mode",
   cycles: "the work-cycle limit",
@@ -550,7 +550,7 @@ export default function NewRunPage() {
   // state because the loader below closes over the first render: a `useState`
   // value read in there is `false` for ever.
   const permissionTouched = useRef(false);
-  // The same question for the specialist, and it needs its own ref for the same
+  // The same question for the agent, and it needs its own ref for the same
   // reason: the settings read and the agent list both land after an arbitrary
   // delay, so a default arriving late must not overwrite a template's agent or
   // a pick the operator has already made.
@@ -706,17 +706,17 @@ export default function NewRunPage() {
   }, []);
 
   /**
-   * The default specialist, applied once both reads have landed.
+   * The default agent, applied once both reads have landed.
    *
    * Two arrivals rather than one, so it cannot be folded into the settings
    * loader: the id is on `/api/settings` and whether it still names anything is
    * on `/api/agents`, and applying it before the second would put an id in the
    * picker that the form could not describe.
    *
-   * A default whose agent has since been deleted leaves the form on no
-   * specialist and says so. That is not the registry's "never fall back to
-   * none" rule bending — that rule is about a run whose operator *named* a
-   * specialist, and it still holds at the door this form posts to. A pre-filled
+   * A default whose agent has since been deleted leaves the form on no agent
+   * and says so. That is not the registry's "never fall back to none" rule
+   * bending — that rule is about a run whose operator *named* one, and it
+   * still holds at the door this form posts to. A pre-filled
    * field nobody has looked at is not a naming, and the alternative is a
    * new-run page that refuses every run until somebody visits Settings.
    */
@@ -955,7 +955,7 @@ export default function NewRunPage() {
   if (selectedAgent && !selectedAgent.usable) {
     problems.push({
       focus: "agent",
-      message: `“${selectedAgent.name}” is missing its description or its prompt, and Claude Code drops such an agent without a word. Fix it, or start with none.`,
+      message: `“${selectedAgent.name}” is missing its description or its prompt, and Claude Code will not register an agent like that — the run would fail the moment it spawned. Fix it, or start with none.`,
       immediate: true,
     });
   }
@@ -1133,7 +1133,7 @@ export default function NewRunPage() {
     // /api/runs; a global default landing on top of it a moment later would
     // undo all three.
     permissionTouched.current = true;
-    // Same for the specialist: a template that names one — or names none
+    // Same for the agent: a template that names one — or names none
     // deliberately — has answered the question, and the settings default must
     // not answer it again a moment later.
     agentTouched.current = true;
@@ -1294,7 +1294,8 @@ export default function NewRunPage() {
           isolate: canIsolate ? isolate : false,
           // An id, never a definition: the registry is where an agent comes
           // from, and the door refuses one that is not in it rather than
-          // starting a run that quietly has no specialist.
+          // starting a run that quietly is not the agent it was asked to be —
+          // which under `--agent` is a run that would fail at the spawn.
           agentId: agentId || null,
           budget: currentBudget(),
         }),
@@ -1534,14 +1535,17 @@ export default function NewRunPage() {
               </div>
             </ListRow>
 
-            {/* Offered only where there is something to offer. A specialist is
-                not a guard and is deliberately not in the card below: an agent
-                holds no tool list and no permission mode, so what it changes is
-                who does a piece of the work and never what the run may do. */}
+            {/* Offered only where there is something to offer. An agent is not
+                a guard and is deliberately not in the card below: it holds no
+                tool list and no permission mode, so what it changes is who the
+                run is and never what the run may do. Being the run rather than
+                a helper inside it is why the row moved from "Specialist" to
+                "Agent" — the old word said "somebody the run may call on",
+                which is the reading `--agent` replaced. */}
             {agents.length > 0 && (
               <ListRow
                 htmlFor="agent"
-                label="Specialist"
+                label="Agent"
                 description={
                   <>
                     {problemFor("agent") ? (
@@ -1549,18 +1553,26 @@ export default function NewRunPage() {
                     ) : selectedAgent ? (
                       selectedAgent.description
                     ) : (
-                      "A saved agent Claude may hand a subtask to — it changes who does part of the work, not what the run may do"
+                      "A saved agent to start this run as — it changes who the run is, not what it may do"
                     )}
+                    {/* An agent's model is the session's now, not a delegated
+                        turn's — so it only reaches a run that has no model of
+                        its own. An explicit --model outranks it, measured on
+                        the pin, and a run's model is settings.defaultModel. */}
                     {selectedAgent?.model && (
                       <span className="block">
-                        Its turns run on{" "}
+                        Runs on{" "}
                         <span className="mono">{selectedAgent.model}</span>
+                        {settings?.defaultModel
+                          ? ", unless the default model in Settings wins"
+                          : ""}
                       </span>
                     )}
                     {/* The registry is a part of the set and not the whole of
                         it: the mounted ~/.claude reaches every child this app
-                        spawns, and --agents merges with it. Said wherever an
-                        agent is chosen, or the picker reads as the full list. */}
+                        spawns, --agents merges with it, and --agent resolves
+                        against the merged set. Said wherever an agent is
+                        chosen, or the picker reads as the full list. */}
                     {ambientLine && (
                       <span className="mt-0.5 block">{ambientLine}</span>
                     )}
@@ -1578,7 +1590,7 @@ export default function NewRunPage() {
                     }}
                     aria-invalid={problemFor("agent") ? true : undefined}
                   >
-                    <option value="">— no specialist —</option>
+                    <option value="">— no agent —</option>
                     {agents.map((a) => (
                       <option key={a.id} value={a.id}>
                         {a.name}
@@ -1599,12 +1611,12 @@ export default function NewRunPage() {
             )}
           </ListGroup>
 
-          {/* A stated fallback rather than a silent one: the form starts with
-              no specialist, and says which setting to fix. */}
+          {/* A stated fallback rather than a silent one: the form starts as no
+              agent, and says which setting to fix. */}
           {defaultAgentGone && (
             <Hint tone="warn" className="mb-3.5">
-              The default specialist in Settings is not in the registry any
-              more, so this run starts with none.{" "}
+              The default agent in Settings is not in the registry any more, so
+              this run starts as none.{" "}
               <Link href="/settings#runs">Change it</Link>
             </Hint>
           )}

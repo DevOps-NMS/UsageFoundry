@@ -107,6 +107,34 @@ services:
       # runs as UF_UID.
       - ${UF_BACKUP_DIR:-./backups}:/backups
 
+    # What this container may take from the host before Docker stops it.
+    #
+    # It supervises a fleet of `claude` children — one Node process per work
+    # cycle, plus one per review, conflict resolution, chat turn and workflow
+    # orchestrator block — and each work cycle's agent starts builds, test
+    # suites and dev servers of its own inside the same cgroup. With no limit,
+    # an over-configured fleet does not fail here: it takes the host down with
+    # it, and the first thing starved is the server process that is supposed to
+    # be supervising and guarding the runs.
+    #
+    # So the failure is made local and recoverable instead. Docker OOM-kills the
+    # container, `restart: unless-stopped` above brings it back, and
+    # `reconcileOnBoot` closes out the runs it was carrying with a reason on
+    # each — a bad hour, rather than a host to go and rescue.
+    #
+    # The defaults are sized for the shipped settings (4 work cycles + 2 other
+    # Claude processes): ~1.5 GiB per work cycle, ~0.5 GiB for the rest, ~1 GiB
+    # for the server, with headroom. Raise both **with** the settings, never
+    # after the fact — README's "Sizing the container" has the arithmetic.
+    #
+    # pids_limit counts tasks, not processes: a Node process is ~10 threads
+    # before it forks anything, and `npm ci` inside an agent's checkout is
+    # dozens more. It is the cheaper of the two limits to hit, and hitting it
+    # fails a command inside an agent's tool call rather than killing the
+    # container, so it is set generously.
+    mem_limit: ${UF_MEM_LIMIT:-10g}
+    pids_limit: ${UF_PIDS_LIMIT:-2048}
+
     restart: unless-stopped
 
 volumes:

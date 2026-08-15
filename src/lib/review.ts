@@ -178,7 +178,9 @@ export async function startReview(runId: string): Promise<ReviewOutcome> {
     };
   }
 
-  const refusal = await windowRefusal();
+  // The whole door, not just the window: this call has taken no slot yet, and
+  // the row `startAssist` is about to write is what fills one.
+  const refusal = await assistRefusal();
   if (refusal) return { ok: false, reason: refusal };
 
   const cwd = await reviewCwd(run);
@@ -217,10 +219,20 @@ export interface AssistRequest {
   /**
    * Specialised agents this invocation may delegate to.
    *
-   * Offered, never imposed, and it costs this child none of what makes it the
-   * deliberate third kind of process: a review still runs `--permission-mode
-   * plan` so nothing it delegates can write, and a delegated turn's spend still
-   * lands in `run_reviews` rather than in `runs.spent_usd`.
+   * **The one caller left on the plural flag, and deliberately not moved to the
+   * singular one.** A run and an orchestrator block now *are* the agent they
+   * name (`sessionAgentArgs`); this stays an offer, because a review is not a
+   * run and has no operator-chosen role to take. What it is is fixed by this
+   * module — `--permission-mode plan` so nothing it does can write, its own
+   * prompt, and a cost that lands in `run_reviews` rather than `runs.spent_usd`
+   * — and selecting somebody's saved agent here would replace exactly that.
+   *
+   * Nothing supplies this today: no caller of `startAssist` passes one, so a
+   * review has never been given an agent at all. It is left as a parameter
+   * rather than deleted because the question of whether a reviewer should be
+   * choosable is a real one and this is where it would be answered; what it must
+   * not do is gain a *selected* agent by default, which is why the singular
+   * encoder is not reached from here.
    */
   agents?: AgentDefinition[];
   /**
@@ -288,13 +300,104 @@ export function startAssist(req: AssistRequest): ReviewOutcome {
   return { ok: true, id };
 }
 
-/** Shared refusal: the operator's own window ceiling is already spent. */
+/**
+ * How many `claude` children that are not work cycles are alive right now.
+ *
+ * Three tables because there are three modules that spawn one, and each already
+ * records its child's whole life in a row that a boot reconciler closes out:
+ * `run_reviews` (a review and a conflict resolution), `chat_sessions` (a chat
+ * turn) and `workflow_instance_blocks` (a block's deciding turn). Counting rows
+ * rather than holding a number in this module is what makes the answer survive
+ * the module boundaries — `chat.ts` and `workflows.ts` both import *this* file,
+ * so neither can be imported back — and it is the same way every other
+ * occupancy question here is answered, from `activeRuns()` down.
+ *
+ * `kind='orchestrator'` is load-bearing on the last one: a **merge** block takes
+ * the identical `thinking` status from the identical `claimBlock`, and it spawns
+ * no child at all. Counting it would refuse a chat turn to make room for a
+ * process that does not exist.
+ */
+export function liveAssistChildren(): number {
+  const row = db()
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM run_reviews WHERE status='running')
+            + (SELECT COUNT(*) FROM chat_sessions WHERE status='thinking')
+            + (SELECT COUNT(*) FROM workflow_instance_blocks
+                WHERE status='thinking' AND kind='orchestrator') AS n`,
+    )
+    .get() as { n: number };
+  return row.n;
+}
+
+/**
+ * The process-budget verdict, given a live count and a cap.
+ *
+ * Pure and separated from the query for `selectPromotable`'s reason: what it
+ * decides is whether a billed child is spawned, and both ways of getting it
+ * wrong are silent — an off-by-one refuses an operator's review for no visible
+ * reason, and a `>` where `>=` belongs quietly restores the unbounded fleet this
+ * exists to end. A null cap is the explicit opt-out and is not a shortage.
+ *
+ * The wording deliberately avoids "already at the ceiling", which is what
+ * `mergeQueue`'s `refusesEveryResolution` matches on to skip the rest of a
+ * repository's queue in one go. A spent window will refuse every later item
+ * identically; a full budget is a slot somebody else is holding for a few
+ * minutes, so the item behind it deserves its own turn to ask.
+ */
+export function assistBudgetRefusal(live: number, cap: number | null): string | null {
+  if (cap === null || live < cap) return null;
+  return (
+    `${live} Claude ${live === 1 ? "process" : "processes"} outside a work cycle ` +
+    `${live === 1 ? "is" : "are"} already running, which is the limit this ` +
+    "container is set to carry. A review, a conflict resolution, a chat turn " +
+    "and a workflow's deciding block share that budget — wait for one to " +
+    "finish, or raise “Other Claude processes at the same time” in Settings."
+  );
+}
+
+/** True when nothing more may be spawned outside a work cycle right now. */
+export function assistBudgetFull(): boolean {
+  return assistBudgetRefusal(liveAssistChildren(), getSettings().maxConcurrentAssists) !== null;
+}
+
+/**
+ * The door for a caller that is about to **take** a slot outside a work cycle:
+ * the process budget is full, or the operator's own window ceiling is spent.
+ *
+ * The budget goes first because it is a `COUNT` and `windowRefusal` is a full
+ * transcript scan — and because the merge queue calls this once per item, so a
+ * shortage that will refuse all of them must not cost a scan each time.
+ *
+ * Not for a caller that already holds its slot; that one wants `windowRefusal`
+ * and the note above it says why.
+ *
+ * It is a check and not a claim: every caller here has an `await` between this
+ * answer and the row that fills the slot, so two requests arriving in the same
+ * tick can both pass a budget with one left. That is deliberate rather than
+ * overlooked — this bounds host memory, not a folder, and the overshoot is the
+ * number of requests in flight, where making it exact would mean a reservation
+ * row and a way to release one that a crash could not strand. A block's turn is
+ * exact anyway, because `advanceInstance` claims synchronously.
+ */
 export async function assistRefusal(): Promise<string | null> {
+  const budget = assistBudgetRefusal(
+    liveAssistChildren(),
+    getSettings().maxConcurrentAssists,
+  );
+  if (budget) return budget;
   return windowRefusal();
 }
 
 /**
- * Refuse a review when the operator's own ceiling is already spent.
+ * Refuse when the operator's own ceiling is already spent — and *only* that.
+ *
+ * Exported for the one caller that has taken its slot before it asks: a block's
+ * deciding turn is claimed by `advanceInstance`, which is where the process
+ * budget gates it, so its own row is already `thinking` and already counted by
+ * the time `startBlockTurn` runs. Putting it through `assistRefusal` there would
+ * have it refuse itself the moment the budget was exactly full — and, worse,
+ * fail the block for it. Everything that has yet to take a slot wants
+ * `assistRefusal`.
  *
  * A review is not a work cycle and has no `BudgetPolicy` to read, so it is not
  * put through `evaluateBudget` — there is no per-run fraction to compare
@@ -308,7 +411,7 @@ export async function assistRefusal(): Promise<string | null> {
  * displayed figure, and a guard that reads the display stops existing the week
  * a new model ships.
  */
-async function windowRefusal(): Promise<string | null> {
+export async function windowRefusal(): Promise<string | null> {
   try {
     const snapshot = await currentSnapshot();
     const full = (f: number | null) => f !== null && f >= 1;
@@ -675,4 +778,28 @@ function finish(
       ...(r.error ? { error: r.error } : {}),
     },
   });
+
+  wakeDeferredBlocks();
+}
+
+/**
+ * Advance every workflow, because this row just gave a slot back.
+ *
+ * A block's deciding turn is deferred rather than refused when
+ * `assistBudgetFull()`, so it is left `waiting` for the next advance — and
+ * `settleBlock`'s own advance only covers a slot that a *block* freed. Without
+ * this, a review holding the last slot would strand that block until something
+ * else in the app happened to finish, which is the "row that sits waiting for
+ * ever" the whole dependency design has none of.
+ *
+ * Imported dynamically for `releaseDependents`' reason: `workflows.ts` imports
+ * this module, so reaching back for it statically would close a cycle. Not
+ * awaited — the advance is its own synchronous pass in a later turn.
+ */
+function wakeDeferredBlocks(): void {
+  void import("./workflows")
+    .then((m) => m.advanceInstances())
+    .catch(() => {
+      /* a workflow that cannot be advanced is not a reason to fail an assist */
+    });
 }

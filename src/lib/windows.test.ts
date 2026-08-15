@@ -633,7 +633,9 @@ describe("agent attribution", () => {
     assert.equal(spend.costUSD, 10);
     assert.equal(spend.entryCount, 3);
     // The complement of the main-thread bucket, so the two always add to the
-    // total — a delegated share is a share of what this run itself spent.
+    // total. Named `delegated` historically and asserted as what it is: every
+    // row carrying an agent name, whatever put the name there — a turn the
+    // session handed off, or, under `--agent`, possibly its own.
     assert.equal(spend.delegatedCostUSD, 5);
     assert.equal(
       spend.rows.reduce((s, r) => s + r.costUSD, 0),
