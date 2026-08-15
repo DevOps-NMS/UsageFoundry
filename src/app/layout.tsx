@@ -3,6 +3,27 @@ import "./globals.css";
 import { AppShell } from "@/components/shell/AppShell";
 import { authEnabled } from "@/lib/config";
 
+/**
+ * Applies to every page under this layout, and it is the banner below that
+ * needs it.
+ *
+ * `authEnabled()` reads an environment variable, and without this every page
+ * was prerendered during `next build` — which for the shipped image means
+ * inside `docker build`, where `UF_AUTH_TOKEN` is not set and cannot be. So the
+ * answer baked into the HTML was "authentication is off" on every install,
+ * including the ones that had set a token, and no restart could change it.
+ *
+ * The mirror image is the reason this is a correctness fix rather than a
+ * cosmetic one: a build whose shell happened to export `UF_AUTH_TOKEN`, run
+ * against a deployment without one, prerenders the banner *away* and leaves
+ * every route open with nothing on the page saying so.
+ *
+ * The cost is small here and would not have been the same trade at the top of a
+ * content site: these pages are client components that fetch their own data, so
+ * what the prerender was saving is a shell, not a render.
+ */
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: {
     default: "UsageFoundry",
