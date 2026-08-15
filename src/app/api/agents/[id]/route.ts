@@ -4,7 +4,8 @@ import {
   getAgent,
   normalizeAgentInput,
   updateAgent,
-} from "@/lib/agents";
+} from "../../../../lib/agents";
+import { auditMutation } from "../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,7 +27,7 @@ export async function GET(_req: Request, ctx: Ctx) {
  * drop is the same mistake as saving one that way, and the CLI reports neither —
  * so the refusal has to be here, while the person who typed it is looking.
  */
-export async function PUT(req: Request, ctx: Ctx) {
+async function putHandler(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
@@ -54,10 +55,15 @@ export async function PUT(req: Request, ctx: Ctx) {
  * whole definition on its own argv rather than a reference to this row, so there
  * is no cascade and no child left pointing at something that is gone.
  */
-export async function DELETE(_req: Request, ctx: Ctx) {
+async function deleteHandler(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   if (!deleteAgent(id)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
   return NextResponse.json({ ok: true });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const PUT = auditMutation(putHandler);
+/** Wrapped so the request that changed something is on the audit log. */
+export const DELETE = auditMutation(deleteHandler);

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getRun } from "@/lib/orchestrator";
 import { listReviews, startReview } from "@/lib/review";
+import { auditMutation } from "../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,7 +46,7 @@ export async function GET(_req: Request, ctx: Ctx) {
  * operator can act on: a window already spent, a review already running, or a
  * run with nothing committed to review.
  */
-export async function POST(_req: Request, ctx: Ctx) {
+async function postHandler(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   if (!getRun(id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
@@ -55,3 +56,6 @@ export async function POST(_req: Request, ctx: Ctx) {
   }
   return NextResponse.json({ ok: true, id: outcome.id });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

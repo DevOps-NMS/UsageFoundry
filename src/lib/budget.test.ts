@@ -4,12 +4,19 @@ import {
   type BudgetPolicy,
   type InstanceBudgetPolicy,
   INSTANCE_ENFORCEABLE_CODES,
+  RUN_ENFORCEABLE_CODES,
+  enforceableForRun,
   evaluateBudget,
+  evaluateInstallBudget,
   evaluateInstanceBudget,
+  installBudgetIsOff,
   instanceBudgetIsOff,
+  normalizeInstallBudget,
   normalizeInstanceBudget,
   normalizePolicy,
+  planReadingAgeMs,
   readWindowGuard,
+  windowGuardRefusal,
 } from "./budget";
 import { pctField, pctSubmit } from "./format";
 import type { UsageSnapshot, WindowState } from "./windows";
@@ -74,6 +81,28 @@ function snapshot(sessionFraction: number | null, weeklyFraction: number | null)
     byEffort: [],
     totalCostUSD: 0,
   } as unknown as UsageSnapshot;
+}
+
+/**
+ * The same snapshot, but with the 5-hour reading coming from the provider and
+ * carrying the instant it was read.
+ *
+ * That reading is cached — five minutes in the ordinary case, up to an hour
+ * while requests are being refused — so a verdict reached on it can be an hour
+ * behind the window it describes, and nothing in the verdict or the run log
+ * used to say so.
+ */
+function planSnapshot(sessionFraction: number, fetchedAt: number): UsageSnapshot {
+  const snap = snapshot(sessionFraction, null);
+  return {
+    ...snap,
+    session: {
+      ...snap.session,
+      fractionMetric: "plan",
+      planFraction: sessionFraction,
+    },
+    plan: { session: null, weekly: null, scopedWeekly: [], fetchedAt },
+  };
 }
 
 const base: BudgetPolicy = {
@@ -286,6 +315,156 @@ describe("evaluateBudget", () => {
     );
     assert.equal(v.allowed, false);
     assert.equal(v.allowed === false && v.code, "no_ceiling");
+  });
+
+  /**
+   * …and the run must not be *ended* on it, which is a separate decision from
+   * whether the verdict exists.
+   *
+   * `INSTANCE_ENFORCEABLE_CODES` already argues this out one level up, in as
+   * many words, and every clause of that argument is about a run: ceilings ship
+   * null by design, the reading behind `fraction` on a stock install is the
+   * provider's own percentage, and it is discarded after an hour without a
+   * fresh answer. Acted on, an unreachable Anthropic host ends every running
+   * fraction-guarded run at its next cycle boundary, blocks every queued one —
+   * cascading `blocked` down every chain behind it — and lets the sweeper end
+   * every parked one, with recovery being one manual reopen per run.
+   *
+   * Every other code stays enforceable, and that is the half that would be
+   * quietly expensive to get wrong: a whitelist that swallowed `run_cost` or
+   * `duration` is a run nothing ends.
+   */
+  it("keeps every refusal but that one actionable for a run", () => {
+    assert.equal(RUN_ENFORCEABLE_CODES.includes("no_ceiling"), false);
+    for (const code of [
+      "weekly_fraction",
+      "session_fraction",
+      "run_cost",
+      "run_tokens",
+      "iterations",
+      "duration",
+      "instance_cost",
+      "no_terminus",
+    ] as const) {
+      assert.equal(RUN_ENFORCEABLE_CODES.includes(code), true, code);
+    }
+
+    // The predicate the two callers read, rather than the list: an allowed
+    // verdict is trivially not something to end a run on.
+    const unreadable = evaluateBudget(
+      { ...base, maxSessionFraction: 0.8 },
+      snapshot(null, null),
+      noProgress,
+      0,
+    );
+    assert.equal(enforceableForRun(unreadable), false);
+    assert.equal(
+      enforceableForRun(
+        evaluateBudget({ ...base, maxRunCostUSD: 1 }, snapshot(null, null), {
+          ...noProgress,
+          spentUSD: 2,
+        }, 0),
+      ),
+      true,
+    );
+    assert.equal(
+      enforceableForRun(evaluateBudget(base, snapshot(null, null), noProgress, 0)),
+      true,
+    );
+  });
+
+  /**
+   * The door that the change above moves the refusal to.
+   *
+   * `POST /api/runs` and the reopen route both call this before anything is
+   * created, so the operator is told at the moment they ask rather than by a
+   * run that flickers queued → blocked. It reads `readWindowGuard`, the same
+   * function the guard reads, so the two cannot come to different conclusions
+   * about whether a window has a reading at all.
+   */
+  it("refuses at the door only where a fraction guard has nothing to read", () => {
+    // Both causes are named, because there are two and they call for different
+    // actions: a ceiling is a thing to go and set, where the provider's own
+    // utilisation simply comes back.
+    const session = windowGuardRefusal(
+      { ...base, maxSessionFraction: 0.8 },
+      snapshot(null, null),
+    );
+    assert.match(session ?? "", /5-hour window has no reading/);
+    assert.match(session ?? "", /provider's own utilisation/);
+    assert.match(
+      windowGuardRefusal({ ...base, maxWeeklyFraction: 0.8 }, snapshot(null, null)) ??
+        "",
+      /weekly-fraction guard/,
+    );
+
+    // The guard and the door say the same sentence, because there is one.
+    const verdict = evaluateBudget(
+      { ...base, maxSessionFraction: 0.8 },
+      snapshot(null, null),
+      noProgress,
+      0,
+    );
+    assert.equal(verdict.allowed === false ? verdict.reason : "", session);
+
+    // A guard with a reading passes, however close to its threshold — the door
+    // answers "can this guard be read", never "is it satisfied". That is
+    // `evaluateBudget`'s question, and asking it here with no progress to
+    // evaluate would refuse a run over limits it cannot yet have reached.
+    assert.equal(
+      windowGuardRefusal({ ...base, maxSessionFraction: 0.8 }, snapshot(0.99, null)),
+      null,
+    );
+    // And a policy with no fraction guard has nothing to say either way.
+    assert.equal(windowGuardRefusal(base, snapshot(null, null)), null);
+  });
+
+  /**
+   * A guard acting on a percentage that may be an hour old must say how old it
+   * was. The reading is the provider's, it is cached, and the two sentences
+   * "the window is at 90%" and "the window was at 90% fifty-eight minutes ago"
+   * are the same string without this — which is the whole of why an operator
+   * reading a stop reason could not tell a live decision from a frozen one.
+   */
+  it("names the age of a stale provider reading in the verdict it decided", () => {
+    const now = 4_000_000;
+    const stale = evaluateBudget(
+      { ...base, maxSessionFraction: 0.8 },
+      planSnapshot(0.9, now - 58 * 60_000),
+      noProgress,
+      now,
+    );
+    assert.equal(stale.allowed, false);
+    assert.equal(stale.allowed === false && stale.code, "session_fraction");
+    assert.match(
+      stale.allowed === false ? stale.reason : "",
+      /58 minutes old/,
+      "a verdict reached on an hour-old reading has to disclose its age",
+    );
+
+    // Inside the source's own refresh cadence there is nothing to disclose: the
+    // reading is as current as that source ever is, and a note on every verdict
+    // would stop being read.
+    const fresh = evaluateBudget(
+      { ...base, maxSessionFraction: 0.8 },
+      planSnapshot(0.9, now - 60_000),
+      noProgress,
+      now,
+    );
+    assert.equal(fresh.allowed, false);
+    assert.doesNotMatch(
+      fresh.allowed === false ? fresh.reason : "",
+      /old when this was decided/,
+    );
+  });
+
+  it("reports no age for a reading that was derived here", () => {
+    // A derived reading is recomputed on every check, so it has no age to
+    // disclose — and null must not be read as "fresh provider reading", which
+    // is a different sentence about a different source.
+    const snap = snapshot(0.9, null);
+    assert.equal(planReadingAgeMs(snap, snap.session, 10_000_000), null);
+    assert.equal(planReadingAgeMs(planSnapshot(0.9, 9_000_000), planSnapshot(0.9, 9_000_000).session, 10_000_000), 1_000_000);
   });
 
   it("guards on reconciled spend, not just what the CLI reported", () => {
@@ -802,5 +981,97 @@ describe("evaluateInstanceBudget — the cap on everything one press of Run spen
     );
     assert.equal(noReading.allowed, false);
     assert.deepEqual(noReading.meters, []);
+  });
+});
+
+/**
+ * The ceiling on the *installation*, which is the one thing here that bounds
+ * more than one spender.
+ *
+ * `maxRunCostUSD` bounds a run, `maxInstanceCostUSD` one press of Run,
+ * `chatTurnBudgetUSD` one chat turn — and nothing bounded the total or the rate
+ * at which new spenders appear, so twenty-five concurrent runs under a $35 run
+ * limit reads as $875 and is $875 *per wave*, with waves unbounded. Pure and
+ * tested here for `evaluateInstanceBudget`'s reason: the decision is arithmetic
+ * whose failure modes are silent, and what reads the database is the caller.
+ */
+describe("evaluateInstallBudget — the cap on everything this install spends", () => {
+  const spend = (spentUSD: number, spentGuardUSD = spentUSD) => ({
+    spentUSD,
+    spentGuardUSD,
+  });
+
+  it("allows an install under its ceiling", () => {
+    const v = evaluateInstallBudget({ maxInstallCostUSD: 100 }, spend(99.99));
+    assert.equal(v.allowed, true);
+    assert.deepEqual(v.meters, [
+      { label: "Spent by this install", value: 99.99, limit: 100, unit: "usd" },
+    ]);
+  });
+
+  it("stops at the ceiling exactly, not a cent past it", () => {
+    // `>=`, the same comparison every other spend guard here makes. A $100 cap
+    // that only trips at $100.01 is a cap the operator did not set.
+    const v = evaluateInstallBudget({ maxInstallCostUSD: 100 }, spend(100));
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "install_cost");
+    assert.equal(v.allowed === false && v.disposition, "stop");
+    // The reason names the install limit rather than any per-run one, because
+    // an operator meeting it will otherwise go looking at the wrong field.
+    assert.match(v.allowed === false ? v.reason : "", /\$100\.00 limit set in Settings/);
+    assert.match(v.allowed === false ? v.reason : "", /24 hours/);
+  });
+
+  it("compares the guard's figure, not the measured floor", () => {
+    // A cycle in flight has reported nothing, and a killed one never will, so
+    // an install guarding on `spent_usd` alone would read far under its own
+    // total for as long as agents keep working — which is exactly when it
+    // matters. Same display-versus-guard split as everywhere else.
+    const v = evaluateInstallBudget({ maxInstallCostUSD: 100 }, spend(40, 120));
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "install_cost");
+    assert.match(v.allowed === false ? v.reason : "", /\$120\.00/);
+    assert.equal(
+      evaluateInstallBudget({ maxInstallCostUSD: 100 }, spend(40)).allowed,
+      true,
+    );
+  });
+
+  it("is off with no ceiling, however much has been spent", () => {
+    const off = { maxInstallCostUSD: null };
+    assert.equal(installBudgetIsOff(off), true);
+    const v = evaluateInstallBudget(off, spend(10_000));
+    assert.equal(v.allowed, true);
+    // No ceiling, no meter: a bar with no denominator is the "unknown renders
+    // as zero" mistake, and the page draws the indeterminate one instead.
+    assert.deepEqual(v.meters, []);
+  });
+
+  it("reads null, blank, zero and a negative all as off", () => {
+    // `normalizeInstanceBudget`'s rule, for its reason: there is no default
+    // limit to restore, because a limit nobody typed is not a limit. Total and
+    // idempotent, because it runs over a settings value read back on every
+    // door check.
+    for (const raw of [null, undefined, "", 0, "0", -5, "nonsense", {}]) {
+      const policy = normalizeInstallBudget({ maxInstallCostUSD: raw });
+      assert.equal(policy.maxInstallCostUSD, null, String(raw));
+      assert.equal(installBudgetIsOff(policy), true, String(raw));
+    }
+    assert.deepEqual(normalizeInstallBudget(null), { maxInstallCostUSD: null });
+
+    // …and a real figure survives, through a string as the wire sends it.
+    assert.deepEqual(normalizeInstallBudget({ maxInstallCostUSD: "250" }), {
+      maxInstallCostUSD: 250,
+    });
+    assert.deepEqual(
+      normalizeInstallBudget(normalizeInstallBudget({ maxInstallCostUSD: 250 })),
+      { maxInstallCostUSD: 250 },
+    );
+  });
+
+  it("is a code a run may actually be stopped on", () => {
+    // Unlike `no_ceiling`, this is a fact about money that has been spent, so
+    // the pre-cycle guard acts on it rather than logging past it.
+    assert.equal(RUN_ENFORCEABLE_CODES.includes("install_cost"), true);
   });
 });

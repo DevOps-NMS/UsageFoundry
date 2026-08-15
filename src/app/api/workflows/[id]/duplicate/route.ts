@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { duplicateWorkflow } from "@/lib/workflows";
 import { workflowDTO } from "../../dto";
+import { auditMutation } from "../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +16,7 @@ type Ctx = { params: Promise<{ id: string }> };
  * has to be submitted before it exists is one navigation away from losing the
  * work it was meant to protect.
  */
-export async function POST(_req: Request, ctx: Ctx) {
+async function postHandler(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   try {
     const copy = duplicateWorkflow(id);
@@ -30,3 +31,6 @@ export async function POST(_req: Request, ctx: Ctx) {
     );
   }
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

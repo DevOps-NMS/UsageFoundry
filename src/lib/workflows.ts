@@ -11,7 +11,8 @@ import {
   type ChatProcess,
   type TurnResult,
 } from "./chat";
-import { assistRefusal } from "./review";
+import { assistBudgetFull, windowRefusal } from "./review";
+import { installBudgetRefusal } from "./installBudget";
 import {
   DEPENDENCY_EDGES,
   blockWaitingRun,
@@ -30,7 +31,9 @@ import {
   stopRun,
   TERMINAL_STATUSES,
   topologicalOrder,
+  RUN_ORIGINS,
   type CreateRunInput,
+  type RunOrigin,
   type DependencyEdge,
   type DependencyLink,
   type DependencyState,
@@ -68,7 +71,12 @@ import {
 } from "./agents";
 import { telemetrySpendSince } from "./otlp";
 import type { UsageSnapshot } from "./windows";
-import { chatGuards, getSettings, type RunGuards } from "./settings";
+import {
+  chatGuards,
+  getSettings,
+  newWorkPaused,
+  type RunGuards,
+} from "./settings";
 import { getTemplate, listTemplates, type RunTemplate } from "./templates";
 import { WORKSPACE_MOUNTS, mountById } from "./config";
 import { dataDirRefusal } from "./serverLock";
@@ -186,14 +194,17 @@ export interface WorkflowNode {
    */
   promptOverride: string | null;
   /**
-   * A saved agent this block's own child may hand a subtask to, or null.
+   * A saved agent this block's own child is started **as**, or null.
    *
    * On the **work** side of the node — beside the mount, the folder, the task
-   * and the prompt override — and deliberately not on the guard side. An agent
-   * carries no capability at all: it holds no tool list and no permission mode,
-   * so what it changes is who does a piece of the work and never what the block
-   * may do. The three narrowings of `--permission-mode` stay three, the two
-   * routes to it stay two, and `guardsFor` still returns the same three fields.
+   * and the prompt override — and deliberately not on the guard side. That
+   * placement was re-decided when the flag became `--agent` rather than carried
+   * over: the child now *is* this agent, which makes the field a larger fact
+   * and not a different kind of one. An agent still carries no capability at
+   * all — it holds no tool list and no permission mode — so what it changes is
+   * who the child is and never what the block may do. The three narrowings of
+   * `--permission-mode` stay three, the two routes to it stay two, and
+   * `guardsFor` still returns the same three fields.
    *
    * **It is the node's own and is never inherited from its template**, which is
    * the mount and folder's rule rather than the prompt's. What decides it is
@@ -204,7 +215,7 @@ export interface WorkflowNode {
    * later would silently move a saved block's run to another repository, and an
    * agent is the same shape of change one field over: it decides who does the
    * work, it points into a registry that is edited somewhere else entirely, and
-   * a saved graph whose specialist moved with nothing in the graph changing is
+   * a saved graph whose agent moved with nothing in the graph changing is
    * exactly that surprise. The canvas states this field in the sentence a press
    * of Run is approved against, which it could not do honestly for a value that
    * lives on another record.
@@ -218,8 +229,8 @@ export interface WorkflowNode {
    * cannot reach a run that has already started.
    *
    * Which child it is differs by kind, and the field does not. On a run block it
-   * is that run's own specialist. On an orchestrator block it is the **deciding
-   * turn's**, because that turn is the child this block spawns; the runs it
+   * is what that run itself is started as. On an orchestrator block it is the
+   * **deciding turn's**, because that turn is the child this block spawns; the runs it
    * emits name their own, one per spec, which is the only per-run answer
    * available to a block that has not decided on them yet. That is the opposite
    * way round from `promptOverride`, which an orchestrator block holds on behalf
@@ -321,7 +332,7 @@ export interface WorkflowKnowledge {
   /** Whether `settings.chatDefaultGuards` isolates — a node naming no template. */
   defaultIsolate: boolean;
   /**
-   * The agent registry, for a node that names a specialist.
+   * The agent registry, for a node that names an agent.
    *
    * Injected like the templates and for the identical reason, and read through
    * the same `agentRefusal` the run door and the template door read — so a
@@ -560,17 +571,19 @@ export function normalizeWorkflowInput(
     const promptOverride =
       kind === "merge" ? "" : String(n.promptOverride ?? "").trim();
 
-    // The specialist this block's own child may be handed a subtask by.
+    // The agent this block's own child is started as.
     //
     // Refused rather than dropped on a merge block, and that is the one place
     // this loop's habit of coercing a field the kind does not hold stops. A
-    // template on a merge block decides nothing, because no agent runs under it;
-    // an agent named on a block that spawns no child at all is a specialist the
-    // operator believes is in play and that no process will ever be given —
-    // which is the exact shape `agents.ts` exists to refuse, and dropping it
-    // here would be this app performing the CLI's own silent drop at the one
-    // door built to end it. Both ends of a `continueBranch` edge are refused by
-    // name below on the same grounds.
+    // template on a merge block decides nothing, because no agent runs under
+    // it; an agent named on a block that spawns no child at all is a choice the
+    // operator made that no process will ever act on — which is the exact shape
+    // `agents.ts` exists to refuse, and dropping it here would be this app
+    // discarding it in silence at the one door built to end that. The sentence
+    // changed shape with the flag and the refusal did not: under `--agents` the
+    // objection was that there was nobody to hand the subtask to, and under
+    // `--agent` it is that there is no child for the agent to *be*. Both ends
+    // of a `continueBranch` edge are refused by name below on the same grounds.
     const namedAgent =
       n.agentId === null || n.agentId === undefined || String(n.agentId).trim() === ""
         ? null
@@ -580,8 +593,8 @@ export function normalizeWorkflowInput(
         ok: false,
         error:
           `“${nodeName}” lands the branches in front of it and starts no agent ` +
-          "of its own, so there is nothing for a specialist to be handed. " +
-          "Remove it, or put it on the block that does the work.",
+          "of its own, so there is nothing for that agent to be. Remove it, or " +
+          "put it on the block that does the work.",
       };
     }
     const agentId = kind === "merge" ? null : namedAgent;
@@ -905,7 +918,7 @@ export interface ProposedBlockSummary {
   /** The template's name, or what the untemplated guard set permits. */
   guardsLabel: string;
   /**
-   * The specialist this block may hand a subtask to, by name, or null for none.
+   * The agent this block's child is started as, by name, or null for none.
    *
    * Separate from `guardsLabel` rather than folded into it, which is the same
    * separation `BlockStatement` makes in the editor and for the same reason: an
@@ -1068,7 +1081,7 @@ export function approveWorkflowProposal(id: string): WorkflowApproval {
 /* ------------------------------------------------------------------ */
 
 export type NodePlan =
-  | { ok: true; input: Omit<CreateRunInput, "dependsOn"> }
+  | { ok: true; input: Omit<CreateRunInput, "dependsOn" | "origin"> }
   | { ok: false; reason: string };
 
 /**
@@ -1103,9 +1116,11 @@ export function planNode(
   }
 
   // Refused by name for the template's reason and the registry's own: a run
-  // given a specialist it does not have is bit-for-bit a run that was never
-  // given one, and nothing downstream can tell them apart — not the event log,
-  // not the cost, not the transcript's own attribution.
+  // that was to be started as an agent and is started as nobody is bit-for-bit
+  // a run that was never given one, and nothing downstream can tell them apart
+  // — not the event log, not the cost, not the transcript's own attribution.
+  // Under `--agent` the other half is louder: a decayed definition reaches the
+  // argv and the spawn fails, every cycle, with the reason only in stderr.
   //
   // Read as truthy rather than against null, unlike the template above it: a
   // graph blob copied onto an instance before this field existed has no key
@@ -1177,10 +1192,11 @@ function guardsFor(
  * this is the one path in the app where nobody looks at the answer before it
  * becomes a process.
  *
- * The **specialist is the third thing the turn decides**, and it belongs with
- * the task and the folder rather than with the guards: an agent is a
- * description and a prompt, it carries no tool list and no permission mode, and
- * every guard below still comes off the block a person saved. It is resolved by
+ * The **agent is the third thing the turn decides** — who the emitted run *is*
+ * — and it belongs with the task and the folder rather than with the guards: an
+ * agent is a description and a prompt, it carries no tool list and no permission
+ * mode, and every guard below still comes off the block a person saved. It is
+ * resolved by
  * the caller — `planEmission` has already refused a name the registry does not
  * have, and this takes the definition that name resolved to.
  */
@@ -1190,7 +1206,7 @@ export function planEmittedRun(
   template: RunTemplate | null,
   defaults: RunGuards,
   agent: AgentDefinition | null,
-): Omit<CreateRunInput, "dependsOn"> {
+): Omit<CreateRunInput, "dependsOn" | "origin"> {
   const guards = guardsFor(template, defaults);
   const base = node.promptOverride?.trim() || template?.prompt || null;
   return {
@@ -1212,17 +1228,17 @@ export function planEmittedRun(
  * One run an orchestrator block asks for.
  *
  * Five fields, and the list is the boundary rather than a starting point: a
- * title, the brief, a folder, a specialist, and which of its siblings it starts
+ * title, the brief, a folder, an agent, and which of its siblings it starts
  * after. There is no template id, no budget, no permission mode, no isolation
  * choice and no model, because the block's own template already answered all of
  * those and a spec that could answer them again would be a fifth route to
  * `--permission-mode` reached by a model with nobody reading the result.
  *
- * The specialist is not one of those and cannot become one. An agent is a
- * description and a prompt — the registry refuses a tool list at the door and
- * has no column for a permission mode — so naming one is the same class of act
- * as writing the task text beside it: it decides who does a piece of the work,
- * and every guard still comes from the block a person saved.
+ * The agent is not one of those and cannot become one. An agent is a description
+ * and a prompt — the registry refuses a tool list at the door and has no column
+ * for a permission mode — so naming one is the same class of act as writing the
+ * task text beside it: it decides who the run *is*, and every guard still comes
+ * from the block a person saved.
  */
 export interface RunSpec {
   /** Stable within one emission; the edges below name it. */
@@ -1234,12 +1250,13 @@ export interface RunSpec {
   /** Path within the *block's* own folder. `""` is the mount root. */
   folder: string;
   /**
-   * A saved agent this run may hand a subtask to, by **name**, or null.
+   * A saved agent to start this run **as**, by **name**, or null.
    *
    * A name rather than an id because a name is what the turn was shown — see
    * `blockSystemPrompt` — and it is the registry's own spelling of it rather
    * than the turn's, because the name is the key of the object `--agents` takes
-   * and the string a transcript attributes a delegated turn to.
+   * *and* the word `--agent` is handed to select it. A misspelling that reached
+   * the argv would not be quietly ignored; it would fail the spawn.
    */
   agent: string | null;
   /** Siblings in this same emission that must settle first. */
@@ -1365,11 +1382,11 @@ export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan
       };
     }
 
-    // The specialist, checked here beside the cap and the folder because this
-    // is the last moment before these become processes. Refused by name rather
-    // than dropped, which is `agentRefusal`'s rule reached from the one door
-    // where nobody is looking: a run emitted "as the reviewer" and started
-    // without one is indistinguishable afterwards from a run that named none.
+    // The agent, checked here beside the cap and the folder because this is the
+    // last moment before these become processes. Refused by name rather than
+    // dropped, which is `agentRefusal`'s rule reached from the one door where
+    // nobody is looking: a run emitted "as the reviewer" and started as nobody
+    // is indistinguishable afterwards from a run that named none.
     const namedAgent = String(e.agent ?? "").trim();
     let agent: string | null = null;
     if (namedAgent !== "") {
@@ -1384,7 +1401,7 @@ export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan
           reason:
             `“${title}” asks for an agent this install does not have: ` +
             `${namedAgent}. Name one of the agents listed in your instructions, ` +
-            "or leave it out — a run with no specialist is the ordinary run.",
+            "or leave it out — a run started as no agent is the ordinary run.",
         };
       }
       if (!match.usable) {
@@ -1392,9 +1409,9 @@ export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan
           ok: false,
           reason:
             `“${title}” asks for the “${match.name}” agent, which is missing ` +
-            "its description or its prompt. Claude Code drops such an agent " +
-            "without a word, so the run would look exactly like one that was " +
-            "never given a specialist. Name another, or leave it out.",
+            "its description or its prompt. Claude Code will not register such " +
+            "an agent, so the run would fail the moment it spawned. Name " +
+            "another, or leave it out.",
         };
       }
       // The registry's spelling, not the turn's — see `RunSpec.agent`.
@@ -2008,7 +2025,7 @@ export type WorkflowInstanceStatus =
   | "stopped";
 
 /** What halted an instance. `null` on an instance nobody has stopped. */
-export type HaltCauseKind = "operator" | "guard";
+export type HaltCauseKind = "operator" | "guard" | "fleet";
 
 export interface WorkflowInstanceNode {
   nodeId: string;
@@ -2079,6 +2096,13 @@ export interface WorkflowInstance {
    * blob beside it already follows.
    */
   instanceBudget: InstanceBudgetPolicy;
+  /**
+   * Which press of Run started it, and what authorised that press. Copied onto
+   * every member's own `runs.origin`, and read again when a deferred node
+   * becomes a run hours later. Null on instances written before the column.
+   */
+  origin: RunOrigin | null;
+  originRef: string | null;
   /** What its blocks have spent: a measured floor and the guard's figure. */
   spend: InstanceProgress;
   nodes: WorkflowInstanceNode[];
@@ -2098,6 +2122,8 @@ interface InstanceRow {
   stop_cause: string | null;
   stop_reason: string | null;
   instance_budget: string | null;
+  origin: string | null;
+  origin_ref: string | null;
 }
 
 /**
@@ -2292,6 +2318,10 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
     workflowName: row.workflow_name,
     graph,
     createdAt: row.created_at,
+    origin: (RUN_ORIGINS as readonly string[]).includes(row.origin ?? "")
+      ? (row.origin as RunOrigin)
+      : null,
+    originRef: row.origin_ref,
     // `stopped` is derived rather than stored — see WorkflowInstanceStatus. An
     // unrecognised value reads as `started`, the same forgiving default the
     // graph blob gets: this is a record, and it has to keep rendering.
@@ -2422,6 +2452,19 @@ export type StartOutcome =
   | { ok: false; reason: string };
 
 /**
+ * Who pressed Run.
+ *
+ * A discriminated union rather than an optional schedule id, so the two cases
+ * cannot both be absent and a caller cannot claim a schedule without naming
+ * one. It carries authorisation and nothing else — no guard, no permission
+ * mode, no budget — which is what keeps "a schedule is the same
+ * `startWorkflow`" true.
+ */
+export type WorkflowTrigger =
+  | { kind: "manual" }
+  | { kind: "schedule"; scheduleId: string };
+
+/**
  * Turn a workflow into runs — every block, in one synchronous pass.
  *
  * Synchronous from the first `createRun` to the last, with no `await` between
@@ -2456,10 +2499,18 @@ export type StartOutcome =
  * fraction guard with no ceiling behind it is refused here, where there is an
  * error channel, rather than tripping at the first block's guard check and
  * halting a graph that never should have started.
+ *
+ * `trigger` records *which* press of Run this was, and it grants nothing: there
+ * is still no field on it that can reach a guard, a permission mode or an
+ * isolation choice, so a schedule remains "the same `startWorkflow`, with
+ * nobody present" rather than a second way of starting work. It is copied onto
+ * the instance so a node created hours later, behind an orchestrator block's
+ * decision, records the trigger the instance actually had.
  */
 export function startWorkflow(
   id: string,
   snapshot: UsageSnapshot,
+  trigger: WorkflowTrigger = { kind: "manual" },
 ): StartOutcome {
   // Before the instance row exists. `createRun` refuses too, but that refusal
   // would arrive mid-pass and take the rollback path — an instance recorded
@@ -2488,6 +2539,14 @@ export function startWorkflow(
         "the workflow.",
     };
   }
+
+  // The install-wide ceiling, before anything else about this workflow is
+  // decided. `createRun` refuses every member individually, which would abort
+  // the pass part-way and record the instance `failed` — a rollback in the
+  // record for a limit that has nothing to do with this graph. Refused here it
+  // is one sentence and no instance at all.
+  const installRefusal = installBudgetRefusal();
+  if (installRefusal) return { ok: false, reason: installRefusal };
 
   const known = currentKnowledge();
   const checked = normalizeWorkflowInput(workflow, known);
@@ -2540,7 +2599,7 @@ export function startWorkflow(
   // plan: it names no template, no mount, no folder and no task, so every
   // refusal `planNode` has is about a field it does not hold.
   const defaults = chatGuards();
-  const plans = new Map<string, Omit<CreateRunInput, "dependsOn">>();
+  const plans = new Map<string, Omit<CreateRunInput, "dependsOn" | "origin">>();
   for (const node of graph.nodes) {
     if (node.kind === "merge") continue;
     const plan = planNode(
@@ -2598,12 +2657,19 @@ export function startWorkflow(
 
   const instanceId = randomUUID();
   const now = Date.now();
+  // A schedule firing and a person pressing Run are the same instantiation with
+  // different authorisation behind them, which is the whole of what `origin`
+  // records. The reference is the schedule, because "which schedule started
+  // this" is the question a scheduled instance raises and the instance id
+  // answers nothing.
+  const origin: RunOrigin = trigger.kind === "schedule" ? "schedule" : "workflow";
+  const originRef = trigger.kind === "schedule" ? trigger.scheduleId : instanceId;
   db()
     .prepare(
       `INSERT INTO workflow_instances
          (id, workflow_id, workflow_name, graph, instance_budget, created_at,
-          status, error)
-       VALUES (?, ?, ?, ?, ?, ?, 'started', NULL)`,
+          status, error, origin, origin_ref)
+       VALUES (?, ?, ?, ?, ?, ?, 'started', NULL, ?, ?)`,
     )
     .run(
       instanceId,
@@ -2615,6 +2681,8 @@ export function startWorkflow(
       // — the same reason the graph blob is copied rather than joined to.
       JSON.stringify(instanceBudget),
       now,
+      origin,
+      originRef,
     );
 
   const addBlock = db().prepare(
@@ -2645,7 +2713,7 @@ export function startWorkflow(
         edge: e.edge,
         continueBranch: e.continueBranch,
       }));
-      const run = createRun({ ...plans.get(nodeId)!, dependsOn });
+      const run = createRun({ ...plans.get(nodeId)!, dependsOn, origin, originRef });
       runIds.set(nodeId, run.id);
       recordMember(instanceId, {
         nodeId,
@@ -2770,7 +2838,17 @@ function deferredNodes(graph: WorkflowGraph): Set<string> {
 export type HaltCause =
   | { kind: "operator" }
   /** The guard's verdict, in full. Recorded on the instance, once. */
-  | { kind: "guard"; detail: string };
+  | { kind: "guard"; detail: string }
+  /**
+   * Taken down with everything else, by one install-wide stop.
+   *
+   * A third kind rather than `operator` with different words, because the
+   * question it answers afterwards is a different one: an operator who finds
+   * twenty-five stopped runs needs to know whether somebody stopped *this*
+   * workflow or reached for the switch that stops everything, and only the
+   * stored cause can say so once the sentence has scrolled off.
+   */
+  | { kind: "fleet" };
 
 /** One member as the decision sees it: an id, a name, and a status. */
 export interface HaltMember {
@@ -2809,9 +2887,11 @@ export interface HaltMember {
  * whole sentence; for `stop` it is the attribution handed to `stopRun`, which
  * appends the clause saying what the run was doing when the halt landed.
  */
-export type HaltStep =
-  | (HaltMember & { action: "stop" | "block"; reason: string })
-  | (HaltMember & { action: "leave"; reason: null });
+export type HaltStepOf<T> =
+  | (T & { action: "stop" | "block"; reason: string })
+  | (T & { action: "leave"; reason: null });
+
+export type HaltStep = HaltStepOf<HaltMember>;
 
 /** What a halt does to one member, for a caller that wants to name it. */
 export type HaltAction = HaltStep["action"];
@@ -2839,6 +2919,9 @@ export interface HaltDecision {
  * ten member rows where it would read as ten separate findings.
  */
 export function haltCause(cause: HaltCause, workflowName: string): string {
+  if (cause.kind === "fleet") {
+    return `Stopped by the operator with every run in flight, workflow “${workflowName}” among them`;
+  }
   return cause.kind === "operator"
     ? `Stopped by the operator with all of workflow “${workflowName}”`
     : `Stopped by the budget guard on workflow “${workflowName}”`;
@@ -2911,16 +2994,24 @@ export function haltPlan(
     act: true,
     note: null,
     cause: attribution,
-    steps: memberSteps(members, attribution),
+    steps: haltSteps(members, attribution),
   };
 }
 
-/** What happens to each member, given the attribution it will be recorded under. */
-function memberSteps(
-  members: readonly HaltMember[],
+/**
+ * What happens to each row, given the attribution it will be recorded under.
+ *
+ * Generic over the row, and exported, because "which rows does this take down"
+ * now has a second caller: an install-wide stop covers runs that belong to no
+ * workflow at all. A second copy of these three branches would be a second
+ * chance to rewrite a `completed` row as stopped, or to hand `stopRun` a member
+ * that never ran and record it as though it had — and both are silent.
+ */
+export function haltSteps<T extends { status: RunStatus | null }>(
+  members: readonly T[],
   attribution: string,
-): HaltStep[] {
-  return members.map((member) => {
+): Array<HaltStepOf<T>> {
+  return members.map((member): HaltStepOf<T> => {
     if (member.status === null) {
       return { ...member, action: "leave" as const, reason: null };
     }
@@ -2937,6 +3028,9 @@ function memberSteps(
     return { ...member, action: "leave" as const, reason: null };
   });
 }
+
+/** Statuses a run has not finished in — it will spend, or is waiting to. */
+export { LIVE_STATUSES };
 
 /** What a halt did, per member, for the caller to report. */
 export interface HaltReport {
@@ -3217,11 +3311,15 @@ export function reconcileHaltsOnBoot(): void {
       continue;
     }
     const cause = haltCause(
-      row.stop_cause === "guard" ? { kind: "guard", detail: "" } : { kind: "operator" },
+      row.stop_cause === "guard"
+        ? { kind: "guard", detail: "" }
+        : row.stop_cause === "fleet"
+          ? { kind: "fleet" }
+          : { kind: "operator" },
       row.workflow_name,
     );
     walkMembers(
-      memberSteps(members, cause),
+      haltSteps(members, cause),
       cause,
       {
         instanceId: row.id,
@@ -3319,6 +3417,51 @@ export function enforceInstanceBudget(
   const instance = guardedInstanceOf(runId);
   if (!instance) return null;
   return guardInstance(instance.instanceId, instance.status, instance.budget, snapshot);
+}
+
+/**
+ * The same guard, at the boundary the three above cannot see: a member has
+ * just **finished spending**.
+ *
+ * Every other call site is "before something spends", and for the ordinary
+ * graph that is not a boundary at all. A member with `maxIterations: 1` — which
+ * is what `normalizePolicy` answers when a template says nothing, and the run
+ * form's own default — reaches `startRun`'s pre-cycle guard exactly once,
+ * before its only cycle; the pass that would have seen that cycle's cost is
+ * refused on `iterations` and `break`s out *ahead* of the instance check. So a
+ * graph of single-cycle blocks released together checked the instance budget N
+ * times, all of them against a total of zero, and never again. The
+ * workflow-wide limit could not fire at all — `CLAUDE.md` named that as the
+ * limiting case, and at 25 nodes with a 25-way concurrency cap it is the
+ * ordinary one.
+ *
+ * Called from `startRun`'s `finally`, after the status write has put this
+ * member's spend on its row, so `instanceSpend` reads it. That turns "the guard
+ * never fires" into "the guard fires one cycle late", which is the bound the
+ * documentation already claims and the same bound the pre-cycle check gives a
+ * multi-cycle block.
+ *
+ * Async only because the window fractions need a reading, and a member settling
+ * is a far rarer event than a cycle boundary — the transcript scan is paid once
+ * per finished run, not once per cycle. `guardedInstanceOf` is one indexed
+ * lookup and answers null for every run that is not a member and every instance
+ * whose budget is off, so an install with no workflows pays a single query.
+ */
+export async function enforceInstanceBudgetAfterMember(
+  runId: string,
+): Promise<InstanceGuardOutcome | null> {
+  const instance = guardedInstanceOf(runId);
+  if (!instance) return null;
+  // Asked before the snapshot rather than left to `guardInstance`: a halted or
+  // rolled-back instance has nothing to decide, and a full transcript scan to
+  // find that out is the one cost worth avoiding here.
+  if (instance.status !== "started") return null;
+  return guardInstance(
+    instance.instanceId,
+    instance.status,
+    instance.budget,
+    await currentSnapshot(),
+  );
 }
 
 /**
@@ -3587,9 +3730,9 @@ function advanceInstance(instanceId: string): void {
       node.templateId ? getTemplate(node.templateId) : null,
       defaults,
       // Read now rather than at `startWorkflow`: this node is being created
-      // hours later, behind a decision, so the registry is asked again and a
-      // specialist that has gone since blocks this one block by name instead of
-      // starting a run quietly without it.
+      // hours later, behind a decision, so the registry is asked again and an
+      // agent that has gone since blocks this one block by name instead of
+      // starting a run that is quietly not the thing the graph named.
       node.agentId ? getAgent(node.agentId) : null,
     );
     if (!plan.ok) {
@@ -3597,7 +3740,17 @@ function advanceInstance(instanceId: string): void {
       continue;
     }
     try {
-      const run = createRun({ ...plan.input, dependsOn: creation.dependsOn });
+      const run = createRun({
+        ...plan.input,
+        dependsOn: creation.dependsOn,
+        // The instance's own, not this moment's: a node created hours after the
+        // press of Run that authorised it belongs to that press, and a
+        // scheduled instance's late nodes are still the schedule's. Rows from
+        // before the column existed read as a manual press, which is what every
+        // instance was until schedules arrived.
+        origin: instance.origin ?? "workflow",
+        originRef: instance.originRef ?? instanceId,
+      });
       // The ledger row held this node's place while it was waiting on a
       // decision, so it carries the position the graph gave it; the row itself
       // goes, because a node in both tables is a block shown twice on the page
@@ -3630,7 +3783,19 @@ function advanceInstance(instanceId: string): void {
 
   // Claimed synchronously, spawned after. The claim is what makes this
   // re-entrant safe; the spawn is what makes it worth doing.
-  const claimed = step.spawn.filter((nodeId) => claimBlock(instanceId, nodeId));
+  //
+  // The budget is asked before each claim rather than once for the batch,
+  // because the claim itself is what fills it: `claimBlock` writes `thinking`,
+  // which is the row `liveAssistChildren` counts, so the next question already
+  // knows about the last answer. A block over the budget is left `waiting` and
+  // not written off — this is a shortage of memory rather than a decision about
+  // the work, and `blocked` here would end the branch of the graph behind it for
+  // a condition that clears in minutes. Whatever frees a slot advances again.
+  const claimed: string[] = [];
+  for (const nodeId of step.spawn) {
+    if (assistBudgetFull()) break;
+    if (claimBlock(instanceId, nodeId)) claimed.push(nodeId);
+  }
   for (const nodeId of claimed) {
     void startBlockTurn(instanceId, nodeId).catch((err) => {
       settleBlock(instanceId, nodeId, {
@@ -3794,9 +3959,13 @@ function claimBlock(instanceId: string, nodeId: string): boolean {
 /**
  * Spawn one block's turn.
  *
- * The gate in front of it is a chat turn's and no more: `assistRefusal()`, the
- * operator's own configured ceiling already spent. There is deliberately no
- * `evaluateBudget` here — this is not a work cycle and inventing a per-block
+ * The gate in front of it is a chat turn's and no more: the host process budget
+ * — taken at `advanceInstance`'s claim rather than here, so a shortage defers
+ * this turn instead of failing it — `windowRefusal()`, the operator's own
+ * configured ceiling already spent, and `installBudgetRefusal()`, the
+ * install-wide rolling-day ceiling this is the fifth door of. There is
+ * deliberately no `evaluateBudget` here — this is not a work cycle and
+ * inventing a per-block
  * fraction would be a threshold nobody set — and the instance's own budget is
  * checked where every other instance-wide decision is, at a member's cycle
  * boundary. What bounds the spend is `settings.chatTurnBudgetUSD`, inside the
@@ -3814,10 +3983,10 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
     return;
   }
 
-  // The specialist this turn itself may delegate to — the block's own child, so
-  // its own field. Asked before anything is spent and refused by name rather
-  // than dropped: failing here costs nothing and says what happened, where a
-  // turn deciding without the agent the operator gave it is the one failure
+  // The agent this turn itself *is* — the block's own child, so its own field.
+  // Asked before anything is spent and refused by name rather than dropped:
+  // failing here costs nothing and says what happened, where a turn deciding as
+  // something other than the agent the operator gave it is the one failure
   // shape nothing downstream can report.
   const own = node.agentId ? getAgent(node.agentId) : null;
   if (node.agentId) {
@@ -3828,7 +3997,16 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
     }
   }
 
-  const refusal = await assistRefusal();
+  // `windowRefusal` and not `assistRefusal`: the process budget gated this turn
+  // at `advanceInstance`'s claim, and this block's own row has been `thinking`
+  // — and so counted — ever since. Asking the budget again here would have a
+  // block refuse itself whenever it was the one that filled it.
+  //
+  // The install-wide ceiling is the other half and is *not* deferred by that
+  // claim: it bounds what the whole install spends in a rolling day rather than
+  // how many children exist, so nothing upstream has already asked it on this
+  // block's behalf and a block holding its slot must still be refused by it.
+  const refusal = (await windowRefusal()) ?? installBudgetRefusal();
   if (refusal) {
     settleBlock(instanceId, nodeId, { status: "failed", error: refusal });
     return;
@@ -3888,16 +4066,21 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
       template,
       instance.workflowName,
       own,
-      // What it may hand an *emitted* run to, which is a different question
-      // from the line above and is answered by the same registry. Read here so
-      // the prompt and `emitBlockRuns`' own check describe one list.
+      // What it may start an *emitted* run as, which is a different question
+      // from the line above — that one is what this turn itself is — and is
+      // answered by the same registry. Read here so the prompt and
+      // `emitBlockRuns`' own check describe one list.
       listAgents(),
     ),
     cwd: safeFolder(node),
-    // Offered to this turn, never imposed: `--agents` hands the delegating
-    // model a role it may use, and everything bounding this child — its tool
-    // surface, its capability token, `--max-budget-usd` — is unchanged.
-    agents: own ? [agentDefinition(own)] : [],
+    // What this deciding turn *is*, not a specialist it may call on: the node's
+    // agent is selected with `--agent`, so the saved prompt is the turn's own.
+    // Everything bounding this child — its tool surface, its capability token,
+    // `--max-budget-usd`, and `blockSystemPrompt` above, which still reaches a
+    // session started this way — is unchanged by it. The runs this block emits
+    // name their own agent per spec, which is the opposite way round from
+    // `promptOverride` and stays that way.
+    agent: own ? agentDefinition(own) : null,
     maxBudgetUSD: settings.chatTurnBudgetUSD,
     timeoutMs: BLOCK_TIMEOUT_MS,
     timedOutMessage: BLOCK_TIMED_OUT,
@@ -3995,8 +4178,13 @@ export function blockSettlement(
  * wrote the block off changes nothing — the same shape `finishTurn` uses on a
  * chat row, and for the same reason: the answer that got there first is the one
  * the operator was shown.
+ *
+ * Exported for `sweepPaused`'s reason and no other: this is the only door to
+ * `createEmitted`, and its other end is a real child process exiting. Without a
+ * way in, what a block's emission actually writes onto a run cannot be pinned
+ * at all.
  */
-function settleBlock(
+export function settleBlock(
   instanceId: string,
   nodeId: string,
   result: TurnResult,
@@ -4045,20 +4233,23 @@ function settleBlock(
 /* ------------------------------------------------------------------ */
 
 /**
- * How long a merge block waits for its own branches, before it stops waiting.
+ * The rows are written by the worker, not by us, so this is a poll.
  *
- * A bound rather than a patience: the merge worker is one sequential loop for
- * the whole process, so this block's rows can sit behind somebody else's batch,
- * and a conflict resolution alone is allowed twelve minutes. What makes a
- * ceiling necessary anyway is what a block stuck `thinking` costs — the instance
- * never reaches `stopped`, and a second press of Run on that workflow is refused
- * for ever. Timing out leaves the queue working: the rows are still the record
- * of each branch, and the block says it stopped watching rather than claiming
- * they failed.
+ * There is no deadline beside it, deliberately. A merge block waits for its
+ * branches for as long as merging them takes — the worker is one sequential
+ * loop for the whole process, so this block's rows can sit behind somebody
+ * else's batch and a conflict resolution takes as long as it takes, and none of
+ * that is a reason to stop watching. It used to give up at an hour, or fifteen
+ * minutes a branch, and what that bought was a block reporting its branches as
+ * not landed while the queue was still landing them — a graph that carried on
+ * past a merge it said had failed.
+ *
+ * What the ceiling was actually protecting against is a block stuck `thinking`
+ * for ever, and that has an answer that is somebody's decision rather than a
+ * clock's: `stopInstance` writes the block off, which this loop tests on every
+ * pass, and the queue's own Cancel takes the batch. A clock could not tell the
+ * difference between a wedged block and a large merge; an operator can.
  */
-const MERGE_BRANCH_BUDGET_MS = 15 * 60_000;
-const MERGE_BLOCK_TIMEOUT_MS = 60 * 60_000;
-/** The rows are written by the worker, not by us, so this is a poll. */
 const MERGE_POLL_MS = 2_000;
 
 /** What became of one branch a merge block was handed. */
@@ -4236,7 +4427,7 @@ async function startMergeBlock(
     )
     .run(queued.batchId, instanceId, nodeId);
 
-  const rows = await awaitBatch(queued.batchId, instanceId, nodeId, queueable.length);
+  const rows = await awaitBatch(queued.batchId, instanceId, nodeId);
   for (const row of rows) {
     candidates.push({
       branch: branchLabel(row.run_id),
@@ -4244,11 +4435,12 @@ async function startMergeBlock(
       reason:
         row.status === "landed"
           ? null
-          : // A row still active is the deadline having passed, not a verdict —
-            // but it is a branch that is not on its target, which is the only
-            // question a successor's condition asks.
+          : // Nothing here stops waiting on a clock any more, so a row still
+            // active is the workflow having been halted out from under it — not
+            // a verdict, but a branch that is not on its target, which is the
+            // only question a successor's condition asks.
             isQueueActive(row.status)
-            ? "still in the merge queue when this block stopped waiting"
+            ? "still in the merge queue when this workflow was stopped"
             : (row.message ?? row.status),
     });
   }
@@ -4328,30 +4520,24 @@ function branchLabel(runId: string): string {
 }
 
 /**
- * Wait for one batch to drain, or stop waiting.
+ * Wait for one batch to drain.
  *
- * Three ways out and each is a different fact. Every row terminal is the merge
- * having finished. The block no longer `thinking` is a halt, which has already
- * written the row and whose answer wins — `finishMergeBlock`'s guarded UPDATE
- * would refuse ours anyway, and returning here saves reading git for a workflow
- * being taken down. The deadline is the third, and it does not cancel anything:
- * the queue goes on working and its rows go on being the record.
+ * Two ways out, and neither of them is a clock. Every row terminal is the merge
+ * having finished, which is the answer this exists to wait for however long it
+ * takes. The block no longer `thinking` is a halt, which has already written
+ * the row and whose answer wins — `finishMergeBlock`'s guarded UPDATE would
+ * refuse ours anyway, and returning here saves reading git for a workflow being
+ * taken down.
  */
 async function awaitBatch(
   batchId: string,
   instanceId: string,
   nodeId: string,
-  branches: number,
 ): Promise<QueueRow[]> {
-  const deadline =
-    Date.now() +
-    Math.min(MERGE_BLOCK_TIMEOUT_MS, MERGE_BRANCH_BUDGET_MS * (branches + 1));
-
   for (;;) {
     const rows = batchRows(batchId);
     if (!rows.some((r) => isQueueActive(r.status))) return rows;
     if (getBlock(instanceId, nodeId)?.status !== "thinking") return rows;
-    if (Date.now() >= deadline) return rows;
     await new Promise((resolve) => setTimeout(resolve, MERGE_POLL_MS).unref?.());
   }
 }
@@ -4431,17 +4617,17 @@ function createEmitted(
     // Resolved now rather than when the spec was accepted, for the reason the
     // template beside it is read at this moment: a row can go between a turn
     // ending and its runs being created. That spec fails by name — a run
-    // started without the specialist it was emitted with is the silent drop
-    // this app refuses at every other door — and the others still start, which
-    // is this pass's whole difference from `startWorkflow`'s.
+    // started as nobody when it was emitted "as the reviewer" is the silent
+    // drop this app refuses at every other door — and the others still start,
+    // which is this pass's whole difference from `startWorkflow`'s.
     let agent: AgentDefinition | null = null;
     if (spec.agent) {
       const saved = getAgentByName(spec.agent);
       if (!saved || !saved.usable) {
         failures.push(
           `“${spec.title}” was not started: the “${spec.agent}” agent it was ` +
-            "emitted with is no longer usable, and a run without the " +
-            "specialist it was given cannot be told from one that never had it.",
+            "emitted with is no longer usable, and a run that is not the agent " +
+            "it was emitted as cannot be told from one that never named one.",
         );
         continue;
       }
@@ -4461,6 +4647,13 @@ function createEmitted(
           runId: runIds.get(d.id)!,
           edge: d.edge,
         })),
+        // Not the instance's origin, even inside a scheduled one: what
+        // authorised *this* run is a model's decision taken moments ago, which
+        // is the one origin here that no person chose run by run. The block's
+        // node is the reference, matching `workflow_instance_runs.emitted_by`
+        // and readable without that join.
+        origin: "orchestrator-block",
+        originRef: nodeId,
       });
       runIds.set(spec.id, run.id);
       recordMember(instanceId, {
@@ -4586,6 +4779,24 @@ export function emitBlockRuns(
   if (block.status !== "thinking") {
     return { ok: false, reason: "This block's turn has already ended." };
   }
+  // The install-wide hold, at this block's door rather than inside
+  // `planEmission`: it is a fact about the machine and not about the specs, the
+  // same class of refusal as the two above it. Recorded through `noteBlock` for
+  // the reason a rejected emission is, and the turn is told plainly — a model
+  // that reads "refused" with no cause tries again in a different shape.
+  if (newWorkPaused()) {
+    noteBlock(
+      instanceId,
+      nodeId,
+      "It tried to emit runs while new work was held across the install, and was refused.",
+    );
+    return {
+      ok: false,
+      reason:
+        "New work is held across this install, so nothing can be started from " +
+        "here. Say in your reply what you would have started.",
+    };
+  }
   if (block.emitted_specs !== null) {
     noteBlock(
       instanceId,
@@ -4669,22 +4880,23 @@ function blockSystemPrompt(
     ? `the “${template.name}” template`
     : "the operator's default guard set in Settings";
 
-  // The specialists an emitted run may be handed to, named because a name is
-  // what `emit_runs` takes. Descriptions are shortened here for the reason
-  // `MAX_AGENT_DESCRIPTION` exists at all — every one of them rides in this
-  // turn's context — and the whole of one reaches the run that names it, on its
-  // own argv, when it spawns. An unusable row is left out: the CLI would drop
-  // it in silence, so offering it would be offering a specialist that is not
-  // there.
+  // The agents an emitted run may be started as, named because a name is what
+  // `emit_runs` takes — and what `--agent` itself takes, so a name that got
+  // through here and is not in the registry would fail that run's spawn.
+  // Descriptions are shortened for the reason `MAX_AGENT_DESCRIPTION` exists at
+  // all — every one of them rides in this turn's context — and the whole of one
+  // reaches the run that names it, on its own argv, when it spawns. An unusable
+  // row is left out: the CLI will not register it, so offering it would be
+  // offering a run that cannot start.
   const choices = registry.filter((a) => a.usable);
-  const specialists =
+  const agentChoices =
     choices.length === 0
       ? []
       : [
           "",
-          "Specialists you may hand a run to, by name in `agent` — this changes",
-          "who does a piece of the work and never what a run may do, and leaving",
-          "it out is the ordinary run:",
+          "Agents you may start a run as, by name in `agent` — the agent's prompt",
+          "becomes that run's own. This changes who a run is and never what it may",
+          "do, and leaving it out is the ordinary run:",
           ...choices.map(
             (a) =>
               `- ${a.name} — ${
@@ -4732,12 +4944,12 @@ function blockSystemPrompt(
     "  argument on emit_runs that touches any of them, deliberately.",
     ...(own
       ? [
-          `- You may hand a subtask of your own to the “${own.name}” agent, which`,
-          "  the operator gave this block. It changes who does part of your",
-          "  looking, not what you are allowed to do.",
+          `- You are the “${own.name}” agent: the operator gave this block that`,
+          "  role, and its prompt is your own. It says who you are and changes",
+          "  none of the bounds above, which still apply exactly as written.",
         ]
       : []),
-    ...specialists,
+    ...agentChoices,
     "",
     "Emitting:",
     "- One run per unit of work, with a short specific title.",

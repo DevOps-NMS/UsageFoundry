@@ -10,6 +10,7 @@ import {
 } from "@/lib/schedules";
 import { getWorkflow } from "@/lib/workflows";
 import { scheduleDTO } from "../../dto";
+import { auditMutation } from "../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,7 +33,7 @@ type Ctx = { params: Promise<{ id: string }> };
  * can change, the shape every other refusal here has.
  */
 
-export async function PUT(req: Request, ctx: Ctx) {
+async function putHandler(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const workflow = getWorkflow(id);
   if (!workflow) {
@@ -55,7 +56,7 @@ export async function PUT(req: Request, ctx: Ctx) {
   return NextResponse.json({ schedule: scheduleDTO(scheduleView(saved, workflow)) });
 }
 
-export async function PATCH(req: Request, ctx: Ctx) {
+async function patchHandler(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const workflow = getWorkflow(id);
   if (!workflow) {
@@ -81,7 +82,7 @@ export async function PATCH(req: Request, ctx: Ctx) {
   return NextResponse.json({ schedule: scheduleDTO(scheduleView(saved, workflow)) });
 }
 
-export async function DELETE(_req: Request, ctx: Ctx) {
+async function deleteHandler(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   if (!getWorkflow(id)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -100,3 +101,10 @@ export async function GET(_req: Request, ctx: Ctx) {
     schedule: schedule ? scheduleDTO(scheduleView(schedule, workflow)) : null,
   });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const PUT = auditMutation(putHandler);
+/** Wrapped so the request that changed something is on the audit log. */
+export const PATCH = auditMutation(patchHandler);
+/** Wrapped so the request that changed something is on the audit log. */
+export const DELETE = auditMutation(deleteHandler);

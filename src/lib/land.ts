@@ -12,16 +12,19 @@ import {
   type ReviewRow,
 } from "./review";
 import {
+  MAX_WORKTREE_SLOTS,
   activeRuns,
   auxWorktreePath,
   conflictKey,
   describeFolder,
   emitRunEvent,
+  forgetSlotVerdict,
   getRun,
-  listRuns,
   overlaps,
+  repoSlug,
   resolveWorkspaceFolder,
   workDirOf,
+  worktreeStore,
   type RunRow,
 } from "./orchestrator";
 
@@ -56,6 +59,26 @@ import {
  */
 
 export type LandStrategy = "merge" | "squash";
+
+/**
+ * Every git call on the landing path runs with no clock on it.
+ *
+ * There is no length of time after which merging somebody's work becomes the
+ * wrong thing to do, so nothing here is allowed to give up on one. A timeout in
+ * `git()` is a `SIGKILL`, and a killed git is `ok: false` — which this file
+ * cannot tell apart from git having refused, so a merge that was simply large
+ * came back as "git refused the merge and it was rolled back", and a `status`
+ * or a `merge-tree` that ran long came back as a checkout that could not be
+ * read or a conflict state that could not be determined, both of which refuse
+ * the land outright. Every one of those is a clock deciding what a repository
+ * should have decided.
+ *
+ * It is spelled at each call rather than changed in `git()` because the default
+ * is right everywhere else: a 20-second bound on the *page* reads that annotate
+ * a folder list is what keeps a request answering. This is the path where the
+ * answer is worth waiting for however long it takes.
+ */
+const NO_CLOCK = { timeoutMs: 0 } as const;
 
 /** One `<<<<<<< … >>>>>>>` block, exactly as the merge would leave it. */
 export interface ConflictRegion {
@@ -379,18 +402,17 @@ async function targetOf(
   const head = checkout?.headBranch;
   if (!head || !run.worktree_base) return null;
 
-  const descends = await git(repoRoot, [
-    "merge-base",
-    "--is-ancestor",
-    run.worktree_base,
-    head,
-  ]);
+  const descends = await git(
+    repoRoot,
+    ["merge-base", "--is-ancestor", run.worktree_base, head],
+    NO_CLOCK,
+  );
   return descends.ok ? { branch: head, inferred: true } : null;
 }
 
 async function checkoutStateOf(folder: string): Promise<CheckoutState> {
-  const head = await git(folder, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  const status = await git(folder, ["status", "--porcelain"]);
+  const head = await git(folder, ["rev-parse", "--abbrev-ref", "HEAD"], NO_CLOCK);
+  const status = await git(folder, ["status", "--porcelain"], NO_CLOCK);
   return {
     path: folder,
     headBranch: head.ok && head.stdout !== "HEAD" ? head.stdout : null,
@@ -445,7 +467,11 @@ export async function landState(runId: string): Promise<LandState | null> {
     };
   }
 
-  const exists = await git(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+  const exists = await git(
+    repoRoot,
+    ["rev-parse", "--verify", `refs/heads/${branch}`],
+    NO_CLOCK,
+  );
   if (!exists.ok) {
     return { ...base, blocked: `Branch ${branch} no longer exists.` };
   }
@@ -471,11 +497,11 @@ export async function landState(runId: string): Promise<LandState | null> {
     };
   }
 
-  const targetExists = await git(repoRoot, [
-    "rev-parse",
-    "--verify",
-    `refs/heads/${target.branch}`,
-  ]);
+  const targetExists = await git(
+    repoRoot,
+    ["rev-parse", "--verify", `refs/heads/${target.branch}`],
+    NO_CLOCK,
+  );
   if (!targetExists.ok) {
     return {
       ...base,
@@ -488,19 +514,18 @@ export async function landState(runId: string): Promise<LandState | null> {
     };
   }
 
-  const counts = await git(repoRoot, [
-    "rev-list",
-    "--left-right",
-    "--count",
-    `${target.branch}...${branch}`,
-  ]);
+  const counts = await git(
+    repoRoot,
+    ["rev-list", "--left-right", "--count", `${target.branch}...${branch}`],
+    NO_CLOCK,
+  );
   const [behind = "0", ahead = "0"] = counts.stdout.split(/\s+/);
 
   const merged = (
-    await git(repoRoot, ["merge-base", "--is-ancestor", branch, target.branch])
+    await git(repoRoot, ["merge-base", "--is-ancestor", branch, target.branch], NO_CLOCK)
   ).ok;
 
-  const tip = (await git(repoRoot, ["rev-parse", branch])).stdout;
+  const tip = (await git(repoRoot, ["rev-parse", branch], NO_CLOCK)).stdout;
   const landedUnchanged = !!run.landed_tip && run.landed_tip === tip;
 
   // Not previewed while the run can still commit: the answer would be stale
@@ -513,7 +538,13 @@ export async function landState(runId: string): Promise<LandState | null> {
     ? ({ outcome: "already-merged" } as const)
     : active
       ? ({ outcome: "unknown", reason: "This run can still commit to it." } as const)
-      : (await git(repoRoot, ["merge-base", "--is-ancestor", target.branch, branch])).ok
+      : (
+            await git(
+              repoRoot,
+              ["merge-base", "--is-ancestor", target.branch, branch],
+              NO_CLOCK,
+            )
+          ).ok
         ? ({ outcome: "fast-forward" } as const)
         : await previewMerge(repoRoot, target.branch, branch);
 
@@ -613,7 +644,11 @@ async function previewMerge(
   // No `--name-only`: it lands the conflict list in a simpler shape but arrived
   // two releases after `--write-tree` itself, and this has to work on whatever
   // git the host mounted.
-  const res = await git(repoRoot, ["merge-tree", "--write-tree", "-z", target, branch]);
+  const res = await git(
+    repoRoot,
+    ["merge-tree", "--write-tree", "-z", target, branch],
+    NO_CLOCK,
+  );
   const preview = parseMergeTree(res.stdout, res.stderr, res.code);
   if (preview.outcome !== "conflict") return preview;
 
@@ -873,12 +908,16 @@ export async function landRun(
     // Read before the merge: after a squash there is nothing in the target's
     // history that points back at these commits, and this is what makes them
     // identifiable afterwards.
-    const tip = (await git(folder, ["rev-parse", branch])).stdout;
+    const tip = (await git(folder, ["rev-parse", branch], NO_CLOCK)).stdout;
 
+    // No clock on the merge itself, which is the whole of `NO_CLOCK`'s reason:
+    // a merge killed part-way through reads here exactly like git refusing one,
+    // so a repository large enough to take a while was told its work could not
+    // be merged and had it rolled back.
     const merge =
       strategy === "squash"
-        ? await git(folder, ["merge", "--squash", branch], { timeoutMs: 120_000 })
-        : await git(folder, ["merge", "--no-edit", branch], { timeoutMs: 120_000 });
+        ? await git(folder, ["merge", "--squash", branch], NO_CLOCK)
+        : await git(folder, ["merge", "--no-edit", branch], NO_CLOCK);
 
     if (!merge.ok) {
       const conflicts = await conflictedFiles(folder);
@@ -896,13 +935,17 @@ export async function landRun(
     if (strategy === "squash") {
       // `--squash` stages the change and stops. Without this the operator is
       // left holding a staged merge that the app claims to have landed.
-      const commit = await git(folder, [
-        "commit",
-        "-m",
-        taskSubject(run),
-        "-m",
-        `Squashed from ${branch} (UsageFoundry run ${run.id}).`,
-      ]);
+      const commit = await git(
+        folder,
+        [
+          "commit",
+          "-m",
+          taskSubject(run),
+          "-m",
+          `Squashed from ${branch} (UsageFoundry run ${run.id}).`,
+        ],
+        NO_CLOCK,
+      );
       if (!commit.ok) {
         await unwind(folder, strategy);
         return {
@@ -940,7 +983,7 @@ export async function landRun(
 
 /** Paths git left conflicted, read before the merge is unwound. */
 async function conflictedFiles(folder: string): Promise<string[]> {
-  const res = await git(folder, ["diff", "--name-only", "--diff-filter=U"]);
+  const res = await git(folder, ["diff", "--name-only", "--diff-filter=U"], NO_CLOCK);
   return res.ok && res.stdout ? res.stdout.split("\n") : [];
 }
 
@@ -953,9 +996,11 @@ async function conflictedFiles(folder: string): Promise<string[]> {
  * clean seconds earlier and no run is allowed to be writing in it.
  */
 async function unwind(folder: string, strategy: LandStrategy): Promise<void> {
-  const abort = await git(folder, ["merge", "--abort"]);
+  // Least of all this one: a rollback killed part-way through leaves the
+  // operator's own checkout mid-merge.
+  const abort = await git(folder, ["merge", "--abort"], NO_CLOCK);
   if (abort.ok || strategy !== "squash") return;
-  await git(folder, ["reset", "--hard", "HEAD"]);
+  await git(folder, ["reset", "--hard", "HEAD"], NO_CLOCK);
 }
 
 /** First line of the task, as a commit subject. */
@@ -1011,8 +1056,8 @@ async function resolveCheckout(
 ): Promise<ResolveCheckout> {
   const own = run.worktree_path;
   if (own && fs.existsSync(own)) {
-    const head = await git(own, ["rev-parse", "--abbrev-ref", "HEAD"]);
-    const status = await git(own, ["status", "--porcelain"]);
+    const head = await git(own, ["rev-parse", "--abbrev-ref", "HEAD"], NO_CLOCK);
+    const status = await git(own, ["status", "--porcelain"], NO_CLOCK);
     if (head.ok && head.stdout === branch && status.ok && status.stdout === "") {
       return { path: own, temporary: false };
     }
@@ -1023,14 +1068,14 @@ async function resolveCheckout(
   if (fs.existsSync(slot)) {
     // Left behind by an earlier attempt that could not clean up. Removing it is
     // safe only because this path is ours alone and nothing else ever adopts it.
-    await git(repoRoot, ["worktree", "remove", "--force", slot]);
+    await git(repoRoot, ["worktree", "remove", "--force", slot], NO_CLOCK);
     fs.rmSync(slot, { recursive: true, force: true });
   }
-  await git(repoRoot, ["worktree", "prune"]);
+  await git(repoRoot, ["worktree", "prune"], NO_CLOCK);
 
-  const add = await git(repoRoot, ["worktree", "add", slot, branch], {
-    timeoutMs: 30 * 60_000,
-  });
+  // A full checkout, and one that is being made in order to merge. The half
+  // hour it used to be given was the same guess as the merge's two minutes.
+  const add = await git(repoRoot, ["worktree", "add", slot, branch], NO_CLOCK);
   if (!add.ok) {
     throw new Error(`Could not create a checkout to resolve in: ${add.stderr.split("\n")[0]}`);
   }
@@ -1042,7 +1087,7 @@ async function discardCheckout(
   checkout: ResolveCheckout,
 ): Promise<void> {
   if (!checkout.temporary) return;
-  await git(repoRoot, ["worktree", "remove", "--force", checkout.path]);
+  await git(repoRoot, ["worktree", "remove", "--force", checkout.path], NO_CLOCK);
 }
 
 /**
@@ -1116,9 +1161,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 
-  const merge = await git(checkout.path, ["merge", "--no-edit", target], {
-    timeoutMs: 120_000,
-  });
+  const merge = await git(checkout.path, ["merge", "--no-edit", target], NO_CLOCK);
   if (merge.ok) {
     // The preview was stale — the branches agree after all. The merge commit is
     // real and useful: landing is now a fast-forward.
@@ -1131,7 +1174,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
 
   const conflicted = await conflictedFiles(checkout.path);
   if (conflicted.length === 0) {
-    await git(checkout.path, ["merge", "--abort"]);
+    await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
     await discardCheckout(repoRoot, checkout);
     return {
       ok: false,
@@ -1158,7 +1201,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
       // keep its own error: reporting "markers are still in f.txt" would be
       // true and useless, because the agent never ran.
       if (result.status === "failed") {
-        await git(checkout.path, ["merge", "--abort"]);
+        await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
         await discardCheckout(repoRoot, checkout);
         return;
       }
@@ -1167,7 +1210,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
         conflicted.map((p) => ({ path: p, text: readIfPossible(path.join(checkout.path, p)) })),
       );
       if (left.length > 0) {
-        await git(checkout.path, ["merge", "--abort"]);
+        await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
         await discardCheckout(repoRoot, checkout);
         return {
           status: "failed" as const,
@@ -1175,14 +1218,14 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
         };
       }
 
-      const staged = await git(checkout.path, [
-        "add",
-        "--",
-        ...conflicted.map((p) => `:(top,literal)${p}`),
-      ]);
-      const unmerged = await git(checkout.path, ["ls-files", "-u"]);
+      const staged = await git(
+        checkout.path,
+        ["add", "--", ...conflicted.map((p) => `:(top,literal)${p}`)],
+        NO_CLOCK,
+      );
+      const unmerged = await git(checkout.path, ["ls-files", "-u"], NO_CLOCK);
       if (!staged.ok || !unmerged.ok || unmerged.stdout !== "") {
-        await git(checkout.path, ["merge", "--abort"]);
+        await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
         await discardCheckout(repoRoot, checkout);
         return {
           status: "failed" as const,
@@ -1190,9 +1233,9 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
         };
       }
 
-      const commit = await git(checkout.path, ["commit", "--no-edit"]);
+      const commit = await git(checkout.path, ["commit", "--no-edit"], NO_CLOCK);
       if (!commit.ok) {
-        await git(checkout.path, ["merge", "--abort"]);
+        await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
         await discardCheckout(repoRoot, checkout);
         return {
           status: "failed" as const,
@@ -1203,7 +1246,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
       // Read before the checkout goes: this is the only handle on what the
       // resolution decided. Its prose survives in the row either way, but prose
       // is what the agent says it did, not what it did.
-      const head = await git(checkout.path, ["rev-parse", "HEAD"]);
+      const head = await git(checkout.path, ["rev-parse", "HEAD"], NO_CLOCK);
 
       await discardCheckout(repoRoot, checkout);
       emitRunEvent({
@@ -1377,7 +1420,7 @@ async function slotState(run: RunRow): Promise<SlotState> {
     return { path: slot ?? null, checkedOutBranch: null, readable: false, files: [] };
   }
 
-  const head = await git(slot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const head = await git(slot, ["rev-parse", "--abbrev-ref", "HEAD"], NO_CLOCK);
   const checkedOutBranch = head.ok && head.stdout !== "HEAD" ? head.stdout : null;
   // Status is read only once the slot is proved to still hold this run's
   // branch. Anything uncommitted under a different branch is a later run's, and
@@ -1386,7 +1429,10 @@ async function slotState(run: RunRow): Promise<SlotState> {
     return { path: slot, checkedOutBranch, readable: head.ok, files: [] };
   }
 
-  const status = await git(slot, ["status", "--porcelain", "-z"], { trim: false });
+  const status = await git(slot, ["status", "--porcelain", "-z"], {
+    ...NO_CLOCK,
+    trim: false,
+  });
   return {
     path: slot,
     checkedOutBranch,
@@ -1517,7 +1563,7 @@ export async function commitPending(
     };
   }
 
-  const staged = await git(dir, ["add", "-A"], { timeoutMs: 120_000 });
+  const staged = await git(dir, ["add", "-A"], NO_CLOCK);
   if (!staged.ok) {
     return {
       ok: false,
@@ -1528,7 +1574,7 @@ export async function commitPending(
   const commit = await git(
     dir,
     ["commit", "-m", resolved.trim(), "-m", `Committed from UsageFoundry run ${run.id}.`],
-    { timeoutMs: 120_000 },
+    NO_CLOCK,
   );
   if (!commit.ok) {
     // Left staged rather than reset. This app's own git runs with hooks off, so
@@ -1544,8 +1590,13 @@ export async function commitPending(
     };
   }
 
-  const head = await git(dir, ["rev-parse", "--short", "HEAD"]);
+  const head = await git(dir, ["rev-parse", "--short", "HEAD"], NO_CLOCK);
   const count = slot.files.length;
+
+  // Freeing the slot is half of what this button is for, and admission
+  // remembers which slots it found unusable — so say the answer has changed
+  // rather than leaving the next run to wait out the memo's window.
+  forgetSlotVerdict(dir);
 
   emitRunEvent({
     runId,
@@ -1802,6 +1853,9 @@ export async function purgeBranch(
     if (!removed.ok) {
       return { ok: false, reason: `Could not remove its checkout: ${removed.stderr.split("\n")[0]}` };
     }
+    // The slot is gone, so whatever admission remembered about it is about a
+    // directory that no longer exists — see `forgetSlotVerdict`.
+    forgetSlotVerdict(slot);
   }
 
   const del = await git(repoRoot, ["branch", "-D", branch]);
@@ -1864,16 +1918,188 @@ export interface BranchSummary {
   prompt: string;
 }
 
+/** A checkout the allocator will not reuse, and what is in the way. */
+export interface DirtySlot {
+  /** Directory name inside the store — what the operator has to go and find. */
+  name: string;
+  /** Uncommitted paths in it, or null when its status could not be read. */
+  uncommitted: number | null;
+}
+
+/** One repository's checkout slots, so exhaustion is visible before it bites. */
+export interface CheckoutStoreSummary {
+  repoRoot: string;
+  repoLabel: string;
+  store: string;
+  /** `MAX_WORKTREE_SLOTS`. */
+  ceiling: number;
+  /** Slots a queued, running or paused run holds. */
+  heldByRuns: number;
+  /** Existing checkouts nothing holds that cannot be reused, lowest slot first. */
+  dirty: DirtySlot[];
+  /**
+   * Slot numbers still allocatable, or null when the probe cap stopped the walk
+   * — "not counted", never a claim that there are none left.
+   */
+  free: number | null;
+}
+
+/** One repository holding branches, and how many of them it holds. */
+export interface BranchRepo {
+  repoRoot: string;
+  repoLabel: string;
+  branches: number;
+}
+
 export interface BranchInventory {
   branches: BranchSummary[];
-  /** Branches that were not examined, because the list is capped. */
+  /**
+   * Branches matching the filter that this page does not show — across every
+   * run this app has recorded, not merely the ones a run-count window reached.
+   */
   notShown: number;
+  /** Branches matching the filter, in total. */
+  total: number;
+  /** Where this page starts in that list. */
+  offset: number;
+  /** How many branches this page was allowed to examine. */
+  limit: number;
+  /** The repository filter in force, or null for every repository. */
+  repo: string | null;
+  /** Every repository holding a branch, whatever the filter — for the picker. */
+  repos: BranchRepo[];
+  /**
+   * Slot pressure for the repositories on this page — see `checkoutStores`.
+   *
+   * Scoped to what was examined rather than to every repository in `repos`, for
+   * the reason the branch cap exists at all: each checkout costs a `git status`,
+   * and a filter that pays for repositories it is not showing is the cost this
+   * page bounds everywhere else.
+   */
+  checkouts: CheckoutStoreSummary[];
 }
 
 /** Branches examined per request. Each costs a `rev-list --count`. */
 const MAX_INVENTORY = 60;
 /** Checkouts whose status is read per request. Each is another git process. */
 const MAX_PENDING_PROBES = 20;
+/** Checkout slots whose status is read per request. Each is another git process. */
+const MAX_SLOT_PROBES = 48;
+
+/**
+ * What each repository's checkout store holds, and how much of it is left.
+ *
+ * The gap this fills: running out of slots is now a refusal — an isolated run
+ * on a repository with none left does not start at all — and until this there
+ * was nowhere an operator could see that coming. The number that matters is not
+ * the branches on this page but the *slots* behind them, since a slot holding
+ * uncommitted work is retired until somebody deals with it (`slotIsDirty`, and
+ * the comment above it says why that is right) while nothing reclaims one.
+ *
+ * Read by directory listing rather than by walking 1…64: a slot number with no
+ * directory is free and costs nothing to establish, so the cost is one `git
+ * status` per checkout that actually exists, capped like every other probe on
+ * this page. The one thing this cannot see is a directory left under this
+ * repository's slot name by an older build of this app that named slots the
+ * lossy way — `allocateSlotPath` skips such a directory, so `free` is an upper
+ * bound there rather than a count. `worktreeSlug` is what made that near
+ * impossible; see its own note.
+ */
+export async function checkoutStores(
+  repoRoots: readonly string[],
+): Promise<CheckoutStoreSummary[]> {
+  const held = new Set(
+    activeRuns()
+      .map((r) => r.worktree_path)
+      .filter((p): p is string => !!p),
+  );
+
+  const stores: CheckoutStoreSummary[] = [];
+  let probes = 0;
+
+  for (const repoRoot of repoRoots) {
+    const store = worktreeStore(repoRoot);
+    if (!store) continue;
+
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(store);
+    } catch {
+      // No store yet, or one that cannot be read. Either way this cannot say
+      // anything true about how many slots are left, and a row claiming all of
+      // them are free is the sentence a refusal would contradict.
+      continue;
+    }
+
+    const slug = repoSlug(repoRoot);
+    const slotNumber = (name: string): number | null => {
+      if (!name.startsWith(`${slug}-`)) return null;
+      const tail = name.slice(slug.length + 1);
+      if (!/^\d+$/.test(tail)) return null;
+      const n = Number(tail);
+      return n >= 1 && n <= MAX_WORKTREE_SLOTS ? n : null;
+    };
+
+    // The union of what is on disk and what a live run has been given, because
+    // the two do not have to agree: a slot is claimed at admission and the
+    // checkout is created when the run starts, so a queued run holds a slot
+    // number with no directory behind it yet. Counting directories alone would
+    // report that number free while the allocator is already skipping it. The
+    // run pass runs second so a held slot that also exists reads as held.
+    const occupied = new Map<number, "held" | "onDisk">();
+    for (const name of entries) {
+      const n = slotNumber(name);
+      if (n !== null) occupied.set(n, "onDisk");
+    }
+    for (const heldPath of held) {
+      if (path.dirname(heldPath) !== store) continue;
+      const n = slotNumber(path.basename(heldPath));
+      if (n !== null) occupied.set(n, "held");
+    }
+
+    let heldByRuns = 0;
+    let capped = false;
+    const dirty: DirtySlot[] = [];
+
+    for (const n of [...occupied.keys()].sort((a, b) => a - b)) {
+      if (occupied.get(n) === "held") {
+        heldByRuns++;
+        continue;
+      }
+      const name = `${slug}-${n}`;
+      const slotPath = path.join(store, name);
+      if (probes >= MAX_SLOT_PROBES) {
+        capped = true;
+        continue;
+      }
+      probes++;
+      const status = await git(slotPath, ["status", "--porcelain", "-z"], {
+        trim: false,
+      });
+      // Unreadable counts as dirty, exactly as `slotIsDirty` counts it. The
+      // allocator will skip this slot, so listing it as free would say the
+      // opposite of what the next run on this repository is refused for.
+      if (!status.ok) {
+        dirty.push({ name, uncommitted: null });
+        continue;
+      }
+      const uncommitted = parseStatusZ(status.stdout).length;
+      if (uncommitted > 0) dirty.push({ name, uncommitted });
+    }
+
+    stores.push({
+      repoRoot,
+      repoLabel: describeFolder(repoRoot).relPath || repoRoot,
+      store,
+      ceiling: MAX_WORKTREE_SLOTS,
+      heldByRuns,
+      dirty,
+      free: capped ? null : MAX_WORKTREE_SLOTS - heldByRuns - dirty.length,
+    });
+  }
+
+  return stores;
+}
 
 /**
  * One row per branch, not one per run that has held it.
@@ -1895,16 +2121,16 @@ const MAX_PENDING_PROBES = 20;
  * says so: the structural question is answered here, and whether it can really
  * be landed is re-derived from git and the full chain by `landRun`.
  */
-function oneRunPerBranch(runs: readonly RunRow[]): RunRow[] {
-  const byBranch = new Map<string, RunRow[]>();
+function oneRunPerBranch<T extends BranchCandidate>(runs: readonly T[]): T[] {
+  const byBranch = new Map<string, T[]>();
   for (const run of runs) {
-    const key = `${run.repo_root}\0${run.worktree_branch}`;
+    const key = `${run.repoRoot}\0${run.branch}`;
     const list = byBranch.get(key);
     if (list) list.push(run);
     else byBranch.set(key, [run]);
   }
 
-  const kept: RunRow[] = [];
+  const kept: T[] = [];
   for (const held of byBranch.values()) {
     if (held.length === 1) {
       kept.push(held[0]);
@@ -1919,21 +2145,148 @@ function oneRunPerBranch(runs: readonly RunRow[]): RunRow[] {
   return kept;
 }
 
+/** Everything the selection below reads off a branch-bearing run, and no more. */
+export interface BranchCandidate {
+  id: string;
+  status: RunRow["status"];
+  iterations: number;
+  repoRoot: string;
+  branch: string;
+}
+
+/** Which slice of the inventory a caller is asking for. */
+export interface BranchQuery {
+  /** `repo_root` to keep, or null/undefined for every repository. */
+  repo?: string | null;
+  /** Branches to skip, in the order below. */
+  offset?: number;
+  /** Branches to examine. Clamped to `MAX_INVENTORY`, whatever is asked for. */
+  limit?: number;
+}
+
+export interface BranchSelection<T> {
+  /** The branches this request pays git for, in the order they are listed. */
+  examined: T[];
+  total: number;
+  offset: number;
+  limit: number;
+  notShown: number;
+  /** Branch counts per repository, over the *unfiltered* set. */
+  repos: Array<{ repoRoot: string; branches: number }>;
+}
+
+/**
+ * Which branches this request examines, and what it must say about the rest.
+ *
+ * Pure, and separated from the git work below for the reason `selectPromotable`
+ * is separated from the spawn: the failure mode is silent. A branch dropped here
+ * is work committed on a ref with no route in the UI that reaches it — nothing
+ * throws, nothing is red, and the count that ought to say so is computed from
+ * the same truncated list. So `total` is counted over every candidate handed in
+ * and `notShown` is derived from it rather than from the page.
+ *
+ * `runs` must be newest-first, as the query that feeds it orders them. The
+ * collapse to one row per branch happens *before* the slice, so a page holds
+ * `limit` branches rather than `limit` runs, and a chain of five links does not
+ * consume five rows of somebody's page.
+ *
+ * `repos` is deliberately computed over the unfiltered set: it is what the
+ * picker is drawn from, and a filter that removes the other repositories from
+ * the list you would use to change it is a filter you cannot get out of.
+ */
+export function selectBranchCandidates<T extends BranchCandidate>(
+  runs: readonly T[],
+  query: BranchQuery = {},
+): BranchSelection<T> {
+  const all = oneRunPerBranch(runs);
+
+  const counts = new Map<string, number>();
+  for (const run of all) counts.set(run.repoRoot, (counts.get(run.repoRoot) ?? 0) + 1);
+
+  const matching = query.repo ? all.filter((r) => r.repoRoot === query.repo) : all;
+
+  // A limit that is missing, zero, negative or unreadable is the default page
+  // rather than the smallest legal one: these arrive off a query string, and a
+  // one-row page is a far worse answer to a typo than the ordinary one.
+  const asked = Math.floor(Number(query.limit));
+  const limit =
+    Number.isFinite(asked) && asked > 0
+      ? Math.min(MAX_INVENTORY, asked)
+      : MAX_INVENTORY;
+  // Clamped rather than refused: an offset past the end is what pressing Next
+  // on a page that shrank under you produces, and an empty page with an honest
+  // total is a better answer than a 400.
+  const offset = Math.min(
+    Math.max(0, Math.floor(Number(query.offset) || 0)),
+    Math.max(0, matching.length - 1),
+  );
+  const examined = matching.slice(offset, offset + limit);
+
+  return {
+    examined,
+    total: matching.length,
+    offset,
+    limit,
+    notShown: matching.length - examined.length,
+    repos: [...counts].map(([repoRoot, branches]) => ({ repoRoot, branches })),
+  };
+}
+
+/**
+ * Every branch-bearing run this app has recorded, newest first.
+ *
+ * A query of its own rather than `listRuns(400)` and a filter, because the
+ * question is "which branches exist" and answering it from the newest N *runs*
+ * silently stops answering it: at twenty-five concurrent runs the 400 newest are
+ * about five hours of work, after which a branch is not merely off the page but
+ * uncounted, so nothing on the page can say it is there. Only the columns the
+ * selection reads are fetched — the full rows for the handful actually examined
+ * are read back afterwards, so a machine with fifty thousand runs on it does not
+ * load fifty thousand prompts to list sixty branches.
+ */
+function branchBearingRuns(): Array<BranchCandidate & { createdAt: number }> {
+  return db()
+    .prepare(
+      `SELECT id, status, iterations, repo_root AS repoRoot,
+              worktree_branch AS branch, created_at AS createdAt
+         FROM runs
+        WHERE isolation = 'worktree'
+          AND worktree_branch IS NOT NULL
+          AND repo_root IS NOT NULL
+        ORDER BY created_at DESC`,
+    )
+    .all() as Array<BranchCandidate & { createdAt: number }>;
+}
+
 /**
  * Every branch this app has produced, with enough state to decide about it.
  *
  * Grouped by repository so the two set-shaped questions — which refs still
  * exist, and which are merged into a given target — are one `for-each-ref` each
  * rather than one git call per branch. The per-branch commit count is not
- * set-shaped and stays one call, which is what the cap above bounds.
+ * set-shaped and stays one call, which is what the cap above bounds. That cap is
+ * on the *page*, not on what exists: `query` is what moves which sixty branches
+ * are paid for, and the counts beside them describe the whole set.
  */
-export async function branchInventory(): Promise<BranchInventory> {
-  const candidates = oneRunPerBranch(
-    listRuns(400).filter(
-      (r) => r.isolation === "worktree" && r.worktree_branch && r.repo_root,
-    ),
-  );
-  const examined = candidates.slice(0, MAX_INVENTORY);
+export async function branchInventory(
+  query: BranchQuery = {},
+): Promise<BranchInventory> {
+  const selection = selectBranchCandidates(branchBearingRuns(), query);
+
+  const rows =
+    selection.examined.length === 0
+      ? []
+      : (db()
+          .prepare(
+            `SELECT * FROM runs WHERE id IN (${selection.examined
+              .map(() => "?")
+              .join(",")})`,
+          )
+          .all(...selection.examined.map((r) => r.id)) as RunRow[]);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const examined = selection.examined
+    .map((r) => byId.get(r.id))
+    .filter((r): r is RunRow => r !== undefined);
   const active = new Set(activeRuns().map((r) => r.id));
 
   const byRepo = new Map<string, RunRow[]>();
@@ -1944,11 +2297,13 @@ export async function branchInventory(): Promise<BranchInventory> {
   }
 
   const branches: BranchSummary[] = [];
+  const roots: string[] = [];
   let probes = 0;
 
   for (const [rawRoot, runs] of byRepo) {
     const repoRoot = repoPathFor(rawRoot);
     if (!repoRoot) continue;
+    roots.push(repoRoot);
 
     // One call for the whole repository. Only a branch some checkout still
     // holds can have uncommitted work of its own to report.
@@ -2028,6 +2383,32 @@ export async function branchInventory(): Promise<BranchInventory> {
     }
   }
 
-  branches.sort((a, b) => b.createdAt - a.createdAt);
-  return { branches, notShown: candidates.length - examined.length };
+  // Back into the order the selection listed them in, rather than re-sorted by
+  // the kept run's own `created_at`. The two differ for a chain — the row kept
+  // is the chain's *owner*, which can be an older link than the one that fixed
+  // the group's place in the list — and the page order has to be the order the
+  // slice was taken in, or which branches land on which page depends on which
+  // link happens to own each of them.
+  const order = new Map(selection.examined.map((r, i) => [r.id, i]));
+  branches.sort((a, b) => (order.get(a.runId) ?? 0) - (order.get(b.runId) ?? 0));
+
+  return {
+    branches,
+    notShown: selection.notShown,
+    total: selection.total,
+    offset: selection.offset,
+    limit: selection.limit,
+    repo: query.repo ?? null,
+    repos: selection.repos
+      .map(({ repoRoot, branches: n }) => {
+        const resolved = repoPathFor(repoRoot) ?? repoRoot;
+        return {
+          repoRoot,
+          repoLabel: describeFolder(resolved).relPath || resolved,
+          branches: n,
+        };
+      })
+      .sort((a, b) => a.repoLabel.localeCompare(b.repoLabel)),
+    checkouts: await checkoutStores(roots),
+  };
 }

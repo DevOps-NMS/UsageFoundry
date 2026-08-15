@@ -19,13 +19,19 @@ import { getRun, type RunRow } from "./orchestrator";
  * is one button per run" — and it only gets to do that by keeping what that
  * decision protected:
  *
- *   - **Exactly one merge is in flight.** Not a batch, a queue. The worker is a
- *     single sequential loop and there is one of it per process.
+ *   - **Exactly one merge is in flight per repository.** Not a batch, a queue.
+ *     A worker is a single sequential loop and there is one of them per
+ *     repository — never two, which is the invariant the whole module rests on
+ *     and the one thing a reader of `startWorker` has to keep true.
  *   - **Every item is re-previewed against git immediately before its own
  *     merge.** Each landing changes the base for the next, so an answer worked
  *     out when the queue was made is worthless by the second item. Nothing here
  *     trusts what the page showed; `landRun` re-derives the whole `LandState`
- *     and refuses on its own reading.
+ *     and refuses on its own reading. That sentence is true of two branches in
+ *     one repository and false of two branches in different ones, which is why
+ *     the repository is the unit of serialisation rather than the process:
+ *     draining every repository through one loop meant a twelve-minute conflict
+ *     resolution in one of them held every clean branch in all the others.
  *   - **A conflict still costs the operator's checkout nothing.** It is resolved
  *     on the run's branch in an isolated checkout, exactly as the single-run
  *     path does it, and a failed merge is aborted and rolled back before the
@@ -81,9 +87,19 @@ const ACTIVE: QueueStatus[] = ["queued", "landing", "resolving"];
 export const isQueueActive = (status: QueueStatus): boolean =>
   ACTIVE.includes(status);
 
-/** How long the worker waits for one conflict resolution to settle. */
-const RESOLVE_TIMEOUT_MS = 12 * 60_000;
-/** How often it looks. The row is written by a child process, not by us. */
+/**
+ * How often the worker looks. The row is written by a child process, not by us.
+ *
+ * There is deliberately no deadline beside it. A resolution is a step in
+ * merging a branch and the only thing that can honestly end one is the
+ * resolution itself: giving up at twelve minutes failed the item, and the row
+ * then said the branch could not be merged when what had actually happened was
+ * that this loop stopped watching — while the child carried on spending, and
+ * `after` committed or rolled back a merge nothing was waiting for any more.
+ * The escapes are unchanged and each is somebody's decision rather than a
+ * clock's: the resolution settles either way, `cancelBatch` takes the rest of
+ * the queue, and the process ending ends the child with it.
+ */
 const RESOLVE_POLL_MS = 2_000;
 
 /* ------------------------------------------------------------------ */
@@ -366,7 +382,7 @@ export function enqueue(
     );
   });
 
-  void startWorker();
+  startWorker();
   return { ok: true, batchId, queued: items.length };
 }
 
@@ -453,14 +469,74 @@ export function reconcileMergeQueueOnBoot(): void {
 /* The worker                                                          */
 /* ------------------------------------------------------------------ */
 
-/** `globalThis` for the reason every other long-lived map here uses it. */
-const worker = ((globalThis as unknown as { __ufMergeWorker?: { running: boolean } })
-  .__ufMergeWorker ??= { running: false });
+/**
+ * Repositories a worker is draining right now, and what this drain has learned.
+ *
+ * `globalThis` for the reason every other long-lived map here uses it.
+ *
+ * **The set is the mutual exclusion.** A repository is added before any `await`
+ * and removed in a `finally`, so between reading the list of repositories with
+ * work and claiming them there is no suspension point and no way for two calls
+ * to `startWorker` to both take one. That is the whole of what stops two merges
+ * going into one working tree from this side; `landing` in `land.ts` is the
+ * other half and is unchanged, because it also has to hold against the manual
+ * land route, which does not go through this queue at all.
+ */
+const workers = ((
+  globalThis as unknown as {
+    __ufMergeWorkers?: { active: Set<string>; resolutionsRefused: string | null };
+  }
+).__ufMergeWorkers ??= { active: new Set<string>(), resolutionsRefused: null });
 
-export const isWorking = () => worker.running;
+export const isWorking = () => workers.active.size > 0;
 
 /**
- * The next branch to land, across every batch.
+ * How many repositories may be drained at once.
+ *
+ * Not unbounded, and the bound is about money rather than about correctness:
+ * every worker can be holding a conflict-resolution child for up to
+ * `RESOLVE_TIMEOUT_MS`, and those are billed. What this change is for is head-of-line
+ * blocking — a clean branch in one repository waiting out a conflict in another
+ * — not parallel spend, so a repository over the cap waits for a slot rather
+ * than for the whole queue. Nothing is dropped; the drain that frees a slot
+ * calls `startWorker` again.
+ */
+const MAX_MERGE_WORKERS = 4;
+
+/**
+ * The repository each queued row belongs to, as SQL.
+ *
+ * `repo_root ?? folder` is the key the worker has always used for "which
+ * repository is this branch in", and it is the key `halted` was already keyed
+ * on — the module modelled the repository as the unit that shares state well
+ * before the worker did. The join is a LEFT one so a row whose run has been
+ * deleted still groups (under `''`) and still reaches a worker that can fail
+ * it; an INNER join would leave it `queued` for ever with nothing to move it.
+ */
+const REPO_KEY = "COALESCE(r.repo_root, r.folder, '')";
+
+/**
+ * Repositories with queued work, the oldest-queued first.
+ *
+ * The order matters only when `MAX_MERGE_WORKERS` is reached: it decides which
+ * repository waits, and the operator's own oldest press of Land should not be
+ * the one that does.
+ */
+export function queuedRepos(): string[] {
+  return (
+    db()
+      .prepare(
+        `SELECT ${REPO_KEY} AS repo FROM merge_queue q
+           LEFT JOIN runs r ON r.id = q.run_id
+          WHERE q.status='queued'
+          GROUP BY repo ORDER BY MIN(q.created_at), MIN(q.batch_id)`,
+      )
+      .all() as { repo: string }[]
+  ).map((r) => r.repo);
+}
+
+/**
+ * The next branch to land in one repository, across every batch.
  *
  * `position` is the operator's order *within* one batch and restarts at 0 for
  * the next one, so ordering by it first interleaved a batch queued while the
@@ -477,18 +553,22 @@ export const isWorking = () => worker.running;
  * it the operator's order, because they were queued at the same instant — but
  * that they do not interleave is not.
  *
+ * The repository term is what makes several workers possible and it changes
+ * none of the above: within one repository this is the sequence it always was.
+ *
  * Exported for the test that pins this sequence. The decision is the SQL, so
  * anything short of running the query would be a second copy of it, and the
  * copy is the one that would stay right.
  */
-export function nextQueued(): QueueRow | null {
+export function nextQueuedIn(repo: string): QueueRow | null {
   return (
     (db()
       .prepare(
-        "SELECT * FROM merge_queue WHERE status='queued'" +
-          " ORDER BY created_at, batch_id, position LIMIT 1",
+        `SELECT q.* FROM merge_queue q LEFT JOIN runs r ON r.id = q.run_id
+          WHERE q.status='queued' AND ${REPO_KEY} = ?
+          ORDER BY q.created_at, q.batch_id, q.position LIMIT 1`,
       )
-      .get() as QueueRow | undefined) ?? null
+      .get(repo) as QueueRow | undefined) ?? null
   );
 }
 
@@ -515,35 +595,54 @@ function setStatus(
 }
 
 /**
- * Work the queue until it is empty, one branch at a time.
+ * Give every repository with queued work a worker, up to the cap.
  *
- * Not awaited by the caller: a queue with a conflict in it runs for minutes,
- * and the rows are what report on it — the page polls them, exactly as it polls
- * a run.
+ * Synchronous from the read to the claim — no `await` between `queuedRepos()`
+ * and the `active.add` — which is the property `createRun`'s folder claim
+ * already documents and the reason two calls to this cannot both start a worker
+ * on one repository. Everything after the claim is a detached loop, not awaited
+ * by the caller: a queue with a conflict in it runs for as long as reconciling
+ * that conflict takes, and the rows are what report on it — the page polls
+ * them, exactly as it polls a run.
  */
-export async function startWorker(): Promise<void> {
+export function startWorker(): void {
   // `enqueue` already refuses, so nothing this process queued can be here — but
   // the table is shared, and draining a row another server queued is this
-  // process merging into a checkout it was never told about.
+  // process merging into a checkout it was never told about. Asked here rather
+  // than per repository because the answer is about this process, not about
+  // which queue it would drain.
   if (!mayWriteDataDir()) return;
-  if (worker.running) return;
-  worker.running = true;
+  for (const repo of queuedRepos()) {
+    if (workers.active.size >= MAX_MERGE_WORKERS) break;
+    if (workers.active.has(repo)) continue;
+    workers.active.add(repo);
+    void drainRepo(repo);
+  }
+}
 
-  /** Repositories the queue has given up on, and why. */
-  const halted = new Map<string, string>();
-  /** Set once a resolution is refused for a reason the next one will hit too. */
-  let resolutionsRefused: string | null = null;
+/**
+ * Work one repository's queue until it is empty, one branch at a time.
+ *
+ * The caller has already claimed `repo`; this releases it, and only this.
+ *
+ * `halt` is a single value rather than the map the one-loop version kept,
+ * because a worker now covers exactly one repository — the same decision, with
+ * the key moved into the loop's identity. A dirty checkout or a HEAD on the
+ * wrong branch still refuses every remaining branch *in that repository* and
+ * says so once, and still says nothing about any other.
+ */
+async function drainRepo(repo: string): Promise<void> {
+  /** Why this repository was given up on, if it was. */
+  let halt: string | null = null;
 
   try {
-    for (let row = nextQueued(); row; row = nextQueued()) {
+    for (let row = nextQueuedIn(repo); row; row = nextQueuedIn(repo)) {
       const run = getRun(row.run_id);
       if (!run) {
         setStatus(row.id, "failed", { message: "That run no longer exists." });
         continue;
       }
 
-      const repo = run.repo_root ?? run.folder;
-      const halt = halted.get(repo);
       if (halt) {
         setStatus(row.id, "skipped", { message: `Not attempted — ${halt}` });
         continue;
@@ -552,11 +651,16 @@ export async function startWorker(): Promise<void> {
       setStatus(row.id, "landing");
       const outcome = await processOne(row, {
         autoResolve: row.auto_resolve === 1,
-        resolutionsRefused,
+        // Shared across the workers in flight rather than held per repository:
+        // what it records is that the *operator's own usage window* is spent,
+        // which is a fact about the account and not about a repository. Each
+        // rediscovery costs a full transcript scan, so learning it once is the
+        // whole point of the flag.
+        resolutionsRefused: workers.resolutionsRefused,
       });
 
-      if (outcome.halt) halted.set(repo, outcome.message);
-      if (outcome.refusedResolutions) resolutionsRefused = outcome.refusedResolutions;
+      if (outcome.halt) halt = outcome.message;
+      if (outcome.refusedResolutions) workers.resolutionsRefused = outcome.refusedResolutions;
       setStatus(row.id, outcome.status, {
         // The prefix is added here and nowhere else. `processOne` returns the
         // bare reason because the same string is also what every row behind
@@ -566,13 +670,18 @@ export async function startWorker(): Promise<void> {
       });
     }
   } finally {
-    worker.running = false;
+    workers.active.delete(repo);
+    // The last worker out ends the drain, and a drain that has ended has
+    // learned nothing the next one should inherit — a window refused an hour
+    // ago may have rolled over since. This is what the flag meant when there
+    // was one loop, kept by making it end with the loops rather than with one.
+    if (workers.active.size === 0) workers.resolutionsRefused = null;
   }
 
-  // A row queued while the loop was draining its last item would otherwise wait
-  // for the next enqueue. Cheap to check, and the alternative is a queue that
-  // stalls for no visible reason.
-  if (nextQueued()) void startWorker();
+  // A repository queued while this loop was draining its last item, or one held
+  // back by the cap, would otherwise wait for the next enqueue. Cheap, and the
+  // alternative is a queue that stalls for no visible reason.
+  startWorker();
 }
 
 interface ItemOutcome {
@@ -658,7 +767,6 @@ async function resolveWithClaude(runId: string): Promise<ResolveOutcome> {
   // was spawned. Nothing to wait for and nothing was billed.
   if (!started.assistId) return { ok: true, reason: started.message, costUSD: 0 };
 
-  const deadline = Date.now() + RESOLVE_TIMEOUT_MS;
   for (;;) {
     const assist = getAssist(started.assistId);
     if (!assist) {
@@ -672,13 +780,6 @@ async function resolveWithClaude(runId: string): Promise<ResolveOutcome> {
             reason: assist.error ?? "The conflict resolution failed.",
             costUSD: assist.cost_usd,
           };
-    }
-    if (Date.now() > deadline) {
-      return {
-        ok: false,
-        reason: "Its conflict resolution did not finish in time.",
-        costUSD: assist.cost_usd,
-      };
     }
     await new Promise((r) => setTimeout(r, RESOLVE_POLL_MS));
   }

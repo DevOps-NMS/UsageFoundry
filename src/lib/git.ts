@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { GIT_BIN } from "./config";
+import { childCredentials } from "./privsep";
 
 /**
  * The one way this app runs git.
@@ -117,6 +118,7 @@ export function gitSync(cwd: string, args: string[]): GitResult {
   const res = spawnSync(GIT_BIN, gitArgs(args), {
     cwd,
     env: gitEnv(),
+    ...childCredentials(),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: GIT_SYNC_TIMEOUT_MS,
@@ -146,6 +148,16 @@ export function gitSync(cwd: string, args: string[]): GitResult {
  * meaning: `git status --porcelain` writes an unstaged edit as `" M path"`, and
  * trimming the stream eats that first space — which shifts the whole record and
  * reads the status letters off the middle of a filename.
+ *
+ * `timeoutMs: 0` runs with **no clock at all**, and it exists for the landing
+ * path. A timeout here is a `SIGKILL`, which arrives at the caller as
+ * `ok: false` and is indistinguishable from git having refused — so a merge on
+ * a large repository was rolled back and reported as "git refused the merge"
+ * for the sole reason that it took longer than a number nobody measured. There
+ * is no length of time after which merging somebody's work becomes the wrong
+ * thing to do, so `land.ts` passes this on every call that decides or performs
+ * one. Memory is still bounded by `maxBytes` where a caller reads a diff, and
+ * an unbounded call is still killed when the process ends.
  */
 export function git(
   cwd: string,
@@ -158,6 +170,7 @@ export function git(
     const child = spawn(GIT_BIN, gitArgs(args), {
       cwd,
       env: gitEnv(),
+      ...childCredentials(),
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -176,14 +189,15 @@ export function git(
     });
     child.stderr.on("data", (c: string) => (stderr += c));
 
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    timer.unref?.();
+    // Zero is "no clock", not "kill immediately" — see the note above.
+    const timer = timeoutMs > 0 ? setTimeout(() => child.kill("SIGKILL"), timeoutMs) : null;
+    timer?.unref?.();
 
     let settled = false;
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve({
         ok: code === 0 && !overflowed,
         stdout: trim ? stdout.trim() : stdout,

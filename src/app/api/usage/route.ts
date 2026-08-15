@@ -1,5 +1,6 @@
+import v8 from "node:v8";
 import { NextResponse } from "next/server";
-import { scanUsage } from "@/lib/transcripts";
+import { scanUsage, transcriptCacheStats } from "@/lib/transcripts";
 import {
   agentOriginIndex,
   buildPeriods,
@@ -7,11 +8,14 @@ import {
   resolveTimeZone,
 } from "@/lib/windows";
 import { listAgents, listAmbientAgents } from "@/lib/agents";
-import { getSettings, limitConfig } from "@/lib/settings";
+import { getSettings, limitConfig, newWorkPaused } from "@/lib/settings";
 import { readAccountProfile } from "@/lib/account";
 import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
+import { retentionCutoff } from "@/lib/retention";
+import { installSpendReport } from "@/lib/installBudget";
 import { PROJECTS_DIR } from "@/lib/config";
+import { configProblems } from "@/lib/configCheck";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,10 +63,18 @@ export async function GET(req: Request) {
     const timeZone = resolveTimeZone(
       new URL(req.url).searchParams.get("tz"),
     );
+    // The transcript horizon, carried onto the card rather than enforced
+    // against it. This offers twelve months and the shipped horizon is thirty
+    // days, so a longer history than the retention would need the retention to
+    // be a year — which would defeat it. `buildPeriods` already drops buckets
+    // that closed before the first entry, so pruning makes the history
+    // *shorter* rather than wrong; this is the sentence for the one bucket the
+    // cutoff falls inside. Read from the same setting `sweepTranscripts` reads.
+    const completeFrom = retentionCutoff(settings.transcriptRetentionDays, now);
     const periods = {
-      day: buildPeriods(entries, "day", limits, now, timeZone),
-      week: buildPeriods(entries, "week", limits, now, timeZone),
-      month: buildPeriods(entries, "month", limits, now, timeZone),
+      day: buildPeriods(entries, "day", limits, now, timeZone, completeFrom),
+      week: buildPeriods(entries, "week", limits, now, timeZone, completeFrom),
+      month: buildPeriods(entries, "month", limits, now, timeZone, completeFrom),
     };
 
     // Bounded by the snapshot's own window so the card describes the same five
@@ -77,12 +89,34 @@ export async function GET(req: Request) {
       snapshot,
       periods,
       telemetry,
+      // Unconditional, unlike `telemetry`: the ceiling is what the operator
+      // typed and the reading is money this app recorded spending, so there is
+      // no setting to gate it on and nothing to leak by reporting it. Its own
+      // key rather than a field on `snapshot`, because it is a fourth reading
+      // over a different span and must never be summed with the meters.
+      install: installSpendReport(now),
       meta: {
         transcriptDir: PROJECTS_DIR,
         fileCount: scan.fileCount,
         entryCount: entries.length,
         unpricedModels: scan.unpricedModels,
         scannedAt: scan.scannedAt,
+        // Capped for the reason a shortened diff is, and the count is the whole
+        // set so the page can say how much it is not showing. Every figure on
+        // this response is a floor while this is non-empty.
+        readFailures: scan.readFailures.slice(0, 5),
+        readFailureCount: scan.readFailures.length,
+        // What this process is holding, and what V8 will let it hold. The
+        // transcript cache is the largest thing on this heap by a wide margin
+        // and used to grow with every turn ever written, so the two are read
+        // together: a rising `heapUsedBytes` beside a flat `entries` at
+        // `maxEntries` is the cache doing its job, and beside a climbing
+        // `entries` it is something else.
+        memory: {
+          cache: transcriptCacheStats(),
+          heapUsedBytes: process.memoryUsage().heapUsed,
+          heapLimitBytes: v8.getHeapStatistics().heap_size_limit,
+        },
         // "Can this window show a percentage at all", which the provider's own
         // reading answers without anything being configured — the whole point
         // of it. Reading the snapshot rather than the settings is what keeps
@@ -100,6 +134,11 @@ export async function GET(req: Request) {
         // from "on, but the provider did not answer" — the second is worth a
         // sentence and the first is not.
         planUsageFromApi: settings.planUsageFromApi,
+        // On the dashboard because a held fleet and a quiet one are identical
+        // here otherwise: the meters read the same, and the only difference is
+        // that nothing new ever starts. One boolean off a settings row rather
+        // than a second poll — this route is already the page's heartbeat.
+        newWorkPaused: newWorkPaused(),
         reservedHeadroomFraction: settings.reservedHeadroomFraction ?? 0,
         // What the user typed, so the meters can name it alongside the reduced
         // ceiling they are actually measured against.
@@ -115,6 +154,11 @@ export async function GET(req: Request) {
         entrypoints: [
           ...new Set(entries.map((e) => e.entrypoint).filter(Boolean)),
         ] as string[],
+        // Cached from the boot probe, so this costs a property read rather than
+        // a stat per mount on a ten-second poll. On this page because a wrongly
+        // pointed mount and a wrongly pointed CLAUDE_HOME both present as the
+        // zeros above it, which is also what a quiet week looks like.
+        configProblems: configProblems(),
       },
     });
   } catch (err) {
