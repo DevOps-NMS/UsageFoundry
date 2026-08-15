@@ -1,13 +1,25 @@
 # Sandboxing a run
 
+**Validated 2026-08-15 (`10-validation.md`). The recommendation stands, at higher
+cost and with one precondition it did not have.** 21 claims confirmed, 7 refuted,
+6 unverifiable. The codebase claims held; most of what failed was a claim about
+the vendor binary, which is where `08-recommendation.md` already said its risk
+was. Two things changed materially, and both are folded into the files below:
+the sandbox needs **three** dependencies (`bubblewrap`, `socat`, and a seccomp
+applier whose absence is only a *warning*), not one; and **`~/.claude/settings.json`
+is an honored sandbox settings source that the agent's own uid can rewrite**, so
+per-run confinement is decorative until the ownership of that directory changes.
+The recommendation is unmoved because every one of those findings lands on the
+runner-up too — Option D reaches confinement through the same CLI mechanism.
+
 ## The recommendation
 
 **Sandbox the child with the CLI's own bubblewrap layer**, enabled and pinned by a
 root-owned `/etc/claude-code/managed-settings.json` in the image that the agents
 cannot write, and scoped per run by a `--settings` overlay generated at each spawn
-site. One container, one image plus `bubblewrap`, no new process, no Docker
-socket, no change to the loopback telemetry and MCP endpoints, no change to the
-metering path.
+site. One container, one image plus `bubblewrap`, `socat` and a seccomp applier, no
+new process, no Docker socket, no change to the loopback telemetry and MCP
+endpoints, no change to the metering path.
 
 It is recommended because the pinned CLI — 2.1.226, `Dockerfile:194` — already
 implements it; because it is the only candidate that crosses none of the five
@@ -15,13 +27,13 @@ things a sandbox boundary here has to leave working; and because its
 `sandbox.failIfUnavailable` key exits at startup rather than silently running
 unsandboxed, which is this repository's own rule about disappearing boundaries
 supplied by the vendor. Its central mechanism was **read out of the pinned binary
-and not executed**: Phase 1 of `09-implementation-sketch.md` is a measurement, and
-its third question — whether the sandbox wraps the session or only Bash — is the
-fact that would promote the runner-up, which is the operator's own sketch in full
-(`04`). The operator's sketch *without* its second half — a runner container alone
-(`03`) — is rejected by name: same container, same uid, same mounts, so a run can
-still write a concurrent run's checkout, the gap the whole exercise was reached
-for.
+and not executed** — twice now, by two runs, neither of which started a sandbox.
+Phase 1 of `09-implementation-sketch.md` is a measurement, and its third question —
+whether the sandbox wraps the session or only Bash — is the fact that would promote
+the runner-up, which is the operator's own sketch in full (`04`). The operator's
+sketch *without* its second half — a runner container alone (`03`) — is rejected by
+name: same container, same uid, same mounts, so a run can still write a concurrent
+run's checkout, the gap the whole exercise was reached for.
 
 ## What a run can reach today, measured
 
@@ -30,12 +42,15 @@ for.
 | `/data` (database, settings, lock) | no — `0:0 700`, `test -r` fails |
 | Server's environment (`UF_AUTH_TOKEN`, Admin key) | no — `/proc/7/environ` denied |
 | The account's OAuth credential | **yes** — `~/.claude/.credentials.json` readable |
-| Another run's checkout | **yes** — writable, 19 slots on this install |
+| The CLI's own user settings | **yes** — `~/.claude/settings.json` writable |
+| Another run's checkout | **yes** — writable, 20 slots on this install |
+| The operator's database backups | **yes** — `/backups`, a sixth bind mount, writable |
 | The server's and a sibling's cmdline | **yes** — `/proc/*/cmdline` world-readable |
 | The internet, any host | **yes** — `curl https://pypi.org` → 200 |
-| New mount or user namespaces | no — `unshare` EPERM, no `CAP_SYS_ADMIN` |
+| New namespaces of any kind | no — `unshare` EPERM, and it is **seccomp**, not capabilities |
 
-Commands and outputs are in `00-problem.md`.
+Commands and outputs are in `00-problem.md`; the last four rows were added or
+corrected by `10-validation.md`, which re-ran every one of them.
 
 ## Index
 
@@ -52,6 +67,7 @@ Commands and outputs are in `00-problem.md`.
 | [07-comparison.md](07-comparison.md) | Weighted criteria, stated before the scores |
 | [08-recommendation.md](08-recommendation.md) | The argument, the cost, and what it does not contain |
 | [09-implementation-sketch.md](09-implementation-sketch.md) | Phases, hand-verification commands, migration, open questions |
+| [10-validation.md](10-validation.md) | An adversarial pass over all of the above: verdict table, environment checks, what is still unmeasured |
 
 Every option file answers the same six headings — shape, isolation gained, the
 five it must not break, what it requires of the host, failure modes, cost — so

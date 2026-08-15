@@ -7,21 +7,29 @@ Commands and their output are quoted rather than described.
 ## The shape
 
 One container. `docker-compose.yml:49` runs it as `user: "0:0"`;
-`src/lib/privsep.ts:154`'s `childCredentials()` is spread into all six spawn sites
+`src/lib/privsep.ts:154`'s `childCredentials()` is spread into all five spawn sites
 — the work cycle (`src/lib/orchestrator.ts:4799`), the reviewer
-(`src/lib/review.ts:613`), both of the chat's (`src/lib/chat.ts:1659`) and both of
-git's (`src/lib/git.ts:127`, `:179`) — dropping each to the operator's own uid. The
-server stays root. A work cycle is `spawn(CLAUDE_BIN, args, …)`, no shell, `stdio:
-["ignore","pipe","pipe"]`, own process group, `cwd` a git worktree under
-`<mountRoot>/.uf-worktrees/` (`src/lib/orchestrator.ts:1736`, `:4793`).
+(`src/lib/review.ts:613`), the chat's, which serves an orchestrator block too
+(`src/lib/chat.ts:1659`), and both of git's (`src/lib/git.ts:127`, `:179`) —
+dropping each to the operator's own uid. The server stays root. A work cycle is
+`spawn(CLAUDE_BIN, args, …)`, no shell, `stdio: ["ignore","pipe","pipe"]`, own
+process group, `cwd` a git worktree under `<mountRoot>/.uf-worktrees/`
+(`src/lib/orchestrator.ts:1736`, `:4793`).
 
-Four bind mounts, one named volume for the database, one for Go's caches
-(`docker-compose.yml:163`–`231`). `grep " /workspace" /proc/self/mountinfo` shows
-three of the four workspace slots resolving to the *same* host directory, and every
-bind mount carried over `fakeowner /run/host_mark/Users` — Docker Desktop for
-macOS, the remapping `docs/agent/environment.md:22` describes. It matters below,
-because it means bind-mount uid ownership inside the container is *presented*
-rather than enforced by the host filesystem.
+> Corrected by `10-validation.md`, which counted them: **five**, not six.
+> `privsep.ts:148`–`149` says "both of `chat.ts`'s" and is itself stale — there is
+> one `spawn` in `chat.ts`, and `docs/agent/architecture.md:102` explains why
+> (`runOrchestratorChild` exists so a block is the same call site, not a fifth).
+
+**Six** host bind mounts, one named volume for the database, one for Go's caches
+(`docker-compose.yml:163`–`231`): the four workspaces, `~/.claude`, and
+`${UF_BACKUP_DIR:-./backups}` at `/backups`.
+`grep " /workspace" /proc/self/mountinfo` shows three of the four workspace slots
+resolving to the *same* host directory, and every bind mount carried over
+`fakeowner /run/host_mark/Users` — Docker Desktop for macOS, the remapping
+`docs/agent/environment.md:22` describes. It matters below, because it means
+bind-mount uid ownership inside the container is *presented* rather than enforced
+by the host filesystem.
 
 ## What is already closed, and it is not nothing
 
@@ -56,6 +64,28 @@ and `land.ts` will merge them. `docs/security.md:72` covers this by implication 
 "treat all four workspaces as one blast radius" — but does not name it, and the
 between-runs case is the one a reader of a *concurrency* feature goes looking for.
 
+**The settings file the CLI itself reads.** Added by `10-validation.md`, and the
+one that decides whether any of the options below can work:
+
+    $ ls -ld /home/node/.claude              →  drwx------ node node
+    $ test -w /home/node/.claude/settings.json  →  WRITABLE by uid 1000
+    $ env | grep CLAUDE_CONFIG_DIR           →  CLAUDE_CONFIG_DIR=/home/node/.claude
+
+Every one of the 25 entries under `~/.claude` is owned by the agent's uid,
+because that is the same directory the CLI writes transcripts into and the whole
+metering path depends on its being writable. A run can therefore rewrite the
+user-level settings the *next* session — its own or a sibling's — starts under.
+
+**The operator's database backups.** `/backups` is a sixth bind mount onto a host
+directory, absent from the table in `README.md` until `10-validation.md` added it:
+
+    $ test -w /backups                       →  WRITABLE by uid 1000
+
+Nothing writes there unless the operator runs `scripts/backup-db.mjs`, which
+bounds it. But that script defaults to `/backups` whenever it is a directory
+(`scripts/backup-db.mjs:96`–`104`), and what it puts there is a copy of the
+database that `/data`'s `0:0 700` exists to keep out of reach.
+
 **A sibling's capability token.** `/proc/<pid>/cmdline` is world-readable and
 carries `--mcp-config <path>`; the file behind it is 0600 owned by the same uid
 that would read it (`docs/security.md:87`). The server's cmdline is readable too —
@@ -80,6 +110,18 @@ tool-policy rule rather than a kernel one.
 a capability grant or a seccomp change. `CAP_SYS_CHROOT` *is* in the bounding set,
 a smaller lever than it looks: a chroot with no mount namespace cannot hide
 `/proc`.
+
+`10-validation.md` re-ran these and closed the question of *which* mechanism
+refuses. It is seccomp, and only seccomp:
+
+    $ unshare -U true                        →  Operation not permitted   (needs no capability)
+    $ cat /proc/sys/user/max_user_namespaces →  31734                     (kernel permits them)
+    $ grep -E 'CapEff|Seccomp' /proc/self/status
+      CapEff: 0000000000000000  Seccomp: 2  Seccomp_filters: 1
+
+So the lever the options below reach for is `security_opt`, not `cap_add` — and
+`CapEff` being zero is worth reading beside `CapBnd`, which is what the process
+*may* acquire rather than what it holds.
 
 ## The threat this is actually about
 

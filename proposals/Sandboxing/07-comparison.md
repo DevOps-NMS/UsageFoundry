@@ -48,14 +48,29 @@ over — D's runner container buys defence in depth A does not have, and pays fo
 in build cost and in a second way for metering to read zero.
 
 Reading the interesting cells rather than the totals: **B scores 3 on filesystem
-and network** because `sandbox.filesystem.write.allowOnly` and
+and network** because `sandbox.filesystem.allowWrite` and
 `sandbox.network.allowedDomains` are per-session policy inside a namespace — finer
 than a per-container network, stronger than a proxy environment variable — and **2
 rather than 3 between two runs** because the sandbox is assumed to wrap commands
 rather than the whole session (`02x-option-cli-sandbox.md`). **B is the only
 positive on loudness**, on `sandbox.failIfUnavailable`; every structural option
 scores negative there, because each adds a way for the transcript scan to read zero
-with nothing thrown. **C scores 0 on fit** rather than negative: it changes the
+with nothing thrown.
+
+> **Disputed — `10-validation.md`.** Three corrections to the cells above, none of
+> which reorders the table. The key is `sandbox.filesystem.allowWrite`, not
+> `…write.allowOnly` (fixed in place). The network enforcement is a proxy the
+> sandboxed command has no route around, not namespace-level filtering, and it
+> depends on a seccomp component whose absence is a warning — so B's 3 on network
+> is conditional. And B's 3 on filesystem and 2 on between-two-runs both hold only
+> once `~/.claude/settings.json` stops being agent-writable; today a run can widen
+> its own write set from that file, which would make both cells 0. The scores are
+> left as written because they describe the option *implemented as specified in
+> Phase 2*, and Phase 2 now carries the fix. **Option D takes every one of these
+> corrections too** — it reaches confinement through the same CLI mechanism — which
+> is why the ordering does not move.
+
+**C scores 0 on fit** rather than negative: it changes the
 loopback endpoints and adds a fifth kind of child, but it also splits the memory
 limits, and those roughly cancel. **E's −3 on host posture** is the Docker socket,
 unrecoverable by careful calling code, and its −1 on credential containment is that

@@ -4,6 +4,16 @@
 managed-settings file the agents cannot write, scoped per run by a `--settings`
 overlay at each spawn site.** Option B, `02x-option-cli-sandbox.md`.
 
+> **Validated 2026-08-15 — it stands.** `10-validation.md` opened every citation
+> and re-ran every measurement. The codebase claims held; several claims about the
+> pinned binary did not, and the cost is higher than this file says: three
+> dependencies rather than one, and a precondition — `~/.claude/settings.json` is
+> an honored sandbox settings source **and** is writable by the agent's uid, so
+> per-run confinement is decorative until that changes. The recommendation is
+> unmoved because every one of those findings applies to Option D as well, which
+> reaches confinement through the same CLI mechanism. Read `10-validation.md`
+> before acting on this file.
+
 ## Why this one, from the constraints rather than from preference
 
 `01-constraints.md` lists five things that cross every candidate boundary and six
@@ -35,15 +45,18 @@ vendor-supplied version of this codebase's own rule, and the reason Option B is 
 only positive loudness score in `07-comparison.md`.
 
 What it delivers is not small: per-run filesystem confinement to the run's own
-worktree, a network allowlist enforced inside a namespace rather than by an
-environment variable, and — for the first time — a `cat` of
-`~/.claude/.credentials.json` from a run's shell that fails.
+worktree, a network allowlist enforced by a proxy the sandboxed command has no
+route around rather than by an environment variable, and — for the first time — a
+`cat` of `~/.claude/.credentials.json` from a run's shell that fails. The first of
+those three is contingent on the precondition above; the third is not.
 
 ## What it costs
 
-An apt package, a root-owned file in `/etc/claude-code/`, a `security_opt` line, a
-per-spawn settings overlay beside `buildArgs` repeated in `review.ts` and
-`chat.ts`, a settings surface and a boot line. Two or three days of code.
+Two apt packages and a global npm install for the seccomp applier, a root-owned
+file in `/etc/claude-code/`, a `security_opt` line, ownership surgery on
+`~/.claude`, a per-spawn settings overlay beside `buildArgs` repeated in
+`review.ts` and `chat.ts`, a settings surface and a boot line. A week, revised up
+from two or three days by `10-validation.md`.
 
 The real cost is elsewhere. **Docker's default seccomp profile has to be relaxed**
 so bubblewrap can create a user namespace — verified: `unshare --user
@@ -74,6 +87,13 @@ wraps commands, so `Edit`/`Write` sit outside it. **The kernel**: 25 sandboxes o
 one kernel, and only Option F moves that. **The database and the server's
 environment** are already closed by privilege separation, verified in
 `00-problem.md`; this adds nothing there and must not take anything away.
+**`~/.claude` as a policy surface**, added by `10-validation.md`: the user-level
+settings file the CLI reads is inside the one directory the metering path requires
+the agent to keep writing, so the two requirements point at the same directory in
+opposite directions and the resolution is per-entry ownership rather than a mode
+change. Every entry missed there fails as a dashboard of zeros, not as an error.
+**`/backups`**, likewise: a sixth bind mount onto a host directory, agent-writable,
+which no allowlist in this proposal accounted for.
 
 ## The runner-up, and the one fact that flips it
 
