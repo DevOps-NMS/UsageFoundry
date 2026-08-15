@@ -6,9 +6,36 @@ import os from "node:os";
  * environment; user-editable preferences live in the settings table instead.
  */
 
+const strictNames: string[] = [];
+
+/**
+ * Read a variable whose *blank* value is a mistake rather than an answer.
+ *
+ * The fallback still applies to one — a blank line in an env file and an
+ * orchestrator rendering `value: ""` both reach here, and refusing to produce a
+ * value at all would leave callers with nothing usable. What changed is that
+ * the name is recorded, so `configCheck.ts` can say at boot that the default
+ * being used was never asked for. That distinction is the whole of issue #98:
+ * `DATA_DIR=` is not a request for `./.data`, it is a typo that puts the
+ * database inside the image's writable layer where the next rebuild destroys it.
+ */
 function env(name: string, fallback: string): string {
+  if (!strictNames.includes(name)) strictNames.push(name);
   const v = process.env[name];
   return v === undefined || v === "" ? fallback : v;
+}
+
+/**
+ * Read a variable where blank *is* the answer: it means "off".
+ *
+ * Three of them, each a documented decision, and they must never be swept into
+ * a validation failure — which is precisely why this check belongs in the app,
+ * which knows which is which, rather than in compose, which does not. Note that
+ * `docker-compose.yml` renders all three as `${VAR:-}`, so a stock install has
+ * all three explicitly blank.
+ */
+function optionalEnv(name: string): string {
+  return process.env[name] ?? "";
 }
 
 /** Root of the Claude Code state directory (transcripts + credentials). */
@@ -163,7 +190,7 @@ export const DATA_DIR = env("DATA_DIR", path.join(process.cwd(), ".data"));
 export const DB_PATH = path.join(DATA_DIR, "usagefoundry.db");
 
 /** Shared secret for the UI. Empty string disables auth entirely. */
-export const AUTH_TOKEN = env("UF_AUTH_TOKEN", "");
+export const AUTH_TOKEN = optionalEnv("UF_AUTH_TOKEN");
 
 /**
  * The operator's explicit acknowledgement that this install runs with no
@@ -185,7 +212,7 @@ export const ALLOW_NO_AUTH = env("UF_ALLOW_NO_AUTH", "");
 export const COOKIE_SECURE = env("UF_COOKIE_SECURE", "");
 
 /** Admin API key (sk-ant-admin01-...). Optional. */
-export const ADMIN_API_KEY = env("ANTHROPIC_ADMIN_KEY", "");
+export const ADMIN_API_KEY = optionalEnv("ANTHROPIC_ADMIN_KEY");
 
 /**
  * GitHub credential handed to spawned agents, or empty when unset.
@@ -202,7 +229,7 @@ export const ADMIN_API_KEY = env("ANTHROPIC_ADMIN_KEY", "");
  * the token: it is the agent's `git push`, `gh pr create` and `gh issue view`
  * that fail without one.
  */
-export const GITHUB_TOKEN = env("UF_GITHUB_TOKEN", "");
+export const GITHUB_TOKEN = optionalEnv("UF_GITHUB_TOKEN");
 
 /** Path to the Claude Code executable inside the container. */
 export const CLAUDE_BIN = env("CLAUDE_BIN", "claude");
@@ -213,6 +240,24 @@ export const GIT_BIN = env("GIT_BIN", "git");
 export const ANTHROPIC_API_BASE = env("ANTHROPIC_API_BASE", "https://api.anthropic.com");
 
 export const USER_AGENT = "UsageFoundry/0.1.0";
+
+/**
+ * Every variable this process actually read through `env()`, in the order it
+ * read them.
+ *
+ * Collected rather than listed, so a variable added to this file cannot be
+ * forgotten here — and it is only the ones a *this* configuration reached:
+ * `WORKSPACE_ROOT` is read solely when no mount is configured, and a boot that
+ * never consulted it has no business reporting on it.
+ */
+export const STRICT_ENV_VARS: readonly string[] = strictNames;
+
+/** The three where an explicitly blank value is a documented "off" switch. */
+export const BLANK_MEANINGFUL_ENV_VARS = [
+  "UF_AUTH_TOKEN",
+  "ANTHROPIC_ADMIN_KEY",
+  "UF_GITHUB_TOKEN",
+] as const;
 
 export const hasAdminKey = () => ADMIN_API_KEY.length > 0;
 export const hasGithubToken = () => GITHUB_TOKEN.length > 0;

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import Database from "better-sqlite3";
 import { DATA_DIR, DB_PATH } from "./config";
+import { heldByAnotherProcess } from "./serverLock";
 
 /**
  * SQLite persistence. Single-writer, single-process — matching the fact that
@@ -48,17 +49,90 @@ const CHAT_PROPOSALS_TABLE = `
       error       TEXT
     );`;
 
+/**
+ * What this build's `migrate()` produces, written to `PRAGMA user_version`.
+ *
+ * Not a migration framework and deliberately not one — the ~50 `addColumn`
+ * calls stay idempotent by reading the live schema, which is the correct check
+ * for an additive change and which a version number could not replace without
+ * one number per column. What this records is the two states reading the schema
+ * cannot tell you: that a *rebuild* has completed, and that the file was last
+ * written by a build newer than this one. Bump it whenever a migration is
+ * something other than an added column or an `IF NOT EXISTS`.
+ *
+ * 1 is the first version. Everything shipped before it reads 0, which is also
+ * what a brand-new file reads — the two are indistinguishable and it does not
+ * matter, since `migrate()` is idempotent either way.
+ */
+export const SCHEMA_VERSION = 1;
+
+export type SchemaVerdict = "unversioned" | "current" | "upgrade" | "downgrade";
+
+/**
+ * What the file's own version says about the build that is opening it.
+ *
+ * Pure, because the interesting case cannot be produced by running this build:
+ * a `downgrade` is a rollback to an older image after a failed deploy, and what
+ * it costs is that `migrate()` is about to run against a schema it does not
+ * know. It is reported rather than refused — an older build's migrate is
+ * additive and its rebuild guard is a live-schema read, so it leaves a newer
+ * file alone — but a state nothing can name is a state nobody debugs.
+ */
+export function schemaVerdict(file: number, code: number): SchemaVerdict {
+  if (file === 0) return "unversioned";
+  if (file === code) return "current";
+  return file < code ? "upgrade" : "downgrade";
+}
+
+/**
+ * May this process write the schema?
+ *
+ * `open()` runs on the first `db()` call in *any* process, which is how a
+ * second server — an agent's `next dev` against its own worktree, pointed at
+ * the live database by an inherited `DATA_DIR` — was entitled to rebuild a
+ * table under the server that owns it. `serverLock.ts` already answers who owns
+ * the directory; this is the same claim gating the one write that is not
+ * additive.
+ *
+ * The empty-file exception is what keeps that from being a new failure. A
+ * process that owns nothing and finds no schema has nothing to destroy, and
+ * refusing there would leave it with a database that has no tables and every
+ * query throwing until a restart. The hazard is a rebuild against *existing
+ * data*, and an empty file has none.
+ */
+function shouldMigrate(db: Database.Database): boolean {
+  if (!heldByAnotherProcess()) return true;
+  if (!tableExists(db, "settings")) return true;
+  console.warn(
+    `[usagefoundry] Another server process holds ${DATA_DIR}. Leaving the ` +
+      "schema exactly as it is — migrations belong to the process that owns " +
+      "this directory.",
+  );
+  return false;
+}
+
 function open(): Database.Database {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const db = new Database(DB_PATH);
   // WAL keeps the dashboard's frequent reads from blocking on run writes.
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  migrate(db);
+  if (shouldMigrate(db)) migrate(db);
   return db;
 }
 
 function migrate(db: Database.Database) {
+  const found = Number(db.pragma("user_version", { simple: true }));
+  if (schemaVerdict(found, SCHEMA_VERSION) === "downgrade") {
+    console.error(
+      `[usagefoundry] This database was written by a newer build (schema ` +
+        `${found}; this build knows ${SCHEMA_VERSION}). Migrating anyway — ` +
+        `every step below is additive or guarded by the live schema — but a ` +
+        `rollback has no defined behaviour here and anything the newer build ` +
+        `added is invisible to this one.`,
+    );
+  }
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
       key   TEXT PRIMARY KEY,
@@ -600,8 +674,11 @@ function migrate(db: Database.Database) {
 
   // `CREATE TABLE IF NOT EXISTS` cannot add a column to a table that already
   // exists, and `ALTER TABLE ADD COLUMN` throws "duplicate column name" on the
-  // second boot. With no version table, checking the live schema is the only
-  // idempotent option.
+  // second boot. Checking the live schema is the idempotent option, and it
+  // stays the right one for these: `PRAGMA user_version` records that a
+  // *rebuild* completed (see `SCHEMA_VERSION`), which is the state a schema
+  // read cannot answer, but keying fifty additive columns on one number would
+  // mean fifty numbers or an ordering nobody can change.
   addColumn(db, "runs", "session_id", "TEXT");
   addColumn(db, "runs", "work_dir", "TEXT");
   addColumn(db, "runs", "isolation", "TEXT");
@@ -886,6 +963,16 @@ function migrate(db: Database.Database) {
   // the model.
   addColumn(db, "workflow_instance_blocks", "reply", "TEXT");
   addColumn(db, "workflow_instance_blocks", "notes", "TEXT");
+
+  // Anything still wearing the rebuild suffix after the one rebuild above has
+  // run. Last, so a leftover this boot has just completed is not reported as
+  // one it left behind.
+  reportOrphanTables(db);
+
+  // Stamped only once everything above has returned, which is what makes it
+  // mean "a build of this version finished migrating this file" rather than
+  // "one started".
+  db.pragma(`user_version = ${SCHEMA_VERSION}`);
 }
 
 /**
@@ -899,7 +986,135 @@ function migrate(db: Database.Database) {
  * its indexes along under their own names, so `CREATE INDEX` would collide with
  * the copy still attached to the old table until that table is dropped.
  */
-function relaxProposalTemplate(db: Database.Database) {
+/**
+ * The columns a proposal had before any of this — the ones a table left behind
+ * by an interrupted rebuild is guaranteed to hold, and therefore the only ones
+ * either the rebuild or the recovery may name. Everything added since
+ * (`prompt_override`, `kind`, `spec_id`, …) arrives through `addColumn` and is
+ * null on a row this moves.
+ */
+const PROPOSAL_BASE_COLUMNS = [
+  "id",
+  "chat_id",
+  "created_at",
+  "template_id",
+  "title",
+  "task",
+  "mount_id",
+  "folder",
+  "status",
+  "run_id",
+  "decided_at",
+  "error",
+] as const;
+
+function tableExists(db: Database.Database, name: string): boolean {
+  return (
+    db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(name) !== undefined
+  );
+}
+
+/**
+ * Rows stranded in `chat_proposals_old` by a rebuild that was interrupted
+ * before this function was transactional.
+ *
+ * The interruption that matters is the one after the `RENAME`. `migrate`'s own
+ * `CREATE TABLE IF NOT EXISTS` then recreates `chat_proposals` empty on the
+ * next boot, `relaxProposalTemplate` reads the new schema, sees the NOT NULL
+ * already gone and returns — so the guard that makes the migration idempotent
+ * is also what makes the loss permanent. Every decided proposal, which is the
+ * record of what the operator approved and which run it became, is still on
+ * disk and is unreachable by every query in `chat.ts`.
+ *
+ * Completed rather than reported, because completing it is unambiguous: the
+ * rows are the same rows, `INSERT OR IGNORE` cannot overwrite anything the app
+ * has written since, and the alternative is a database that boots into an empty
+ * table for ever. A leftover whose shape this build does not recognise is the
+ * one case that cannot be completed, and that one is said out loud and left
+ * alone — see below.
+ */
+function recoverStrandedProposals(db: Database.Database) {
+  if (!tableExists(db, "chat_proposals_old")) return;
+
+  const cols = new Set(
+    (
+      db.prepare("PRAGMA table_info(chat_proposals_old)").all() as {
+        name: string;
+      }[]
+    ).map((c) => c.name),
+  );
+  const missing = PROPOSAL_BASE_COLUMNS.filter((c) => !cols.has(c));
+  if (missing.length > 0) {
+    // Loud, and not fatal. A table this build cannot read is not one it can
+    // safely drop either, and refusing to boot over it would strand the whole
+    // install rather than one table — where leaving it in place costs nothing
+    // but the disk it is already using.
+    console.error(
+      `[usagefoundry] chat_proposals_old is present and does not have the ` +
+        `columns this build knows (missing: ${missing.join(", ")}). It has ` +
+        `been left alone; nothing in the app reads it. This is the residue of ` +
+        `an interrupted migration and needs a hand.`,
+    );
+    return;
+  }
+
+  const list = PROPOSAL_BASE_COLUMNS.join(", ");
+  const moved = db.transaction(() => {
+    // OR IGNORE rather than a plain INSERT: a boot interrupted between the
+    // INSERT and the DROP leaves both tables populated, and re-running must be
+    // a no-op rather than a primary-key failure that stops every later boot.
+    const res = db
+      .prepare(
+        `INSERT OR IGNORE INTO chat_proposals (${list})
+         SELECT ${list} FROM chat_proposals_old`,
+      )
+      .run();
+    db.exec("DROP TABLE chat_proposals_old");
+    // A rename carries the table's indexes with it under their own names, so
+    // `migrate`'s own `CREATE INDEX IF NOT EXISTS` earlier in this same boot
+    // found the name taken by the *old* table and did nothing — and the DROP
+    // above has just taken it away. Recreated here rather than left to the next
+    // boot, which is the shape the rebuild itself uses and for the same reason.
+    db.exec(
+      `CREATE INDEX IF NOT EXISTS idx_chat_proposals_chat
+         ON chat_proposals(chat_id, created_at)`,
+    );
+    return res.changes;
+  })();
+
+  console.warn(
+    `[usagefoundry] Recovered ${moved} chat proposal(s) stranded in ` +
+      `chat_proposals_old by an interrupted migration.`,
+  );
+}
+
+/**
+ * Drop the NOT NULL from `chat_proposals.template_id`, preserving the rows.
+ *
+ * The alternative — dropping the table and letting it be recreated — would take
+ * the decided proposals with it, which are the record of what the operator
+ * approved and what came of it. A rebuild costs fifteen lines and keeps that.
+ *
+ * **One transaction, and that is the whole of issue #94.** `db.exec` maps to
+ * `sqlite3_exec`, which runs each statement in autocommit: the four statements
+ * used to commit independently, so a crash, an OOM kill or a `docker compose
+ * down` between the first and the last left the rows in an orphan table that no
+ * query in this app reads, permanently — see `recoverStrandedProposals` for why
+ * the next boot could not notice. DDL is transactional in SQLite, so the
+ * statements below either all land or none of them do. The steps stay separate
+ * `exec` calls rather than one blob because a transaction is only worth having
+ * if a failure part-way through is a real state, and this is the shape that
+ * lets the test put one there.
+ *
+ * The index is recreated at the end rather than before: renaming a table brings
+ * its indexes along under their own names, so `CREATE INDEX` would collide with
+ * the copy still attached to the old table until that table is dropped.
+ */
+export function relaxProposalTemplate(db: Database.Database) {
+  recoverStrandedProposals(db);
+
   const column = (
     db.prepare("PRAGMA table_info(chat_proposals)").all() as {
       name: string;
@@ -908,19 +1123,44 @@ function relaxProposalTemplate(db: Database.Database) {
   ).find((c) => c.name === "template_id");
   if (!column || column.notnull === 0) return;
 
-  db.exec(`
-    ALTER TABLE chat_proposals RENAME TO chat_proposals_old;
-    ${CHAT_PROPOSALS_TABLE}
-    INSERT INTO chat_proposals
-      (id, chat_id, created_at, template_id, title, task, mount_id, folder,
-       status, run_id, decided_at, error)
-    SELECT id, chat_id, created_at, template_id, title, task, mount_id, folder,
-           status, run_id, decided_at, error
-      FROM chat_proposals_old;
-    DROP TABLE chat_proposals_old;
-    CREATE INDEX IF NOT EXISTS idx_chat_proposals_chat
-      ON chat_proposals(chat_id, created_at);
-  `);
+  const list = PROPOSAL_BASE_COLUMNS.join(", ");
+  const steps = [
+    "ALTER TABLE chat_proposals RENAME TO chat_proposals_old",
+    CHAT_PROPOSALS_TABLE,
+    `INSERT INTO chat_proposals (${list}) SELECT ${list} FROM chat_proposals_old`,
+    "DROP TABLE chat_proposals_old",
+    `CREATE INDEX IF NOT EXISTS idx_chat_proposals_chat
+       ON chat_proposals(chat_id, created_at)`,
+  ];
+
+  db.transaction(() => {
+    for (const sql of steps) db.exec(sql);
+  })();
+}
+
+/**
+ * Every `*_old` table this build did not just create, named on stdout.
+ *
+ * `recoverStrandedProposals` completes the one interrupted rebuild this app has
+ * ever shipped. Anything else wearing that suffix is either a future migration
+ * that was interrupted or a table somebody made by hand, and neither is
+ * something to drop — so this reports and boots. Reporting rather than refusing
+ * for the reason `configCheck.ts` gives about a mount: a state worth a person's
+ * attention is not the same as a state worth taking the install away over.
+ */
+function reportOrphanTables(db: Database.Database) {
+  const rows = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%\\_old' ESCAPE '\\'",
+    )
+    .all() as { name: string }[];
+  for (const row of rows) {
+    console.error(
+      `[usagefoundry] ${row.name} is present and nothing in this app reads it. ` +
+        `It is the residue of an interrupted migration — the rows in it are not ` +
+        `visible anywhere in the UI.`,
+    );
+  }
 }
 
 function addColumn(

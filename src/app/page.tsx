@@ -404,6 +404,22 @@ export default function Dashboard() {
   const banner = (
     <div aria-live="polite">
       {pollError && <Notice tone="danger">{pollError}</Notice>}
+      {/* Above the meters rather than under them with the other notices, and
+          that is the whole distinction: those explain a number the reader has
+          just looked at, where this one says the numbers may be describing the
+          wrong machine. A mount that is not a directory and a CLAUDE_HOME with
+          no transcripts under it both render as the zeros below — which is also
+          what a quiet week looks like. A refusal never reaches here (the boot
+          exits on one), but it is rendered as danger rather than dropped, so a
+          route that somehow serves one still shows it. */}
+      {data?.meta.configProblems.map((p) => (
+        <Notice
+          key={`${p.variable}:${p.message}`}
+          tone={p.severity === "refuse" ? "danger" : "warn"}
+        >
+          <strong className="mono">{p.variable}</strong> {p.message}
+        </Notice>
+      ))}
     </div>
   );
 

@@ -155,6 +155,18 @@ export interface PeriodSeriesDTO {
   buckets: PeriodBucketDTO[];
 }
 
+/**
+ * One thing the boot found wrong with the environment this process was given.
+ *
+ * The client mirror of `ConfigProblem` in `configCheck.ts`, which imports
+ * `node:fs` and so cannot be reached from a `"use client"` file.
+ */
+export interface ConfigProblemDTO {
+  severity: "refuse" | "warn";
+  variable: string;
+  message: string;
+}
+
 export interface UsageResponse {
   snapshot: SnapshotDTO;
   /**
@@ -215,6 +227,18 @@ export interface UsageResponse {
      * is a normal state — never an error, and never a ceiling.
      */
     account: AccountProfileDTO;
+    /**
+     * What the boot made of this process's own configuration — a mount that is
+     * not a directory, a `CLAUDE_HOME` with no transcripts under it, a variable
+     * set to the empty string.
+     *
+     * Only ever warnings in practice: a refusal exits the process before it
+     * serves, so nothing that reads this can be looking at one. It rides on the
+     * usage payload because that is the page an operator is on when the figures
+     * are zero, and "the mount is empty" is the answer to the question they are
+     * about to ask. Computed once at boot, not per request.
+     */
+    configProblems: ConfigProblemDTO[];
   };
   /**
    * What runs have reported over their own telemetry inside the same 5-hour

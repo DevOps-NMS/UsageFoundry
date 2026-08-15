@@ -853,7 +853,13 @@ through before trusting this unattended:
   intact, a null `template_id` accepted afterwards — but not through
   better-sqlite3 in a running container, because the environment it was written
   in has a native module built for another platform. The first `docker compose
-  up` on an existing `.data` is the test.
+  up` on an existing `.data` is the test. What *is* now covered, through
+  better-sqlite3 and the real `open()`/`migrate()` path, is the **interruption**:
+  `schemaMigration.test.ts` drives the rebuild with a throw injected after each
+  statement in turn and asserts every row survives, and it puts the on-disk
+  residue of a pre-transaction crash (the renamed table) in front of a second
+  boot and asserts the rows come back. The happy path on a real upgraded volume
+  is still the part nobody has watched.
 - **The derived 5-hour boundary against a live `/usage` reading.** Removing the
   hour rounding was argued from the CLI's own header handling and rendering, not
   from watching the two side by side, and what is left over — the opening turn's

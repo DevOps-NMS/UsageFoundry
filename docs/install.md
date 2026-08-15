@@ -83,6 +83,36 @@ Settings shows whether a token is configured.
 Compose also mounts `~/.claude` **read-write** — Claude Code writes new session
 transcripts there as runs execute, so a read-only mount breaks runs.
 
+## What the boot checks, and what each failure looks like
+
+The variables above are the ones you set. These are the ones the app *reads*,
+and it checks them once, before it serves anything — every one of these used to
+present the same way, as a container that starts, answers `/login` and shows an
+empty dashboard, which is also what a quiet week looks like.
+
+| Variable | Required | Wrong value | What happens |
+|---|---|---|---|
+| `DATA_DIR` | **yes** | blank, not a directory, or not writable | **The container exits**, naming the path and the uid. Compose sets it to `/data`. |
+| `WORKSPACE_ROOTS` | yes (compose composes it) | an entry whose path is not a directory | Warned at boot and on the dashboard. That workspace's folder picker is empty and no run can start in it. |
+| `CLAUDE_HOME` | yes | no `projects/` directory under it | Warned. Every usage figure reads zero; runs, workflows and the merge queue still work. |
+| `UF_AUTH_TOKEN` | no | — | Blank means **auth off**. Never reported. |
+| `ANTHROPIC_ADMIN_KEY` | no | — | Blank means the API-account page says "not configured". Never reported. |
+| `UF_GITHUB_TOKEN` | no | — | Blank means runs cannot use GitHub. Never reported. |
+| anything else | no | set to the empty string | Warned. A blank value is read as unset and takes the default, which is a value nobody chose. |
+
+`DATA_DIR` is the one that refuses because it is the one that decides where your
+only copy of anything lives — a boot that carries on writing to a directory you
+did not name is manufacturing the loss, and in the shipped image the default is
+inside the container's writable layer, which `docker compose up --build`
+destroys. A missing workspace only warns because compose mounts four slots
+unconditionally, a bind source can be temporarily unavailable, and taking the
+dashboard away over an empty folder picker is worse than the empty picker.
+
+Writability is tested by an actual write. `mkdirSync(recursive: true)` reports
+success for a directory it cannot write to, which is why an ownership mismatch
+used to surface later, as an `EACCES` from the server lock rather than as a
+statement about the configuration — see `UF_UID` below.
+
 ## On Linux, set `UF_UID` and `UF_GID`
 
 The container writes to both bind mounts: your `~/.claude`, and your workspaces.
