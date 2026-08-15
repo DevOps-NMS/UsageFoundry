@@ -8,7 +8,7 @@ Getting the container running, signed in, and pointed at your code.
 
 ```bash
 cp .env.example .env
-# edit .env:  UF_AUTH_TOKEN (recommended), UF_WORKSPACE (required),
+# edit .env:  UF_AUTH_TOKEN (required), UF_WORKSPACE (required),
 #             UF_WORKSPACE_2… (optional, for more than one workspace)
 
 docker compose up --build
@@ -74,7 +74,8 @@ Settings shows whether a token is configured.
 | Variable | Purpose |
 |---|---|
 | `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. Absolute path; compose refuses to start without it. |
-| `UF_AUTH_TOKEN` | Shared secret for the UI. Blank disables auth — only acceptable on loopback. |
+| `UF_AUTH_TOKEN` | Shared secret for the UI. Blank makes the server **refuse to start** unless `UF_ALLOW_NO_AUTH=1` is also set. |
+| `UF_ALLOW_NO_AUTH` | `1` to run with no authentication at all. Only for a loopback-bound install on a machine you alone use; every page then says so. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
 | `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid every spawned agent runs as; must own the mounts. The server itself runs as root and drops to this. Default 1000. |
@@ -119,6 +120,11 @@ anything to do with who owns `/data`.
 
 If you would rather start clean, `docker compose down -v` destroys the volume
 along with your run history and settings.
+
+That volume is the only copy of every run, every cost, every template, workflow
+and schedule, and nothing backs it up on its own — take a snapshot before you
+try either of the commands above, and put one in cron afterwards:
+**[Backup and restore](backup-and-restore.md)**.
 
 ## Multiple workspaces
 

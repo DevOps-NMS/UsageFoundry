@@ -149,6 +149,7 @@ const EDITABLE_PATHS = [
   "forwardSubAgentText",
   "defaultPermissionMode",
   "maxConcurrentRuns",
+  "maxConcurrentAssists",
   "isolationCopyGlobs",
   "landStrategy",
   "continuationPrompt",
@@ -156,6 +157,7 @@ const EDITABLE_PATHS = [
   "isolationPreamble",
   "continuedWorkPrompt",
   "liveGuardIntervalSeconds",
+  "maxCycleSilenceMinutes",
   "killProcessGroup",
   "resumeGraceHours",
   "telemetryForRuns",
@@ -499,6 +501,83 @@ function EditedRail({ on }: { on: boolean }) {
 }
 
 /** One `label: value` line in the environment summary under the title. */
+/**
+ * The one way to end a session from inside the app.
+ *
+ * It exists because a session now *is* something: the cookie used to be
+ * `UF_AUTH_TOKEN` itself, so there was nothing to end short of changing the
+ * environment and restarting the container — which kills every run in flight.
+ * "All" is here rather than only "this browser" because the case that matters
+ * is a cookie that got out, and the browser holding it is not this one.
+ */
+function SignOut({ sessions }: { sessions: number }) {
+  const [busy, setBusy] = useState(false);
+
+  async function signOut(all: boolean) {
+    setBusy(true);
+    try {
+      await fetch("/api/logout", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ all }),
+      });
+    } finally {
+      // Whatever happened, the credential this page was loaded with may no
+      // longer be good, and the gate is the authority on that.
+      window.location.href = "/login";
+    }
+  }
+
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      <Badge tone="ok">{sessions === 1 ? "1 session" : `${sessions} sessions`}</Badge>
+      <Button variant="secondary" busy={busy} onClick={() => void signOut(false)}>
+        Sign out
+      </Button>
+      <Button variant="secondary" busy={busy} onClick={() => void signOut(true)}>
+        Sign out everywhere
+      </Button>
+    </span>
+  );
+}
+
+/**
+ * Failed sign-ins, and the row is absent while there have been none.
+ *
+ * It is here because the limiter's record has to be readable by a person: a
+ * burst against the one unauthenticated route in this app used to leave no
+ * trace at all — no counter, no log line, nothing to find afterwards. A row
+ * that said "0" every day is a row nobody would still be reading on the day it
+ * said something else.
+ */
+function FailedSignIns({ summary }: { summary: unknown }) {
+  if (typeof summary !== "object" || summary === null) return null;
+  const s = summary as {
+    failures?: number;
+    firstAt?: number | null;
+    lastAt?: number | null;
+    lockedSources?: number;
+    lockedGlobally?: boolean;
+  };
+  const failures = Number(s.failures ?? 0);
+  if (failures === 0) return null;
+
+  const when = (t: number | null | undefined) =>
+    typeof t === "number" ? new Date(t).toLocaleString() : "—";
+
+  return (
+    <EnvRow label="Failed sign-ins">
+      <Badge tone={s.lockedGlobally ? "danger" : "warn"}>{failures}</Badge>{" "}
+      <span>
+        {when(s.firstAt)} → {when(s.lastAt)}
+        {Number(s.lockedSources ?? 0) > 0 &&
+          ` · ${s.lockedSources} source(s) locked out`}
+        {s.lockedGlobally && " · sign-in locked install-wide"}
+      </span>
+    </EnvRow>
+  );
+}
+
 function EnvRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex gap-2">
@@ -525,8 +604,9 @@ export default function SettingsPage() {
   // The registry, and the definitions this app did not write. Both are needed
   // for one row: the picker offers the first, and the sentence beside it has to
   // declare the second, because `--agents` merges with what the CLI finds on
-  // disk rather than replacing it — so the registry is a part of the set a run
-  // can delegate to and never the whole of it.
+  // disk rather than replacing it and `--agent` resolves against the merged
+  // set — so the registry is a part of what is in play and never the whole of
+  // it, whichever of them a run is started as.
   const [agents, setAgents] = useState<AgentDTO[]>([]);
   const [ambientAgents, setAmbientAgents] = useState<AmbientAgentDTO[]>([]);
   const [agentsLoaded, setAgentsLoaded] = useState(false);
@@ -809,6 +889,17 @@ export default function SettingsPage() {
             </>
           )}
         </EnvRow>
+        <EnvRow label="Sign-in">
+          {env.authEnabled ? (
+            <SignOut sessions={Number(env.activeSessions ?? 0)} />
+          ) : (
+            <>
+              <Badge tone="danger">no token</Badge>{" "}
+              <span>every route is open</span>
+            </>
+          )}
+        </EnvRow>
+        <FailedSignIns summary={env.signIn} />
       </dl>
 
       {/* Plain anchors rather than `ButtonLink`: the pane is its own scroll
@@ -1353,13 +1444,15 @@ export default function SettingsPage() {
           {/* Beside the model and deliberately not among the guards below. An
               agent carries a description and a prompt — the registry refuses a
               tool list at the door and has no column for a permission mode — so
-              this decides who does part of the work and never what a run is
-              allowed to do. It is an id, so an operator who fixes their
-              reviewer's prompt gets the fixed one on the next run. */}
+              this decides who a run *is* and never what it is allowed to do.
+              Beside the model for a second reason since `--agent`: a saved
+              agent's model is the session's, reached only where the field above
+              is blank. It is an id, so an operator who fixes their reviewer's
+              prompt gets the fixed one on the next run. */}
           <SettingRow
             htmlFor="agent"
             edited={isEdited("defaultAgentId")}
-            label="Default specialist"
+            label="Default agent"
             description={
               describeAmbientAgents(ambientAgents) ??
               "Pre-selected on the new-run form, which can change it or clear it"
@@ -1373,7 +1466,7 @@ export default function SettingsPage() {
                   patch({ defaultAgentId: e.target.value || null })
                 }
               >
-                <option value="">No specialist</option>
+                <option value="">No agent</option>
                 {agents.map((a) => (
                   <option key={a.id} value={a.id} disabled={!a.usable}>
                     {a.name}
@@ -1382,8 +1475,8 @@ export default function SettingsPage() {
                 ))}
                 {/* A default whose agent has been deleted since it was saved.
                     Kept as an option rather than silently reverting the picker
-                    to "No specialist", which would look like the setting had
-                    never been made — and Save then refuses it by name. */}
+                    to "No agent", which would look like the setting had never
+                    been made — and Save then refuses it by name. */}
                 {agentsLoaded &&
                   effective.defaultAgentId !== null &&
                   !agents.some((a) => a.id === effective.defaultAgentId) && (
@@ -1424,7 +1517,7 @@ export default function SettingsPage() {
             htmlFor="conc"
             edited={isEdited("maxConcurrentRuns")}
             label="Runs at the same time"
-            description="Each run carries its own spending limit, so this multiplies the worst case — three runs at $5 can spend $15. A run over the limit waits rather than being refused, and queued or parked runs do not count against it"
+            description="Work cycles only — reviews, chat turns and workflow blocks have their own budget below. Each run carries its own spending limit, so this multiplies the worst case: three runs at $5 can spend $15. A run over the limit waits rather than being refused, and queued or parked runs do not count against it"
           >
             <div className="w-32">
               <Input
@@ -1438,6 +1531,32 @@ export default function SettingsPage() {
                 onChange={(e) =>
                   patch({
                     maxConcurrentRuns: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="concassist"
+            edited={isEdited("maxConcurrentAssists")}
+            label="Other Claude processes at the same time"
+            description="A review, a merge-conflict resolution, an orchestrator chat turn and a workflow orchestrator block's deciding turn share this one budget. The first three are refused while it is full, and say so; a workflow block waits for a slot instead. Together with the limit above, this is the most Claude processes the container will ever carry"
+          >
+            <div className="w-32">
+              <Input
+                id="concassist"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="at once"
+                placeholder="No limit"
+                value={effective.maxConcurrentAssists ?? ""}
+                onChange={(e) =>
+                  patch({
+                    maxConcurrentAssists: e.target.value
                       ? Number(e.target.value)
                       : null,
                   })
@@ -1690,6 +1809,27 @@ export default function SettingsPage() {
                 value={effective.liveGuardIntervalSeconds}
                 onChange={(e) =>
                   patch({ liveGuardIntervalSeconds: Number(e.target.value) })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="silence"
+            edited={isEdited("maxCycleSilenceMinutes")}
+            label="Silent cycle limit"
+            description="A work cycle that has printed nothing for this long is ended, so a wedged agent gives its folder and its slot back without a restart. Counted from the last line Claude Code printed, not from the start of the cycle, and one tool call can be silent for a long time"
+          >
+            <div className="w-36">
+              <Input
+                id="silence"
+                type="number"
+                min={5}
+                className="tabular-nums"
+                unit="minutes"
+                value={effective.maxCycleSilenceMinutes}
+                onChange={(e) =>
+                  patch({ maxCycleSilenceMinutes: Number(e.target.value) })
                 }
               />
             </div>

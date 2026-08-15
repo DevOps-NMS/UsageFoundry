@@ -34,13 +34,13 @@ import type { RegistryAgent } from "./agents";
  *    isolation choice, because the whole approval gate rests on those coming
  *    from something a person wrote — a template, or the untemplated guard set
  *    in settings. A regression here type-checks perfectly and shows up as an
- *    agent running somewhere nobody chose. The specialist is the second thing
+ *    agent running somewhere nobody chose. The agent is the second thing
  *    a proposal may name and it is on the other side of that line — it decides
- *    who does a piece of the work — so what is pinned about it is both
+ *    who the run *is* — so what is pinned about it is both
  *    directions at once: the whole definition reaches the run, no guard and no
  *    word of the prompt moves, and one that has been deleted is refused **by
  *    name** rather than falling back to none. That fallback is the expensive
- *    one, because a run given a specialist it does not have is bit-for-bit a
+ *    one, because a run that is not the agent it was proposed as is bit-for-bit a
  *    run that was never given one, and nothing downstream can tell them apart.
  *  - `planApprovalBatch` has no agent dimension by construction — `BatchProposal`
  *    carries a label, a title and its edges and nothing else — which is why
@@ -415,7 +415,7 @@ describe("planProposal", () => {
   it("carries the named agent's whole definition onto the run", () => {
     // The definition rather than the id, because that is what `createRun`
     // freezes onto the row: an id there would leave cycle 4 of this run with no
-    // specialist the moment somebody tidies the registry, which is the CLI's own
+    // agent the moment somebody tidies the registry, which is the CLI's own
     // silent drop performed by this app.
     const plan = planProposal(
       proposal({ agent_id: "agent1" }),
@@ -459,7 +459,7 @@ describe("planProposal", () => {
   });
 
   it("refuses a proposal whose agent has been deleted, by name", () => {
-    // Never a fallback to no specialist: the operator approved the card that
+    // Never a fallback to no agent: the operator approved the card that
     // said "and hand the review to the reviewer", and a run that quietly has
     // none is bit-for-bit a run that was never given one.
     const plan = planProposal(
@@ -476,7 +476,7 @@ describe("planProposal", () => {
   it("refuses an agent the CLI would drop, naming it", () => {
     // `rowToAgent` reports rather than repairs, so a decayed row arrives here
     // resolvable and unusable — and sending it is the one outcome with no
-    // symptom at all: exit 0, nothing on stderr, no specialist.
+    // symptom at all: a spawn the CLI refuses by name, cycle after cycle.
     const plan = planProposal(
       proposal({ agent_id: "agent1" }),
       template,

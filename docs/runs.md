@@ -293,3 +293,27 @@ keep moving — this run's own spend stops accruing the moment a cycle is killed
 before it could report, and both window fractions can fall. A policy with
 neither is refused at creation, and refused again as `no_terminus` if it reaches
 the guard by some other route.
+
+### A work cycle that goes quiet
+
+Every rule above bounds what a cycle *spends*, and none of them bounds a cycle
+that has stopped doing anything at all. A `claude` wedged on a socket read never
+exits, so nothing in the run loop ever comes back: the run sits at *running*,
+holding its folder against every other run in that project, its checkout, and one
+of your concurrent-run slots, until the container is restarted.
+
+So a cycle also has a deadline — **Settings → Unattended runs → Silent cycle
+limit**, two hours by default. It measures *silence*, not duration: the clock is
+the time since Claude Code last printed anything, and any output resets it. A
+cycle that is still reporting is working however long it takes, which is why a
+run is never ended for taking its time here — ending one for its wall clock is
+what `maxDurationMinutes` under `live` enforcement is for. The default is
+generous on purpose, because the stream is silent for the whole of one model turn
+and the whole of one tool call: a run whose test suite takes an hour is silent for
+an hour and perfectly healthy.
+
+When it fires the child is signalled the same way *Stop* signals one — `SIGINT`
+first, so the cycle may still report what it cost — the run ends as **failed**
+with a stop reason naming the deadline, and its folder and checkout go to
+whatever was queued behind it. It cannot be switched off; the shortest it can be
+set to is five minutes.
