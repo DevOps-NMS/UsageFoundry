@@ -22,8 +22,9 @@ import { Table, Td, Th, Tr } from "@/components/ui/Table";
  * The run page already says what the run spent twice over — `runs.spent_usd`,
  * which is what Claude Code reported for each cycle that finished, and
  * telemetry, which is its own per-request figure. Neither can answer "how much
- * of this went to a specialist", because neither records which agent produced a
- * turn. The transcripts do: `attributionAgent` is on the assistant record
+ * of this did the main thread produce itself", because neither records which
+ * agent produced a turn. The transcripts do: `attributionAgent` is on the
+ * assistant record
  * already, which is why this reading is the *same* source the dashboard meters
  * come from rather than a new one, scoped to one session id.
  *
@@ -52,10 +53,24 @@ export function RunAgentCost({
   /** Re-read when the run stops, so a finished run settles on its final split. */
   active,
   now,
+  /**
+   * The agent this run was started as, by name, or null for the ordinary run.
+   *
+   * Read for one sentence at the foot of the card and by nothing else — the
+   * rows, the share and the meter are the transcript's own answer and this must
+   * never move a figure. What it buys is that the two readings `--agent` makes
+   * possible stop looking like faults: a single row under the agent's name with
+   * `(main thread)` empty, and a lone `(main thread)` row on a run whose page
+   * says it is the reviewer, are the same card telling the truth about what
+   * Claude Code wrote. Which of the two it writes is unmeasured, so the sentence
+   * states the run's agent and claims nothing about where its turns landed.
+   */
+  startedAs = null,
 }: {
   runId: string;
   active: boolean;
   now: number;
+  startedAs?: string | null;
 }) {
   const [spend, setSpend] = useState<RunAgentSpendDTO | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -92,7 +107,7 @@ export function RunAgentCost({
   // Unknown is never zero. Three different things reach this bar as null — the
   // read has not landed, it failed, or the run has no session to read — and each
   // of them is "we do not know what the split is", which is the hatched
-  // indeterminate bar rather than a delegated share of 0%.
+  // indeterminate bar rather than a share of 0%.
   const share =
     spend && spend.costUSD > 0 ? spend.delegatedCostUSD / spend.costUSD : null;
   const upperShare =
@@ -102,9 +117,16 @@ export function RunAgentCost({
 
   return (
     <>
+      {/* "Outside the main thread" rather than "handed to a specialist",
+          because the figure is literally the spend that did not land in
+          `MAIN_THREAD_BUCKET` and nothing here knows why it did not. Under
+          `--agent` that matters: whether a run started as an agent files its
+          own turns under that agent's name is unmeasured, so a label naming
+          delegation would be a claim this card cannot support the day the
+          answer is "it does". The label says what was counted. */}
       <Meter
         size="compact"
-        label="Handed to a specialist"
+        label="Outside the main thread"
         fraction={share}
         // The gap an unpriced model opens, drawn as the hatched band every other
         // meter here draws it as — the displayed figure stays a floor.
@@ -188,6 +210,8 @@ export function RunAgentCost({
         turn lands in a row and the rows add up to the total. A third reading
         beside the two above, never added to either — they measure the same work
         through Claude Code&rsquo;s own reporting.
+        {startedAs &&
+          ` Started as ${startedAs}, so these rows may sit entirely under that name or entirely under (main thread) — which Claude Code writes is its own bookkeeping.`}
         {spend?.excludedFromTotals &&
           " Sub-agent turns are excluded from the dashboard totals in Settings; they are counted here."}
         {spend ? ` Read up to ${fmtRelative(spend.to, now)}.` : ""}

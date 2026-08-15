@@ -3,28 +3,42 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
+import { MOUNTED_WORKSPACE_SLOTS } from "./config";
+
 /**
- * Covers the deployment agreements nothing else here can see: that the
- * directory compose points `DATA_DIR` at is writable by whatever uid compose
- * runs the container as, and that the memory ceiling compose gives the
- * container is a ceiling the server's own stated heap fits inside.
+ * Covers the agreement between `Dockerfile` and `docker-compose.yml` about who
+ * may write the data directory, and who may not — the first of the deployment
+ * agreements pinned here, and the only one this comment is about. The backup
+ * path, the healthcheck, the mounted workspace slots and the container's memory
+ * ceiling against the server's own stated heap each carry their reasoning below.
  *
  * It is not a pure function, and it earns its place on the same grounds the
  * rest of this suite does — a failure that is silent, expensive, and invisible
  * to every other check here. `/data` is a *named volume*, so Docker copies the
  * ownership and mode of the image's directory onto the volume root when it
- * first creates it. Left at `chown node:node` and the default 0755, that hands
- * the database to uid 1000 alone, while compose's `user: "${UF_UID:-1000}…"`
- * runs the container as the uid Linux operators are told to set to their own.
- * The app then cannot create its SQLite file and every data route fails —
- * after the operator followed the instruction meant to prevent exactly that.
+ * first creates it, and nothing afterwards revisits that decision.
  *
- * Nothing else notices: it typechecks, it builds, it passes on macOS (where
- * Docker Desktop's remapping makes 1000 right whatever the host uid is), and it
- * is one Dockerfile edit away from coming back. Docker is not available in the
- * environment this repo's tests run in, so this pins the two halves against
- * each other rather than the behaviour; README's "Not yet verified by hand"
- * carries the command that checks the behaviour itself.
+ * **This file used to assert the opposite of what it asserts now, and the
+ * inversion is deliberate.** The old rule was that `/data` must be
+ * world-writable, because compose ran the *whole* container — server and
+ * agents alike — as `${UF_UID:-1000}`, and a fresh volume left at `chown
+ * node:node` plus the default 0755 belonged to uid 1000 alone: the app could
+ * not create its SQLite file under any other uid, and every data route failed
+ * for an operator who had just followed the instruction meant to prevent
+ * permission problems. That reasoning was sound and its conclusion is now
+ * wrong, because the premise moved. The server runs as root and drops its
+ * children to `UF_AGENT_UID`, so it needs no grant to create the database —
+ * while a world-writable `/data` hands twenty-five unattended agents the
+ * settings every guard reads, the budget and status on every run, and the lock
+ * `serverLock.ts` uses to decide whether a second writer exists. An agent that
+ * can write that file sets `chatDefaultGuards.permissionMode` to
+ * `bypassPermissions` with no HTTP request and no token.
+ *
+ * Nothing else notices either way: it typechecks, it builds, and both
+ * arrangements start a container. Docker is not available in the environment
+ * this repo's tests run in, so this pins the two halves against each other
+ * rather than the behaviour; `docs/verification.md`'s "Not yet verified by
+ * hand" carries the commands that check the behaviour itself.
  */
 
 function repoRoot(): string {
@@ -65,24 +79,79 @@ function chmodGrants(): { mode: number; target: string }[] {
   return grants;
 }
 
+/** The runner stage alone — the two earlier stages never reach the image. */
+function runnerStage(): string {
+  const start = dockerfile.indexOf("AS runner");
+  assert.notEqual(start, -1, "the Dockerfile no longer has a stage named `runner`");
+  return dockerfile.slice(start);
+}
+
+/**
+ * The packages the runner stage's `apt-get install` names, as whole tokens.
+ * Tokenised rather than matched as a substring, because `better-sqlite3` — the
+ * npm package, named in the comments there — contains `sqlite3` behind a word
+ * boundary and would satisfy any looser test.
+ */
+function runtimePackages(): string[] {
+  const stage = runnerStage();
+  const start = stage.indexOf("apt-get install");
+  assert.notEqual(start, -1, "the runner stage no longer installs anything");
+  const end = stage.indexOf("rm -rf /var/lib/apt/lists", start);
+  assert.notEqual(end, -1, "the runner stage's apt-get install has no recognisable end");
+  return stage
+    .slice(start + "apt-get install".length, end)
+    .split(/[\s\\&]+/)
+    .filter((token) => token && !token.startsWith("-"));
+}
+
+/** The container path a compose volume line binds something to. */
+function mountTarget(pattern: RegExp): string | null {
+  const match = pattern.exec(compose);
+  return match ? match[1] : null;
+}
+
 describe("the image and compose agree on the data volume", () => {
-  it("gives DATA_DIR a mode any uid can write", () => {
+  it("keeps DATA_DIR away from every uid but the server's", () => {
     const dataDir = composeDataDir();
     const grant = chmodGrants().find((g) => g.target === dataDir);
 
     assert.ok(
       grant,
       `Dockerfile never chmods ${dataDir}. A fresh named volume takes that ` +
-        `directory's mode, so without this the container cannot create its ` +
-        `database under any UF_UID other than 1000.`,
+        `directory's mode, and the image's default 0755 leaves it readable by ` +
+        `every agent this app spawns.`,
     );
-    // 0o002 — the other-write bit. Ownership is uid 1000's either way, so this
-    // is the only bit that makes an arbitrary uid able to create the file.
+    // Group as well as other. The children are dropped to UF_AGENT_GID, which
+    // an operator may well set to a group the server is also in, so a 0770 here
+    // would read as tightened and grant exactly what it was tightened against.
     assert.equal(
-      grant.mode & 0o002,
-      0o002,
-      `${dataDir} is chmod ${grant.mode.toString(8)} in the image; a uid other ` +
-        `than 1000 cannot create a file in it.`,
+      grant.mode & 0o077,
+      0,
+      `${dataDir} is chmod ${grant.mode.toString(8)} in the image. The database, ` +
+        `the settings every guard reads and the server lock are in it, and an ` +
+        `agent that can write them bypasses every approval gate in this app.`,
+    );
+  });
+
+  it("reclaims a volume created before that mode existed", () => {
+    // Only a *fresh* volume takes the image's mode, so the assertion above
+    // covers new installs and nothing else: an existing `usagefoundry-data` is
+    // `node:node 0777` from the old arrangement and no image pull changes it.
+    // Without the entrypoint every deployment that already has data would
+    // upgrade into the same open directory, under a Dockerfile stating
+    // otherwise — which is worse than the original defect, because it now reads
+    // as fixed.
+    const dataDir = composeDataDir();
+    const entrypoint = fs.readFileSync(
+      path.join(root, "docker-entrypoint.sh"),
+      "utf8",
+    );
+    assert.match(entrypoint, new RegExp(`chown\\s+0:0\\s+${dataDir}\\b`));
+    assert.match(entrypoint, new RegExp(`chmod\\s+0700\\s+${dataDir}\\b`));
+    assert.match(
+      dockerfile,
+      /^ENTRYPOINT .*uf-entrypoint/m,
+      "the image no longer runs the entrypoint that reclaims the volume.",
     );
   });
 
@@ -95,12 +164,196 @@ describe("the image and compose agree on the data volume", () => {
     );
   });
 
-  it("still runs the container as a configurable uid", () => {
-    // The other half of the pair. If `user:` ever stops being parameterised the
-    // test above is guarding nothing — but removing it reintroduces the
-    // bind-mount ownership failure the README describes, so it must not happen
-    // quietly either.
-    assert.match(compose, /^\s*user:\s*"\$\{UF_UID:-1000\}:\$\{UF_GID:-1000\}"\s*$/m);
+  it("still hands the operator's uid to whatever writes their files", () => {
+    // The other half of the pair, and it moved: `user:` used to carry
+    // `${UF_UID}` for the whole container, and now carries root for the server
+    // while `UF_AGENT_UID`/`UF_AGENT_GID` carry the operator's uid to every
+    // child. Both halves are asserted because dropping either one is silent in
+    // its own direction — no root, and the server cannot switch uids at all
+    // (`privsep.ts` throws, which is the loud case); no agent uid, and every
+    // child runs as root, which is worse than the shared arrangement this
+    // replaced. Parameterised, because an unparameterised agent uid
+    // reintroduces the bind-mount ownership failure the README describes.
+    assert.match(compose, /^\s*user:\s*"0:0"\s*$/m);
+    assert.match(compose, /^\s*UF_AGENT_UID:\s*"\$\{UF_UID:-1000\}"\s*$/m);
+    assert.match(compose, /^\s*UF_AGENT_GID:\s*"\$\{UF_GID:-1000\}"\s*$/m);
+  });
+
+  it("does not drop the server's own uid in the image", () => {
+    // A `USER` line in the runner stage would take the privilege the server
+    // needs to drop its children, and compose's `user:` would not put it back.
+    // The failure is `privsep.ts` throwing at boot — loud, but a build-time
+    // assertion is cheaper than finding out from a container that will not
+    // start.
+    const runner = dockerfile.slice(dockerfile.lastIndexOf("FROM "));
+    assert.doesNotMatch(
+      runner,
+      /^\s*USER\s+(?!root\b|0\b)/m,
+      "the runner stage drops to a non-root USER, so the server cannot spawn " +
+        "children as another uid.",
+    );
+  });
+});
+
+/**
+ * The second agreement, and the one whose failure is unrecoverable rather than
+ * merely loud: the database can be copied out of a live container, and the copy
+ * lands somewhere `docker compose down -v` does not reach.
+ *
+ * Every part of it is a file this repository ships and nothing else checks. The
+ * scripts are useless if the image does not carry them — `docker compose exec
+ * usagefoundry node scripts/backup-db.mjs` is `Cannot find module`, discovered
+ * by an operator who believes they have had nightly backups for a month. A
+ * backup written into the data volume is destroyed by the one command it exists
+ * to survive. And `sqlite3` is what the manual procedures in the docs are
+ * written in; without it in the image, `docker exec … sqlite3` is `command not
+ * found` and the only documented way out of a wedged row fails at the first
+ * word. Docker is not available where these tests run, so this pins the files
+ * against each other; docs/verification.md carries the commands that check the
+ * behaviour itself.
+ */
+describe("the image can back its own database up", () => {
+  it("carries the backup and restore scripts", () => {
+    const stage = runnerStage();
+    for (const script of ["backup-db.mjs", "restore-db.mjs"]) {
+      assert.ok(
+        fs.existsSync(path.join(root, "scripts", script)),
+        `scripts/${script} is gone, and the image and the docs both name it`,
+      );
+      assert.ok(
+        stage.includes(`scripts/${script}`),
+        `the runner stage no longer copies scripts/${script} into the image`,
+      );
+    }
+  });
+
+  it("carries sqlite3, which the documented manual procedures need", () => {
+    assert.ok(
+      runtimePackages().includes("sqlite3"),
+      "the runtime image no longer installs sqlite3, so every `docker exec … " +
+        "sqlite3 …` in the docs is `command not found`",
+    );
+  });
+
+  it("writes backups outside the volume that `down -v` destroys", () => {
+    const target = mountTarget(/^\s*-\s*\$\{UF_BACKUP_DIR:-[^}]+\}:(\S+)\s*$/m);
+    assert.ok(target, "docker-compose.yml no longer bind-mounts a backup directory");
+    assert.notEqual(
+      target,
+      composeDataDir(),
+      "backups are being written into the data volume, which is the thing they " +
+        "exist to survive",
+    );
+    assert.ok(
+      !target.startsWith(`${composeDataDir()}/`),
+      `${target} is inside ${composeDataDir()}, so a backup dies with the volume`,
+    );
+    assert.ok(
+      fs.readFileSync(path.join(root, "scripts", "backup-db.mjs"), "utf8").includes(target),
+      `the backup script does not know about ${target}, so its default lands ` +
+        "somewhere compose does not mount",
+    );
+  });
+});
+
+/**
+ * The healthcheck and the route it probes, pinned against each other.
+ *
+ * Same grounds as the volume pair above: Docker is not available here, so what
+ * can be checked is that the two halves still name one another. Both ways of
+ * breaking this are silent — a `HEALTHCHECK` pointed at a path that no longer
+ * exists reports every container unhealthy for ever, and one pointed at `/`
+ * reports a server that cannot open its database as healthy, because with
+ * `UF_AUTH_TOKEN` set that path is a 307 to /login and `curl -f` accepts a
+ * redirect.
+ */
+describe("the image declares a healthcheck against a route that exists", () => {
+  const directive = /^HEALTHCHECK\s+([\s\S]*?)$/m.exec(dockerfile);
+
+  it("declares one at all", () => {
+    assert.ok(
+      directive,
+      "Dockerfile has no HEALTHCHECK. `restart: unless-stopped` sees process " +
+        "exits only, so without this a wedged server runs indefinitely.",
+    );
+  });
+
+  it("probes the health route rather than a page", () => {
+    const block = dockerfile.slice(dockerfile.indexOf("HEALTHCHECK"));
+    assert.match(
+      block,
+      /\/api\/health/,
+      "the healthcheck must probe /api/health — any page path answers 307 to " +
+        "/login under UF_AUTH_TOKEN, which `curl -f` treats as success",
+    );
+    assert.ok(
+      fs.existsSync(path.join(root, "src/app/api/health/route.ts")),
+      "the route the HEALTHCHECK probes does not exist",
+    );
+  });
+
+  it("sets all four timings, and stays tolerant of a slow answer", () => {
+    const line = dockerfile.slice(dockerfile.indexOf("HEALTHCHECK"));
+    for (const flag of ["--interval=", "--timeout=", "--retries=", "--start-period="]) {
+      assert.ok(line.includes(flag), `HEALTHCHECK is missing ${flag}`);
+    }
+    // A restart marks every in-flight run failed and leaves its current cycle's
+    // spend unreconciled, so a single slow probe must never be enough.
+    const retries = /--retries=(\d+)/.exec(line);
+    assert.ok(retries && Number(retries[1]) >= 3, "retries must stay conservative");
+  });
+});
+
+/**
+ * The second agreement between the two files, and it points the other way: the
+ * *code* carries a number that only `docker-compose.yml` can make true.
+ *
+ * `MOUNTED_WORKSPACE_SLOTS` is what `unmountedWorkspaceRefusal` refuses past, so
+ * a fifth volume line added without bumping it would refuse a slot the
+ * deployment really does mount — the same silence inverted, and louder. Both
+ * halves are one edit away from each other and neither typechecks against the
+ * other, which is what this is for.
+ */
+describe("the mounted workspace slots the code assumes", () => {
+  /** Slot numbers compose bind-mounts: `/workspace` is 1, `/workspace2` is 2. */
+  function mountedSlots(): number[] {
+    const slots: number[] = [];
+    for (const match of compose.matchAll(/^\s*-\s+\S.*:\/workspace(\d*)\s*$/gm)) {
+      slots.push(match[1] ? Number(match[1]) : 1);
+    }
+    return slots.sort((a, b) => a - b);
+  }
+
+  it("matches the number of volume lines in compose", () => {
+    assert.deepEqual(
+      mountedSlots(),
+      Array.from({ length: MOUNTED_WORKSPACE_SLOTS }, (_, i) => i + 1),
+      `docker-compose.yml mounts a different set of workspace slots than ` +
+        `MOUNTED_WORKSPACE_SLOTS (${MOUNTED_WORKSPACE_SLOTS}) claims. A slot that is ` +
+        `mounted and refused, or configured and never mounted, is the failure ` +
+        `unmountedWorkspaceRefusal exists to end.`,
+    );
+  });
+
+  it("forwards the slots beyond it so a boot can refuse them", () => {
+    const line = /^\s*UF_UNMOUNTED_WORKSPACES:\s*"(.*)"\s*$/m.exec(compose);
+    assert.ok(line, "docker-compose.yml no longer forwards UF_UNMOUNTED_WORKSPACES");
+
+    const forwarded = [...line[1].matchAll(/UF_WORKSPACE_(\d+)_NAME:\+/g)].map((m) =>
+      Number(m[1]),
+    );
+    assert.ok(forwarded.length > 0, "no slot is detected, so a fifth is silent again");
+    assert.equal(
+      Math.min(...forwarded),
+      MOUNTED_WORKSPACE_SLOTS + 1,
+      "detection has to start at the first slot compose does not mount",
+    );
+    // Contiguous, so there is no gap an operator can fall into between the
+    // highest mounted slot and the highest detected one.
+    assert.deepEqual(
+      [...forwarded].sort((a, b) => a - b),
+      Array.from({ length: forwarded.length }, (_, i) => MOUNTED_WORKSPACE_SLOTS + 1 + i),
+    );
   });
 });
 

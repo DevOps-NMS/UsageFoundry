@@ -1,17 +1,28 @@
+// Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
+// rewrites the path alias at runtime, so a module a test loads has to import
+// the way src/lib and the chat route already do.
 import { NextResponse } from "next/server";
 import {
   DEPENDENCY_EDGES,
   createRun,
+  currentSnapshot,
   dependenciesOf,
   describeFolder,
   listRuns,
   queuePosition,
   type DependencyEdge,
   type RunDependencyInput,
-} from "@/lib/orchestrator";
-import { PERMISSION_MODES, type PermissionMode } from "@/lib/settings";
-import { resolveAgentForRun, runAgentDTO } from "@/lib/agents";
-import { ENFORCEMENT_MODES, normalizePolicy } from "@/lib/budget";
+} from "../../../lib/orchestrator";
+import { recentOpsEvents } from "../../../lib/ops";
+import type { BootReconcileDTO } from "../../../lib/apiTypes";
+import { PERMISSION_MODES, type PermissionMode } from "../../../lib/settings";
+import { resolveAgentForRun, runAgentDTO } from "../../../lib/agents";
+import {
+  ENFORCEMENT_MODES,
+  normalizePolicy,
+  windowGuardRefusal,
+} from "../../../lib/budget";
+import { auditMutation, SUBJECT_HEADER } from "../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -42,7 +53,17 @@ export async function GET() {
       queuePosition: r.status === "queued" ? queuePosition(r.id) : undefined,
     };
   });
-  return NextResponse.json({ runs });
+  // Beside the runs rather than on a route of its own: it is the explanation
+  // for the rows in that list, and this is the one the page already polls.
+  const boot = recentOpsEvents(1, "boot.reconciled")[0] ?? null;
+  const lastBootReconcile: BootReconcileDTO | null = boot
+    ? {
+        at: boot.ts,
+        closed: Number(boot.detail.closed ?? 0),
+        kept: Number(boot.detail.kept ?? 0),
+      }
+    : null;
+  return NextResponse.json({ runs, lastBootReconcile });
 }
 
 /**
@@ -114,7 +135,7 @@ function readDependencies(
   return { ok: true, value };
 }
 
-export async function POST(req: Request) {
+async function postHandler(req: Request) {
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
   // This value reaches `--permission-mode` on a process that edits files, so it
@@ -186,6 +207,21 @@ export async function POST(req: Request) {
   // one now would reject exactly the setup that needs this mode most — the
   // default one, where no ceiling is known and the wall arrives unannounced.
 
+  // A fraction guard with nothing to read is refused **here**, and nowhere
+  // after: `RUN_ENFORCEABLE_CODES` keeps the pre-cycle guard from ending a run
+  // over it, because the reading it needs is the provider's own percentage and
+  // an unreachable Anthropic host would otherwise stop every fraction-guarded
+  // run in the install at its next cycle boundary. This is the moment with a
+  // person and an error channel, which is what makes refusing right here and
+  // logging everywhere else the same decision `startWorkflow` already makes for
+  // an instance. The snapshot is awaited before `createRun` rather than inside
+  // it: that function runs from entry to INSERT with no `await` at all, and one
+  // here would silently reintroduce two agents in one directory.
+  if (policy.maxWeeklyFraction !== null || policy.maxSessionFraction !== null) {
+    const refusal = windowGuardRefusal(policy, await currentSnapshot());
+    if (refusal) return NextResponse.json({ error: refusal }, { status: 400 });
+  }
+
   try {
     // createRun admits or queues the run and starts whatever is now startable.
     // It never blocks on the agent: the run loop reports through the event
@@ -200,10 +236,18 @@ export async function POST(req: Request) {
       agent: agent.agent,
       budget: policy,
       dependsOn: deps.value,
+      // The one route a person reaches with a form in front of them. There is
+      // no authorising record beyond the request itself, which the request log
+      // holds — see the `x-uf-subject` header set on the response below.
+      origin: "form",
     });
 
     const storedBudget = JSON.parse(run.budget) as Record<string, unknown>;
-    return NextResponse.json({
+    // The audit line's subject. Every other mutating route names the row it
+    // acts on in its own path; this one mints the id inside the handler, and
+    // the wrapper will not read a response body to find it. Stripped before the
+    // response leaves.
+    const response = NextResponse.json({
       run: {
         ...run,
         budget: {
@@ -215,6 +259,8 @@ export async function POST(req: Request) {
         queuePosition: run.status === "queued" ? queuePosition(run.id) : undefined,
       },
     });
+    response.headers.set(SUBJECT_HEADER, run.id);
+    return response;
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : String(err) },
@@ -222,3 +268,6 @@ export async function POST(req: Request) {
     );
   }
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

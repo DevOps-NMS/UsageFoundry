@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { QuickOpen } from "@/components/shell/QuickOpen";
 import { PANES } from "@/components/shell/panes";
+import { ReadOnlyNotice } from "@/components/shell/ReadOnlyNotice";
 import { Sidebar, readCollapsed, writeCollapsed } from "@/components/shell/Sidebar";
 import { Toolbar } from "@/components/shell/Toolbar";
 import {
@@ -20,8 +21,21 @@ import {
  * a browser looks like. A Mac app fills the window it was given, and the two
  * halves scroll independently — the sidebar stays put while a run log runs off
  * the bottom of the pane beside it.
+ *
+ * `authDisabled` is the one fact the shell carries that is not about the shell.
+ * It is a prop from `layout.tsx` rather than something polled, because the
+ * point of it is that it cannot be missed: a server component reads the
+ * environment once and every page render says it, with no request to fail and
+ * no state to get stale. There is deliberately no dismiss control — the state
+ * it reports is that anyone who can reach this port can start a billed agent.
  */
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({
+  children,
+  authDisabled = false,
+}: {
+  children: ReactNode;
+  authDisabled?: boolean;
+}) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -42,7 +56,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   /**
    * The app's one keyboard listener.
    *
-   * ⌘1…⌘7 for the panes and ⌘K for quick open, and nothing else — every chord
+   * ⌘1…⌘8 for the panes and ⌘K for quick open, and nothing else — every chord
    * here is either the app's or the browser's, never both. ⌘R, ⌘L, ⌘T and ⌘W
    * are the browser's and are never looked at; the modifier test in
    * `isPlainCommandChord` is what keeps ⌘⇧K and Ctrl+1 out of range as well.
@@ -86,15 +100,25 @@ export function AppShell({ children }: { children: ReactNode }) {
   }
 
   // The login page keeps `main` so the skip link still has its target, and
-  // nothing else — there is no session behind it to navigate with.
+  // nothing else — there is no session behind it to navigate with. The banner
+  // rides along: /login is reachable by hand even with auth off, and it is the
+  // one page whose whole subject is the credential that is not being asked for.
   if (chromeless) {
-    return <main id="main">{children}</main>;
+    return (
+      <>
+        {authDisabled && <AuthDisabledBanner />}
+        <main id="main">{children}</main>
+      </>
+    );
   }
 
   return (
     <div className="flex h-dvh overflow-hidden">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
+        {/* Above the toolbar and inside the flex column, so the pane shrinks by
+            its height rather than being pushed off the bottom of `h-dvh`. */}
+        {authDisabled && <AuthDisabledBanner />}
         <Toolbar
           sidebarCollapsed={collapsed}
           onToggleSidebar={toggleSidebar}
@@ -117,11 +141,39 @@ export function AppShell({ children }: { children: ReactNode }) {
               exactly as before — free space is never negative, so nothing
               shrinks either. */}
           <div className="flex min-h-full flex-col px-4 pt-5 pb-12 sm:px-5">
+            {/* Above every page rather than on one of them: a server that
+                cannot write refuses Start, Run, Approve and Land alike, and
+                finding that out one button at a time is what this replaces. */}
+            <ReadOnlyNotice />
             {children}
           </div>
         </main>
       </div>
       <QuickOpen open={quickOpen} onDismiss={() => setQuickOpen(false)} />
+    </div>
+  );
+}
+
+/**
+ * The one banner in this app with no way to close it.
+ *
+ * Standing context normally gets `Notice`'s quiet treatment, precisely so a
+ * permanent bar does not train the eye past the conditional warnings. This is
+ * the exception and it earns it by not being permanent: it appears only while
+ * the server is answering every route without a credential, which is a state an
+ * operator either fixes or accepts deliberately. `role="alert"` rather than a
+ * polite region, because on the page it arrives with, it is the news.
+ */
+function AuthDisabledBanner() {
+  return (
+    <div
+      role="alert"
+      className="shrink-0 border-b border-danger-line bg-inset px-4 py-1.5 text-xs leading-normal text-ink-muted sm:px-5"
+    >
+      <span className="font-semibold text-danger">Authentication is off.</span>{" "}
+      Anyone who can reach this port can start billed agents and write to every
+      mounted repository. Set <span className="mono">UF_AUTH_TOKEN</span> in{" "}
+      <span className="mono">.env</span> and restart.
     </div>
   );
 }

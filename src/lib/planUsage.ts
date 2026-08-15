@@ -28,7 +28,7 @@ import type { PlanUsage, PlanWindow } from "./windows";
  *     CLI to draw a meter is not a trade worth making. An expired token is a
  *     miss.
  *  2. **It is rate limited.** Hitting it a handful of times inside a minute
- *     earns a 429, and this app polls its dashboard every 5–10 seconds. So it
+ *     earns a 429, and this app polls its dashboard every 1–2 minutes. So it
  *     is cached on Claude Code's own cadence — the CLI refreshes at most every
  *     5 minutes and treats a cached reading as usable for an hour, both read
  *     out of the shipped binary — and a failure serves the last good value

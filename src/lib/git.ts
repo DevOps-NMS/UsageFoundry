@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { GIT_BIN } from "./config";
+import { childCredentials } from "./privsep";
 
 /**
  * The one way this app runs git.
@@ -99,19 +100,34 @@ export const gitArgs = (args: string[]) => [
 ];
 
 /**
+ * The longest one synchronous git call may hold the event loop.
+ *
+ * Named rather than inlined because it is read from outside this module:
+ * `serverLock.ts` derives `STALE_MS` from it, since a `spawnSync` is a hold on
+ * the one event loop that also beats the lock's heartbeat, and a heartbeat
+ * window shorter than a single git call is a window a working server can miss
+ * with no other load at all.
+ */
+export const GIT_SYNC_TIMEOUT_MS = 20_000;
+
+/**
  * Synchronous git, for the admission decision only.
  *
  * `createRun` runs from entry to INSERT with no `await`, and that is what makes
  * its folder claim atomic — so the calls it makes have to be synchronous. These
- * are single-digit milliseconds. Everything else uses `git()` below.
+ * are single-digit milliseconds for the `rev-parse`s, and are emphatically not
+ * for `status --porcelain` on a large checkout with `core.fsmonitor` cleared,
+ * which is what the ceiling above is really about. Everything else uses `git()`
+ * below.
  */
 export function gitSync(cwd: string, args: string[]): GitResult {
   const res = spawnSync(GIT_BIN, gitArgs(args), {
     cwd,
     env: gitEnv(),
+    ...childCredentials(),
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    timeout: 20_000,
+    timeout: GIT_SYNC_TIMEOUT_MS,
   });
 
   return {
@@ -138,6 +154,16 @@ export function gitSync(cwd: string, args: string[]): GitResult {
  * meaning: `git status --porcelain` writes an unstaged edit as `" M path"`, and
  * trimming the stream eats that first space — which shifts the whole record and
  * reads the status letters off the middle of a filename.
+ *
+ * `timeoutMs: 0` runs with **no clock at all**, and it exists for the landing
+ * path. A timeout here is a `SIGKILL`, which arrives at the caller as
+ * `ok: false` and is indistinguishable from git having refused — so a merge on
+ * a large repository was rolled back and reported as "git refused the merge"
+ * for the sole reason that it took longer than a number nobody measured. There
+ * is no length of time after which merging somebody's work becomes the wrong
+ * thing to do, so `land.ts` passes this on every call that decides or performs
+ * one. Memory is still bounded by `maxBytes` where a caller reads a diff, and
+ * an unbounded call is still killed when the process ends.
  */
 export function git(
   cwd: string,
@@ -150,6 +176,7 @@ export function git(
     const child = spawn(GIT_BIN, gitArgs(args), {
       cwd,
       env: gitEnv(),
+      ...childCredentials(),
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -168,14 +195,15 @@ export function git(
     });
     child.stderr.on("data", (c: string) => (stderr += c));
 
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    timer.unref?.();
+    // Zero is "no clock", not "kill immediately" — see the note above.
+    const timer = timeoutMs > 0 ? setTimeout(() => child.kill("SIGKILL"), timeoutMs) : null;
+    timer?.unref?.();
 
     let settled = false;
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve({
         ok: code === 0 && !overflowed,
         stdout: trim ? stdout.trim() : stdout,

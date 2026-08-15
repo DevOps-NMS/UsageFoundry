@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { currentSnapshot } from "@/lib/orchestrator";
 import { startWorkflow } from "@/lib/workflows";
 import { instanceDTO } from "../../dto";
+import { auditMutation } from "../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -32,7 +33,7 @@ type Ctx = { params: Promise<{ id: string }> };
  * does anything. The body is still not read — the instance budget comes off the
  * saved workflow and there is no field here that could set one.
  */
-export async function POST(_req: Request, ctx: Ctx) {
+async function postHandler(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
 
   const outcome = startWorkflow(id, await currentSnapshot());
@@ -41,3 +42,6 @@ export async function POST(_req: Request, ctx: Ctx) {
   }
   return NextResponse.json({ instance: instanceDTO(outcome.instance) });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

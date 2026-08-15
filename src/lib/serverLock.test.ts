@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { GIT_SYNC_TIMEOUT_MS } from "./git";
 import {
   STALE_MS,
+  heartbeatVerdict,
   lockVerdict,
+  ownershipRefusal,
   parseLock,
   stillBeating,
   type ServerLock,
@@ -80,6 +83,96 @@ describe("lockVerdict", () => {
 
   it("watches a fresh lock whose pid has gone", () => {
     assert.equal(lockVerdict(held, self, false), "observe");
+  });
+});
+
+describe("heartbeatVerdict", () => {
+  // The owner never asked this question. `beat()` wrote the file every second
+  // and compared nothing, so a stall past `STALE_MS` handed the directory to a
+  // second process — which ran all six boot reconcilers over live runs — and
+  // then the first process's next beat overwrote that lock with its own owner
+  // id and carried on. Both then held the directory permanently, with the
+  // folder claim's guarantee void and nothing anywhere reporting it.
+
+  it("keeps beating on its own lock", () => {
+    assert.equal(heartbeatVerdict(held, held.ownerId), "beat");
+  });
+
+  it("stands down when the lock names a different owner", () => {
+    assert.equal(heartbeatVerdict({ ...held, ownerId: "owner-b" }, held.ownerId), "lost");
+  });
+
+  it("takes an absent lock back rather than treating it as a loss", () => {
+    // Absence is the clean-shutdown signal, as `stillBeating` reads it: the
+    // owner releases by unlinking, so nobody holds the directory and restamping
+    // it takes back something no other process has claimed. Reading this as a
+    // loss would make any wiped or rotated data directory permanently
+    // read-only.
+    assert.equal(heartbeatVerdict(null, held.ownerId), "beat");
+  });
+
+  it("does not decide on the pid or the timestamp", () => {
+    // Only the owner id is evidence that it changed hands — the same test
+    // `releaseDataDir` makes before it deletes the file. A pid is reused across
+    // a restart by design, and a heartbeat this process wrote is naturally
+    // older than now.
+    assert.equal(
+      heartbeatVerdict({ ...held, pid: 999, heartbeatAt: 0 }, held.ownerId),
+      "beat",
+    );
+  });
+});
+
+describe("STALE_MS", () => {
+  it("is longer than a single synchronous git call", () => {
+    // The arithmetic the whole margin turns on: `gitSync` is a `spawnSync` with
+    // git's own ceiling on it, and one `git status --porcelain` on the
+    // admission path can reach it. At the old 15s a working server missed the
+    // window on one call with no other load at all, and a second process was
+    // then entitled to close out every run in flight.
+    assert.ok(
+      STALE_MS > GIT_SYNC_TIMEOUT_MS,
+      `STALE_MS (${STALE_MS}) must exceed one gitSync ceiling (${GIT_SYNC_TIMEOUT_MS})`,
+    );
+  });
+});
+
+describe("ownershipRefusal", () => {
+  // The sentence every writer in the app answers with, so both directions are
+  // silent and expensive. Refuse when we do own the directory and the server
+  // refuses its own operator; permit when we do not and two processes admit
+  // runs against one SQLite file, which is the collision the folder claim
+  // exists to prevent and which nothing afterwards reports.
+  it("permits the owner", () => {
+    assert.equal(ownershipRefusal("owned", null), null);
+  });
+
+  it("permits a process that has never asked", () => {
+    // The claim is made once, at boot. Refusing here would refuse every caller
+    // that reaches this module without a boot in front of it.
+    assert.equal(ownershipRefusal("unclaimed", null), null);
+  });
+
+  it("refuses a second server, naming the pid that holds the directory", () => {
+    const refusal = ownershipRefusal("held", { pid: 4231 });
+    assert.match(refusal ?? "", /process 4231/);
+    assert.match(refusal ?? "", /does not own its data directory/);
+  });
+
+  it("refuses an owner that lost the directory, in different words", () => {
+    // Same answer, different diagnosis: this one is *this* server having
+    // stalled, and telling the operator it was never the owner would send them
+    // looking for a second server that does not exist.
+    const refusal = ownershipRefusal("lost", { pid: 4231 });
+    assert.match(refusal ?? "", /lost its claim/);
+    assert.match(refusal ?? "", /process 4231/);
+  });
+
+  it("still refuses when there is no lock to name", () => {
+    // Reachable: the heartbeat gives ownership up when it cannot write the file
+    // at all, so there is no owner to point at — and that is the case where
+    // carrying on writing would be worst.
+    assert.match(ownershipRefusal("lost", null) ?? "", /another server process/);
   });
 });
 

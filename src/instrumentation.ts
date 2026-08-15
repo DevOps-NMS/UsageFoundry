@@ -13,11 +13,66 @@
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    // Before anything else, and before the reconcile guard below, so a dev
+    // server that re-evaluates this module says it again: an install with no
+    // `UF_AUTH_TOKEN` serves every route in this app to anyone who can reach
+    // the port, and the whole of what was wrong with that was that nothing
+    // anywhere said so. Read from `process.env` rather than through
+    // `lib/config` so the refusal cannot be delayed behind a module that
+    // touches the filesystem.
+    const { authBootSignal } = await import("./lib/authGuard");
+    const signal = authBootSignal({
+      token: process.env.UF_AUTH_TOKEN ?? "",
+      allowNoAuth: process.env.UF_ALLOW_NO_AUTH ?? "",
+    });
+    if (signal.kind === "refused") {
+      console.error(signal.message);
+      // Exit rather than throw. A rejected `register()` is logged by Next and
+      // the server carries on listening, which is precisely the state this
+      // refusal exists to make unreachable.
+      process.exit(1);
+    }
+    if (signal.kind === "unauthenticated") console.warn(signal.message);
+
     const g = globalThis as unknown as { __ufReconciled?: boolean };
     if (g.__ufReconciled) return;
     g.__ufReconciled = true;
 
-    const { reconcileOnBoot, killAllAgents } = await import("./lib/orchestrator");
+    // Before anything opens the database or claims the directory it lives in.
+    // `configCheck.ts` carries the reasoning for which of these refuses and
+    // which warns; what is decided here is only what a refusal *does*.
+    //
+    // It exits rather than throwing. A rejected `register()` is logged by Next
+    // and the server then serves anyway, which for a `DATA_DIR` this process
+    // cannot write — or one it was never given — means a container that answers
+    // /login and writes every row to a file the next rebuild deletes. Exiting
+    // is what makes "refuses to start" true; `restart: unless-stopped` turns it
+    // into a visible restart loop with this message at the top of every attempt,
+    // which is louder than any log line and is the point.
+    const { configProblems } = await import("./lib/configCheck");
+    const problems = configProblems();
+    for (const p of problems.filter((x) => x.severity === "warn")) {
+      console.warn(`[usagefoundry] Configuration: ${p.message}`);
+    }
+    const refusals = problems.filter((p) => p.severity === "refuse");
+    if (refusals.length > 0) {
+      for (const p of refusals) {
+        console.error(`[usagefoundry] Refusing to start. ${p.message}`);
+      }
+      process.exit(1);
+    }
+
+    const { reconcileOnBoot, shutdownRuns } = await import("./lib/orchestrator");
+
+    // Which arrangement this install is in, said once, before anything spawns.
+    // The unseparated case is a *silent* absence of a boundary — the app looks
+    // and behaves identically — and an operator who has pinned `user:` back to
+    // their own uid, or who runs this outside the container, has no other way
+    // to find out that `/proc`, `DATA_DIR` and the capability file are reachable
+    // by every agent. A misconfiguration throws instead, out of this same call,
+    // so it stops the boot rather than the first run.
+    const { describeSeparation } = await import("./lib/privsep");
+    console.warn(`[usagefoundry] ${describeSeparation()}`);
 
     // Every reconciler below reads "this row says running, therefore the
     // process that owned it died with my predecessor". That inference is only
@@ -27,10 +82,17 @@ export async function register() {
     // live database, and it closed out three runs whose agents were mid-cycle
     // and went on working for another minute. So the claim gates all four,
     // rather than each of them re-deriving it.
-    const { claimDataDir, releaseDataDir } = await import("./lib/serverLock");
-    const owned = await claimDataDir();
+    const { claimDataDir, ownsDataDir, releaseDataDir } = await import(
+      "./lib/serverLock"
+    );
+    await claimDataDir();
 
-    if (owned) {
+    // `ownsDataDir()` rather than the boolean `claimDataDir` just returned.
+    // They agree here — nothing can take the directory in the microtask between
+    // them — and the point is that ownership is a thing this app *asks*, at the
+    // moment it acts on it, everywhere. A captured boot-time answer was how the
+    // heartbeat came to restamp a lock that had changed hands.
+    if (ownsDataDir()) {
       reconcileOnBoot();
 
       // Same problem, different table: a review is a child process too, and a
@@ -86,11 +148,28 @@ export async function register() {
       // one window pressed twice.
       const { reconcileSchedulesOnBoot } = await import("./lib/schedules");
       reconcileSchedulesOnBoot();
+
+      // And the one sweep that deletes rather than reconciles. Gated on the
+      // same claim as everything above, for a reason of its own: it decides
+      // what is safe to discard from the *live* state — which runs have
+      // settled, which checkouts nothing holds — and a process that does not
+      // own this directory is reading another server's answers to both.
+      const { startRetentionSweeper } = await import("./lib/retention");
+      startRetentionSweeper();
     } else {
+      // Not "starting without closing anything out" any more, which read like a
+      // benign notice on a process that then admitted runs and spawned billed
+      // agents. This server is read-only for as long as it is up: every writer
+      // asks `ownsDataDir()` at the moment it would write, and the same
+      // sentence is on `/api/health` and above every page, because a warning
+      // into a container's stdout is not a signal anybody receives.
       console.warn(
         "[usagefoundry] Another server process already holds this data " +
-          "directory. Starting without closing out any run, review, merge or " +
-          "chat — they belong to that server, and it is still working.",
+          "directory. This one is read-only: it serves every page, and refuses " +
+          "to start, resume, merge or spend anything. Only one process may " +
+          "write to a UsageFoundry data directory — it cannot be scaled to a " +
+          "second replica. Stop the other server and restart this one if that " +
+          "is not what you meant.",
       );
     }
 
@@ -100,18 +179,41 @@ export async function register() {
     // on its own — without this, quitting the dev server would leave a real,
     // billed agent running. Under Docker the container cgroup already handles
     // it and this is redundant.
+    //
+    // It is `await`ed now, and that is the change: this used to be
+    // `killAllAgents(sig)` and `process.exit(0)` on the next line, so not one
+    // of the suspended `startRun` frames ever resumed and nothing after
+    // `await runIteration(...)` ever ran. Every in-flight cycle's spend went
+    // with it — `reconcileKilledCycle` exists for exactly that and was
+    // unreachable from here — along with the two columns saying a cycle is open.
+    // `shutdownRuns` is bounded (`SHUTDOWN_GRACE_MS`) and returns as soon as
+    // nothing is left in flight, so an idle server still exits at once.
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
       process.once(sig, () => {
-        const n = killAllAgents(sig);
-        if (n > 0) {
-          console.warn(`[usagefoundry] Signalled ${n} running agent(s) on ${sig}.`);
-        }
-        // Hand the directory back explicitly. Without this the next boot — which
-        // for `restart: unless-stopped` is immediate — finds a lock that is
-        // still inside its stale window and has to watch a dead pid for four
-        // seconds before it may reconcile anything.
-        releaseDataDir();
-        process.exit(0);
+        void (async () => {
+          try {
+            const { closed, recovered } = await shutdownRuns(sig);
+            if (closed > 0) {
+              console.warn(
+                `[usagefoundry] Stopped ${closed} run(s) on ${sig}; recovered the ` +
+                  `spend of ${recovered} interrupted work cycle(s). They are on the ` +
+                  "runs page, and can be picked up together.",
+              );
+            }
+          } catch (err) {
+            // A shutdown that cannot account for its cycles still has to be a
+            // shutdown. Reported rather than swallowed, because the alternative
+            // is a container that hangs until Docker's grace period kills it.
+            console.error("[usagefoundry] Shutdown reconciliation failed:", err);
+          } finally {
+            // Hand the directory back explicitly. Without this the next boot —
+            // which for `restart: unless-stopped` is immediate — finds a lock
+            // that is still inside its stale window and has to watch a dead pid
+            // for four seconds before it may reconcile anything.
+            releaseDataDir();
+            process.exit(0);
+          }
+        })();
       });
     }
   }

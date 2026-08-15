@@ -49,6 +49,7 @@ import { chatGuards } from "@/lib/settings";
 import { githubRemotes, scanWorkspace } from "@/lib/workspace";
 import { mountById } from "@/lib/config";
 import { fmtUSD } from "@/lib/format";
+import { auditMutation } from "../../../lib/requestLog";
 
 /**
  * What one `get_run_diff` may return.
@@ -126,13 +127,13 @@ interface JsonRpcRequest {
  * Tools both kinds of caller get: everything that only reads.
  *
  * `list_agents` is deliberately in here rather than in `CHAT_TOOLS`, and the
- * placement *is* the decision: both subjects can name a specialist — a chat on
- * a proposal the operator then approves, a block on a run it emits — so both
- * have to be able to see what exists before they name one, and the alternative
- * is a block guessing at names out of its system prompt. It grants neither of
- * them anything: an agent holds no tool list and no permission mode, so what
- * this list can move is who does a piece of the work and never what a run may
- * do. Being here is also what makes the two guards in `callTool` say the right
+ * placement *is* the decision: both subjects can name an agent — a chat on a
+ * proposal the operator then approves, a block on a run it emits — so both have
+ * to be able to see what exists before they name one, and the alternative is a
+ * block guessing at names out of its system prompt. It grants neither of them
+ * anything: an agent holds no tool list and no permission mode, so what this
+ * list can move is who a run *is* and never what a run may do. Being here is
+ * also what makes the two guards in `callTool` say the right
  * thing about it — they refuse the tools of the *other* subject, and a shared
  * tool is in neither list.
  */
@@ -219,14 +220,16 @@ const SHARED_TOOLS = [
   {
     name: "list_agents",
     description:
-      "Saved specialised agents: roles a run may hand a subtask to. Read it " +
-      "before naming one — the operator writes @name in their message and this " +
-      "is what turns that into the agent to propose the work under. An agent " +
-      "carries a description and a prompt and nothing else: it changes who " +
-      "does a piece of the work, never what the run is allowed to do, so " +
-      "naming one sets no budget, no permission mode and no isolation choice. " +
-      "It also reports the agent definitions on this machine that this app did " +
-      "not save, which reach every run either way and cannot be named here.",
+      "Saved agents: roles a run can be started AS. Naming one replaces the " +
+      "run's own system prompt with the agent's, so the run does the work as " +
+      "that agent rather than handing part of it to one. Read this before " +
+      "naming any — the operator writes @name in their message and this is " +
+      "what turns that into the agent to start the run as. An agent carries a " +
+      "description and a prompt and nothing else: it changes who the run is, " +
+      "never what the run is allowed to do, so naming one sets no budget, no " +
+      "permission mode and no isolation choice. It also reports the agent " +
+      "definitions on this machine that this app did not save, which reach " +
+      "every run either way and cannot be named here.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
 ];
@@ -294,12 +297,12 @@ const CHAT_TOOLS = [
         agentId: {
           type: "string",
           description:
-            "id from list_agents: a saved specialist the run may hand a " +
-            "subtask to. Name one when the operator writes @something in " +
-            "their message, or when a saved agent plainly fits the work. It " +
-            "changes who does part of the work and never what the run may do " +
-            "— the guards are still the template's, or the default set. Omit " +
-            "it for the ordinary run.",
+            "id from list_agents: the saved agent this run is STARTED AS, so " +
+            "the agent's prompt becomes the run's own. Name one when the " +
+            "operator writes @something in their message, or when a saved " +
+            "agent plainly fits the whole job. It changes who the run is and " +
+            "never what the run may do — the guards are still the template's, " +
+            "or the default set. Omit it for the ordinary run.",
         },
         title: {
           type: "string",
@@ -445,10 +448,10 @@ const CHAT_TOOLS = [
               agentId: {
                 type: "string",
                 description:
-                  "id from list_agents: a saved specialist this block's own " +
-                  "child may hand a subtask to. It changes who does part of " +
-                  "the work and never what the block may do. Refused on a " +
-                  "merge block, which starts no agent at all.",
+                  "id from list_agents: the saved agent this block's own child " +
+                  "is STARTED AS. It changes who that child is and never what " +
+                  "the block may do. Refused on a merge block, which starts no " +
+                  "child at all, so there would be nothing for the agent to be.",
               },
               fanOut: {
                 type: "number",
@@ -521,11 +524,11 @@ const CHAT_TOOLS = [
  * The fifth is `agent`, and it is on the other side of that line rather than an
  * exception to it: a saved agent is a description and a prompt, the registry
  * refuses a tool list at the door and has no column for a permission mode, so
- * naming one decides *who* does a piece of the work exactly as the task text
- * beside it decides what the work is. `planEmission` refuses a name this install
- * does not have, for the reason every other door refuses a deleted agent by name
- * — a run given a specialist it does not have is bit-for-bit a run that was
- * never given one.
+ * naming one decides *who the run is* exactly as the task text beside it decides
+ * what the work is. `planEmission` refuses a name this install does not have,
+ * for the reason every other door refuses a deleted agent by name — and since
+ * `--agent` takes a name, a misspelling let through here would be a run that
+ * fails at the spawn rather than one that quietly starts as nobody.
  */
 const BLOCK_TOOLS = [
   {
@@ -572,12 +575,12 @@ const BLOCK_TOOLS = [
               agent: {
                 type: "string",
                 description:
-                  "Optional: the name of a saved specialist this run may hand " +
-                  "a subtask to, exactly as your instructions list it. It " +
-                  "changes who does a piece of the work and never what the run " +
-                  "may do — the guards are still the block's. A name this " +
-                  "install does not have is refused; omit it for the ordinary " +
-                  "run.",
+                  "Optional: the name of a saved agent to START THIS RUN AS, " +
+                  "exactly as your instructions list it — the agent's prompt " +
+                  "becomes that run's own. It changes who the run is and never " +
+                  "what the run may do; the guards are still the block's. A " +
+                  "name this install does not have is refused; omit it for the " +
+                  "ordinary run.",
               },
               dependsOn: {
                 type: "array",
@@ -619,7 +622,7 @@ function toolsFor(subject: CapabilitySubject) {
     : [...SHARED_TOOLS, ...BLOCK_TOOLS];
 }
 
-export async function POST(req: Request) {
+async function postHandler(req: Request) {
   const header = req.headers.get("authorization") ?? "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
   const subject = subjectForCapability(bearer);
@@ -664,7 +667,8 @@ export async function GET() {
   );
 }
 
-export async function DELETE() {
+// Takes the request it does not read, so the audit wrapper has one to log.
+async function deleteHandler(_req: Request) {
   return new Response(null, { status: 405 });
 }
 
@@ -821,15 +825,15 @@ async function callTool(
       // Both handles, each named for the caller that takes it: the chat's
       // proposal tools take an `agentId` like every other identifier they
       // speak in, and `emit_runs` takes the `name`, because a block's turn
-      // names a specialist for a run it is creating and a name is the key the
-      // `--agents` flag itself uses. Reporting only one would leave whichever
-      // caller wanted the other guessing at it.
+      // names the agent a run it is creating will be started as — and a name is
+      // both the key `--agents` uses and the word `--agent` takes. Reporting
+      // only one would leave whichever caller wanted the other guessing at it.
       //
       // `usable: false` is reported rather than the row being hidden, because
       // the two failures read alike from here and only one of them is the
       // operator's to fix: an agent missing its description or its prompt is
-      // dropped by the CLI without a word, so a run given it looks exactly
-      // like a run that was never given one. Every door refuses it by name.
+      // one the CLI will not register, so a run started as it dies at the
+      // spawn. Every door refuses it by name.
       return text(
         JSON.stringify(
           {
@@ -851,9 +855,10 @@ async function callTool(
               scope: a.scope,
             })),
             note:
-              "Naming an agent sets no guard. Budget, work-cycle limit, " +
-              "permission mode and isolation all come from the template a " +
-              "proposal or block names, or from the operator's default guard " +
+              "Naming an agent starts the run AS that agent — its prompt " +
+              "becomes the run's own — and sets no guard. Budget, work-cycle " +
+              "limit, permission mode and isolation all come from the template " +
+              "a proposal or block names, or from the operator's default guard " +
               "set. The agents under alsoOnThisMachine are in play for every " +
               "run whether or not one is named, and cannot be named here.",
           },
@@ -1326,9 +1331,9 @@ function saveTemplate(args: Record<string, unknown>, chatId: string) {
     // Carried from the row rather than taken from an argument, and named here
     // for the reason every other field on this object is: the update replaces
     // the template wholesale, so a field this list forgets is a field the chat
-    // silently deletes. There is deliberately no argument for it — a specialist
-    // is one of the guard-shaped facts a person chose, and this tool may write
-    // a prompt and nothing else.
+    // silently deletes. There is deliberately no argument for it — which agent
+    // a template names is one of the facts a person chose, and this tool may
+    // write a prompt and nothing else.
     agentId: existing?.agentId ?? null,
     budget: guards.budget,
   };
@@ -1386,14 +1391,14 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
     );
   }
 
-  // The specialist, refused here as well as at approval for the reason the
-  // template above it is: a proposal that cannot be approved is otherwise
-  // discovered by a person clicking Approve on a list of twenty. It is the same
+  // The agent, refused here as well as at approval for the reason the template
+  // above it is: a proposal that cannot be approved is otherwise discovered by
+  // a person clicking Approve on a list of twenty. It is the same
   // `agentRefusal` the run door, the template door and every workflow door use,
   // so an agent that has gone is one sentence wherever it is named — and it is
   // a refusal rather than a silent drop, because a run proposed "as the
-  // reviewer" and started with no specialist is bit-for-bit a run that was
-  // never given one.
+  // reviewer" and started as nobody is bit-for-bit a run that was never given
+  // one.
   const agentId = String(args.agentId ?? "").trim() || null;
   if (agentId !== null) {
     const refusal = agentRefusal(agentId, currentAgentKnowledge());
@@ -1588,8 +1593,8 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
   // Said outside the guard clause, because an agent bounds nothing — the same
   // separation the run page and the workflow canvas make, so this app never
   // words it as though naming one narrowed anything.
-  const specialist = agentId
-    ? ` It may hand a subtask to ${currentAgentKnowledge().get(agentId)?.name ?? "the agent you named"}.`
+  const asAgent = agentId
+    ? ` It runs as ${currentAgentKnowledge().get(agentId)?.name ?? "the agent you named"}.`
     : "";
   const after =
     dependsOn.length === 0
@@ -1602,7 +1607,12 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
           .join(" and ")} — say so, because both have to be approved in the ` +
         "same click unless the earlier one has already started.";
   return text(
-    `Proposed "${title}" (id ${proposal.id}) under ${guards}.${specialist}${after} ` +
+    `Proposed "${title}" (id ${proposal.id}) under ${guards}.${asAgent}${after} ` +
       "It is waiting for the operator to approve it; nothing is running.",
   );
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);
+/** Wrapped so the request that changed something is on the audit log. */
+export const DELETE = auditMutation(deleteHandler);

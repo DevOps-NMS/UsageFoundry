@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { instanceBudgetIsOff, type InstanceBudgetPolicy } from "./budget";
 import { db } from "./db";
+import { mayWriteDataDir } from "./serverLock";
 import { currentSnapshot } from "./orchestrator";
+import { newWorkPaused } from "./settings";
 import { isTimeZone, zonedParts, zoneOffset } from "./windows";
 import {
   getWorkflow,
@@ -791,7 +793,25 @@ function stopScheduler(): void {
   timer.tick = null;
 }
 
-async function tickSchedules(): Promise<void> {
+/**
+ * Exported for its test and for nothing else — no other module calls it.
+ *
+ * It is the one of the four creation routes with no seam a caller can reach:
+ * the other three are decided by a pure function a test can hand a flag to,
+ * where this one reads the hold itself, inside a timer. A route that quietly
+ * stopped consulting it would look exactly like a quiet hour.
+ */
+export async function tickSchedules(): Promise<void> {
+  // Asked here rather than only at the boot that started this timer, because
+  // ownership moves: a server that stalls past `STALE_MS` loses the directory
+  // to a second process, and the two would then press Run for the same window.
+  // The timer stops rather than skipping a tick — the schedules belong to
+  // whoever owns the directory, and this process will never own it again.
+  if (!mayWriteDataDir()) {
+    stopScheduler();
+    return;
+  }
+
   // A tick that spawns a graph takes longer than the interval; stacking them
   // would press Run twice for one window.
   if (timer.running) return;
@@ -849,7 +869,12 @@ async function fireIfDue(schedule: WorkflowSchedule, now: number): Promise<void>
   const decision = decideSchedule({
     spec: schedule.spec,
     timeZone: schedule.timeZone,
-    paused: false,
+    // The install-wide hold reaches this route through the argument that
+    // already means "do not fire, and do not make the window up afterwards" —
+    // the cursor stays put, so clearing the hold records the windows that
+    // passed as missed rather than pressing Run for each of them. A schedule's
+    // own pause never gets here: `activeSchedules` filters those out in SQL.
+    paused: newWorkPaused(),
     lastFireAt: schedule.cursorAt,
     liveCount:
       liveRunsOf(schedule.workflowId).length + liveBlocksOf(schedule.workflowId),
@@ -886,7 +911,13 @@ async function fireIfDue(schedule: WorkflowSchedule, now: number): Promise<void>
     return;
   }
 
-  const outcome = startWorkflow(schedule.workflowId, await currentSnapshot());
+  // Named as the schedule's, so the runs this fire creates are distinguishable
+  // from the same graph started by hand. This is the one press of Run with
+  // nobody present at all, which is exactly the case an audit column exists for.
+  const outcome = startWorkflow(schedule.workflowId, await currentSnapshot(), {
+    kind: "schedule",
+    scheduleId: schedule.id,
+  });
   if (!outcome.ok) {
     recordOutcome(schedule, "refused", outcome.reason, action.fireAt, null, now);
     return;

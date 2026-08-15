@@ -58,6 +58,9 @@ describe("gitEnv", () => {
     const planted = {
       UF_AUTH_TOKEN: "shared-secret",
       UF_GITHUB_TOKEN: "ghp_x",
+      // The per-repository map is withheld by the same namespace rule, which is
+      // why a second credential shape needed no second exclusion.
+      UF_GITHUB_TOKENS: "acme/web=ghp_y",
       ANTHROPIC_ADMIN_KEY: "sk-admin",
       ANTHROPIC_API_KEY: "sk-x",
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector",
