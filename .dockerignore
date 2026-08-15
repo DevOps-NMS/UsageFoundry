@@ -1,6 +1,10 @@
 node_modules
 .next
 .git
+# `.git` does not match `.github` — separate entry, or the builder stage's
+# `COPY . .` layer is invalidated by every workflow edit, for files that have
+# no business in the image.
+.github
 .gitignore
 .env
 .env.*

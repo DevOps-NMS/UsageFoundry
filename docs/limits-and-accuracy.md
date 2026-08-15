@@ -185,13 +185,23 @@ a run stopped before the visible bar looks full is explained rather than
 mysterious. Nothing shown as a dollar amount is ever the fallback rate.
 
 **Cost attribution.** Beyond model and project, each turn is broken down by
-**reasoning effort**, **sub-agent**, and **skill** — all three recorded by Claude
+**reasoning effort**, **agent**, and **skill** — all three recorded by Claude
 Code on the transcript record itself, so the tables cover full history rather
-than starting from the day they were added. Turns with no sub-agent or skill get
-explicit `(main thread)` / `(no skill)` buckets, so every column reconciles to
-the window total instead of quietly omitting a remainder. Effort is typically
-the largest single lever; excluding sub-agent turns in Settings empties the
-by-agent table, which the card says outright.
+than starting from the day they were added. Turns carrying no agent name or no
+skill get explicit `(main thread)` / `(no skill)` buckets, so every column
+reconciles to the window total instead of quietly omitting a remainder. Effort is
+typically the largest single lever.
+
+That column was *Sub-agent* while the only way a name could reach it was a turn
+the main thread handed off. A run can now be **started as** an agent, so a name
+here need not be a sub-agent at all, and `(main thread)` is a turn Claude Code
+recorded no agent name on rather than a turn no agent produced. Nothing infers a
+bucket either way — the rollup groups on what the transcript says, which is why
+the word had to stop asserting more than the arithmetic does. Two things stay
+separate from it: *Count sub-agent turns in usage totals* in Settings keys on the
+record's own sidechain flag, which is a genuinely delegated turn, and the origin
+chip beside a row says only where **this install** found a definition for that
+name.
 
 **Usage by period (day / week / month).** The two meters answer *may I start a
 run right now*; the **Usage by period** card answers *what has this been

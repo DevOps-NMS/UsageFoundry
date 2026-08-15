@@ -9,6 +9,7 @@ import {
   parseRunAgent,
   rowToAgent,
   runAgentDefinitions,
+  sessionAgentArgs,
 } from "./agents";
 
 /**
@@ -23,10 +24,19 @@ import {
  * member whose model is JSON `null` is dropped, and a `--agents` value that is
  * not JSON is ignored entirely. Exit 0 in every case, no warning on stderr.
  *
- * So the whole class of fault is one shape: a run that was given a specialist
- * and does not have one, which is bit-for-bit a run that was never given one.
- * Nothing downstream can tell the difference — not the event log, not the cost,
- * not the transcript's own `attributionAgent`, which simply never names it.
+ * That silence was the whole argument for validating here, and the move from
+ * `--agents` to `--agent` **keeps the refusals and changes what they buy**. The
+ * drop above is a drop from the set `--agent` resolves against, so a member the
+ * CLI will not register is no longer a run quietly missing its agent — it
+ * is a run whose every work cycle exits non-zero at the spawn, before any
+ * request is made:
+ *
+ *     $ claude --agents '{"uf-nodesc":{"prompt":"p"}}' --agent uf-nodesc -p hi
+ *     --agent 'uf-nodesc' not found. Available agents: claude, Explore,
+ *     general-purpose, Plan, statusline-setup, typescript   (exit 1)
+ *
+ * Louder, and still worth refusing in front of the person who can fix it rather
+ * than in a stderr line on a run that has already been started.
  */
 
 const valid = {
@@ -87,7 +97,7 @@ describe("normalizeAgentInput", () => {
   });
 
   for (const field of ["name", "description", "prompt"] as const) {
-    it(`refuses a missing ${field}, which the CLI would drop without a word`, () => {
+    it(`refuses a missing ${field}, which the CLI will not register`, () => {
       const parsed = normalizeAgentInput({ ...valid, [field]: "" });
       assert.equal(parsed.ok, false);
       assert(!parsed.ok);
@@ -101,11 +111,13 @@ describe("normalizeAgentInput", () => {
 
   /**
    * Measured: a `--agents` member named `general-purpose` does not appear as a
-   * second entry in what `claude --agent <unknown>` lists. So a saved agent
-   * under a built-in's name either does nothing while the operator believes it
-   * is in play, or replaces a built-in the main thread delegates to — and the
-   * CLI does not say which. Refused at the door because neither outcome reports
-   * anything afterwards.
+   * second entry in what `claude --agent <unknown>` lists. So `--agent Explore`
+   * selects *an* Explore with no way to tell from outside whether it is the
+   * operator's prompt or the built-in, and the CLI does not say which. The
+   * reason narrows under the singular flag rather than disappearing: what is at
+   * stake is no longer one delegated subtask but the whole run, which would be
+   * something other than the thing its name says. Refused at the door because
+   * neither outcome reports anything afterwards.
    */
   for (const name of ["general-purpose", "Explore", "GENERAL-PURPOSE"]) {
     it(`refuses “${name}”, a name the CLI already answers to`, () => {
@@ -179,7 +191,7 @@ describe("agentsFlagValue", () => {
   /**
    * The one that would be silent. `{"model": null}` is legal JSON and an illegal
    * member: the CLI drops the whole agent and carries on, so the run loses its
-   * specialist and nothing anywhere says so. The key is omitted rather than
+   * agent and nothing anywhere says so. The key is omitted rather than
    * nulled, which is the only spelling of "inherit" that survives.
    */
   it("omits model rather than sending null, which would drop the agent", () => {
@@ -210,6 +222,84 @@ describe("agentsFlagValue", () => {
   });
 });
 
+/**
+ * The singular flag: the run *is* the agent rather than being offered it.
+ *
+ * Measured against the pin rather than read from the docs, because the whole
+ * shape of the change turned on one question — whether `--agent` can select a
+ * definition supplied on the same argv by `--agents`. It can:
+ *
+ *     $ claude --agents '{"uf-probe-agent":{"description":"…","prompt":"…"}}' \
+ *         --agent uf-probe-typo -p hi
+ *     --agent 'uf-probe-typo' not found. Available agents: claude, Explore,
+ *     general-purpose, Plan, statusline-setup, typescript, uf-probe-agent
+ *
+ * So both flags travel together, and this is what pins that neither half can go
+ * missing. Dropping `--agents` selects a name the CLI cannot resolve, which is a
+ * non-zero exit before any request is made — every work cycle of that run dying
+ * at the spawn. Dropping `--agent` is the old behaviour wearing the new one's
+ * name: a definition merely offered to a session that is still the ordinary main
+ * agent, which is bit-for-bit indistinguishable from the feature working.
+ */
+describe("sessionAgentArgs", () => {
+  const row = { name: "reviewer", description: "d", prompt: "p", model: null };
+
+  it("emits nothing at all for a run that named no agent", () => {
+    assert.deepEqual(sessionAgentArgs(null), []);
+    assert.deepEqual(sessionAgentArgs(undefined), []);
+  });
+
+  it("defines the agent and then selects it by name", () => {
+    const args = sessionAgentArgs(row);
+    assert.deepEqual(args, [
+      "--agents",
+      JSON.stringify({ reviewer: { description: "d", prompt: "p" } }),
+      "--agent",
+      "reviewer",
+    ]);
+  });
+
+  /**
+   * The two halves have to agree, and nothing downstream would report it if they
+   * did not — a selected name the definition does not carry is a spawn failure
+   * whose message is inside the CLI's own stderr.
+   */
+  it("selects exactly the name it defined", () => {
+    for (const name of ["reviewer", "uf spaced", "Ünïcode"]) {
+      const args = sessionAgentArgs({ ...row, name });
+      const defined = Object.keys(JSON.parse(args[args.indexOf("--agents") + 1]));
+      assert.deepEqual(defined, [args[args.indexOf("--agent") + 1]]);
+      assert.deepEqual(defined, [name]);
+    }
+  });
+
+  /**
+   * A name with a space in it is one argv word, not two. Verified on the pin
+   * that such a name both registers and resolves — `--agents '{"uf spaced":…}'
+   * --agent "uf spaced"` runs — which is only true because nothing here goes
+   * through a shell.
+   */
+  it("keeps a spaced name as one argument", () => {
+    const args = sessionAgentArgs({ ...row, name: "uf spaced" });
+    assert.equal(args.length, 4);
+    assert.equal(args[3], "uf spaced");
+  });
+
+  it("still omits a null model, which would drop the member and fail the spawn", () => {
+    const args = sessionAgentArgs({ ...row, model: null });
+    assert.equal("model" in JSON.parse(args[1]).reviewer, false);
+    assert.equal(JSON.parse(sessionAgentArgs({ ...row, model: "sonnet" })[1]).reviewer.model, "sonnet");
+  });
+
+  /**
+   * It is the same encoder underneath rather than a second one that happens to
+   * agree today — the reason `agentsFlagValue` is one function at all.
+   */
+  it("defines through the one encoder, never a second copy of the shape", () => {
+    assert.equal(sessionAgentArgs(row)[1], agentsFlagValue([row]));
+  });
+});
+
 describe("rowToAgent", () => {
   const stored = {
     id: "a1",
@@ -230,9 +320,11 @@ describe("rowToAgent", () => {
   /**
    * A row can outlive the build that wrote it — `rowToTemplate`'s reason for
    * narrowing on read as well as on save. What it narrows here is the pair the
-   * CLI drops in silence, and it reports rather than repairs: a placeholder
-   * description would produce an agent the delegating model chooses on the
-   * strength of text nobody wrote.
+   * CLI will not register, which named on `--agent` fails the spawn outright,
+   * and it reports rather than repairs: a placeholder description would make
+   * that row registrable again, so the run would start as an agent described by
+   * text nobody wrote instead of being refused in front of the person who can
+   * fix it.
    */
   for (const field of ["name", "description", "prompt"] as const) {
     it(`reports a row with no ${field} as unusable rather than repairing it`, () => {
@@ -256,7 +348,7 @@ describe("rowToAgent", () => {
  * It earns a test on the grounds the rest of this file does, with the failure
  * pointing inwards rather than at the CLI: the alternative to refusing is
  * *falling back to no agent*, which produces a run the operator believes has a
- * specialist and which is bit-for-bit a run that was never given one. That is
+ * agent and which is bit-for-bit a run that was never given one. That is
  * the CLI's own silent drop, reproduced by this app, at the one door built to
  * stop it. Both refusals are also the only thing standing between a template
  * that names a deleted agent and a run started under guards nobody reviewed.
@@ -279,10 +371,14 @@ describe("agentRefusal", () => {
     assert.match(String(message), /deadbeef/);
   });
 
-  it("refuses one the CLI would drop in silence, by name", () => {
+  it("refuses one the CLI would not register, by name", () => {
     const message = agentRefusal("a2", known);
     assert.match(String(message), /half-written/);
-    assert.match(String(message), /without a word/);
+    // The sentence has to say what would actually happen, and that changed with
+    // the flag: such an agent used to be dropped without a word, and a run named
+    // on `--agent` now fails at the spawn instead. Refusing here is still right
+    // — this door is in front of somebody who can fix it.
+    assert.match(String(message), /will not register/);
   });
 
   it("refuses everything against an empty registry", () => {
@@ -297,7 +393,8 @@ describe("agentRefusal", () => {
  * already-validated definition, so the only way it can be wrong is that it
  * outlived the build that wrote it — `rowToAgent`'s reason — and the least it
  * could have meant is no agent. Putting a half-formed member on the argv instead
- * would be handing the CLI exactly the shape it drops without a word.
+ * would be handing the CLI exactly the shape it will not register — which,
+ * selected on `--agent`, is a run whose every cycle dies at the spawn.
  */
 describe("parseRunAgent / runAgentDefinitions", () => {
   const frozen = JSON.stringify({

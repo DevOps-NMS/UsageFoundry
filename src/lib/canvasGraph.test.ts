@@ -112,10 +112,10 @@ test("no template is null on the wire, not an empty string", () => {
   assert.equal(wire.nodes[1].templateId, "tpl-1");
 });
 
-test("a specialist is carried by the kinds that spawn a child, and by no other", () => {
+test("an agent is carried by the kinds that spawn a child, and by no other", () => {
   // The merge case is why this is here rather than left to the server. That
-  // block spawns nothing, so naming a specialist on it is *refused* — not
-  // dropped, because a specialist the operator believes is in play and that no
+  // block spawns nothing, so naming an agent on it is *refused* — not
+  // dropped, because an agent the operator believes is in play and that no
   // process is ever given is the fault the whole registry exists to end. A
   // block switched from run to merge with an agent still picked would therefore
   // be unsavable over a control the inspector no longer shows, which is a dead
