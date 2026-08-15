@@ -4165,20 +4165,23 @@ function settleBlock(
 /* ------------------------------------------------------------------ */
 
 /**
- * How long a merge block waits for its own branches, before it stops waiting.
+ * The rows are written by the worker, not by us, so this is a poll.
  *
- * A bound rather than a patience: the merge worker is one sequential loop for
- * the whole process, so this block's rows can sit behind somebody else's batch,
- * and a conflict resolution alone is allowed twelve minutes. What makes a
- * ceiling necessary anyway is what a block stuck `thinking` costs — the instance
- * never reaches `stopped`, and a second press of Run on that workflow is refused
- * for ever. Timing out leaves the queue working: the rows are still the record
- * of each branch, and the block says it stopped watching rather than claiming
- * they failed.
+ * There is no deadline beside it, deliberately. A merge block waits for its
+ * branches for as long as merging them takes — the worker is one sequential
+ * loop for the whole process, so this block's rows can sit behind somebody
+ * else's batch and a conflict resolution takes as long as it takes, and none of
+ * that is a reason to stop watching. It used to give up at an hour, or fifteen
+ * minutes a branch, and what that bought was a block reporting its branches as
+ * not landed while the queue was still landing them — a graph that carried on
+ * past a merge it said had failed.
+ *
+ * What the ceiling was actually protecting against is a block stuck `thinking`
+ * for ever, and that has an answer that is somebody's decision rather than a
+ * clock's: `stopInstance` writes the block off, which this loop tests on every
+ * pass, and the queue's own Cancel takes the batch. A clock could not tell the
+ * difference between a wedged block and a large merge; an operator can.
  */
-const MERGE_BRANCH_BUDGET_MS = 15 * 60_000;
-const MERGE_BLOCK_TIMEOUT_MS = 60 * 60_000;
-/** The rows are written by the worker, not by us, so this is a poll. */
 const MERGE_POLL_MS = 2_000;
 
 /** What became of one branch a merge block was handed. */
@@ -4356,7 +4359,7 @@ async function startMergeBlock(
     )
     .run(queued.batchId, instanceId, nodeId);
 
-  const rows = await awaitBatch(queued.batchId, instanceId, nodeId, queueable.length);
+  const rows = await awaitBatch(queued.batchId, instanceId, nodeId);
   for (const row of rows) {
     candidates.push({
       branch: branchLabel(row.run_id),
@@ -4364,11 +4367,12 @@ async function startMergeBlock(
       reason:
         row.status === "landed"
           ? null
-          : // A row still active is the deadline having passed, not a verdict —
-            // but it is a branch that is not on its target, which is the only
-            // question a successor's condition asks.
+          : // Nothing here stops waiting on a clock any more, so a row still
+            // active is the workflow having been halted out from under it — not
+            // a verdict, but a branch that is not on its target, which is the
+            // only question a successor's condition asks.
             isQueueActive(row.status)
-            ? "still in the merge queue when this block stopped waiting"
+            ? "still in the merge queue when this workflow was stopped"
             : (row.message ?? row.status),
     });
   }
@@ -4448,30 +4452,24 @@ function branchLabel(runId: string): string {
 }
 
 /**
- * Wait for one batch to drain, or stop waiting.
+ * Wait for one batch to drain.
  *
- * Three ways out and each is a different fact. Every row terminal is the merge
- * having finished. The block no longer `thinking` is a halt, which has already
- * written the row and whose answer wins — `finishMergeBlock`'s guarded UPDATE
- * would refuse ours anyway, and returning here saves reading git for a workflow
- * being taken down. The deadline is the third, and it does not cancel anything:
- * the queue goes on working and its rows go on being the record.
+ * Two ways out, and neither of them is a clock. Every row terminal is the merge
+ * having finished, which is the answer this exists to wait for however long it
+ * takes. The block no longer `thinking` is a halt, which has already written
+ * the row and whose answer wins — `finishMergeBlock`'s guarded UPDATE would
+ * refuse ours anyway, and returning here saves reading git for a workflow being
+ * taken down.
  */
 async function awaitBatch(
   batchId: string,
   instanceId: string,
   nodeId: string,
-  branches: number,
 ): Promise<QueueRow[]> {
-  const deadline =
-    Date.now() +
-    Math.min(MERGE_BLOCK_TIMEOUT_MS, MERGE_BRANCH_BUDGET_MS * (branches + 1));
-
   for (;;) {
     const rows = batchRows(batchId);
     if (!rows.some((r) => isQueueActive(r.status))) return rows;
     if (getBlock(instanceId, nodeId)?.status !== "thinking") return rows;
-    if (Date.now() >= deadline) return rows;
     await new Promise((resolve) => setTimeout(resolve, MERGE_POLL_MS).unref?.());
   }
 }

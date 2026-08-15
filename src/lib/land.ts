@@ -57,6 +57,26 @@ import {
 
 export type LandStrategy = "merge" | "squash";
 
+/**
+ * Every git call on the landing path runs with no clock on it.
+ *
+ * There is no length of time after which merging somebody's work becomes the
+ * wrong thing to do, so nothing here is allowed to give up on one. A timeout in
+ * `git()` is a `SIGKILL`, and a killed git is `ok: false` — which this file
+ * cannot tell apart from git having refused, so a merge that was simply large
+ * came back as "git refused the merge and it was rolled back", and a `status`
+ * or a `merge-tree` that ran long came back as a checkout that could not be
+ * read or a conflict state that could not be determined, both of which refuse
+ * the land outright. Every one of those is a clock deciding what a repository
+ * should have decided.
+ *
+ * It is spelled at each call rather than changed in `git()` because the default
+ * is right everywhere else: a 20-second bound on the *page* reads that annotate
+ * a folder list is what keeps a request answering. This is the path where the
+ * answer is worth waiting for however long it takes.
+ */
+const NO_CLOCK = { timeoutMs: 0 } as const;
+
 /** One `<<<<<<< … >>>>>>>` block, exactly as the merge would leave it. */
 export interface ConflictRegion {
   /** The block, markers included. */
@@ -379,18 +399,17 @@ async function targetOf(
   const head = checkout?.headBranch;
   if (!head || !run.worktree_base) return null;
 
-  const descends = await git(repoRoot, [
-    "merge-base",
-    "--is-ancestor",
-    run.worktree_base,
-    head,
-  ]);
+  const descends = await git(
+    repoRoot,
+    ["merge-base", "--is-ancestor", run.worktree_base, head],
+    NO_CLOCK,
+  );
   return descends.ok ? { branch: head, inferred: true } : null;
 }
 
 async function checkoutStateOf(folder: string): Promise<CheckoutState> {
-  const head = await git(folder, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  const status = await git(folder, ["status", "--porcelain"]);
+  const head = await git(folder, ["rev-parse", "--abbrev-ref", "HEAD"], NO_CLOCK);
+  const status = await git(folder, ["status", "--porcelain"], NO_CLOCK);
   return {
     path: folder,
     headBranch: head.ok && head.stdout !== "HEAD" ? head.stdout : null,
@@ -445,7 +464,11 @@ export async function landState(runId: string): Promise<LandState | null> {
     };
   }
 
-  const exists = await git(repoRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+  const exists = await git(
+    repoRoot,
+    ["rev-parse", "--verify", `refs/heads/${branch}`],
+    NO_CLOCK,
+  );
   if (!exists.ok) {
     return { ...base, blocked: `Branch ${branch} no longer exists.` };
   }
@@ -471,11 +494,11 @@ export async function landState(runId: string): Promise<LandState | null> {
     };
   }
 
-  const targetExists = await git(repoRoot, [
-    "rev-parse",
-    "--verify",
-    `refs/heads/${target.branch}`,
-  ]);
+  const targetExists = await git(
+    repoRoot,
+    ["rev-parse", "--verify", `refs/heads/${target.branch}`],
+    NO_CLOCK,
+  );
   if (!targetExists.ok) {
     return {
       ...base,
@@ -488,19 +511,18 @@ export async function landState(runId: string): Promise<LandState | null> {
     };
   }
 
-  const counts = await git(repoRoot, [
-    "rev-list",
-    "--left-right",
-    "--count",
-    `${target.branch}...${branch}`,
-  ]);
+  const counts = await git(
+    repoRoot,
+    ["rev-list", "--left-right", "--count", `${target.branch}...${branch}`],
+    NO_CLOCK,
+  );
   const [behind = "0", ahead = "0"] = counts.stdout.split(/\s+/);
 
   const merged = (
-    await git(repoRoot, ["merge-base", "--is-ancestor", branch, target.branch])
+    await git(repoRoot, ["merge-base", "--is-ancestor", branch, target.branch], NO_CLOCK)
   ).ok;
 
-  const tip = (await git(repoRoot, ["rev-parse", branch])).stdout;
+  const tip = (await git(repoRoot, ["rev-parse", branch], NO_CLOCK)).stdout;
   const landedUnchanged = !!run.landed_tip && run.landed_tip === tip;
 
   // Not previewed while the run can still commit: the answer would be stale
@@ -513,7 +535,13 @@ export async function landState(runId: string): Promise<LandState | null> {
     ? ({ outcome: "already-merged" } as const)
     : active
       ? ({ outcome: "unknown", reason: "This run can still commit to it." } as const)
-      : (await git(repoRoot, ["merge-base", "--is-ancestor", target.branch, branch])).ok
+      : (
+            await git(
+              repoRoot,
+              ["merge-base", "--is-ancestor", target.branch, branch],
+              NO_CLOCK,
+            )
+          ).ok
         ? ({ outcome: "fast-forward" } as const)
         : await previewMerge(repoRoot, target.branch, branch);
 
@@ -613,7 +641,11 @@ async function previewMerge(
   // No `--name-only`: it lands the conflict list in a simpler shape but arrived
   // two releases after `--write-tree` itself, and this has to work on whatever
   // git the host mounted.
-  const res = await git(repoRoot, ["merge-tree", "--write-tree", "-z", target, branch]);
+  const res = await git(
+    repoRoot,
+    ["merge-tree", "--write-tree", "-z", target, branch],
+    NO_CLOCK,
+  );
   const preview = parseMergeTree(res.stdout, res.stderr, res.code);
   if (preview.outcome !== "conflict") return preview;
 
@@ -873,12 +905,16 @@ export async function landRun(
     // Read before the merge: after a squash there is nothing in the target's
     // history that points back at these commits, and this is what makes them
     // identifiable afterwards.
-    const tip = (await git(folder, ["rev-parse", branch])).stdout;
+    const tip = (await git(folder, ["rev-parse", branch], NO_CLOCK)).stdout;
 
+    // No clock on the merge itself, which is the whole of `NO_CLOCK`'s reason:
+    // a merge killed part-way through reads here exactly like git refusing one,
+    // so a repository large enough to take a while was told its work could not
+    // be merged and had it rolled back.
     const merge =
       strategy === "squash"
-        ? await git(folder, ["merge", "--squash", branch], { timeoutMs: 120_000 })
-        : await git(folder, ["merge", "--no-edit", branch], { timeoutMs: 120_000 });
+        ? await git(folder, ["merge", "--squash", branch], NO_CLOCK)
+        : await git(folder, ["merge", "--no-edit", branch], NO_CLOCK);
 
     if (!merge.ok) {
       const conflicts = await conflictedFiles(folder);
@@ -896,13 +932,17 @@ export async function landRun(
     if (strategy === "squash") {
       // `--squash` stages the change and stops. Without this the operator is
       // left holding a staged merge that the app claims to have landed.
-      const commit = await git(folder, [
-        "commit",
-        "-m",
-        taskSubject(run),
-        "-m",
-        `Squashed from ${branch} (UsageFoundry run ${run.id}).`,
-      ]);
+      const commit = await git(
+        folder,
+        [
+          "commit",
+          "-m",
+          taskSubject(run),
+          "-m",
+          `Squashed from ${branch} (UsageFoundry run ${run.id}).`,
+        ],
+        NO_CLOCK,
+      );
       if (!commit.ok) {
         await unwind(folder, strategy);
         return {
@@ -940,7 +980,7 @@ export async function landRun(
 
 /** Paths git left conflicted, read before the merge is unwound. */
 async function conflictedFiles(folder: string): Promise<string[]> {
-  const res = await git(folder, ["diff", "--name-only", "--diff-filter=U"]);
+  const res = await git(folder, ["diff", "--name-only", "--diff-filter=U"], NO_CLOCK);
   return res.ok && res.stdout ? res.stdout.split("\n") : [];
 }
 
@@ -953,9 +993,11 @@ async function conflictedFiles(folder: string): Promise<string[]> {
  * clean seconds earlier and no run is allowed to be writing in it.
  */
 async function unwind(folder: string, strategy: LandStrategy): Promise<void> {
-  const abort = await git(folder, ["merge", "--abort"]);
+  // Least of all this one: a rollback killed part-way through leaves the
+  // operator's own checkout mid-merge.
+  const abort = await git(folder, ["merge", "--abort"], NO_CLOCK);
   if (abort.ok || strategy !== "squash") return;
-  await git(folder, ["reset", "--hard", "HEAD"]);
+  await git(folder, ["reset", "--hard", "HEAD"], NO_CLOCK);
 }
 
 /** First line of the task, as a commit subject. */
@@ -1011,8 +1053,8 @@ async function resolveCheckout(
 ): Promise<ResolveCheckout> {
   const own = run.worktree_path;
   if (own && fs.existsSync(own)) {
-    const head = await git(own, ["rev-parse", "--abbrev-ref", "HEAD"]);
-    const status = await git(own, ["status", "--porcelain"]);
+    const head = await git(own, ["rev-parse", "--abbrev-ref", "HEAD"], NO_CLOCK);
+    const status = await git(own, ["status", "--porcelain"], NO_CLOCK);
     if (head.ok && head.stdout === branch && status.ok && status.stdout === "") {
       return { path: own, temporary: false };
     }
@@ -1023,14 +1065,14 @@ async function resolveCheckout(
   if (fs.existsSync(slot)) {
     // Left behind by an earlier attempt that could not clean up. Removing it is
     // safe only because this path is ours alone and nothing else ever adopts it.
-    await git(repoRoot, ["worktree", "remove", "--force", slot]);
+    await git(repoRoot, ["worktree", "remove", "--force", slot], NO_CLOCK);
     fs.rmSync(slot, { recursive: true, force: true });
   }
-  await git(repoRoot, ["worktree", "prune"]);
+  await git(repoRoot, ["worktree", "prune"], NO_CLOCK);
 
-  const add = await git(repoRoot, ["worktree", "add", slot, branch], {
-    timeoutMs: 30 * 60_000,
-  });
+  // A full checkout, and one that is being made in order to merge. The half
+  // hour it used to be given was the same guess as the merge's two minutes.
+  const add = await git(repoRoot, ["worktree", "add", slot, branch], NO_CLOCK);
   if (!add.ok) {
     throw new Error(`Could not create a checkout to resolve in: ${add.stderr.split("\n")[0]}`);
   }
@@ -1042,7 +1084,7 @@ async function discardCheckout(
   checkout: ResolveCheckout,
 ): Promise<void> {
   if (!checkout.temporary) return;
-  await git(repoRoot, ["worktree", "remove", "--force", checkout.path]);
+  await git(repoRoot, ["worktree", "remove", "--force", checkout.path], NO_CLOCK);
 }
 
 /**
@@ -1116,9 +1158,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
 
-  const merge = await git(checkout.path, ["merge", "--no-edit", target], {
-    timeoutMs: 120_000,
-  });
+  const merge = await git(checkout.path, ["merge", "--no-edit", target], NO_CLOCK);
   if (merge.ok) {
     // The preview was stale — the branches agree after all. The merge commit is
     // real and useful: landing is now a fast-forward.
@@ -1131,7 +1171,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
 
   const conflicted = await conflictedFiles(checkout.path);
   if (conflicted.length === 0) {
-    await git(checkout.path, ["merge", "--abort"]);
+    await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
     await discardCheckout(repoRoot, checkout);
     return {
       ok: false,
@@ -1158,7 +1198,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
       // keep its own error: reporting "markers are still in f.txt" would be
       // true and useless, because the agent never ran.
       if (result.status === "failed") {
-        await git(checkout.path, ["merge", "--abort"]);
+        await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
         await discardCheckout(repoRoot, checkout);
         return;
       }
@@ -1167,7 +1207,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
         conflicted.map((p) => ({ path: p, text: readIfPossible(path.join(checkout.path, p)) })),
       );
       if (left.length > 0) {
-        await git(checkout.path, ["merge", "--abort"]);
+        await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
         await discardCheckout(repoRoot, checkout);
         return {
           status: "failed" as const,
@@ -1175,14 +1215,14 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
         };
       }
 
-      const staged = await git(checkout.path, [
-        "add",
-        "--",
-        ...conflicted.map((p) => `:(top,literal)${p}`),
-      ]);
-      const unmerged = await git(checkout.path, ["ls-files", "-u"]);
+      const staged = await git(
+        checkout.path,
+        ["add", "--", ...conflicted.map((p) => `:(top,literal)${p}`)],
+        NO_CLOCK,
+      );
+      const unmerged = await git(checkout.path, ["ls-files", "-u"], NO_CLOCK);
       if (!staged.ok || !unmerged.ok || unmerged.stdout !== "") {
-        await git(checkout.path, ["merge", "--abort"]);
+        await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
         await discardCheckout(repoRoot, checkout);
         return {
           status: "failed" as const,
@@ -1190,9 +1230,9 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
         };
       }
 
-      const commit = await git(checkout.path, ["commit", "--no-edit"]);
+      const commit = await git(checkout.path, ["commit", "--no-edit"], NO_CLOCK);
       if (!commit.ok) {
-        await git(checkout.path, ["merge", "--abort"]);
+        await git(checkout.path, ["merge", "--abort"], NO_CLOCK);
         await discardCheckout(repoRoot, checkout);
         return {
           status: "failed" as const,
@@ -1203,7 +1243,7 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
       // Read before the checkout goes: this is the only handle on what the
       // resolution decided. Its prose survives in the row either way, but prose
       // is what the agent says it did, not what it did.
-      const head = await git(checkout.path, ["rev-parse", "HEAD"]);
+      const head = await git(checkout.path, ["rev-parse", "HEAD"], NO_CLOCK);
 
       await discardCheckout(repoRoot, checkout);
       emitRunEvent({
@@ -1377,7 +1417,7 @@ async function slotState(run: RunRow): Promise<SlotState> {
     return { path: slot ?? null, checkedOutBranch: null, readable: false, files: [] };
   }
 
-  const head = await git(slot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+  const head = await git(slot, ["rev-parse", "--abbrev-ref", "HEAD"], NO_CLOCK);
   const checkedOutBranch = head.ok && head.stdout !== "HEAD" ? head.stdout : null;
   // Status is read only once the slot is proved to still hold this run's
   // branch. Anything uncommitted under a different branch is a later run's, and
@@ -1386,7 +1426,10 @@ async function slotState(run: RunRow): Promise<SlotState> {
     return { path: slot, checkedOutBranch, readable: head.ok, files: [] };
   }
 
-  const status = await git(slot, ["status", "--porcelain", "-z"], { trim: false });
+  const status = await git(slot, ["status", "--porcelain", "-z"], {
+    ...NO_CLOCK,
+    trim: false,
+  });
   return {
     path: slot,
     checkedOutBranch,
@@ -1517,7 +1560,7 @@ export async function commitPending(
     };
   }
 
-  const staged = await git(dir, ["add", "-A"], { timeoutMs: 120_000 });
+  const staged = await git(dir, ["add", "-A"], NO_CLOCK);
   if (!staged.ok) {
     return {
       ok: false,
@@ -1528,7 +1571,7 @@ export async function commitPending(
   const commit = await git(
     dir,
     ["commit", "-m", resolved.trim(), "-m", `Committed from UsageFoundry run ${run.id}.`],
-    { timeoutMs: 120_000 },
+    NO_CLOCK,
   );
   if (!commit.ok) {
     // Left staged rather than reset. This app's own git runs with hooks off, so
@@ -1544,7 +1587,7 @@ export async function commitPending(
     };
   }
 
-  const head = await git(dir, ["rev-parse", "--short", "HEAD"]);
+  const head = await git(dir, ["rev-parse", "--short", "HEAD"], NO_CLOCK);
   const count = slot.files.length;
 
   // Freeing the slot is half of what this button is for, and admission

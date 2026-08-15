@@ -49,8 +49,31 @@ export type AssistKind = "review" | "resolve";
 
 /** Diff bytes sent to the reviewer. Bounded by argv, not by context. */
 const REVIEW_DIFF_BYTES = 60_000;
-/** A single argv entry is capped at 128 KB on Linux; stay well clear of it. */
+/**
+ * How long a *review* is given, and the one kind of assist that gets a clock.
+ *
+ * A review is a page waiting for an answer about a diff, and one that never
+ * arrives is a card that spins for ever — so it is bounded. A **resolution is
+ * not**: it is a step in merging a branch, the merge queue is waiting on it,
+ * and there is no length of time after which reconciling somebody's work
+ * becomes the wrong thing to do. Killed at ten minutes it took the merge with
+ * it — `after` aborts the merge and discards the checkout, so the branch was
+ * rolled back and the queue reported a failure, for a conflict the agent may
+ * well have been most of the way through. `assistTimeoutMs` is where that
+ * split is made rather than at this constant, so a third kind cannot inherit a
+ * clock by accident.
+ */
 const REVIEW_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * The clock for one assist, or none at all.
+ *
+ * A resolution is unbounded on purpose — see above. The escapes it leaves are
+ * the ones that already exist and are somebody's decision rather than a
+ * timer's: stopping the queue's batch, and the process ending.
+ */
+const assistTimeoutMs = (kind: AssistKind): number =>
+  kind === "resolve" ? 0 : REVIEW_TIMEOUT_MS;
 
 export interface ReviewRow {
   id: string;
@@ -517,10 +540,12 @@ const EXIT_DRAIN_MS = 2_000;
  * runs, the `run_reviews` row stays `running`, `assistRunning` then refuses
  * every further review or resolution for that run, and a resolution's throwaway
  * `<slug>-resolve` checkout is left registered mid-merge because `after` never
- * runs. With `killProcessGroup` on, the ten-minute timeout eventually reaps the
- * group and the completed, billed answer is recorded as a timeout — and for a
- * resolution, rolled back. With it off there is no group to kill and nothing
- * else reaps the grandchild, so the row is `running` until the server restarts.
+ * runs. For a review, `killProcessGroup` plus the ten-minute clock eventually
+ * reaps the group and records the completed, billed answer as a timeout; with
+ * it off there is no group to kill and nothing else reaps the grandchild. A
+ * **resolution has no clock at all** — see `assistTimeoutMs` — so settling on
+ * `exit` is not the fast path there, it is the only path: without it that row
+ * is `running` until the server restarts, and the merge queue is waiting on it.
  *
  * `runIteration` and `chat.ts`'s `settleOnExit` settle the identical hazard the
  * identical way: `exit` is the guarantee, `close` is the fast path, and the
@@ -590,16 +615,20 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
     child.stderr.on("data", (c: string) => (stderr += c.slice(0, 4_096)));
 
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      signalTree(child, "SIGTERM");
-      setTimeout(() => signalTree(child, "SIGKILL"), 5_000).unref?.();
-    }, REVIEW_TIMEOUT_MS);
-    timer.unref?.();
+    const limitMs = assistTimeoutMs(kind);
+    const timer =
+      limitMs > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            signalTree(child, "SIGTERM");
+            setTimeout(() => signalTree(child, "SIGKILL"), 5_000).unref?.();
+          }, limitMs)
+        : null;
+    timer?.unref?.();
 
     let settled = false;
     const done = () => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve();
     };
 
@@ -644,7 +673,7 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
       if (timedOut) {
         void land({
           status: "failed",
-          error: `It did not finish within ${REVIEW_TIMEOUT_MS / 60_000} minutes and was stopped.`,
+          error: `It did not finish within ${limitMs / 60_000} minutes and was stopped.`,
         });
         return;
       }
