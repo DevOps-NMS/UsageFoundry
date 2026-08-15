@@ -13,8 +13,14 @@ import type {
   BudgetPolicyDTO,
   RunGuardsDTO,
   SettingsDTO,
+  StorageReportDTO,
 } from "@/lib/apiTypes";
-import { describeAmbientAgents, fmtTokens, fmtUSD } from "@/lib/format";
+import {
+  describeAmbientAgents,
+  fmtBytes,
+  fmtTokens,
+  fmtUSD,
+} from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
@@ -72,6 +78,7 @@ const SECTIONS = [
   { id: "runs", label: "Runs" },
   { id: "guards", label: "Default guards" },
   { id: "unattended", label: "Unattended runs" },
+  { id: "storage", label: "Storage" },
   { id: "prompts", label: "Prompts" },
 ];
 
@@ -135,6 +142,7 @@ const EDITABLE_PATHS = [
   "chatDefaultGuards.budget.maxIterations",
   "chatDefaultGuards.budget.maxDurationMinutes",
   "chatTurnBudgetUSD",
+  "installDailyCostLimitUSD",
   "planUsageFromApi",
   "sessionCostLimit",
   "weeklyCostLimit",
@@ -149,6 +157,7 @@ const EDITABLE_PATHS = [
   "forwardSubAgentText",
   "defaultPermissionMode",
   "maxConcurrentRuns",
+  "maxConcurrentAssists",
   "isolationCopyGlobs",
   "landStrategy",
   "continuationPrompt",
@@ -156,9 +165,13 @@ const EDITABLE_PATHS = [
   "isolationPreamble",
   "continuedWorkPrompt",
   "liveGuardIntervalSeconds",
+  "maxCycleSilenceMinutes",
   "killProcessGroup",
   "resumeGraceHours",
   "telemetryForRuns",
+  "eventRetentionDays",
+  "checkoutRetentionDays",
+  "transcriptRetentionDays",
 ] as const;
 
 /**
@@ -498,7 +511,182 @@ function EditedRail({ on }: { on: boolean }) {
   );
 }
 
+/** How long ago, in the coarsest unit that still says something. */
+function ago(ms: number): string {
+  const mins = Math.max(0, Math.round((Date.now() - ms) / 60_000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}
+
+/**
+ * What each store holds right now.
+ *
+ * Rows in a grouped list rather than `Stat` cards: the question an operator
+ * brings to this is "which of these is filling my disk", which is a comparison
+ * down a column rather than three headline figures. A failed read says so —
+ * a store that could not be measured and a store with nothing in it must not
+ * read alike, which is the same rule the hatched meter follows.
+ */
+function StorageFigures({
+  report,
+  error,
+}: {
+  report: StorageReportDTO | null;
+  error: string | null;
+}) {
+  if (error !== null) {
+    return (
+      <Notice tone="warn">
+        <strong>Sizes could not be read.</strong> {error}. The horizons below
+        still apply — this is a measurement, not a setting.
+      </Notice>
+    );
+  }
+  if (!report) return <Empty>Measuring…</Empty>;
+
+  const { database, checkouts, transcripts, lastSweep } = report;
+  return (
+    <ListGroup
+      label="On disk now"
+      footnote={
+        <>
+          Removing rows lets SQLite reuse the pages; the file itself only
+          shrinks after a <span className="mono">VACUUM</span>, which{" "}
+          <span className="mono">README.md</span> gives beside the backup
+          procedure
+          {lastSweep && (
+            <>
+              . Last swept {ago(lastSweep.at)} — {lastSweep.events.toLocaleString()}{" "}
+              log rows, {lastSweep.telemetry.toLocaleString()} telemetry rows,{" "}
+              {lastSweep.checkouts} checkout
+              {lastSweep.checkouts === 1 ? "" : "s"} and{" "}
+              {lastSweep.transcripts.toLocaleString()} transcript
+              {lastSweep.transcripts === 1 ? "" : "s"} (
+              {fmtBytes(lastSweep.transcriptBytes)}) discarded
+            </>
+          )}
+        </>
+      }
+    >
+      <ListRow
+        label="Database"
+        description={`${database.path} — ${database.runEvents.toLocaleString()} log rows, ${database.telemetryRows.toLocaleString()} telemetry rows`}
+      >
+        <span className="tabular-nums text-sm">
+          {fmtBytes(database.bytes + database.walBytes)}
+        </span>
+      </ListRow>
+
+      {checkouts.map((store) => (
+        <ListRow
+          key={store.path}
+          label={`Checkouts — ${store.label}`}
+          description={`${store.path} — ${store.count} checkout${store.count === 1 ? "" : "s"}`}
+        >
+          <span className="tabular-nums text-sm">
+            {/* "at least", because the walk is bounded: a store of installed
+                dependency trees is millions of files, and a figure that stopped
+                counting has to say so rather than read as the total. */}
+            {store.partial ? "≥ " : ""}
+            {fmtBytes(store.bytes)}
+          </span>
+        </ListRow>
+      ))}
+
+      <ListRow
+        label="Transcripts"
+        description={`${transcripts.path} — ${transcripts.files.toLocaleString()} session${transcripts.files === 1 ? "" : "s"}`}
+      >
+        <span className="tabular-nums text-sm">
+          {transcripts.partial ? "≥ " : ""}
+          {fmtBytes(transcripts.bytes)}
+        </span>
+      </ListRow>
+    </ListGroup>
+  );
+}
+
 /** One `label: value` line in the environment summary under the title. */
+/**
+ * The one way to end a session from inside the app.
+ *
+ * It exists because a session now *is* something: the cookie used to be
+ * `UF_AUTH_TOKEN` itself, so there was nothing to end short of changing the
+ * environment and restarting the container — which kills every run in flight.
+ * "All" is here rather than only "this browser" because the case that matters
+ * is a cookie that got out, and the browser holding it is not this one.
+ */
+function SignOut({ sessions }: { sessions: number }) {
+  const [busy, setBusy] = useState(false);
+
+  async function signOut(all: boolean) {
+    setBusy(true);
+    try {
+      await fetch("/api/logout", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ all }),
+      });
+    } finally {
+      // Whatever happened, the credential this page was loaded with may no
+      // longer be good, and the gate is the authority on that.
+      window.location.href = "/login";
+    }
+  }
+
+  return (
+    <span className="inline-flex flex-wrap items-center gap-2">
+      <Badge tone="ok">{sessions === 1 ? "1 session" : `${sessions} sessions`}</Badge>
+      <Button variant="secondary" busy={busy} onClick={() => void signOut(false)}>
+        Sign out
+      </Button>
+      <Button variant="secondary" busy={busy} onClick={() => void signOut(true)}>
+        Sign out everywhere
+      </Button>
+    </span>
+  );
+}
+
+/**
+ * Failed sign-ins, and the row is absent while there have been none.
+ *
+ * It is here because the limiter's record has to be readable by a person: a
+ * burst against the one unauthenticated route in this app used to leave no
+ * trace at all — no counter, no log line, nothing to find afterwards. A row
+ * that said "0" every day is a row nobody would still be reading on the day it
+ * said something else.
+ */
+function FailedSignIns({ summary }: { summary: unknown }) {
+  if (typeof summary !== "object" || summary === null) return null;
+  const s = summary as {
+    failures?: number;
+    firstAt?: number | null;
+    lastAt?: number | null;
+    lockedSources?: number;
+    lockedGlobally?: boolean;
+  };
+  const failures = Number(s.failures ?? 0);
+  if (failures === 0) return null;
+
+  const when = (t: number | null | undefined) =>
+    typeof t === "number" ? new Date(t).toLocaleString() : "—";
+
+  return (
+    <EnvRow label="Failed sign-ins">
+      <Badge tone={s.lockedGlobally ? "danger" : "warn"}>{failures}</Badge>{" "}
+      <span>
+        {when(s.firstAt)} → {when(s.lastAt)}
+        {Number(s.lockedSources ?? 0) > 0 &&
+          ` · ${s.lockedSources} source(s) locked out`}
+        {s.lockedGlobally && " · sign-in locked install-wide"}
+      </span>
+    </EnvRow>
+  );
+}
+
 function EnvRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex gap-2">
@@ -525,11 +713,17 @@ export default function SettingsPage() {
   // The registry, and the definitions this app did not write. Both are needed
   // for one row: the picker offers the first, and the sentence beside it has to
   // declare the second, because `--agents` merges with what the CLI finds on
-  // disk rather than replacing it — so the registry is a part of the set a run
-  // can delegate to and never the whole of it.
+  // disk rather than replacing it and `--agent` resolves against the merged
+  // set — so the registry is a part of what is in play and never the whole of
+  // it, whichever of them a run is started as.
   const [agents, setAgents] = useState<AgentDTO[]>([]);
   const [ambientAgents, setAmbientAgents] = useState<AmbientAgentDTO[]>([]);
   const [agentsLoaded, setAgentsLoaded] = useState(false);
+  // What the append-only stores currently hold. Its own read because it walks
+  // directories, and its own failure state because a missing figure must read
+  // as "not measured" rather than as a store with nothing in it.
+  const [storage, setStorage] = useState<StorageReportDTO | null>(null);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const standalone = useStandalone();
 
   const load = useCallback(async () => {
@@ -558,6 +752,17 @@ export default function SettingsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    fetch("/api/storage", { cache: "no-store" })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`the server answered ${r.status}`);
+        setStorage((await r.json()) as StorageReportDTO);
+      })
+      .catch((err: unknown) =>
+        setStorageError(err instanceof Error ? err.message : String(err)),
+      );
+  }, []);
 
   useEffect(() => {
     // A failed read leaves the picker holding only the stored value, which is
@@ -809,6 +1014,17 @@ export default function SettingsPage() {
             </>
           )}
         </EnvRow>
+        <EnvRow label="Sign-in">
+          {env.authEnabled ? (
+            <SignOut sessions={Number(env.activeSessions ?? 0)} />
+          ) : (
+            <>
+              <Badge tone="danger">no token</Badge>{" "}
+              <span>every route is open</span>
+            </>
+          )}
+        </EnvRow>
+        <FailedSignIns summary={env.signIn} />
       </dl>
 
       {/* Plain anchors rather than `ButtonLink`: the pane is its own scroll
@@ -1353,13 +1569,15 @@ export default function SettingsPage() {
           {/* Beside the model and deliberately not among the guards below. An
               agent carries a description and a prompt — the registry refuses a
               tool list at the door and has no column for a permission mode — so
-              this decides who does part of the work and never what a run is
-              allowed to do. It is an id, so an operator who fixes their
-              reviewer's prompt gets the fixed one on the next run. */}
+              this decides who a run *is* and never what it is allowed to do.
+              Beside the model for a second reason since `--agent`: a saved
+              agent's model is the session's, reached only where the field above
+              is blank. It is an id, so an operator who fixes their reviewer's
+              prompt gets the fixed one on the next run. */}
           <SettingRow
             htmlFor="agent"
             edited={isEdited("defaultAgentId")}
-            label="Default specialist"
+            label="Default agent"
             description={
               describeAmbientAgents(ambientAgents) ??
               "Pre-selected on the new-run form, which can change it or clear it"
@@ -1373,7 +1591,7 @@ export default function SettingsPage() {
                   patch({ defaultAgentId: e.target.value || null })
                 }
               >
-                <option value="">No specialist</option>
+                <option value="">No agent</option>
                 {agents.map((a) => (
                   <option key={a.id} value={a.id} disabled={!a.usable}>
                     {a.name}
@@ -1382,8 +1600,8 @@ export default function SettingsPage() {
                 ))}
                 {/* A default whose agent has been deleted since it was saved.
                     Kept as an option rather than silently reverting the picker
-                    to "No specialist", which would look like the setting had
-                    never been made — and Save then refuses it by name. */}
+                    to "No agent", which would look like the setting had never
+                    been made — and Save then refuses it by name. */}
                 {agentsLoaded &&
                   effective.defaultAgentId !== null &&
                   !agents.some((a) => a.id === effective.defaultAgentId) && (
@@ -1424,7 +1642,7 @@ export default function SettingsPage() {
             htmlFor="conc"
             edited={isEdited("maxConcurrentRuns")}
             label="Runs at the same time"
-            description="Each run carries its own spending limit, so this multiplies the worst case — three runs at $5 can spend $15. A run over the limit waits rather than being refused, and queued or parked runs do not count against it"
+            description="Work cycles only — reviews, chat turns and workflow blocks have their own budget below. Each run carries its own spending limit, so this multiplies the worst case: three runs at $5 can spend $15. A run over the limit waits rather than being refused, and queued or parked runs do not count against it"
           >
             <div className="w-32">
               <Input
@@ -1438,6 +1656,32 @@ export default function SettingsPage() {
                 onChange={(e) =>
                   patch({
                     maxConcurrentRuns: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="concassist"
+            edited={isEdited("maxConcurrentAssists")}
+            label="Other Claude processes at the same time"
+            description="A review, a merge-conflict resolution, an orchestrator chat turn and a workflow orchestrator block's deciding turn share this one budget. The first three are refused while it is full, and say so; a workflow block waits for a slot instead. Together with the limit above, this is the most Claude processes the container will ever carry"
+          >
+            <div className="w-32">
+              <Input
+                id="concassist"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="at once"
+                placeholder="No limit"
+                value={effective.maxConcurrentAssists ?? ""}
+                onChange={(e) =>
+                  patch({
+                    maxConcurrentAssists: e.target.value
                       ? Number(e.target.value)
                       : null,
                   })
@@ -1662,6 +1906,34 @@ export default function SettingsPage() {
             </div>
           </SettingRow>
         </ListGroup>
+
+        <ListGroup className="mt-4" label="What this whole install may spend">
+          <SettingRow
+            htmlFor="installbudget"
+            edited={isEdited("installDailyCostLimitUSD")}
+            label="Install limit, rolling 24 hours"
+            description="Every other limit here bounds one run, one workflow or one chat turn — this is the only one that bounds the total. Once it is reached, no new run, workflow, orchestrator turn or chat message starts until spend ages out of the window. A run still going, or one that finished inside it, counts its whole spend"
+          >
+            <div className="w-36">
+              <Input
+                id="installbudget"
+                type="number"
+                min={0}
+                step="10"
+                className="tabular-nums"
+                unit="USD"
+                placeholder="No limit"
+                value={effective.installDailyCostLimitUSD ?? ""}
+                onChange={(e) =>
+                  patch({
+                    installDailyCostLimitUSD:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+        </ListGroup>
       </Section>
 
       <Section
@@ -1690,6 +1962,27 @@ export default function SettingsPage() {
                 value={effective.liveGuardIntervalSeconds}
                 onChange={(e) =>
                   patch({ liveGuardIntervalSeconds: Number(e.target.value) })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="silence"
+            edited={isEdited("maxCycleSilenceMinutes")}
+            label="Silent cycle limit"
+            description="A work cycle that has printed nothing for this long is ended, so a wedged agent gives its folder and its slot back without a restart. Counted from the last line Claude Code printed, not from the start of the cycle, and one tool call can be silent for a long time"
+          >
+            <div className="w-36">
+              <Input
+                id="silence"
+                type="number"
+                min={5}
+                className="tabular-nums"
+                unit="minutes"
+                value={effective.maxCycleSilenceMinutes}
+                onChange={(e) =>
+                  patch({ maxCycleSilenceMinutes: Number(e.target.value) })
                 }
               />
             </div>
@@ -1748,6 +2041,92 @@ export default function SettingsPage() {
               checked={effective.telemetryForRuns}
               onChange={(v) => patch({ telemetryForRuns: v })}
             />
+          </SettingRow>
+        </ListGroup>
+      </Section>
+
+      <Section
+        id="storage"
+        title="Storage"
+        lede="Three stores grow with the work rather than with these settings. A run's own record — its spend, its cycles, how it ended — is never discarded; what a horizon below bounds is the evidence behind it."
+      >
+        <StorageFigures report={storage} error={storageError} />
+
+        <ListGroup
+          className="mt-4"
+          label="Retention"
+          footnote="Blank keeps everything for ever. A run that has not finished is never swept, whatever the horizon says"
+        >
+          <SettingRow
+            htmlFor="evret"
+            edited={isEdited("eventRetentionDays")}
+            label="Keep a finished run's log for"
+            description="Every tool call, every reply and every line of an agent's build output is a row. The run itself stays on the list with its spend and its stop reason — this discards the log behind it"
+          >
+            <div className="w-32">
+              <Input
+                id="evret"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="days"
+                value={numOrEmpty(effective.eventRetentionDays)}
+                onChange={(e) =>
+                  patch({
+                    eventRetentionDays:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="coret"
+            edited={isEdited("checkoutRetentionDays")}
+            label="Reclaim an idle checkout after"
+            description="A finished run's worktree, once its branch is landed or has no commits of its own. The branch and its commits stay; what goes is the directory, which git rebuilds in seconds — with the installed dependencies that are most of its size"
+          >
+            <div className="w-32">
+              <Input
+                id="coret"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="days"
+                value={numOrEmpty(effective.checkoutRetentionDays)}
+                onChange={(e) =>
+                  patch({
+                    checkoutRetentionDays:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="trret"
+            edited={isEdited("transcriptRetentionDays")}
+            label="Keep session transcripts for"
+            description="Claude Code writes one per session into your home directory, and nothing else prunes them. Pruning one ends any chance of resuming that conversation, and shortens the calendar history on the dashboard — which says which of its buckets are affected"
+          >
+            <div className="w-32">
+              <Input
+                id="trret"
+                type="number"
+                min={1}
+                className="tabular-nums"
+                unit="days"
+                value={numOrEmpty(effective.transcriptRetentionDays)}
+                onChange={(e) =>
+                  patch({
+                    transcriptRetentionDays:
+                      e.target.value === "" ? null : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
           </SettingRow>
         </ListGroup>
       </Section>

@@ -28,9 +28,10 @@ import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 const POLL_MS = 10_000;
 
 /** Who halted it, in the same words the member runs' own reasons use. */
-const CAUSE_LABEL: Record<"operator" | "guard", string> = {
+const CAUSE_LABEL: Record<"operator" | "guard" | "fleet", string> = {
   operator: "You stopped this run",
   guard: "Its budget guard stopped this run",
+  fleet: "You stopped everything in flight, this run among it",
 };
 
 type BlockStatus = WorkflowInstanceDTO["blocks"][number]["status"];
@@ -504,7 +505,7 @@ export default function WorkflowInstancePage() {
         <Hint>
           {noLimits
             ? "Nothing bounds this workflow as a whole — each block is bounded only by its own guards"
-            : "Checked before a block starts a work cycle, never during one — a block already working carries on until some block reaches a cycle boundary, so the total can overshoot by up to one work cycle per block running at the time, and blocks running at once multiply that"}
+            : "Checked before a block starts a work cycle and again as each block finishes, never during one — a block already working carries on until it or another reaches one of those boundaries, so the total can overshoot by up to one work cycle per block running at the time, and blocks running at once multiply that"}
         </Hint>
         {instance.liveRunCount > 0 && (
           <Hint>

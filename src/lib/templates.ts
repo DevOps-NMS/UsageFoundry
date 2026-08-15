@@ -35,10 +35,11 @@ import { MAX_TEMPLATE_NAME } from "./apiTypes";
  * - **The model.** `settings.defaultModel` already sets it globally and the run
  *   form does not offer it at all. Two places to set one thing is how they
  *   drift, and the second place would be the one nobody remembers to check.
- *   `agentId` below is not a second one: an agent's own `model` is the model one
- *   *delegated* turn runs on, which nothing else here can express, and it is on
- *   the agent rather than on the template for the same reason this list gives —
- *   there is one place to set it.
+ *   `agentId` below is not a second one, though the singular flag brought it
+ *   closer than it was: an agent's own `model` is now the *session's*, so what
+ *   keeps it off this list is that an explicit `--model` outranks it — measured
+ *   on the pin — which makes it a fallback for a run that named none rather than
+ *   a second place to set one.
  * - **A last-used timestamp.** Ordering is by name, so the picker reads the way
  *   a person scans it. Most-recently-used would need a write on every
  *   instantiation and a `templateId` on the run wire that exists for nothing
@@ -58,7 +59,7 @@ export interface RunTemplate {
   isolate: boolean;
   permissionMode: PermissionMode;
   /**
-   * The saved agent a run from this template may hand a subtask to, or null.
+   * The saved agent a run from this template is started as, or null.
    *
    * An id rather than a copy, unlike `runs.agent` — see the column note in
    * `db.ts`. It carries no capability with it: an agent holds no tool list and
@@ -67,7 +68,7 @@ export interface RunTemplate {
    * What it reaches is the **new-run form**, as a seed for the picker there, the
    * same treatment `mountId`/`folder` get and not the treatment the prompt and
    * the guards get. The two server-side readers of a template deliberately do
-   * not inherit it: `planProposal` takes the specialist off the proposal and
+   * not inherit it: `planProposal` takes the agent off the proposal and
    * `planNode` takes it off the node, each for its own stated reason, so a chat
    * proposal made under this template gets its prompt and its guards from here
    * and its agent from itself. Saying "it carries onto the run like the guards
@@ -276,8 +277,8 @@ export function rowToTemplate(row: TemplateRow): RunTemplate {
     // Read back as it was written, including an id whose agent has since been
     // deleted: the surfaces that instantiate this refuse such a template by
     // name, and repairing it to null here would turn that refusal into a run
-    // quietly started with no specialist. A blank column and a blank string are
-    // the same absence, which is the one thing collapsed.
+    // quietly started as nobody. A blank column and a blank string are the same
+    // absence, which is the one thing collapsed.
     agentId: (row.agent_id ?? "").trim() === "" ? null : row.agent_id,
     budget: normalizePolicy(rawBudget),
     createdAt: row.created_at,

@@ -6,6 +6,7 @@ import {
   updateTemplate,
 } from "@/lib/templates";
 import { currentAgentKnowledge } from "@/lib/agents";
+import { auditMutation } from "../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,7 +28,7 @@ export async function GET(_req: Request, ctx: Ctx) {
  * as saving one that way, and refusing it only at `POST /api/runs` would put
  * the error a week away from the edit that caused it.
  */
-export async function PUT(req: Request, ctx: Ctx) {
+async function putHandler(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
@@ -56,10 +57,15 @@ export async function PUT(req: Request, ctx: Ctx) {
  * Deleting a template affects nothing that is running. A run copies every value
  * it needs at creation, so there is no cascade and no run left dangling.
  */
-export async function DELETE(_req: Request, ctx: Ctx) {
+async function deleteHandler(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   if (!deleteTemplate(id)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
   return NextResponse.json({ ok: true });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const PUT = auditMutation(putHandler);
+/** Wrapped so the request that changed something is on the audit log. */
+export const DELETE = auditMutation(deleteHandler);

@@ -12,6 +12,7 @@ import {
 import { latestAssist, reviewPaths } from "@/lib/review";
 import { getRun } from "@/lib/orchestrator";
 import { getSettings } from "@/lib/settings";
+import { auditMutation } from "../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -73,7 +74,7 @@ export async function GET(_req: Request, ctx: Ctx) {
  * The check runs again inside `landRun` from a fresh read: the page the
  * operator pressed the button on may have been open for an hour.
  */
-export async function POST(req: Request, ctx: Ctx) {
+async function postHandler(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   if (!getRun(id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
@@ -133,3 +134,6 @@ export async function POST(req: Request, ctx: Ctx) {
         { status: 400 },
       );
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);

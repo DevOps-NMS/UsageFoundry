@@ -17,6 +17,8 @@ import {
 import { db } from "./db";
 import { chatGuards, getSettings, type RunGuards } from "./settings";
 import { assistRefusal } from "./review";
+import { installBudgetRefusal } from "./installBudget";
+import { childCredentials, chownForChild, privilegeSeparated } from "./privsep";
 import {
   createRun,
   dependencyCycle,
@@ -32,8 +34,8 @@ import {
   agentDefinition,
   agentKnowledgeOf,
   agentRefusal,
-  agentsArgs,
   getAgent,
+  sessionAgentArgs,
   type AgentDefinition,
   type RegistryAgent,
 } from "./agents";
@@ -154,12 +156,12 @@ export interface ChatProposalRow {
   /** Null when the proposal runs under `settings.chatDefaultGuards` instead. */
   template_id: string | null;
   /**
-   * The saved agent this run may hand a subtask to, by id, or null.
+   * The saved agent this run is started as, by id, or null.
    *
    * An id rather than a copy — see the column note in `db.ts` — and on the
    * *work* side of the proposal beside the task and the folder, never on the
    * guard side: an agent holds no tool list and no permission mode, so naming
-   * one decides who does a piece of the work and never what the run may do.
+   * one decides who the run *is* and never what the run may do.
    */
   agent_id: string | null;
   title: string;
@@ -351,7 +353,7 @@ export interface ProposalInput {
   kind?: ProposalKind;
   /** Null runs it under the operator's untemplated guard set. */
   templateId: string | null;
-  /** A saved agent the run may delegate to, by id. Null is the ordinary run. */
+  /** A saved agent the run is started as, by id. Null is the ordinary run. */
   agentId?: string | null;
   title: string;
   task: string;
@@ -403,7 +405,7 @@ export function createProposal(
 /* ------------------------------------------------------------------ */
 
 export type ProposalPlan =
-  | { ok: true; input: CreateRunInput }
+  | { ok: true; input: Omit<CreateRunInput, "origin"> }
   | { ok: false; reason: string };
 
 /**
@@ -428,16 +430,16 @@ export type ProposalPlan =
  * *is* the half of a run a model may write. A proposal can therefore replace
  * the template's prompt for one run, and the card says when it did.
  *
- * **The specialist is the second exception and is not one either.** A saved
- * agent is a description and a prompt: the registry refuses a tool list at the
- * door and has no column for a permission mode, so naming one is the same class
- * of act as writing the task text beside it — it decides *who* does a piece of
- * the work, and every guard below still comes from the template or from
- * settings. It is resolved by the caller for the reason the template is, so this
- * function stays pure, and a named agent that has gone is refused **by name**
- * rather than falling back to none: the operator approved the card that said
- * "and hand the review to the reviewer", and a run that silently has no
- * specialist is bit-for-bit a run that was never given one.
+ * **The agent is the second exception and is not one either.** A saved agent is
+ * a description and a prompt: the registry refuses a tool list at the door and
+ * has no column for a permission mode, so naming one is the same class of act as
+ * writing the task text beside it — it decides *who the run is*, and every guard
+ * below still comes from the template or from settings. It is resolved by the
+ * caller for the reason the template is, so this function stays pure, and a
+ * named agent that has gone is refused **by name** rather than falling back to
+ * none: the operator approved the card that said "as the reviewer", and a run
+ * that silently is not the reviewer is bit-for-bit a run that was never given
+ * one.
  */
 export function planProposal(
   proposal: Pick<
@@ -891,7 +893,16 @@ export function approveProposal(
   }
 
   try {
-    const run = createRun({ ...plan.input, dependsOn: [...dependsOn] });
+    const run = createRun({
+      ...plan.input,
+      dependsOn: [...dependsOn],
+      // The proposal rather than the chat: a thread holds many proposals and
+      // only one of them authorised this run. A plain id, so it keeps reading
+      // true after the chat — and with it, by cascade, the proposal row — has
+      // been deleted.
+      origin: "chat",
+      originRef: proposal.id,
+    });
     markProposal(id, "approved", { runId: run.id });
     return { ok: true, runId: run.id };
   } catch (err) {
@@ -1431,7 +1442,10 @@ export async function sendChatMessage(
   // already spent. A chat turn spends against the same window as everything
   // else, and unlike a run it goes through no `evaluateBudget` — there is no
   // per-chat fraction and inventing one would be a threshold nobody set.
-  const refusal = await assistRefusal();
+  // …and the install-wide ceiling, which is the one limit in this app a chat
+  // turn was never measured against at all: `chatTurnBudgetUSD` bounds *this*
+  // turn and nothing bounds the hundredth.
+  const refusal = (await assistRefusal()) ?? installBudgetRefusal();
   if (refusal) return { ok: false, reason: refusal };
 
   // From here to the spawn there is deliberately no `await`: one event-loop
@@ -1500,14 +1514,20 @@ export interface OrchestratorChildOptions {
    */
   cwd?: string;
   /**
-   * Specialised agents this turn may delegate to.
+   * The agent this turn **is**, or null.
    *
-   * Offered, never imposed — `buildArgs` says why `--agent` is not the flag
-   * used. Nothing here widens the turn's boundary: its tool surface is still
-   * whatever `/api/mcp` publishes for its subject, and a delegated turn's spend
-   * still lands inside `--max-budget-usd` below.
+   * Selected rather than offered — `sessionAgentArgs` emits the definition and
+   * picks it by name, so the saved prompt is the turn's own. Nothing here widens
+   * the turn's boundary: its tool surface is still whatever `/api/mcp` publishes
+   * for its subject, `--strict-mcp-config` and the capability token are
+   * untouched, and the spend still lands inside `--max-budget-usd` below.
+   *
+   * Only one of this function's two callers ever passes one. A workflow's
+   * orchestrator block hands over the agent its node names, which is the whole
+   * point of that field; `runTurn` withholds one, and the note there is the
+   * reason rather than an omission.
    */
-  agents?: AgentDefinition[];
+  agent?: AgentDefinition | null;
   /** `--max-budget-usd`, the only thing bounding the spend inside the CLI. */
   maxBudgetUSD: number | null;
   timeoutMs: number;
@@ -1604,9 +1624,12 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
       if (fs.existsSync(mount.path)) args.push("--add-dir", mount.path);
     }
 
-    // One encoder for all four spawn sites — every way of getting this shape
-    // wrong is silent, so there is one place that knows it.
-    args.push(...agentsArgs(o.agents ?? []));
+    // One encoder for every spawn site, so there is one place that knows the
+    // shape — silent when a member is only offered, a failed spawn when it is
+    // selected. The appended system prompt above still reaches a session started
+    // this way (measured on the pin), which is what keeps the boundary this
+    // child is bounded by in front of it.
+    args.push(...sessionAgentArgs(o.agent));
 
     if (o.resumeSessionId) args.push("--resume", o.resumeSessionId);
     if (settings.defaultModel) args.push("--model", settings.defaultModel);
@@ -1622,6 +1645,10 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
     const child = spawn(CLAUDE_BIN, args, {
       cwd: o.cwd && fs.existsSync(o.cwd) ? o.cwd : chatCwd(),
       env: chatEnv(),
+      // Dropped like every other child, and this is the one that most needs it:
+      // it runs `bypassPermissions` with no allowlist, so the only thing between
+      // it and the server's own files is that it is not the server's uid.
+      ...childCredentials(),
       stdio: ["ignore", "pipe", "pipe"],
       detached: settings.killProcessGroup && process.platform !== "win32",
     });
@@ -1653,11 +1680,7 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
       // Both of these are why the token is worth having: the credential dies
       // with the turn, and the file that carried it does not outlive it either.
       revokeCapability(token);
-      try {
-        fs.unlinkSync(configPath);
-      } catch {
-        // Already gone, or a read-only tmp. Not worth failing a turn over.
-      }
+      removeMcpConfig(configPath);
       o.onSettle(result);
     };
 
@@ -1676,44 +1699,45 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
 }
 
 /**
- * One chat turn: the shared child, wired to this chat's row.
+ * One chat turn: the shared child, wired to this chat's row — and the one caller
+ * of `runOrchestratorChild` that names no agent.
  *
- * Everything that decides what the child *is* now lives in
- * `runOrchestratorChild`; what is left here is what makes it a conversation —
- * the session to resume, the registry an operator's Stop reaches into, and the
- * row the answer lands on.
+ * Everything that decides what the child *is* lives in `runOrchestratorChild`;
+ * what is left here is what makes it a conversation — the session to resume, the
+ * registry an operator's Stop reaches into, and the row the answer lands on.
  *
- * **No `agents` is passed, and that is a decision rather than an omission.**
- * The plumbing is right there — `runOrchestratorChild` takes them, and a
- * workflow's orchestrator block hands it the one its node names — so what
- * follows is why the chat does not.
+ * **The withholding is deliberate, and the singular flag makes it more so.** The
+ * plumbing is right there: `runOrchestratorChild` takes an `agent`, and a
+ * workflow's orchestrator block hands it the one its node names.
  *
- * This is the only child in the app whose boundary is *prose*. It runs
- * `bypassPermissions` with no allowlist, so the paragraph in `systemPrompt`
- * saying look-do-not-build is the whole of what stands between an orchestrator
- * and an agent that fixes the bug it was asked to write a proposal about. That
- * paragraph travels as `--append-system-prompt`, which is the *main thread's*
- * system prompt; a `--agents` member carries a system prompt of its own for the
- * turn it is delegated, and whether the appended text reaches that turn as well
- * is **not verified against the pin**. Every other child can absorb the
- * question, because what bounds it is a permission mode and two tool lists that
- * a delegated turn plainly does inherit — this one cannot, and the safe reading
- * of an unverified inheritance is that it does not hold.
+ * While the flag was `--agents` the reason was a doubt — a member carries a
+ * system prompt of its own, and whether `--append-system-prompt` also reached
+ * the turn it was delegated was not verified against the pin, which mattered
+ * here and nowhere else because this is the only child whose boundary is
+ * *prose*. That doubt is now measured and gone: an agent told to reply with a
+ * secret word stated only in the appended text replied with it, so the appended
+ * prompt reaches a `--agent` session alongside the agent's own.
  *
- * The second half is that there is no work here for a specialist to do. A chat
- * turn looks and proposes; it produces a `chat_proposals` row and a sentence.
- * What an agent would change is how the orchestrator *thinks*, which is the one
- * thing `systemPrompt` fixes deliberately — so the feature would be a second,
- * unreviewed system prompt inside the child that has no other boundary, bought
- * for no capability the turn is missing.
+ * What replaces it is the stronger half of the same argument, and it is not a
+ * doubt. This child runs `bypassPermissions` with no allowlist, so
+ * `systemPrompt()`'s look-do-not-build paragraph is the whole of what stands
+ * between an orchestrator and an agent that fixes the bug it was asked to write
+ * a proposal about. Selecting an agent here would make some saved prompt the
+ * orchestrator's own role — reachable from a registry a chat proposal can
+ * name — which is precisely what that paragraph exists to prevent, and no
+ * measurement can make it safe.
+ *
+ * The second half is unchanged: there is no work here for one to do. A chat turn
+ * looks and proposes; it produces a `chat_proposals` row and a sentence, so what
+ * an agent would change is how the orchestrator *thinks*.
  *
  * A workflow's orchestrator block is not the counter-example it looks like: its
  * agent is one field on a graph a person saved and read as a whole, and what
  * that turn may *do* with it is bounded by `planEmission` and by guards off a
  * template rather than by prose. The `@`-mention in the composer is the answer
- * to what an operator actually wants here — it names the specialist the
- * proposed **run** carries, which is a fact about work that is approved before
- * it happens.
+ * to what an operator actually wants here — it names the agent the proposed
+ * **run** is started as, which is a fact about work that is approved before it
+ * happens.
  */
 function runTurn(chat: ChatRow, prompt: string): void {
   const settings = getSettings();
@@ -1914,6 +1938,17 @@ function finishTurn(chatId: string, r: TurnResult): void {
         .run(first.text.replace(/\s+/g, " ").slice(0, 80), chatId);
     }
   }
+
+  // This turn just gave a slot back to the process budget, and a block's
+  // deciding turn deferred by that budget is left `waiting` rather than failed —
+  // so whatever frees a slot has to wake it. `review.ts` carries the same four
+  // lines for the same reason, and for the same reason imports dynamically:
+  // `workflows.ts` imports this module.
+  void import("./workflows")
+    .then((m) => m.advanceInstances())
+    .catch(() => {
+      /* a workflow that cannot be advanced is not a reason to fail a turn */
+    });
 }
 
 /**
@@ -2008,9 +2043,9 @@ function systemPrompt(): string {
     "- list_workflows: the saved graphs the operator already has. Read it before",
     "  proposing a new one — the work may already be a workflow, and one running",
     "  now is worth mentioning rather than duplicating.",
-    "- list_agents: the saved specialists a run may hand a subtask to, and the",
-    "  agent definitions on this machine that this app did not save. The second",
-    "  group is in play for every run whatever you name and cannot be named.",
+    "- list_agents: the saved agents a run can be started AS, and the agent",
+    "  definitions on this machine that this app did not save. The second group",
+    "  is in play for every run whatever you name and cannot be named.",
     "",
     "When the operator writes @something in their message, they are naming a",
     "saved agent from that list: propose the work under it, using its agentId.",
@@ -2028,13 +2063,14 @@ function systemPrompt(): string {
     "- promptOverride replaces the template's prompt for that one run when it",
     "  does not fit. Use it rather than contradicting the template inside the",
     "  task, and say that you rewrote it.",
-    "- agentId names a saved specialist the run's Claude may hand a subtask to.",
-    "  Use it when the operator names one with @, or when a saved agent plainly",
-    "  fits the work; say which you used and why. It decides who does part of",
-    "  the work and never what the run may do — every guard is still the",
-    "  template's or the default set, so do not describe it as narrowing or",
-    "  widening anything. An agent that has been deleted is refused by name",
-    "  rather than dropped, so re-read list_agents rather than guessing an id.",
+    "- agentId names the saved agent the run is STARTED AS: that agent's prompt",
+    "  becomes the run's own, so the run does the whole job as it rather than",
+    "  handing part of the job to it. Use it when the operator names one with @,",
+    "  or when a saved agent plainly fits the work; say which you used and why.",
+    "  It decides who the run is and never what the run may do — every guard is",
+    "  still the template's or the default set, so do not describe it as",
+    "  narrowing or widening anything. An agent that has been deleted is refused",
+    "  by name rather than dropped, so re-read list_agents rather than guessing.",
     "- save_template writes a template's name and prompt back for reuse. It",
     "  cannot touch guards: creating one takes the default guard set, and",
     "  updating one keeps the guards it already has. Tell the operator to adjust",
@@ -2074,9 +2110,9 @@ function systemPrompt(): string {
     "  a graph, and the workflow is saved with no workflow-wide budget — tell the",
     "  operator to set one in the editor, because a workflow cannot be put on a",
     "  schedule without it.",
-    "- A block may name an agentId, the same specialist a proposed run may name",
-    "  and with the same effect: who does part of the work, never what the block",
-    "  may do. A merge block starts no agent, so naming one there is refused.",
+    "- A block may name an agentId, the same way a proposed run may and with the",
+    "  same effect: what that block's child is started as, never what the block",
+    "  may do. A merge block starts no child, so naming one there is refused.",
     "- Say what each block does and, for any orchestrator block, how many runs it",
     "  may start. That is the number the operator is agreeing to.",
     "",
@@ -2133,18 +2169,57 @@ function chatEnv(): NodeJS.ProcessEnv {
 }
 
 /**
+ * Where a turn's MCP config goes: a directory of its own, never a shared one.
+ *
+ * Under privilege separation this is a fixed base the *server* owns, mode 0711
+ * — traversable by a child that has been handed a path, and not listable by
+ * anything. `/tmp` was the whole of the problem: 1777 and world-readable, so
+ * `ls /tmp/uf-mcp-*.json` found a live capability without guessing the random
+ * name, and any of the twenty-five concurrent agents could run it.
+ *
+ * Without separation there is no boundary to build and no point pretending
+ * otherwise, so it falls back to `os.tmpdir()` — one uid means a sibling reads
+ * whatever this process can write, wherever it is put.
+ */
+export const MCP_CONFIG_BASE = "/run/uf-mcp";
+
+function mcpConfigBase(): string {
+  if (!privilegeSeparated()) return os.tmpdir();
+  fs.mkdirSync(MCP_CONFIG_BASE, { recursive: true, mode: 0o711 });
+  // `mkdir` masks the mode through the umask and does nothing at all when the
+  // directory already exists, so the mode is set rather than requested.
+  fs.chmodSync(MCP_CONFIG_BASE, 0o711);
+  return MCP_CONFIG_BASE;
+}
+
+/**
  * The MCP config, as a file rather than an argv string.
  *
  * `--mcp-config` takes either, and a string would put the capability token in
  * the child's command line — readable by every process on the host for as long
- * as the turn lasts. The file is written 0600 and unlinked when the turn ends.
+ * as the turn lasts. The file is written 0600, in a per-turn directory of its
+ * own, and both are removed when the turn ends.
+ *
+ * The directory is the part that is new, and 0600 is the part that started
+ * meaning something. Both are bounded by the fact that every child in this app
+ * shares one uid: the chat's own turn has to be able to *read* this file, so it
+ * has to be owned by the uid the agents run as, so a work-cycle agent that
+ * reads the path out of `/proc/<pid>/cmdline` can still open it. What is closed
+ * is the enumeration route — the directory does not list, and there is nothing
+ * of ours left in `/tmp`. Closing the rest needs the chat's child to be a
+ * different uid from a work cycle's, which needs a second Claude credential
+ * that install does not have; `docs/security.md` says so rather than implying
+ * this is airtight.
  */
-function writeMcpConfig(token: string): string {
-  const file = path.join(
-    os.tmpdir(),
-    `uf-mcp-${randomBytes(9).toString("hex")}.json`,
+export function writeMcpConfig(token: string): string {
+  const dir = path.join(
+    mcpConfigBase(),
+    `uf-mcp-${randomBytes(9).toString("hex")}`,
   );
+  const file = path.join(dir, "config.json");
   try {
+    fs.mkdirSync(dir, { recursive: false, mode: 0o700 });
+    fs.chmodSync(dir, 0o700);
     fs.writeFileSync(
       file,
       JSON.stringify({
@@ -2158,18 +2233,41 @@ function writeMcpConfig(token: string): string {
       }),
       { mode: 0o600 },
     );
+    // Written by the server, read by the child, and they are no longer the same
+    // uid. Both halves: a directory the child cannot enter is a turn with no
+    // tools at all, which reads as a model that chose not to call any.
+    chownForChild(dir);
+    chownForChild(file);
   } catch (err) {
     // A write that fails part-way — ENOSPC, the likeliest of these — leaves the
     // file behind with whatever reached the disk, and what it carries is the
-    // capability token. Nothing else would ever remove it: the unlink in `land`
+    // capability token. Nothing else would ever remove it: the cleanup in `land`
     // is inside a promise this failure never reaches.
-    try {
-      fs.unlinkSync(file);
-    } catch {
-      // Never created, or the same condition that failed the write. The
-      // original error is the one worth reporting.
-    }
+    removeMcpConfig(file);
     throw err;
   }
   return file;
+}
+
+/**
+ * Remove a turn's config and the directory that held it.
+ *
+ * Both, and in that order: the directory is per-turn, so one left behind is a
+ * slow leak in a path nothing else cleans, and `rmdir` after the unlink cannot
+ * take anything that is not ours. Never throws — this runs on the settle path
+ * of every turn, and a turn is not worth failing over a file that is already
+ * gone or a read-only `/tmp`.
+ */
+export function removeMcpConfig(file: string): void {
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    // Never created, or the same condition that failed the write.
+  }
+  try {
+    fs.rmdirSync(path.dirname(file));
+  } catch {
+    // Not empty, never created, or the tmpdir fallback's own parent — none of
+    // which is worth a word.
+  }
 }

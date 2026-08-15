@@ -3,11 +3,15 @@ import type { IconName } from "@/components/ui/Icon";
 /**
  * The app's destinations, once.
  *
- * The source list draws them, the toolbar titles itself from them, ⌘1…⌘7
+ * The source list draws them, the toolbar titles itself from them, ⌘1…⌘8
  * navigates to them and quick open searches them. Four readers is why this is
  * a module rather than an array inside the sidebar: a pane added in one of
  * them and missed in the others is a pane you can reach and cannot get back
  * from, or a shortcut that lands somewhere the list does not highlight.
+ *
+ * The digit follows the row's position rather than the pane's age: a shortcut
+ * that names the fifth row and lands on the sixth is worse than one somebody
+ * has to relearn, so inserting a pane renumbers the ones under it.
  */
 export interface Pane {
   href: string;
@@ -22,9 +26,10 @@ export const PANES: readonly Pane[] = [
   { href: "/chat", label: "Orchestrator", icon: "chat", shortcut: "2" },
   { href: "/runs", label: "Runs", icon: "runs", shortcut: "3" },
   { href: "/workflows", label: "Workflows", icon: "workflows", shortcut: "4" },
-  { href: "/branches", label: "Branches", icon: "branches", shortcut: "5" },
-  { href: "/account", label: "API account", icon: "account", shortcut: "6" },
-  { href: "/settings", label: "Settings", icon: "settings", shortcut: "7" },
+  { href: "/agents", label: "Agents", icon: "agents", shortcut: "5" },
+  { href: "/branches", label: "Branches", icon: "branches", shortcut: "6" },
+  { href: "/account", label: "API account", icon: "account", shortcut: "7" },
+  { href: "/settings", label: "Settings", icon: "settings", shortcut: "8" },
 ];
 
 /**

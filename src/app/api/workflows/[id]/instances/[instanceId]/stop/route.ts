@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getInstance, stopInstance } from "@/lib/workflows";
 import { instanceDTO } from "../../../../dto";
+import { auditMutation } from "../../../../../../../lib/requestLog";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +26,7 @@ type Ctx = { params: Promise<{ id: string; instanceId: string }> };
  * instance is stopping, which is what was asked for — and answering 400 would
  * make a Stop button look broken at exactly the moment it worked.
  */
-export async function POST(_req: Request, ctx: Ctx) {
+async function postHandler(_req: Request, ctx: Ctx) {
   const { id, instanceId } = await ctx.params;
 
   const instance = getInstance(instanceId);
@@ -45,3 +46,6 @@ export async function POST(_req: Request, ctx: Ctx) {
     instance: instanceDTO(getInstance(instanceId)!),
   });
 }
+
+/** Wrapped so the request that changed something is on the audit log. */
+export const POST = auditMutation(postHandler);
