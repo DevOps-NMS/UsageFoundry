@@ -591,7 +591,7 @@ export default function Dashboard() {
 
         {/* One block, so the footnotes read as a group belonging to the meter
             rather than as three unrelated remarks stacked under it. */}
-        <div className="mt-3 space-y-1 text-xs text-ink-muted">
+        <div className="mt-3 max-w-[68ch] space-y-1 text-xs text-ink-muted">
           {s.session.tokenFraction !== null &&
             s.session.fractionMetric === "cost" && (
               <div className="tabular-nums">
@@ -677,7 +677,7 @@ export default function Dashboard() {
             )}
           />
 
-          <div className="mt-3 space-y-1 text-xs text-ink-muted">
+          <div className="mt-3 max-w-[68ch] space-y-1 text-xs text-ink-muted">
             {s.weekly.tokenFraction !== null &&
               s.weekly.fractionMetric === "cost" && (
                 <div className="tabular-nums">

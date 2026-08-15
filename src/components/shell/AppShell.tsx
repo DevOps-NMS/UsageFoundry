@@ -170,10 +170,16 @@ function AuthDisabledBanner() {
       role="alert"
       className="shrink-0 border-b border-danger-line bg-inset px-4 py-1.5 text-xs leading-normal text-ink-muted sm:px-5"
     >
-      <span className="font-semibold text-danger">Authentication is off.</span>{" "}
-      Anyone who can reach this port can start billed agents and write to every
-      mounted repository. Set <span className="mono">UF_AUTH_TOKEN</span> in{" "}
-      <span className="mono">.env</span> and restart.
+      {/* The bar is full-bleed and the sentence is not, for `Notice`'s reason:
+          the rule under it is what makes this read as a bar, and the words are
+          prose. Uncapped they ran the width of the monitor. */}
+      <div className="max-w-[110ch]">
+        <span className="font-semibold text-danger">Authentication is off.</span>{" "}
+        Anyone who can reach this port can start billed agents and write to
+        every mounted repository. Set{" "}
+        <span className="mono">UF_AUTH_TOKEN</span> in{" "}
+        <span className="mono">.env</span> and restart.
+      </div>
     </div>
   );
 }

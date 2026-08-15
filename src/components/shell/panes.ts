@@ -77,6 +77,14 @@ export function toolbarTitle(pathname: string): string {
  * it would be the shell reaching into a body it is not allowed to touch. So a
  * page whose primary action is not a link simply has none up here, and keeps
  * the button it already has.
+ *
+ * The second half of that sentence is also the rule for a page whose action
+ * *is* a link: `/runs` and `/workflows` both head themselves with the same
+ * primary button this would draw, and both were rendering it twice, 62px
+ * apart, the toolbar's secondary copy stuttering directly above the page's own
+ * accent one. Whichever surface offers an action, only one of them does. The
+ * dashboard keeps this because the dashboard has no such button of its own,
+ * which is exactly the case this exists for.
  */
 export interface ToolbarAction {
   href: string;
@@ -84,11 +92,6 @@ export interface ToolbarAction {
 }
 
 export function toolbarAction(pathname: string): ToolbarAction | null {
-  if (pathname === "/" || pathname === "/runs") {
-    return { href: "/runs/new", label: "New run" };
-  }
-  if (pathname === "/workflows") {
-    return { href: "/workflows/new", label: "New workflow" };
-  }
+  if (pathname === "/") return { href: "/runs/new", label: "New run" };
   return null;
 }

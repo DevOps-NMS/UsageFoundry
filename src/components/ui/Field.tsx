@@ -246,7 +246,14 @@ export function Textarea({
       disabled={bits.disabled}
       aria-describedby={bits.describedBy}
       aria-invalid={bits.ariaInvalid}
-      className={`w-full ${CONTROL_BASE} ${CONTROL_BLOCK} ${bits.border} min-h-[90px] resize-y font-mono text-sm ${className}`}
+      // `max-w` rather than a width, so the note above still holds — this
+      // narrows and never fights `w-full`. The pane fills the window by
+      // design, so the prompt editors on the settings page and the task box on
+      // the run form were monospace boxes 340 columns across on a 2560px
+      // display: a line of a prompt ran off the edge of what anyone reads,
+      // and the resize handle was the only way back. 100 columns is the
+      // measure the text in them is written to.
+      className={`w-full max-w-[100ch] ${CONTROL_BASE} ${CONTROL_BLOCK} ${bits.border} min-h-[90px] resize-y font-mono text-sm ${className}`}
     />
   );
 }

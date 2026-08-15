@@ -7,7 +7,8 @@ import { after, before, describe, it } from "node:test";
 import type Database from "better-sqlite3";
 
 /**
- * Covers what `queueView` puts in front of the operator, and only that.
+ * Covers what the merge-queue card puts in front of the operator, and only that
+ * — `queueView` for the panel and `queueHistory` for the disclosure under it.
  *
  * `selectQueueBatches` is the rule and is tested pure in `mergeQueue.test.ts`.
  * This is the other half, and it is the half that was wrong: the query never
@@ -63,6 +64,13 @@ before(async () => {
       rows.run(`${batchId}-row-${i}`, batchId, runId, i, status, when);
     });
 
+  // Three finished batches older than either of those, which is what the
+  // history disclosure exists for: they used to be on the card for as long as
+  // they were in the newest three, and then gone from the app entirely.
+  at("done-ancient", 50, ["landed"]);
+  at("done-oldest", 100, ["landed", "landed"]);
+  at("done-newer", 200, ["landed", "failed"]);
+
   at("web", 1_000, ["landed", "landing", "queued", "queued"]);
   at("billing", 2_000, ["queued", "queued", "queued"]);
 });
@@ -75,18 +83,25 @@ after(() => {
 describe("the merge queue view", () => {
   it("covers a batch still working under a newer one, oldest first", () => {
     const view = queue.queueView();
+    // Both unfinished batches, however old — the worker drains the whole table,
+    // so one it is still merging must be on the panel without anybody opening a
+    // disclosure. Plus `done-newer`, which is the last thing that finished: this
+    // is the two-repositories case the tail exists for, where one repository's
+    // report of what landed would otherwise go the moment the next press of Land
+    // arrived. `done-oldest` is the history's.
     assert.deepEqual(
       view.map((b) => b.batchId),
-      ["web", "billing"],
+      ["done-newer", "web", "billing"],
     );
     // Whole, landed rows included: "1 landed · 2 waiting" is a sentence about a
     // batch, and a batch trimmed to its unfinished rows reads as one that had
     // not started.
+    const web = view.find((b) => b.batchId === "web");
     assert.deepEqual(
-      view[0].rows.map((r) => r.status),
+      web?.rows.map((r) => r.status),
       ["landed", "landing", "queued", "queued"],
     );
-    assert.equal(view[0].createdAt, 1_000);
+    assert.equal(web?.createdAt, 1_000);
   });
 
   it("hands every unfinished row to the page, across batches", () => {
@@ -95,6 +110,46 @@ describe("the merge queue view", () => {
       .flatMap((b) => b.rows)
       .filter((r) => queue.isQueueActive(r.status));
     assert.equal(active.length, 6);
+  });
+
+  it("counts the earlier batches without reading a row of them", () => {
+    // What the closed disclosure is labelled with. The card polls every three
+    // seconds while the worker runs, so this is the case that has to stay cheap
+    // — and it still has to be a true count, or a history that had not loaded
+    // would read as an install that has only ever pressed Land twice.
+    const history = queue.queueHistory(false);
+    assert.equal(history.total, 2);
+    assert.deepEqual(history.batches, []);
+  });
+
+  it("hands the earlier batches over whole, newest first, when they are asked for", () => {
+    const history = queue.queueHistory(true);
+    assert.deepEqual(
+      history.batches.map((b) => b.batchId),
+      ["done-oldest", "done-ancient"],
+    );
+    // Whole, and in the operator's own order within the batch — a past press of
+    // Land reads exactly as it did while it was running.
+    assert.deepEqual(
+      history.batches[0].rows.map((r) => r.status),
+      ["landed", "landed"],
+    );
+    assert.equal(history.batches[0].createdAt, 100);
+  });
+
+  it("puts every batch in exactly one of the two lists", () => {
+    // The pair is one decision read from both ends. A batch in neither is a
+    // press of Land with no record anywhere in the app; in both, it is the same
+    // rows twice on one card. Both are silent.
+    const shown = queue.queueView().map((b) => b.batchId);
+    const hidden = queue.queueHistory(true).batches.map((b) => b.batchId);
+    assert.deepEqual([...shown, ...hidden].sort(), [
+      "billing",
+      "done-ancient",
+      "done-newer",
+      "done-oldest",
+      "web",
+    ]);
   });
 
   it("lets Cancel reach a batch that is not the newest, and leaves the merge in flight alone", () => {

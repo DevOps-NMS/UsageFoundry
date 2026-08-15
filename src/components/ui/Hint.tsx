@@ -11,6 +11,12 @@ import type { HTMLAttributes, ReactNode } from "react";
  *
  * It stays one size below body text and never bold: a hint that reads as
  * loudly as the thing it is annotating is a hint the eye stops on twice.
+ *
+ * And it carries a measure, the same 68ch `ListRow`'s description already had.
+ * The pane fills the window by design, so an uncapped hint is as wide as the
+ * monitor — 370 characters a line on a 2560px display, which is the same note
+ * the row one card over sets at 68. A max-width can only ever narrow, so this
+ * changes nothing wherever the field is already in a column.
  */
 export type HintTone = "neutral" | "warn" | "danger";
 
@@ -35,7 +41,7 @@ export function Hint({
   return (
     <div
       {...rest}
-      className={`mt-1.5 text-xs leading-snug ${TONE[tone]} ${className}`}
+      className={`mt-1.5 max-w-[68ch] text-xs leading-snug ${TONE[tone]} ${className}`}
     >
       {children}
     </div>

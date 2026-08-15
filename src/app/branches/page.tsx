@@ -26,7 +26,7 @@ import {
 import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
-import { Card, CardTitle, Empty } from "@/components/ui/Card";
+import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
 import { Spinner } from "@/components/ui/Log";
 import { Select, Toggle } from "@/components/ui/Field";
@@ -338,7 +338,74 @@ function aheadByItem(batches: MergeQueueBatchDTO[]): Map<string, number> {
 }
 
 /**
- * The queue, one group per press of Land.
+ * One press of Land: when it was queued, what it is doing, and the button that
+ * stops it.
+ *
+ * Shared by the panel and the history below it so a past batch reads exactly
+ * like a present one — the difference between the two is which list it is in,
+ * not how it is drawn. `onCancel` is absent for a finished batch because there
+ * is nothing left in it to cancel, which is also why the history never needs
+ * `aheadByItem`: nothing in it is waiting behind anything.
+ */
+function QueueBatchSection({
+  batch,
+  ahead,
+  summary = true,
+  onCancel,
+  busy = false,
+}: {
+  batch: MergeQueueBatchDTO;
+  ahead?: Map<string, number>;
+  /**
+   * Off where the card's own line above already says it. That line covers every
+   * batch on the panel, so with one batch there the two are the same sentence
+   * twice, six pixels apart.
+   */
+  summary?: boolean;
+  onCancel?: (batchId: string) => void;
+  busy?: boolean;
+}) {
+  const waiting = batch.items.filter((i) => i.status === "queued").length;
+  return (
+    <section className="border-t border-line pt-3 first:border-0 first:pt-0">
+      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="text-xs text-ink-muted">
+          Queued {fmtDateTime(batch.createdAt)}
+        </span>
+        {summary && (
+          <span className="text-xs text-ink-faint">
+            {queueSummary(batch.items)}
+          </span>
+        )}
+        {onCancel && waiting > 0 && (
+          <Button
+            variant="ghost"
+            className="ml-auto min-w-[144px]"
+            onClick={() => onCancel(batch.batchId)}
+            disabled={busy}
+          >
+            Cancel {waiting} waiting
+          </Button>
+        )}
+      </div>
+
+      <ol>
+        {batch.items.map((item, i) => (
+          <QueueStep
+            key={item.id}
+            item={item}
+            ahead={ahead?.get(item.id) ?? 0}
+            last={i === batch.items.length - 1}
+          />
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+/**
+ * The queue, one group per press of Land — and the earlier presses behind a
+ * disclosure.
  *
  * Grouped rather than run together because Cancel is per batch — `cancelBatch`
  * is scoped by `batch_id`, and a button that stopped some other press of Land's
@@ -346,13 +413,30 @@ function aheadByItem(batches: MergeQueueBatchDTO[]): Map<string, number> {
  * summary above the groups is the whole queue's, since that is the number the
  * operator is actually waiting on; each group carries only what identifies it
  * and the button that stops it.
+ *
+ * **What is open and what is closed is a safety rule, not a preference.** The
+ * card carried every outstanding batch plus the last three that finished, and a
+ * batch is as many rows as branches were selected — thirty rows of finished work
+ * standing over the branch table on a live install, permanently, and the fourth
+ * batch back gone for good. So the finished ones moved behind `<details>`. What
+ * did *not* move is every batch the worker still owes an answer for: it drains
+ * the whole table rather than one batch, so one it is still merging must be on
+ * screen without anybody opening anything — that is `selectQueueBatches`' whole
+ * reason to exist, and putting it one press away would be the same defect with a
+ * disclosure in front of it.
  */
 function QueuePanel({
   queue,
+  history,
+  historyOpen,
+  onToggleHistory,
   onCancel,
   busy,
 }: {
   queue: MergeQueueDTO;
+  history: MergeQueueBatchDTO[] | null;
+  historyOpen: boolean;
+  onToggleHistory: (open: boolean) => void;
   onCancel: (batchId: string) => void;
   busy: boolean;
 }) {
@@ -360,6 +444,7 @@ function QueuePanel({
   const spent = items.reduce((n, i) => n + i.resolveCostUSD, 0);
   const active = items.some((i) => ITEM_ACTIVE.includes(i.status));
   const ahead = aheadByItem(queue.batches);
+  const notListed = history ? queue.historyCount - history.length : 0;
 
   return (
     <Card className="mb-4">
@@ -382,42 +467,49 @@ function QueuePanel({
         )}
       </p>
 
-      {queue.batches.map((batch) => {
-        const waiting = batch.items.filter((i) => i.status === "queued").length;
-        return (
-          <section
-            key={batch.batchId}
-            className="border-t border-line pt-3 first:border-0 first:pt-0"
-          >
-            <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-              <span className="text-xs text-ink-muted">
-                Queued {fmtDateTime(batch.createdAt)}
-              </span>
-              {waiting > 0 && (
-                <Button
-                  variant="ghost"
-                  className="ml-auto min-w-[144px]"
-                  onClick={() => onCancel(batch.batchId)}
-                  disabled={busy}
-                >
-                  Cancel {waiting} waiting
-                </Button>
-              )}
-            </div>
+      {queue.batches.map((batch) => (
+        <QueueBatchSection
+          key={batch.batchId}
+          batch={batch}
+          ahead={ahead}
+          summary={queue.batches.length > 1}
+          onCancel={onCancel}
+          busy={busy}
+        />
+      ))}
 
-            <ol>
-              {batch.items.map((item, i) => (
-                <QueueStep
-                  key={item.id}
-                  item={item}
-                  ahead={ahead.get(item.id) ?? 0}
-                  last={i === batch.items.length - 1}
-                />
-              ))}
-            </ol>
-          </section>
-        );
-      })}
+      {queue.historyCount > 0 && (
+        <details
+          className="mt-3 border-t border-line pt-3"
+          open={historyOpen}
+          onToggle={(e) => onToggleHistory(e.currentTarget.open)}
+        >
+          <summary className="ui-transition cursor-pointer text-sm text-ink-muted marker:text-ink-faint hover:text-ink">
+            {queue.historyCount === 1
+              ? "1 earlier press of Land"
+              : `${queue.historyCount} earlier presses of Land`}
+          </summary>
+
+          {/* Newest first here and drain order above: what is at the top of the
+              panel is what lands next, and nothing in this list is going to
+              land. */}
+          <div className="mt-3">
+            {history === null ? (
+              <SkeletonText lines={2} />
+            ) : (
+              history.map((batch) => (
+                <QueueBatchSection key={batch.batchId} batch={batch} />
+              ))
+            )}
+            {notListed > 0 && (
+              <p className="mt-3 text-xs text-ink-faint">
+                {notListed} older {notListed === 1 ? "batch is" : "batches are"}{" "}
+                recorded and not listed here.
+              </p>
+            )}
+          </div>
+        </details>
+      )}
     </Card>
   );
 }
@@ -574,6 +666,13 @@ export default function Branches() {
   const [queue, setQueue] = useState<MergeQueueDTO | null>(null);
   const [queueBusy, setQueueBusy] = useState(false);
 
+  // Held apart from `queue` rather than read off it, because the queue is
+  // re-fetched every three seconds while the worker is running and that answer
+  // deliberately carries no history: folded in, every poll would blank an open
+  // disclosure and it would flicker back a request later.
+  const [history, setHistory] = useState<MergeQueueBatchDTO[] | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+
   // Which slice of the inventory is being asked for. Held here rather than read
   // back off the answer so pressing Next twice in a row is two pages forward
   // and not two requests for the same one.
@@ -637,6 +736,27 @@ export default function Branches() {
     }
   }, []);
 
+  /**
+   * The earlier presses of Land, read only while somebody is looking at them.
+   *
+   * A read failure here is deliberately *not* `setReadError`: that banner says
+   * the page's own state may be stale, and this list is a log of merges that
+   * already happened. Reporting it there would put a warning about the live
+   * queue on screen because a history nobody is waiting on did not arrive.
+   */
+  const loadHistory = useCallback(async () => {
+    try {
+      const res = await fetch("/api/branches/queue?history=1", {
+        cache: "no-store",
+      });
+      const json = (await res.json().catch(() => ({}))) as Partial<MergeQueueDTO>;
+      if (res.ok && json.history) setHistory(json.history);
+    } catch {
+      // Leaves the skeleton standing rather than claiming there is nothing
+      // earlier. Opening the disclosure again asks for it again.
+    }
+  }, []);
+
   // Two effects rather than one: `load` changes identity whenever the filter or
   // the page does, and re-reading the queue for a page change would poll a route
   // this page is deliberately careful about.
@@ -647,6 +767,14 @@ export default function Branches() {
   useEffect(() => {
     void loadQueue();
   }, [loadQueue]);
+
+  // Keyed on the count as well as the switch, so a batch that finishes while the
+  // disclosure is open moves into the list it now belongs to instead of being
+  // in neither until somebody closes and reopens it.
+  useEffect(() => {
+    if (!historyOpen) return;
+    void loadHistory();
+  }, [historyOpen, queue?.historyCount, loadHistory]);
 
   const queueItems = useMemo(
     () => (queue?.batches ?? []).flatMap((b) => b.items),
@@ -798,7 +926,14 @@ export default function Branches() {
       </div>
 
       {queue && queue.batches.length > 0 && (
-        <QueuePanel queue={queue} onCancel={cancelQueue} busy={queueBusy} />
+        <QueuePanel
+          queue={queue}
+          history={history}
+          historyOpen={historyOpen}
+          onToggleHistory={setHistoryOpen}
+          onCancel={cancelQueue}
+          busy={queueBusy}
+        />
       )}
 
       {/* Above the table rather than in it: a repository with no slot left

@@ -1023,8 +1023,14 @@ export default function SettingsPage() {
       <h1 className="mb-2 text-xl font-semibold tracking-tight">Settings</h1>
 
       {/* Presence, never content: the API answers with booleans for the admin
-          key and the GitHub token, and nothing here asks for the values. */}
-      <dl className="mb-5 grid max-w-[70ch] gap-x-8 gap-y-1.5 text-xs sm:grid-cols-2">
+          key and the GitHub token, and nothing here asks for the values.
+
+          The measure is stated per *column* rather than for the box: 70ch is
+          one readable line, and at `sm` this is two columns each carrying a
+          96px label beside its value, so the same figure left 152px for the
+          value and broke "the API / account page stays / empty" over three
+          lines with 1700px of empty pane beside it. */}
+      <dl className="mb-5 grid max-w-[70ch] gap-x-8 gap-y-1.5 text-xs sm:max-w-[104ch] sm:grid-cols-2">
         <EnvRow label="Transcripts">
           <span className="mono">{String(env.claudeHome ?? "—")}</span>
         </EnvRow>
@@ -1541,7 +1547,7 @@ export default function SettingsPage() {
               </Table>
             </TableWrap>
 
-            <dl className="mt-3.5 grid max-w-[70ch] gap-x-8 gap-y-1.5 text-xs sm:grid-cols-2">
+            <dl className="mt-3.5 grid max-w-[70ch] gap-x-8 gap-y-1.5 text-xs sm:max-w-[104ch] sm:grid-cols-2">
               <EnvRow label="History">
                 <span className="tabular-nums">
                   {evCount("historyDays", "days")}

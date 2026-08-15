@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   isQueueActive,
   planItem,
+  selectHistoryBatches,
   selectQueueBatches,
   type BatchSummary,
   type QueueStatus,
@@ -275,5 +276,71 @@ describe("selectQueueBatches", () => {
       ids(selectQueueBatches([batch("a", 1, ["cancelled", "skipped"])], 0)),
       [],
     );
+  });
+});
+
+/**
+ * The other end of the same decision.
+ *
+ * `selectQueueBatches` says what the panel opens on; this says what is behind
+ * the disclosure under it, and the pair has to *partition* the finished batches.
+ * A batch in neither is a press of Land with no record anywhere in the app —
+ * silent, because the panel renders whatever list it is handed and says nothing
+ * about what is missing, and the operator's only sign of it is a merge commit in
+ * a directory they own. A batch in both is the same rows twice on one card.
+ */
+describe("selectHistoryBatches", () => {
+  it("holds the finished batches the panel drops, newest first", () => {
+    const all = [
+      batch("oldest", 1_000, ["landed"]),
+      batch("middle", 2_000, ["failed"]),
+      batch("newest", 3_000, ["landed"]),
+    ];
+    assert.deepEqual(ids(selectQueueBatches(all, 1)), ["newest"]);
+    assert.deepEqual(ids(selectHistoryBatches(all, 1)), ["middle", "oldest"]);
+  });
+
+  it("never holds an unfinished batch, however old it is", () => {
+    // The one that must not be behind a disclosure: the worker drains the whole
+    // table, so this batch is still merging into somebody's checkout. It belongs
+    // on the panel by `selectQueueBatches`' rule and nowhere else.
+    const all = [
+      batch("ancient", 1_000, ["queued", "queued"]),
+      batch("recent", 2_000, ["landed"]),
+    ];
+    assert.deepEqual(ids(selectQueueBatches(all, 1)), ["ancient", "recent"]);
+    assert.deepEqual(ids(selectHistoryBatches(all, 1)), []);
+  });
+
+  it("partitions every batch between the two lists", () => {
+    const all = [
+      batch("a", 1_000, ["landed"]),
+      batch("b", 2_000, ["queued"]),
+      batch("c", 3_000, ["cancelled"]),
+      batch("d", 4_000, ["landing", "queued"]),
+      batch("e", 5_000, ["failed", "landed"]),
+    ];
+    for (const tail of [0, 1, 2, 9]) {
+      const shown = ids(selectQueueBatches(all, tail));
+      const hidden = ids(selectHistoryBatches(all, tail));
+      assert.deepEqual(
+        [...shown, ...hidden].sort(),
+        ids(all).sort(),
+        `tail ${tail} lost or duplicated a batch`,
+      );
+      assert.equal(
+        new Set([...shown, ...hidden]).size,
+        all.length,
+        `tail ${tail} put a batch in both lists`,
+      );
+    }
+  });
+
+  it("is total on the edges", () => {
+    assert.deepEqual(selectHistoryBatches([], 1), []);
+    // Everything finished is on the panel, so there is nothing earlier to show.
+    assert.deepEqual(ids(selectHistoryBatches([batch("a", 1, ["landed"])], 9)), []);
+    // A tail of nothing puts every finished batch here.
+    assert.deepEqual(ids(selectHistoryBatches([batch("a", 1, ["landed"])], 0)), ["a"]);
   });
 });

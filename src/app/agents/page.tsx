@@ -345,10 +345,18 @@ export default function AgentsPage() {
                   return (
                     <Tr key={agent.id}>
                       <Td className="align-top">
+                        {/* `whitespace-nowrap` because the column is sized to
+                            its content and a hyphen is a break opportunity:
+                            `ts-coder` came apart as "ts-" over "coder" where
+                            `typescript` two tables down, having no hyphen in
+                            it, did not. Agent names are hyphenated by
+                            convention, so this is the ordinary case rather
+                            than an odd one, and a name is the handle the
+                            operator picks the agent by. */}
                         <button
                           type="button"
                           onClick={() => openEdit(agent)}
-                          className="cursor-pointer text-left font-medium text-ink hover:text-accent"
+                          className="cursor-pointer whitespace-nowrap text-left font-medium text-ink hover:text-accent"
                         >
                           {agent.name}
                         </button>

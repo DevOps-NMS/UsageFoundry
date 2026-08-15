@@ -193,13 +193,36 @@ export interface BatchSummary {
 /**
  * How many finished batches stay on the page once nothing in them is outstanding.
  *
- * The page used to show exactly one — the newest — which is both too few and the
- * wrong one: queue a second repository's branches and the first repository's
- * report of what landed went with it. Three is a working session's worth of
- * "how did each of those go" without turning the panel into a log of every merge
- * this install has ever made.
+ * One, and the number is only defensible because the ones it drops are now
+ * *reachable*. It was three, and three was chosen when a finished batch that
+ * left this answer left the app entirely: the page had shown exactly one — the
+ * newest — so queueing a second repository's branches took the first
+ * repository's report of what landed with it, and a short tail was the cheapest
+ * way to stop that. The tail was never the point, though; it only moved the
+ * cliff. A batch is as many rows as branches were selected, so three of them is
+ * routinely thirty rows of finished work standing permanently above the branch
+ * table (measured on a live install: 1 + 10 + 21), and the fourth batch back
+ * was still gone for good.
+ *
+ * `selectHistoryBatches` is the other half and is what makes one enough: every
+ * finished batch this drops is behind a disclosure on the same card rather than
+ * discarded. The panel opens on what is happening now — every outstanding batch,
+ * whatever else is queued, plus the last thing that finished — and the log of
+ * how each earlier press of Land went is one press away.
  */
-const FINISHED_TAIL = 3;
+const FINISHED_TAIL = 1;
+
+/**
+ * How far back the history disclosure reads.
+ *
+ * `merge_queue` gains a row per branch ever queued and nothing prunes it, so the
+ * *rows* have to be bounded somewhere or opening this reads the whole table.
+ * The summaries do not: they are one `GROUP BY` that carries no row payload,
+ * which is what lets the card state how many earlier batches exist even when it
+ * has only read twenty of them. Twenty is a working month rather than a working
+ * session — this is the log, so it should reach past the tail the panel drops.
+ */
+const MAX_HISTORY_BATCHES = 20;
 
 /**
  * Which batches the queue view covers, oldest first.
@@ -231,18 +254,56 @@ export function selectQueueBatches(
   batches: readonly BatchSummary[],
   finishedTail: number,
 ): BatchSummary[] {
-  const ordered = [...batches].sort(
+  const ordered = orderBatches(batches);
+  const tail = tailIds(ordered, finishedTail);
+  return ordered.filter((b) => b.unfinished || tail.has(b.batchId));
+}
+
+/**
+ * The finished batches `selectQueueBatches` leaves out, newest first.
+ *
+ * The two are one decision read from both ends, which is why they share
+ * `orderBatches` and `tailIds` rather than each deciding for itself what the
+ * tail is: a batch that fell out of one and did not appear in the other would
+ * be a press of Land with no record anywhere in the app, and the operator's
+ * only sign of it would be a merge commit in a directory they own.
+ *
+ * An **unfinished** batch is never here, however old it is. It is on the panel
+ * by `selectQueueBatches`' rule, and the disclosure below it is closed by
+ * default — a batch still merging into somebody's checkout must not be
+ * something they have to open a history to find.
+ *
+ * Newest first, which is the one place this app orders batches that way and it
+ * is deliberate: the panel above is drain order, because what is at the top is
+ * what lands next, and nothing here is going to drain. Reading a log oldest
+ * first means scrolling past a month to reach yesterday.
+ */
+export function selectHistoryBatches(
+  batches: readonly BatchSummary[],
+  finishedTail: number,
+): BatchSummary[] {
+  const ordered = orderBatches(batches);
+  const tail = tailIds(ordered, finishedTail);
+  return ordered
+    .filter((b) => !b.unfinished && !tail.has(b.batchId))
+    .reverse();
+}
+
+/** Oldest first, `batch_id` breaking a shared instant. */
+function orderBatches(batches: readonly BatchSummary[]): BatchSummary[] {
+  return [...batches].sort(
     (a, b) =>
       a.createdAt - b.createdAt ||
       (a.batchId < b.batchId ? -1 : a.batchId > b.batchId ? 1 : 0),
   );
+}
+
+/** The ids of the newest `n` finished batches, given an ordered list. */
+function tailIds(ordered: BatchSummary[], n: number): Set<string> {
   const finished = ordered.filter((b) => !b.unfinished);
-  const tail = new Set(
-    finished
-      .slice(Math.max(0, finished.length - Math.max(0, finishedTail)))
-      .map((b) => b.batchId),
+  return new Set(
+    finished.slice(Math.max(0, finished.length - Math.max(0, n))).map((b) => b.batchId),
   );
-  return ordered.filter((b) => b.unfinished || tail.has(b.batchId));
 }
 
 /* ------------------------------------------------------------------ */
@@ -263,16 +324,17 @@ export interface QueueBatch {
 }
 
 /**
- * What the page shows: every outstanding batch, and a short tail of finished ones.
+ * One summary per batch: when it was queued, and whether the worker still owes
+ * it an answer.
  *
- * The summaries are read first and the rows only for the batches that survive
- * `selectQueueBatches`, so nothing here reads a table that grows by one row per
- * branch ever landed. The status test is built from `ACTIVE` rather than spelled
- * out, so "unfinished" means here what `isQueueActive` means everywhere else.
+ * The one scan both readers below share. It carries no row payload, which is
+ * what lets the card state how many earlier batches exist without reading any
+ * of them. The status test is built from `ACTIVE` rather than spelled out, so
+ * "unfinished" means here what `isQueueActive` means everywhere else.
  */
-export function queueView(): QueueBatch[] {
+function batchSummaries(): BatchSummary[] {
   const marks = ACTIVE.map(() => "?").join(",");
-  const summaries = (
+  return (
     db()
       .prepare(
         `SELECT batch_id AS batchId, MIN(created_at) AS createdAt,
@@ -281,10 +343,17 @@ export function queueView(): QueueBatch[] {
       )
       .all(...ACTIVE) as { batchId: string; createdAt: number; unfinished: number }[]
   ).map((s) => ({ ...s, unfinished: s.unfinished === 1 }));
+}
 
-  const chosen = selectQueueBatches(summaries, FINISHED_TAIL);
+/**
+ * The rows of the given batches, keeping the order they were handed in.
+ *
+ * The batch order is the caller's — drain order for the panel, newest first for
+ * the history — and `position` is the operator's own order *within* a batch,
+ * which is the one thing neither caller may reorder.
+ */
+function rowsFor(chosen: BatchSummary[]): QueueBatch[] {
   if (chosen.length === 0) return [];
-
   const rows = db()
     .prepare(
       `SELECT * FROM merge_queue WHERE batch_id IN (${chosen.map(() => "?").join(",")})
@@ -299,6 +368,46 @@ export function queueView(): QueueBatch[] {
     createdAt: b.createdAt,
     rows: byBatch.get(b.batchId) ?? [],
   }));
+}
+
+/**
+ * What the panel shows: every outstanding batch, and the last one that finished.
+ *
+ * The summaries are read first and the rows only for the batches that survive
+ * `selectQueueBatches`, so nothing here reads a table that grows by one row per
+ * branch ever landed.
+ */
+export function queueView(): QueueBatch[] {
+  return rowsFor(selectQueueBatches(batchSummaries(), FINISHED_TAIL));
+}
+
+/** The earlier presses of Land, and how many of them there are. */
+export interface QueueHistory {
+  /** Newest first, and empty unless the rows were asked for. */
+  batches: QueueBatch[];
+  /** How many earlier batches exist, whether or not their rows were read. */
+  total: number;
+}
+
+/**
+ * The finished batches the panel is not showing.
+ *
+ * `withRows` is the whole reason this is one function rather than two: the count
+ * is what the closed disclosure needs and it costs one `GROUP BY`, where the
+ * rows are what the open one needs and cost a read bounded by
+ * `MAX_HISTORY_BATCHES`. The card polls every three seconds while the queue is
+ * working, so the closed case has to stay the cheap one.
+ *
+ * `total` counts every earlier batch and not only the ones read, because a
+ * history that silently stopped at twenty would read exactly like an install
+ * that had only ever pressed Land twenty times.
+ */
+export function queueHistory(withRows: boolean): QueueHistory {
+  const older = selectHistoryBatches(batchSummaries(), FINISHED_TAIL);
+  return {
+    batches: withRows ? rowsFor(older.slice(0, MAX_HISTORY_BATCHES)) : [],
+    total: older.length,
+  };
 }
 
 /** Run ids with a row the worker still expects to touch. */

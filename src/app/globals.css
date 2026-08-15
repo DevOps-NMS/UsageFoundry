@@ -641,16 +641,19 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--accent);
 }
 
-button {
-  background: var(--tint); color: var(--tint-fg); border: 1px solid transparent;
-  border-radius: var(--radius-sm); padding: 8px 14px;
-  font: inherit; font-size: 13px; font-weight: 550; cursor: pointer;
-}
-button:hover:not(:disabled) { filter: brightness(1.1); }
-button:disabled { opacity: .5; cursor: not-allowed; }
-button.secondary { background: var(--bezel); color: var(--fg); border-color: var(--border); }
-button.danger { background: var(--danger); }
-.btn-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+/* A bare `button` used to be painted here as a filled accent pill — background,
+   padding, radius, weight — and `.secondary`, `.danger` and `.btn-row` sat
+   beside it. All four are gone, and the element rule is the one that had to go
+   rather than merely being tidied away: every `<button>` in src/ now states its
+   own background (ui/Button's variant map, Switch's track, SegmentedControl's
+   segment, the canvas's chips), so the rule styled nothing that wanted it and
+   silently claimed anything that did not. The agents table's name button —
+   `text-ink font-medium` and no background — rendered as a 65px blue pill with
+   the name broken mid-word, two rows above the same name as plain text in the
+   on-disk table. Preflight already resets a button's background, border and
+   font, which is what those call sites were written against; do not reinstate
+   an element-level rule here, because the next one is silent in exactly the
+   same way. `grep -rn` across src/ finds no className naming the other three. */
 
 /* `.center-card` used to live here; the login page, its only caller, is on the
    kit now. */

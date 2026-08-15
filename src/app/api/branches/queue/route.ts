@@ -3,6 +3,7 @@ import {
   cancelBatch,
   enqueue,
   isWorking,
+  queueHistory,
   queueView,
   type QueueRow,
 } from "@/lib/mergeQueue";
@@ -43,8 +44,17 @@ function toDTO(row: QueueRow) {
   };
 }
 
+/** A batch as the page groups it. */
+function batchDTO(batch: { batchId: string; createdAt: number; rows: QueueRow[] }) {
+  return {
+    batchId: batch.batchId,
+    createdAt: batch.createdAt,
+    items: batch.rows.map(toDTO),
+  };
+}
+
 /**
- * Every outstanding batch, grouped, plus a short tail of finished ones.
+ * Every outstanding batch, grouped, plus the last one that finished.
  *
  * It answered with the newest batch alone, which the worker has never agreed
  * with — it drains every queued row whatever batch it is in, so an earlier
@@ -54,15 +64,26 @@ function toDTO(row: QueueRow) {
  * `working` is still the worker's own flag rather than one scoped to this
  * answer, and that is now honest: the row it can be working on is `landing` or
  * `resolving`, which is a row `queueView` covers by definition.
+ *
+ * `?history=1` adds the finished batches the panel is not showing. It is a
+ * parameter rather than a route because it is the same resource read one screen
+ * further back, and it is opt-in because this is the one read on this page that
+ * polls: the card asks for it when somebody opens the disclosure and on no tick
+ * where that disclosure is shut. `historyCount` rides on every answer either
+ * way — it is what the closed disclosure is labelled with, and it costs the
+ * `GROUP BY` this route was already paying for.
  */
-export async function GET() {
+export async function GET(req: Request) {
+  const wantRows = new URL(req.url).searchParams.get("history") === "1";
+  const history = queueHistory(wantRows);
   return NextResponse.json({
     working: isWorking(),
-    batches: queueView().map((batch) => ({
-      batchId: batch.batchId,
-      createdAt: batch.createdAt,
-      items: batch.rows.map(toDTO),
-    })),
+    batches: queueView().map(batchDTO),
+    historyCount: history.total,
+    // `null` rather than `[]` when it was not asked for: an empty list is a
+    // real answer here — every earlier batch already on the panel — and the
+    // page renders "nothing earlier" for one and "not read yet" for the other.
+    history: wantRows ? history.batches.map(batchDTO) : null,
   });
 }
 

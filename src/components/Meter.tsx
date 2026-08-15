@@ -216,8 +216,14 @@ export function Meter({
       {/* `text-ink-muted`, not `text-ink-faint`: this line names the ceiling the
           bar above is measured against, and `--fg-faint` is 3.4:1 on the card
           surface in light and 3.6:1 in dark — under 4.5:1 at 12px in both. */}
+      {/* The track spans its card and this line does not, which is `Notice`'s
+          split: the bar has to be the card's width to be read against it, and
+          this is a sentence. 68ch is the measure `Hint` and `ListRow` already
+          state. */}
       {detail && (
-        <div className={`text-xs text-ink-muted ${sz.detail}`}>{detail}</div>
+        <div className={`max-w-[68ch] text-xs text-ink-muted ${sz.detail}`}>
+          {detail}
+        </div>
       )}
     </div>
   );

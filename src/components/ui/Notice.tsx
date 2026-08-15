@@ -60,7 +60,12 @@ export function Notice({
         quiet ? "px-3.5 py-2 text-xs" : "px-3.5 py-3 text-sm"
       } ${quiet ? TONE_QUIET[tone] : TONE[tone]} [&_strong]:font-semibold [&_strong]:text-ink ${className}`}
     >
-      {children}
+      {/* The bar spans its container and the words inside it do not. The tone
+          edge is the thing that has to reach the card's width to read as a
+          banner; the sentence is prose, and this pane fills the window, so
+          uncapped it ran 370 characters a line on a 2560px display. 80ch is
+          what the card footnotes one section over already use. */}
+      <div className="max-w-[80ch]">{children}</div>
     </div>
   );
 }

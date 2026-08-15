@@ -1339,8 +1339,27 @@ export interface MergeQueueDTO {
    * nothing left to hide.
    */
   working: boolean;
-  /** Every batch with something still to do, oldest first, then a short tail of finished ones. */
+  /**
+   * Every batch with something still to do, oldest first, then the last one
+   * that finished. Drain order: what is at the top is what lands next.
+   */
   batches: MergeQueueBatchDTO[];
+  /**
+   * How many finished batches are *not* in `batches` — what the closed history
+   * disclosure is labelled with. Counted over every earlier batch rather than
+   * over the ones read, so a history that stops at its own cap still says how
+   * much it stopped short of.
+   */
+  historyCount: number;
+  /**
+   * Those earlier batches, newest first, and only when they were asked for.
+   *
+   * `null` is "not read yet" and `[]` is "there are none" — the card says
+   * different things for the two, and collapsing them would make a queue whose
+   * history had not loaded read as an install that has only ever pressed Land
+   * once.
+   */
+  history: MergeQueueBatchDTO[] | null;
 }
 
 export interface BranchSummaryDTO {
