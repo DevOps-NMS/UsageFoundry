@@ -13,6 +13,7 @@ import {
   type WorkspaceMount,
 } from "./config";
 import { git, gitSync } from "./git";
+import { childCredentials, chownForChild } from "./privsep";
 import { db } from "./db";
 import { getSettings, limitConfig, type PermissionMode } from "./settings";
 import {
@@ -29,12 +30,20 @@ import { scanUsage, type UsageEntry } from "./transcripts";
 import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
-import { telemetrySpendSince, type TelemetrySpend } from "./otlp";
-import { agentsArgs, runAgentDefinitions, type AgentDefinition } from "./agents";
+import {
+  ingestTokenFor,
+  revokeIngestTokens,
+  telemetrySpendSince,
+  type TelemetrySpend,
+} from "./otlp";
+import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
 // The log's own extraction of what a tool call is about, so the parser retains
 // the same line for a call whose result comes back an error. Client-safe and
 // pure; the dependency runs the permitted way round.
 import { toolArgs } from "./logLine";
+// Same direction, same reason: the cycle deadline says how long it waited in
+// the words the run page already uses for every other span.
+import { fmtDuration } from "./format";
 import type { RunDependencyDTO } from "./apiTypes";
 
 /**
@@ -177,9 +186,9 @@ export interface RunRow {
   spent_usd_est: number;
   spent_tokens_est: number;
   /**
-   * The specialised agent this run's main thread may delegate to, as the whole
-   * JSON definition rather than an id — see the column note in `db.ts`. Null is
-   * the ordinary run. Read through `parseRunAgent`, never parsed at a call site.
+   * The agent this run was started **as**, as the whole JSON definition rather
+   * than an id — see the column note in `db.ts`. Null is the ordinary run. Read
+   * through `parseRunAgent`, never parsed at a call site.
    */
   agent: string | null;
 }
@@ -240,9 +249,15 @@ const procs = ((globalThis as unknown as {
  * Replaces a reason-less `Set` of cancelled ids: with live guards there are now
  * two distinct callers, and filing a guard-driven kill as "Stopped by operator"
  * would be a lie in the one place the operator most needs the truth.
+ *
+ * `deadline` is the third caller and the one that is nobody's decision: the
+ * cycle stopped producing output and this app ended it. It is kept apart from
+ * `guard` rather than folded into it because a guard is a rule a person
+ * configured and this is a fault — see `interruptOutcome`, which is where the
+ * difference becomes something the operator reads.
  */
-interface Interrupt {
-  kind: "operator" | "guard";
+export interface Interrupt {
+  kind: "operator" | "guard" | "deadline";
   reason: string;
   code?: BudgetStopCode;
   /** True only for a live-resume step-aside; the run parks rather than ends. */
@@ -257,6 +272,37 @@ interface Interrupt {
 const interrupts = ((globalThis as unknown as {
   __ufInterrupts?: Map<string, Interrupt>;
 }).__ufInterrupts ??= new Map<string, Interrupt>());
+
+/**
+ * How a run ends, given why it was interrupted.
+ *
+ * Pure and tested because it is the whole of what an operator reads off a
+ * stopped run, and every way of getting it wrong typechecks and looks like an
+ * ordinary ending. A cycle killed on its deadline arrives here as the same
+ * shape as an operator's Stop — a dead child, a null exit code, no `result`
+ * event — so if this collapsed the three kinds into one status the runs list
+ * would say a hung agent had been stopped by somebody, which is the sentence
+ * that stops anyone looking for the cause.
+ *
+ * `failed` for a deadline, and that is the deliberate part: `stopped` is what
+ * this app writes when a person or a rule they configured decided, and nobody
+ * decided this. It is still terminal and still in `REOPENABLE`, so the run can
+ * be picked up by hand exactly as a crashed one can.
+ */
+export function interruptOutcome(it: Interrupt): {
+  status: RunStatus;
+  reason: string;
+  resumeAt: number | null;
+} {
+  if (it.pause) {
+    return { status: "paused", reason: it.reason, resumeAt: it.resumeAt ?? null };
+  }
+  return {
+    status: it.kind === "deadline" ? "failed" : "stopped",
+    reason: it.reason,
+    resumeAt: null,
+  };
+}
 
 /**
  * Runs with a child in flight that asked for live enforcement.
@@ -297,6 +343,33 @@ const timers = ((globalThis as unknown as {
 
 /** How often a paused run is reconsidered. */
 const SWEEP_MS = 60_000;
+
+/** The shortest silence that may end a work cycle. */
+const MIN_CYCLE_SILENCE_MS = 5 * 60_000;
+/** `DEFAULTS.maxCycleSilenceMinutes`, for a row that says nothing usable. */
+const FALLBACK_CYCLE_SILENCE_MINUTES = 120;
+
+/**
+ * How long this run's next cycle may be silent, from what is stored.
+ *
+ * Read-time narrowing, `chatGuards`' rule and for its reason: the settings blob
+ * is JSON in a row that outlives the build which wrote it and can be edited by
+ * hand, so `PUT /api/settings` flooring what it is *sent* is not enough on its
+ * own. Both ways of reading a bad value are silent and each is expensive in the
+ * opposite direction — a zero taken at face value switches the deadline off,
+ * which is the defect this exists to end, and a zero read as "the shortest
+ * allowed" kills healthy cycles, since the stream goes quiet for the whole of
+ * one model turn and the whole of one tool call. So off, negative and corrupt
+ * take the default, being three ways of saying nothing usable rather than a
+ * request for the shortest deadline there is; a positive number below the floor
+ * is a request, and gets the floor.
+ */
+export function cycleSilenceMs(minutes: number): number {
+  const asked = Number(minutes);
+  const wanted =
+    Number.isFinite(asked) && asked > 0 ? asked : FALLBACK_CYCLE_SILENCE_MINUTES;
+  return Math.max(MIN_CYCLE_SILENCE_MS, Math.floor(wanted * 60_000));
+}
 
 /* ------------------------------------------------------------------ */
 /* Persistence helpers                                                 */
@@ -1247,7 +1320,15 @@ export function prepareWorktreeStore(repoRoot: string): string {
   if (storeStat && !storeStat.isDirectory()) {
     throw new Error(`Refusing to use ${store}: it is not a directory.`);
   }
-  if (!storeStat) fs.mkdirSync(store, { recursive: true });
+  if (!storeStat) {
+    fs.mkdirSync(store, { recursive: true });
+    // Created by the server, used by the child: under privilege separation this
+    // process is root and everything it writes into a bind mount lands
+    // root-owned, so a checkout store left alone would refuse the very
+    // `worktree add` it exists for. Only on the creating pass — a store an
+    // earlier release made already belongs to the right uid.
+    chownForChild(store);
+  }
 
   const realStore = fs.realpathSync(store);
   const { mountId } = describeFolder(repoRoot);
@@ -1646,6 +1727,17 @@ function seedWorktree(repoRoot: string, slotPath: string): string[] {
     if (fs.existsSync(target)) continue;
     try {
       fs.copyFileSync(path.join(repoRoot, e.name), target);
+      // The copy is the server's, the checkout is the child's. An `.env` the
+      // agent cannot rewrite is worse than one it never had, because it reads
+      // as a configured worktree right up until the first write — so a chown
+      // that fails takes the file with it rather than leaving one behind that
+      // `copied` claims is there and usable.
+      try {
+        chownForChild(target);
+      } catch (err) {
+        fs.rmSync(target, { force: true });
+        throw err;
+      }
       copied.push(e.name);
     } catch {
       /* a file we cannot read is not worth failing the run over */
@@ -1715,7 +1807,7 @@ export interface CreateRunInput {
   /** Give this run its own checkout. Defaults on for a git repository. */
   isolate?: boolean;
   /**
-   * A specialised agent the run's main thread may hand a subtask to.
+   * The saved agent this run is started **as**.
    *
    * The whole definition, resolved from the registry by the caller — the door is
    * where an id becomes a definition or a refusal, exactly as it is where a
@@ -2257,12 +2349,13 @@ export function createRun(input: CreateRunInput): RunRow {
     }
     if (input.agent) {
       // Once, at creation, rather than per cycle: it is a fact about the run
-      // and not about a spawn. "may hand" rather than "runs as" is the literal
-      // truth of `--agents` — it offers the role to the delegating model, which
-      // is what a sub-agent is, and it bounds nothing about what the run may do.
+      // and not about a spawn. "runs as" is now the literal truth —
+      // `sessionAgentArgs` defines the member *and* selects it with `--agent`,
+      // so the saved prompt is this session's own. It still bounds nothing
+      // about what the run may do, which is the second sentence's whole job.
       log(
         id,
-        `Claude may hand a subtask to the “${input.agent.name}” agent. It changes who does a piece of the work, not what this run is allowed to do.`,
+        `This run is started as the “${input.agent.name}” agent, so its prompt is the run's own. It changes who the run is, not what this run is allowed to do.`,
         { agent: input.agent.name },
       );
     }
@@ -3105,7 +3198,7 @@ interface IterationResult {
   finalText: string;
   isError: boolean;
   /**
-   * `tool_use` block id → the specialist that `Task` call handed work to.
+   * `tool_use` block id → the sub-agent that `Task` call handed work to.
    *
    * Parser state rather than a result, and it lives here because this is the
    * only thing that survives from one line of the stream to the next: the id
@@ -3428,20 +3521,26 @@ export function buildArgs(opts: {
   maxRunCostUSD: number | null;
   spentGuardUSD: number;
   /**
-   * Specialised agents this run's main thread may delegate to.
+   * The agent this run **is**, or null for an ordinary run.
    *
-   * Attached rather than imposed: `--agents` *offers* these to the delegating
-   * model, which is what a sub-agent is. The CLI also has `--agent <name>`,
-   * which replaces the session's own main agent, and that is deliberately not
-   * wired here — it is a different feature answering a different question
-   * (which role does the run itself take, rather than which specialists it may
-   * hand a subtask to), and the description a saved agent carries exists only
-   * for the delegation this flag enables.
+   * This used to be a list, offered to the run's own main thread as specialists
+   * it might delegate to (`--agents` alone). It is now the session's own agent:
+   * `sessionAgentArgs` emits the definition *and* selects it by name, so the
+   * saved prompt is what this run opens with rather than a role it may hand a
+   * subtask to.
    *
-   * They bound nothing. What the run may do is the permission mode and the two
-   * lists below, exactly as before an agent was attached.
+   * **It bounds nothing, and the two measurements that make that true are worth
+   * having in front of anyone editing this function.** The permission mode, the
+   * isolation grant and the deny list below are unchanged by it, and the
+   * appended system prompt still arrives — verified on the pin, because the
+   * failure if it did not would be silent and expensive in both directions: an
+   * isolated run whose preamble stopped arriving finishes `completed` on a
+   * branch with no commits, and a run that never saw `SELF_HOSTING_NOTICE` is
+   * one that has not been told why `pkill` is denied or what to do instead.
+   * `--agent` also survives `--resume`, which is what makes it true of every
+   * cycle rather than only the first.
    */
-  agents?: AgentDefinition[];
+  agent?: AgentDefinition | null;
   /**
    * Forward what a delegated turn says into this run's own stream.
    *
@@ -3458,9 +3557,12 @@ export function buildArgs(opts: {
   if (opts.model) args.push("--model", opts.model);
   if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
   if (opts.forwardSubAgentText) args.push("--forward-subagent-text");
-  // One encoder for all four spawn sites, because every way of getting this
-  // shape wrong is silent — see `agentsFlagValue`.
-  args.push(...agentsArgs(opts.agents ?? []));
+  // One encoder for every spawn site, because every way of getting the shape
+  // wrong is silent when a member is merely offered and fails the spawn outright
+  // when it is selected — see `agentsFlagValue` and `sessionAgentArgs`. This
+  // sits above `--allowedTools` and `--append-system-prompt` rather than below
+  // for no reason but reading order; the CLI takes the flags in any order.
+  args.push(...sessionAgentArgs(opts.agent));
   // Additive: `--allowedTools` names what skips the prompt, and everything else
   // still follows the mode. It is not the allowlist `chat.ts` runs under, where
   // `manual` mode is what makes the same flag exhaustive.
@@ -3574,17 +3676,25 @@ export function needsLiveSpendTelemetry(policy: BudgetPolicy): boolean {
  * to this app's own endpoint, and `/api/usage` still gates its card on the
  * setting.
  *
- * When `UF_AUTH_TOKEN` is set the exporter authenticates like any other
- * client, which is why `middleware.ts` needs no exemption for the ingest path.
+ * The exporter authenticates with a capability scoped to this one run, never
+ * with `UF_AUTH_TOKEN`. It used to carry that one: `childEnv` deletes `UF_*`
+ * from the child's environment and this merge put the app's master credential
+ * straight back, inside a variable `env` prints, for a Claude Code session with
+ * `Bash` — and it opens `POST /api/runs`, `PUT /api/settings`, every other run's
+ * diff and the approval route. `ingestTokenFor` mints something that opens one
+ * thing instead: writing telemetry for this run. `middleware.ts` therefore
+ * exempts the ingest path, and the route authenticates itself — the two go
+ * together, exactly as they do for `/api/mcp`.
+ *
+ * Exported for the test that pins the absence: no value returned here may
+ * contain `UF_AUTH_TOKEN`, and there is nothing else in the app that would
+ * notice if one did.
  */
-function telemetryEnv(runId: string, required = false): Record<string, string> {
+export function telemetryEnv(
+  runId: string,
+  required = false,
+): Record<string, string> {
   if (!required && !getSettings().telemetryForRuns) return {};
-
-  const headers: Record<string, string> = process.env.UF_AUTH_TOKEN
-    ? {
-        OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${process.env.UF_AUTH_TOKEN}`,
-      }
-    : {};
 
   return {
     CLAUDE_CODE_ENABLE_TELEMETRY: "1",
@@ -3594,10 +3704,13 @@ function telemetryEnv(runId: string, required = false): Record<string, string> {
     // Well under the default 5s, so a killed iteration loses less of its
     // final batch. It cannot be eliminated: a SIGKILL flushes nothing.
     OTEL_LOGS_EXPORT_INTERVAL: "1000",
-    // Stamped onto every record so a request can be attributed to this run.
-    // Interactive sessions carry no such attribute and stay unattributed.
+    // Stamped onto every record so a captured payload still says which run it
+    // claims to be. It is no longer what *decides* that: the ingest route takes
+    // the run id off the capability below, so a record naming another run
+    // cannot move spend onto it.
     OTEL_RESOURCE_ATTRIBUTES: `uf.run_id=${runId}`,
-    ...headers,
+    // base64url, so no comma or `=` to break this header's own key=value list.
+    OTEL_EXPORTER_OTLP_HEADERS: `Authorization=Bearer ${ingestTokenFor(runId)}`,
   };
 }
 
@@ -3722,12 +3835,19 @@ export function signalTree(
  * the id is what makes the run resumable, and the events that lose it — a crash,
  * a restart, a kill — are exactly the ones that stop this promise settling at
  * all.
+ *
+ * `silenceMs` is the cycle's deadline, and it is a **required** argument for
+ * `buildArgs`' reason one door over: a caller that could omit it would drop the
+ * deadline by omission, and a dropped deadline is invisible until the day a
+ * child hangs. See the watchdog below for what it measures and why it is
+ * silence rather than wall clock.
  */
-function runIteration(
+export function runIteration(
   runId: string,
   cwd: string,
   args: string[],
   telemetryRequired: boolean,
+  silenceMs: number,
   onSession: (sessionId: string) => void,
 ): Promise<IterationResult> {
   return new Promise((resolve) => {
@@ -3736,6 +3856,10 @@ function runIteration(
     const child: AgentProcess = spawn(CLAUDE_BIN, args, {
       cwd,
       env: childEnv({ ...telemetryEnv(runId, telemetryRequired), ...githubEnv() }),
+      // The uid `childEnv`'s strip only means something against: same process,
+      // one step down, so `/proc/<server>/environ` and `/data` stop being
+      // readable by the thing whose prompt came out of a repository.
+      ...childCredentials(),
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, so a kill reaches the builds, test runners and
       // servers the agent started. Those are what actually hold the working
@@ -3746,6 +3870,15 @@ function runIteration(
     });
 
     procs.set(runId, child);
+
+    /**
+     * When this child last showed a sign of life, for the watchdog below.
+     *
+     * Assignment rather than a call so the two stream handlers stay one line
+     * each: this is the hottest path in the loop, and the timer is armed once
+     * rather than rescheduled per chunk.
+     */
+    let lastOutputAt = Date.now();
 
     const result: IterationResult = {
       exitCode: -1,
@@ -3766,6 +3899,7 @@ function runIteration(
 
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
+      lastOutputAt = Date.now();
       stdoutBuf += chunk;
       let nl: number;
       while ((nl = stdoutBuf.indexOf("\n")) !== -1) {
@@ -3777,6 +3911,10 @@ function runIteration(
 
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
+      // Before the empty-text return: a child writing whitespace is still a
+      // child that is running, and the watchdog asks about the process rather
+      // than about the log.
+      lastOutputAt = Date.now();
       const text = chunk.trim();
       if (!text) return;
       log(runId, text, { stream: "stderr" });
@@ -3799,9 +3937,14 @@ function runIteration(
     });
 
     let settled = false;
+    let silenceTimer: NodeJS.Timeout | null = null;
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
+      // Before anything else. `interruptRun` records the interrupt whether or
+      // not there is still a child to signal, so a watchdog that fired after
+      // the cycle had returned would stop a run whose cycle finished normally.
+      if (silenceTimer) clearTimeout(silenceTimer);
       procs.delete(runId);
       if (stdoutBuf.trim())
         handleStreamLine(runId, stdoutBuf.trim(), result, onSession);
@@ -3819,6 +3962,73 @@ function runIteration(
       setTimeout(() => finish(code), 2_000).unref?.();
     });
     child.on("close", (code) => finish(code));
+
+    /**
+     * The deadline, and what "hung" is taken to mean.
+     *
+     * **Silence, not wall clock.** The clock is the time since the last thing
+     * the child printed, and any stdout or stderr chunk resets it. Those are
+     * two different guarantees and only this one is safe to apply to every run:
+     * a cycle that is still reporting is working, however long it has been at
+     * it, and killing one for its *duration* is `maxDurationMinutes` under
+     * `enforcement: "live"` — a mode the operator opts into precisely because
+     * it costs the in-flight cycle's work and turns its measured cost into an
+     * estimate. Deriving this from that limit instead would have made
+     * `between-cycles` a live mode without saying so, and `between-cycles` is
+     * the default and the only mode whose accounting is exact.
+     *
+     * What it buys is the case nothing else here notices at all: this promise
+     * settles only when the child says so, so a `claude` wedged on a socket
+     * read, or an agent's own tool call blocked on a read with no timeout,
+     * leaves it pending for the life of the process. The run stays `running`,
+     * holding its folder against every other run in that subtree, its checkout
+     * slot, and one of `maxConcurrentRuns` — until the container is restarted.
+     * Nothing else looks: the live ticker is registered only for the two
+     * non-default modes, the sweeper selects `paused` rows, and
+     * `reconcileOnBoot` is a restart by definition.
+     *
+     * It goes through `interruptRun` rather than killing the child here, so
+     * there is still exactly one kill path: the `SIGINT`-first ladder gives the
+     * cycle its chance to report its own cost, the loop's post-cycle checkpoint
+     * picks the interrupt up like any other, and `reconcileKilledCycle`
+     * recovers what the cycle spent into `spent_usd_est`. What it deliberately
+     * does *not* do is settle this promise itself: the run's folder is handed
+     * to whatever is queued behind it the moment this function returns, so
+     * resolving while a child might still be writing there would trade a held
+     * slot for two agents in one working tree — the one thing the folder claim
+     * exists to prevent. The ladder ends in `SIGKILL`, which is the strongest
+     * answer there is.
+     */
+    const onSilence = () => {
+      if (settled) return;
+      // Re-armed rather than trusted, because output resets `lastOutputAt`
+      // without touching the timer — cheap on the hot path, one extra wakeup
+      // per busy cycle here.
+      const quietFor = Date.now() - lastOutputAt;
+      if (quietFor < silenceMs) {
+        armSilence(silenceMs - quietFor);
+        return;
+      }
+      interruptRun(runId, {
+        kind: "deadline",
+        reason:
+          `No output from Claude Code for ${fmtDuration(silenceMs)}, so this work ` +
+          `cycle was ended. A cycle that has stopped reporting is not going to ` +
+          `finish on its own, and one left running holds this run's folder and its ` +
+          `place in the queue until the server restarts.`,
+        pause: false,
+        at: Date.now(),
+      });
+    };
+
+    const armSilence = (ms: number) => {
+      silenceTimer = setTimeout(onSilence, ms);
+      // `unref` for the reason every other timer here has it: a deadline must
+      // not be what keeps the process alive.
+      silenceTimer.unref?.();
+    };
+
+    armSilence(silenceMs);
   });
 }
 
@@ -4095,7 +4305,7 @@ function handleStreamLine(
           payload: { text: b.text },
         });
       } else if (b.type === "tool_use") {
-        // A `Task` call names the specialist it is handing work to, and its own
+        // A `Task` call names the sub-agent it is handing work to, and its own
         // block id is what every forwarded message from that sub-agent carries.
         // Recorded so those messages can be labelled; per cycle, because the
         // ids are.
@@ -4456,9 +4666,10 @@ export async function startRun(id: string): Promise<void> {
   };
 
   const applyInterrupt = (it: Interrupt) => {
-    stopReason = it.reason;
-    finalStatus = it.pause ? "paused" : "stopped";
-    pausedUntil = it.pause ? (it.resumeAt ?? null) : null;
+    const outcome = interruptOutcome(it);
+    stopReason = outcome.reason;
+    finalStatus = outcome.status;
+    pausedUntil = outcome.resumeAt;
   };
 
   // Everything that can throw belongs inside the try. Parsing the budget blob
@@ -4688,9 +4899,13 @@ export async function startRun(id: string): Promise<void> {
         maxRunCostUSD: policy.maxRunCostUSD,
         spentGuardUSD: spentGuardBeforeCycle,
         // The run's own frozen copy, so every cycle — including one a restart
-        // picks up hours later — is given exactly the specialist the operator
-        // started it with, whatever has happened to the registry since.
-        agents: runAgentDefinitions(run.agent),
+        // picks up hours later — opens as exactly the agent the operator started
+        // it with, whatever has happened to the registry since. A copy rather
+        // than an id is what makes that true, and it matters more now than it
+        // did while the definition was merely being offered: an agent deleted
+        // between cycle 3 and cycle 4 would leave cycle 4 selecting a name
+        // nothing defines, which the CLI refuses at the spawn.
+        agent: parseRunAgent(run.agent),
         // Off the same `settings` read every prompt on this run comes from, so
         // it is fixed for the segment rather than per cycle. It changes only
         // what reaches the log — it is not a capability, nothing acts on it,
@@ -4754,22 +4969,32 @@ export async function startRun(id: string): Promise<void> {
 
       let res: IterationResult;
       try {
-        res = await runIteration(id, workDir, args, liveSpendTelemetry, (sid) => {
-          // A resume that comes back under a different id is recorded rather
-          // than treated as a failure: which of the two Claude Code reports for
-          // a `--resume` is its business, and this app has never observed it
-          // against a real CLI. What is not acceptable is adopting it silently
-          // — every later cycle resumes whatever landed here, and a run that
-          // quietly changed conversation looks, from outside, exactly like one
-          // that restarted.
-          if (resumeTarget && sid !== resumeTarget && sessionId === resumeTarget) {
-            log(
-              id,
-              `This work cycle asked to resume session ${resumeTarget}, and Claude Code reported session ${sid}. Later cycles will continue ${sid}.`,
-            );
-          }
-          adoptSession(sid);
-        });
+        res = await runIteration(
+          id,
+          workDir,
+          args,
+          liveSpendTelemetry,
+          // Off the same `settings` read the prompts come from, so it is fixed
+          // for this stretch of work rather than moving under a cycle already
+          // in flight — `forwardSubAgentText`'s rule one argument over.
+          cycleSilenceMs(settings.maxCycleSilenceMinutes),
+          (sid) => {
+            // A resume that comes back under a different id is recorded rather
+            // than treated as a failure: which of the two Claude Code reports
+            // for a `--resume` is its business, and this app has never observed
+            // it against a real CLI. What is not acceptable is adopting it
+            // silently — every later cycle resumes whatever landed here, and a
+            // run that quietly changed conversation looks, from outside,
+            // exactly like one that restarted.
+            if (resumeTarget && sid !== resumeTarget && sessionId === resumeTarget) {
+              log(
+                id,
+                `This work cycle asked to resume session ${resumeTarget}, and Claude Code reported session ${sid}. Later cycles will continue ${sid}.`,
+              );
+            }
+            adoptSession(sid);
+          },
+        );
       } finally {
         liveGuards.delete(id);
       }
@@ -5119,6 +5344,11 @@ export async function startRun(id: string): Promise<void> {
     procs.delete(id);
     interrupts.delete(id);
     liveGuards.delete(id);
+    // The exporter's credential dies with the run's loop, the way the chat's
+    // dies with its turn — on a short grace, because the exporter batches on a
+    // one-second timer and revoking on the instant would drop the tail of the
+    // last cycle and understate what the run spent.
+    revokeIngestTokens(id);
 
     // Spend is only ever read from the CLI's `result` event, so a cycle killed
     // before that event lands contributes $0 to `spent_usd`. Say what was
@@ -5844,14 +6074,14 @@ export function reopenRun(
     };
   }
 
-  // The specialised agent is carried the same way and more simply: the `agent`
-  // column is not touched here at all, and there is no argument on this function
-  // and no field on the reopen route that could reach it. Same reasoning as
+  // The agent is carried the same way and more simply: the `agent` column is
+  // not touched here at all, and there is no argument on this function and no
+  // field on the reopen route that could reach it. Same reasoning as
   // `permissionMode` below — the operator answered that question when they
   // started the run, and picking it up again is not a second chance to answer
   // it. The definition is the run's own copy, so this is also the one path where
-  // a run whose agent has since been deleted still gets the specialist it ran
-  // with, rather than being refused or quietly losing it.
+  // a run whose agent has since been deleted is still picked up *as* the agent
+  // it ran as, rather than being refused or quietly losing it.
 
   // Carried from the stored blob rather than accepted from the caller: this
   // value reaches `--permission-mode` on a process that edits files, and

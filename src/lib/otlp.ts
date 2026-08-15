@@ -1,3 +1,5 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
+
 import { db } from "./db";
 
 /**
@@ -21,6 +23,110 @@ import { db } from "./db";
  * are accepted below so a change on either side does not silently stop
  * matching.
  */
+
+/* ---------------------------------------------------------------- */
+/* Who may post                                                      */
+/* ---------------------------------------------------------------- */
+
+/**
+ * What lets one run's exporter reach the ingest route, and nothing else.
+ *
+ * The exporter used to authenticate with `UF_AUTH_TOKEN`, put into the agent's
+ * own environment as `OTEL_EXPORTER_OTLP_HEADERS` — the app's master credential,
+ * handed to a Claude Code session with `Bash`, in a variable `env` prints. That
+ * contradicted the rule stated directly above `childEnv`, which strips `UF_*`
+ * from every child precisely because that token opens every route in the app:
+ * `POST /api/runs`, `PUT /api/settings`, every other run's diff, the approval
+ * route, branch deletion.
+ *
+ * This is `chat.ts`'s capability applied to a narrower subject. 32 random bytes,
+ * held in memory, compared in constant time against every live token rather than
+ * looked up by key (a `Map.get` on a secret leaks its prefix through timing),
+ * and it opens exactly one thing: writing telemetry records *for its own run*.
+ * The route takes the run id from the token, so a record claiming another run's
+ * `uf.run_id` cannot move spend onto it.
+ *
+ * On `globalThis` for the reason every other long-lived singleton here is —
+ * `next dev` would otherwise re-evaluate the module and invalidate a live run's
+ * credential mid-cycle. It never outlives the process, so nothing recovered from
+ * a captured environment after a restart ingests anything.
+ *
+ * There is deliberately **no** expiry while a run is live. A run may last hours,
+ * and a token that timed out would stop telemetry arriving with nothing to say
+ * so — which is a live spending guard silently reading zero, the exact failure
+ * `needsLiveSpendTelemetry` exists to prevent. It is revoked when the run's loop
+ * ends instead, on a short grace: the exporter batches on a one-second timer, so
+ * revoking on the instant would drop the tail of the last cycle and understate
+ * the run.
+ */
+interface IngestToken {
+  runId: string;
+  /** `Infinity` while the run is live; a near instant once it has ended. */
+  expiresAt: number;
+}
+
+const ingestTokens = ((
+  globalThis as unknown as { __ufOtlpTokens?: Map<string, IngestToken> }
+).__ufOtlpTokens ??= new Map<string, IngestToken>());
+
+/**
+ * How long a finished run's exporter may still be believed.
+ *
+ * `OTEL_LOGS_EXPORT_INTERVAL` is 1000ms and the request itself takes some of
+ * that, so this is a batch or two of slack rather than a policy.
+ */
+const INGEST_GRACE_MS = 30_000;
+
+/**
+ * The token for a run, minted on first use and stable for the rest of the run.
+ *
+ * One per run rather than one per work cycle: every cycle exports to the same
+ * endpoint for the same run id, and a token per cycle would be one more thing
+ * to revoke on each of the paths a cycle can end on.
+ */
+export function ingestTokenFor(runId: string): string {
+  for (const [token, entry] of ingestTokens) {
+    if (entry.runId === runId && entry.expiresAt === Infinity) return token;
+  }
+  const token = randomBytes(32).toString("base64url");
+  ingestTokens.set(token, { runId, expiresAt: Infinity });
+  return token;
+}
+
+/** Called from `startRun`'s `finally`, on every path a run's loop can leave by. */
+export function revokeIngestTokens(runId: string): void {
+  const until = Date.now() + INGEST_GRACE_MS;
+  for (const entry of ingestTokens.values()) {
+    if (entry.runId === runId && entry.expiresAt === Infinity) {
+      entry.expiresAt = until;
+    }
+  }
+}
+
+/**
+ * Which run a bearer token speaks for, or null.
+ *
+ * Sweeps expired entries as it goes, which is what bounds the map: nothing else
+ * runs on a timer, and the only writer is a run starting.
+ */
+export function runForIngestToken(token: string): string | null {
+  if (!token) return null;
+  const offered = Buffer.from(token);
+  const now = Date.now();
+  let found: string | null = null;
+
+  for (const [candidate, entry] of ingestTokens) {
+    if (entry.expiresAt < now) {
+      ingestTokens.delete(candidate);
+      continue;
+    }
+    const known = Buffer.from(candidate);
+    if (known.length === offered.length && timingSafeEqual(known, offered)) {
+      found = entry.runId;
+    }
+  }
+  return found;
+}
 
 /* ---------------------------------------------------------------- */
 /* OTLP/HTTP-JSON wire shapes (the subset we read)                   */

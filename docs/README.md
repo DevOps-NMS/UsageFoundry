@@ -6,6 +6,10 @@
 
 - **[Installation and setup](install.md)** — Docker, signing the container in,
   required environment, Linux `UF_UID`, multiple workspaces, GitHub access.
+- **[Backup and restore](backup-and-restore.md)** — every run, every cost, every
+  workflow and every schedule is one file in one volume with no second copy.
+  How to snapshot it while runs are working, how to put it back, and why `cp`
+  is not a backup here.
 - **[Limits and accuracy](limits-and-accuracy.md)** — the two unrelated things
   called "your Anthropic limits", what the subscription view cannot see, where
   percentages come from, and how exact each figure is. **Read this before
