@@ -91,6 +91,47 @@ Those variables reach the agent and nothing else: not the reviewer, and not the
 git this app itself runs, whose children execute repository-controlled hooks.
 Settings shows whether a token is configured.
 
+### `gh` extensions
+
+The image carries `gh` itself. Extensions are yours to name, and naming them in
+`.env` is the only way that lasts:
+
+```bash
+UF_GH_EXTENSIONS=dlvhdr/gh-dash github/gh-copilot@v1.1.0
+```
+
+`owner/repo` per extension separated by spaces (commas and `|` also work), with
+an optional `@tag` to pin a version. The container installs each one at boot,
+into a named volume — `docker compose up --build` therefore keeps them, which is
+what installing one by hand in a shell does not do: `gh` keeps extensions in the
+container's writable layer, and that command discards it. The failure that
+follows an upgrade is the quiet kind this whole page is about, an `unknown
+command` inside a tool call, read from outside as the agent choosing not to use
+the tool.
+
+It needs `UF_GITHUB_TOKEN` above, even for a public extension: `gh` refuses every
+API call without a credential. `UF_GITHUB_TOKENS` cannot stand in, because those
+tokens are chosen by the folder a run works in and this happens before any run
+exists.
+
+An extension already installed is left alone, including one whose `@tag` has
+since moved — a restart is not a good moment to silently replace an executable
+that runs with your token in its environment. To move a pin or drop an
+extension, edit the line and remove the old one yourself:
+
+```bash
+docker compose exec usagefoundry sh -c 'GH_TOKEN=$UF_GITHUB_TOKEN gh extension list'
+docker compose exec usagefoundry sh -c 'GH_TOKEN=$UF_GITHUB_TOKEN gh extension remove dash'
+```
+
+(`gh` answers nothing at all without a credential, and the container holds the
+token under this app's own name rather than gh's — hence the prefix.)
+
+Then restart. `docker compose down -v` discards them all with the volume, and
+the next boot reinstalls whatever `.env` still names. What happened at boot is in
+`docker compose logs`, one `[usagefoundry]` line per extension installed or
+refused.
+
 ## Required environment
 
 | Variable | Purpose |
@@ -102,6 +143,7 @@ Settings shows whether a token is configured.
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
 | `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only, and every repository. |
 | `UF_GITHUB_TOKENS` | Optional. `folder=token` entries separated by `\|`, narrowing the credential to the repository a run is working in. |
+| `UF_GH_EXTENSIONS` | Optional. `gh` extensions to install at boot, `owner/repo` or `owner/repo@tag`, space-separated. Kept in a named volume, so a rebuild does not lose them. Needs `UF_GITHUB_TOKEN`. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid every spawned agent runs as; must own the mounts. The server itself runs as root and drops to this. Default 1000. |
 | `UF_MEM_LIMIT` | What the container may take before Docker kills it. Default `10g`, sized for the shipped 4 runs plus 2 other Claude processes. |
 | `UF_NODE_HEAP_MB` | The server's own heap ceiling, in MiB. Default 2048. |

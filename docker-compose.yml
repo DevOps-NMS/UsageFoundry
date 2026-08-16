@@ -98,6 +98,14 @@ services:
       # entry names falls back to the one above, so leaving that blank gives an
       # unnamed repository no credential at all.
       UF_GITHUB_TOKENS: "${UF_GITHUB_TOKENS:-}"
+      # Optional: `gh` extensions to install at boot, space-separated, each
+      # `owner/repo` or `owner/repo@tag` to pin a version. Read by
+      # docker-entrypoint.sh and by nothing in the app — installing them is a
+      # boot-time job, not a request-time one. They land in the named volume
+      # below, so this list is consulted once per extension and not again.
+      # Needs UF_GITHUB_TOKEN: gh refuses every API call unauthenticated, even
+      # for a public repository.
+      UF_GH_EXTENSIONS: "${UF_GH_EXTENSIONS:-}"
       # One entry per selectable workspace, "Label=/container/path", separated
       # by "|". An entry whose label is empty — i.e. UF_WORKSPACE_N_NAME is not
       # set in .env — is skipped, so extra workspaces are switched on from .env
@@ -216,6 +224,20 @@ services:
       # the correct treatment of a cache and the reason backups are not here.
       - usagefoundry-gocache:/home/node/go
 
+      # Where `gh` keeps its extensions, and a named volume for the same reason
+      # the Go cache above is one: the default location is inside the writable
+      # layer, which `docker compose up --build` discards. An extension
+      # installed by hand in a shell therefore works until the next upgrade and
+      # is then simply gone — and what an agent sees at that point is
+      # `unknown command`, inside a tool call nothing here reads, which the run
+      # loop files as the agent choosing not to use it.
+      #
+      # It holds executables that run as UF_AGENT_UID with the run's own
+      # GH_TOKEN in their environment, so treat the list in UF_GH_EXTENSIONS the
+      # way you would treat a dependency: `owner/repo@tag` pins one, and
+      # `docker compose down -v` is what discards them.
+      - usagefoundry-gh:/home/node/.local/share/gh
+
       # Where `scripts/backup-db.mjs` writes, and the one thing here that is
       # deliberately *not* the named volume above: a snapshot kept inside the
       # volume dies with `docker compose down -v`, which is the command this
@@ -312,3 +334,4 @@ services:
 volumes:
   usagefoundry-data:
   usagefoundry-gocache:
+  usagefoundry-gh:

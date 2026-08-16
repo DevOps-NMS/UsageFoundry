@@ -542,3 +542,66 @@ describe("compose's blank-by-default variables and config.ts's own env split", (
     );
   });
 });
+
+/**
+ * Where `gh` extensions land, pinned across the three files that have to name
+ * one directory for the mechanism to mean anything.
+ *
+ * `UF_GH_EXTENSIONS` exists because installing an extension in a shell survives
+ * `docker restart` and is discarded by `docker compose up --build`, so the tool
+ * an operator installed is simply absent after the next upgrade — and what an
+ * agent meets is `unknown command` inside a tool call, which the run loop reads
+ * as the agent deciding not to use it. The volume is the whole of the fix, and
+ * it is worth exactly as much as the agreement between the path the entrypoint
+ * installs into, the path compose mounts and the path the image creates. Any
+ * one of the three moving leaves a container that boots, installs the
+ * extensions, reports them installed, and loses them on the rebuild — the
+ * original defect, now wearing a configuration variable that says it is fixed.
+ */
+describe("gh extensions survive the rebuild that installs them by hand does not", () => {
+  const entrypoint = fs.readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8");
+
+  /** The directory the entrypoint treats as gh's, off the entrypoint itself. */
+  function ghDataVolume(): string {
+    const match = /^GH_DATA_VOLUME=(\S+)$/m.exec(entrypoint);
+    assert.ok(match, "docker-entrypoint.sh no longer names a gh data directory");
+    return match[1];
+  }
+
+  it("mounts a named volume over the directory the entrypoint installs into", () => {
+    const target = ghDataVolume();
+    assert.match(
+      compose,
+      new RegExp(`^\\s*-\\s*[A-Za-z0-9][\\w.-]*:${target}\\s*$`, "m"),
+      `${target} is not a named volume in docker-compose.yml. Without one it ` +
+        `is the image's writable layer, which \`docker compose up --build\` ` +
+        `discards along with every extension UF_GH_EXTENSIONS installed.`,
+    );
+  });
+
+  it("ships that directory in the image, so a fresh volume is not root's", () => {
+    // A named volume takes its root's ownership from the directory at the mount
+    // point when Docker first creates it. Absent from the image, that root is
+    // root-owned 0755 and the children — which are the only thing that runs an
+    // extension, and the only thing that installs one — cannot write it.
+    const target = ghDataVolume();
+    assert.match(
+      dockerfile,
+      new RegExp(`mkdir -p[^\\n]*(\\\\\\s*\\n[^\\n]*)*${target}`),
+      `the image never creates ${target}, so the volume created over it ` +
+        `belongs to root and every install fails on a directory it cannot write`,
+    );
+  });
+
+  it("installs as the uid that will run them, never as root", () => {
+    // Root-owned executables in a volume the agents are meant to own leave them
+    // unable to upgrade or remove what they run, and the privilege split this
+    // image is built around says the children are not root.
+    assert.match(
+      entrypoint,
+      /setpriv --reuid="\$UF_AGENT_UID"/,
+      "docker-entrypoint.sh installs gh extensions without dropping to " +
+        "UF_AGENT_UID, so the executables an agent runs belong to root",
+    );
+  });
+});

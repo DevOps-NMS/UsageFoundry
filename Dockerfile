@@ -241,8 +241,15 @@ COPY scripts/backup-db.mjs scripts/restore-db.mjs ./scripts/
 # 1000 assumed here. `docker-entrypoint.sh` corrects it when it is not, for the
 # same reason it reclaims /data: the ownership a volume is created with is never
 # revisited.
+#
+# `/home/node/.local/share/gh` is the third, on the same terms: it is where `gh`
+# keeps the extensions `UF_GH_EXTENSIONS` names, the children are what run them,
+# and the directory has to exist in the image so a fresh volume inherits `node`
+# rather than root. `extensions/` is created with it because `gh extension list`
+# is what the entrypoint asks before installing anything, and gh reports a
+# missing directory the same way it reports an empty one.
 RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.claude \
-      /home/node/go/build-cache \
+      /home/node/go/build-cache /home/node/.local/share/gh/extensions \
  && chown -R node:node /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
  && chown root:root /data \
  && chmod 0700 /data
