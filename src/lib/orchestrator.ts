@@ -6,6 +6,7 @@ import path from "node:path";
 import fs from "node:fs";
 import {
   CLAUDE_BIN,
+  CLAUDE_CONFIG_DIR,
   GITHUB_TOKEN,
   OTLP_SELF_URL,
   WORKSPACE_MOUNTS,
@@ -17,7 +18,7 @@ import {
 import { git, gitSync } from "./git";
 import { dataDirRefusal, mayWriteDataDir, requireDataDir } from "./serverLock";
 import { childCredentials, chownForChild } from "./privsep";
-import { sandboxRefusal } from "./sandbox";
+import { currentSandbox, sandboxRefusal } from "./sandbox";
 import { db } from "./db";
 import {
   getSettings,
@@ -64,7 +65,7 @@ import { clipToolInput, MAX_LOG_CHARS, toolArgs } from "./logLine";
 // Same direction, same reason: the cycle deadline says how long it waited in
 // the words the run page already uses for every other span.
 import { fmtDuration } from "./format";
-import type { RunDependencyDTO } from "./apiTypes";
+import type { RunDependencyDTO, SandboxStateDTO } from "./apiTypes";
 
 /**
  * Runs Claude Code headlessly against a folder, iteration by iteration, and
@@ -4535,6 +4536,241 @@ export function buildArgs(opts: {
   return args;
 }
 
+/* ------------------------------------------------------------------ */
+/* What one child may write                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A write set, or the reason there is not one.
+ *
+ * Two states rather than a `string[]`, because an overlay that named nothing
+ * must not be able to reach an argv looking like a boundary. `10-validation.md`
+ * read `if(!n&&!M&&!N&&!D&&!U) return t;` out of the pinned binary: a policy
+ * with no network entry, no read or write restriction and no credential entry
+ * hands the command back **unwrapped**, and `sandbox.failIfUnavailable` does not
+ * catch it — a sandbox nothing was asked of is not one that failed. So a set
+ * that resolved to nothing says so as its own state, the same rule
+ * `sandboxArrangement`'s `empty` reading takes one door over.
+ */
+export type SandboxPolicy =
+  | { kind: "confined"; allowWrite: string[] }
+  | { kind: "unconfined"; reason: string };
+
+/**
+ * Which child is being confined, which is the whole of what differs between the
+ * three sets.
+ *
+ * One union and one function rather than three, so the difference between them
+ * is an argument a reader can see beside the others rather than a second code
+ * path that drifted. There are four kinds of child (`docs/agent/architecture.md`)
+ * and three of them spawn a `claude`; `git.ts`'s two spawn git, which reads no
+ * settings file and takes no overlay.
+ */
+export type SandboxScope =
+  /** A work cycle, in its own checkout. */
+  | { kind: "run"; workDir: string; repoRoot: string | null }
+  /** `review.ts`'s one spawn, which serves the reviewer and the resolver. */
+  | { kind: "assist"; cwd: string; permissionMode: "plan" | "acceptEdits" }
+  /** `chat.ts`'s one spawn, which serves a chat turn and an orchestrator block. */
+  | { kind: "chat"; dirs: readonly string[] };
+
+/**
+ * Characters that make the CLI throw a `sandbox.filesystem` entry away.
+ *
+ * Glob patterns in that block are **silently dropped on Linux** — `"Skipping
+ * glob pattern on Linux/WSL: ${n}"`, filtered out of `allowWrite` and
+ * `denyWrite` both (`10-validation.md`). Nothing this app names is written as a
+ * pattern, and `settings.isolationCopyGlobs` — `[".env", ".env.*",
+ * "!.env.example"]` — never reaches here, because what it copies lands *inside*
+ * the checkout that is already named as one literal path. What can still arrive
+ * is a folder whose own name carries one of these characters: a literal path to
+ * this app, a pattern to the CLI, and gone with a debug log.
+ *
+ * The entry that goes missing that way is the run's own checkout, so the whole
+ * set is refused rather than emitted short — a boundary with a hole in exactly
+ * the place the boundary exists for is the more expensive of the two ways this
+ * is wrong, and the run still works without an overlay.
+ */
+const SANDBOX_GLOB_CHARS = /[*?[\]{}!]/;
+
+/**
+ * The overlay this child gets, on top of a managed policy it cannot weaken.
+ *
+ * `/etc/claude-code/managed-settings.json` is what enables the sandbox at all —
+ * written by `docker-entrypoint.sh` under `UF_SANDBOX=1`, root-owned, and the
+ * one policy surface an agent's uid cannot rewrite. This is the per-child half:
+ * `--settings` is an honored source for `filesystem.allowWrite` where a
+ * repository's own `.claude/settings.json` is ignored for these keys, so the
+ * install-wide policy says what nobody may do and this says what *this* child
+ * may write.
+ *
+ * **It is decorative until `~/.claude` stops being agent-writable, and nobody
+ * should read it as a boundary before that lands.** `~/.claude/settings.json`
+ * is an honored source for `sandbox.filesystem` too and is writable by
+ * `UF_AGENT_UID` today (`10-validation.md`, finding 1): a run appends
+ * `{"sandbox":{"filesystem":{"allowWrite":["/"]}}}` and the next session — its
+ * own and every sibling's — is confined to nothing. Closing it means root-owning
+ * the directory itself and handing back the entries the CLI writes, which is a
+ * separate piece of work, deliberately after this one because it runs against a
+ * bind-mounted host directory the operator also uses and every entry missed
+ * shows up as a dashboard of zeros rather than an error. `docs/verification.md`
+ * carries it as the dependency it is.
+ *
+ * **And what nothing here settles either way:** whether the CLI's sandbox wraps
+ * the whole session or only Bash (`09-implementation-sketch.md`, Phase 1
+ * question 3, never executed). If it is Bash-only, a model using `Edit` against
+ * a sibling's path is unconfined whatever this names. The evidence points both
+ * ways — the Bash tool's own prompt says "your command will be run in a
+ * sandbox", and a `getFsReadConfig` export is the shape a file tool consults —
+ * so this asserts neither.
+ *
+ * Pure, and unit-tested on `CLAUDE.md`'s rule: both ways of being wrong are
+ * silent. Too narrow fails inside a tool call the run loop does not read, which
+ * is a cycle that spends money and writes nothing; too wide is a boundary that
+ * is not there, which is the thing this exists to be. Reading what the install
+ * is configured with is `currentSandbox()`, and emitting the argv is
+ * `sandboxArgs` — both kept out of here so the decision can be asked without a
+ * filesystem.
+ */
+export function sandboxSettings(scope: SandboxScope): SandboxPolicy {
+  switch (scope.kind) {
+    case "run":
+      return writeSet(
+        [
+          // This cycle's own checkout — the worktree when isolated, the folder
+          // the operator picked when not. The path the loop re-proved inside
+          // its mount immediately before the spawn, not the row it was read
+          // from hours earlier.
+          scope.workDir,
+          // **And the repository's real git directory, which widens the
+          // boundary past this checkout.** A worktree's `.git` is a file
+          // holding `gitdir: <repo>/.git/worktrees/<slug>`
+          // (`01-constraints.md`), so an isolated run cannot commit — the thing
+          // the isolation preamble orders it to do — unless the repository's
+          // own `.git` is writable. The set is therefore "this repository", not
+          // "this checkout": two runs on one repository can still rewrite each
+          // other's refs, and confining the checkout does not confine the
+          // branch. Only a per-run clone would, and that is a different
+          // proposal. Named as it is rather than pretended narrower.
+          scope.repoRoot === null ? null : path.join(scope.repoRoot, ".git"),
+        ],
+        "a run with no working directory",
+      );
+
+    case "assist":
+      // Two children through one spawn, and the difference is the mode. The
+      // reviewer runs `--permission-mode plan` and writes nothing at all, so
+      // its set is the transcript directory below and nothing else — a
+      // read-only child, spelled as one. The conflict resolver runs
+      // `acceptEdits` and edits conflict markers in a throwaway checkout
+      // (`land.ts`), so that checkout is named and the repository's `.git` is
+      // deliberately **not**: it is not asked to run git, and the merge commit
+      // is made by this server afterwards once the result has been checked.
+      return writeSet(
+        scope.permissionMode === "plan" ? [] : [scope.cwd],
+        "an assist with no working directory",
+      );
+
+    case "chat":
+      // Deliberately much wider, and the reason is not this function's to
+      // narrow. The chat already passes `--add-dir` for every mount that exists
+      // and runs `--permission-mode bypassPermissions` (`chat.ts`), because an
+      // orchestrator has to be able to look at what an operator has before it
+      // proposes work against it. What bounds that child is its MCP tool
+      // surface, a capability token that dies with the turn and
+      // `chatTurnBudgetUSD` — not its filesystem. A write set narrower than its
+      // `--add-dir` list would be this app quietly disagreeing with itself, so
+      // the same array is handed to both.
+      return writeSet(scope.dirs, "a chat turn with no mounts");
+  }
+}
+
+/**
+ * One set, spelled as absolute literal paths and never as anything else.
+ *
+ * `CLAUDE_CONFIG_DIR` is added here rather than at the three call sites, so that
+ * no call site can leave it out. **It is the metering path.** Every window,
+ * every meter and every budget guard but one is derived from the transcripts the
+ * CLI writes under it (`scanUsage`, `transcripts.ts`), and a write set that
+ * forgets it produces a dashboard of zeros rather than an error —
+ * `01-constraints.md` names that as the sharpest way to get this wrong, because
+ * nothing throws, nothing fails to typecheck and every page still renders.
+ *
+ * It is also the directory the hole in `sandboxSettings`' note lives in, which
+ * is the constraint pointing both ways at once: metering needs it writable by
+ * the agent's uid, policy integrity needs the settings file inside it not to be.
+ * The resolution is per-entry ownership, and it is not this function's.
+ */
+function writeSet(paths: readonly (string | null)[], empty: string): SandboxPolicy {
+  const allowWrite: string[] = [];
+
+  for (const candidate of [...paths, CLAUDE_CONFIG_DIR]) {
+    if (candidate === null || candidate === "") continue;
+    // A relative entry is not a path the CLI can bind either, and this app's
+    // own paths are absolute — one arriving here means a caller passed
+    // something it had not resolved, which is a set that would confine the
+    // wrong tree rather than one that fails.
+    if (!path.isAbsolute(candidate)) {
+      return { kind: "unconfined", reason: `${candidate} is not an absolute path` };
+    }
+    if (SANDBOX_GLOB_CHARS.test(candidate)) {
+      return {
+        kind: "unconfined",
+        reason: `${candidate} reads as a glob pattern, which this CLI drops from a write set on Linux`,
+      };
+    }
+    if (!allowWrite.includes(candidate)) allowWrite.push(candidate);
+  }
+
+  return allowWrite.length > 0
+    ? { kind: "confined", allowWrite }
+    : { kind: "unconfined", reason: empty };
+}
+
+/**
+ * The overlay as argv, or nothing at all.
+ *
+ * Withheld on two readings, and they are different failures. An `unconfined`
+ * policy is a set this app could not spell, and an empty `sandbox.filesystem`
+ * would be worse than no flag: it is the short-circuit above, a policy that
+ * resolves to nothing and runs every command unwrapped while an operator reads
+ * a boot line saying the sandbox is on. A `none` arrangement is an install with
+ * no managed policy at all — the stock one, and every install today — where
+ * naming paths configures a sandbox that is not enabled. Withholding it there
+ * keeps a stock install's argv byte-identical to what it was, which is what
+ * confines the risk of this change to the operators who asked for a sandbox.
+ *
+ * Emitted for every other reading, `unknown` included: a policy file that cannot
+ * be read is not evidence that there is no policy, and naming paths against a
+ * sandbox that turns out not to exist costs nothing where withholding them from
+ * one that does is the boundary going missing.
+ *
+ * **It never carries `sandbox.enabled`.** Switching a sandbox on belongs to the
+ * managed file the entrypoint writes from `UF_SANDBOX`, because the binary
+ * rewrites an enabled policy that omits `failIfUnavailable` to `true`
+ * (`10-validation.md`, finding 16) — so an `enabled` on this argv would make
+ * every `claude` invocation on an install without bubblewrap exit non-zero,
+ * fleet-wide, from a flag no operator can edit. This names paths and nothing
+ * else.
+ *
+ * JSON on the argv rather than a file: `--settings` takes `<file-or-json>`, a
+ * file would be a per-child lifecycle to write, chown and remove for something
+ * that carries no secret, and nothing here goes through a shell.
+ */
+export function sandboxArgs(policy: SandboxPolicy, arrangement: SandboxStateDTO): string[] {
+  if (arrangement === "none") return [];
+  if (policy.kind !== "confined") return [];
+  return [
+    "--settings",
+    JSON.stringify({ sandbox: { filesystem: { allowWrite: policy.allowWrite } } }),
+  ];
+}
+
+/** The overlay for a child spawned right now, against this install's policy. */
+export function sandboxArgsFor(scope: SandboxScope): string[] {
+  return sandboxArgs(sandboxSettings(scope), currentSandbox().state);
+}
+
 /**
  * Environment for the spawned agent.
  *
@@ -6031,6 +6267,27 @@ export async function startRun(id: string): Promise<void> {
       if (stillContained !== workDir) {
         throw new Error(`Working directory changed underneath the run: ${workDir}`);
       }
+
+      // What this cycle may write, if anything confines it at all. Read per
+      // cycle rather than per run for the reason the containment check above is:
+      // a run outlives the policy it started under, and an operator who has
+      // just switched one on gets it at the next cycle rather than at the next
+      // restart. `workDir` is the local the check above re-proved, not the row,
+      // because an isolated run's checkout is assigned after the row is read.
+      const sandbox = sandboxSettings({ kind: "run", workDir, repoRoot: run.repo_root });
+      const confinement = currentSandbox().state;
+      if (sandbox.kind === "unconfined" && confinement !== "none") {
+        // The one shape this can take on an install that asked for a sandbox: a
+        // path the CLI would drop from a write set, so there is no per-run set
+        // at all. Said on the run's own log rather than left to be inferred —
+        // the install-wide policy still applies and the cycle still works, which
+        // is exactly why nothing else here would ever mention it.
+        log(
+          id,
+          `No per-run write set for this cycle: ${sandbox.reason}. The install's managed sandbox policy still applies; this run is not confined to its own checkout.`,
+        );
+      }
+      args.push(...sandboxArgs(sandbox, confinement));
 
       // Captured before the spawn, because `adoptSession` may move `sessionId`
       // while the child is still running.

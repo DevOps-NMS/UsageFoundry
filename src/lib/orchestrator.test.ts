@@ -82,6 +82,8 @@ const {
   refusalResumeAt,
   reopenPrompt,
   reopenRun,
+  sandboxArgs,
+  sandboxSettings,
   selectPromotable,
   sweepPaused,
   telemetryEnv,
@@ -93,6 +95,7 @@ const {
   MAX_TRANSIENT_RETRIES,
 } = require("./orchestrator") as typeof import("./orchestrator");
 
+const { CLAUDE_CONFIG_DIR } = require("./config") as typeof import("./config");
 const { normalizePolicy } = require("./budget") as typeof import("./budget");
 const { revokeIngestTokens, runForIngestToken } =
   require("./otlp") as typeof import("./otlp");
@@ -1891,6 +1894,195 @@ describe("buildArgs", () => {
     assert.equal(args[args.indexOf("--model") + 1], "claude-opus-5");
     assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
     assert.equal(args[args.indexOf("--resume") + 1], "sess-1");
+  });
+});
+
+/**
+ * Covers the per-child write set, and only that.
+ *
+ * It earns a test on the same grounds `buildArgs` does, and the two ways of
+ * being wrong point opposite ways and are both silent. **Too narrow** fails
+ * inside a tool call the run loop does not read: a policy denial comes back out
+ * of a mount namespace as an ordinary `EACCES` — which is why `sandboxRefusal`
+ * deliberately does not match those words — so the whole symptom is a cycle that
+ * spent money and wrote nothing. **Too wide** is a boundary that is not there,
+ * which is the entire thing this function exists to be, and it reads identically
+ * on every page.
+ *
+ * So the assertions are the three `09-implementation-sketch.md` names, and the
+ * middle one is the point of the exercise: the run's own checkout is writable,
+ * a **sibling run's** is not, and `CLAUDE_CONFIG_DIR` is, because that is the
+ * metering path and forgetting it produces a dashboard of zeros rather than an
+ * error.
+ *
+ * Written against a set, not against a string: an entry is a directory, so
+ * "writable" is containment. Asserting `!allowWrite.includes(sibling)` would
+ * pass for a set naming the checkout store itself, which holds every concurrent
+ * run's worktree and is the exact failure this is about.
+ *
+ * None of it has been executed against a sandbox. Nothing in this environment
+ * can start one (`docs/verification.md`), so what this pins is the set this app
+ * asks for — not that the CLI honours it, and not that the confinement covers
+ * anything but Bash.
+ */
+describe("sandboxSettings — what one child may write", () => {
+  const repo = `${ws}/RepoOne`;
+  const own = `${ws}/.uf-worktrees/repoone-1`;
+  const sibling = `${ws}/.uf-worktrees/repoone-2`;
+  const store = `${ws}/.uf-worktrees`;
+
+  /** Whether a path falls inside the set, which is what "writable" means here. */
+  const writable = (
+    policy: ReturnType<typeof sandboxSettings>,
+    target: string,
+  ): boolean =>
+    policy.kind === "confined" &&
+    policy.allowWrite.some((p) => target === p || target.startsWith(`${p}${path.sep}`));
+
+  const isolated = sandboxSettings({ kind: "run", workDir: own, repoRoot: repo });
+
+  it("gives an isolated run its own checkout", () => {
+    assert.equal(writable(isolated, own), true);
+    assert.equal(writable(isolated, `${own}/src/index.ts`), true);
+  });
+
+  it("does not give it a concurrent run's checkout", () => {
+    // The gap the whole exercise was reached for: measured today, `test -w` on
+    // a sibling's worktree passes from inside a run, on a branch somebody will
+    // land.
+    assert.equal(writable(isolated, sibling), false);
+    assert.equal(writable(isolated, `${sibling}/src/index.ts`), false);
+    // And not by naming the store either, which would contain every sibling
+    // while still not being the sibling's own path.
+    assert.equal(writable(isolated, store), false);
+  });
+
+  it("keeps CLAUDE_CONFIG_DIR writable, which is the metering path", () => {
+    // Every window, every meter and every guard but one is derived from the
+    // transcripts under it. A set that forgets it reports zeros rather than
+    // failing, which is the sharpest way to get this wrong.
+    assert.equal(writable(isolated, CLAUDE_CONFIG_DIR), true);
+    assert.equal(writable(isolated, `${CLAUDE_CONFIG_DIR}/projects/x.jsonl`), true);
+    // Every child, not only a work cycle: the reviewer and the chat write
+    // transcripts that the same scan bills against.
+    for (const scope of [
+      { kind: "assist", cwd: own, permissionMode: "plan" },
+      { kind: "chat", dirs: [ws] },
+    ] as const) {
+      assert.equal(writable(sandboxSettings(scope), CLAUDE_CONFIG_DIR), true);
+    }
+  });
+
+  it("names the repository's git directory, which widens the boundary", () => {
+    // Not an oversight and not narrower than it looks. A worktree's `.git` is a
+    // pointer into `<repo>/.git/worktrees/<slug>`, so an isolated run cannot
+    // make the commit the isolation preamble orders it to make unless the
+    // repository's own git directory is writable — which means two runs on one
+    // repository can still rewrite each other's refs.
+    assert.equal(writable(isolated, `${repo}/.git`), true);
+    assert.equal(writable(isolated, `${repo}/.git/worktrees/repoone-1`), true);
+    // The working tree beside it is still not writable: the operator's own
+    // checkout is not this run's to edit.
+    assert.equal(writable(isolated, `${repo}/src/index.ts`), false);
+  });
+
+  it("gives a run in the operator's own folder that folder and no repository", () => {
+    const plain = sandboxSettings({ kind: "run", workDir: repo, repoRoot: null });
+    assert.equal(writable(plain, repo), true);
+    assert.equal(writable(plain, sibling), false);
+  });
+
+  it("gives the reviewer a read-only set and the resolver its checkout", () => {
+    // One spawn site, two children. `plan` writes nothing at all, so its set is
+    // the transcript directory and nothing else — the repository it is reading a
+    // diff out of is not in it.
+    const reviewer = sandboxSettings({
+      kind: "assist",
+      cwd: own,
+      permissionMode: "plan",
+    });
+    assert.deepEqual(
+      reviewer.kind === "confined" ? reviewer.allowWrite : null,
+      [CLAUDE_CONFIG_DIR],
+    );
+
+    // The conflict resolver edits markers in a throwaway checkout and is
+    // deliberately not the thing that commits — this server makes the merge
+    // commit after checking the result — so it gets that checkout and no `.git`.
+    const resolver = sandboxSettings({
+      kind: "assist",
+      cwd: own,
+      permissionMode: "acceptEdits",
+    });
+    assert.equal(writable(resolver, own), true);
+    assert.equal(writable(resolver, `${repo}/.git`), false);
+    assert.equal(writable(resolver, sibling), false);
+  });
+
+  it("gives the chat every directory it was already handed", () => {
+    // Deliberately the widest of the three: the chat passes `--add-dir` for
+    // every mount and runs `bypassPermissions`, so a narrower write set would be
+    // this app refusing, inside a tool call, a directory it put on the argv one
+    // line earlier. The same array feeds both.
+    const chat = sandboxSettings({ kind: "chat", dirs: [ws, `${tmp}/alias`] });
+    assert.equal(writable(chat, `${ws}/Other`), true);
+    assert.equal(writable(chat, `${tmp}/alias`), true);
+    // Which does include a sibling's checkout, and says so rather than
+    // pretending the chat is confined by its filesystem.
+    assert.equal(writable(chat, sibling), true);
+  });
+
+  it("refuses a set it cannot spell rather than emitting one with a hole", () => {
+    // `sandbox.filesystem` entries carrying a glob pattern are silently dropped
+    // on Linux, so a folder whose name contains one arrives here as a literal
+    // path and leaves the CLI as nothing. The entry that would go missing is the
+    // run's own checkout, which is the one place a hole is fatal.
+    const globbed = sandboxSettings({
+      kind: "run",
+      workDir: `${ws}/.uf-worktrees/repo[1]-1`,
+      repoRoot: repo,
+    });
+    assert.equal(globbed.kind, "unconfined");
+    assert.match(globbed.kind === "unconfined" ? globbed.reason : "", /glob/);
+
+    // A relative path is the same failure arriving from a caller rather than
+    // from an operator: it would confine some other tree, not this one.
+    assert.equal(
+      sandboxSettings({ kind: "run", workDir: "checkout", repoRoot: null }).kind,
+      "unconfined",
+    );
+  });
+
+  it("emits nothing at all rather than an empty policy", () => {
+    // The quietest failure available here: the CLI hands a command back
+    // unwrapped when the whole policy resolves to nothing, and
+    // `failIfUnavailable` does not catch it, because a sandbox nothing was asked
+    // of is not one that failed.
+    assert.deepEqual(sandboxArgs({ kind: "unconfined", reason: "why" }, "on"), []);
+
+    // And nothing on a stock install, which is every install today: naming
+    // paths against a sandbox that is not enabled configures nothing, and the
+    // argv stays byte-identical to what it was.
+    assert.deepEqual(sandboxArgs(isolated, "none"), []);
+  });
+
+  it("names the paths as settings, and never switches a sandbox on", () => {
+    for (const state of ["on", "empty", "unknown"] as const) {
+      const args = sandboxArgs(isolated, state);
+      assert.equal(args[0], "--settings");
+      const overlay = JSON.parse(args[1]) as {
+        sandbox: { enabled?: unknown; filesystem: { allowWrite: string[] } };
+      };
+      assert.deepEqual(
+        overlay.sandbox.filesystem.allowWrite,
+        isolated.kind === "confined" ? isolated.allowWrite : null,
+      );
+      // The one key it must never carry. Enabling a sandbox from an argv would
+      // default `failIfUnavailable` to true inside the CLI, so an install
+      // without bubblewrap would have every `claude` invocation exit non-zero
+      // with no off switch an operator can reach.
+      assert.equal("enabled" in overlay.sandbox, false);
+    }
   });
 });
 
