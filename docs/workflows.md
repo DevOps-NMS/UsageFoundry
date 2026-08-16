@@ -342,6 +342,15 @@ reads there as `blocked`-then-`queued` as it advances, since a `waiting` run
 holds no folder, no checkout and no place in the queue until the runs ahead of
 it settle.
 
+The workflow's own page lists every press of Run with what became of it.
+**working** means something in it is still going, and the count beside it says
+how much; **finished** means the graph reached its end — which is a fact about
+the graph and not about the work, so a block that failed is still on its own row
+to be read; **blocked** means part of it never ran at all, because a block in
+front of it ended in a way its link could not accept, and the count is how many
+blocks that was. The last of those is the one to open: nothing is coming, and
+the block that decided it says so on the instance page.
+
 The instance keeps its own copy of the graph and of the workflow's name, so
 editing or renaming the workflow afterwards cannot rewrite what it says
 happened. Deleting a workflow takes those records with it and **no run**: the

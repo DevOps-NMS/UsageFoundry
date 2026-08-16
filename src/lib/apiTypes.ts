@@ -1058,11 +1058,24 @@ export interface WorkflowInstanceDTO {
   workflowName: string;
   createdAt: number;
   /**
-   * `stopping` is a halt whose members have not all finished yet; `stopped` is
-   * the same row once they have. The difference is derived from the runs rather
-   * than written, because a signalled child takes seconds to die.
+   * Four of the six are derived from the members rather than written, because
+   * nothing would run the pass that wrote them: a signalled child takes seconds
+   * to die, and a graph whose last member settles has nobody left to close it
+   * out. `stopping` and `stopped` are one halted row either side of its last
+   * live member; `started`, `finished` and `blocked` are one unhalted row —
+   * still working, reached its end, or had part of it written off because
+   * something in front of it satisfied nothing.
+   *
+   * `finished` is about the graph, not about the work: how a member ended is on
+   * the member's own row.
    */
-  status: "started" | "failed" | "stopping" | "stopped";
+  status:
+    | "started"
+    | "finished"
+    | "blocked"
+    | "failed"
+    | "stopping"
+    | "stopped";
   error: string | null;
   /** When the halt closed the door — not when the last child died. */
   stoppedAt: number | null;
@@ -1080,6 +1093,12 @@ export interface WorkflowInstanceDTO {
   stopReason: string | null;
   /** Members that have not finished. Non-zero for as long as `stopping` is. */
   liveRunCount: number;
+  /**
+   * Members that never ran, because something in front of them did not satisfy
+   * its edge. What `blocked` is counted from, and what says how much of the
+   * graph is missing rather than merely that some of it is.
+   */
+  blockedCount: number;
   /** The limits it was started under — a copy, not the live workflow's. */
   instanceBudget: InstanceBudgetDTO;
   /**

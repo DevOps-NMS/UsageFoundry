@@ -2013,16 +2013,45 @@ export function deleteWorkflow(id: string): boolean {
 /**
  * Where one press of Run has got to.
  *
- * `stopping` and `stopped` are the same stored row: the halt writes `stopping`
- * and the difference is whether any member is still live, which is a fact about
- * the runs rather than something a second pass writes. A signalled child takes
- * seconds to die, and after a restart nothing would run that second pass at all.
+ * Four of the six are read off the members rather than stored, for one reason:
+ * `workflow_instances.status` records what has been *done to* an instance — it
+ * was rolled back, or a halt closed its door — and never what its members have
+ * got to, which is a fact about the runs and the blocks. Nothing would write
+ * that second fact: a signalled child takes seconds to die, and a graph whose
+ * last member settles has nobody left to run a closing pass at all, least of
+ * all after a restart.
+ *
+ * So `stopping` and `stopped` are one halted row, told apart by whether a
+ * member is still live; and `started`, `finished` and `blocked` are one unhalted
+ * row, told apart by whether anything is still live and whether anything was
+ * written off. `finished` says the graph reached its end, not that every member
+ * succeeded — how a member ended is on the member's own row, and a word here
+ * that claimed otherwise would be this app reporting a failed run as work that
+ * landed.
  */
 export type WorkflowInstanceStatus =
   | "started"
+  | "finished"
+  | "blocked"
   | "failed"
   | "stopping"
   | "stopped";
+
+/**
+ * Whether anything may still happen to this instance.
+ *
+ * The three unhalted readings are one fact to everything that *acts* on an
+ * instance: nobody has stopped it, so it may still create runs, spend, and be
+ * stopped. Each of those sites tested `status === "started"` when that was the
+ * only word for an unhalted row, and each would have quietly closed a door that
+ * is open the moment `finished` and `blocked` were split out of it — a stop
+ * answering "this run is already stopping" over a graph that had finished on
+ * its own, a deferred block never created behind a member that had settled.
+ * Named rather than repeated, so widening the vocabulary again is one edit.
+ */
+function instanceIsOpen(status: WorkflowInstanceStatus): boolean {
+  return status === "started" || status === "finished" || status === "blocked";
+}
 
 /** What halted an instance. `null` on an instance nobody has stopped. */
 export type HaltCauseKind = "operator" | "guard" | "fleet";
@@ -2089,6 +2118,12 @@ export interface WorkflowInstance {
   stopReason: string | null;
   /** Members that have not finished. Non-zero under `stopping`. */
   liveRunCount: number;
+  /**
+   * Members that never ran, because something in front of them did not satisfy
+   * its edge. What separates a graph that reached its end from one whose tail
+   * was written off — both have nothing live, and only this says which.
+   */
+  blockedCount: number;
   /**
    * The limits this press of Run was started under — a copy taken then, never
    * the live workflow's. Editing the workflow must not move the guard an
@@ -2202,32 +2237,80 @@ export function instanceSpend(instanceId: string): InstanceProgress {
   };
 }
 
+/** What an instance's members are doing, in the two counts a reading needs. */
+export interface InstanceMemberTally {
+  /** Runs still going, plus blocks still deciding or still waiting to. */
+  live: number;
+  /** Members written off because something in front of them satisfied nothing. */
+  blocked: number;
+}
+
 /**
- * How much of this instance has not finished: runs still going, plus blocks
- * still deciding or still waiting to.
+ * How much of this instance has not finished, and how much of it never ran.
  *
- * The block half is not decorative. `stopped` is derived from "nothing is live",
- * so a halt that left an orchestrator turn running would read as *stopped* while
- * a billed child was still deciding what to start — and `startWorkflow`'s refusal
- * of a second press reads the same count.
+ * The block half of `live` is not decorative. `stopped` is derived from "nothing
+ * is live", so a halt that left an orchestrator turn running would read as
+ * *stopped* while a billed child was still deciding what to start — and
+ * `startWorkflow`'s refusal of a second press reads the same count.
+ *
+ * `blocked` is counted over both halves for the same reason, one status along:
+ * a dependency that did no work satisfies nothing, and either half of the graph
+ * can be written off for it — a run by `releasableRuns`, a node still in the
+ * ledger by `planInstanceStep`. An instance that counted only one of them would
+ * report a graph missing its tail as a graph that reached its end.
  */
-function liveMemberCount(instanceId: string): number {
+function memberTally(instanceId: string): InstanceMemberTally {
   const runs = db()
     .prepare(
-      `SELECT COUNT(*) AS n
+      `SELECT COALESCE(SUM(CASE WHEN r.status IN
+                (${LIVE_STATUSES.map(() => "?").join(",")})
+              THEN 1 ELSE 0 END), 0) AS live,
+              COALESCE(SUM(CASE WHEN r.status = 'blocked' THEN 1 ELSE 0 END), 0)
+                AS blocked
          FROM workflow_instance_runs w
          JOIN runs r ON r.id = w.run_id
-        WHERE w.instance_id = ?
-          AND r.status IN (${LIVE_STATUSES.map(() => "?").join(",")})`,
+        WHERE w.instance_id = ?`,
     )
-    .get(instanceId, ...LIVE_STATUSES) as { n: number };
+    .get(...LIVE_STATUSES, instanceId) as InstanceMemberTally;
   const blocks = db()
     .prepare(
-      "SELECT COUNT(*) AS n FROM workflow_instance_blocks" +
-        " WHERE instance_id = ? AND status IN ('waiting','thinking')",
+      "SELECT COALESCE(SUM(CASE WHEN status IN ('waiting','thinking')" +
+        " THEN 1 ELSE 0 END), 0) AS live," +
+        " COALESCE(SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END), 0)" +
+        " AS blocked" +
+        " FROM workflow_instance_blocks WHERE instance_id = ?",
     )
-    .get(instanceId) as { n: number };
-  return runs.n + blocks.n;
+    .get(instanceId) as InstanceMemberTally;
+  return {
+    live: runs.live + blocks.live,
+    blocked: runs.blocked + blocks.blocked,
+  };
+}
+
+/**
+ * Which of the six readings a stored row is, given what its members are doing.
+ *
+ * Pure and unit-tested for `haltPlan`'s reason: every way of being wrong here
+ * typechecks, throws nothing and renders. A graph that finished an hour ago, one
+ * whose tail was written off, and one with an agent working in it right now were
+ * one word between them until this split, and that word is the whole of what an
+ * operator reads to decide whether to wait, to look at a block, or to press Run
+ * again.
+ *
+ * A halt outranks the members: an instance stopped with a member already written
+ * off is `stopped`, because what ended it is the headline and the member says
+ * the rest on its own row. An unrecognised stored value reads as an unhalted
+ * one, the same forgiving default the graph blob gets — this is a record, and it
+ * has to keep rendering.
+ */
+export function instanceStatus(
+  stored: string,
+  members: InstanceMemberTally,
+): WorkflowInstanceStatus {
+  if (stored === "failed") return "failed";
+  if (stored === "stopping") return members.live > 0 ? "stopping" : "stopped";
+  if (members.live > 0) return "started";
+  return members.blocked > 0 ? "blocked" : "finished";
 }
 
 /** Every non-run block of one instance, in the order the graph declared them. */
@@ -2310,7 +2393,7 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
     )
     .all(row.id) as WorkflowInstanceNode[];
 
-  const live = liveMemberCount(row.id);
+  const members = memberTally(row.id);
 
   return {
     id: row.id,
@@ -2322,17 +2405,9 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
       ? (row.origin as RunOrigin)
       : null,
     originRef: row.origin_ref,
-    // `stopped` is derived rather than stored — see WorkflowInstanceStatus. An
-    // unrecognised value reads as `started`, the same forgiving default the
-    // graph blob gets: this is a record, and it has to keep rendering.
-    status:
-      row.status === "failed"
-        ? "failed"
-        : row.status === "stopping"
-          ? live > 0
-            ? "stopping"
-            : "stopped"
-          : "started",
+    // Four of the six are read off the members — see `instanceStatus`, which is
+    // the whole of that decision and is pure so it can be tested.
+    status: instanceStatus(row.status, members),
     error: row.error,
     stoppedAt: row.stopped_at,
     stopCause:
@@ -2340,7 +2415,8 @@ function rowToInstance(row: InstanceRow): WorkflowInstance {
         ? row.stop_cause
         : null,
     stopReason: row.stop_reason,
-    liveRunCount: live,
+    liveRunCount: members.live,
+    blockedCount: members.blocked,
     instanceBudget: parseInstanceBudget(row.instance_budget),
     spend: instanceSpend(row.id),
     nodes,
@@ -2964,7 +3040,7 @@ export function haltPlan(
   // Idempotence, stated as a decision rather than left to the UPDATE that
   // enforces it: a second stop must be a no-op, not a second kill ladder run
   // over children that are already dying.
-  if (instance.status !== "started") {
+  if (!instanceIsOpen(instance.status)) {
     const note =
       instance.status === "failed"
         ? "This workflow run never started — its blocks were rolled back when it was created."
@@ -3708,7 +3784,7 @@ export function advanceInstances(): void {
 /** One instance: apply whatever `planInstanceStep` says can happen now. */
 function advanceInstance(instanceId: string): void {
   const instance = getInstance(instanceId);
-  if (!instance || instance.status !== "started") return;
+  if (!instance || !instanceIsOpen(instance.status)) return;
 
   const step = planInstanceStep(instance.graph, instanceState(instance));
 
@@ -4041,7 +4117,7 @@ async function startBlockTurn(instanceId: string, nodeId: string): Promise<void>
   // instance is a billed child deciding work for a workflow that is being
   // taken down.
   const fresh = getInstance(instanceId);
-  if (!fresh || fresh.status !== "started") {
+  if (!fresh || !instanceIsOpen(fresh.status)) {
     // Written off rather than settled: nothing was spawned and nothing spent,
     // which is what `blocked` says and `failed` would not. `upsertBlock`'s
     // guard also means a halt that got here first keeps its own wording.
@@ -4219,8 +4295,13 @@ export function settleBlock(
       ).changes > 0;
   if (!settled) return;
 
+  // `instanceIsOpen` rather than a test for `started`, and the difference is
+  // load-bearing here in a way it is nowhere else: the UPDATE above has just
+  // settled this block, so if it was the last live member the instance reads
+  // `finished` on this very line. A halt is the only thing that may stop the
+  // runs it decided on from being created.
   const instance = getInstance(instanceId);
-  if (instance?.status === "started" && specs.length > 0) {
+  if (instance && instanceIsOpen(instance.status) && specs.length > 0) {
     createEmitted(instanceId, nodeId, specs);
   }
 
@@ -4389,7 +4470,7 @@ async function startMergeBlock(
   }
 
   const fresh = getInstance(instanceId);
-  if (!fresh || fresh.status !== "started") {
+  if (!fresh || !instanceIsOpen(fresh.status)) {
     upsertBlock(
       instanceId,
       node,
@@ -4763,7 +4844,7 @@ export function emitBlockRuns(
 ): EmissionOutcome {
   const instance = getInstance(instanceId);
   if (!instance) return { ok: false, reason: "This workflow run no longer exists." };
-  if (instance.status !== "started") {
+  if (!instanceIsOpen(instance.status)) {
     return {
       ok: false,
       reason:

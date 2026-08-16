@@ -9,6 +9,7 @@ import type {
   WorkflowDTO,
   WorkflowInstanceDTO,
 } from "@/lib/apiTypes";
+import type { BadgeTone } from "@/lib/format";
 import {
   fmtDateTime,
   fmtPct,
@@ -32,6 +33,64 @@ const CONDITION_LABEL: Record<"on-success" | "on-finish", string> = {
   "on-success": "only if it completes",
   "on-finish": "once it finishes",
 };
+
+type InstanceStatus = WorkflowInstanceDTO["status"];
+
+/**
+ * What one press of Run is called on the page.
+ *
+ * "working" rather than "started", which is what this said for every unhalted
+ * instance — a graph that finished an hour ago, one whose tail was written off
+ * and one with an agent spending in it right now all read `started` and all
+ * wore the same green badge. The word an operator acts on is whether anything
+ * is still going, so that is the word.
+ */
+const OUTCOME_LABEL: Record<InstanceStatus, string> = {
+  started: "working",
+  finished: "finished",
+  blocked: "blocked",
+  failed: "not started",
+  stopping: "stopping",
+  stopped: "stopped",
+};
+
+const OUTCOME_TONE: Record<InstanceStatus, BadgeTone> = {
+  started: "accent",
+  finished: "ok",
+  blocked: "warn",
+  failed: "danger",
+  stopping: "warn",
+  stopped: "warn",
+};
+
+/**
+ * The clause after the badge, or nothing.
+ *
+ * `finished` has none on purpose: the badge is the whole fact, and the Runs
+ * column beside it already carries the count. Every other reading leaves a
+ * question the badge cannot answer — how much is still going, how much never
+ * ran, who stopped it.
+ */
+function outcomeDetail(inst: WorkflowInstanceDTO): string | null {
+  switch (inst.status) {
+    case "started":
+      return `${inst.liveRunCount} block(s) working`;
+    case "blocked":
+      return `${inst.blockedCount} block(s) never ran`;
+    case "failed":
+      return inst.error;
+    case "stopping":
+      return `${inst.liveRunCount} block(s) still finishing`;
+    case "stopped":
+      return inst.stopCause === "guard"
+        ? "by its budget guard"
+        : inst.stopCause === "fleet"
+          ? "with everything in flight"
+          : "by you";
+    case "finished":
+      return null;
+  }
+}
 
 /**
  * A limit's value at the right edge of its row.
@@ -482,40 +541,10 @@ export default function WorkflowPage() {
                         </Link>
                       </Td>
                       <Td className="align-top text-ink-muted">
-                        {inst.status === "failed" && (
-                          <>
-                            <Badge tone="danger">not started</Badge>{" "}
-                            {inst.error}
-                          </>
-                        )}
-                        {inst.status === "started" && (
-                          <>
-                            <Badge tone="ok">started</Badge>{" "}
-                            {/* An instance with nothing live has finished in
-                                every sense the machinery has — there is no
-                                `completed` status to write, so the count is
-                                what says which of the two this is. */}
-                            {inst.liveRunCount > 0
-                              ? `${inst.liveRunCount} block(s) working`
-                              : "nothing still working"}
-                          </>
-                        )}
-                        {inst.status === "stopping" && (
-                          <>
-                            <Badge tone="warn">stopping</Badge>{" "}
-                            {inst.liveRunCount} block(s) still finishing
-                          </>
-                        )}
-                        {inst.status === "stopped" && (
-                          <>
-                            <Badge tone="warn">stopped</Badge>{" "}
-                            {inst.stopCause === "guard"
-                              ? "by its budget guard"
-                              : inst.stopCause === "fleet"
-                                ? "with everything in flight"
-                                : "by you"}
-                          </>
-                        )}
+                        <Badge tone={OUTCOME_TONE[inst.status]}>
+                          {OUTCOME_LABEL[inst.status]}
+                        </Badge>{" "}
+                        {outcomeDetail(inst)}
                       </Td>
                       <Td num className="align-top text-ink-muted">
                         {inst.nodes.length}

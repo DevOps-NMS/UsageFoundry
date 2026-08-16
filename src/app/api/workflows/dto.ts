@@ -113,6 +113,7 @@ export function instanceDTO(instance: WorkflowInstance): WorkflowInstanceDTO {
     stopCause: instance.stopCause,
     stopReason: instance.stopReason,
     liveRunCount: instance.liveRunCount,
+    blockedCount: instance.blockedCount,
     instanceBudget: instance.instanceBudget,
     spentUSD: instance.spend.spentUSD,
     spentGuardUSD: instance.spend.spentGuardUSD,

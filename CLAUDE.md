@@ -84,6 +84,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - Instantiation is topological, one synchronous pass, all or nothing. Half a graph is not a smaller workflow.
   - A node holds no permission mode, no budget and no model — guards come from its template.
   - An orchestrator block's `fanOut` is not nullable, and a workflow whose instance budget sets nothing cannot be scheduled.
+  - An instance's status is four parts derived: `started` means something is live, never "not halted". Act on `instanceIsOpen`, never on `status === "started"`.
 
 - **`review.ts`, `git.ts`, `diff.ts`, `patch.ts`** → `docs/agent/git-and-review.md`
   - Every `git diff` carries `--no-ext-diff --no-textconv`; paths that go back out as pathspecs are pinned `:(top,literal)`.

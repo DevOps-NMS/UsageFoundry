@@ -386,7 +386,10 @@ export default function WorkflowInstancePage() {
               opens the sheet, so the button is blurred to <body> before
               `showModal()` records what to restore focus to, and Esc would drop
               the operator at the top of the page. */}
-          {instance.status === "started" && instance.liveRunCount > 0 && (
+          {/* `started` is now exactly "something is still live" — an instance
+              with nothing live reads `finished` or `blocked` — so the count
+              beside this test would be a second copy of that rule. */}
+          {instance.status === "started" && (
             <Button
               variant="danger"
               onClick={() => setConfirmStop(true)}

@@ -927,6 +927,20 @@ through before trusting this unattended:
   smaller than the proposal describing it, and whether it runs `git` writes
   while investigating (it has the credentials to push, since `githubEnv()`
   reaches this child).
+- **The three words an unhalted instance now reads as, in a browser.**
+  `instanceStatus` is unit tested pure, and the count it decides from — over
+  member runs *and* the ledger of blocks that are not runs yet — is tested
+  against a real database in `instanceReading.test.ts`, including a graph whose
+  runs have all settled while a deferred block is still to wake. What has not
+  happened is anyone seeing the workflow page render them: `working`,
+  `finished` and `blocked` replaced a single green `started` badge in one table
+  cell, and the cell is now one lookup pair plus `outcomeDetail` rather than
+  four conditional blocks. Nothing here can start or stop an agent, so the
+  failure available is cosmetic — a badge tone that reads wrong, or a clause
+  that renders empty. What a human should check, on the workflow's own page:
+  a graph mid-flight says `working` with a count, the same graph after its last
+  block settles says `finished` with no clause, and a graph whose `on-success`
+  dependent was written off says `blocked` with the number that never ran.
 - **Stopping a whole workflow instance against real runs.** `haltPlan` — which
   members a stop selects and what each becomes — is unit tested over an instance
   holding one running, one queued, one parked, one waiting, one completed and one

@@ -7,6 +7,7 @@ import {
   bootBlockPlan,
   emittedFolderRefusal,
   haltPlan,
+  instanceStatus,
   mergeBlockOutcome,
   normalizeWorkflowInput,
   planEmission,
@@ -1077,6 +1078,76 @@ describe("haltPlan — a stop that arrives when there is nothing to do", () => {
       decision.steps.map((s) => s.runId),
       ["r-build", "r-test"],
     );
+  });
+
+  it("is a no-op on a graph that reached its end, in the word it now reads as", () => {
+    // The same instance as the case above, seen through `instanceStatus`: with
+    // nothing live it is `finished` rather than `started`, and this is the one
+    // place a halt can meet that word. Reading it as "not started" would answer
+    // "this run is already stopping" over a graph that stopped on its own.
+    const decision = plan(
+      "finished",
+      MEMBERS.filter((m) => m.status === "completed" || m.status === "failed"),
+    );
+    assert.equal(decision.act, false);
+    assert.match(decision.note ?? "", /already finished/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Which of the six readings one instance row is                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `instanceStatus` — what a press of Run is reported as.
+ *
+ * Every way of being wrong here typechecks, throws nothing and renders a page,
+ * which is exactly how the defect this pins survived: `started` was the word for
+ * every unhalted row, so a graph that finished an hour ago, one whose tail was
+ * written off behind a block that decided nothing, and one with a billed agent
+ * working in it right now were one green badge between them. That word is what
+ * an operator reads to decide whether to wait for it, to go and look at why a
+ * block never ran, or to press Run again — and the third of those is money.
+ */
+describe("instanceStatus — a graph that ended is not a graph still working", () => {
+  const tally = (live: number, blocked = 0) => ({ live, blocked });
+
+  it("reads a member still going as started", () => {
+    assert.equal(instanceStatus("started", tally(1)), "started");
+  });
+
+  it("reads a graph with nothing left to do as finished", () => {
+    assert.equal(instanceStatus("started", tally(0)), "finished");
+  });
+
+  it("reads a graph whose tail was written off as blocked", () => {
+    // The half a `finished` badge would hide: these blocks never ran, because
+    // the one in front of them satisfied nothing, and nothing will ever wake
+    // them. Reported as finished it reads as a workflow that did its work.
+    assert.equal(instanceStatus("started", tally(0, 2)), "blocked");
+  });
+
+  it("reads a branch that died beside one still running as started", () => {
+    // A blocked member does not end the instance: the rest of the graph is
+    // still spending, and `started` is what says the page is worth refreshing.
+    assert.equal(instanceStatus("started", tally(1, 1)), "started");
+  });
+
+  it("keeps the halt above whatever the members say", () => {
+    // Who ended it is the headline. A member written off by the halt itself
+    // must not turn "you stopped this" into "a block stopped it".
+    assert.equal(instanceStatus("stopping", tally(2, 1)), "stopping");
+    assert.equal(instanceStatus("stopping", tally(0, 1)), "stopped");
+    assert.equal(instanceStatus("failed", tally(0, 3)), "failed");
+    assert.equal(instanceStatus("failed", tally(2)), "failed");
+  });
+
+  it("reads an unrecognised stored value off the members", () => {
+    // The forgiving default the graph blob gets, for the same reason: this is a
+    // record and it has to keep rendering. A row written by another version
+    // still says whether anything is live.
+    assert.equal(instanceStatus("kicked-off", tally(1)), "started");
+    assert.equal(instanceStatus("", tally(0)), "finished");
   });
 });
 
