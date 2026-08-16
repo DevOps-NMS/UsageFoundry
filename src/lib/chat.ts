@@ -24,6 +24,7 @@ import {
   createRun,
   dependencyCycle,
   githubEnv,
+  sandboxArgsFor,
   signalTree,
   topologicalOrder,
   type CreateRunInput,
@@ -1628,9 +1629,20 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
     // `bypassPermissions` this is no longer read-only, which is the half of
     // the trade above that costs something: a chat told to leave the work
     // alone is now the only thing stopping it from editing a checkout.
-    for (const mount of WORKSPACE_MOUNTS) {
-      if (fs.existsSync(mount.path)) args.push("--add-dir", mount.path);
-    }
+    const addDirs = WORKSPACE_MOUNTS.filter((m) => fs.existsSync(m.path)).map(
+      (m) => m.path,
+    );
+    for (const dir of addDirs) args.push("--add-dir", dir);
+
+    // And the same list again as this child's write set, if anything confines
+    // it at all. The same encoder the work cycle and the reviewer use, and
+    // deliberately the widest of the three sets it produces: this child is
+    // `bypassPermissions` with every mount already on its argv above, so a
+    // narrower write set would be this app disagreeing with itself one line
+    // later — an orchestrator refused inside a tool call, on a directory it was
+    // handed on purpose. What bounds it is its MCP tool surface, a capability
+    // that dies with the turn and `chatTurnBudgetUSD`, not its filesystem.
+    args.push(...sandboxArgsFor({ kind: "chat", dirs: addDirs }));
 
     // One encoder for every spawn site, so there is one place that knows the
     // shape — silent when a member is only offered, a failed spawn when it is
