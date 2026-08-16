@@ -82,6 +82,26 @@ ENV NODE_ENV=production \
 #                       because the app depends on it — but somebody holding a
 #                       backup file at 3am wants a shell they can inspect it in.
 #
+#   bubblewrap, socat — the two apt halves of the CLI's own Linux sandbox, which
+#                       `docker-entrypoint.sh` can be asked to switch on with
+#                       UF_SANDBOX and which is off in every stock install. The
+#                       CLI's dependency check treats a missing `bwrap` and a
+#                       missing `socat` as *errors* rather than warnings (the
+#                       binary's own words: `bubblewrap (bwrap): not installed`,
+#                       `socat: not installed`), so an install that turned the
+#                       switch on without these would meet the failure this
+#                       image exists to avoid — one arriving inside a tool call.
+#                       bwrap builds the namespace; socat bridges the egress
+#                       proxy's unix sockets to the TCP ports a sandboxed
+#                       command dials. Roughly 1 MB together. `bwrap` cannot
+#                       start at all until the operator also supplies the
+#                       seccomp profile docker-compose.yml carries commented
+#                       out — `unshare` is EPERM under Docker's default
+#                       profile, measured in this container. `socat` is an
+#                       ordinary tool and is on the agents' PATH from now on,
+#                       which beside curl, python3, g++ and a Go toolchain is
+#                       a rounding error rather than a new reach.
+#
 # This costs roughly 250 MB, nearly all of it g++. A compiler in the runtime
 # image is a deliberate trade: the alternative is an agent that cannot install
 # dependencies, and a run that fails at step one is worth less than the layer.
@@ -89,6 +109,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git ripgrep ca-certificates tini \
       python3 make g++ curl procps less sqlite3 \
+      bubblewrap socat \
  && rm -rf /var/lib/apt/lists/*
 
 # Two things git cannot work out for itself inside a container, both of which
@@ -193,6 +214,29 @@ ENV PATH="/usr/local/go/bin:${PATH}" \
 # understates spend, so the failure would not announce itself.
 ARG CLAUDE_CLI_VERSION=2.1.226
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" && npm cache clean --force
+
+# The third dependency of that same sandbox, and the only one that is not apt.
+#
+# Without it the CLI still sandboxes — the dependency check reports a missing
+# seccomp applier as a *warning*, not an error: `seccomp not available - unix
+# socket access not restricted`, and at wrap time `[Sandbox Linux] apply-seccomp
+# binary not available - unix socket blocking disabled. Install
+# @anthropic-ai/sandbox-runtime globally for full protection.` What that warning
+# costs is the network boundary: the domain allowlist is enforced by a proxy on
+# a unix socket, and the seccomp filter is the whole of what stops a sandboxed
+# command dialling that socket directly. Absent, the allowlist is advice.
+#
+# Pinned on the same argument as the CLI above and as a second half of it. That
+# pin protects a contract read off one build rather than a specification, and
+# this adds the sandbox settings schema to what it covers: a renamed key leaves
+# `sandbox.enabled` unread and the run unsandboxed, and `failIfUnavailable` does
+# not catch it, because a sandbox that was never asked for is not one that
+# failed. 0.0.71 is the release that was current when 2.1.226 was published
+# (2026-08-07 against 2026-08-08), which is as close as anything here can get to
+# "the version this CLI was built against". Move the two together.
+ARG SANDBOX_RUNTIME_VERSION=0.0.71
+RUN npm install -g "@anthropic-ai/sandbox-runtime@${SANDBOX_RUNTIME_VERSION}" \
+ && npm cache clean --force
 
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./

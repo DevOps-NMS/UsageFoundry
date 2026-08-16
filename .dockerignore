@@ -19,3 +19,7 @@ npm-debug.log*
 README.md
 docker-compose.yml
 Dockerfile
+# The seccomp profile is read by the Docker *daemon* on the host, from the
+# `security_opt` line in docker-compose.yml. Nothing inside the container ever
+# opens it, and a copy in the image would only look like something that did.
+uf-seccomp.json

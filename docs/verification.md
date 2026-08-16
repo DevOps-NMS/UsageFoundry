@@ -1505,6 +1505,109 @@ through before trusting this unattended:
   and that the run page shows a `sandbox` line *beside* the failed call rather
   than instead of it.
 
+  **The image's three sandbox dependencies, the generated policy and the
+  seccomp profile — none of it built, started or applied.** The image now
+  carries `bubblewrap` and `socat` on the apt line and
+  `@anthropic-ai/sandbox-runtime` pinned beside the CLI;
+  `docker-entrypoint.sh` writes `/etc/claude-code/managed-settings.json` when
+  `UF_SANDBOX=1`; `docker-compose.yml` carries a commented `security_opt` line
+  and `uf-seccomp.json` beside it. What was checked here is what could be:
+  `npm run typecheck`, `npm test` and `next build` pass, `sh -n` and `dash -n`
+  accept the entrypoint, the policy generator was lifted out and run under
+  `dash` against a temporary directory once per branch it has — off, on,
+  `warn`, a domain list, a rejected domain, an unrecognised `UF_SANDBOX`, and
+  the removal on the way back down — and `@anthropic-ai/sandbox-runtime@0.0.71`'s
+  published tarball really does carry `vendor/seccomp/arm64/apply-seccomp` and
+  `.../x64/apply-seccomp`.
+  **Docker is not available in the container this was written in** — no
+  `docker` binary, no `/var/run/docker.sock`, `apt-get` needs a root this had
+  not got, and `unshare --user` answers `Operation not permitted` — so the
+  image was never built, the container never started, and no `bwrap` has ever
+  run. Every command below is for a human and **none of them has been run**:
+
+  ```sh
+  # 0. are the two apt packages installable in this image at all? Dockerfile:92
+  #    removes the apt lists, so this could not be answered from inside one.
+  apt-get update && apt-cache policy bubblewrap socat
+
+  # 1. does bubblewrap work under the relaxed profile? (uncomment security_opt)
+  docker compose exec usagefoundry \
+    bwrap --unshare-user --ro-bind / / --dev /dev true && echo BWRAP-OK
+
+  # 2. Phase 2's own four, from proposals/Sandboxing/09-implementation-sketch.md
+  docker compose up --build
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'echo x >> /etc/claude-code/managed-settings.json'   # expect denied
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'echo x >> ~/.claude/settings.json; rm -f ~/.claude/settings.json'
+                                                               # expect both denied
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'ls ~/.claude/projects >/dev/null && touch ~/.claude/projects/.probe'
+                                                               # expect BOTH to work
+  docker compose logs usagefoundry | grep -i sandbox           # expect the boot line
+  ```
+
+  The second of those four **will fail today and is not a regression**: making
+  `~/.claude` root-owned while handing back the entries the CLI writes is a
+  separate piece of work, so `~/.claude/settings.json` is still writable by the
+  agents and is still an honored source for `sandbox.filesystem`. Until it
+  lands, a run can widen the filesystem half of the policy from inside itself.
+  It cannot widen the credential deny (a separate list), and it cannot widen
+  the domain list once `UF_SANDBOX_ALLOWED_DOMAINS` names one, because that
+  also sets `allowManagedDomainsOnly`.
+
+  **Whether the generated policy resolves to a sandbox at all.** This is the
+  failure that would be quietest of the lot, and it is unverified in both
+  directions. The CLI hands a command back **unwrapped** when the whole policy
+  amounts to nothing — read out of the pinned binary as
+  `if(!n&&!M&&!N&&!D&&!U) return t;`, where the five terms are a network
+  restriction, a read deny or masked file, a write config, an env-var change
+  and a git-safe-directory list — and `failIfUnavailable` does not catch it,
+  because a sandbox nothing was asked of is not one that failed. The policy
+  generated here always names a `credentials.files` deny and two `denyRead`
+  paths, both of which feed that second term, so on this reading it can never
+  short-circuit; that reading is `strings` on one build and has been executed
+  never. Confirm from the outside rather than by re-reading the binary:
+
+  ```sh
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'cat ~/.claude/.credentials.json'   # expect denied, with the session
+                                              # still billing on the next cycle
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'cat /data/usagefoundry.db > /dev/null'          # expect denied
+  ```
+
+  A `cat` of the credential that **succeeds** from inside a run while the
+  policy is in place is the whole signal: it means the wrapper short-circuited
+  and no `bwrap` ran, whatever the boot line says.
+
+  **Three things about the policy's content that are reasoning, not
+  measurement.** It writes `denyRead` and never `allowWrite`/`denyWrite`,
+  because a write config of any kind makes the CLI bind `/` read-only and
+  rw-bind only the allow set — so a deny-write list with no allow list is a
+  read-only filesystem and a fleet that fails on its first `npm install`. It
+  sets `allowUnsandboxedCommands: false`, whose documented default is `true`,
+  on the grounds that a model able to pass `dangerouslyDisableSandbox` makes
+  the rest advisory. And it always writes `failIfUnavailable` explicitly,
+  because the binary says two different things about its default — the settings
+  schema documents `false`, the normaliser rewrites an enabled policy that
+  omits it to `true`. All three are readings of one build.
+
+  **The seccomp profile has never been applied to a daemon.** `uf-seccomp.json`
+  is generated by `scripts/make-seccomp-profile.py` from Docker v28.5.2's own
+  default profile with six syscalls ungated — `clone`, `clone3`, `unshare`,
+  `mount`, `umount2`, `pivot_root` — and the three rules that exist only to
+  constrain `clone`/`clone3` for a container without `CAP_SYS_ADMIN` removed,
+  so the resulting filter does not depend on how libseccomp merges a narrow
+  rule with a wide one. That much is mechanical and was checked by re-reading
+  the generated file. What is unverified is everything after: that Docker
+  accepts the profile, that `bwrap` starts under it, that the six are enough
+  (bubblewrap 0.8 uses the classic mount API; a future one reaching for
+  `open_tree`/`move_mount` would fail loudly and need them added), and that
+  nothing else in the image needs a syscall this profile's *unmodified* rules
+  withhold. Regenerate against your own engine before trusting it:
+  `python3 scripts/make-seccomp-profile.py "v$(docker version --format '{{.Server.Version}}')"`.
+
   **What the boot line and the Settings row say once there is something to
   report.** Only the `none` reading has ever been rendered, which is every stock
   install and is why it is the one that had to be right. The other three are

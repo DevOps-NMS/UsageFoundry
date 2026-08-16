@@ -110,6 +110,39 @@ function mountTarget(pattern: RegExp): string | null {
   return match ? match[1] : null;
 }
 
+/** The service's `environment:` block, key by key. */
+function environmentKeys(): Map<string, string> {
+  const start = /^ {4}environment:$/m.exec(compose);
+  assert.ok(start, "docker-compose.yml no longer has an environment: block");
+  const rest = compose.slice(start.index + start[0].length);
+  const end = /^ {4}\S/m.exec(rest);
+  const block = end ? rest.slice(0, end.index) : rest;
+
+  const entries = new Map<string, string>();
+  for (const [, key, value] of block.matchAll(/^ {6}([A-Z][A-Z0-9_]*):\s*(.*)$/gm)) {
+    entries.set(key, value.trim().replace(/^"(.*)"$/, "$1"));
+  }
+  assert.ok(entries.size > 0, "no environment keys were found to check");
+  return entries;
+}
+
+/**
+ * What an operator who sets nothing in `.env` actually gets, which is the only
+ * install this file can reason about — and the one every deployment starts as.
+ *
+ * `${X:-default}` yields its default, `${X:+word}` yields nothing (that form
+ * exists precisely to say "only when X is set"), a bare `${X}` yields nothing,
+ * and `${X:?message}` aborts `docker compose up` rather than substituting, so
+ * it can never reach the app blank.
+ */
+function resolvedWithEmptyEnv(value: string): string {
+  return value
+    .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^}]*\}/g, "<aborts>")
+    .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}/g, "$1")
+    .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:\+[^}]*\}/g, "")
+    .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g, "");
+}
+
 describe("the image and compose agree on the data volume", () => {
   it("keeps DATA_DIR away from every uid but the server's", () => {
     const dataDir = composeDataDir();
@@ -473,42 +506,9 @@ describe("compose's blank-by-default variables and config.ts's own env split", (
     return new Set([...configSource.matchAll(pattern)].map((m) => m[1]));
   }
 
-  /** The service's `environment:` block, key by key. */
-  function environmentBlock(): Map<string, string> {
-    const start = /^ {4}environment:$/m.exec(compose);
-    assert.ok(start, "docker-compose.yml no longer has an environment: block");
-    const rest = compose.slice(start.index + start[0].length);
-    const end = /^ {4}\S/m.exec(rest);
-    const block = end ? rest.slice(0, end.index) : rest;
-
-    const entries = new Map<string, string>();
-    for (const [, key, value] of block.matchAll(/^ {6}([A-Z][A-Z0-9_]*):\s*(.*)$/gm)) {
-      entries.set(key, value.trim().replace(/^"(.*)"$/, "$1"));
-    }
-    assert.ok(entries.size > 0, "no environment keys were found to check");
-    return entries;
-  }
-
-  /**
-   * What an operator who sets nothing in `.env` actually gets, which is the only
-   * install this file can reason about — and the one every deployment starts as.
-   *
-   * `${X:-default}` yields its default, `${X:+word}` yields nothing (that form
-   * exists precisely to say "only when X is set"), a bare `${X}` yields nothing,
-   * and `${X:?message}` aborts `docker compose up` rather than substituting, so
-   * it can never reach the app blank.
-   */
-  function resolvedWithEmptyEnv(value: string): string {
-    return value
-      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^}]*\}/g, "<aborts>")
-      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}/g, "$1")
-      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*:\+[^}]*\}/g, "")
-      .replace(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/g, "");
-  }
-
   it("reads every one of them through the door that treats blank as an answer", () => {
     const strict = namesRead("env");
-    const blank = [...environmentBlock()]
+    const blank = [...environmentKeys()]
       .filter(([, value]) => resolvedWithEmptyEnv(value) === "")
       .map(([key]) => key);
 
@@ -602,6 +602,128 @@ describe("gh extensions survive the rebuild that installs them by hand does not"
       /setpriv --reuid="\$UF_AGENT_UID"/,
       "docker-entrypoint.sh installs gh extensions without dropping to " +
         "UF_AGENT_UID, so the executables an agent runs belong to root",
+    );
+  });
+});
+
+/**
+ * The sandbox switch, pinned across the four files that have to agree for it to
+ * mean anything — and, first, for it to stay *off*.
+ *
+ * Same grounds as the gh block above, one boundary over and with more at stake
+ * in both directions. `UF_SANDBOX` is read by `docker-entrypoint.sh` and by
+ * nothing in the app, so a variable an operator sets in `.env` reaches the
+ * container only if compose forwards it: dropped, it is a security control
+ * switched on in a file, never written, and never applied — the
+ * `UF_WORKSPACE_5_NAME` silence wearing a policy. The path is the same shape of
+ * agreement pointing the other way: `src/lib/sandbox.ts` reports what confines
+ * this install by *reading that file*, so a path that moves in one of the two
+ * makes an install with a live policy report that it has none, which is the one
+ * thing that row exists to prevent.
+ *
+ * And the direction this run had to get right at all: the switch ships off, and
+ * `security_opt` ships commented. An uncommented seccomp line would make every
+ * stock `docker compose up` depend on a profile file the daemon may reject, for
+ * a sandbox nobody asked for. Docker is not available where these tests run, so
+ * this pins the files against each other; `docs/verification.md` carries the
+ * commands that check the behaviour, every one of them still unrun.
+ */
+describe("the sandbox ships off, and its switch reaches the container", () => {
+  const entrypoint = fs.readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8");
+
+  it("forwards every UF_SANDBOX variable the entrypoint reads", () => {
+    const read = new Set(
+      [...entrypoint.matchAll(/\$\{(UF_SANDBOX[A-Z_]*)[:}]/g)].map((m) => m[1]),
+    );
+    assert.ok(read.size > 0, "docker-entrypoint.sh no longer reads any UF_SANDBOX variable");
+
+    const forwarded = new Set(
+      [...compose.matchAll(/^ {6}(UF_SANDBOX[A-Z_]*):/gm)].map((m) => m[1]),
+    );
+    const dropped = [...read].filter((name) => !forwarded.has(name));
+    assert.deepEqual(
+      dropped,
+      [],
+      `docker-compose.yml does not forward ${dropped.join(", ")}, so setting ` +
+        `${dropped.length === 1 ? "it" : "them"} in .env changes nothing at all — ` +
+        `an operator would be reading a variable they set against a fleet that ` +
+        `never saw it.`,
+    );
+  });
+
+  it("leaves all of them blank, so a stock install writes no policy", () => {
+    for (const [key, value] of [...environmentKeys()].filter(([k]) =>
+      k.startsWith("UF_SANDBOX"),
+    )) {
+      assert.equal(
+        resolvedWithEmptyEnv(value),
+        "",
+        `docker-compose.yml gives ${key} the default "${value}". The sandbox is ` +
+          `an opt-in whose failure mode is a fleet that cannot run a command, and ` +
+          `nothing in the image may turn it on.`,
+      );
+    }
+  });
+
+  it("writes the policy where the app looks for it", () => {
+    const sandboxSource = fs.readFileSync(path.join(root, "src", "lib", "sandbox.ts"), "utf8");
+    const read = /MANAGED_SETTINGS_PATH\s*=\s*"([^"]+)"/.exec(sandboxSource);
+    assert.ok(read, "src/lib/sandbox.ts no longer names a managed settings path");
+
+    const written = /^MANAGED_SETTINGS_FILE="([^"]+)"$/m.exec(entrypoint);
+    assert.ok(written, "docker-entrypoint.sh no longer names a managed settings file");
+    assert.equal(
+      written[1].replace("$MANAGED_SETTINGS_DIR", dirName(entrypoint)),
+      read[1],
+      "the entrypoint writes the sandbox policy somewhere src/lib/sandbox.ts does " +
+        "not read, so an install with a live policy reports that it has none",
+    );
+  });
+
+  /** The directory `MANAGED_SETTINGS_DIR` is set to, for the path above. */
+  function dirName(source: string): string {
+    const match = /^MANAGED_SETTINGS_DIR=(\S+)$/m.exec(source);
+    assert.ok(match, "docker-entrypoint.sh no longer names a managed settings directory");
+    return match[1];
+  }
+
+  it("carries the two dependencies a missing one of which is an error", () => {
+    // The CLI's own dependency check reports a missing `bwrap` or `socat` as an
+    // error rather than a warning, so an install that switched the sandbox on
+    // without them meets that failure inside a tool call — which is the shape
+    // of failure this image carries a compiler and `gh` to avoid.
+    const packages = runtimePackages();
+    for (const name of ["bubblewrap", "socat"]) {
+      assert.ok(
+        packages.includes(name),
+        `the runtime image no longer installs ${name}, so UF_SANDBOX=1 produces a ` +
+          `fleet whose every command fails on a missing sandbox dependency`,
+      );
+    }
+    // The third is an npm global and is pinned for the reason the CLI is: this
+    // adds the sandbox settings schema to what that pin protects.
+    assert.match(
+      runnerStage(),
+      /@anthropic-ai\/sandbox-runtime@\$\{SANDBOX_RUNTIME_VERSION\}/,
+      "the seccomp applier is no longer installed at a pinned version, and its " +
+        "absence downgrades the network boundary on a warning",
+    );
+  });
+
+  it("ships the seccomp line commented, next to a profile that exists", () => {
+    assert.doesNotMatch(
+      compose,
+      /^\s*security_opt:/m,
+      "docker-compose.yml applies a seccomp profile by default. A stock install " +
+        "must not depend on a profile file the operator has not chosen to supply.",
+    );
+    const line = /^\s*#\s*-\s*seccomp=(\S+)\s*$/m.exec(compose);
+    assert.ok(line, "docker-compose.yml no longer carries the commented seccomp line");
+    assert.ok(
+      fs.existsSync(path.join(root, line[1])),
+      `the commented security_opt line names ${line[1]}, which this repository ` +
+        `does not ship — an operator who uncomments it gets a container that ` +
+        `will not start`,
     );
   });
 });

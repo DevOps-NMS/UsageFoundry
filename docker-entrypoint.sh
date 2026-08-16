@@ -149,4 +149,161 @@ if [ -n "${UF_GH_EXTENSIONS:-}" ]; then
   fi
 fi
 
+# The CLI's own sandbox policy, written here rather than baked into the image.
+#
+# Generated at boot because the enforcement level has to be something an
+# operator can lower without a rebuild. The seccomp relaxation this needs lives
+# in docker-compose.yml and is commented out, so an install whose Docker rejects
+# or never applied it has no working sandbox — and a `failIfUnavailable: true`
+# compiled into the image would mean every `claude` invocation exits non-zero,
+# fleet-wide, with no off switch short of building a new image. UF_SANDBOX_*
+# below is that switch, and it is an `.env` edit and a restart.
+#
+# Blank is off and off writes nothing at all: no file, no directory, no policy,
+# and a stock `docker compose up --build` behaves exactly as it did before this
+# block existed. What is *not* skipped when it is off is the removal below —
+# `docker restart` keeps the writable layer, so a policy written under an
+# earlier setting would otherwise outlive the setting that asked for it, which
+# is an off switch that does not switch anything off.
+MANAGED_SETTINGS_DIR=/etc/claude-code
+MANAGED_SETTINGS_FILE="$MANAGED_SETTINGS_DIR/managed-settings.json"
+# What says the file is this app's to delete. Nothing about the CLI's own
+# schema marks a policy's author, and an operator who put their own
+# managed-settings.json in the image is not asking us to remove it.
+MANAGED_SETTINGS_STAMP="$MANAGED_SETTINGS_DIR/.usagefoundry-owned"
+
+# The domains an operator named, as the elements of a JSON array.
+#
+# Validated rather than interpolated: this string reaches a policy file that
+# decides what the fleet may dial, and a stray quote in it would produce either
+# invalid JSON or an entry that is not the one written down. Anything that is
+# not domain-shaped is dropped by name — `*.example.com` is the widest form the
+# CLI accepts, and it is spelled with characters this allows.
+sandbox_domain_array() {
+  array=""
+  # Word splitting without pathname expansion. `*.example.com` is a domain the
+  # CLI accepts and a glob this shell would otherwise try to match against the
+  # working directory, quietly turning an allowlist entry into whichever file
+  # happened to be sitting there.
+  set -f
+  for entry in $(echo "$1" | tr '|,' '  '); do
+    case "$entry" in
+      *[!A-Za-z0-9.*_-]*)
+        echo "[usagefoundry] UF_SANDBOX_ALLOWED_DOMAINS entry \"$entry\" is not a" \
+             "domain name — ignored." >&2
+        continue ;;
+    esac
+    array="$array${array:+, }\"$entry\""
+  done
+  set +f
+  printf '%s' "$array"
+}
+
+if [ "${UF_SANDBOX:-}" = "1" ]; then
+  # Absent means on in one of the binary's two readings and off in the other —
+  # the settings schema documents `failIfUnavailable` as defaulting to false,
+  # while the normaliser rewrites an enabled policy that omits it to true. Both
+  # were read out of the pinned binary and neither was executed, so it is always
+  # written explicitly and the disagreement decides nothing here.
+  case "${UF_SANDBOX_ENFORCEMENT:-refuse}" in
+    refuse) fail_if_unavailable=true ;;
+    warn)   fail_if_unavailable=false ;;
+    *)
+      fail_if_unavailable=true
+      echo "[usagefoundry] UF_SANDBOX_ENFORCEMENT is" \
+           "\"${UF_SANDBOX_ENFORCEMENT}\", which is neither \"refuse\" nor" \
+           "\"warn\" — treating it as \"refuse\", so a sandbox that cannot" \
+           "start stops the CLI rather than running unconfined." >&2 ;;
+  esac
+
+  # Omitted entirely when no domain was named, rather than shipped empty: an
+  # empty allowlist is a fleet that cannot reach the API it bills against, and
+  # a domain list this project guessed at would fail inside a tool call the run
+  # loop does not read. Named, it also pins the list to *this* file —
+  # `~/.claude/settings.json` is an honored source for sandbox settings and is
+  # writable by the agents, so without allowManagedDomainsOnly a run widens its
+  # own allowlist and the next session starts against it.
+  network_block=""
+  domains="$(sandbox_domain_array "${UF_SANDBOX_ALLOWED_DOMAINS:-}")"
+  if [ -n "$domains" ]; then
+    network_block="    \"network\": { \"allowedDomains\": [$domains], \"allowManagedDomainsOnly\": true },"
+  fi
+
+  # Built beside the destination and moved onto it only once it parses. Two
+  # reasons, and neither is tidiness. A policy the CLI cannot read has its
+  # whole sandbox block ignored — which takes `failIfUnavailable` with it, so
+  # the fleet would run unconfined under an .env that says otherwise, and the
+  # window in which that file is live is a window of exactly that. And a write
+  # that fails must leave whatever was there alone: an operator who put their
+  # own managed-settings.json into a derived image is not asking this app to
+  # replace it, and is certainly not asking it to delete it.
+  policy_tmp="$MANAGED_SETTINGS_DIR/.usagefoundry-policy.tmp"
+  sandbox_policy_installed=""
+  if mkdir -p "$MANAGED_SETTINGS_DIR" 2>/dev/null &&
+     cat > "$policy_tmp" 2>/dev/null <<EOF
+{
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": $fail_if_unavailable,
+    "allowUnsandboxedCommands": false,
+$network_block
+    "filesystem": {
+      "denyRead": ["${DATA_DIR:-/data}", "/backups"]
+    },
+    "credentials": {
+      "files": [
+        { "path": "${CLAUDE_CONFIG_DIR:-/home/node/.claude}/.credentials.json", "mode": "deny" }
+      ]
+    }
+  }
+}
+EOF
+  then
+    if node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' \
+         "$policy_tmp" 2>/dev/null &&
+       mv "$policy_tmp" "$MANAGED_SETTINGS_FILE" 2>/dev/null
+    then
+      # Root-owned 0644, and both halves are load-bearing. Root, because the
+      # agents are UF_AGENT_UID and this is the one policy surface they cannot
+      # rewrite — a repository's own .claude/settings.json is agent-writable and
+      # is ignored for these keys. World-readable, because the `claude` children
+      # that have to *read* it are that same unprivileged uid.
+      chmod 0755 "$MANAGED_SETTINGS_DIR" 2>/dev/null
+      chmod 0644 "$MANAGED_SETTINGS_FILE" 2>/dev/null
+      : > "$MANAGED_SETTINGS_STAMP" 2>/dev/null
+      sandbox_policy_installed=1
+      if ! chown 0:0 "$MANAGED_SETTINGS_DIR" "$MANAGED_SETTINGS_FILE" 2>/dev/null; then
+        # Said rather than left to be noticed: a policy owned by the uid the
+        # agents run as is a file a run can rewrite between cycles, which is the
+        # whole of what root ownership here is for.
+        echo "[usagefoundry] $MANAGED_SETTINGS_FILE could not be given to root," \
+             "so the sandbox policy belongs to the same uid the agents do and a" \
+             "run can rewrite it. See docs/security.md." >&2
+      fi
+    fi
+    rm -f "$policy_tmp" 2>/dev/null
+  fi
+
+  if [ -z "$sandbox_policy_installed" ]; then
+    echo "[usagefoundry] UF_SANDBOX is 1 but $MANAGED_SETTINGS_FILE could not be" \
+         "written — no policy from this app is in place and every run is" \
+         "unconfined. Check that this container runs as root (\`user: \"0:0\"\`" \
+         "in docker-compose.yml)." >&2
+  fi
+elif [ -n "${UF_SANDBOX:-}" ]; then
+  # Not silently read as off. The variable that switches a security boundary on
+  # is the one place a typo must not be indistinguishable from a decision — and
+  # the app's own boot line reads the *file*, so it will say there is no sandbox
+  # while .env says there is one. This is the sentence that joins the two.
+  echo "[usagefoundry] UF_SANDBOX is \"${UF_SANDBOX}\", and the only value that" \
+       "switches the sandbox on is \"1\" — no policy was written and every run" \
+       "is unconfined." >&2
+fi
+
+if [ "${UF_SANDBOX:-}" != "1" ] && [ -e "$MANAGED_SETTINGS_STAMP" ]; then
+  rm -f "$MANAGED_SETTINGS_FILE" "$MANAGED_SETTINGS_STAMP" 2>/dev/null
+  echo "[usagefoundry] UF_SANDBOX is off — removed the sandbox policy this app" \
+       "wrote at an earlier boot."
+fi
+
 exec "$@"

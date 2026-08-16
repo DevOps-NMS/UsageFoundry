@@ -114,6 +114,21 @@ environment out of `/proc`, so `UF_AUTH_TOKEN` and `ANTHROPIC_ADMIN_KEY` — the
 app's own master credential and an organisation-wide Admin key, neither of which
 has anything to do with the task the agent was given — are no longer reachable.
 
+There is now a switch that reaches the first of the five, and it is **off, and
+unproven**. `UF_SANDBOX=1` (see `.env.example`) has the container write a
+root-owned policy that puts each of an agent's commands inside Claude Code's own
+bubblewrap namespace, with a deny over `~/.claude/.credentials.json` — the first
+mechanism here that makes a `cat` of your token fail inside a run while the
+session still bills — plus a read deny over `/data` and `/backups` and, if you
+name domains, an egress allowlist. It needs the `security_opt` block in
+`docker-compose.yml` uncommented, since bubblewrap cannot start under Docker's
+default seccomp profile. Two things it is not. It does **not** close the third
+bullet above: the policy is install-wide and names no per-run paths, so a run can
+still write a concurrent run's checkout. And nothing about it has ever been
+executed on this project — the mechanism was read out of the pinned CLI binary,
+so turning it on is an experiment you are running rather than a control you are
+enabling. `docs/verification.md` carries every step that would settle it.
+
 ## Everything else
 
 - Compose binds to **`127.0.0.1:3000`**, not `0.0.0.0`. `UF_BIND_ADDRESS` moves

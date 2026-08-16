@@ -106,6 +106,33 @@ services:
       # Needs UF_GITHUB_TOKEN: gh refuses every API call unauthenticated, even
       # for a public repository.
       UF_GH_EXTENSIONS: "${UF_GH_EXTENSIONS:-}"
+      # The CLI's own sandbox around the commands an agent runs. Blank is off
+      # and is the shipped state: nothing is written, nothing is confined, and
+      # this install behaves exactly as it did before the switch existed. "1"
+      # makes docker-entrypoint.sh write /etc/claude-code/managed-settings.json
+      # — root-owned, so it is the one policy surface a run cannot edit.
+      #
+      # Read by the entrypoint and by nothing in the app, the same arrangement
+      # UF_GH_EXTENSIONS has: what the app reports is the *file*, read at boot,
+      # so an install where the write failed says there is no sandbox rather
+      # than repeating what this variable claims.
+      #
+      # It needs the security_opt block at the bottom of this file uncommented.
+      # Without it bubblewrap cannot start, and what happens then is
+      # UF_SANDBOX_ENFORCEMENT's answer.
+      UF_SANDBOX: "${UF_SANDBOX:-}"
+      # What a sandbox that cannot start does. "refuse" (the default, and what
+      # blank means) exits the CLI non-zero rather than running unconfined;
+      # "warn" runs the command anyway. Refusing is loud and recoverable — the
+      # run's own log names it — where the alternative is a fleet that works
+      # perfectly and confines nothing.
+      UF_SANDBOX_ENFORCEMENT: "${UF_SANDBOX_ENFORCEMENT:-}"
+      # Domains sandboxed commands may reach, "|"-separated. Blank leaves egress
+      # unrestricted, which is deliberate: an allowlist this project guessed at
+      # would fail inside a tool call the first time an agent ran `npm install`.
+      # Naming any domain also pins the list to the managed file, so a run
+      # cannot widen it from the ~/.claude/settings.json it can write.
+      UF_SANDBOX_ALLOWED_DOMAINS: "${UF_SANDBOX_ALLOWED_DOMAINS:-}"
       # One entry per selectable workspace, "Label=/container/path", separated
       # by "|". An entry whose label is empty — i.e. UF_WORKSPACE_N_NAME is not
       # set in .env — is skipped, so extra workspaces are switched on from .env
@@ -251,6 +278,48 @@ services:
       # first: Docker creates a missing bind source as root, and the children
       # that write it run as UF_AGENT_UID.
       - ${UF_BACKUP_DIR:-./backups}:/backups
+
+    # ------------------------------------------------------------------------
+    # What this container may ask the kernel for — commented out, and the whole
+    # of what UF_SANDBOX above needs from the host.
+    # ------------------------------------------------------------------------
+    # Uncomment the two lines below to let bubblewrap start. Nothing else here
+    # depends on them: with them commented the image still carries bwrap, socat
+    # and the seccomp applier, and every one of them sits unused, which is what
+    # makes a stock install identical to the one before this section existed. A
+    # missing ./uf-seccomp.json cannot break a boot that never reads it.
+    #
+    # What it widens. Docker's default seccomp profile allows the whole
+    # namespace-and-mount family only to a container holding CAP_SYS_ADMIN, and
+    # this one holds none — so `unshare` fails with EPERM before the kernel is
+    # consulted at all. Measured in the shipped container rather than reasoned
+    # about: plain `unshare -U`, which needs no privilege on a stock kernel,
+    # fails the same way; `/proc/sys/user/max_user_namespaces` is 31734 and
+    # `Seccomp: 2` with one filter loaded. ./uf-seccomp.json is Docker's own
+    # default profile with six syscalls ungated — clone, clone3, unshare, mount,
+    # umount2, pivot_root — which is the user namespace and the mount namespace
+    # bubblewrap builds inside it, and nothing else. The twenty-one other
+    # syscalls in the rule this reaches into (bpf, perf_event_open, setns,
+    # syslog, quotactl, sethostname and the rest) stay behind the capability
+    # gate Docker put them behind. The kernel still applies its own
+    # user-namespace rules afterwards; what changes is that it is asked.
+    #
+    # What it does not widen. No CAP_SYS_ADMIN — the capability set is
+    # untouched, and it is the capability rather than the syscall that carries
+    # the mount-anywhere powers people mean by "SYS_ADMIN". Not `--privileged`,
+    # which is every capability, every device and no seccomp filter at all. And
+    # nothing like mounting the Docker socket, which is root on the host wearing
+    # a unix socket. It is materially smaller than the first and not comparable
+    # to the other two.
+    #
+    # ./uf-seccomp.json is generated, not written by hand — regenerate it
+    # against your own engine's version so every rule this does not touch stays
+    # the one Docker actually ships:
+    #
+    #   python3 scripts/make-seccomp-profile.py "v$(docker version --format '{{.Server.Version}}')"
+    #
+    # security_opt:
+    #   - seccomp=./uf-seccomp.json
 
     # ------------------------------------------------------------------------
     # What this container may take from the host before Docker stops it.
