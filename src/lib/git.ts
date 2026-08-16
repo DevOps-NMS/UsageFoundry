@@ -164,6 +164,20 @@ export function gitSync(cwd: string, args: string[]): GitResult {
  * thing to do, so `land.ts` passes this on every call that decides or performs
  * one. Memory is still bounded by `maxBytes` where a caller reads a diff, and
  * an unbounded call is still killed when the process ends.
+ *
+ * **It never rejects, and that is a contract the whole app was already reading
+ * it as having.** Not every failure to start a child reaches the `error` event:
+ * `spawn` demotes exactly `EACCES`/`EAGAIN`/`EMFILE`/`ENFILE`/`ENOENT` to one,
+ * and throws every other errno synchronously — `ENOTDIR` from a `cwd` that has
+ * become a file, `EPERM` from `childCredentials()`. `EMFILE` and `ENFILE` are
+ * worse than a throw from `spawn`: they *return*, having deliberately skipped
+ * the stdio wiring, so `child.stdout` is `undefined` and the `setEncoding`
+ * below is what throws — and file descriptors are the resource this app is
+ * closest to spending, at four merge workers each running a dozen git children
+ * beside a fleet of agents. Every caller in `land.ts` reads a `GitResult` and
+ * none of them has a `catch`, so a rejection propagated out of the merge
+ * worker's loop and left the row it was landing stuck on `landing` for ever.
+ * A child that could not be started is reported as the failed call it is.
  */
 export function git(
   cwd: string,
@@ -173,31 +187,10 @@ export function git(
   const { timeoutMs = 20_000, maxBytes = 0, trim = true } = opts;
 
   return new Promise((resolve) => {
-    const child = spawn(GIT_BIN, gitArgs(args), {
-      cwd,
-      env: gitEnv(),
-      ...childCredentials(),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
     let stdout = "";
     let stderr = "";
     let overflowed = false;
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (c: string) => {
-      if (overflowed) return;
-      stdout += c;
-      if (maxBytes > 0 && stdout.length > maxBytes) {
-        overflowed = true;
-        child.kill("SIGKILL");
-      }
-    });
-    child.stderr.on("data", (c: string) => (stderr += c));
-
-    // Zero is "no clock", not "kill immediately" — see the note above.
-    const timer = timeoutMs > 0 ? setTimeout(() => child.kill("SIGKILL"), timeoutMs) : null;
-    timer?.unref?.();
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
     let settled = false;
     const finish = (code: number | null) => {
@@ -212,7 +205,40 @@ export function git(
         overflowed,
       });
     };
-    child.on("error", () => finish(null));
-    child.on("close", (code) => finish(code));
+
+    try {
+      const child = spawn(GIT_BIN, gitArgs(args), {
+        cwd,
+        env: gitEnv(),
+        ...childCredentials(),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (c: string) => {
+        if (overflowed) return;
+        stdout += c;
+        if (maxBytes > 0 && stdout.length > maxBytes) {
+          overflowed = true;
+          child.kill("SIGKILL");
+        }
+      });
+      child.stderr.on("data", (c: string) => (stderr += c));
+
+      // Zero is "no clock", not "kill immediately" — see the note above.
+      timer = timeoutMs > 0 ? setTimeout(() => child.kill("SIGKILL"), timeoutMs) : null;
+      timer?.unref?.();
+
+      child.on("error", () => finish(null));
+      child.on("close", (code) => finish(code));
+    } catch (err) {
+      // The child never started, and the errno said so by throwing rather than
+      // by the `error` event. `stderr` is where a caller already looks for why
+      // a git call failed, so the reason goes there rather than into a rejection
+      // nothing above is written to catch.
+      stderr = err instanceof Error ? err.message : String(err);
+      finish(null);
+    }
   });
 }

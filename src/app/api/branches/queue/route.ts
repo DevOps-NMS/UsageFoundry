@@ -9,6 +9,7 @@ import {
 } from "@/lib/mergeQueue";
 import { getRun } from "@/lib/orchestrator";
 import { getSettings } from "@/lib/settings";
+import { jsonNoStore } from "../../../../lib/http";
 import { auditMutation } from "../../../../lib/requestLog";
 
 export const runtime = "nodejs";
@@ -72,11 +73,18 @@ function batchDTO(batch: { batchId: string; createdAt: number; rows: QueueRow[] 
  * where that disclosure is shut. `historyCount` rides on every answer either
  * way — it is what the closed disclosure is labelled with, and it costs the
  * `GROUP BY` this route was already paying for.
+ *
+ * Answered through `jsonNoStore` for the reason that helper exists: this is a
+ * polled route, `dynamic = "force-dynamic"` governs Next's *own* cache and puts
+ * nothing on the wire, and a queue answer held anywhere between the browser and
+ * the app is a panel whose merge statuses never move while the rows behind it
+ * land. `cache: "no-store"` on the page's own `fetch` speaks only to the
+ * browser's cache.
  */
 export async function GET(req: Request) {
   const wantRows = new URL(req.url).searchParams.get("history") === "1";
   const history = queueHistory(wantRows);
-  return NextResponse.json({
+  return jsonNoStore({
     working: isWorking(),
     batches: queueView().map(batchDTO),
     historyCount: history.total,

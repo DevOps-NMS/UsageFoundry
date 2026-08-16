@@ -42,8 +42,21 @@ import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
  *
  * The inventory is not polled: each row costs a git process to work out and
  * nothing in it changes on its own. The queue *does* change on its own, so it is
- * polled while it is working and the inventory is re-read once when it stops —
- * which is exactly when every state in it may have moved.
+ * polled, and the inventory is re-read once when it stops — which is exactly
+ * when every state in it may have moved.
+ *
+ * The queue is polled **whatever it last said**, slowly while it is idle and
+ * every few seconds while it is working. Gating the interval on "something in
+ * the last answer was active" made an idle queue an absorbing state: with no
+ * interval running nothing fetched a newer answer, so nothing could ever say
+ * the queue had started again, and the only thing that could restart it was a
+ * press of Land in *this* tab. A merge block in a workflow queues branches
+ * directly, and so does a second tab — both of those advanced, failed and
+ * landed with this page frozen on whatever it happened to be showing, which is
+ * the shape of "the statuses never update even when the merge succeeds". The
+ * same freeze followed a single failed read on load, since the mount effect
+ * runs once. The idle tick is what makes the answer eventually true rather than
+ * eventually stale; it is one `GROUP BY` and no git.
  */
 
 /**
@@ -161,6 +174,18 @@ const ITEM_ACTIVE: MergeQueueItemDTO["status"][] = [
   "landing",
   "resolving",
 ];
+
+/** How often the queue is re-read while the worker is on it. */
+const QUEUE_POLL_MS = 3_000;
+/**
+ * And while it is not.
+ *
+ * Slower rather than absent, because what this tick is for is queue activity
+ * this tab did not start — a workflow's merge block, another tab, another
+ * server sharing the table. Nothing here costs a git process; the inventory
+ * beside it does, and is still read only on the edge.
+ */
+const QUEUE_IDLE_POLL_MS = 15_000;
 
 const ITEM_TONE: Record<MergeQueueItemDTO["status"], BadgeTone> = {
   queued: "neutral",
@@ -786,8 +811,10 @@ export default function Branches() {
     (queue.working || queueItems.some((i) => ITEM_ACTIVE.includes(i.status)));
 
   useEffect(() => {
-    if (!queueActive) return;
-    const t = setInterval(() => void loadQueue(), 3000);
+    const t = setInterval(
+      () => void loadQueue(),
+      queueActive ? QUEUE_POLL_MS : QUEUE_IDLE_POLL_MS,
+    );
     return () => clearInterval(t);
   }, [queueActive, loadQueue]);
 
