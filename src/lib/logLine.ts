@@ -12,7 +12,7 @@
  * runs in the browser over the replayed event stream.
  */
 
-import type { RunEventDTO } from "./apiTypes";
+import type { RunEventDTO, SandboxRefusalKindDTO } from "./apiTypes";
 import { fmtPct, fmtUSD } from "./format";
 
 /**
@@ -202,6 +202,22 @@ function serialise(value: unknown): string | undefined {
   }
 }
 
+/**
+ * One clause per sandbox condition, and none of them says "denied".
+ *
+ * Every marker `sandbox.ts` recognises is a sandbox that is *not working*
+ * rather than a policy that refused a path, and a row that said the second
+ * about the first would send an operator to edit an allowlist that was never
+ * consulted. The wording is deliberately as narrow as the evidence.
+ */
+const SANDBOX_REASON: Record<SandboxRefusalKindDTO, string> = {
+  "seccomp-unavailable":
+    "the seccomp applier is missing, so unix socket access is not restricted",
+  "sandbox-unavailable": "a sandbox was required here and could not start",
+  "dependency-missing": "the sandbox's own dependencies are not installed",
+  "sandbox-message": "the CLI's Linux sandbox reported this",
+};
+
 /** How loudly a hand-driven transition should read. */
 function statusTone(status: unknown): LogTone {
   if (status === "failed") return "danger";
@@ -299,6 +315,35 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
         tone: "danger",
         label: "tool failed",
         text: [command ? `${who}: ${command}` : who, String(p.text ?? "").trim()]
+          .filter(Boolean)
+          .join(" — "),
+      };
+    }
+
+    case "sandbox": {
+      const tool = String(p.name ?? "tool");
+      const command = String(p.command ?? "").trim();
+      // This row sits directly under the `tool_error` for the same call, which
+      // already carries the tool's own words in full. So it says the one thing
+      // that row cannot — which sandbox condition those words were recognised
+      // as — and says it first, or the two lines are the same sentence twice.
+      // The raw reason is still on the event for anyone reading the table.
+      //
+      // `warn` rather than `danger`, the call the guard row already makes: a
+      // boundary doing its job is not a fault, and the failure is set as one
+      // above.
+      const kind = String(p.kind ?? "");
+      return {
+        voice: "system",
+        tone: "warn",
+        label: "sandbox",
+        text: [
+          // A kind this build does not know is a row written by another one.
+          // Naming it beats a blank line, and beats claiming which it was.
+          SANDBOX_REASON[kind as SandboxRefusalKindDTO] ??
+            `an unrecognised sandbox condition (${kind || "unnamed"})`,
+          command ? `${tool}: ${command}` : tool,
+        ]
           .filter(Boolean)
           .join(" — "),
       };

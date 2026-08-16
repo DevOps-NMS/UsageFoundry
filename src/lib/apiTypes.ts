@@ -1191,6 +1191,19 @@ export interface RunEventDTO {
      * went fine. Errors only — a successful result is not recorded at all.
      */
     | "tool_error"
+    /**
+     * A tool call that failed for a sandbox reason, carrying the words that
+     * said so.
+     *
+     * Its own kind rather than a flag on `tool_error`, and emitted *beside* one
+     * rather than instead of it, because the two answer different questions and
+     * an operator asks the second one about a whole run: `kind = 'sandbox'` is
+     * "did the policy refuse anything here", where the failure itself stays
+     * where every other failed call is. It is also the one class of tool failure
+     * that reaches stdout, for the reason a tripped guard does — a fleet whose
+     * allowlist is too narrow fails inside tool calls nobody is reading.
+     */
+    | "sandbox"
     | "iteration"
     | "budget"
     | "result"

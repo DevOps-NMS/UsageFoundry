@@ -17,6 +17,7 @@ import {
 import { git, gitSync } from "./git";
 import { dataDirRefusal, mayWriteDataDir, requireDataDir } from "./serverLock";
 import { childCredentials, chownForChild } from "./privsep";
+import { sandboxRefusal } from "./sandbox";
 import { db } from "./db";
 import {
   getSettings,
@@ -275,6 +276,11 @@ export interface RunEvent {
     | "tool"
     /** A tool call that came back an error. See `toolResultFailures`. */
     | "tool_error"
+    /**
+     * A tool call that failed for a sandbox reason. See `sandboxRefusal`, and
+     * `RunEventDTO` for why it is beside the `tool_error` rather than on it.
+     */
+    | "sandbox"
     | "iteration"
     | "budget"
     | "result"
@@ -514,6 +520,20 @@ function logLifecycle(e: PersistedRunEvent): void {
       return;
     case "error":
       opsLog("error", "run.error", { run_id: e.runId, message: str("message") });
+      return;
+    case "sandbox":
+      // The one tool failure that reaches stdout, and it is here for the
+      // reason a tripped guard is: a policy that refuses the work fails inside
+      // tool calls, and at twenty-five unattended runs the run page is not
+      // where anyone finds that out. Ordinary `tool_error` rows stay off, which
+      // is what keeps this line worth reading.
+      opsLog("warn", "run.sandbox_refusal", {
+        run_id: e.runId,
+        sandbox: str("kind"),
+        tool: str("name"),
+        matched: str("matched"),
+        reason: str("reason"),
+      });
       return;
     default:
       return;
@@ -5342,6 +5362,29 @@ function handleStreamLine(
         kind: "tool_error",
         payload: { ...failure },
       });
+
+      // And, when the words say so, the second statement about the same
+      // failure: that a *policy* refused it rather than the work being
+      // impossible. Beside the row above and never instead of it — a
+      // non-match must leave the tool failure exactly as it was, and a match
+      // must not move it somewhere a reader looking for failed calls will not
+      // look. The reason is carried verbatim: this recognises text read out of
+      // one CLI build and never executed, so what it decided has to be
+      // checkable against what the tool actually said.
+      const sandbox = sandboxRefusal(failure.text);
+      if (sandbox) {
+        emit({
+          runId,
+          ts: Date.now(),
+          kind: "sandbox",
+          payload: {
+            ...sandbox,
+            name: failure.name,
+            command: failure.command,
+            toolUseId: failure.toolUseId,
+          },
+        });
+      }
     }
     return;
   }
