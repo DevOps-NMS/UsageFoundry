@@ -1547,14 +1547,15 @@ through before trusting this unattended:
   docker compose logs usagefoundry | grep -i sandbox           # expect the boot line
   ```
 
-  The second of those four **will fail today and is not a regression**: making
-  `~/.claude` root-owned while handing back the entries the CLI writes is a
-  separate piece of work, so `~/.claude/settings.json` is still writable by the
-  agents and is still an honored source for `sandbox.filesystem`. Until it
-  lands, a run can widen the filesystem half of the policy from inside itself.
-  It cannot widen the credential deny (a separate list), and it cannot widen
-  the domain list once `UF_SANDBOX_ALLOWED_DOMAINS` names one, because that
-  also sets `allowManagedDomainsOnly`.
+  The second of those four **fails on a stock install and is not a regression**:
+  making `~/.claude` root-owned while handing back the entries the CLI writes is
+  a second switch, `UF_LOCK_CLAUDE_HOME`, and it is off unless the operator sets
+  it — see the entry on it below, which carries that check and three more. With
+  it off, `~/.claude/settings.json` is writable by the agents and is an honored
+  source for `sandbox.filesystem`, so a run can widen the filesystem half of the
+  policy from inside itself. It cannot widen the credential deny (a separate
+  list), and it cannot widen the domain list once `UF_SANDBOX_ALLOWED_DOMAINS`
+  names one, because that also sets `allowManagedDomainsOnly`.
 
   **Whether the generated policy resolves to a sandbox at all.** This is the
   failure that would be quietest of the lot, and it is unverified in both
@@ -1665,23 +1666,26 @@ through before trusting this unattended:
 
   **The dependency this does not close, and nothing should be read as a boundary
   until it does.** `~/.claude/settings.json` is an honored source for
-  `sandbox.filesystem` and is writable by `UF_AGENT_UID` today
+  `sandbox.filesystem` and is writable by `UF_AGENT_UID` on a stock install
   (`10-validation.md`, finding 1), so a run can append
   `{"sandbox":{"filesystem":{"allowWrite":["/"]}}}` and every later session — its
   own and every sibling's — is confined to nothing. Root-owning `~/.claude`
-  itself and handing back the entries the CLI writes is a separate piece of
-  work, deliberately after this one: it runs against a bind-mounted host
-  directory the operator also uses outside the container, and every entry missed
-  shows up as a dashboard of zeros rather than an error. Until it lands, the
-  per-run overlay narrows a policy a run can widen from inside itself. The probe
-  is two lines and costs no billed cycle:
+  itself and handing back the entries the CLI writes has since landed, as
+  `UF_LOCK_CLAUDE_HOME=1` in `docker-entrypoint.sh` — **off by default**, because
+  it runs against a bind-mounted host directory the operator also uses outside
+  the container, and every entry missed shows up as a dashboard of zeros rather
+  than an error. With it off, which is every stock install, the per-run overlay
+  still narrows a policy a run can widen from inside itself. The probe is two
+  lines and costs no billed cycle:
 
   ```sh
   docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
     'echo "{\"sandbox\":{\"filesystem\":{\"allowWrite\":[\"/tmp/uf-probe\"]}}}" \
-       >> ~/.claude/settings.json'                  # expect denied once the
-                                                    # ownership work has landed
+       >> ~/.claude/settings.json'                  # expect denied only with
+                                                    # UF_LOCK_CLAUDE_HOME=1
   ```
+
+  The entry below carries that check and the rest of what that switch needs.
 
   **And the question nobody has answered either way: whether the CLI's sandbox
   wraps the session or only Bash** (`09-implementation-sketch.md`, Phase 1
@@ -1706,6 +1710,148 @@ through before trusting this unattended:
   it is the first thing to run after the sibling check above. And whether the
   overlay's paths survive a rename: they are the row's own recorded paths, so a
   checkout moved underneath a live run would be confined to where it used to be.
+
+- **Root-owning `~/.claude`, which no container has ever done and which changes
+  a directory on the operator's own host.** `UF_LOCK_CLAUDE_HOME=1` makes
+  `docker-entrypoint.sh` give `$CLAUDE_CONFIG_DIR` and its `settings.json` to
+  root, after handing back the entries the CLI writes (`projects sessions todos
+  shell-snapshots history.jsonl .credentials.json .claude.json backups`). It is
+  off by default and skipped when `UF_AGENT_UID` is unset.
+
+  What was checked, and it is all short of the thing itself: `npm run typecheck`
+  and `npm test` pass (neither reads a shell script, so they say nothing about
+  this); `sh -n` and `dash -n` accept the file; and the block was driven under
+  `dash` through **eighteen scenarios** with `chown`, `stat`, `id` and `setpriv`
+  replaced by stubs that record what *would* have been changed — off with an
+  untouched home, on with everything already the agent's, a missing `projects/`,
+  a root-owned entry that hands back, one that cannot, a directory chown that
+  fails after `settings.json` was taken (the revert), an agent that can no
+  longer write `projects/` or read `settings.json` (the undo, including the case
+  where `settings.json` was root's from an earlier boot rather than this one), a
+  chown that reports success while the agent can still write (the `fakeowner`
+  case), a `setpriv` that cannot run at all (the lock is kept and the boot line
+  says it was never checked), no `settings.json` at all, not running as root, no
+  `UF_AGENT_UID`, a value that is not `1`, off after a lock, off against a
+  `~/.claude` that is root's all the way down, and a hand-back on the way down
+  that fails. Every branch printed
+  what it should and no branch chowned anything it should not have. **That is a
+  control-flow harness and not a kernel**: no ownership was changed anywhere, by
+  anything, at any point — the container was never built and never started,
+  because this run had no `docker` binary, no `/var/run/docker.sock`, no root
+  for `apt-get`, and `unshare --user` answering `Operation not permitted`.
+
+  Three things about the CLI *were* measured, against the pinned 2.1.226 with a
+  throwaway `CLAUDE_CONFIG_DIR`, and they are why the list above is what it is.
+  A session start creates `.claude.json`, `backups/`, `projects/` and
+  `sessions/` at the top level of that directory before it has authenticated —
+  `.claude.json` lands *inside* it precisely because `CLAUDE_CONFIG_DIR` is set,
+  which is not where it sits on a host that has not set it. A session started
+  against a config directory whose **top level is not writable** but whose
+  entries exist runs to the API and fails only on the credential, creating
+  nothing and complaining about nothing. And the binary's own atomic writer —
+  temp file, then rename — falls back to an in-place `O_TRUNC` write when the
+  rename fails with `EACCES`, which is why rewrites of top-level files the
+  agents still own survive a directory they no longer do.
+
+  What none of that touches is whether a real container comes up, whether the
+  ownership reaches the kernel that enforces it, and whether a work cycle still
+  meters. Every command below is for a human and **none has been run**:
+
+  ```sh
+  # 0. the shipped state first — with UF_LOCK_CLAUDE_HOME unset, nothing changes
+  docker compose up -d --build
+  docker compose logs usagefoundry | grep UF_LOCK_CLAUDE_HOME    # expect nothing
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'test -w ~/.claude/settings.json && echo BAD-writable'       # expect BAD-writable
+
+  # then set UF_LOCK_CLAUDE_HOME=1 in .env, add the line docs/install.md names
+  # to docker-compose.yml's environment: block, and restart
+  docker compose up -d
+  docker compose exec usagefoundry sh -c 'echo "[$UF_LOCK_CLAUDE_HOME]"'
+  # expect [1]. Compose forwards by name and has no env_file, so a missing line
+  # there is a switch that is set, read by compose, and never seen by the boot
+  docker compose logs usagefoundry | grep UF_LOCK_CLAUDE_HOME
+  # expect "…is root-owned: a run cannot rewrite or replace its settings.json…"
+  # a refusal instead names the entry, the owner it wanted and the owner it saw
+
+  # 1 + 2. the two the sketch names (09-implementation-sketch.md:274–283)
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'echo x >> ~/.claude/settings.json'                    # expect denied
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'rm -f ~/.claude/settings.json; ls ~/.claude/settings.json'
+                                              # expect denied, and still listed
+  # if the append *succeeds*, the lock is not in force and your settings.json is
+  # no longer valid JSON — remove the stray line before the next session reads it
+
+  # 3. and the half that is not a permission check — the metering path
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'ls ~/.claude/projects >/dev/null && touch ~/.claude/projects/.probe'
+                                                          # expect BOTH to work
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'cat ~/.claude/settings.json >/dev/null'   # expect it to work: hooks,
+                                     # permission rules and env are in that file
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'rm -f ~/.claude/projects/.probe'                  # tidy up after it
+  ```
+
+  Then the part no permission check reaches: **run a real work cycle** and
+  confirm the dashboard's figures move. `projects/` is `transcripts.ts`'s scan,
+  so a hand-back that half-worked is a fleet that looks idle rather than an
+  error — the two together (a cycle that commits, and a window that grows) are
+  the only evidence this did not break metering. A chat turn and a review are
+  worth one pass each for the same reason.
+
+  **The check the sketch does not name, and this change makes necessary: your
+  own Claude Code, on the host, outside this container.** `~/.claude` is a bind
+  mount of your home directory, so this changes what your own tools may do
+  there. From a host shell, not `docker compose exec`:
+
+  ```sh
+  ls -ld ~/.claude ~/.claude/settings.json
+  # Linux: expect root:<your gid> 0750, and root:<your gid> 0640 on the file
+  ls ~/.claude/projects >/dev/null && echo ok      # expect ok — still yours
+  claude -p 'say hi'                               # expect a normal answer
+  touch ~/.claude/probe                            # expect Permission denied
+  ```
+
+  What you have given up, and it is not nothing: you can no longer create
+  anything at the top level of `~/.claude`, and you can no longer edit
+  `~/.claude/settings.json` — including through `/config`, which will fail — from
+  your own account. `sudoedit ~/.claude/settings.json` is the way to change it
+  while this is on. If your host `~/.claude` is *fresh* rather than one Claude
+  Code has been using, expect breakage instead: a directory it has not created
+  yet (`todos/`, `statsig/`, `file-history/`, whatever the version wants) cannot
+  be created under a root-owned parent, and the failure will be inside a tool
+  call rather than on your screen. The boot names the ones it knows about, once.
+
+  The way back, which should also be exercised once before you need it:
+
+  ```sh
+  # clear UF_LOCK_CLAUDE_HOME in .env, then
+  docker compose up -d
+  docker compose logs usagefoundry | grep UF_LOCK_CLAUDE_HOME
+  # expect "off — gave /home/node/.claude back to <uid>:<gid>"
+  ls -ld ~/.claude                                 # expect your own uid, 0700
+  # and if that ever fails to run:
+  sudo chown -R "$(id -u):$(id -g)" ~/.claude
+  ```
+
+  **On macOS this may do nothing at all, in either direction.** Docker Desktop
+  emulates bind-mount ownership (`fakeowner` on every mount here —
+  `10-validation.md`, finding 14), so the `chown` may not reach the host files
+  and may not confine the agents. The entrypoint asks an agent's own uid, with
+  `setpriv`, whether it can still write the directory and the file, and prints
+  `…the ownership change did not reach the kernel that enforces it…` when the
+  answer is yes. Read that line before believing any of this is in force; the
+  `echo x >> ~/.claude/settings.json` above is the check that settles it.
+
+  One thing that is **not** closed by this and should not be read into it: a run
+  can still read `~/.claude/.credentials.json` (it is the credential it bills
+  against),
+  and every other entry under `~/.claude` — `CLAUDE.md`, `agents/`, `rules/`,
+  `plugins/` — keeps the owner it had, which is the agents'. This closes the
+  file the CLI resolves a *sandbox policy* from, and the hooks and permission
+  rules beside it in that same file. It does not make `~/.claude` read-only.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

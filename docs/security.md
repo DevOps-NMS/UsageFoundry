@@ -129,6 +129,28 @@ executed on this project — the mechanism was read out of the pinned CLI binary
 so turning it on is an experiment you are running rather than a control you are
 enabling. `docs/verification.md` carries every step that would settle it.
 
+**And one more surface, which is a policy file rather than a path.**
+`~/.claude/settings.json` is one of the sources Claude Code merges a sandbox
+policy from — the managed file above, `--settings` on the command line, and
+*user settings* — and it is owned by the uid the agents run as. A run that
+appends `{"sandbox":{"filesystem":{"allowWrite":["/"]}}}` to it widens the
+policy every later session starts under, its own and every sibling's; while that
+is true, the paragraph above describes a boundary a run can move. The same file
+also carries hooks, permission rules and environment for every session, so this
+is not only about the sandbox. `UF_LOCK_CLAUDE_HOME=1` closes it by giving
+`~/.claude` **and** that file to root at boot, then handing back, individually,
+the entries the CLI writes — `projects/` first, because that is the metering
+path every window and every guard reads. Both halves are load-bearing: a
+root-owned file inside a directory the agents own is a file they can delete and
+replace. It is off by default and it is a separate switch from `UF_SANDBOX` in
+both directions, because each is worth having without the other. What it costs:
+it changes a directory on your **host** that you also use outside this
+container, and `docs/install.md` says exactly what you lose and how to undo it.
+On macOS the platform emulates bind-mount ownership, so the `chown` may reach
+neither your files nor the agents — the entrypoint asks an agent's own uid
+whether it can still write that file and says so on the boot log, and that line
+is the only evidence here that the boundary exists.
+
 ## Everything else
 
 - Compose binds to **`127.0.0.1:3000`**, not `0.0.0.0`. `UF_BIND_ADDRESS` moves

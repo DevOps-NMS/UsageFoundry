@@ -306,4 +306,318 @@ if [ "${UF_SANDBOX:-}" != "1" ] && [ -e "$MANAGED_SETTINGS_STAMP" ]; then
        "wrote at an earlier boot."
 fi
 
+# The other file the CLI reads a sandbox policy out of, and the only one the
+# agents can write.
+#
+# `$CLAUDE_CONFIG_DIR/settings.json` is an *honored* source for `sandbox.*`: the
+# pinned binary resolves the policy from the managed file above, from
+# `--settings` on the argv, and from user settings, merged — and
+# `filesystem.allowWrite` is documented as *additional* paths. That file is
+# owned and writable by the uid every agent runs as, so a run appends
+# `{"sandbox":{"filesystem":{"allowWrite":["/"]}}}` and every session after it —
+# its own and every sibling's — starts confined to nothing. Until this block
+# runs, both the managed policy above and the per-run overlay `orchestrator.ts`
+# builds are narrower than what a run can hand itself.
+#
+# Root-owning the *file* does not close it: unlinking a file is a write to the
+# directory that holds it, not to the file, and the agents own that directory.
+# So the directory becomes root's as well, and the entries the CLI writes are
+# handed back one at a time. Never the directory's *contents* wholesale — this
+# block chowns nothing recursively except an entry it found in the wrong hands,
+# so every entry not named below keeps the owner it already had, which on a
+# stock install is the agent's.
+#
+# Off by default, and deliberately not the same switch as UF_SANDBOX. They are
+# worth having one at a time in both directions: the sandbox's credential deny
+# and its domain list are on other lists and are not weakened by this hole, and
+# this is worth closing on an install with no sandbox at all, because
+# `settings.json` also carries hooks, permission rules and environment for every
+# session the CLI starts.
+CLAUDE_HOME_DIR="${CLAUDE_CONFIG_DIR:-/home/node/.claude}"
+
+# What the CLI writes at the top level of that directory, and therefore what has
+# to stay the agent's after the directory stops being. `projects/` first because
+# it is the metering path — `transcripts.ts` walks it for every window, every
+# guard and every spend figure, and a `projects/` the CLI cannot write is a
+# dashboard of zeros rather than an error anybody sees.
+#
+# The first six are the list `proposals/Sandboxing/09-implementation-sketch.md`
+# names. `.claude.json` and `backups` are added from a measurement rather than
+# from the sketch: run against a throwaway `CLAUDE_CONFIG_DIR`, CLI 2.1.226
+# creates `.claude.json`, `backups/`, `projects/` and `sessions/` at the top
+# level of it before it has even authenticated — `.claude.json` lands *inside*
+# the config directory precisely because `CLAUDE_CONFIG_DIR` is set, which is
+# not where it sits on a host that has not set it.
+CLAUDE_HOME_HANDBACK='projects sessions todos shell-snapshots history.jsonl .credentials.json .claude.json backups'
+
+# The owner of a path, or the empty string for something that is not there.
+claude_home_owner() {
+  stat -c '%u:%g' "$1" 2>/dev/null || echo ''
+}
+
+# `test -r`/`test -w` asked from the uid the agents actually run as, which is
+# the only thing here that answers the question the operator has. Root's own
+# `test -w` says yes to everything, and on a bind mount whose ownership the
+# platform emulates — Docker Desktop's `fakeowner`, which is what every macOS
+# install has — a `stat` after a `chown` can report the change while the kernel
+# the agent meets enforces something else. Prints yes/no, or "unknown" when the
+# probe itself could not run, because a `setpriv` that fails must not be read as
+# a permission denied.
+claude_home_agent_test() {
+  setpriv --reuid="$UF_AGENT_UID" --regid="${UF_AGENT_GID:-$UF_AGENT_UID}" \
+          --clear-groups \
+    sh -c 'if test "$1" "$2"; then echo yes; else echo no; fi' sh "$1" "$2" \
+    2>/dev/null || echo unknown
+}
+
+if [ "${UF_LOCK_CLAUDE_HOME:-}" = "1" ] && [ -n "${UF_AGENT_UID:-}" ]; then
+  claude_home_agent="${UF_AGENT_UID}:${UF_AGENT_GID:-$UF_AGENT_UID}"
+  claude_home_root="0:${UF_AGENT_GID:-$UF_AGENT_UID}"
+  claude_home_settings="$CLAUDE_HOME_DIR/settings.json"
+  claude_home_refusal=""
+  claude_home_settings_was=""
+  claude_home_missing=""
+
+  # Three ways this must not start, checked before anything is touched. The
+  # third is the one that matters: a locked directory is one the CLI cannot
+  # create entries in, so a `projects/` that does not exist yet would never
+  # exist, and the failure would be a dashboard of zeros on an install that
+  # looks like it is working. The same is true of the other entries in the list
+  # — `sessions/`, `todos/`, `shell-snapshots/`, `history.jsonl` — but they are
+  # skipped rather than refused, because only `projects/` is silent about it and
+  # because refusing over a `todos/` the CLI has not needed yet would make this
+  # unturnable-on. Sign in and run one real cycle before switching this on; if
+  # something is missing afterwards, create it yourself as the agent's uid
+  # (`docker compose exec --user "${UF_UID:-1000}" usagefoundry mkdir -p
+  # ~/.claude/todos`) with the switch off, then turn it on.
+  if [ ! -d "$CLAUDE_HOME_DIR" ]; then
+    claude_home_refusal="$CLAUDE_HOME_DIR is not a directory"
+  elif [ "$(id -u)" != "0" ]; then
+    claude_home_refusal="this container is not running as root, so nothing here can change an owner"
+  elif [ ! -d "$CLAUDE_HOME_DIR/projects" ]; then
+    claude_home_refusal="$CLAUDE_HOME_DIR/projects does not exist yet, and a root-owned directory is one the CLI cannot create it in — sign in and run one work cycle first"
+  fi
+
+  # Hand back what exists, and check that the hand-back took. Guarded on the
+  # entry's own owner and recursive only when that owner is wrong, which is the
+  # same trade-off the Go cache above makes and for the same reason: `projects/`
+  # is tens of thousands of transcript files on a working install, and chowning
+  # them on every boot would sit in front of the healthcheck's start period on
+  # every routine restart. The ordinary case is one `stat` per entry. What that
+  # accepts, exactly as the Go cache does, is an entry whose root is right and
+  # whose contents are not — nothing here walks a tree it was not told to.
+  #
+  # This runs before the directory is locked, so a failure leaves the install as
+  # it was: metering intact, the hole open, and a message saying so. The reverse
+  # order would trade a policy hole for a metering outage.
+  if [ -z "$claude_home_refusal" ]; then
+    for claude_home_entry in $CLAUDE_HOME_HANDBACK; do
+      claude_home_path="$CLAUDE_HOME_DIR/$claude_home_entry"
+      if [ ! -e "$claude_home_path" ]; then
+        # Not created here — this hands entries back, it does not invent them,
+        # and a `sessions/` this app made would be one the CLI never asked for.
+        # Collected instead, and named once on the boot that takes the directory
+        # (below), because after that the CLI cannot create it either. Not
+        # repeated on every later boot: a permanent warning about a `todos/` the
+        # installed CLI has never needed is noise, and noise is what stops the
+        # next line from being read.
+        claude_home_missing="${claude_home_missing:+$claude_home_missing }$claude_home_entry"
+        continue
+      fi
+      claude_home_have="$(claude_home_owner "$claude_home_path")"
+      [ "$claude_home_have" = "$claude_home_agent" ] && continue
+      chown -R "$claude_home_agent" "$claude_home_path" 2>/dev/null
+      claude_home_have="$(claude_home_owner "$claude_home_path")"
+      if [ "$claude_home_have" != "$claude_home_agent" ]; then
+        claude_home_refusal="$claude_home_path is owned by ${claude_home_have:-a stat that failed} and could not be given to $claude_home_agent"
+        break
+      fi
+      echo "[usagefoundry] UF_LOCK_CLAUDE_HOME: gave $claude_home_path back to" \
+           "$claude_home_agent"
+    done
+  fi
+
+  # The file itself, before the directory, so that a failure here has changed
+  # nothing at all. Root-owned 0640 rather than 0644: the agents have to *read*
+  # it — it carries their hooks, their permission rules and their environment,
+  # and a session that cannot read it loses all three silently — and the group
+  # is the agent's own, so nothing is opened up to anyone else on the operator's
+  # host. A `settings.json` that does not exist is left alone rather than
+  # created: once the directory below is root's, the agents cannot create one
+  # either, so its absence is closed by the same lock.
+  if [ -z "$claude_home_refusal" ] && [ -e "$claude_home_settings" ]; then
+    claude_home_have="$(claude_home_owner "$claude_home_settings")"
+    if [ "$claude_home_have" != "$claude_home_root" ]; then
+      chown "$claude_home_root" "$claude_home_settings" 2>/dev/null
+      if [ "$(claude_home_owner "$claude_home_settings")" = "$claude_home_root" ]; then
+        # Recorded so a failure on the directory below can put it back exactly
+        # as it was found, rather than leaving half a change behind.
+        claude_home_settings_was="$claude_home_have"
+        chmod 0640 "$claude_home_settings" 2>/dev/null
+      else
+        claude_home_refusal="settings.json is owned by ${claude_home_have:-a stat that failed} and could not be given to $claude_home_root"
+      fi
+    fi
+  fi
+
+  # And the directory. 0750 rather than 0700: root owns it now, and the agents
+  # reach `projects/` through it, so the group bit is what keeps the metering
+  # path readable. Not 0755, because on the operator's host this is their own
+  # `~/.claude` and it was 0700 before this ran.
+  if [ -z "$claude_home_refusal" ]; then
+    claude_home_have="$(claude_home_owner "$CLAUDE_HOME_DIR")"
+    if [ "$claude_home_have" != "$claude_home_root" ]; then
+      chown "$claude_home_root" "$CLAUDE_HOME_DIR" 2>/dev/null
+      if [ "$(claude_home_owner "$CLAUDE_HOME_DIR")" = "$claude_home_root" ]; then
+        chmod 0750 "$CLAUDE_HOME_DIR" 2>/dev/null
+        if [ -n "${claude_home_missing:-}" ]; then
+          echo "[usagefoundry] UF_LOCK_CLAUDE_HOME: $CLAUDE_HOME_DIR is now" \
+               "root's and these entries" \
+               "are not in it, so the CLI can no longer create them:" \
+               "$claude_home_missing. If a session needs one, clear" \
+               "UF_LOCK_CLAUDE_HOME, restart, let the CLI make it, and set the" \
+               "variable again." >&2
+        fi
+      else
+        claude_home_refusal="$CLAUDE_HOME_DIR is owned by ${claude_home_have:-a stat that failed} and could not be given to $claude_home_root"
+        if [ -n "$claude_home_settings_was" ]; then
+          chown "$claude_home_settings_was" "$claude_home_settings" 2>/dev/null
+          chmod 0600 "$claude_home_settings" 2>/dev/null
+        fi
+      fi
+    fi
+  fi
+
+  # What the agents can actually do now, asked as one of them. The three
+  # answers are not equally serious, so they are not reported together: a
+  # `projects/` that has stopped being writable is a metering outage and is
+  # undone here, where a `settings.json` that is still writable is the hole this
+  # was meant to close still being open — bad, loud, and not worth breaking an
+  # install over.
+  if [ -z "$claude_home_refusal" ]; then
+    claude_home_open=""
+    claude_home_broke=""
+    claude_home_unknown=""
+
+    # `projects/` first, because if two of these are wrong it is the one that
+    # decides what happens: a metering outage outranks a policy hole.
+    case "$(claude_home_agent_test -w "$CLAUDE_HOME_DIR/projects")" in
+      no) claude_home_broke="cannot write $CLAUDE_HOME_DIR/projects, which is every usage figure and every budget guard" ;;
+      unknown) claude_home_unknown=1 ;;
+    esac
+    case "$(claude_home_agent_test -w "$CLAUDE_HOME_DIR")" in
+      yes) claude_home_open="the directory itself" ;;
+      unknown) claude_home_unknown=1 ;;
+    esac
+    if [ -e "$claude_home_settings" ]; then
+      case "$(claude_home_agent_test -w "$claude_home_settings")" in
+        yes) claude_home_open="${claude_home_open:+$claude_home_open and }settings.json" ;;
+        unknown) claude_home_unknown=1 ;;
+      esac
+      case "$(claude_home_agent_test -r "$claude_home_settings")" in
+        no) [ -n "$claude_home_broke" ] ||
+              claude_home_broke="cannot read $claude_home_settings, which carries its hooks, permission rules and environment" ;;
+        unknown) claude_home_unknown=1 ;;
+      esac
+    fi
+
+    if [ -n "$claude_home_broke" ]; then
+      # All or nothing, and this is the "nothing": put the directory and the
+      # file back rather than leave an install metering zeroes. `settings.json`
+      # goes back whenever it is root's, not only when this boot took it —
+      # half-undoing leaves a file the CLI cannot write inside a directory the
+      # agents can, which is neither state.
+      chown "$claude_home_agent" "$CLAUDE_HOME_DIR" 2>/dev/null
+      chmod 0700 "$CLAUDE_HOME_DIR" 2>/dev/null
+      case "$(claude_home_owner "$claude_home_settings")" in
+        0:*) chown "$claude_home_agent" "$claude_home_settings" 2>/dev/null
+             chmod 0600 "$claude_home_settings" 2>/dev/null ;;
+      esac
+      claude_home_refusal="an agent $claude_home_broke — the lock was undone and $CLAUDE_HOME_DIR is back at $(claude_home_owner "$CLAUDE_HOME_DIR")"
+    elif [ -n "$claude_home_open" ]; then
+      echo "[usagefoundry] UF_LOCK_CLAUDE_HOME is 1 and the chown reported" \
+           "success, but an agent can still write $claude_home_open — the" \
+           "ownership change did not reach the kernel that enforces it (a" \
+           "bind mount whose ownership the platform emulates does this). A run" \
+           "can still widen its own sandbox policy. See docs/security.md." >&2
+    elif [ -n "$claude_home_unknown" ]; then
+      # Not folded into the success line. The chowns reported success and the
+      # ownership reads back as root, but the one check that speaks for the
+      # kernel rather than for `stat` did not run, and saying "locked" on the
+      # strength of a probe that never happened is how a boundary comes to be
+      # believed in.
+      echo "[usagefoundry] UF_LOCK_CLAUDE_HOME is 1 and $CLAUDE_HOME_DIR now" \
+           "reads as root's, but \`setpriv\` could not ask an agent's own uid" \
+           "what it can still do — nothing here has confirmed the lock, and" \
+           "docs/verification.md's two probes are the only thing that will." >&2
+    else
+      # Every line this block prints carries the variable's name, success
+      # included, so one `grep UF_LOCK_CLAUDE_HOME` over the logs answers
+      # "is it on?" rather than four different greps.
+      echo "[usagefoundry] UF_LOCK_CLAUDE_HOME is 1 and $CLAUDE_HOME_DIR is" \
+           "root-owned: a run cannot rewrite or replace its settings.json, and" \
+           "$claude_home_agent still writes projects/."
+    fi
+  fi
+
+  if [ -n "$claude_home_refusal" ]; then
+    echo "[usagefoundry] UF_LOCK_CLAUDE_HOME is 1 but $claude_home_refusal." \
+         "Nothing was left half-changed: $CLAUDE_HOME_DIR is as it was, so" \
+         "metering is unaffected and a run can still rewrite the sandbox" \
+         "policy in its settings.json. See docs/install.md." >&2
+  fi
+else
+  # Off, or no agent uid — and off has to undo, or it is not an off switch.
+  #
+  # Undone from the state rather than from a stamp on purpose. A stamp would
+  # live in the writable layer, which `docker compose up --build` discards while
+  # the bind mount keeps every ownership change this made, so the one boot that
+  # most needs to hand the directory back is the one that would have forgotten
+  # it did anything. The signature used instead is narrow: root owns the
+  # directory *and* the agents own `projects/` inside it, which is this block's
+  # own arrangement and not one anything else produces. A `~/.claude` that is
+  # root's all the way down is somebody who ran compose under sudo, and this
+  # leaves it alone.
+  if [ -n "${UF_LOCK_CLAUDE_HOME:-}" ] && [ "${UF_LOCK_CLAUDE_HOME}" != "1" ]; then
+    echo "[usagefoundry] UF_LOCK_CLAUDE_HOME is \"${UF_LOCK_CLAUDE_HOME}\", and" \
+         "the only value that locks $CLAUDE_HOME_DIR is \"1\" — it was left" \
+         "writable by the agents, and a run can rewrite its sandbox policy." >&2
+  elif [ "${UF_LOCK_CLAUDE_HOME:-}" = "1" ]; then
+    # Skipped rather than attempted, on the same condition as the chown blocks
+    # further up: with no UF_AGENT_UID the children are root, and root is not
+    # stopped by an owner or a mode. Said out loud because believing in a
+    # boundary that is not there is worse than not having it.
+    echo "[usagefoundry] UF_LOCK_CLAUDE_HOME is 1 but UF_AGENT_UID is unset, so" \
+         "every child runs as root and no ownership would stop one — nothing" \
+         "was changed. Set UF_UID in .env to separate them first." >&2
+  fi
+
+  if [ -n "${UF_AGENT_UID:-}" ] && [ -d "$CLAUDE_HOME_DIR" ]; then
+    claude_home_agent="${UF_AGENT_UID}:${UF_AGENT_GID:-$UF_AGENT_UID}"
+    claude_home_settings="$CLAUDE_HOME_DIR/settings.json"
+    case "$(claude_home_owner "$CLAUDE_HOME_DIR")" in
+      0:*)
+        if [ "$(claude_home_owner "$CLAUDE_HOME_DIR/projects")" = "$claude_home_agent" ]; then
+          chown "$claude_home_agent" "$CLAUDE_HOME_DIR" 2>/dev/null
+          chmod 0700 "$CLAUDE_HOME_DIR" 2>/dev/null
+          case "$(claude_home_owner "$claude_home_settings")" in
+            0:*) chown "$claude_home_agent" "$claude_home_settings" 2>/dev/null
+                 chmod 0600 "$claude_home_settings" 2>/dev/null ;;
+          esac
+          if [ "$(claude_home_owner "$CLAUDE_HOME_DIR")" = "$claude_home_agent" ]; then
+            echo "[usagefoundry] UF_LOCK_CLAUDE_HOME is off — gave" \
+                 "$CLAUDE_HOME_DIR back to $claude_home_agent, which a boot" \
+                 "with it on had taken."
+          else
+            echo "[usagefoundry] UF_LOCK_CLAUDE_HOME is off but" \
+                 "$CLAUDE_HOME_DIR is still root's and could not be handed" \
+                 "back — the CLI cannot create anything new in it. Run" \
+                 "\`chown $claude_home_agent $CLAUDE_HOME_DIR\` as root, or" \
+                 "start this container as root once." >&2
+          fi
+        fi ;;
+    esac
+  fi
+fi
+
 exec "$@"

@@ -232,6 +232,76 @@ and schedule, and nothing backs it up on its own — take a snapshot before you
 try either of the commands above, and put one in cron afterwards:
 **[Backup and restore](backup-and-restore.md)**.
 
+## Optional: give `~/.claude` to root
+
+Off by default, and worth understanding before you switch it on, because it is
+the one setting here that changes a directory **on your host** that you use
+outside this container.
+
+The reason it exists: `~/.claude/settings.json` is one of the files Claude Code
+reads its sandbox policy out of, and it belongs to the same uid your agents run
+as. A run can append to it, and the next session — its own or another run's —
+starts under whatever it wrote. That makes `UF_SANDBOX` and the per-run limits
+this app passes each `claude` narrower than what a run can grant itself, and the
+same file carries hooks, permission rules and environment for every session.
+
+```bash
+UF_LOCK_CLAUDE_HOME=1
+```
+
+**And one line in `docker-compose.yml`, without which the variable above does
+nothing at all.** Compose forwards variables to the container by name and this
+one is not in the file yet, so add it to the `environment:` block beside
+`UF_SANDBOX`:
+
+```yaml
+      UF_LOCK_CLAUDE_HOME: "${UF_LOCK_CLAUDE_HOME:-}"
+```
+
+then check that it arrived, because a variable that did not is indistinguishable
+from a switch that is off:
+
+```bash
+docker compose exec usagefoundry sh -c 'echo "[$UF_LOCK_CLAUDE_HOME]"'   # expect [1]
+```
+
+At the next boot the container gives `~/.claude` and its `settings.json` to
+root, and hands back — individually — the entries the CLI writes: `projects/`,
+`sessions/`, `todos/`, `shell-snapshots/`, `history.jsonl`, `.credentials.json`,
+`.claude.json` and `backups/`. `projects/` is the one that matters most: it is
+every usage figure, every window and every budget guard on this dashboard, and
+it stays yours. It is all or nothing — if any entry cannot be handed back,
+nothing is changed at all and the boot log names the entry, the owner it wanted
+and the owner it saw.
+
+**Turn it on in this order.** Sign in, and let one real work cycle finish, before
+you set the variable. A root-owned `~/.claude` is one the CLI cannot create
+anything new in, so every directory it needs has to exist first. The boot
+refuses outright if `projects/` is missing, and names the others it did not find
+so you can decide whether you need them.
+
+**What changes on your host.** On Linux this is your own `~/.claude`, and the
+ownership change is real:
+
+- your own Claude Code keeps working — transcripts, sessions and history are all
+  entries that stayed yours;
+- you can no longer create anything at the top level of `~/.claude`, and you can
+  no longer edit `~/.claude/settings.json`, including through `/config`, without
+  `sudo`;
+- `sudo chown -R "$(id -u):$(id -g)" ~/.claude` undoes it, and so does clearing
+  the variable and restarting: the container hands the directory back on the
+  first boot with it off.
+
+On macOS, Docker Desktop emulates bind-mount ownership, so the `chown` may never
+reach your host files — and may not confine the agents either. The entrypoint
+checks from an agent's own uid after it has finished and prints a line saying so
+if the change did not take. Read `docker compose logs usagefoundry | grep
+LOCK_CLAUDE_HOME` before believing the boundary is there.
+
+None of this has been run against a real container by this project.
+`docs/verification.md` carries the steps that would settle it, all of them
+unrun.
+
 ## Reaching it from another machine
 
 Compose publishes the port on `127.0.0.1` by default, so the app answers on the
