@@ -1458,6 +1458,62 @@ through before trusting this unattended:
   at all but the Settings page, where the app already declares the ambient set
   once and where "your `~/.claude` starts every agentless child as *X*" is a true
   sentence with no control to contradict it.
+- **Everything about the sandbox reporting, because no sandbox has ever been
+  started.** `sandboxRefusal` and `sandboxArrangement` are unit-tested in both
+  directions and `npm run typecheck`, `npm test` and `next build` all pass, but
+  the marker strings the detector matches were **read out of the pinned binary
+  with `strings` and never executed** (`proposals/Sandboxing/10-validation.md`,
+  "What this validation did not check"), and the run this was written in could
+  not have executed them: no `docker` binary, no `/var/run/docker.sock`, and
+  `unshare --user` answers `Operation not permitted`, so bubblewrap could not
+  have started even if it had been installed. Three separate things are
+  unverified, and the first is the one that matters:
+
+  **Whether the strings the detector matches are the strings the CLI actually
+  emits into a tool result.** Nothing here has seen one. Once Phase 2 of
+  `proposals/Sandboxing/09-implementation-sketch.md` is in place — bubblewrap,
+  `socat`, the seccomp `security_opt` and a managed policy — capture the real
+  text before trusting the table:
+
+  ```sh
+  # A command the policy refuses, read off the wire rather than off a page.
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c '
+    claude -p "run: touch /etc/uf-probe" --output-format stream-json --verbose' \
+    | jq -r 'select(.type=="user") | .message.content[]?
+             | select(.is_error == true) | .content'
+  ```
+
+  Then compare what it prints against `MARKERS` in `src/lib/sandbox.ts` and add
+  what is missing. Expect the common case — a path outside the allowlist — to
+  come back as a bare `EACCES`/`Permission denied` with nothing sandbox-shaped
+  in it at all: that is why the matcher deliberately does not match those words,
+  and closing that gap needs whatever distinguishing text this command actually
+  shows, not a looser matcher.
+
+  **Whether the event reaches the two places it is supposed to.** The emit is on
+  the same path as `tool_error` and the rendering is a case in the same switch,
+  so both are ordinary — but neither has been watched. With a policy in place,
+  start a run whose first command the policy refuses and confirm both:
+
+  ```sh
+  docker compose logs usagefoundry | grep run.sandbox_refusal   # one JSON line
+  sqlite3 "$DATA_DIR/usagefoundry.db" \
+    "SELECT kind, count(*) FROM run_events WHERE kind IN ('tool_error','sandbox')
+       GROUP BY kind;"     # expect the tool_error row to still be there too
+  ```
+
+  and that the run page shows a `sandbox` line *beside* the failed call rather
+  than instead of it.
+
+  **What the boot line and the Settings row say once there is something to
+  report.** Only the `none` reading has ever been rendered, which is every stock
+  install and is why it is the one that had to be right. The other three are
+  reasoning: `docker compose logs usagefoundry | grep '\] sandbox:'` should
+  change wording as soon as `/etc/claude-code/managed-settings.json` exists, an
+  `{"sandbox":{"enabled":true}}` with nothing under it should read **enabled but
+  empty** on Settings rather than on, and a file that is present and unparsable
+  should read **unknown** rather than none. All three are one `docker compose
+  exec` and a reload apiece, and none of them costs a billed cycle.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
