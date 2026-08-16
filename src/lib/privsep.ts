@@ -184,3 +184,33 @@ export function describeSeparation(): string {
     : "privilege separation off: children share this process's uid, so /proc, " +
         "DATA_DIR and the MCP capability file are reachable by every agent";
 }
+
+/**
+ * The second line of the same boot statement: whether anything confines what a
+ * child may touch, as opposed to which uid it touches it as.
+ *
+ * A sandbox has the property the uid split has, which is why it is said here and
+ * not left to be noticed. Absent, it costs nothing visible — every page renders
+ * the same, every run works, and the only difference is how far a
+ * prompt-injected agent gets past the task it was given. A boundary that
+ * disappears quietly is the shape of failure this codebase says out loud.
+ *
+ * Its own function rather than a clause inside `describeSeparation()` because
+ * the two are independent: an install can have either without the other, and
+ * what a later change fills in is this sentence alone, where a clause would mean
+ * editing one `docs/security.md` quotes verbatim.
+ *
+ * Today the honest sentence is that there is no sandbox. Nothing in this app
+ * configures the CLI's own, wraps a child in `bwrap`, or narrows a tool call
+ * below what the container's uid already permits — `--add-dir` names every
+ * mount, a `Bash` call is not bounded by its cwd, and the checkout store holds
+ * every concurrent run's worktree at one uid. It stays in that tense until
+ * something makes it false.
+ */
+export function describeSandbox(): string {
+  return (
+    "sandbox: none — nothing confines an agent's commands below this " +
+    "container's own uid, so every mount, the whole network and a concurrent " +
+    "run's checkout are reachable from any run"
+  );
+}
