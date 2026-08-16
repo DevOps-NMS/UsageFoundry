@@ -829,7 +829,7 @@ it serves every page and refuses every write, naming the owner's pid. You can
 see which one you are looking at:
 
 ```bash
-curl -s localhost:3000/api/health    # 200 + "ownsDataDir": true, or 503 with the reason
+curl -s localhost:3000/api/health    # 200 + "ownership": "owned", or 503 with "error" and the owner's pid
 ```
 
 A read-only second server is deliberately still allowed to boot, because it is

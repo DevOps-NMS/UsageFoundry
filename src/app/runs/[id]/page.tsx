@@ -619,10 +619,17 @@ export default function RunDetail({
     // ordinary pre-cycle check decides. Asking early while the window is still
     // full parks it again, which is the honest outcome; a button that spends
     // past a limit the operator set would be worse than no button.
+    // `not-owner` is its own sentence for the reason the comment above these
+    // two handlers gives: it arrives as a 200 carrying an outcome, and falling
+    // through to "This run is not waiting" would be a false statement about a
+    // row that is waiting, on a server that simply cannot act on it. The pid
+    // that can is in the notice above every page rather than repeated here.
     setStopNote(
       res.data.outcome === "requeued"
         ? "Trying now — if the 5-hour window is still too full it steps aside again."
-        : "This run is not waiting.",
+        : res.data.outcome === "not-owner"
+          ? "This server does not own the data directory, so it cannot start anything. See the notice above."
+          : "This run is not waiting.",
     );
   }
 
