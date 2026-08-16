@@ -1855,6 +1855,23 @@ through before trusting this unattended:
   file the CLI resolves a *sandbox policy* from, and the hooks and permission
   rules beside it in that same file. It does not make `~/.claude` read-only.
 
+  **And an open question this raised, which nothing here answers and nothing
+  here acts on.** Two more server-pushed files sit in that directory and stay
+  the agents' under this: `remote-settings.json` (`{"channelsEnabled":true}` on
+  the install this was written on) and `policy-limits.json` (`restrictions`,
+  `compliance_taints`). The first is reachable from the *managed* source list
+  the sandbox policy is built from — the binary's provider resolver has a
+  `remote` branch beside `helper`/`plist`/`hklm`/`file` — but the loader in
+  front of it reads `if(!ije()&&yrs!==!0)return null` with `ije(){return}`, so
+  it yields nothing unless an internal flag is set, and what sets it was not
+  traced. If it is ever live, it is a *managed*-tier source that an agent owns,
+  which would outrank the file this locks. Root-owning it was deliberately not
+  done: the CLI refreshes it from the server as the agent's uid, so taking it
+  would break org-managed settings on exactly the installs that have them, to
+  close a hole nobody has shown is open. `policy-limits.json` was not traced at
+  all. Both are worth an hour against a live binary before anyone calls the
+  policy surface closed.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
