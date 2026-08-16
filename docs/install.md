@@ -288,9 +288,14 @@ ownership change is real:
 - you can no longer create anything at the top level of `~/.claude`, and you can
   no longer edit `~/.claude/settings.json`, including through `/config`, without
   `sudo`;
-- `sudo chown -R "$(id -u):$(id -g)" ~/.claude` undoes it, and so does clearing
-  the variable and restarting: the container hands the directory back on the
-  first boot with it off.
+- clearing the variable and restarting undoes it — the container hands the
+  directory back on the first boot with it off — and by hand it is two paths
+  and no `-R`, since nothing below them was ever taken:
+
+  ```bash
+  sudo chown "$(id -u):$(id -g)" ~/.claude ~/.claude/settings.json
+  sudo chmod 0700 ~/.claude && sudo chmod 0600 ~/.claude/settings.json
+  ```
 
 On macOS, Docker Desktop emulates bind-mount ownership, so the `chown` may never
 reach your host files — and may not confine the agents either. The entrypoint

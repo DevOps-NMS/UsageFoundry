@@ -1832,8 +1832,10 @@ through before trusting this unattended:
   docker compose logs usagefoundry | grep UF_LOCK_CLAUDE_HOME
   # expect "off — gave /home/node/.claude back to <uid>:<gid>"
   ls -ld ~/.claude                                 # expect your own uid, 0700
-  # and if that ever fails to run:
-  sudo chown -R "$(id -u):$(id -g)" ~/.claude
+  # and if that ever fails to run — two paths, no -R, because nothing below
+  # them was taken:
+  sudo chown "$(id -u):$(id -g)" ~/.claude ~/.claude/settings.json
+  sudo chmod 0700 ~/.claude && sudo chmod 0600 ~/.claude/settings.json
   ```
 
   **On macOS this may do nothing at all, in either direction.** Docker Desktop
