@@ -739,6 +739,28 @@ export function startWorker(): void {
  * the key moved into the loop's identity. A dirty checkout or a HEAD on the
  * wrong branch still refuses every remaining branch *in that repository* and
  * says so once, and still says nothing about any other.
+ *
+ * **A row is answered even when this app is the thing that broke**, which is
+ * the one status transition nothing else in the process can make. `setStatus`
+ * is reachable only from here; `cancelBatch` and `cancelQueuedFor` touch
+ * `queued` rows alone; and `reconcileMergeQueueOnBoot` needs a restart. So a
+ * throw escaping this loop left the row it was on stuck at `landing` or
+ * `resolving` for the life of the container — with `enqueue` then refusing that
+ * run by name for ever, since `queuedRunIds` counts it as still in the queue,
+ * and the panel pinning its batch as unfinished under a spinner. The operator
+ * lands the branch by hand, it works, and the queue goes on saying `landing`.
+ * That was reachable: `git()` documents that it never rejects and now holds to
+ * it, but `landState`, `landRun` and `resolveConflicts` reach a database and a
+ * spawn on every item, and none of them is total.
+ *
+ * The row is **failed rather than retried**, and the message says the merge may
+ * have gone through: the throw can land after `landRun` has already committed
+ * into the operator's checkout, and this is the same sentence the boot
+ * reconciler gives a row it caught mid-merge, for the same reason — nothing
+ * here saw the write finish, and inventing an answer is worse than naming the
+ * uncertainty. It halts the repository for `planItem`'s reason: a fault in this
+ * app will meet the branch behind this one identically, and each rediscovery is
+ * another merge attempted into a directory a person owns.
  */
 async function drainRepo(repo: string): Promise<void> {
   /** Why this repository was given up on, if it was. */
@@ -757,26 +779,37 @@ async function drainRepo(repo: string): Promise<void> {
         continue;
       }
 
-      setStatus(row.id, "landing");
-      const outcome = await processOne(row, {
-        autoResolve: row.auto_resolve === 1,
-        // Shared across the workers in flight rather than held per repository:
-        // what it records is that the *operator's own usage window* is spent,
-        // which is a fact about the account and not about a repository. Each
-        // rediscovery costs a full transcript scan, so learning it once is the
-        // whole point of the flag.
-        resolutionsRefused: workers.resolutionsRefused,
-      });
+      try {
+        setStatus(row.id, "landing");
+        const outcome = await processOne(row, {
+          autoResolve: row.auto_resolve === 1,
+          // Shared across the workers in flight rather than held per
+          // repository: what it records is that the *operator's own usage
+          // window* is spent, which is a fact about the account and not about a
+          // repository. Each rediscovery costs a full transcript scan, so
+          // learning it once is the whole point of the flag.
+          resolutionsRefused: workers.resolutionsRefused,
+        });
 
-      if (outcome.halt) halt = outcome.message;
-      if (outcome.refusedResolutions) workers.resolutionsRefused = outcome.refusedResolutions;
-      setStatus(row.id, outcome.status, {
-        // The prefix is added here and nowhere else. `processOne` returns the
-        // bare reason because the same string is also what every row behind
-        // this one is told, and prefixing it twice reads as a stutter.
-        message: outcome.halt ? `Not attempted — ${outcome.message}` : outcome.message,
-        resolveCost: outcome.resolveCost,
-      });
+        if (outcome.halt) halt = outcome.message;
+        if (outcome.refusedResolutions) workers.resolutionsRefused = outcome.refusedResolutions;
+        setStatus(row.id, outcome.status, {
+          // The prefix is added here and nowhere else. `processOne` returns the
+          // bare reason because the same string is also what every row behind
+          // this one is told, and prefixing it twice reads as a stutter.
+          message: outcome.halt ? `Not attempted — ${outcome.message}` : outcome.message,
+          resolveCost: outcome.resolveCost,
+        });
+      } catch (err) {
+        halt = `this server hit an error landing ${run.worktree_branch ?? row.run_id.slice(0, 8)}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        setStatus(row.id, "failed", {
+          message: `This server hit an error while landing it, so it is not known whether the merge went through: ${
+            err instanceof Error ? err.message : String(err)
+          }. Check the branch before queueing it again.`,
+        });
+      }
     }
   } finally {
     workers.active.delete(repo);
@@ -790,6 +823,14 @@ async function drainRepo(repo: string): Promise<void> {
   // A repository queued while this loop was draining its last item, or one held
   // back by the cap, would otherwise wait for the next enqueue. Cheap, and the
   // alternative is a queue that stalls for no visible reason.
+  //
+  // Deliberately still *after* the `finally`, so a throw skips it. What can
+  // still throw past the row-level catch above is `nextQueuedIn` or the catch's
+  // own `setStatus` — both of them the database itself, and both of them still
+  // true a microsecond later against a row this drain has not moved. Re-arming
+  // there is an unbounded loop on one row rather than a recovery, and it would
+  // be a synchronous one: `drainRepo` throwing before its first `await` runs
+  // this line inside the `startWorker` that called it.
   startWorker();
 }
 

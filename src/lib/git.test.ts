@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
-import { gitArgs, gitEnv } from "./git";
+import { git, gitArgs, gitEnv } from "./git";
 
 /**
  * Covers what every git call this app makes carries, and only that.
@@ -89,5 +92,38 @@ describe("gitEnv", () => {
     assert.equal(env.GIT_TERMINAL_PROMPT, "0");
     assert.equal(env.PATH, process.env.PATH);
     assert.equal(env.HOME, process.env.HOME);
+  });
+});
+
+/**
+ * That a child which never started is a failed call and not a rejection.
+ *
+ * Every caller of `git()` in `land.ts` reads a `GitResult` and none of them has
+ * a `catch`, so this is load-bearing rather than defensive — and the way it was
+ * wrong is invisible from the call site, because `spawn` demotes only five
+ * errnos to the `error` event this already handled. `ENOTDIR` is the one that
+ * can be provoked deterministically; the one that matters in production is
+ * `EMFILE`, which does not throw from `spawn` at all but *returns* having
+ * skipped the stdio wiring, so `child.stdout` is undefined and `setEncoding`
+ * throws instead. Both arrive at the same line, and both used to reject.
+ *
+ * What that cost is a merge queue row: the rejection propagated out of the
+ * worker's loop and left the branch it was landing stuck on `landing` for the
+ * life of the container, with no status the operator could ever see change.
+ */
+describe("git", () => {
+  it("reports a child that could not be started, rather than rejecting", async () => {
+    const file = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "uf-git-")),
+      "not-a-directory",
+    );
+    fs.writeFileSync(file, "");
+
+    // A `cwd` that is a file: ENOTDIR, which `spawn` throws synchronously.
+    const res = await git(file, ["rev-parse", "HEAD"]);
+
+    assert.equal(res.ok, false);
+    assert.equal(res.code, null);
+    assert.match(res.stderr, /ENOTDIR/);
   });
 });
