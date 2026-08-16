@@ -16,7 +16,7 @@ container this was written in has no `docker` binary, no `/var/run/docker.sock`,
 no root for `apt-get`, and `unshare --user` returns `Operation not permitted`
 under Docker's default seccomp profile — which is the very thing question 1 is
 about. What *has* been exercised is the script's answer logic against stubs
-(`probe.test.sh`, 35 assertions) and the seccomp profile's derivation against
+(`probe.test.sh`, 37 assertions) and the seccomp profile's derivation against
 moby's published default (`seccomp-diff.mjs`). Neither of those is a measurement
 of the CLI.
 
@@ -59,10 +59,11 @@ you while the script itself never reads a byte of it.
 `uf-seccomp.json` was derived from moby **v28.5.2**'s copy of the default
 profile — sha256 `01536f1d1df938ae611eba20d6349e0de7a99b6ecdee1549427a0b01b8301e28`,
 byte-identical to `profiles/seccomp/default.json` at v28.3.3. The default moves
-between engine releases (28.2 added three `lsm_*` names; 28.x dropped the
-`io_uring` family that 24.x allowed), so a profile derived from the wrong one
-either denies something your containers rely on or permits something nobody
-read. Check it before you use it:
+between engine releases — measured, by running the check below against three
+tags: v28.1.1 to v28.5.2 gained twelve names including three `lsm_*`, and
+v24.0.7 allowed the `io_uring` family that v28 no longer does. A profile derived
+from the wrong one either denies something your containers rely on or permits
+something nobody read. Check it before you use it:
 
 ```sh
 docker version --format '{{.Server.Version}}'      # note the version
@@ -75,6 +76,14 @@ curl -fsSL -o /tmp/upstream.json \
   https://raw.githubusercontent.com/moby/moby/v<VERSION>/vendor/github.com/moby/profiles/seccomp/default.json
 
 node scripts/sandbox-probe/seccomp-diff.mjs /tmp/upstream.json
+```
+
+No node on that machine? Do it after step 2, in the image, which has one:
+
+```sh
+docker run --rm --entrypoint node \
+  -v "$PWD/scripts/sandbox-probe:/p" -v /tmp/upstream.json:/u.json \
+  usagefoundry:probe /p/seccomp-diff.mjs /u.json /p/uf-seccomp.json
 ```
 
 Expect `OK: everything outside those 4 blocks is /tmp/upstream.json verbatim.`

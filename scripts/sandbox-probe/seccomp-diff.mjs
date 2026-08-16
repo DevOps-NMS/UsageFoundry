@@ -27,10 +27,12 @@
 //
 //   node scripts/sandbox-probe/seccomp-diff.mjs /tmp/upstream.json
 //
-// With no node on the host, the probe image carries one:
+// With no node on the host, the probe image carries one. --entrypoint is not
+// optional: that image's entrypoint is probe.sh, which would refuse the argv.
 //
-//   docker run --rm -v "$PWD/scripts/sandbox-probe:/p" -v /tmp/upstream.json:/u.json \
-//     usagefoundry:probe node /p/seccomp-diff.mjs /u.json /p/uf-seccomp.json
+//   docker run --rm --entrypoint node \
+//     -v "$PWD/scripts/sandbox-probe:/p" -v /tmp/upstream.json:/u.json \
+//     usagefoundry:probe /p/seccomp-diff.mjs /u.json /p/uf-seccomp.json
 
 import fs from "node:fs";
 import path from "node:path";

@@ -1476,7 +1476,7 @@ through before trusting this unattended:
   transcribable line each. `scripts/sandbox-probe/RUNBOOK.md` is the ordered
   list of what to run, on which machine, and what each answer decides; steps 4
   and 5 are billed. Its own answer logic is exercised against stubs by
-  `scripts/sandbox-probe/probe.test.sh` (35 assertions, no Docker and no
+  `scripts/sandbox-probe/probe.test.sh` (37 assertions, no Docker and no
   money) — which measures the harness and says nothing about the CLI.
 
   **Nothing below has been measured.** Fill it in from the script's last block,

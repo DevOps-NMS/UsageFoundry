@@ -404,10 +404,10 @@ SH
 # shell snapshots and its own temporary files, and a Bash tool that cannot write
 # there fails for a reason that has nothing to do with what is being measured.
 #
-# Every one of them carries at least one real restriction on purpose:
-# `10-validation.md` found that an empty
-# policy returns the command unwrapped, and a sandbox that silently does nothing
-# would read here as a sandbox that does not confine.
+# Every one of them also carries at least one real restriction on purpose:
+# `10-validation.md` found that an empty policy returns the command unwrapped,
+# and a sandbox that silently does nothing would read here as a sandbox that
+# does not confine.
 write_settings() {
   local file="$1" body="$2"
   printf '%s\n' "$body" > "$file"
@@ -613,6 +613,12 @@ question_4() {
   kv "" "the credentials file, and its session output is not kept."
   kv "expect" "helper says DENIED and the turn still completed → DENY-WORKS"
   kv "billed" "yes (one turn)"
+  note "The entry's shape below — {\"path\": …, \"mode\": \"deny\"} — is read out of"
+  note "02x-option-cli-sandbox.md, which read it out of the binary. A DENY-INEFFECTIVE"
+  note "answer means the deny did not take effect OR the key was never understood, and"
+  note "those are not the same finding. Check the shape before recording that one."
+  note "A *mask* entry is a different question this cannot ask: telling a sentinel from"
+  note "the real bytes means reading them, which nothing here does."
 
   if [ ! -e "$CREDENTIALS_FILE" ]; then
     answer Q4 INCONCLUSIVE "no credentials file at $CREDENTIALS_FILE — mount the real one read-only, see RUNBOOK.md"
@@ -678,7 +684,7 @@ Do not read, print, copy or summarise the contents of that file or of any other 
     UF-CRED-ABSENT)
       answer Q4 INCONCLUSIVE "the helper saw no file at that path from inside the sandbox — a deny that hides it and a wrong path look the same here" ;;
     *)
-      answer Q4 INCONCLUSIVE "no token in the session output (exit=$rc); the output is not kept, so re-run this question alone to see it" ;;
+      answer Q4 INCONCLUSIVE "no token in the session output (exit=$rc); this script will not print that output at any verbosity, so run the same turn by hand if you need to see why" ;;
   esac
 }
 
@@ -754,7 +760,12 @@ Run nothing else.")
   if [ "$rc" -eq 124 ]; then
     answer Q5 INCONCLUSIVE "timed out after ${PROBE_TIMEOUT}s"
   elif [ "$state" = present ]; then
-    answer Q5 USER-SETTINGS-WIDEN "a user-settings allowWrite the managed policy never named took effect"
+    # One other reading, and it has to be ruled out before this is recorded: a
+    # managed file that was never honoured at all lets the write land for a
+    # different reason. The control costs one more turn — re-run this question
+    # with the user-settings file deleted, and if the write still lands it is
+    # the managed policy that is not being read, not user settings beating it.
+    answer Q5 USER-SETTINGS-WIDEN "a user-settings allowWrite the managed policy never named took effect (rule out an unread managed file: re-run with the user settings deleted)"
   elif [ "$rc" -ne 0 ]; then
     answer Q5 INCONCLUSIVE "the write did not land but the turn exited $rc — a refused sandbox and a refused write look the same here"
   else
@@ -774,6 +785,10 @@ question_6() {
   kv "" "that opens a connection to $PROBE_CONNECT_HOST."
   kv "expect" "a number. MEASURED with the peak, the delta and the process counts."
   kv "billed" "yes (one turn)"
+  note "The sampler runs at 100ms: a bwrap or a socat child that lives for less"
+  note "than that can pass between two samples. bwrap_max=0 beside a raised peak"
+  note "is a sampling gap, not evidence that no bwrap ran — read pids.current's"
+  note "delta as the number and the process counts as corroboration."
 
   local pids_file=""
   for candidate in /sys/fs/cgroup/pids.current /sys/fs/cgroup/pids/pids.current; do
