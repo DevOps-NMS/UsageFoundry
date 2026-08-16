@@ -75,6 +75,23 @@ read — reaches something that is not this run's business.
   filesystem access and again after symlink resolution. But a `Bash` call is not
   bounded by cwd, and `--add-dir` names every configured mount. Treat all four
   workspaces as one blast radius.
+- **A concurrent run's checkout, and the branch that checkout will land.** This
+  is the sharp form of the point above and the one worth stating on its own,
+  because it is the case a reader of a *concurrency* feature comes looking for.
+  Every isolated run gets a worktree under `<mount>/.uf-worktrees/`, they are all
+  in one store on one mount, and every child of every kind is the same uid — so
+  there is no boundary between two runs at all, rather than a weak one. A run can
+  edit a run that is working beside it: its files, its seeded config, and the
+  branch it is committing to. Nothing detects that. The second run's commits are
+  simply not what its agent wrote, and Land merges them into your repository like
+  any other work. Measure it from an agent's uid against any slot that is not the
+  one you are asking about:
+
+  ```sh
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'test -w /workspace/.uf-worktrees/<another-run>/ && echo BAD-writable || echo ok'
+  # expect BAD-writable, today: this is a gap, not a check you are confirming
+  ```
 - **`UF_GITHUB_TOKEN`, for as long as the cycle lasts.** It is deliberately
   handed to work cycles (and the chat), because `git push` and `gh` cannot work
   without it. An unattended agent can use everything that token can, which is
