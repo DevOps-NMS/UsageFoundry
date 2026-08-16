@@ -1458,6 +1458,49 @@ through before trusting this unattended:
   at all but the Settings page, where the app already declares the ambient set
   once and where "your `~/.claude` starts every agentless child as *X*" is a true
   sentence with no control to contradict it.
+- **The CLI's own sandbox — every claim about it, none of them executed.**
+  `proposals/Sandboxing/02x-option-cli-sandbox.md` establishes that the pinned
+  CLI (2.1.226) implements a bubblewrap sandbox configured by `sandbox.*`
+  settings keys, and `08-recommendation.md` recommends adopting it. All of that
+  was read out of the binary's strings with `strings`, and **not one line of it
+  has been run** — two runs have now written about the mechanism without
+  starting one, both in environments with no Docker, no root and a seccomp
+  profile that refuses `unshare --user` outright, which is the first thing that
+  would have to change. Nothing in this repository enables a sandbox and nothing
+  depends on any of these answers yet; what depends on them is what gets built.
+
+  The harness is `scripts/sandbox-probe/` — a throwaway image on the same base
+  and the same CLI pin, a seccomp profile that is Docker's default plus user
+  namespaces, and one script that runs questions 0-8 of
+  `proposals/Sandboxing/09-implementation-sketch.md:134`-`200` and prints one
+  transcribable line each. `scripts/sandbox-probe/RUNBOOK.md` is the ordered
+  list of what to run, on which machine, and what each answer decides; steps 4
+  and 5 are billed. Its own answer logic is exercised against stubs by
+  `scripts/sandbox-probe/probe.test.sh` (35 assertions, no Docker and no
+  money) — which measures the harness and says nothing about the CLI.
+
+  **Nothing below has been measured.** Fill it in from the script's last block,
+  and record the CLI, bubblewrap and kernel versions it prints with it:
+
+  | Question | Answer | Recorded |
+  |---|---|---|
+  | Q0 — are `bubblewrap` and `socat` installable in this image? | *(unmeasured)* | |
+  | Q1 — does bubblewrap start under the relaxed profile? | *(unmeasured)* | |
+  | Q2 — does the CLI refuse to start when it cannot sandbox? | *(unmeasured)* | |
+  | Q3 — is the sandbox around the session or only around Bash? | *(unmeasured)* | |
+  | Q4 — does a credentials deny entry stop a shell reading the token? | *(unmeasured)* | |
+  | Q5 — does a user-settings write widen a managed policy? | *(unmeasured)* | |
+  | Q6 — what does one sandboxed command cost in tasks? | *(unmeasured)* | |
+  | Q7 — does the CLI's sandbox unshare PID? | *(unmeasured)* | |
+  | Q8a — which bubblewrap, and does it carry `--tmp-overlay`? | *(unmeasured)* | |
+  | Q8b — does `--unshare-pid` plus `--tmp-overlay` work here? | *(unmeasured)* | |
+  | Q8c — does one bubblewrap start inside another? | *(unmeasured)* | |
+  | Q8d — does the CLI's own bubblewrap start inside one we started? | *(unmeasured)* | |
+
+  Q3 and Q8d are the two that decide the shape rather than refine it: together
+  they say whether the vendor's sandbox stands alone, is replaced by a wrapper
+  this app puts around the whole `claude` process, or composes with one. The
+  others each move a phase of the plan; RUNBOOK.md's table says which.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
