@@ -4347,11 +4347,26 @@ const ISOLATED_GIT_TOOLS = ["Bash(git add:*)", "Bash(git commit:*)"];
  * `restart: unless-stopped` brought the container back, and `reconcileOnBoot`
  * marked fourteen runs failed 690ms later — including the one that ran it.
  *
- * Withheld by name because there is no ownership boundary to withhold it by:
- * compose runs a single uid, so an agent and the server supervising it can
- * signal each other freely, and the container has neither a docker socket nor
- * a docker CLI — this is the only route from an agent to a restart, and it does
- * not look like one from the agent's side.
+ * Withheld by name because a name is the only thing there is to withhold it by
+ * for most of what it reaches. The uid split closed one half of that and left
+ * the other open, and the halves are worth keeping apart. Where the server is
+ * *actually* root — the shipped container, and nothing else — children drop to
+ * `UF_AGENT_UID` (`src/lib/privsep.ts:23`–`33`) and `kill(2)` checks the
+ * sender's uid, so the incident above cannot recur the way it happened: the
+ * pattern still matches the server, and the signal is refused. `npm run dev` on
+ * a laptop, the test suite, and a container an operator has pinned back to
+ * `user: "1000:1000"` all run one uid and get the original behaviour, which
+ * `privsep.ts:41`–`47` states in as many words.
+ *
+ * What no arrangement here closes is agent-to-agent. Every child of every kind
+ * takes the same uid, so one run's `pkill -f` reaches a sibling's `claude`, the
+ * dev server it started and the build it is halfway through — and that run's
+ * only evidence is a tool call that failed for no reason it can see. Until an
+ * agent's processes are separated from a sibling's by a uid per slot or a PID
+ * namespace, this deny and the notice below it are the whole of what stands
+ * between two runs. The container has neither a docker socket nor a docker CLI,
+ * so name-matched killing also remains the only route from an agent to a
+ * restart, and it does not look like one from the agent's side.
  *
  * `kill` itself stays permitted, deliberately. A pid is a handle on a process
  * the agent actually started; a pattern is a guess about every process on the
