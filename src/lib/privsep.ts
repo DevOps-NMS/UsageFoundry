@@ -201,16 +201,19 @@ export function describeSeparation(): string {
  * what a later change fills in is this sentence alone, where a clause would mean
  * editing one `docs/security.md` quotes verbatim.
  *
- * Nothing in this app configures the CLI's own sandbox, wraps a child in
- * `bwrap`, or narrows a tool call below what the container's uid already
- * permits — `--add-dir` names every mount, a `Bash` call is not bounded by its
- * cwd, and the checkout store holds every concurrent run's worktree at one uid.
- * So on a stock install the sentence is still that there is no sandbox. What it
- * is no longer is a *constant*: the arrangement is read rather than asserted, so
- * an install that has been given a managed policy says a different sentence than
- * one that has not, which is the whole of what this line is for. `sandbox.ts`
- * owns the reading and states what it does not claim; the wording of each state
- * lives there beside the reasoning for it.
+ * Nothing in this app wraps a child in `bwrap`. What it does do is name each
+ * child's write set on the argv — `sandboxSettings` in `orchestrator.ts` — and
+ * that is a *narrowing* of a policy rather than a policy: it configures a
+ * sandbox the managed file switched on, and is withheld entirely on an install
+ * whose reading is `none`. So on a stock install the sentence is still that
+ * there is no sandbox, and nothing about a tool call is bounded below the
+ * container's own uid there: `--add-dir` names every mount, a `Bash` call is not
+ * bounded by its cwd, and the checkout store holds every concurrent run's
+ * worktree at one uid. What this line is no longer is a *constant*: the
+ * arrangement is read rather than asserted, so an install that has been given a
+ * managed policy says a different sentence than one that has not, which is the
+ * whole of what it is for. `sandbox.ts` owns the reading and states what it does
+ * not claim; the wording of each state lives there beside the reasoning for it.
  */
 export function describeSandbox(): string {
   const { state, detail } = currentSandbox();

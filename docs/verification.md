@@ -1618,6 +1618,95 @@ through before trusting this unattended:
   should read **unknown** rather than none. All three are one `docker compose
   exec` and a reload apiece, and none of them costs a billed cycle.
 
+- **The per-run write set, which nothing has ever honoured.** `sandboxSettings`
+  and `sandboxArgs` (`src/lib/orchestrator.ts`, beside `buildArgs`) name what
+  each `claude` child may write — the work cycle's own checkout and its
+  repository's `.git`, the reviewer's nothing-at-all, the conflict resolver's
+  throwaway checkout, the chat's every mount — and `CLAUDE_CONFIG_DIR` in all
+  four, because that is the metering path. They are unit-tested in
+  `orchestrator.test.ts` for the three assertions
+  `proposals/Sandboxing/09-implementation-sketch.md` names (the run's own
+  checkout writable, a **sibling run's** not, `CLAUDE_CONFIG_DIR` writable) plus
+  the two ways the overlay can be a boundary that is not there — a path the
+  CLI's Linux filter would drop as a glob, and a set that resolved to nothing —
+  and `npm run typecheck` and `npm test` pass. Both assertions were watched to
+  fail before they passed: dropping `CLAUDE_CONFIG_DIR` from the set fails the
+  metering case and the reviewer's, and naming the checkout *store* instead of
+  the checkout fails the sibling case.
+
+  What has **not** happened is any of it against a sandbox. No `--settings`
+  overlay has ever reached a running CLI, no `bwrap` has ever started here, and
+  the run this was written in could not have started one: no `docker` binary, no
+  `/var/run/docker.sock`, and `unshare --user` answers `Operation not
+  permitted`. So the by-hand check that `09-implementation-sketch.md` asks for —
+  two concurrent runs, A asked to write into B's checkout, the tool call fails —
+  is **unrun**, and these are its commands:
+
+  ```sh
+  # With UF_SANDBOX=1, the security_opt line uncommented, and the image built.
+  docker compose up -d --build
+  docker compose logs usagefoundry | grep '\] sandbox:'   # expect "on", not "none"
+
+  # Start two isolated runs on one repository, then from run A's task:
+  #   ls /workspace/.uf-worktrees/                 # find B's slot
+  #   touch /workspace/.uf-worktrees/<B-slot>/probe    # expect the tool call to fail
+  #   touch ./probe                                    # expect this one to work
+  # and from B's, the same two the other way round. Then, on run A's page,
+  # confirm the failed call is on the log rather than only in the transcript.
+  ```
+
+  Two things to read the result against before believing it. A denial from a
+  mount namespace comes back as a bare `EACCES`, which `sandboxRefusal`
+  deliberately does not match, so the log line to expect is `tool_error` and not
+  `sandbox` — a run whose write into a sibling merely *fails* is the whole
+  signal. And a `touch` that **succeeds** does not by itself mean the overlay was
+  ignored: see the two open questions below, either of which produces exactly
+  that.
+
+  **The dependency this does not close, and nothing should be read as a boundary
+  until it does.** `~/.claude/settings.json` is an honored source for
+  `sandbox.filesystem` and is writable by `UF_AGENT_UID` today
+  (`10-validation.md`, finding 1), so a run can append
+  `{"sandbox":{"filesystem":{"allowWrite":["/"]}}}` and every later session — its
+  own and every sibling's — is confined to nothing. Root-owning `~/.claude`
+  itself and handing back the entries the CLI writes is a separate piece of
+  work, deliberately after this one: it runs against a bind-mounted host
+  directory the operator also uses outside the container, and every entry missed
+  shows up as a dashboard of zeros rather than an error. Until it lands, the
+  per-run overlay narrows a policy a run can widen from inside itself. The probe
+  is two lines and costs no billed cycle:
+
+  ```sh
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'echo "{\"sandbox\":{\"filesystem\":{\"allowWrite\":[\"/tmp/uf-probe\"]}}}" \
+       >> ~/.claude/settings.json'                  # expect denied once the
+                                                    # ownership work has landed
+  ```
+
+  **And the question nobody has answered either way: whether the CLI's sandbox
+  wraps the session or only Bash** (`09-implementation-sketch.md`, Phase 1
+  question 3, never executed). If it is Bash-only, a model using `Edit` against a
+  sibling's path is unconfined whatever the write set says — and that is a
+  likelier shape for a confused run than a shell command is. The evidence points
+  both ways: the Bash tool's own prompt text says "your command will be run in a
+  sandbox", and a `getFsReadConfig` export is the shape a *file tool* consults
+  (`10-validation.md`, #19). Nothing in this app asserts either answer. The check
+  is the same two runs as above, with the write into B's checkout made once
+  through `Bash` and once through `Write`.
+
+  **Three smaller unknowns of the same kind.** Whether `--settings` as JSON on
+  the argv *merges* with `/etc/claude-code/managed-settings.json` rather than
+  standing in for other sources — read out of the binary's source list
+  (`flagSettings` beside `userSettings` and the managed file), never executed.
+  Whether the write set is wide enough for a cycle to *work*: it names the
+  checkout, the repository's `.git` and the config directory and nothing else, so
+  `/tmp`, `~/.npm` and `$GOPATH` are outside it, and the binary binds `/`
+  read-only and rw-binds only the allow set once any write config exists — a
+  first `npm install` or `go build` is where that fails, inside a tool call, and
+  it is the first thing to run after the sibling check above. And whether the
+  overlay's paths survive a rename: they are the row's own recorded paths, so a
+  checkout moved underneath a live run would be confined to where it used to be.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
