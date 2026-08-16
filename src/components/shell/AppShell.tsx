@@ -126,8 +126,20 @@ export function AppShell({
         />
         {/* The pane's own scroll region. A `sticky bottom-0` bar inside a page
             now sticks to the bottom of this rather than of the document, which
-            is where it was always meant to be. */}
-        <main id="main" className="min-h-0 flex-1 overflow-y-auto">
+            is where it was always meant to be.
+
+            `relative` is what keeps that true for anything *absolutely*
+            positioned inside a page, and it is load-bearing rather than
+            decorative: an absolute box whose containing block is the initial
+            one is not clipped by this scroller at all, so it extends the
+            *document's* scrollable overflow to wherever it was laid out. Every
+            `sr-only` element does exactly that — Tailwind's is `position:
+            absolute` with no offsets — so a `<caption className="sr-only">` on
+            a table 1200px down a page gave the document a second scrollbar
+            beside this one, and dragging it slid the whole window, sidebar
+            included, off the top of the viewport into the page background.
+            Making this the containing block puts them back inside the pane. */}
+        <main id="main" className="relative min-h-0 flex-1 overflow-y-auto">
           {/* px-4 / sm:px-5 is the gutter two pages already reach through with
               a matching negative margin — keep the pair in step.
 
