@@ -26,3 +26,5 @@ next-env.d.ts
 # operator's own database and never belongs in the repository.
 backups/*
 !backups/.gitkeep
+
+.claude/
