@@ -561,7 +561,7 @@ function CheckoutStores({ stores }: { stores: CheckoutStoreDTO[] }) {
   const exhausted = notable.filter((s) => s.free === 0);
 
   return (
-    <Card>
+    <Card className="mb-4">
       <CardTitle>Checkout slots</CardTitle>
       {exhausted.length > 0 && (
         <Notice tone="danger">
