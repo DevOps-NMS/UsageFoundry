@@ -52,7 +52,8 @@ assert.equal(
 
 const { claimDataDir, heartbeat, ownsDataDir, parseLock, releaseDataDir } =
   require("./serverLock") as typeof import("./serverLock");
-const { createRun, getRun } = require("./orchestrator") as typeof import("./orchestrator");
+const { createRun, getRun, promoteQueued, stopRun, sweepPaused } =
+  require("./orchestrator") as typeof import("./orchestrator");
 const { db } = require("./db") as typeof import("./db");
 
 /**
@@ -100,6 +101,30 @@ const task = {
   budget: { maxIterations: 1 },
   origin: "form" as const,
 };
+
+/**
+ * One row the owner left behind, inserted rather than created.
+ *
+ * `createRun` is the door the first case covers and is refused outright below,
+ * so it cannot seed anything here, and what these rows stand for is the owner's
+ * queue rather than this process's. Each gets its own folder so the folder
+ * claim never decides the outcome instead of the gate under test.
+ */
+function seedRun(id: string, status: "queued" | "paused"): string {
+  const folder = path.join(tmp, "workspace", id);
+  fs.mkdirSync(folder, { recursive: true });
+  db()
+    .prepare(
+      `INSERT INTO runs (id, folder, prompt, status, budget, max_iterations,
+                         iterations, created_at, work_dir)
+       VALUES (?, ?, 'do it', ?, '{"maxIterations":1,"permissionMode":"acceptEdits"}',
+               1, 0, ?, ?)`,
+    )
+    .run(id, folder, status, Date.now(), folder);
+  return id;
+}
+
+const statusOf = (id: string) => getRun(id)?.status;
 
 describe("a process that does not own the data directory", () => {
   it("refuses to admit a run, and names the pid that does", async () => {
@@ -190,5 +215,65 @@ describe("an owner that loses the directory while it is up", () => {
     const before = spawnCount;
     assert.throws(() => createRun(task), /lost its claim on the data directory/);
     assert.equal(spawnCount, before);
+  });
+
+  /**
+   * The six boot reconcilers cannot be asked this directly, and that is a fact
+   * about where their gate is rather than a gap in it: they run once, at boot,
+   * behind `ownsDataDir()` in `src/instrumentation.ts`, and not one of them
+   * carries a check of its own, so a test that rebuilt that `if` would pin its
+   * own copy of the gate and say nothing about the app. The assertion above
+   * that `ownsDataDir()` has flipped is what covers them, that being the whole
+   * of the expression they sit behind.
+   *
+   * What outlives a boot is the two loops that go on deciding about the owner's
+   * rows for as long as this process is up, and after a loss they carry exactly
+   * the exposure the reconcilers did: the promoter is the one route to
+   * `startRun` and therefore to a billed child in a checkout this server no
+   * longer owns, and the parked sweeper is the one door that may un-park a run.
+   * Both read ownership at the write rather than at boot, so both have to leave
+   * the rows as they found them, and neither says so anywhere else: a loop that
+   * quietly decides nothing is indistinguishable from a quiet minute.
+   *
+   * The control is half the case, for the reason the admission control above is
+   * there. A refusal that fired whatever the state would pass every assertion
+   * before it and stop the app.
+   */
+  it("leaves the promoter and the parked sweeper with nothing to do", async () => {
+    assert.equal(ownsDataDir(), false, "this case continues from the beat above");
+
+    const queued = seedRun("lost-queued", "queued");
+    const parked = seedRun("lost-parked", "paused");
+
+    const before = spawnCount;
+    promoteQueued();
+    await sweepPaused();
+
+    assert.equal(statusOf(queued), "queued", "a lost directory must promote nothing");
+    assert.equal(statusOf(parked), "paused", "a lost directory must un-park nothing");
+    assert.equal(spawnCount, before, "and must spawn nothing on the way");
+
+    // The other half. `claimDataDir` is asked once per process in the app, but
+    // nothing here is stateful beyond the lock file, so removing the stranger's
+    // and asking again puts the same two loops back where they started.
+    fs.rmSync(lockPath(), { force: true });
+    assert.equal(await claimDataDir(), true);
+
+    promoteQueued();
+    // `startRun` claims the row with a guarded UPDATE before its first `await`,
+    // so promotion is observable synchronously; the stop is what keeps the
+    // continuation from reaching a spawn.
+    assert.equal(statusOf(queued), "running", "owning it again must promote the queue");
+    stopRun(queued);
+
+    await sweepPaused();
+    assert.notEqual(
+      statusOf(parked),
+      "paused",
+      "owning it again must let the sweeper reconsider a parked run",
+    );
+    stopRun(parked);
+
+    await settle();
   });
 });
