@@ -19,6 +19,19 @@ B — it cannot deny the credential to the shell while the CLI still reads it, a
 its network control is by port rather than by host — but it is a complement worth
 a file, and the comparison was scored without it (`07-comparison.md`).
 
+**Re-read on 2026-08-16 against the operator's three goals, which are not what it
+was scored against:** no run may signal another run's processes, no run may write
+into a checkout that is not its own, and later a run should install the tools it
+needs into a filesystem that is discarded when it finishes. Against those, B lands
+one, half-lands one and does not address one; `07-comparison.md` has no criterion
+for the first or the third; and the shape that answers all three — **this app
+invoking `bwrap` around the `claude` process**, rather than configuring the CLI to
+invoke it around Bash — was never considered, though it needs the same seccomp
+relaxation B already pays for. It does not overturn the recommendation on the
+credential, which is the axis the survey optimised and the one an outer wrapper
+cannot win. It does mean `09-implementation-sketch.md` now carries a decision
+between Phase 1 and Phase 2, and two more questions in Phase 1 that gate it.
+
 ## The recommendation
 
 **Sandbox the child with the CLI's own bubblewrap layer**, enabled and pinned by a

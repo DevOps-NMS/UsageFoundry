@@ -1,6 +1,7 @@
 # Implementation sketch
 
-Five phases. Each is useful alone; none of the later ones gates the earlier.
+Five phases and one decision between the first two. Each phase is useful alone;
+none of the later ones gates the earlier.
 
 > **`10-validation.md` disputes that last clause.** Phase 4 — the run event that
 > distinguishes "the policy refused it" from "the agent gave up" — is the only way
@@ -20,6 +21,80 @@ Five phases. Each is useful alone; none of the later ones gates the earlier.
 > environment variable instead, so the enforcement level is something an operator
 > can lower without one.
 
+## The operator's three goals, and where this sketch lands against them
+
+Added 2026-08-16, after the survey was written and scored. They are not the
+criteria of `07-comparison.md`: **no run may signal another run's processes**;
+**no run may write into a checkout that is not its own**; and — later, not now —
+**a run should be able to install the tools it needs into a filesystem that is
+discarded when it finishes**. The nine weighted criteria contain the second. They
+do not contain the first at all, and the third is not an axis anywhere in the
+survey. Against these three, Option B as specified below lands one, half-lands
+one, and does not address one.
+
+**Signalling — not addressed, and the weakest fit of the three.** What stands
+between run A and run B's process tree today is `PROCESS_KILLERS`
+(`src/lib/orchestrator.ts:4358`) and `SELF_HOSTING_NOTICE` (`:4383`): a tool deny
+and a paragraph of system prompt, which `kill $(pgrep -f …)` walks around by
+construction — `:4363`–`4365` says so in as many words. Option B does not change
+it. The base bwrap argv read out of the pinned binary is `["--new-session",
+"--die-with-parent"]` with **no `--unshare-pid`** (`02x-option-cli-sandbox.md:87`–`89`),
+so a sandboxed command keeps the shared `/proc` and keeps signalling siblings at
+one uid. The only option in the survey that closes this is **A**, whose
+uid-per-slot boundary is a check `kill(2)` performs in the kernel rather than a
+mode on a file — which also means the `fakeowner` caveat that is the whole of A's
+risk (`02-option-harden-in-place.md:51`) does not apply to this half of it. A
+scored 22 against B's 49 and is not recommended.
+
+**The wrong checkout — half, and conditionally.** B closes it for *commands*,
+once `~/.claude/settings.json` stops being agent-writable (`10-validation.md`,
+finding 1) and *if* the sandbox wraps more than Bash — question 3 below, still
+open. If it is Bash-only, a model using `Edit` against a sibling's path is
+unconfined, and that is a likelier shape for a confused run than a shell command
+is. Neither answer touches the sharper case: a worktree's `.git` is a pointer
+into the main repository (`01-constraints.md`), so `<repo>/.git` is in the write
+set under every option here, and two runs on one repository can still rewrite
+each other's refs. Confining the checkout does not confine the branch. Only a
+per-run clone does, and that is a different proposal.
+
+**A discardable filesystem — absent.** Not a criterion, not a scored axis, and in
+no option but E, which the survey ranks last on the Docker socket. B allowlists
+paths in the filesystem that is already there; there is no writable overlay and
+nothing to discard. The requirement is already acknowledged one layer down —
+`Dockerfile:85`–`87` carries a 250 MB compiler on the ground that "an agent that
+cannot install dependencies … fails at step one" — and what is missing is the
+half that throws the result away instead of accumulating it in the image.
+
+### What follows: the survey assumes only the CLI may invoke bubblewrap
+
+Nothing stops this app from calling `bwrap` itself at the five spawn sites,
+wrapping the whole `claude` process rather than configuring the CLI to wrap each
+Bash call. The shape is the exec-wrapper `10-validation.md` reached for with
+Landlock, so `docs/agent/architecture.md:102`'s four kinds of child stay four and
+there is no supervisor to argue about. One move answers all three goals:
+`--unshare-pid` closes the signalling case for the entire process tree including
+the CLI's own file tools; a mount namespace confines `Edit`/`Write` and not only
+Bash, which **retires** question 3 rather than waiting on it; and
+`--overlay`/`--tmp-overlay` is a writable per-run root that exists for the length
+of the process. Its precondition is the one Option B already pays for — Docker's
+seccomp profile relaxed for `CLONE_NEWUSER` — so this is a second use of a trade
+that is on the table either way, not a new one.
+
+What it gives up is the vendor's `sandbox.credentials` deny. That needs a
+boundary *between* the CLI and its children, which an outer wrapper cannot supply
+by construction — the same limit `10-validation.md` records for Landlock, for the
+same reason — and it is Option B's one headline credential win
+(`08-recommendation.md:59`–`62`). This app would also own the `failIfUnavailable`
+equivalent, which is the codebase's own rule about boundaries that disappear
+quietly and not a nicety. **The two compose**: an outer wrapper for the three
+goals above, the CLI's own layer inside it for the credential deny and the domain
+allowlist, both behind one seccomp relaxation. Whether they actually nest is
+**unverified** — question 8 below.
+
+Nothing in the phases changes order. Phase 1 grows two questions and a decision
+point; Phases 2–4 are written for the vendor route and are marked where the
+wrapper route differs.
+
 ## Phase 0 — worth doing whichever option wins
 
 **Name the between-runs gap in `docs/security.md`.** Its "What an agent can still
@@ -35,6 +110,21 @@ one) is not in `.env.example`. Verified rather than proposed: `cat
 /sys/fs/cgroup/cpu.max` from inside the container reads `max 100000`, i.e. no
 quota, against `nproc` 12 (`10-validation.md`). Worth doing on that measurement
 alone.
+
+**Correct the stale rationale on `PROCESS_KILLERS`.**
+`src/lib/orchestrator.ts:4344` withholds the killers by name "because there is no
+ownership boundary to withhold it by: compose runs a single uid, so an agent and
+the server supervising it can signal each other freely." `privsep.ts` has since
+made that false for the case it describes — the server stays root and children
+drop to `UF_AGENT_UID` (`src/lib/privsep.ts:23`–`33`), so `kill(2)`'s uid check
+means the measured incident at `:4339`–`4342` cannot recur that way on an install
+where the server is *actually* root. `npm run dev` on a laptop and a container an
+operator has pinned back to `user: "1000:1000"` both still get the original
+behaviour, which `privsep.ts:41`–`47` states. What the comment describes is now
+true only **between two agents**, which is the first of the three goals above. A
+stale rationale on a defence is how the defence gets deleted by the next person
+who re-reads it, and this one is load-bearing until a PID namespace or a uid per
+slot lands. One paragraph, no behaviour change.
 
 **Extend the boot line.** `describeSeparation()` (`src/lib/privsep.ts:180`) states
 the privilege arrangement in one line because that boundary disappears silently.
@@ -77,14 +167,84 @@ default with `unshare`/`clone` permitted for `CLONE_NEWUSER`:
     #    sandboxed Bash call that opens a connection — expect bwrap plus two socat
     #    listeners plus one socat child per connection.
 
-Questions 2–6 are billed cycles and belong against a scratch repository. Question 3
-is still the gate: a session-wide sandbox confirms the recommendation, a Bash-only
-sandbox promotes Option D to a live decision. Question 5 is the one that decides
-whether Phase 3 confines anything at all — if a user-settings write widens the
-policy, the ownership work in Phase 2 below is not optional and not cosmetic.
-Question 0 is first because the whole plan rests on it and it costs nothing.
+    # 7. does the CLI's sandbox unshare PID?  (goal 1; 02x:87-89 leans no)
+    #    From inside one sandboxed Bash call: `echo $$`, `ls /proc | wc -l`, and
+    #    whether a *sibling run's* pid is visible and signalable from it.
+
+    # 8. can this app wrap the CLI itself, and is a discardable root available?
+    #    Costs nothing extra — question 1's probe image already carries bwrap.
+    bwrap --version          # bookworm ships 0.8.0, which is also the release
+                             # --overlay/--tmp-overlay arrive in: at the boundary,
+                             # so print it and try the flag rather than trust it
+    bwrap --unshare-user --unshare-pid --die-with-parent \
+          --ro-bind / / --proc /proc --dev /dev \
+          --tmp-overlay /usr sh -c 'echo $$; touch /usr/probe && echo OVERLAY-OK'
+                             # expect pid 1 (goal 1) and a write to /usr that
+                             # leaves nothing behind (goal 3)
+    #    then the nesting question, which decides whether the two routes compose:
+    #    the same wrapper around `claude` with sandbox.enabled true, one Bash call
+    #    inside it — does the CLI's own bwrap start inside ours, or fail?
+
+Questions 2–7 are billed cycles and belong against a scratch repository; question
+8's commands are not, and question 0 is first because the whole plan rests on it
+and costs nothing. Question 5 decides whether Phase 3 confines anything at all —
+if a user-settings write widens the policy, the ownership work in Phase 2 below is
+not optional and not cosmetic.
+
+Question 3 is still the gate, and what it gates has changed. A session-wide
+sandbox confirms the recommendation. A Bash-only sandbox no longer promotes
+Option D — D reaches confinement through the same vendor mechanism by its own
+account (`04-option-runner-with-per-run-sandboxes.md:13`–`14`) and inherits the
+same answer — it promotes the **wrapper route** above, which does not have to ask
+the question. Questions 7 and 8 exist so that decision is made on a measurement
+rather than on the argv `strings` happened to show.
+
+## The decision Phase 1 gates
+
+Two routes, one seccomp relaxation, and they are not exclusive.
+
+**Configure the vendor's sandbox** — Option B as recommended, Phases 2–4 below as
+written. Wins the credential: a `sandbox.credentials.files` deny entry is the only
+mechanism in the survey that makes a `cat` of `~/.claude/.credentials.json` fail
+from a run's shell while the session still bills. Wins loudness, on
+`sandbox.failIfUnavailable`, which is this repository's own rule supplied by the
+vendor. Costs the ownership surgery on `~/.claude`, a second vendor contract
+(`@anthropic-ai/sandbox-runtime`) on top of `Dockerfile:194`'s pin, and it answers
+one of the three goals above.
+
+**Wrap the child ourselves** — a `sandbox.ts` producing bwrap argv, applied at the
+five sites where `childCredentials()` is spread today, so the spawned binary is
+`bwrap` and `CLAUDE_BIN` is what it execs. Wins all three goals by
+construction rather than by measurement: `--unshare-pid` for signalling, a mount
+namespace over `Edit` as well as Bash for the wrong checkout, `--tmp-overlay` for
+a root that is discarded. Costs the credential deny, which needs a boundary the
+outer wrapper cannot draw; costs a `failIfUnavailable` equivalent this app writes
+and must keep loud; and costs the policy being ours to get wrong, where the vendor
+route inherits a schema someone else maintains.
+
+**Both** is the expected end state and the reason to measure question 8: the
+wrapper supplies the three goals, the CLI's own layer inside it supplies the
+credential deny and the domain allowlist. If they do not nest, the decision is
+between a credential a run's shell cannot read and the three goals — and the
+second of those goals is the one `README.md:56` calls "the gap the whole exercise
+was reached for", while the credential is a thing every option in the survey
+leaves reachable from the process that bills against it.
+
+Two things the third goal costs, worth pricing before it is scheduled rather than
+after. A discardable root that agents install into pulls **directly against the
+network allowlist** — installing a tool *is* reaching an arbitrary registry, which
+is the egress path `07-comparison.md` weights at 2 as the exfiltration route; the
+resolution is a per-run allowlist naming registries rather than an off switch. And
+any overlay must leave `$CLAUDE_HOME/projects` bound through unmodified, or the
+transcript scan reads a discarded filesystem and every window and every budget
+guard compares against nothing — `01-constraints.md`'s metering crossing, arriving
+by a new door.
 
 ## Phase 2 — the image and the immovable policy
+
+Written for the vendor route. Under the wrapper route this phase keeps the apt
+line and loses the managed-settings file, the ownership surgery on `~/.claude` and
+the second vendor contract; if the two compose, it is unchanged.
 
 `Dockerfile`: `bubblewrap` **and `socat`** on the existing apt line (`:88`–`92`),
 `@anthropic-ai/sandbox-runtime` installed globally beside the CLI (`:195`) or its
@@ -146,6 +306,14 @@ there. Assert the run's own worktree is writable, a *sibling's* is not, and
 `CLAUDE_CONFIG_DIR` is, which is the metering path. Verify by hand with two
 concurrent runs: A is asked to write into B's checkout and the tool call fails.
 
+Under the wrapper route this phase is the same function emitting bwrap argv
+instead of a settings overlay, spread beside `childCredentials()` at the same five
+sites, and it takes the same three assertions. Two differences worth having in
+front of whoever writes it: the glob constraint disappears, because bwrap takes
+`--bind` paths this app builds rather than a settings array the CLI filters
+(`10-validation.md`); and the sibling assertion becomes true of `Edit` as well as
+Bash, which is what the test is actually for.
+
 ## Phase 4 — report it on the page
 
 A sandbox that is on and one that is off must not look the same. The boot line from
@@ -189,8 +357,32 @@ re-signing proxy is described in AWS terms, so assumed not — though generic
 `files` mask entries ("sentinel binds") do exist, so the honest form of the
 question is whether a masked token still authenticates. **Whether a per-uid
 boundary is
-enforced on Docker Desktop's `fakeowner` filesystem**, which affects Option A only
-and cannot be answered from a container holding no privilege to change uid. **What
+enforced on Docker Desktop's `fakeowner` filesystem**, which affects Option A's
+*filesystem* half only — its signalling half is a `kill(2)` uid check the kernel
+performs and no bind-mount remapping reaches — and cannot be answered from a
+container holding no privilege to change uid.
+
+**Whether bookworm's `bubblewrap` carries `--overlay`/`--tmp-overlay` and whether
+overlayfs mounts inside a user namespace work on this kernel.** The base image is
+`node:22-bookworm-slim` (`Dockerfile:40`), the flags arrive in bubblewrap 0.8.0,
+and unprivileged overlayfs arrives in Linux 5.11 against this kernel's 6.12 — so
+both are expected and neither is measured. The risk is not the version, it is the
+placement: an upper and work directory over a `fakeowner` bind mount is where this
+would fail on the platform this install runs, and nowhere else in the survey does
+a claim depend on that filesystem doing something rather than merely presenting
+ownership. **Whether the CLI's own bwrap nests inside one this app started**,
+which decides whether the two routes compose or choose. Both are question 8.
+
+**Rootless Podman as a third route, not given a file.** Once the seccomp profile
+permits `CLONE_NEWUSER`, a per-run *container* no longer needs the Docker socket
+that makes Option E net-negative (`05-option-per-run-container.md:14`–`22`), which
+is the one objection that sank it. It is left unscored rather than argued because
+multi-id mapping wants setuid `newuidmap`/`newgidmap` in the image, a single-id
+mapping is most of what bwrap already gives for a fraction of the moving parts,
+and Option E's other costs — the mount list per run, the lifecycle surviving a
+server restart, `docker compose down` not knowing about it — are unchanged by
+where the socket went. Named here so the next reader does not mistake its absence
+for a judgement that it is impossible. **What
 `sandbox.seccomp` filters.** And **the platform in general**: this install is macOS
 Docker Desktop (`fakeowner` over `/run/host_mark/Users`, linuxkit 6.12.76 aarch64),
 but `docs/install.md` supports Linux too, and Option E's host-root objection and

@@ -14,6 +14,18 @@ overlay at each spawn site.** Option B, `02x-option-cli-sandbox.md`.
 > reaches confinement through the same CLI mechanism. Read `10-validation.md`
 > before acting on this file.
 
+> **Scoped 2026-08-16 — it stands on the axis it was scored on, which is not the
+> operator's.** The three goals stated after this file was written are that no run
+> may signal another, that no run may write a checkout that is not its own, and
+> that a run should later be able to install tools into a filesystem that is
+> discarded. This option addresses the second, conditionally; the first is not a
+> criterion in `07-comparison.md` and the pinned binary's base bwrap argv has no
+> `--unshare-pid` in it; the third is not an axis anywhere in the survey. The
+> route that answers all three — this app invoking `bwrap` around the `claude`
+> process itself — costs the credential deny that is this file's headline win, and
+> the two may compose. `09-implementation-sketch.md` carries the goals, the
+> decision and the two Phase 1 questions that gate it.
+
 ## Why this one, from the constraints rather than from preference
 
 `01-constraints.md` lists five things that cross every candidate boundary and six
