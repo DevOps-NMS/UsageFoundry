@@ -205,6 +205,11 @@ export interface FleetReopenReport {
  * no "reopen everything failed" selector on the wire — the caller says which,
  * and `reopenRun` still refuses each one on its own terms and by name.
  *
+ * The ids the page displayed are still only the page's answer, though, and one
+ * of them may be a run the operator has since held back: `set_aside_at` is
+ * checked here, against the row, at the moment of the write. Same rule the
+ * server lock follows — a list is a reading, and a reading is stale.
+ *
  * One budget for all of them, because the usual reason a fleet needs picking up
  * is one thing that ended all of it — a restart, a wall, a spending limit set too
  * low — and re-entering the same numbers twenty-five times is what makes the
@@ -227,8 +232,23 @@ export function reopenFleet(
   for (const id of ids) {
     if (seen.has(id)) continue;
     seen.add(id);
-    if (!getRun(id)) {
+    const run = getRun(id);
+    if (!run) {
       report.refused.push({ id, reason: "No such run." });
+      continue;
+    }
+    // Refused here rather than inside `reopenRun`, and that split is the whole
+    // design of the flag: setting a run aside answers the *bulk* pick-ups, so
+    // its own page must go on offering Resume — and pressing that is the
+    // decision being taken back, which is why `reopenRun` clears the column
+    // instead of reading it. Named in the report rather than skipped, because
+    // the count on the button came from a list rendered before this press and
+    // an operator who set one aside a moment ago is owed the sentence saying so.
+    if (run.set_aside_at !== null) {
+      report.refused.push({
+        id,
+        reason: "Set aside. Pick it up on its own page if you want it back.",
+      });
       continue;
     }
     const outcome = reopenRun(id, budget);

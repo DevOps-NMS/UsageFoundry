@@ -625,6 +625,18 @@ through before trusting this unattended:
   it was stopped *with every run in flight*; then press **Hold new work**,
   submit a run, and confirm it sits `queued` with the dashboard saying so in
   words; then **Resume new work** and confirm it starts without a restart.
+- **Setting a run aside, in a browser.** `fleet.test.ts` drives all three doors
+  against a real database: `reopenFleet` refuses a set-aside id by name while
+  picking up the one beside it, `restartClosedRuns` drops it from the notice and
+  restores it when the run is put back, and `reopenRun` clears the mark. `npm run
+  typecheck` and `npm test` both pass. What has **not** happened: no browser has
+  rendered either button, and **Stop and set aside** has never been pressed on a
+  run with a live `claude` child — the stop is `stopRun`'s existing path reached
+  through a new route, but the *ordering* that matters (mark, then signal) has
+  only been read, not watched. `docker compose up --build` was not run. Before
+  trusting it: stop a cheap run with **Stop and set aside**, confirm the Fleet
+  count excludes it and the restart notice does too, then press **Resume** on its
+  page and confirm the chip is gone and the counts include it again.
 - **Per-repository cost, in a browser.** `groupRunSpend` is unit-tested for the
   two cases that fail silently — two mounts onto one host directory rolling up
   as one repository, and a run with no repository landing in its own bucket

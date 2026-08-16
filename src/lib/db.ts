@@ -984,6 +984,27 @@ function migrate(db: Database.Database) {
   // ever had.
   addColumn(db, "runs", "restart_closed", "INTEGER NOT NULL DEFAULT 0");
 
+  // When an operator set this run aside — "leave this one alone".
+  //
+  // Both bulk pick-ups act on a *set*: the restart notice on every
+  // `restart_closed` row, and the fleet's on every terminal run the page is
+  // displaying. So a run somebody had deliberately stopped was swept back into
+  // work by a press aimed at the twenty-four beside it, and there was nothing
+  // an operator could say to stop that short of never using either button.
+  //
+  // A fact about the operator's intent, and deliberately not about the ending:
+  // it leaves `status`, `stop_reason` and `restart_closed` exactly as they were,
+  // so putting the run back restores the row it already had rather than a state
+  // it was never in. Which is also why the two bulk readers *filter* on it
+  // rather than clearing anything — a run set aside and then put back is in the
+  // restart notice again, because the restart is still holding it up.
+  //
+  // Nullable rather than a flag, for `reopened_at`'s reason: when somebody
+  // decided this is the only thing separating a run held back on purpose from
+  // one nobody has looked at yet. `reopenRun` clears it, because picking a run
+  // up by hand is that decision being taken back.
+  addColumn(db, "runs", "set_aside_at", "INTEGER");
+
   // Which gate this run came through, and the record that authorised it.
   //
   // Runs arrive from five routes and three of them start an agent with nobody

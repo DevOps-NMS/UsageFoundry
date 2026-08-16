@@ -185,6 +185,27 @@ again on its first check. The time limit is the exception — it runs from the
 moment it starts again, since counting the hours it spent dead would refuse
 every run older than its own limit. Everything else carries over untouched.
 
+### Keeping a run out of the bulk pick-ups
+
+Two controls pick up runs by the handful: the notice at the top of **Runs** after
+a restart, and **Pick up N stopped** on the Fleet card. Both act on a set, so a
+run you deliberately stopped is in it — and a press aimed at the other
+twenty-four starts it again.
+
+**Set aside** on the run's page is the answer. Both controls skip it from then
+on, and their counts drop by one so the number on the button is what the press
+would actually start. Nothing else about the run changes: it keeps the status it
+ended with and the reason it ended for, and the page carries a *set aside* chip
+so it is not a decision you have to remember making.
+
+On a run that is still going the button reads **Stop and set aside** and does
+both, in that order — the run is marked first, so there is no moment where it has
+finished and a bulk press could still catch it.
+
+It is not a lock. **Resume** on the run's own page works exactly as it did, and
+using it puts the run back among the others — picking a run up by name is the
+decision being taken back. **Put back** does the same without starting anything.
+
 ### Running the same task again
 
 Two ways, and the cheap one is worth knowing first.

@@ -216,6 +216,12 @@ export interface RunRow {
    */
   restart_closed: number;
   /**
+   * When an operator set this run aside, or null. Both bulk pick-ups skip a run
+   * that carries one; picking it up on its own page clears it. Says nothing
+   * about how the run ended — see the column note in `db.ts`.
+   */
+  set_aside_at: number | null;
+  /**
    * Which gate this run came through, recorded rather than deduced. Null only
    * for rows written before the column existed.
    */
@@ -7285,9 +7291,16 @@ export function reopenRun(
       // leaves the count the restart notice offers to pick up. Cleared here
       // rather than when it next ends, because what that count answers is "how
       // many runs is the restart still holding up", not "how many did it touch".
+      //
+      // `set_aside_at=NULL` for the mirror of that reason. Setting a run aside
+      // says "not with the others", and this is the operator picking up this one
+      // run, by name, on its own page — the decision being taken back rather
+      // than worked around. Leaving it set would mean a run that had been picked
+      // up and had run again was still excluded from the next bulk pick-up, on
+      // the strength of something somebody decided about a previous ending.
       `UPDATE runs SET status=?, budget=?, max_iterations=?, follow_up=?, reopened_at=?,
          started_at=NULL, finished_at=NULL, exit_code=NULL, stop_reason=NULL,
-         resume_at=NULL, restart_closed=0 WHERE id=? AND status=?`,
+         resume_at=NULL, restart_closed=0, set_aside_at=NULL WHERE id=? AND status=?`,
     )
     .run(
       waitingAgain ? "waiting" : "queued",
@@ -7570,11 +7583,70 @@ export async function shutdownRuns(
  * the process never got that far. Read off the column rather than the reason
  * text for `reported_done`'s reason — a stop reason is prose, written to be
  * read by a person, and parsing it is how it silently stops matching.
+ *
+ * A run set aside is not one of them. It answers both halves of what this
+ * function is for at once: the notice counts what is still outstanding, and a
+ * run somebody has decided against is not outstanding, so counting it would
+ * leave a banner nobody could ever clear — and `reopenRestartClosed` reads this
+ * very list, so the filter is also what keeps the press from starting it.
+ * Filtered rather than cleared at the door, so putting the run back restores
+ * both.
  */
 export function restartClosedRuns(): RunRow[] {
   return db()
-    .prepare("SELECT * FROM runs WHERE restart_closed = 1 ORDER BY created_at")
+    .prepare(
+      "SELECT * FROM runs WHERE restart_closed = 1 AND set_aside_at IS NULL" +
+        " ORDER BY created_at",
+    )
     .all() as RunRow[];
+}
+
+export type SetAsideOutcome = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Hold one run back from the bulk pick-ups, or put it back among them.
+ *
+ * The two bulk controls act on a set — every `restart_closed` row, or every
+ * terminal run the page is showing — so the only way to keep a run somebody had
+ * deliberately stopped out of one was to not press the button. At twenty-five
+ * runs that means a control the operator stops using, which is worse than the
+ * one-page-at-a-time state it replaced. This is the per-run answer, and it is
+ * deliberately the *only* thing it does: the run's status, its stop reason and
+ * its `restart_closed` flag are untouched, so putting it back leaves the row
+ * exactly as the ending wrote it.
+ *
+ * A live run is set aside *before* it is signalled, never after — `stopFleet`'s
+ * ordering and its reason. Stopping first opens a window where the row is
+ * terminal and unmarked, which is precisely the set a bulk pick-up sweeps, so
+ * the press meant to hold a run back could hand it to one instead. Marking a
+ * `running` row is safe in a way the reverse is not: nothing about it changes
+ * the loop's behaviour, and the terminal `setStatus` the loop writes on its way
+ * out patches named columns and leaves this one alone.
+ *
+ * Not a refusal on a running run, then, but the caller still has to do the
+ * stopping: `stopRun` is a decision with its own confirmation and its own audit
+ * line, and folding it in here would make one function that both marks and
+ * kills depending on a status it read itself.
+ */
+export function setRunAside(id: string, aside: boolean): SetAsideOutcome {
+  const run = getRun(id);
+  if (!run) return { ok: false, reason: "No such run." };
+
+  db()
+    .prepare("UPDATE runs SET set_aside_at = ? WHERE id = ?")
+    .run(aside ? Date.now() : null, id);
+
+  // On the run's own log rather than only the audit line, because what this
+  // explains is a run that is sitting terminal while the fleet around it gets
+  // picked up — and the page an operator asks that question on is this one.
+  log(
+    id,
+    aside
+      ? "Set aside. Picking up runs in bulk will skip this one until it is put back."
+      : "Put back. Picking up runs in bulk includes this one again.",
+  );
+
+  return { ok: true };
 }
 
 /**

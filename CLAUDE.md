@@ -51,6 +51,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - `runs.origin` is a **required** field at every `createRun` call site. `reopenRun` deliberately writes none.
   - Only the 5-hour window can be waited out. A provider refusal parks the run regardless of enforcement mode.
   - `cancelled` is checked twice per cycle, and the interrupt test comes **before** the exit-code test.
+  - Both bulk pick-ups filter on `set_aside_at`; `reopenRun` clears it. Setting a live run aside marks it **before** the stop.
 
 - **`createRun`/`promoteQueued`, `serverLock.ts`, `db.ts`, `instrumentation.ts`** → `docs/agent/concurrency-and-ownership.md`
   - `createRun` runs from entry to INSERT with **no `await`**. Adding one silently puts two agents in one directory.

@@ -384,3 +384,81 @@ describe("the hold on new work", () => {
     );
   });
 });
+
+/**
+ * The per-run answer to a control that acts on a set.
+ *
+ * Both bulk pick-ups take a whole set — every `restart_closed` row, or every
+ * terminal run the page is displaying — so a run somebody had deliberately
+ * stopped was started again by a press aimed at the twenty-four beside it, and
+ * nothing anywhere said it had been. That failure is silent in the worst way
+ * available: an agent that edits files starts working in a folder the operator
+ * had finished with, under limits nobody re-read.
+ *
+ * Three cases, because there are three doors and each is a different mechanism.
+ * The fleet's own reads the column off the row at the moment of the write, so a
+ * stale list cannot get past it. The restart notice reads a query, so what it
+ * needs proving is the filter — in both directions, since putting a run back
+ * has to restore the banner it left. And `reopenRun` deliberately does *not*
+ * read the column at all: picking one run up by name is the decision being
+ * taken back, so the mark has to be gone afterwards rather than quietly
+ * excluding a run that has since worked again.
+ */
+describe("a run set aside", () => {
+  // Suppresses `promoteQueued`, so a reopened row stays `queued` and nothing
+  // reaches a spawn. What is under test is which rows each door selects.
+  before(() => settings.setNewWorkPaused(true));
+  after(() => settings.setNewWorkPaused(false));
+
+  it("is refused by name when the fleet's pick-up names it anyway", () => {
+    const kept = run("aside-kept", "stopped");
+    const aside = run("aside-refused", "stopped");
+    assert.equal(orch.setRunAside(aside, true).ok, true);
+
+    const report = fleet.reopenFleet([kept, aside], { maxIterations: 3 });
+
+    assert.deepEqual(report.reopened, [kept]);
+    assert.equal(report.refused.length, 1);
+    assert.equal(report.refused[0].id, aside);
+    assert.match(report.refused[0].reason, /set aside/i);
+    // The whole point of the mark: it changes what a list acts on and nothing
+    // about the run, so the row still says exactly how it ended.
+    assert.equal(statusOf(aside), "stopped");
+    assert.equal(statusOf(kept), "queued");
+  });
+
+  it("leaves the restart notice, and rejoins it when it is put back", () => {
+    const id = run("aside-restart", "failed");
+    dbMod.db().prepare("UPDATE runs SET restart_closed = 1 WHERE id = ?").run(id);
+    const listed = () => orch.restartClosedRuns().some((r) => r.id === id);
+    assert.equal(listed(), true);
+
+    orch.setRunAside(id, true);
+    assert.equal(listed(), false, "a run set aside is no longer outstanding");
+    assert.equal(
+      orch.reopenRestartClosed().reopened,
+      0,
+      "and the press that reads that list must start nothing",
+    );
+    assert.equal(statusOf(id), "failed");
+
+    // Filtered rather than cleared at the door: the restart is still holding
+    // this run up, so putting it back has to restore the count as well.
+    orch.setRunAside(id, false);
+    assert.equal(listed(), true);
+    assert.equal(orch.getRun(id)!.restart_closed, 1);
+  });
+
+  it("is cleared by picking that one run up", () => {
+    const id = run("aside-cleared", "stopped");
+    orch.setRunAside(id, true);
+
+    assert.equal(orch.reopenRun(id, { maxIterations: 3 }).ok, true);
+
+    assert.equal(
+      orch.getRun(id)!.set_aside_at,
+      null,
+      "a run picked up by hand is not still held back from the next bulk press",
+    );
+  });
+});

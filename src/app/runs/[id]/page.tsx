@@ -626,6 +626,44 @@ export default function RunDetail({
     );
   }
 
+  /**
+   * Hold this run back from the two bulk pick-ups, or put it back among them.
+   *
+   * The one control on this page that does not change what the run *is*. A live
+   * run is stopped by the same request, in that order and for the reason on
+   * `setRunAside`; a finished one is only marked. Either way the row keeps the
+   * status and the stop reason it had, which is what makes the undo an undo.
+   */
+  async function setAside(aside: boolean) {
+    setActionError(null);
+    const res = await jsonRequest<{ stopped?: string }>(
+      `/api/runs/${id}/set-aside`,
+      { method: aside ? "POST" : "DELETE" },
+    );
+    if (!res.ok) {
+      setStopNote(null);
+      setActionError(
+        actionFailureMessage(
+          res,
+          aside ? "Could not set this run aside." : "Could not put this run back.",
+        ),
+      );
+      return;
+    }
+    // `stopped` says which of the two things just happened, and the operator
+    // pressed one button for both — a run that was still working needs to hear
+    // that its agent is going, not only that a list will skip it.
+    setStopNote(
+      !aside
+        ? "Back among the others. Picking up runs in bulk includes this one again."
+        : res.data.stopped === "signalled"
+          ? "Stopping the current work cycle, and set aside — no bulk pick-up will start it."
+          : res.data.stopped === "cancelled"
+            ? "Stopped and set aside — no bulk pick-up will start it."
+            : "Set aside — no bulk pick-up will start it.",
+    );
+  }
+
   function openReopen() {
     if (!run) return;
     const blankIfNull = (v: number | null) => (v === null ? "" : String(v));
@@ -715,6 +753,10 @@ export default function RunDetail({
   // A `completed` run that used up its cycle cap never reported anything, and
   // is continued rather than pushed back on — same branch as `reopenPrompt`.
   const saidDone = run.status === "completed" && Boolean(run.reported_done);
+  // Orthogonal to every other flag here: a run can be set aside in any status,
+  // and it changes nothing this page offers — only what the two bulk pick-ups
+  // on the runs page will act on.
+  const setAsideAt = run.set_aside_at ?? null;
   const handoff = [...events].reverse().find((e) => e.kind === "handoff");
   const cycleInFlight = fmtCycleInFlight(run);
   const state = describeRun(run, {
@@ -749,6 +791,7 @@ export default function RunDetail({
         Run <span className="mono text-lg">{run.id.slice(0, 8)}</span>
         <StatusMark status={run.status} />
         <Badge tone={STATUS_TONE[run.status]}>{run.status}</Badge>
+        {setAsideAt && <Badge>set aside</Badge>}
       </h1>
       <p className="mb-5 max-w-[80ch] text-sm text-ink-muted">
         {run.mountLabel && <>{run.mountLabel} · </>}
@@ -822,6 +865,17 @@ export default function RunDetail({
             </p>
           )}
 
+          {/* Where the run says it is being held back, next to the Resume
+              button that still works. The chip in the heading is the glance;
+              this is the sentence, because what an operator needs to know is
+              which press it changes — and the answer is not this page's. */}
+          {setAsideAt && (
+            <p className="mt-1 text-xs text-ink-muted">
+              Set aside {fmtRelative(setAsideAt, nowTick)}. Picking up runs in
+              bulk skips this one; Resume here still works and puts it back.
+            </p>
+          )}
+
           <ButtonRow className="mt-3">
             {run.status === "paused" && <Button onClick={tryNow}>Try now</Button>}
             {resumable && !reopenOpen && (
@@ -838,6 +892,22 @@ export default function RunDetail({
             {active && (
               <Button variant="danger" onClick={stop}>
                 {run.status === "paused" ? "Give up" : "Stop run"}
+              </Button>
+            )}
+            {/* The undo comes first when there is one, because a run already
+                set aside has nothing else to offer here. Otherwise: `danger` on
+                a live run, where the press also ends a billed agent, and plain
+                on a finished one, where it changes a list and nothing else. */}
+            {setAsideAt ? (
+              <Button variant="secondary" onClick={() => void setAside(false)}>
+                Put back
+              </Button>
+            ) : (
+              <Button
+                variant={active ? "danger" : "secondary"}
+                onClick={() => void setAside(true)}
+              >
+                {active ? "Stop and set aside" : "Set aside"}
               </Button>
             )}
           </ButtonRow>

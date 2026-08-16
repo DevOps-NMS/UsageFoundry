@@ -549,6 +549,12 @@ export interface RunDTO {
    */
   restart_closed?: number;
   /**
+   * When an operator set this run aside, or null. Both bulk pick-ups skip it
+   * while it is set; the run's own Resume clears it. Says nothing about how the
+   * run ended — a set-aside run keeps the status and stop reason it had.
+   */
+  set_aside_at?: number | null;
+  /**
    * Spend reconciled from transcripts for work cycles killed before Claude Code
    * reported theirs. Shown beside `spent_usd`, never folded into it.
    */

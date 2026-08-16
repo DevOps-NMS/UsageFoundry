@@ -319,9 +319,15 @@ function RunList({
                   }
                 >
                   <Td className="align-top">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <StatusMark status={r.status} />
                       <span className="text-ink">{r.status}</span>
+                      {/* Beside the status rather than replacing it: this run
+                          ended however it ended, and being held back from the
+                          bulk pick-ups is a separate fact about it. Without the
+                          chip the only sign is a Fleet count one row lower that
+                          quietly does not include it. */}
+                      {r.set_aside_at && <Badge>set aside</Badge>}
                     </div>
                     {detail && (
                       <div
@@ -540,11 +546,16 @@ export default function RunsPage() {
    * Derived here and handed down rather than read inside the control, because
    * the rule is about *what somebody looked at* — a run that failed between the
    * render and the click is not on this list and is not swept in.
+   *
+   * A run set aside is left out, so the count on the button is what the press
+   * would actually start. Only half the answer, and the cheaper half: the list
+   * is a reading taken at render, so `reopenFleet` checks the column again
+   * against each row before it writes.
    */
   const reopenable = useMemo(
     () =>
       runs
-        .filter((r) => REOPENABLE.has(r.status))
+        .filter((r) => REOPENABLE.has(r.status) && !r.set_aside_at)
         .map((r) => ({ id: r.id, status: r.status })),
     [runs],
   );

@@ -203,8 +203,9 @@ export function FleetControls({
           {reopenable.length === 1 ? "" : "s"} listed on this page, each
           continuing its own session. One budget applies to all of them; a run
           that has already used more than it allows is refused by name and left
-          alone. A run that reported the task done is not in this list — that is
-          a decision per run, on its own page.
+          alone. Two kinds are not in this list at all: one that reported the
+          task done, and one you set aside — both are a decision per run, on its
+          own page.
         </p>
         <Field
           label="Work cycles"
