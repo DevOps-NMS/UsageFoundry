@@ -19,6 +19,7 @@ import {
   WORKSPACE_ROOT,
   CLAUDE_HOME,
 } from "../../../lib/config";
+import { currentSandbox } from "../../../lib/sandbox";
 import { loginFailureSummary } from "../../../lib/loginAttempts";
 import { activeSessionCount } from "../../../lib/sessions";
 import { FIVE_HOURS_MS } from "../../../lib/windows";
@@ -45,6 +46,11 @@ export async function GET() {
       // operator points this at, and nothing else on this page says so.
       // Folders, never values.
       githubTokens: githubTokenSummary(),
+      // What confines a tool call, which nothing else on any page says. The
+      // reading is taken per request rather than at boot for the reason
+      // `sandbox.ts` gives: a stale answer about a boundary is the failure this
+      // row exists to prevent.
+      sandbox: currentSandbox(),
       authEnabled: authEnabled(),
       // How many browser sign-ins are outstanding — a question that had no
       // answer at all while the cookie was UF_AUTH_TOKEN itself.

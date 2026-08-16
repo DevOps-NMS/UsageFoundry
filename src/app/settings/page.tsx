@@ -12,6 +12,8 @@ import type {
   AmbientAgentDTO,
   BudgetPolicyDTO,
   RunGuardsDTO,
+  SandboxDTO,
+  SandboxStateDTO,
   SettingsDTO,
   StorageReportDTO,
 } from "@/lib/apiTypes";
@@ -20,6 +22,7 @@ import {
   fmtBytes,
   fmtTokens,
   fmtUSD,
+  type BadgeTone,
 } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -729,6 +732,52 @@ function FailedSignIns({ summary }: { summary: unknown }) {
   );
 }
 
+/**
+ * What confines a tool call, in the manner of the two rows above it: presence
+ * rather than content, and the one fact that changes what an agent can reach.
+ *
+ * Four readings and not a switch, because two of them are the ways a sandbox
+ * lies about itself. `empty` is the loudest of the four and is the only one
+ * drawn as a fault: a policy switched on that names nothing runs every command
+ * unwrapped, so it is an install that believes it is confined and is not.
+ * `unknown` is a policy file this app could not read, and it is deliberately
+ * neutral rather than reassuring — the same call the meters make against a
+ * window with no figure in it, where a confident zero is the failure.
+ *
+ * The sentence is the server's, not this page's. It is the same one the boot
+ * line prints, and a second copy written here is a second thing to keep honest.
+ */
+function SandboxRow({ sandbox }: { sandbox: unknown }) {
+  const read =
+    typeof sandbox === "object" && sandbox !== null
+      ? (sandbox as Partial<SandboxDTO>)
+      : null;
+  // A payload with no sandbox key at all is a server older than this row, and
+  // saying nothing beats inventing a reading for it.
+  if (!read?.state) return null;
+
+  const state = read.state;
+  const TONE: Record<SandboxStateDTO, BadgeTone> = {
+    none: "warn",
+    on: "ok",
+    empty: "danger",
+    unknown: "neutral",
+  };
+  const WORD: Record<SandboxStateDTO, string> = {
+    none: "none",
+    on: "on",
+    empty: "enabled but empty",
+    unknown: "unknown",
+  };
+
+  return (
+    <EnvRow label="Sandbox">
+      <Badge tone={TONE[state]}>{WORD[state]}</Badge>{" "}
+      <span>{read.detail}</span>
+    </EnvRow>
+  );
+}
+
 function EnvRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex gap-2">
@@ -1073,6 +1122,7 @@ export default function SettingsPage() {
             </>
           )}
         </EnvRow>
+        <SandboxRow sandbox={env.sandbox} />
         <EnvRow label="Sign-in">
           {env.authEnabled ? (
             <SignOut sessions={Number(env.activeSessions ?? 0)} />

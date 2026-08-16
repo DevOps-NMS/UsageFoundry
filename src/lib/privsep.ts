@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { currentSandbox } from "./sandbox";
 
 /**
  * Which uid the children run as, and why it is not the server's.
@@ -200,17 +201,18 @@ export function describeSeparation(): string {
  * what a later change fills in is this sentence alone, where a clause would mean
  * editing one `docs/security.md` quotes verbatim.
  *
- * Today the honest sentence is that there is no sandbox. Nothing in this app
- * configures the CLI's own, wraps a child in `bwrap`, or narrows a tool call
- * below what the container's uid already permits — `--add-dir` names every
- * mount, a `Bash` call is not bounded by its cwd, and the checkout store holds
- * every concurrent run's worktree at one uid. It stays in that tense until
- * something makes it false.
+ * Nothing in this app configures the CLI's own sandbox, wraps a child in
+ * `bwrap`, or narrows a tool call below what the container's uid already
+ * permits — `--add-dir` names every mount, a `Bash` call is not bounded by its
+ * cwd, and the checkout store holds every concurrent run's worktree at one uid.
+ * So on a stock install the sentence is still that there is no sandbox. What it
+ * is no longer is a *constant*: the arrangement is read rather than asserted, so
+ * an install that has been given a managed policy says a different sentence than
+ * one that has not, which is the whole of what this line is for. `sandbox.ts`
+ * owns the reading and states what it does not claim; the wording of each state
+ * lives there beside the reasoning for it.
  */
 export function describeSandbox(): string {
-  return (
-    "sandbox: none — nothing confines an agent's commands below this " +
-    "container's own uid, so every mount, the whole network and a concurrent " +
-    "run's checkout are reachable from any run"
-  );
+  const { state, detail } = currentSandbox();
+  return `sandbox: ${state === "empty" ? "enabled but empty" : state} — ${detail}`;
 }
