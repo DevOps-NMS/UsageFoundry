@@ -859,74 +859,78 @@ function ClaudeAccount() {
   const pending = state?.pending ?? null;
 
   return (
-    <>
-      <EnvRow label="Claude account">
-        {state === null && loadError === null ? (
-          <span>reading…</span>
-        ) : loadError ? (
-          <>
-            <Badge tone="danger">unavailable</Badge> <span>{loadError}</span>{" "}
-            <Button variant="secondary" onClick={() => void load()}>
-              Retry
+    <EnvRow label="Claude account">
+      {state === null && loadError === null ? (
+        <span>reading…</span>
+      ) : loadError ? (
+        <>
+          <Badge tone="danger">unavailable</Badge> <span>{loadError}</span>{" "}
+          <Button variant="secondary" onClick={() => void load()}>
+            Retry
+          </Button>
+        </>
+      ) : auth === null ? (
+        // The CLI answered something we cannot read. Distinct from signed
+        // out, and not fixed by signing in — so no Sign in button here.
+        <>
+          <Badge tone="danger">unreadable</Badge>{" "}
+          <span>{state?.error ?? "the CLI did not answer"}</span>
+        </>
+      ) : (
+        <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1.5">
+          {auth.loggedIn ? (
+            <>
+              <Badge tone="ok">signed in</Badge>
+              <span>
+                {[auth.email, auth.organization, auth.plan]
+                  .filter(Boolean)
+                  .join(" · ") || auth.method || "no identity reported"}
+              </span>
+            </>
+          ) : (
+            <>
+              <Badge tone="danger">signed out</Badge>
+              <span>runs fail until this is signed in</span>
+            </>
+          )}
+          {/* Stated wherever it is true, because it silently outranks
+              everything to its left: with a key set, that key is what a work
+              cycle bills, and the subscription beside it is decoration. */}
+          {auth.apiKeySource && (
+            <>
+              <Badge tone="warn">{auth.apiKeySource}</Badge>
+              <span>this key is what runs bill, not the subscription</span>
+            </>
+          )}
+          {pending ? (
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setFlowError(null);
+                setCode("");
+                setLinkUrl(pending.url);
+              }}
+            >
+              Finish sign-in
             </Button>
-          </>
-        ) : auth === null ? (
-          // The CLI answered something we cannot read. Distinct from signed
-          // out, and not fixed by signing in — so no Sign in button here.
-          <>
-            <Badge tone="danger">unreadable</Badge>{" "}
-            <span>{state?.error ?? "the CLI did not answer"}</span>
-          </>
-        ) : (
-          <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1.5">
-            {auth.loggedIn ? (
-              <>
-                <Badge tone="ok">signed in</Badge>
-                <span>
-                  {[auth.email, auth.organization, auth.plan]
-                    .filter(Boolean)
-                    .join(" · ") || auth.method || "no identity reported"}
-                </span>
-              </>
-            ) : (
-              <>
-                <Badge tone="danger">signed out</Badge>
-                <span>runs fail until this is signed in</span>
-              </>
-            )}
-            {/* Stated wherever it is true, because it silently outranks
-                everything to its left: with a key set, that key is what a work
-                cycle bills, and the subscription beside it is decoration. */}
-            {auth.apiKeySource && (
-              <>
-                <Badge tone="warn">{auth.apiKeySource}</Badge>
-                <span>this key is what runs bill, not the subscription</span>
-              </>
-            )}
-            {pending ? (
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setFlowError(null);
-                  setCode("");
-                  setLinkUrl(pending.url);
-                }}
-              >
-                Finish sign-in
-              </Button>
-            ) : auth.loggedIn ? (
-              <Button variant="secondary" onClick={() => setConfirmOut(true)}>
-                Sign out
-              </Button>
-            ) : (
-              <Button variant="secondary" busy={busy} onClick={() => void begin()}>
-                Sign in
-              </Button>
-            )}
-          </span>
-        )}
-      </EnvRow>
+          ) : auth.loggedIn ? (
+            <Button variant="secondary" onClick={() => setConfirmOut(true)}>
+              Sign out
+            </Button>
+          ) : (
+            <Button variant="secondary" busy={busy} onClick={() => void begin()}>
+              Sign in
+            </Button>
+          )}
+        </span>
+      )}
 
+      {/* Inside the row rather than beside it. `EnvRow` renders a `<dd>`, which
+          takes flow content and so takes a `<dialog>`; as siblings these two
+          would be direct children of the `<dl>` above, which may hold only
+          `dt`, `dd` and `div`. Nothing moves visually — a closed `<dialog>` is
+          `display: none` and an open one is in the top layer — which is exactly
+          why the wrong version would never have announced itself. */}
       <Sheet
         open={linkUrl !== null}
         onDismiss={() => void abandon()}
@@ -981,7 +985,7 @@ function ClaudeAccount() {
           page.
         </p>
       </Sheet>
-    </>
+    </EnvRow>
   );
 }
 
