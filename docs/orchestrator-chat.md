@@ -97,9 +97,19 @@ writes as well as reads.
 
 **It can look before it proposes.** `get_usage` gives it the 5-hour and weekly
 windows, so it can tell you that approving ten runs into a nearly-spent window
-means ten runs that stop on their first guard check. `get_run` and `get_run_diff`
-give it a finished run's log, spend and patch, so "why did that one fail, and
-what should we do about it" is a question it can actually answer.
+means ten runs that stop on their first guard check. `get_run` gives it any run's
+log, spend, status and the list of files that run changed, so "why did that one
+fail, and what should we do about it" is a question it can actually answer.
+
+The one tool that is narrower than the rest is `get_run_diff`, which returns
+**patch text** and only for the runs this conversation proposed (for a workflow
+block: the runs of its own instance). A capability token *is* its holder's
+identity, so nothing on the server can tell the chat's own turn from an agent
+that read the token out of the config file of a turn in flight — and where a
+work cycle is confined to the folder it started in, an unscoped `get_run_diff`
+was the source of every repository this install has run against. For any other
+run the chat still has `get_run`'s file summary, and it can read the folder
+itself.
 
 **A turn that is not going to finish can be stopped.** While the chat is
 working, **Stop** appears beside Send. It signals the process answering — and

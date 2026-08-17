@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { currentSandbox } from "./sandbox";
 
 /**
  * Which uid the children run as, and why it is not the server's.
@@ -35,8 +36,23 @@ import fs from "node:fs";
  * What this does *not* buy is written down beside it in `docs/security.md`: the
  * child is still the uid that owns `~/.claude`, so a work cycle can still read
  * the account's own OAuth credential — it has to, that credential is what it
- * bills against — and every child shares one uid, so a capability minted for
- * one of them is reachable by a sibling that knows where to look.
+ * bills against.
+ *
+ * **The third defence needed a second cut, and it is a gid rather than a uid.**
+ * Moving the MCP capability file out of `/tmp` closed enumeration and nothing
+ * else: `--mcp-config <path>` is an argv element, `/proc/<pid>/cmdline` is
+ * world-readable, and a work-cycle agent that reads the path out of a sibling's
+ * command line was handed a file its own uid owned. A second *uid* for the chat
+ * would need a second Claude credential to authenticate as, which a
+ * subscription install does not have. A second *gid* needs nothing: the chat and
+ * block child keeps `UF_AGENT_UID`, so it still bills against the same account
+ * and still writes the operator's files as the uid they expect, while the
+ * per-turn directory and file are handed to `UF_CHAT_GID` and mode 0710/0040 —
+ * so a work-cycle agent fails the owner check (root), fails the group check (it
+ * is not in that group), and is left with the "other" bits, which are zero.
+ * `resolveChatGid` is that decision, and it is separate from the pair above
+ * because it is inert on its own: a gid sharpens a boundary the uid split makes,
+ * and without that split there is nothing to sharpen.
  *
  * Inert unless the server is actually root. `npm run dev` on a laptop, the test
  * suite, and a container an operator has pinned back to `user: "1000:1000"` all
@@ -116,8 +132,68 @@ export function resolveChildCredentials(o: {
   return { uid, gid };
 }
 
+/**
+ * The gid a chat or orchestrator-block child runs under, when it is not the
+ * agents' — or null for "one group for every child", which is what every
+ * install had before this existed.
+ *
+ * Pure and unit-tested for the same reason `resolveChildCredentials` is: the way
+ * this fails is that the capability file is handed to a group every agent is
+ * already in, which looks identical from the page, from the boot log and from
+ * `ls -l`.
+ *
+ * Three refusals, and each is an environment asking for a boundary that would
+ * not be one:
+ *
+ *   - **group 0.** That is the server's own group on this image, so the file
+ *     would be handed back to the half of the split it is being kept from.
+ *   - **the agents' own gid.** The mode pair would then grant exactly what it
+ *     was written to refuse. This is why the shipped default is 65533 rather
+ *     than 1001: a gid one above the operator's is a gid an operator plausibly
+ *     already has, and a stock install must not refuse to boot on a host whose
+ *     `UF_GID` happens to collide with a number this repository picked.
+ *   - **a name where an id belongs**, as everywhere else here.
+ *
+ * @param separated what `resolveChildCredentials` decided, or null.
+ */
+export function resolveChatGid(o: {
+  separated: ChildCredentials | null;
+  chatGid: string | undefined;
+}): number | null {
+  // No uid split, so every child is the server's uid and a gid buys nothing: a
+  // sibling reads what this process can write whatever group it carries. Not a
+  // refusal, because compose sets this unconditionally and an install with
+  // `UF_UID=0` — no separable uid to run an agent as — is entitled to boot.
+  if (!o.separated) return null;
+
+  const wanted = (o.chatGid ?? "").trim();
+  // Nothing asked for: the chat's config is chowned to the agents as it was, and
+  // `describeSeparation()` says the capability is reachable by a sibling.
+  if (!wanted) return null;
+
+  const gid = parseId(wanted, "UF_CHAT_GID");
+  if (gid === 0) {
+    throw new Error(
+      "UF_CHAT_GID is 0, which is the server's own group on this image. A " +
+        "capability file handed to group 0 is one the server's own children " +
+        "can read. Name a group no agent is in, or clear it.",
+    );
+  }
+  if (gid === o.separated.gid) {
+    throw new Error(
+      `UF_CHAT_GID is ${gid}, which is the gid every agent already runs as ` +
+        `(UF_AGENT_GID). The MCP capability file would be handed to the group ` +
+        `it is being kept from. Name a different group, or clear UF_CHAT_GID ` +
+        `and accept that a concurrent agent can read a live capability.`,
+    );
+  }
+  return gid;
+}
+
 let decided = false;
 let credentials: ChildCredentials | null = null;
+let chatGidDecided = false;
+let chatGid: number | null = null;
 
 /**
  * The credentials, decided once. Throws on a misconfiguration, every time it is
@@ -134,6 +210,18 @@ function separation(): ChildCredentials | null {
     decided = true;
   }
   return credentials;
+}
+
+/** The chat gid, decided once, on the same terms as `separation()`. */
+function chatSeparation(): number | null {
+  if (!chatGidDecided) {
+    chatGid = resolveChatGid({
+      separated: separation(),
+      chatGid: process.env.UF_CHAT_GID,
+    });
+    chatGidDecided = true;
+  }
+  return chatGid;
 }
 
 /** Is a child a different uid from this process? */
@@ -167,6 +255,70 @@ export function childCredentials(): { uid?: number; gid?: number } {
 }
 
 /**
+ * The same, for the one child that is not a work cycle: the orchestrator chat
+ * and a workflow's orchestrator block, which share `runOrchestratorChild`.
+ *
+ * Identical uid, deliberately — it authenticates with the same `~/.claude` and
+ * writes the same mounts, so a different uid would need a second Claude
+ * credential — and a different gid, which is the whole of what keeps a
+ * work-cycle agent out of this turn's capability file.
+ *
+ * What makes that hold is the same libuv behaviour called out above: `setgid`
+ * and `setuid` are called and `setgroups` never is, so a child's group set is
+ * the gid handed here plus whatever *supplementary* groups this process already
+ * carries — which on this image is root's, and root is in no group but 0.
+ * Neither side is therefore in the other's group, which is what makes the
+ * 0710/0040 pair in `mcpConfigOwnership` decide anything. An image that gave the
+ * server supplementary membership of either group would undo it silently.
+ */
+export function chatChildCredentials(): { uid?: number; gid?: number } {
+  const c = separation();
+  if (!c) return {};
+  return { uid: c.uid, gid: chatSeparation() ?? c.gid };
+}
+
+/** How a turn's MCP config is owned, when there is a group to own it. */
+export interface McpConfigOwnership {
+  /** The group the per-turn directory and the config file are handed to. */
+  gid: number;
+  /** 0710: the chat child traverses by group. Nothing else resolves a name. */
+  dirMode: number;
+  /**
+   * 0040: group read, and *nothing* for the owner.
+   *
+   * The owner is root, which ignores these bits entirely, so a 0440 here would
+   * suggest the owner bit was doing work that the kernel never consults. What
+   * decides is the group, and it is the only thing set.
+   */
+  fileMode: number;
+}
+
+/**
+ * The ownership a turn's MCP config takes, or null for "as the agents own it".
+ *
+ * Null in two cases that are one case: no uid split (nothing to defend against
+ * — a sibling is this process's own uid), and a uid split with no chat gid
+ * (`UF_CHAT_GID` cleared, which `describeSeparation()` states). Both leave
+ * `chat.ts` on its previous behaviour rather than half-applying a boundary.
+ */
+export function mcpConfigOwnership(): McpConfigOwnership | null {
+  if (!separation()) return null;
+  const gid = chatSeparation();
+  return gid === null ? null : { gid, dirMode: 0o710, fileMode: 0o040 };
+}
+
+/**
+ * Hand a path the server created to a group, leaving its owner alone.
+ *
+ * The counterpart to `chownForChild` for the one thing the child must read and
+ * must not own: owning it is what let a *sibling* open it, because every child
+ * this app spawns is one uid.
+ */
+export function chownToGroup(target: string, gid: number): void {
+  fs.chownSync(target, process.getuid?.() ?? 0, gid);
+}
+
+/**
  * Hand a path the server created inside a bind mount to the uid that has to use
  * it afterwards.
  *
@@ -189,8 +341,58 @@ export function chownForChild(target: string): void {
 /** One line for the boot log, so an install states which arrangement it is in. */
 export function describeSeparation(): string {
   const c = separation();
-  return c
-    ? `privilege separation on: children run as ${c.uid}:${c.gid}, server as ${process.getuid?.() ?? "?"}`
-    : "privilege separation off: children share this process's uid, so /proc, " +
-        "DATA_DIR and the MCP capability file are reachable by every agent";
+  if (!c) {
+    return (
+      "privilege separation off: children share this process's uid, so /proc, " +
+      "DATA_DIR and the MCP capability file are reachable by every agent"
+    );
+  }
+  const gid = chatSeparation();
+  // The chat gid is named either way. Absent, it is the one part of the split
+  // that is missing, and a line that only mentioned what is on would read as a
+  // complete boundary — which is how the /tmp defect survived a review.
+  const chat =
+    gid === null
+      ? ", chat and block turns in the agents' own group (UF_CHAT_GID unset, so " +
+        "a concurrent agent can read a live MCP capability)"
+      : `, chat and block turns as ${c.uid}:${gid}`;
+  return (
+    `privilege separation on: children run as ${c.uid}:${c.gid}` +
+    chat +
+    `, server as ${process.getuid?.() ?? "?"}`
+  );
+}
+
+/**
+ * The second line of the same boot statement: whether anything confines what a
+ * child may touch, as opposed to which uid it touches it as.
+ *
+ * A sandbox has the property the uid split has, which is why it is said here and
+ * not left to be noticed. Absent, it costs nothing visible — every page renders
+ * the same, every run works, and the only difference is how far a
+ * prompt-injected agent gets past the task it was given. A boundary that
+ * disappears quietly is the shape of failure this codebase says out loud.
+ *
+ * Its own function rather than a clause inside `describeSeparation()` because
+ * the two are independent: an install can have either without the other, and
+ * what a later change fills in is this sentence alone, where a clause would mean
+ * editing one `docs/security.md` quotes verbatim.
+ *
+ * Nothing in this app wraps a child in `bwrap`. What it does do is name each
+ * child's write set on the argv — `sandboxSettings` in `orchestrator.ts` — and
+ * that is a *narrowing* of a policy rather than a policy: it configures a
+ * sandbox the managed file switched on, and is withheld entirely on an install
+ * whose reading is `none`. So on a stock install the sentence is still that
+ * there is no sandbox, and nothing about a tool call is bounded below the
+ * container's own uid there: `--add-dir` names every mount, a `Bash` call is not
+ * bounded by its cwd, and the checkout store holds every concurrent run's
+ * worktree at one uid. What this line is no longer is a *constant*: the
+ * arrangement is read rather than asserted, so an install that has been given a
+ * managed policy says a different sentence than one that has not, which is the
+ * whole of what it is for. `sandbox.ts` owns the reading and states what it does
+ * not claim; the wording of each state lives there beside the reasoning for it.
+ */
+export function describeSandbox(): string {
+  const { state, detail } = currentSandbox();
+  return `sandbox: ${state === "empty" ? "enabled but empty" : state} — ${detail}`;
 }

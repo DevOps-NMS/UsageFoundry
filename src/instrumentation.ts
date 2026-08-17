@@ -71,8 +71,14 @@ export async function register() {
     // to find out that `/proc`, `DATA_DIR` and the capability file are reachable
     // by every agent. A misconfiguration throws instead, out of this same call,
     // so it stops the boot rather than the first run.
-    const { describeSeparation } = await import("./lib/privsep");
+    // The sandbox line beside it says the other half of the same question —
+    // which uid a child runs as, and then what confines what it may touch. It
+    // reads "none" today and is here anyway, because that is the reading an
+    // operator has to be able to see; a line that only appears once a sandbox
+    // exists says nothing at all about the installs that have none.
+    const { describeSeparation, describeSandbox } = await import("./lib/privsep");
     console.warn(`[usagefoundry] ${describeSeparation()}`);
+    console.warn(`[usagefoundry] ${describeSandbox()}`);
 
     // Every reconciler below reads "this row says running, therefore the
     // process that owned it died with my predecessor". That inference is only

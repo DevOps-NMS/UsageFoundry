@@ -173,6 +173,42 @@ export interface ConfigProblemDTO {
   message: string;
 }
 
+/**
+ * What confines a tool call below the uid it runs as.
+ *
+ * Four readings rather than a boolean, because two of them are the ways a
+ * sandbox lies about itself and both must be sayable on the page: `empty` is a
+ * policy that is switched on and names nothing, which runs every command
+ * unwrapped, and `unknown` is a policy file that could not be read, which is not
+ * evidence of absence. `none` is the stock install and is the honest word for
+ * it. The client mirror of `sandbox.ts`, which imports `node:fs`.
+ */
+export type SandboxStateDTO = "none" | "on" | "empty" | "unknown";
+
+/**
+ * What a `sandbox` run event's matched text says happened.
+ *
+ * Here rather than beside the matcher because the log renders it and
+ * `sandbox.ts` imports `node:fs`. Every one is a sandbox that is not working;
+ * `sandbox.ts` says why a policy *denial* is not in the list.
+ */
+export type SandboxRefusalKindDTO =
+  | "seccomp-unavailable"
+  | "sandbox-unavailable"
+  | "dependency-missing"
+  | "sandbox-message";
+
+export interface SandboxDTO {
+  state: SandboxStateDTO;
+  /** The whole sentence, in words an operator can check against the file. */
+  detail: string;
+  /**
+   * Whether the CLI refuses to start rather than running unsandboxed. Null when
+   * nothing asked for a sandbox, since there is then no such promise to report.
+   */
+  failIfUnavailable: boolean | null;
+}
+
 export interface UsageResponse {
   snapshot: SnapshotDTO;
   /**
@@ -1195,6 +1231,19 @@ export interface RunEventDTO {
      * went fine. Errors only — a successful result is not recorded at all.
      */
     | "tool_error"
+    /**
+     * A tool call that failed for a sandbox reason, carrying the words that
+     * said so.
+     *
+     * Its own kind rather than a flag on `tool_error`, and emitted *beside* one
+     * rather than instead of it, because the two answer different questions and
+     * an operator asks the second one about a whole run: `kind = 'sandbox'` is
+     * "did the policy refuse anything here", where the failure itself stays
+     * where every other failed call is. It is also the one class of tool failure
+     * that reaches stdout, for the reason a tripped guard does — a fleet whose
+     * allowlist is too narrow fails inside tool calls nobody is reading.
+     */
+    | "sandbox"
     | "iteration"
     | "budget"
     | "result"

@@ -114,10 +114,12 @@ process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
 const {
   CHAT_TIMEOUT_MS,
   STALE_TURN_MARGIN_MS,
+  chatOwnsRun,
   chatPrompt,
   composeTask,
   createChat,
   createProposal,
+  markProposal,
   decisionNote,
   getChat,
   listMessages,
@@ -841,6 +843,67 @@ describe("githubSlug", () => {
   });
 });
 
+describe("chatOwnsRun — what a capability may ask for the patch of", () => {
+  // The scope `/api/mcp` applies to `get_run_diff`, and its two failures are
+  // opposite and unequal. Refusing a thread's own run is loud: the model says
+  // it cannot read the diff of the run it just started. Answering for someone
+  // else's is silent and is the whole point of the scope — a capability token
+  // *is* its holder's identity, so a token read out of a turn in flight asks
+  // this question as the chat, and an unfiltered query hands a work-cycle agent
+  // the patch of every run in every repository this install has ever worked in.
+  it("answers for the runs this thread started, and for no others", () => {
+    const mine = createChat();
+    const theirs = createChat();
+
+    const proposal = createProposal(mine.id, {
+      templateId: null,
+      title: "Fix it",
+      task: "Fix the thing.",
+      promptOverride: null,
+      mountId: "work",
+      folder: "repo",
+      specId: "fix",
+    });
+    const other = createProposal(theirs.id, {
+      templateId: null,
+      title: "Fix theirs",
+      task: "Fix their thing.",
+      promptOverride: null,
+      mountId: "work",
+      folder: "other",
+      specId: "fix",
+    });
+    markProposal(proposal.id, "approved", { runId: "run-mine" });
+    markProposal(other.id, "approved", { runId: "run-theirs" });
+
+    assert.equal(chatOwnsRun(mine.id, "run-mine"), true);
+    assert.equal(chatOwnsRun(mine.id, "run-theirs"), false);
+    assert.equal(chatOwnsRun(theirs.id, "run-mine"), false);
+
+    // A run nobody proposed — every run started from the UI, which is most of
+    // them — belongs to no thread rather than to all of them.
+    assert.equal(chatOwnsRun(mine.id, "run-from-the-page"), false);
+  });
+
+  it("does not count a proposal that was never approved", () => {
+    // `run_id` is null until `approveProposal` writes one, and SQL equality
+    // against null is null rather than true — asserted rather than assumed,
+    // because the failure would be a scope that admits every id it is asked
+    // about as soon as one pending proposal exists in the thread.
+    const chat = createChat();
+    createProposal(chat.id, {
+      templateId: null,
+      title: "Pending",
+      task: "Not approved.",
+      promptOverride: null,
+      mountId: "work",
+      folder: "repo",
+      specId: "pending",
+    });
+    assert.equal(chatOwnsRun(chat.id, "run-mine"), false);
+  });
+});
+
 describe("a proposal's label, dependencies and graph survive the round trip", () => {
   // The one thing in this feature that is neither a pure decision nor a
   // spawn: `migrate()` adds five columns by ALTER and `proposalDeps` reads one
@@ -1108,6 +1171,43 @@ describe("writeMcpConfig — the capability never lands in a shared directory", 
     assert.equal(path.isAbsolute(MCP_CONFIG_BASE), true);
     assert.notEqual(MCP_CONFIG_BASE, os.tmpdir());
     assert.equal(MCP_CONFIG_BASE.startsWith(`${os.tmpdir()}/`), false);
+  });
+
+  it("hands the config to a group, never to the uid that would read it", () => {
+    // The half `0600` never did. Every child in this app is one uid, so a
+    // config owned by the agents' uid is one a *work-cycle* agent can open the
+    // moment it reads `--mcp-config <path>` out of a sibling's
+    // /proc/<pid>/cmdline — which is public. What excludes it is a group it is
+    // not in: 0710 on the directory (traverse, never list) and 0040 on the file.
+    //
+    // The ownership is a parameter precisely so this can be checked, because a
+    // unit test in this process has one uid and cannot observe the refusal
+    // itself. What is pinned is the decision — the modes, and that neither the
+    // directory nor the file is left owned by the reader's group. The container
+    // check that observes the EACCES is in docs/verification.md.
+    const gid = process.getgid?.() ?? 0;
+    const file = writeMcpConfig("cap-token-grouped", {
+      gid,
+      dirMode: 0o710,
+      fileMode: 0o040,
+    });
+    const dir = path.dirname(file);
+    try {
+      const dirStat = fs.statSync(dir);
+      const fileStat = fs.statSync(file);
+
+      assert.equal(dirStat.mode & 0o777, 0o710);
+      assert.equal(fileStat.mode & 0o777, 0o040);
+      // Nothing for "other" on either, which is what a work-cycle agent is
+      // reduced to once the owner and group checks have both refused it.
+      assert.equal(dirStat.mode & 0o007, 0);
+      assert.equal(fileStat.mode & 0o007, 0);
+      assert.equal(dirStat.gid, gid);
+      assert.equal(fileStat.gid, gid);
+    } finally {
+      removeMcpConfig(file);
+    }
+    assert.equal(fs.existsSync(dir), false);
   });
 
   it("takes the directory with it when the turn ends", () => {

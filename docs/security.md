@@ -28,6 +28,23 @@ app's defences are file modes that said nothing while they were:
 - the MCP capability file is written `0600`, which excludes nobody when the
   reader owns it.
 
+The chat and a workflow's orchestrator block take that same uid and a
+**different group**, `UF_CHAT_GID` (65533 in the shipped image, as `ufchat`).
+That group owns the per-turn MCP capability file — `0710` on its directory and
+`0040` on the file — so a work-cycle agent that knows the exact path fails the
+owner check, fails the group check, and is left with the "other" bits, which are
+zero. It is a group rather than a second uid because the chat child has to stay
+the uid that owns the mounted `~/.claude`: that credential is what it
+authenticates and bills with, and a second uid would need a second Claude
+account. The server refuses to boot when `UF_CHAT_GID` equals the gid the agents
+run as, since the file would then be handed to the group it is kept from.
+
+One visible consequence: files a chat turn writes — its own transcript under the
+mounted `~/.claude`, anything it touches in a checkout — carry that group, so
+`ls -l` on the host shows `65533` where a group name usually is. Nothing reads
+them by group. Every one is still owned by your uid, which is what both the
+other agents and the CLI's own 0600 credential file go through.
+
 It has to be this way round. The child must be the uid that owns the bind
 mounts, because an isolated run is *ordered* to commit and its commits land in
 your own `<repo>/.git`; and the server must be able to read
@@ -45,6 +62,15 @@ docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
 
 docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
   'test -w /data/usagefoundry.db && echo BAD-writable || echo ok'
+
+# and, with a run working and a chat turn sent at the same time — the config
+# a live turn is using, found the way an agent would find it
+docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+  'for p in $(pgrep -x claude); do
+     tr "\0" "\n" < /proc/$p/cmdline | grep -A1 -x -- --mcp-config | tail -1
+   done | while read -r cfg; do
+     [ -n "$cfg" ] && { [ -r "$cfg" ] && echo BAD-readable || echo ok; }
+   done'
 ```
 
 **Switching it off is possible and silent by nature**, so the server says which
@@ -75,27 +101,84 @@ read — reaches something that is not this run's business.
   filesystem access and again after symlink resolution. But a `Bash` call is not
   bounded by cwd, and `--add-dir` names every configured mount. Treat all four
   workspaces as one blast radius.
+- **A concurrent run's checkout, and the branch that checkout will land.** This
+  is the sharp form of the point above and the one worth stating on its own,
+  because it is the case a reader of a *concurrency* feature comes looking for.
+  Every isolated run gets a worktree under `<mount>/.uf-worktrees/`, they are all
+  in one store on one mount, and every child of every kind is the same uid — so
+  there is no boundary between two runs at all, rather than a weak one. A run can
+  edit a run that is working beside it: its files, its seeded config, and the
+  branch it is committing to. Nothing detects that. The second run's commits are
+  simply not what its agent wrote, and Land merges them into your repository like
+  any other work. Measure it from an agent's uid against any slot that is not the
+  one you are asking about:
+
+  ```sh
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'test -w /workspace/.uf-worktrees/<another-run>/ && echo BAD-writable || echo ok'
+  # expect BAD-writable, today: this is a gap, not a check you are confirming
+  ```
 - **`UF_GITHUB_TOKEN`, for as long as the cycle lasts.** It is deliberately
   handed to work cycles (and the chat), because `git push` and `gh` cannot work
   without it. An unattended agent can use everything that token can, which is
   why the advice to scope it to the repositories you actually run agents against
   is in `.env.example` rather than here.
-- **A concurrent chat turn's MCP capability, if it can find the path.** The
-  config file carrying it is no longer in `/tmp` — it is 0600 in a 0700 per-turn
-  directory under a base the server owns and nothing else can list, and both go
-  when the turn ends. But `--mcp-config <path>` is on the child's command line
-  and `/proc/<pid>/cmdline` is world-readable, so an agent that catches a turn
-  in flight can still read a capability it did not mint. That closes when a chat
-  turn runs as a different uid from a work cycle, which needs a second Claude
-  credential a subscription install does not have. What it opens is bounded by
-  its subject and dies with the turn: read-mostly tools for a `chat`, and
-  `emit_runs` — inside the block's own folder and fan-out cap — for a `block`.
+- **What a stolen capability would open, if one could be stolen.** This is the
+  one in this list that is now closed rather than sized, and it is here because
+  the shape of it matters: the config file is no longer in `/tmp`, and it is no
+  longer owned by the uid that would read it. An agent that catches a turn in
+  flight can still find the path — `--mcp-config <path>` is on the child's
+  command line and `/proc/<pid>/cmdline` is world-readable — and opening it
+  fails on the group. Clearing `UF_CHAT_GID`, or running without privilege
+  separation at all, puts this back: the boot log says which arrangement you are
+  in. What a capability opens is bounded by its subject and dies with the turn —
+  read-mostly tools for a `chat`, and `emit_runs`, inside the block's own folder
+  and fan-out cap, for a `block` — and `get_run_diff` is scoped to the caller's
+  own runs, so neither reaches the patch of a run in a repository it was not
+  working in.
 
 There is one thing the split *does* close that reads similarly and is worth not
 confusing with the above: an agent can no longer read the **server's**
 environment out of `/proc`, so `UF_AUTH_TOKEN` and `ANTHROPIC_ADMIN_KEY` — the
 app's own master credential and an organisation-wide Admin key, neither of which
 has anything to do with the task the agent was given — are no longer reachable.
+
+There is now a switch that reaches the first of the five, and it is **off, and
+unproven**. `UF_SANDBOX=1` (see `.env.example`) has the container write a
+root-owned policy that puts each of an agent's commands inside Claude Code's own
+bubblewrap namespace, with a deny over `~/.claude/.credentials.json` — the first
+mechanism here that makes a `cat` of your token fail inside a run while the
+session still bills — plus a read deny over `/data` and `/backups` and, if you
+name domains, an egress allowlist. It needs the `security_opt` block in
+`docker-compose.yml` uncommented, since bubblewrap cannot start under Docker's
+default seccomp profile. Two things it is not. It does **not** close the third
+bullet above: the policy is install-wide and names no per-run paths, so a run can
+still write a concurrent run's checkout. And nothing about it has ever been
+executed on this project — the mechanism was read out of the pinned CLI binary,
+so turning it on is an experiment you are running rather than a control you are
+enabling. `docs/verification.md` carries every step that would settle it.
+
+**And one more surface, which is a policy file rather than a path.**
+`~/.claude/settings.json` is one of the sources Claude Code merges a sandbox
+policy from — the managed file above, `--settings` on the command line, and
+*user settings* — and it is owned by the uid the agents run as. A run that
+appends `{"sandbox":{"filesystem":{"allowWrite":["/"]}}}` to it widens the
+policy every later session starts under, its own and every sibling's; while that
+is true, the paragraph above describes a boundary a run can move. The same file
+also carries hooks, permission rules and environment for every session, so this
+is not only about the sandbox. `UF_LOCK_CLAUDE_HOME=1` closes it by giving
+`~/.claude` **and** that file to root at boot, then handing back, individually,
+the entries the CLI writes — `projects/` first, because that is the metering
+path every window and every guard reads. Both halves are load-bearing: a
+root-owned file inside a directory the agents own is a file they can delete and
+replace. It is off by default and it is a separate switch from `UF_SANDBOX` in
+both directions, because each is worth having without the other. What it costs:
+it changes a directory on your **host** that you also use outside this
+container, and `docs/install.md` says exactly what you lose and how to undo it.
+On macOS the platform emulates bind-mount ownership, so the `chown` may reach
+neither your files nor the agents — the entrypoint asks an agent's own uid
+whether it can still write that file and says so on the boot log, and that line
+is the only evidence here that the boundary exists.
 
 ## Everything else
 

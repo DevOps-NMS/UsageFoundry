@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { resolveChildCredentials } from "./privsep";
+import { resolveChatGid, resolveChildCredentials } from "./privsep";
 
 /**
  * The decision behind every spawn in this app, and both ways of getting it
@@ -104,3 +104,71 @@ describe("resolveChildCredentials", () => {
     );
   });
 });
+
+/**
+ * The gid that keeps a live MCP capability away from a concurrent work cycle.
+ *
+ * Its failure is the quietest in this file: the capability file is written,
+ * chowned and read exactly as before, the turn works, the boot log says
+ * separation is on — and the group it was handed to is one every agent is
+ * already in, so `0710`/`0040` grant precisely what they were written to refuse.
+ * Nothing downstream can tell the two apart, which is why the collision is a
+ * refusal rather than a fallback.
+ */
+describe("resolveChatGid", () => {
+  const agents = { uid: 1000, gid: 1000 };
+
+  it("asks for nothing when there is no uid split to sharpen", () => {
+    // `npm run dev`, the test suite, and a host whose own uid is 0. Compose sets
+    // UF_CHAT_GID unconditionally, so this pair is a normal state rather than a
+    // misconfiguration: one uid means a sibling reads whatever this process can
+    // write, whatever group carries it.
+    assert.equal(
+      resolveChatGid({ separated: null, chatGid: "65533" }),
+      null,
+    );
+  });
+
+  it("asks for nothing when no chat gid is configured", () => {
+    // The uid split whole, minus this one boundary. `describeSeparation()` is
+    // what stops that being silent.
+    assert.equal(resolveChatGid({ separated: agents, chatGid: undefined }), null);
+    assert.equal(resolveChatGid({ separated: agents, chatGid: "  " }), null);
+  });
+
+  it("takes the configured group when the agents run in another", () => {
+    assert.equal(resolveChatGid({ separated: agents, chatGid: "65533" }), 65533);
+    assert.equal(
+      resolveChatGid({ separated: { uid: 501, gid: 20 }, chatGid: "65533" }),
+      65533,
+    );
+  });
+
+  it("refuses the group the agents already run in", () => {
+    // The whole defect, expressed as configuration: the file would be handed to
+    // the group it is being kept from, and every mode on it would still read as
+    // tightened. This is why the shipped default is far from the range an
+    // operator's own UF_GID lands in.
+    assert.throws(
+      () => resolveChatGid({ separated: agents, chatGid: "1000" }),
+      /every agent already runs as/,
+    );
+  });
+
+  it("refuses group 0", () => {
+    // The server's own group on this image, so the capability would come back
+    // within reach of the half of the split it is kept from.
+    assert.throws(
+      () => resolveChatGid({ separated: agents, chatGid: "0" }),
+      /server's own group/,
+    );
+  });
+
+  it("refuses a name where an id belongs", () => {
+    assert.throws(
+      () => resolveChatGid({ separated: agents, chatGid: "ufchat" }),
+      /numeric id/,
+    );
+  });
+});
+

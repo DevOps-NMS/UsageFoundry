@@ -82,6 +82,26 @@ ENV NODE_ENV=production \
 #                       because the app depends on it — but somebody holding a
 #                       backup file at 3am wants a shell they can inspect it in.
 #
+#   bubblewrap, socat — the two apt halves of the CLI's own Linux sandbox, which
+#                       `docker-entrypoint.sh` can be asked to switch on with
+#                       UF_SANDBOX and which is off in every stock install. The
+#                       CLI's dependency check treats a missing `bwrap` and a
+#                       missing `socat` as *errors* rather than warnings (the
+#                       binary's own words: `bubblewrap (bwrap): not installed`,
+#                       `socat: not installed`), so an install that turned the
+#                       switch on without these would meet the failure this
+#                       image exists to avoid — one arriving inside a tool call.
+#                       bwrap builds the namespace; socat bridges the egress
+#                       proxy's unix sockets to the TCP ports a sandboxed
+#                       command dials. Roughly 1 MB together. `bwrap` cannot
+#                       start at all until the operator also supplies the
+#                       seccomp profile docker-compose.yml carries commented
+#                       out — `unshare` is EPERM under Docker's default
+#                       profile, measured in this container. `socat` is an
+#                       ordinary tool and is on the agents' PATH from now on,
+#                       which beside curl, python3, g++ and a Go toolchain is
+#                       a rounding error rather than a new reach.
+#
 # This costs roughly 250 MB, nearly all of it g++. A compiler in the runtime
 # image is a deliberate trade: the alternative is an agent that cannot install
 # dependencies, and a run that fails at step one is worth less than the layer.
@@ -89,6 +109,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git ripgrep ca-certificates tini \
       python3 make g++ curl procps less sqlite3 \
+      bubblewrap socat \
  && rm -rf /var/lib/apt/lists/*
 
 # Two things git cannot work out for itself inside a container, both of which
@@ -194,6 +215,29 @@ ENV PATH="/usr/local/go/bin:${PATH}" \
 ARG CLAUDE_CLI_VERSION=2.1.226
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" && npm cache clean --force
 
+# The third dependency of that same sandbox, and the only one that is not apt.
+#
+# Without it the CLI still sandboxes — the dependency check reports a missing
+# seccomp applier as a *warning*, not an error: `seccomp not available - unix
+# socket access not restricted`, and at wrap time `[Sandbox Linux] apply-seccomp
+# binary not available - unix socket blocking disabled. Install
+# @anthropic-ai/sandbox-runtime globally for full protection.` What that warning
+# costs is the network boundary: the domain allowlist is enforced by a proxy on
+# a unix socket, and the seccomp filter is the whole of what stops a sandboxed
+# command dialling that socket directly. Absent, the allowlist is advice.
+#
+# Pinned on the same argument as the CLI above and as a second half of it. That
+# pin protects a contract read off one build rather than a specification, and
+# this adds the sandbox settings schema to what it covers: a renamed key leaves
+# `sandbox.enabled` unread and the run unsandboxed, and `failIfUnavailable` does
+# not catch it, because a sandbox that was never asked for is not one that
+# failed. 0.0.71 is the release that was current when 2.1.226 was published
+# (2026-08-07 against 2026-08-08), which is as close as anything here can get to
+# "the version this CLI was built against". Move the two together.
+ARG SANDBOX_RUNTIME_VERSION=0.0.71
+RUN npm install -g "@anthropic-ai/sandbox-runtime@${SANDBOX_RUNTIME_VERSION}" \
+ && npm cache clean --force
+
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
@@ -253,6 +297,27 @@ RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.cl
  && chown -R node:node /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
  && chown root:root /data \
  && chmod 0700 /data
+
+# The group a chat or orchestrator-block turn runs in, and no work cycle does.
+#
+# It carries the per-turn MCP capability file, which is 0710/0040 owned by this
+# group — the whole of what keeps one of twenty-five concurrent agents from
+# reading a live capability off a sibling's `/proc/<pid>/cmdline` and speaking to
+# /api/mcp as the chat. `src/lib/privsep.ts` argues out why this is a gid and not
+# a second uid: the chat child must stay the uid that owns the mounted
+# `~/.claude`, because that credential is what it authenticates and bills with.
+#
+# 65533 rather than 1001, and the distance is the point: compose defaults
+# `UF_CHAT_GID` to this, and the app *refuses to boot* when it equals the gid the
+# agents run as, since the mode pair would then grant exactly what it refuses.
+# A number just above the operator's own is one an operator plausibly has;
+# 65533 is below `nogroup` and free on this base image.
+#
+# Only the numeric gid decides anything — the kernel never reads /etc/group for
+# a permission check, and both `spawn` and `chown` here are given numbers. The
+# entry exists so `ls -l` inside the container names it, and so this default has
+# one place it is written down rather than two.
+RUN groupadd -g 65533 ufchat
 
 # No `USER node`. The server runs as root and drops every child it spawns to
 # `UF_AGENT_UID`/`UF_AGENT_GID` — see `src/lib/privsep.ts`, which argues out why

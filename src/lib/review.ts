@@ -13,6 +13,7 @@ import {
   currentSnapshot,
   emitRunEvent,
   getRun,
+  sandboxArgsFor,
   signalTree,
   workDirOf,
   type RunRow,
@@ -602,6 +603,21 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
     // One encoder for all four spawn sites — every way of getting this shape
     // wrong is silent, so there is one place that knows it.
     args.push(...agentsArgs(req.agents ?? []));
+
+    // What this child may write, if anything confines it at all. The same
+    // encoder the work cycle and the chat use, handed the one thing that
+    // differs: a reviewer under `plan` writes nothing and gets a read-only set,
+    // where the conflict resolver under `acceptEdits` gets its throwaway
+    // checkout — and nothing else, since it is not the thing that commits.
+    //
+    // Which leaves the repository's `.git` outside the resolver's set, and that
+    // is a decision rather than an omission: it is told not to run git, and the
+    // merge commit is this server's afterwards. If a `git status` it ran anyway
+    // turns out to fail on the index under `<repo>/.git/worktrees/<slug>`, the
+    // fix is that one entry for this scope — not a wider default for every
+    // child. Nothing here has been executed against a sandbox; see
+    // `docs/verification.md`.
+    args.push(...sandboxArgsFor({ kind: "assist", cwd, permissionMode }));
 
     // No shell, as everywhere else here: the prompt carries a diff, which is
     // arbitrary repository content full of quotes and backticks.

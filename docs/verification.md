@@ -661,7 +661,8 @@ through before trusting this unattended:
 - **The whole privilege split, which is every part of it that matters.** The
   server now runs as root and drops each child to `UF_AGENT_UID`; `/data` is
   root-owned 0700 and reclaimed by an entrypoint; the MCP capability leaves
-  `/tmp`; the telemetry exporter carries a per-run capability instead of
+  `/tmp` and is owned by `UF_CHAT_GID`, a group only the chat and block child
+  is in; the telemetry exporter carries a per-run capability instead of
   `UF_AUTH_TOKEN`. `npm run typecheck` and `npm test` pass, the decision
   (`resolveChildCredentials`), the compose/Dockerfile pair, the capability file
   and `telemetryEnv` are all unit-tested, and **no container has been built or
@@ -673,7 +674,8 @@ through before trusting this unattended:
   ```sh
   docker compose up --build -d
   docker compose logs usagefoundry | grep 'privilege separation'
-  # expect "on: children run as 1000:1000, server as 0"
+  # expect "on: children run as 1000:1000, chat and block turns as 1000:65533,
+  # server as 0" — a line naming no chat gid is the capability boundary absent
 
   # #79 — the server's environment
   docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
@@ -690,6 +692,23 @@ through before trusting this unattended:
   docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
     'ls /tmp/uf-mcp-* 2>/dev/null; ls /run/uf-mcp 2>/dev/null; echo "exit=$?"'
   # expect nothing from the first and a permission error from the second
+
+  # #87 — and the read itself, which the group is what refuses. Prints modes
+  # and a byte count only: the file carries a live bearer token.
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c '
+    for p in $(ls /proc | grep "^[0-9][0-9]*$"); do
+      cfg=$(tr "\0" "\n" < /proc/$p/cmdline 2>/dev/null |
+            grep -A1 -x -- --mcp-config | tail -1)
+      case "$cfg" in /run/uf-mcp/*)
+        echo "pid $p -> $cfg"
+        if [ -r "$cfg" ]; then echo "BAD-readable, $(wc -c < "$cfg") bytes"
+        else echo "ok: not readable"; fi ;;
+      esac
+    done'
+  # expect "ok: not readable", and `ls -ldn` of the directory to show group
+  # 65533 rather than the agents' gid. A run that finds no --mcp-config argv at
+  # all has proved nothing: the window is one turn, so send the chat message
+  # first and probe while it is still working.
 
   # #83 — with UF_AUTH_TOKEN set and a run under live enforcement
   #   task the agent with:  env | grep OTEL_EXPORTER_OTLP_HEADERS
@@ -711,11 +730,19 @@ through before trusting this unattended:
   `UF_AGENT_UID`/`UF_AGENT_GID` cleared, which is the previous behaviour whole
   and which the app detects and reports at boot.
 
-  Two things are known-not-closed rather than unverified, and are in
+  One thing is known-not-closed rather than unverified, and is in
   `docs/security.md` rather than here: an agent can still read
-  `~/.claude/.credentials.json` (it is what a work cycle bills against), and a
-  sibling agent can still read a live MCP capability's path out of
-  `/proc/<pid>/cmdline`. Both need a second Claude credential to close.
+  `~/.claude/.credentials.json`, because it is what a work cycle bills against,
+  and only a per-run credential Claude Code does not have would close it.
+
+  The MCP capability *path* is still readable out of `/proc/<pid>/cmdline` and
+  always will be — what changed is that the file it names is owned by
+  `UF_CHAT_GID` and mode 0040, so the path leads somewhere the reader cannot
+  open. That is a group check rather than a second Claude credential, and it is
+  unit-tested at `chat.test.ts` ("hands the config to a group…") and
+  `privsep.test.ts` (`resolveChatGid`) — but a unit test in one process has one
+  uid and **cannot observe the refusal**, which is why the probe above exists and
+  why this bullet is on this list rather than in the verified section.
 
   One thing that is *not* on this list and used to be: `npm run build` failing
   on a clean tree with `TypeError: generate is not a function`. That is the
@@ -1458,6 +1485,466 @@ through before trusting this unattended:
   at all but the Settings page, where the app already declares the ambient set
   once and where "your `~/.claude` starts every agentless child as *X*" is a true
   sentence with no control to contradict it.
+- **Everything about the sandbox reporting, because no sandbox has ever been
+  started.** `sandboxRefusal` and `sandboxArrangement` are unit-tested in both
+  directions and `npm run typecheck`, `npm test` and `next build` all pass, but
+  the marker strings the detector matches were **read out of the pinned binary
+  with `strings` and never executed** (`proposals/Sandboxing/10-validation.md`,
+  "What this validation did not check"), and the run this was written in could
+  not have executed them: no `docker` binary, no `/var/run/docker.sock`, and
+  `unshare --user` answers `Operation not permitted`, so bubblewrap could not
+  have started even if it had been installed. Three separate things are
+  unverified, and the first is the one that matters:
+
+  **Whether the strings the detector matches are the strings the CLI actually
+  emits into a tool result.** Nothing here has seen one. Once Phase 2 of
+  `proposals/Sandboxing/09-implementation-sketch.md` is in place — bubblewrap,
+  `socat`, the seccomp `security_opt` and a managed policy — capture the real
+  text before trusting the table:
+
+  ```sh
+  # A command the policy refuses, read off the wire rather than off a page.
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c '
+    claude -p "run: touch /etc/uf-probe" --output-format stream-json --verbose' \
+    | jq -r 'select(.type=="user") | .message.content[]?
+             | select(.is_error == true) | .content'
+  ```
+
+  Then compare what it prints against `MARKERS` in `src/lib/sandbox.ts` and add
+  what is missing. Expect the common case — a path outside the allowlist — to
+  come back as a bare `EACCES`/`Permission denied` with nothing sandbox-shaped
+  in it at all: that is why the matcher deliberately does not match those words,
+  and closing that gap needs whatever distinguishing text this command actually
+  shows, not a looser matcher.
+
+  **Whether the event reaches the two places it is supposed to.** The emit is on
+  the same path as `tool_error` and the rendering is a case in the same switch,
+  so both are ordinary — but neither has been watched. With a policy in place,
+  start a run whose first command the policy refuses and confirm both:
+
+  ```sh
+  docker compose logs usagefoundry | grep run.sandbox_refusal   # one JSON line
+  sqlite3 "$DATA_DIR/usagefoundry.db" \
+    "SELECT kind, count(*) FROM run_events WHERE kind IN ('tool_error','sandbox')
+       GROUP BY kind;"     # expect the tool_error row to still be there too
+  ```
+
+  and that the run page shows a `sandbox` line *beside* the failed call rather
+  than instead of it.
+
+  **The image's three sandbox dependencies, the generated policy and the
+  seccomp profile — none of it built, started or applied.** The image now
+  carries `bubblewrap` and `socat` on the apt line and
+  `@anthropic-ai/sandbox-runtime` pinned beside the CLI;
+  `docker-entrypoint.sh` writes `/etc/claude-code/managed-settings.json` when
+  `UF_SANDBOX=1`; `docker-compose.yml` carries a commented `security_opt` line
+  and `uf-seccomp.json` beside it. What was checked here is what could be:
+  `npm run typecheck`, `npm test` and `next build` pass, `sh -n` and `dash -n`
+  accept the entrypoint, the policy generator was lifted out and run under
+  `dash` against a temporary directory once per branch it has — off, on,
+  `warn`, a domain list, a rejected domain, an unrecognised `UF_SANDBOX`, and
+  the removal on the way back down — and `@anthropic-ai/sandbox-runtime@0.0.71`'s
+  published tarball really does carry `vendor/seccomp/arm64/apply-seccomp` and
+  `.../x64/apply-seccomp`.
+  **Docker is not available in the container this was written in** — no
+  `docker` binary, no `/var/run/docker.sock`, `apt-get` needs a root this had
+  not got, and `unshare --user` answers `Operation not permitted` — so the
+  image was never built, the container never started, and no `bwrap` has ever
+  run. Every command below is for a human and **none of them has been run**; the
+  entry below on the CLI's own sandbox carries `scripts/sandbox-probe/`, which
+  runs the sketch's questions 0-8 outside this app's own wiring:
+
+  ```sh
+  # 0. are the two apt packages installable in this image at all? Dockerfile:92
+  #    removes the apt lists, so this could not be answered from inside one.
+  apt-get update && apt-cache policy bubblewrap socat
+
+  # 1. does bubblewrap work under the relaxed profile? (uncomment security_opt)
+  docker compose exec usagefoundry \
+    bwrap --unshare-user --ro-bind / / --dev /dev true && echo BWRAP-OK
+
+  # 2. Phase 2's own four, from proposals/Sandboxing/09-implementation-sketch.md
+  docker compose up --build
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'echo x >> /etc/claude-code/managed-settings.json'   # expect denied
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'echo x >> ~/.claude/settings.json; rm -f ~/.claude/settings.json'
+                                                               # expect both denied
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'ls ~/.claude/projects >/dev/null && touch ~/.claude/projects/.probe'
+                                                               # expect BOTH to work
+  docker compose logs usagefoundry | grep -i sandbox           # expect the boot line
+  ```
+
+  The second of those four **fails on a stock install and is not a regression**:
+  making `~/.claude` root-owned while handing back the entries the CLI writes is
+  a second switch, `UF_LOCK_CLAUDE_HOME`, and it is off unless the operator sets
+  it — see the entry on it below, which carries that check and three more. With
+  it off, `~/.claude/settings.json` is writable by the agents and is an honored
+  source for `sandbox.filesystem`, so a run can widen the filesystem half of the
+  policy from inside itself. It cannot widen the credential deny (a separate
+  list), and it cannot widen the domain list once `UF_SANDBOX_ALLOWED_DOMAINS`
+  names one, because that also sets `allowManagedDomainsOnly`.
+
+  **Whether the generated policy resolves to a sandbox at all.** This is the
+  failure that would be quietest of the lot, and it is unverified in both
+  directions. The CLI hands a command back **unwrapped** when the whole policy
+  amounts to nothing — read out of the pinned binary as
+  `if(!n&&!M&&!N&&!D&&!U) return t;`, where the five terms are a network
+  restriction, a read deny or masked file, a write config, an env-var change
+  and a git-safe-directory list — and `failIfUnavailable` does not catch it,
+  because a sandbox nothing was asked of is not one that failed. The policy
+  generated here always names a `credentials.files` deny and two `denyRead`
+  paths, both of which feed that second term, so on this reading it can never
+  short-circuit; that reading is `strings` on one build and has been executed
+  never. Confirm from the outside rather than by re-reading the binary:
+
+  ```sh
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'cat ~/.claude/.credentials.json'   # expect denied, with the session
+                                              # still billing on the next cycle
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'cat /data/usagefoundry.db > /dev/null'          # expect denied
+  ```
+
+  A `cat` of the credential that **succeeds** from inside a run while the
+  policy is in place is the whole signal: it means the wrapper short-circuited
+  and no `bwrap` ran, whatever the boot line says.
+
+  **Three things about the policy's content that are reasoning, not
+  measurement.** It writes `denyRead` and never `allowWrite`/`denyWrite`,
+  because a write config of any kind makes the CLI bind `/` read-only and
+  rw-bind only the allow set — so a deny-write list with no allow list is a
+  read-only filesystem and a fleet that fails on its first `npm install`. It
+  sets `allowUnsandboxedCommands: false`, whose documented default is `true`,
+  on the grounds that a model able to pass `dangerouslyDisableSandbox` makes
+  the rest advisory. And it always writes `failIfUnavailable` explicitly,
+  because the binary says two different things about its default — the settings
+  schema documents `false`, the normaliser rewrites an enabled policy that
+  omits it to `true`. All three are readings of one build.
+
+  **The seccomp profile has never been applied to a daemon.** `uf-seccomp.json`
+  is generated by `scripts/make-seccomp-profile.py` from Docker v28.5.2's own
+  default profile with six syscalls ungated — `clone`, `clone3`, `unshare`,
+  `mount`, `umount2`, `pivot_root` — and the three rules that exist only to
+  constrain `clone`/`clone3` for a container without `CAP_SYS_ADMIN` removed,
+  so the resulting filter does not depend on how libseccomp merges a narrow
+  rule with a wide one. That much is mechanical and was checked by re-reading
+  the generated file. What is unverified is everything after: that Docker
+  accepts the profile, that `bwrap` starts under it, that the six are enough
+  (bubblewrap 0.8 uses the classic mount API; a future one reaching for
+  `open_tree`/`move_mount` would fail loudly and need them added), and that
+  nothing else in the image needs a syscall this profile's *unmodified* rules
+  withhold. Regenerate against your own engine before trusting it:
+  `python3 scripts/make-seccomp-profile.py "v$(docker version --format '{{.Server.Version}}')"`.
+
+  **What the boot line and the Settings row say once there is something to
+  report.** Only the `none` reading has ever been rendered, which is every stock
+  install and is why it is the one that had to be right. The other three are
+  reasoning: `docker compose logs usagefoundry | grep '\] sandbox:'` should
+  change wording as soon as `/etc/claude-code/managed-settings.json` exists, an
+  `{"sandbox":{"enabled":true}}` with nothing under it should read **enabled but
+  empty** on Settings rather than on, and a file that is present and unparsable
+  should read **unknown** rather than none. All three are one `docker compose
+  exec` and a reload apiece, and none of them costs a billed cycle.
+
+- **The per-run write set, which nothing has ever honoured.** `sandboxSettings`
+  and `sandboxArgs` (`src/lib/orchestrator.ts`, beside `buildArgs`) name what
+  each `claude` child may write — the work cycle's own checkout and its
+  repository's `.git`, the reviewer's nothing-at-all, the conflict resolver's
+  throwaway checkout, the chat's every mount — and `CLAUDE_CONFIG_DIR` in all
+  four, because that is the metering path. They are unit-tested in
+  `orchestrator.test.ts` for the three assertions
+  `proposals/Sandboxing/09-implementation-sketch.md` names (the run's own
+  checkout writable, a **sibling run's** not, `CLAUDE_CONFIG_DIR` writable) plus
+  the two ways the overlay can be a boundary that is not there — a path the
+  CLI's Linux filter would drop as a glob, and a set that resolved to nothing —
+  and `npm run typecheck` and `npm test` pass. Both assertions were watched to
+  fail before they passed: dropping `CLAUDE_CONFIG_DIR` from the set fails the
+  metering case and the reviewer's, and naming the checkout *store* instead of
+  the checkout fails the sibling case.
+
+  What has **not** happened is any of it against a sandbox. No `--settings`
+  overlay has ever reached a running CLI, no `bwrap` has ever started here, and
+  the run this was written in could not have started one: no `docker` binary, no
+  `/var/run/docker.sock`, and `unshare --user` answers `Operation not
+  permitted`. So the by-hand check that `09-implementation-sketch.md` asks for —
+  two concurrent runs, A asked to write into B's checkout, the tool call fails —
+  is **unrun**, and these are its commands:
+
+  ```sh
+  # With UF_SANDBOX=1, the security_opt line uncommented, and the image built.
+  docker compose up -d --build
+  docker compose logs usagefoundry | grep '\] sandbox:'   # expect "on", not "none"
+
+  # Start two isolated runs on one repository, then from run A's task:
+  #   ls /workspace/.uf-worktrees/                 # find B's slot
+  #   touch /workspace/.uf-worktrees/<B-slot>/probe    # expect the tool call to fail
+  #   touch ./probe                                    # expect this one to work
+  # and from B's, the same two the other way round. Then, on run A's page,
+  # confirm the failed call is on the log rather than only in the transcript.
+  ```
+
+  Two things to read the result against before believing it. A denial from a
+  mount namespace comes back as a bare `EACCES`, which `sandboxRefusal`
+  deliberately does not match, so the log line to expect is `tool_error` and not
+  `sandbox` — a run whose write into a sibling merely *fails* is the whole
+  signal. And a `touch` that **succeeds** does not by itself mean the overlay was
+  ignored: see the two open questions below, either of which produces exactly
+  that.
+
+  **The dependency this does not close, and nothing should be read as a boundary
+  until it does.** `~/.claude/settings.json` is an honored source for
+  `sandbox.filesystem` and is writable by `UF_AGENT_UID` on a stock install
+  (`10-validation.md`, finding 1), so a run can append
+  `{"sandbox":{"filesystem":{"allowWrite":["/"]}}}` and every later session — its
+  own and every sibling's — is confined to nothing. Root-owning `~/.claude`
+  itself and handing back the entries the CLI writes has since landed, as
+  `UF_LOCK_CLAUDE_HOME=1` in `docker-entrypoint.sh` — **off by default**, because
+  it runs against a bind-mounted host directory the operator also uses outside
+  the container, and every entry missed shows up as a dashboard of zeros rather
+  than an error. With it off, which is every stock install, the per-run overlay
+  still narrows a policy a run can widen from inside itself. The probe is two
+  lines and costs no billed cycle:
+
+  ```sh
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'echo "{\"sandbox\":{\"filesystem\":{\"allowWrite\":[\"/tmp/uf-probe\"]}}}" \
+       >> ~/.claude/settings.json'                  # expect denied only with
+                                                    # UF_LOCK_CLAUDE_HOME=1
+  ```
+
+  The entry below carries that check and the rest of what that switch needs.
+
+  **And the question nobody has answered either way: whether the CLI's sandbox
+  wraps the session or only Bash** (`09-implementation-sketch.md`, Phase 1
+  question 3, never executed). If it is Bash-only, a model using `Edit` against a
+  sibling's path is unconfined whatever the write set says — and that is a
+  likelier shape for a confused run than a shell command is. The evidence points
+  both ways: the Bash tool's own prompt text says "your command will be run in a
+  sandbox", and a `getFsReadConfig` export is the shape a *file tool* consults
+  (`10-validation.md`, #19). Nothing in this app asserts either answer. The check
+  is the same two runs as above, with the write into B's checkout made once
+  through `Bash` and once through `Write`.
+
+  **Three smaller unknowns of the same kind.** Whether `--settings` as JSON on
+  the argv *merges* with `/etc/claude-code/managed-settings.json` rather than
+  standing in for other sources — read out of the binary's source list
+  (`flagSettings` beside `userSettings` and the managed file), never executed.
+  Whether the write set is wide enough for a cycle to *work*: it names the
+  checkout, the repository's `.git` and the config directory and nothing else, so
+  `/tmp`, `~/.npm` and `$GOPATH` are outside it, and the binary binds `/`
+  read-only and rw-binds only the allow set once any write config exists — a
+  first `npm install` or `go build` is where that fails, inside a tool call, and
+  it is the first thing to run after the sibling check above. And whether the
+  overlay's paths survive a rename: they are the row's own recorded paths, so a
+  checkout moved underneath a live run would be confined to where it used to be.
+
+- **Root-owning `~/.claude`, which no container has ever done and which changes
+  a directory on the operator's own host.** `UF_LOCK_CLAUDE_HOME=1` makes
+  `docker-entrypoint.sh` give `$CLAUDE_CONFIG_DIR` and its `settings.json` to
+  root, after handing back the entries the CLI writes (`projects sessions todos
+  shell-snapshots history.jsonl .credentials.json .claude.json backups`). It is
+  off by default and skipped when `UF_AGENT_UID` is unset.
+
+  What was checked, and it is all short of the thing itself: `npm run typecheck`
+  and `npm test` pass (neither reads a shell script, so they say nothing about
+  this); `sh -n` and `dash -n` accept the file; and the block was driven under
+  `dash` through **eighteen scenarios** with `chown`, `stat`, `id` and `setpriv`
+  replaced by stubs that record what *would* have been changed — off with an
+  untouched home, on with everything already the agent's, a missing `projects/`,
+  a root-owned entry that hands back, one that cannot, a directory chown that
+  fails after `settings.json` was taken (the revert), an agent that can no
+  longer write `projects/` or read `settings.json` (the undo, including the case
+  where `settings.json` was root's from an earlier boot rather than this one), a
+  chown that reports success while the agent can still write (the `fakeowner`
+  case), a `setpriv` that cannot run at all (the lock is kept and the boot line
+  says it was never checked), no `settings.json` at all, not running as root, no
+  `UF_AGENT_UID`, a value that is not `1`, off after a lock, off against a
+  `~/.claude` that is root's all the way down, and a hand-back on the way down
+  that fails. Every branch printed
+  what it should and no branch chowned anything it should not have. **That is a
+  control-flow harness and not a kernel**: no ownership was changed anywhere, by
+  anything, at any point — the container was never built and never started,
+  because this run had no `docker` binary, no `/var/run/docker.sock`, no root
+  for `apt-get`, and `unshare --user` answering `Operation not permitted`.
+
+  Three things about the CLI *were* measured, against the pinned 2.1.226 with a
+  throwaway `CLAUDE_CONFIG_DIR`, and they are why the list above is what it is.
+  A session start creates `.claude.json`, `backups/`, `projects/` and
+  `sessions/` at the top level of that directory before it has authenticated —
+  `.claude.json` lands *inside* it precisely because `CLAUDE_CONFIG_DIR` is set,
+  which is not where it sits on a host that has not set it. A session started
+  against a config directory whose **top level is not writable** but whose
+  entries exist runs to the API and fails only on the credential, creating
+  nothing and complaining about nothing. And the binary's own atomic writer —
+  temp file, then rename — falls back to an in-place `O_TRUNC` write when the
+  rename fails with `EACCES`, which is why rewrites of top-level files the
+  agents still own survive a directory they no longer do.
+
+  What none of that touches is whether a real container comes up, whether the
+  ownership reaches the kernel that enforces it, and whether a work cycle still
+  meters. Every command below is for a human and **none has been run**:
+
+  ```sh
+  # 0. the shipped state first — with UF_LOCK_CLAUDE_HOME unset, nothing changes
+  docker compose up -d --build
+  docker compose logs usagefoundry | grep UF_LOCK_CLAUDE_HOME    # expect nothing
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+    'test -w ~/.claude/settings.json && echo BAD-writable'       # expect BAD-writable
+
+  # then set UF_LOCK_CLAUDE_HOME=1 in .env, add the line docs/install.md names
+  # to docker-compose.yml's environment: block, and restart
+  docker compose up -d
+  docker compose exec usagefoundry sh -c 'echo "[$UF_LOCK_CLAUDE_HOME]"'
+  # expect [1]. Compose forwards by name and has no env_file, so a missing line
+  # there is a switch that is set, read by compose, and never seen by the boot
+  docker compose logs usagefoundry | grep UF_LOCK_CLAUDE_HOME
+  # expect "…is root-owned: a run cannot rewrite or replace its settings.json…"
+  # a refusal instead names the entry, the owner it wanted and the owner it saw
+
+  # 1 + 2. the two the sketch names (09-implementation-sketch.md:274–283)
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'echo x >> ~/.claude/settings.json'                    # expect denied
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'rm -f ~/.claude/settings.json; ls ~/.claude/settings.json'
+                                              # expect denied, and still listed
+  # if the append *succeeds*, the lock is not in force and your settings.json is
+  # no longer valid JSON — remove the stray line before the next session reads it
+
+  # 3. and the half that is not a permission check — the metering path
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'ls ~/.claude/projects >/dev/null && touch ~/.claude/projects/.probe'
+                                                          # expect BOTH to work
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'cat ~/.claude/settings.json >/dev/null'   # expect it to work: hooks,
+                                     # permission rules and env are in that file
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+    sh -c 'rm -f ~/.claude/projects/.probe'                  # tidy up after it
+  ```
+
+  Then the part no permission check reaches: **run a real work cycle** and
+  confirm the dashboard's figures move. `projects/` is `transcripts.ts`'s scan,
+  so a hand-back that half-worked is a fleet that looks idle rather than an
+  error — the two together (a cycle that commits, and a window that grows) are
+  the only evidence this did not break metering. A chat turn and a review are
+  worth one pass each for the same reason.
+
+  **The check the sketch does not name, and this change makes necessary: your
+  own Claude Code, on the host, outside this container.** `~/.claude` is a bind
+  mount of your home directory, so this changes what your own tools may do
+  there. From a host shell, not `docker compose exec`:
+
+  ```sh
+  ls -ld ~/.claude ~/.claude/settings.json
+  # Linux: expect root:<your gid> 0750, and root:<your gid> 0640 on the file
+  ls ~/.claude/projects >/dev/null && echo ok      # expect ok — still yours
+  claude -p 'say hi'                               # expect a normal answer
+  touch ~/.claude/probe                            # expect Permission denied
+  ```
+
+  What you have given up, and it is not nothing: you can no longer create
+  anything at the top level of `~/.claude`, and you can no longer edit
+  `~/.claude/settings.json` — including through `/config`, which will fail — from
+  your own account. `sudoedit ~/.claude/settings.json` is the way to change it
+  while this is on. If your host `~/.claude` is *fresh* rather than one Claude
+  Code has been using, expect breakage instead: a directory it has not created
+  yet (`todos/`, `statsig/`, `file-history/`, whatever the version wants) cannot
+  be created under a root-owned parent, and the failure will be inside a tool
+  call rather than on your screen. The boot names the ones it knows about, once.
+
+  The way back, which should also be exercised once before you need it:
+
+  ```sh
+  # clear UF_LOCK_CLAUDE_HOME in .env, then
+  docker compose up -d
+  docker compose logs usagefoundry | grep UF_LOCK_CLAUDE_HOME
+  # expect "off — gave /home/node/.claude back to <uid>:<gid>"
+  ls -ld ~/.claude                                 # expect your own uid, 0700
+  # and if that ever fails to run — two paths, no -R, because nothing below
+  # them was taken:
+  sudo chown "$(id -u):$(id -g)" ~/.claude ~/.claude/settings.json
+  sudo chmod 0700 ~/.claude && sudo chmod 0600 ~/.claude/settings.json
+  ```
+
+  **On macOS this may do nothing at all, in either direction.** Docker Desktop
+  emulates bind-mount ownership (`fakeowner` on every mount here —
+  `10-validation.md`, finding 14), so the `chown` may not reach the host files
+  and may not confine the agents. The entrypoint asks an agent's own uid, with
+  `setpriv`, whether it can still write the directory and the file, and prints
+  `…the ownership change did not reach the kernel that enforces it…` when the
+  answer is yes. Read that line before believing any of this is in force; the
+  `echo x >> ~/.claude/settings.json` above is the check that settles it.
+
+  One thing that is **not** closed by this and should not be read into it: a run
+  can still read `~/.claude/.credentials.json` (it is the credential it bills
+  against),
+  and every other entry under `~/.claude` — `CLAUDE.md`, `agents/`, `rules/`,
+  `plugins/` — keeps the owner it had, which is the agents'. This closes the
+  file the CLI resolves a *sandbox policy* from, and the hooks and permission
+  rules beside it in that same file. It does not make `~/.claude` read-only.
+
+  **And an open question this raised, which nothing here answers and nothing
+  here acts on.** Two more server-pushed files sit in that directory and stay
+  the agents' under this: `remote-settings.json` (`{"channelsEnabled":true}` on
+  the install this was written on) and `policy-limits.json` (`restrictions`,
+  `compliance_taints`). The first is reachable from the *managed* source list
+  the sandbox policy is built from — the binary's provider resolver has a
+  `remote` branch beside `helper`/`plist`/`hklm`/`file` — but the loader in
+  front of it reads `if(!ije()&&yrs!==!0)return null` with `ije(){return}`, so
+  it yields nothing unless an internal flag is set, and what sets it was not
+  traced. If it is ever live, it is a *managed*-tier source that an agent owns,
+  which would outrank the file this locks. Root-owning it was deliberately not
+  done: the CLI refreshes it from the server as the agent's uid, so taking it
+  would break org-managed settings on exactly the installs that have them, to
+  close a hole nobody has shown is open. `policy-limits.json` was not traced at
+  all. Both are worth an hour against a live binary before anyone calls the
+  policy surface closed.
+- **The CLI's own sandbox — every claim about it, none of them executed.**
+  `proposals/Sandboxing/02x-option-cli-sandbox.md` establishes that the pinned
+  CLI (2.1.226) implements a bubblewrap sandbox configured by `sandbox.*`
+  settings keys, and `08-recommendation.md` recommends adopting it. All of that
+  was read out of the binary's strings with `strings`, and **not one line of it
+  has been run** — several runs have now written about the mechanism without
+  starting one, every one of them in an environment with no Docker, no root and a
+  seccomp profile that refuses `unshare --user` outright, which is the first
+  thing that would have to change. No stock install enables a sandbox either:
+  `UF_SANDBOX=1` is opt-in and off unless the operator sets it. What depends on
+  these answers is the wiring in the entries above, none of which has ever met a
+  running sandbox, and whatever gets built after that.
+
+  The harness is `scripts/sandbox-probe/` — a throwaway image on the same base
+  and the same CLI pin, a seccomp profile that is Docker's default plus user
+  namespaces, and one script that runs questions 0-8 of
+  `proposals/Sandboxing/09-implementation-sketch.md:134`-`200` and prints one
+  transcribable line each. `scripts/sandbox-probe/RUNBOOK.md` is the ordered
+  list of what to run, on which machine, and what each answer decides; steps 4
+  and 5 are billed. Its own answer logic is exercised against stubs by
+  `scripts/sandbox-probe/probe.test.sh` (37 assertions, no Docker and no
+  money) — which measures the harness and says nothing about the CLI.
+
+  **Nothing below has been measured.** Fill it in from the script's last block,
+  and record the CLI, bubblewrap and kernel versions it prints with it:
+
+  | Question | Answer | Recorded |
+  |---|---|---|
+  | Q0 — are `bubblewrap` and `socat` installable in this image? | *(unmeasured)* | |
+  | Q1 — does bubblewrap start under the relaxed profile? | *(unmeasured)* | |
+  | Q2 — does the CLI refuse to start when it cannot sandbox? | *(unmeasured)* | |
+  | Q3 — is the sandbox around the session or only around Bash? | *(unmeasured)* | |
+  | Q4 — does a credentials deny entry stop a shell reading the token? | *(unmeasured)* | |
+  | Q5 — does a user-settings write widen a managed policy? | *(unmeasured)* | |
+  | Q6 — what does one sandboxed command cost in tasks? | *(unmeasured)* | |
+  | Q7 — does the CLI's sandbox unshare PID? | *(unmeasured)* | |
+  | Q8a — which bubblewrap, and does it carry `--tmp-overlay`? | *(unmeasured)* | |
+  | Q8b — does `--unshare-pid` plus `--tmp-overlay` work here? | *(unmeasured)* | |
+  | Q8c — does one bubblewrap start inside another? | *(unmeasured)* | |
+  | Q8d — does the CLI's own bubblewrap start inside one we started? | *(unmeasured)* | |
+
+  Q3 and Q8d are the two that decide the shape rather than refine it: together
+  they say whether the vendor's sandbox stands alone, is replaced by a wrapper
+  this app puts around the whole `claude` process, or composes with one. The
+  others each move a phase of the plan; RUNBOOK.md's table says which.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
