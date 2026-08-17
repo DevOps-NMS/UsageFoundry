@@ -7655,11 +7655,30 @@ export function reopenPrompt(o: {
   /** The agent's last cycle replied DONE. False for a cycle-capped run. */
   reportedDone: boolean;
   sessionId: string | null;
-  /** The operator's own message, already trimmed. Wins over both. */
+  /** The operator's own message, already trimmed. Wins over all three. */
   note: string;
   donePushback: string;
+  /**
+   * This run's last cycle was cut off by a restart rather than by the agent.
+   *
+   * `reconcileOnBoot` and `shutdownRuns` are the only writers of `failed` with
+   * `restart_closed` set, so the pair names exactly the mid-cycle kill: the
+   * queued and paused-too-long branches both write `stopped`, and
+   * `markRestartClosed` only touches rows that were `running`.
+   */
+  restartKilled: boolean;
 }): string {
   if (o.note) return o.note;
+  // Above the pushback, and the order is the point: `reported_done` is whatever
+  // the *previous* cycle left on the row, and a cycle killed mid-tool-call
+  // never got to change it. A run whose last completed cycle said DONE and was
+  // then reopened, worked and killed would otherwise be told it had reported
+  // the task complete — by a branch reading a column two cycles stale.
+  //
+  // Without a session there is nothing to continue and `nextPrompt` reopens with
+  // the task plus `priorWorkNotice`, which already says work happened here; a
+  // note about a severed conversation would be describing one that is gone.
+  if (o.restartKilled && o.sessionId) return RESTART_KILLED_NOTICE;
   // Without a session there is nothing to push back against — `nextPrompt`
   // starts the original task over — so the substitution is dropped entirely.
   if (o.status === "completed" && o.reportedDone && o.sessionId) {
@@ -7667,6 +7686,33 @@ export function reopenPrompt(o: {
   }
   return "";
 }
+
+/**
+ * What a resumed run is told when a restart, not the agent, ended its last cycle.
+ *
+ * The empty branch above used to catch this, so `nextPrompt` sent
+ * `continuationPrompt` — "Continue working on the task. If it is fully complete
+ * and verified, reply with exactly DONE" — into a conversation whose last event
+ * was a child dying mid-tool-call. Twenty-four runs on this install took that
+ * path, and the tree those kills leave is not hypothetical: one was cut down
+ * immediately after `git checkout -- src/lib/chat.ts` with the only copy of its
+ * fix in `/tmp`, another mid-mutation-test with a deliberately wrong variant of
+ * a source file on disk, a third with a tracked file moved out to `/tmp` and
+ * `tsconfig.json` rewritten by a dev server. Every one of them reconstructed the
+ * tree in its next cycle *despite* being asked whether it was finished.
+ *
+ * It says what happened and what to check, and deliberately does not restate the
+ * task — the conversation carrying it is intact, which is the whole reason this
+ * branch requires a session.
+ */
+const RESTART_KILLED_NOTICE =
+  "Your last work cycle did not finish. The server restarted while it was " +
+  "running and cut it off part-way through a step, so whatever it was doing was " +
+  "neither completed nor reported and its own account of it is lost. Before you " +
+  "carry on, establish what it actually left behind rather than assuming: what " +
+  "is uncommitted or staged, whether a file was moved aside or a config " +
+  "rewritten, whether a stash was pushed, and whether the last edit landed " +
+  "whole. Then continue the task from there.";
 
 /**
  * Put a finished run back to work, continuing its Claude Code session, and
@@ -7822,6 +7868,9 @@ export function reopenRun(
     sessionId: run.session_id,
     note,
     donePushback: getSettings().donePushbackPrompt,
+    // Read here rather than after the UPDATE below, which clears the column in
+    // the same statement that queues the run.
+    restartKilled: run.status === "failed" && run.restart_closed !== 0,
   });
 
   const flip = db()

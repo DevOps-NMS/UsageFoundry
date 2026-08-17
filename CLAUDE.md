@@ -53,6 +53,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - `cancelled` is checked twice per cycle, and the interrupt test comes **before** the exit-code test.
   - Both bulk pick-ups filter on `set_aside_at`; `reopenRun` clears it. Setting a live run aside marks it **before** the stop.
   - The DONE contract reaches cycle 1 as **generated** text, gated on `endsOnDone`. A prompt in `Settings` would not reach a saved install.
+  - `reopenPrompt`'s restart branch sits **above** the pushback: `reported_done` is stale after a mid-cycle kill.
 
 - **`createRun`/`promoteQueued`, `serverLock.ts`, `db.ts`, `instrumentation.ts`** → `docs/agent/concurrency-and-ownership.md`
   - `createRun` runs from entry to INSERT with **no `await`**. Adding one silently puts two agents in one directory.

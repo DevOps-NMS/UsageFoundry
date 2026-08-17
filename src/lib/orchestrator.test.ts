@@ -962,6 +962,7 @@ describe("prompt for a reopened run", () => {
     sessionId: "sess-1" as string | null,
     note: "",
     donePushback: "PUSHBACK",
+    restartKilled: false,
   };
 
   it("pushes back only on a run whose agent really said DONE", () => {
@@ -1002,6 +1003,63 @@ describe("prompt for a reopened run", () => {
     // The run restarts from its original task, and `nextPrompt` appends a note
     // to it rather than sending one alone.
     assert.equal(reopenPrompt({ ...base, sessionId: null }), "");
+  });
+
+  it("tells a restart-killed run that its last cycle was cut off", () => {
+    // The empty branch used to catch this, so the run was handed
+    // `continuationPrompt` — "Continue working on the task. If it is fully
+    // complete and verified, reply with exactly DONE" — into a conversation
+    // whose last event was a child dying mid-tool-call. The agent has no way to
+    // know: from inside, a severed turn and a finished one look the same.
+    const killed = reopenPrompt({
+      ...base,
+      status: "failed",
+      reportedDone: false,
+      restartKilled: true,
+    });
+    assert.match(killed, /server restarted/);
+    assert.notEqual(killed, "");
+  });
+
+  it("puts the restart notice above the pushback, not below it", () => {
+    // `reported_done` is whatever the *previous* cycle left on the row, and a
+    // cycle killed mid-tool-call never reached the code that changes it. Read in
+    // the other order, a run that said DONE two cycles ago, was reopened, worked
+    // and was then killed would be told it had reported the task complete — and
+    // then forbidden from starting anything new.
+    const stale = reopenPrompt({
+      ...base,
+      status: "failed",
+      reportedDone: true,
+      restartKilled: true,
+    });
+    assert.match(stale, /server restarted/);
+    assert.notEqual(stale, "PUSHBACK");
+  });
+
+  it("keeps the operator's own note above the restart notice", () => {
+    // Somebody who typed a message while picking the run up knows what happened
+    // to it, and their message is the one thing that outranks every branch here.
+    assert.equal(
+      reopenPrompt({ ...base, status: "failed", restartKilled: true, note: "NOTE" }),
+      "NOTE",
+    );
+  });
+
+  it("drops the restart notice when there is no session to continue", () => {
+    // `nextPrompt` reopens with the task plus `priorWorkNotice`, which already
+    // says work happened in this folder. A note about a severed conversation
+    // would be describing one that no longer exists.
+    assert.equal(
+      reopenPrompt({
+        ...base,
+        status: "failed",
+        reportedDone: false,
+        restartKilled: true,
+        sessionId: null,
+      }),
+      "",
+    );
   });
 });
 
