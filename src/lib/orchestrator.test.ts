@@ -707,6 +707,9 @@ describe("prompt for the next work cycle", () => {
     continuedWork: "READ-FIRST",
     continuation: "CONTINUE",
     donePushback: "PUSHBACK",
+    // Off in the base so every case below reads as it did before the completion
+    // notice existed; the cases that are *about* it turn it on by name.
+    endsOnDone: false,
   };
 
   it("opens with the task when there is no session to resume", () => {
@@ -714,15 +717,42 @@ describe("prompt for the next work cycle", () => {
   });
 
   it("prepends the isolation preamble only on that opening turn", () => {
-    assert.equal(
-      nextPrompt({ ...base, sessionId: null, isolationPreamble: "PRE" }),
-      "PRE\n\nTASK",
-    );
+    const opened = nextPrompt({
+      ...base,
+      sessionId: null,
+      isolationPreamble: "PRE",
+    });
+    // Composition rather than the literal: the shared-checkout notice sits
+    // between the two and pinning its whole text here would make every wording
+    // change a test edit. What matters is that the preamble still opens the
+    // prompt and the task still closes it.
+    assert.ok(opened.startsWith("PRE\n\n"));
+    assert.ok(opened.endsWith("\n\nTASK"));
     // Mid-conversation the agent is already in its worktree and has been told.
     assert.equal(
       nextPrompt({ ...base, isolationPreamble: "PRE" }),
       "CONTINUE",
     );
+  });
+
+  it("warns an isolated run that the stash stack is shared, and only there", () => {
+    // `refs/stash` is a common ref: a bare `git stash pop` in one worktree
+    // applies and drops whatever a sibling run pushed. The preamble says the
+    // checkout is the agent's own, which is exactly the belief that makes the
+    // bare pop look safe, so the correction travels with it.
+    const isolated = nextPrompt({
+      ...base,
+      sessionId: null,
+      isolationPreamble: "PRE",
+    });
+    assert.match(isolated, /refs\/stash/);
+    assert.match(isolated, /stash@\{n\}/);
+    // A run in the operator's own checkout has no sibling worktree to collide
+    // with, and gets neither the preamble nor this.
+    assert.equal(nextPrompt({ ...base, sessionId: null }), "TASK");
+    // Not on a resumed cycle, for the preamble's reason: it is carried by the
+    // opening turn of the conversation it is true of.
+    assert.equal(nextPrompt({ ...base, isolationPreamble: "PRE" }), "CONTINUE");
   });
 
   it("continues an existing session rather than restating the task", () => {
@@ -746,15 +776,14 @@ describe("prompt for the next work cycle", () => {
       nextPrompt({ ...base, sessionId: null, followUp: "NOTE" }),
       "TASK\n\nNOTE",
     );
-    assert.equal(
-      nextPrompt({
-        ...base,
-        sessionId: null,
-        isolationPreamble: "PRE",
-        followUp: "NOTE",
-      }),
-      "PRE\n\nTASK\n\nNOTE",
-    );
+    const isolated = nextPrompt({
+      ...base,
+      sessionId: null,
+      isolationPreamble: "PRE",
+      followUp: "NOTE",
+    });
+    assert.ok(isolated.startsWith("PRE\n\n"));
+    assert.ok(isolated.endsWith("\n\nTASK\n\nNOTE"));
   });
 
   it("says so when the task is being reopened on top of earlier work", () => {
@@ -775,7 +804,16 @@ describe("prompt for the next work cycle", () => {
       priorCycles: 1,
       worktreeBranch: "uf/thing",
     });
-    assert.match(isolated, /^PRE\n\nA previous attempt at this task already ran 1 work cycle and committed its work to this branch \(uf\/thing\)/);
+    assert.ok(isolated.startsWith("PRE\n\n"));
+    assert.match(
+      isolated,
+      /A previous attempt at this task already ran 1 work cycle and committed its work to this branch \(uf\/thing\)/,
+    );
+    // The preamble and its shared-checkout notice come first — both are facts
+    // about the machine, and the prior-work notice is a fact about this run.
+    assert.ok(
+      isolated.indexOf("refs/stash") < isolated.indexOf("A previous attempt"),
+    );
     assert.match(isolated, /\n\nTASK$/);
   });
 
@@ -847,6 +885,65 @@ describe("prompt for the next work cycle", () => {
       }),
       "CONTINUE",
     );
+  });
+
+  /**
+   * The one that decides whether a finished run can end itself.
+   *
+   * `reportedDone` matches `/^\s*DONE\s*$/m` against every cycle's final text,
+   * cycle 1 included, but the token was named only by `continuationPrompt` —
+   * which `nextPrompt` returns on the `sessionId !== null` branch and nowhere
+   * else. So the terminus existed and the first cycle was never told it. Silent
+   * in the expensive direction: nothing fails, the run simply buys a second
+   * cycle to say one word into a re-sent conversation.
+   */
+  it("tells the opening cycle how the run ends", () => {
+    const opened = nextPrompt({ ...base, sessionId: null, endsOnDone: true });
+    assert.ok(opened.startsWith("TASK\n\n"));
+    // The same bar the continuation prompt sets, in the same words: cycle 1 and
+    // cycle 2 disagreeing about what "finished" means is the bug this closes.
+    assert.match(opened, /exactly DONE on its own line/);
+    // The escape clause. An instruction an agent cannot satisfy produces churn,
+    // not silence — the reason `donePushbackPrompt` carries one too.
+    assert.match(opened, /If work remains/);
+  });
+
+  it("promises nothing about DONE when DONE would not end the run", () => {
+    // `maxIterations === 1` ends the run at the cap either way, so the sentence
+    // buys nothing here — and it would still flip `reported_done`, which is the
+    // one input to `reopenPrompt`'s pushback branch. `continueAfterDone` is the
+    // other: that run is set to carry on past a DONE and `donePushbackPrompt`
+    // says so, so promising the opposite on the opening turn is a contradiction
+    // the agent meets again on every later cycle.
+    assert.equal(nextPrompt({ ...base, sessionId: null, endsOnDone: false }), "TASK");
+  });
+
+  it("keeps the completion notice off a resumed cycle", () => {
+    // `continuationPrompt` is already the whole turn there and already carries
+    // the contract. Sending both would restate it at the top of a conversation
+    // that is re-sent in full on every request.
+    assert.equal(nextPrompt({ ...base, endsOnDone: true }), "CONTINUE");
+    assert.equal(
+      nextPrompt({ ...base, justRetriggered: true, endsOnDone: true }),
+      "PUSHBACK",
+    );
+  });
+
+  it("puts the completion notice after the task, never before it", () => {
+    // It is a statement *about* the task above. Read first it is a preamble to
+    // an instruction the agent has not seen, and it is also the last thing in
+    // the opening context, which is where an instruction about when to stop
+    // belongs.
+    const opened = nextPrompt({
+      ...base,
+      sessionId: null,
+      isolationPreamble: "PRE",
+      followUp: "NOTE",
+      endsOnDone: true,
+    });
+    assert.ok(opened.startsWith("PRE\n\n"));
+    assert.ok(opened.indexOf("TASK") < opened.indexOf("exactly DONE"));
+    assert.ok(opened.indexOf("NOTE") < opened.indexOf("exactly DONE"));
   });
 });
 

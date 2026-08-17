@@ -4245,10 +4245,23 @@ export function nextPrompt(o: {
   continuedWork: string;
   continuation: string;
   donePushback: string;
+  /**
+   * Whether replying DONE can actually end this run.
+   *
+   * False for `maxIterations === 1`, where the cycle cap ends it either way and
+   * the sentence would buy nothing but a changed `reported_done` — which is the
+   * one input to `reopenPrompt`'s pushback branch, so a promise that changes
+   * nothing about this run would change what a pick-up says to it. False for
+   * `continueAfterDone`, where the run is set to carry on regardless and
+   * `donePushbackPrompt` tells the agent so in as many words; a cycle-1 notice
+   * saying the opposite is a contradiction the agent meets on every later cycle.
+   */
+  endsOnDone: boolean;
 }): string {
   if (o.sessionId === null) {
     return [
       o.isolationPreamble,
+      o.isolationPreamble ? SHARED_CHECKOUT_NOTICE : null,
       // Ahead of the prior-work notice, and both can apply: this one is about
       // the branch's whole history, that one about this run's own earlier
       // attempt at the task. Read in the other order the agent meets "carry on
@@ -4257,6 +4270,9 @@ export function nextPrompt(o: {
       o.priorCycles > 0 ? priorWorkNotice(o.priorCycles, o.worktreeBranch) : null,
       o.task,
       o.followUp,
+      // Last, so it is the most recent thing in the opening context and so it
+      // reads as a statement about the task above rather than a preamble to it.
+      o.endsOnDone ? COMPLETION_NOTICE : null,
     ]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
@@ -4333,6 +4349,86 @@ function priorWorkNotice(cycles: number, branch: string | null): string {
     `stopped rather than starting it again.`
   );
 }
+
+/**
+ * The only cycle that is ever told how a run ends.
+ *
+ * Until this existed, `DEFAULT_CONTINUATION_PROMPT` was the sole string in the
+ * app naming the `DONE` token, and `nextPrompt` returns it only on the
+ * `sessionId !== null` branch — so cycle 1 was judged by `reportedDone`'s
+ * matcher against a protocol it had never been given. Measured over 251 runs on
+ * this install: of the runs whose budget allowed a second cycle, those whose
+ * *task text* happened to carry the token ended in one cycle 53% of the time
+ * and those without did so twice out of 120 — both of them a crash and an
+ * operator stop rather than a completion. `reported_done` was 69% in both
+ * groups. The second cycle was not finding more work; it was the first turn
+ * permitted to say the job was over, and 92 of them cost $162 to say one word
+ * into a re-sent conversation.
+ *
+ * Generated here rather than added to `Settings`, and that is the load-bearing
+ * half. `getSettings()` is `{...DEFAULTS, ...stored}` and the settings page PUTs
+ * the whole *effective* object on Save, so every `DEFAULT_*` prompt is
+ * materialised into the stored blob the first time anybody presses it — after
+ * which editing the constant reaches no install that has ever saved. The same
+ * split `continuedWorkNotice` makes, for the same reason: the sentence that has
+ * to stay true is generated, and only guidance is editable.
+ *
+ * Both sentences are load-bearing. The first restates
+ * `DEFAULT_CONTINUATION_PROMPT` almost verbatim on purpose — cycle 1 and cycle 2
+ * disagreeing about the bar is the bug — and names the token as the *only*
+ * ending, because an agent that believes stopping its turn is enough is exactly
+ * the agent that produced the 92. The second exists because an instruction an
+ * agent cannot satisfy produces churn rather than silence: told only to reply
+ * DONE when finished, a run that is genuinely unfinished invents work to explain
+ * itself. `DEFAULT_DONE_PUSHBACK_PROMPT` carries the same escape clause for the
+ * same reason.
+ */
+const COMPLETION_NOTICE =
+  "This run continues until you reply with exactly DONE on its own line: that " +
+  "line is what ends it, and nothing else does — stopping your turn without it " +
+  "buys another work cycle on the same task. When the task above is fully " +
+  "complete and verified, reply with exactly DONE on its own line and make no " +
+  "further changes. If work remains, or something could not be verified, end " +
+  "with what remains and why instead of DONE, and this run will carry on.";
+
+/**
+ * What an isolated run is not told by "you are working in a dedicated worktree".
+ *
+ * `refs/stash` is a **common** ref, not a per-worktree one, so every isolated
+ * run on a repository pops from one shared stack — reproduced on git 2.50.1:
+ * worktree A stashes, worktree B stashes, and A's `git stash pop` applies B's
+ * entry and drops it. Across this install's 251 runs there are 123 `git stash
+ * pop` calls and **not one** names a `stash@{n}`; eight runs left assistant text
+ * saying in as many words that they had popped a sibling's work. The isolation
+ * preamble actively invites the belief — it says the checkout is the agent's own
+ * — and the failure is silent in the worst direction: a sibling's uncommitted
+ * files arrive in this run's tree looking like its own edits.
+ *
+ * The clean-tree case is named because it is the one that surprises: `git stash
+ * -u` with nothing to stash creates no entry at all, so the `pop` that pairs
+ * with it in the agent's plan takes whatever a sibling pushed instead.
+ *
+ * Generated beside the preamble rather than added to it for
+ * `COMPLETION_NOTICE`'s reason — the preamble is settings-backed and stale on
+ * any install that has pressed Save. Sent only where the preamble is, which is
+ * the first cycle of an isolated run: this is a fact about the machine that run
+ * is standing on, and it is true for the whole run.
+ *
+ * `/tmp` gets one clause rather than a mechanism. It is shared by every
+ * concurrent agent and 117 paths in this corpus were used by more than one run,
+ * but not one confirmed clobber was found, so what is warranted is a sentence
+ * and not a per-run `TMPDIR`.
+ */
+const SHARED_CHECKOUT_NOTICE =
+  "Two things in this container are shared with the other agents working right " +
+  "now, and your worktree does not isolate either. The git stash stack is one " +
+  "of them: `refs/stash` is common to every worktree of this repository, so a " +
+  "bare `git stash pop` can apply and destroy a sibling run's uncommitted work " +
+  "— and `git stash -u` on an already-clean tree pushes nothing, so the pop you " +
+  "paired with it takes theirs. Prefer commits over stashing; if you must " +
+  "stash, push with `git stash push -m <unique-label>` and pop by that label's " +
+  "own `stash@{n}`, never bare. `/tmp` is the other: put scratch files under a " +
+  "directory named for your branch rather than at a name a sibling would pick.";
 
 /**
  * The two commands an isolated run is *ordered* to use, granted to it.
@@ -6284,6 +6380,12 @@ export async function startRun(id: string): Promise<void> {
         continuedWork: settings.continuedWorkPrompt,
         continuation: settings.continuationPrompt,
         donePushback: settings.donePushbackPrompt,
+        // Read off the same policy the loop's own exits read, so the promise
+        // the opening prompt makes and the rule that ends the run cannot drift:
+        // `continueAfterDone` is the flag at 6862 that sends a DONE agent back
+        // in, and `maxIterations === 1` is the cap at 6883 that ends the run
+        // before a second cycle could exist.
+        endsOnDone: !policy.continueAfterDone && policy.maxIterations !== 1,
       });
       justRetriggered = false;
 
