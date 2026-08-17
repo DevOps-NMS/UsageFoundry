@@ -179,6 +179,37 @@ describe("the image and compose agree on the data volume", () => {
     assert.match(compose, /^\s*UF_AGENT_GID:\s*"\$\{UF_GID:-1000\}"\s*$/m);
   });
 
+  it("creates the group the chat runs in, at the gid compose defaults to", () => {
+    // Two halves that are only a boundary together, and both fail silently on
+    // their own. A compose default naming a gid the image never creates still
+    // works — the kernel checks numbers, not /etc/group — so the drift is
+    // invisible until someone reads `ls -l` inside the container and sees a
+    // number where a group belongs. The reverse, an image group nothing selects,
+    // is a boundary that simply does not exist while the boot log reports the
+    // uid split as on.
+    const created = /groupadd\s+-g\s+(\d+)\s+(\S+)/.exec(dockerfile);
+    assert.ok(created, "the image no longer creates a group for the chat child");
+    const declared = /^\s*UF_CHAT_GID:\s*"\$\{UF_CHAT_GID:-(\d+)\}"\s*$/m.exec(
+      compose,
+    );
+    assert.ok(declared, "docker-compose.yml no longer names UF_CHAT_GID");
+    assert.equal(
+      declared[1],
+      created[1],
+      `compose defaults UF_CHAT_GID to ${declared[1]} and the image creates ` +
+        `${created[2]} as ${created[1]}.`,
+    );
+
+    // And it must not be the group the agents run in, which is the one value
+    // that turns the whole arrangement into a no-op: the capability file would
+    // be handed to the group it is kept from. `privsep.ts` refuses that pair at
+    // boot; this refuses shipping it as the default, which is the case no
+    // operator would ever see a refusal for.
+    const agentGid = /^\s*UF_AGENT_GID:\s*"\$\{UF_GID:-(\d+)\}"\s*$/m.exec(compose);
+    assert.ok(agentGid, "docker-compose.yml no longer names UF_AGENT_GID");
+    assert.notEqual(declared[1], agentGid[1]);
+  });
+
   it("does not drop the server's own uid in the image", () => {
     // A `USER` line in the runner stage would take the privilege the server
     // needs to drop its children, and compose's `user:` would not put it back.

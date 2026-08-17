@@ -661,7 +661,8 @@ through before trusting this unattended:
 - **The whole privilege split, which is every part of it that matters.** The
   server now runs as root and drops each child to `UF_AGENT_UID`; `/data` is
   root-owned 0700 and reclaimed by an entrypoint; the MCP capability leaves
-  `/tmp`; the telemetry exporter carries a per-run capability instead of
+  `/tmp` and is owned by `UF_CHAT_GID`, a group only the chat and block child
+  is in; the telemetry exporter carries a per-run capability instead of
   `UF_AUTH_TOKEN`. `npm run typecheck` and `npm test` pass, the decision
   (`resolveChildCredentials`), the compose/Dockerfile pair, the capability file
   and `telemetryEnv` are all unit-tested, and **no container has been built or
@@ -673,7 +674,8 @@ through before trusting this unattended:
   ```sh
   docker compose up --build -d
   docker compose logs usagefoundry | grep 'privilege separation'
-  # expect "on: children run as 1000:1000, server as 0"
+  # expect "on: children run as 1000:1000, chat and block turns as 1000:65533,
+  # server as 0" — a line naming no chat gid is the capability boundary absent
 
   # #79 — the server's environment
   docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
@@ -690,6 +692,23 @@ through before trusting this unattended:
   docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
     'ls /tmp/uf-mcp-* 2>/dev/null; ls /run/uf-mcp 2>/dev/null; echo "exit=$?"'
   # expect nothing from the first and a permission error from the second
+
+  # #87 — and the read itself, which the group is what refuses. Prints modes
+  # and a byte count only: the file carries a live bearer token.
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c '
+    for p in $(ls /proc | grep "^[0-9][0-9]*$"); do
+      cfg=$(tr "\0" "\n" < /proc/$p/cmdline 2>/dev/null |
+            grep -A1 -x -- --mcp-config | tail -1)
+      case "$cfg" in /run/uf-mcp/*)
+        echo "pid $p -> $cfg"
+        if [ -r "$cfg" ]; then echo "BAD-readable, $(wc -c < "$cfg") bytes"
+        else echo "ok: not readable"; fi ;;
+      esac
+    done'
+  # expect "ok: not readable", and `ls -ldn` of the directory to show group
+  # 65533 rather than the agents' gid. A run that finds no --mcp-config argv at
+  # all has proved nothing: the window is one turn, so send the chat message
+  # first and probe while it is still working.
 
   # #83 — with UF_AUTH_TOKEN set and a run under live enforcement
   #   task the agent with:  env | grep OTEL_EXPORTER_OTLP_HEADERS
@@ -711,11 +730,19 @@ through before trusting this unattended:
   `UF_AGENT_UID`/`UF_AGENT_GID` cleared, which is the previous behaviour whole
   and which the app detects and reports at boot.
 
-  Two things are known-not-closed rather than unverified, and are in
+  One thing is known-not-closed rather than unverified, and is in
   `docs/security.md` rather than here: an agent can still read
-  `~/.claude/.credentials.json` (it is what a work cycle bills against), and a
-  sibling agent can still read a live MCP capability's path out of
-  `/proc/<pid>/cmdline`. Both need a second Claude credential to close.
+  `~/.claude/.credentials.json`, because it is what a work cycle bills against,
+  and only a per-run credential Claude Code does not have would close it.
+
+  The MCP capability *path* is still readable out of `/proc/<pid>/cmdline` and
+  always will be — what changed is that the file it names is owned by
+  `UF_CHAT_GID` and mode 0040, so the path leads somewhere the reader cannot
+  open. That is a group check rather than a second Claude credential, and it is
+  unit-tested at `chat.test.ts` ("hands the config to a group…") and
+  `privsep.test.ts` (`resolveChatGid`) — but a unit test in one process has one
+  uid and **cannot observe the refusal**, which is why the probe above exists and
+  why this bullet is on this list rather than in the verified section.
 
   One thing that is *not* on this list and used to be: `npm run build` failing
   on a clean tree with `TypeError: generate is not a function`. That is the

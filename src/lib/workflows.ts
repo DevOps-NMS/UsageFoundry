@@ -2373,6 +2373,25 @@ function parseSpecs(raw: string | null): RunSpec[] {
   }
 }
 
+/**
+ * Is that run one of this instance's blocks?
+ *
+ * The block half of what `/api/mcp` scopes `get_run_diff` by; `chatOwnsRun` is
+ * the other and carries the reasoning. This is the shape a deciding block
+ * actually needs — "the block before me produced this, what did it change" — so
+ * scoping costs it nothing, while a capability read out of a sibling's config
+ * file no longer reaches the patches of runs in other workflows.
+ */
+export function instanceOwnsRun(instanceId: string, runId: string): boolean {
+  return (
+    db()
+      .prepare(
+        "SELECT 1 FROM workflow_instance_runs WHERE instance_id = ? AND run_id = ? LIMIT 1",
+      )
+      .get(instanceId, runId) !== undefined
+  );
+}
+
 function rowToInstance(row: InstanceRow): WorkflowInstance {
   let graph: WorkflowGraph = { nodes: [], edges: [] };
   try {

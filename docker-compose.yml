@@ -167,6 +167,18 @@ services:
       # before and the boot log says the boundary is absent.
       UF_AGENT_UID: "${UF_UID:-1000}"
       UF_AGENT_GID: "${UF_GID:-1000}"
+      # The group the orchestrator chat and a workflow's orchestrator block run
+      # in — the same uid as every other child, a different group. It owns the
+      # per-turn MCP capability file (0710 on the directory, 0040 on the file),
+      # which is what stops a concurrent work-cycle agent reading a live
+      # capability off `/proc/<pid>/cmdline` and calling /api/mcp as the chat.
+      #
+      # The default is the group the image creates and must not be the gid the
+      # agents run as: the server refuses to boot when the two match, rather
+      # than handing the file to the group it is being kept from. Clearing this
+      # keeps the uid split and drops this one boundary, which the boot log
+      # states — it is not silent either way.
+      UF_CHAT_GID: "${UF_CHAT_GID:-65533}"
 
     volumes:
       # Credentials + transcripts. Read-write because Claude Code writes new
