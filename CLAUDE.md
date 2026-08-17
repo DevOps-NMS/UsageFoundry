@@ -109,6 +109,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - Variants are typed props with `Record<Union, string>` lookup maps, never `data-[…]` Tailwind variants.
   - `"use client"` files import from `apiTypes.ts` / `format.ts`, never `windows.ts` / `transcripts.ts`.
   - Route handlers touching SQLite or the filesystem need `runtime = "nodejs"` and `dynamic = "force-dynamic"`.
+  - `saveSettings` stores only what differs from `DEFAULTS`. Writing the whole object kills every future default on that install.
 
 - **`docker-compose.yml`, `.env`, `Dockerfile`, `config.ts`** → `docs/agent/environment.md`
   - `DATA_DIR` **refuses** the boot; every other variable warns. That asymmetry is the decision.

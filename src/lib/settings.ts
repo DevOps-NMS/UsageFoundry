@@ -614,10 +614,82 @@ export function getSettings(): Settings {
   return { ...DEFAULTS, ...getJSON<Partial<Settings>>(KEY, {}) };
 }
 
+/**
+ * Persist the effective object as **only what differs from `DEFAULTS`**.
+ *
+ * `getSettings()` is `{...DEFAULTS, ...stored}` and the settings page PUTs the
+ * whole *effective* object on Save, so storing it verbatim materialised all
+ * thirty-three keys into the blob the first time anybody pressed the button —
+ * and from that moment every `DEFAULT_*` in this file was dead for that install.
+ * There is no versioning and no migration, and nothing anywhere surfaces the
+ * divergence, so a shipped default and a running install disagree silently and
+ * permanently.
+ *
+ * Measured, not reasoned. `8651bcd` raised `maxConcurrentRuns` from `null` to 4
+ * at 20:28 on 2026-08-14, to bound exactly the failure that happened two minutes
+ * later: sixteen concurrent runs met the provider's 5-hour wall inside a
+ * 44-second span, every one of them with its first cycle amputated. The stored
+ * row carried an explicit `"maxConcurrentRuns": null`, the spread put it back
+ * over the 4, and the fix was never in force on the install it was written for.
+ * The four prompt strings are the same trap one door over, which is why
+ * `COMPLETION_NOTICE` and `SHARED_CHECKOUT_NOTICE` are generated in
+ * `orchestrator.ts` instead of living here.
+ *
+ * The trade is real and it is the one being chosen deliberately: a value an
+ * operator set *to today's default* becomes indistinguishable from one they
+ * never set, so a later change to that default moves it. That is precisely what
+ * makes a shipped number reach an existing install, the effective object is
+ * identical either way until the default changes, and the alternative has now
+ * cost this install twice. An operator who wants a number pinned against a
+ * future default has no way to say so, and if that turns out to matter the place
+ * to answer it is a stored marker, never a return to writing the whole blob.
+ *
+ * Deep rather than `!==`, because five keys hold an object or an array
+ * (`weeklyAnchor`, `isolationCopyGlobs`, `isolationCopyGlobsByRepo`,
+ * `chatDefaultGuards`, and the nested `budget` inside it) and reference
+ * inequality would keep every one of them forever, which is the bug this fixes
+ * for the keys that matter most.
+ */
 export function saveSettings(patch: Partial<Settings>): Settings {
   const next = { ...getSettings(), ...patch };
-  setJSON(KEY, next);
+  const stored: Partial<Settings> = {};
+  for (const key of SETTINGS_KEYS) {
+    if (!sameValue(next[key], DEFAULTS[key])) {
+      // The cast is the price of a per-key loop over a heterogeneous record:
+      // `next[key]` and `stored[key]` are the same member of the same union at
+      // every iteration, and TypeScript cannot carry that through the index.
+      (stored as Record<string, unknown>)[key] = next[key];
+    }
+  }
+  setJSON(KEY, stored);
   return next;
+}
+
+/**
+ * Structural equality, for deciding whether a value is still the shipped one.
+ *
+ * `JSON.stringify` comparison would be shorter and wrong: it is key-order
+ * sensitive, so a `chatDefaultGuards` that came back off the wire with its keys
+ * in a different order than `DEFAULT_CHAT_GUARDS` declares them would read as a
+ * change and be stored forever — the exact failure being fixed, arriving through
+ * the fix.
+ */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  if (typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((v, i) => sameValue(v, b[i]));
+  }
+  const ka = Object.keys(a as object);
+  const kb = Object.keys(b as object);
+  if (ka.length !== kb.length) return false;
+  return ka.every(
+    (k) =>
+      Object.hasOwn(b as object, k) &&
+      sameValue((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
+  );
 }
 
 /**
