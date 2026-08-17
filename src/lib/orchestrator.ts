@@ -5730,6 +5730,35 @@ function handleStreamLine(
       kind: "log",
       payload: { message: `system:${ev.subtype ?? ""}`, raw: ev },
     });
+
+    // A hook that wrote into the session's context, said in words.
+    //
+    // The event above already carries it, but only inside `raw` behind a
+    // message that reads `system:hook_response` — and `describeEvent` drops
+    // every `system:`-prefixed line, deliberately, to keep the CLI's own
+    // chatter out of the feed. So what a plugin put in front of the agent was
+    // on the run's log and invisible on it at the same time. That is the wrong
+    // shape for the one kind of opening context this app does not otherwise
+    // record: `iteration` holds the prompt, and hook output is the half of what
+    // the session opened with that the prompt does not contain.
+    //
+    // Only the two events whose stdout the CLI documents as reaching the model.
+    // A `PreToolUse` hook that merely returns an exit code fires on every tool
+    // call, and logging those would bury the run's own output.
+    if (ev.subtype === "hook_response") {
+      const injects =
+        ev.hook_event === "SessionStart" || ev.hook_event === "UserPromptSubmit";
+      const output = typeof ev.output === "string" ? ev.output.trim() : "";
+      if (injects && output) {
+        // Under `MAX_LOG_CHARS`, so this is the only cut and the line does not
+        // arrive already shortened for storage and then shortened again.
+        const shown = output.length > 2000 ? `${output.slice(0, 2000)}…` : output;
+        log(
+          runId,
+          `${String(ev.hook_name ?? ev.hook_event)} hook added this to the agent's context:\n${shown}`,
+        );
+      }
+    }
   }
 }
 
