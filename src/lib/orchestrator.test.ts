@@ -808,7 +808,12 @@ describe("prompt for the next work cycle", () => {
     // diff and any review are measured over — so the agent, the reviewer and
     // the merge are all looking at one thing.
     assert.match(continued, /git log --oneline abc123\.\.HEAD/);
-    assert.match(continued, /git diff abc123\.\.\.HEAD/);
+    // `--stat`, never the diff: what the opening turn reads is re-sent on every
+    // turn after it, and the stat names the same files for a fraction of the
+    // resident context. A bare `git diff` here cost tens of thousands of tokens
+    // per continued run and nothing looked wrong, so the flag is pinned.
+    assert.match(continued, /git diff --stat abc123\.\.\.HEAD/);
+    assert.doesNotMatch(continued, /git diff abc123/);
     // The editable half is the guidance, and it comes last.
     assert.match(continued, /READ-FIRST\n\nTASK$/);
   });

@@ -4284,9 +4284,18 @@ export function nextPrompt(o: {
  * conversation that was ever going to be resumed, the decisions behind those
  * commits were never in any context, and the branch may well contain choices
  * this agent would not have made. So it is pointed at the range rather than
- * told to infer it — `git diff <base>...HEAD` is the chain's whole change, the
- * same range the run page's diff and any review are measured over, which is
- * what keeps the agent, the reviewer and the merge looking at one thing.
+ * told to infer it — `<base>...HEAD` is the chain's whole change, the same
+ * range the run page's diff and any review are measured over, which is what
+ * keeps the agent, the reviewer and the merge looking at one thing.
+ *
+ * The range is asked for as `--stat`, never as the diff itself, because what
+ * an opening turn reads it then pays for on every turn after it: the
+ * conversation is re-sent whole on each request, so an opening `git diff` is
+ * not read once but held for the life of the run. Five commits of this repo's
+ * own history is 176KB of diff against 1.2KB of stat — tens of thousands of
+ * resident tokens to say what a stat says, about work the agent may never
+ * touch. The stat names every file and how far it moved, which is what decides
+ * where to look; opening one of them then costs one file, and the agent can.
  *
  * The facts are generated and the guidance is `settings.continuedWorkPrompt`,
  * for the reason `PeriodSeries.limitBasis` travels beside its fraction: the
@@ -4303,7 +4312,7 @@ function continuedWorkNotice(
     `what it decided is in your context, and the only record of it is the branch itself. ` +
     `Before doing anything, read it:\n\n` +
     `    git log --oneline ${range}..HEAD\n` +
-    `    git diff ${range}...HEAD\n\n` +
+    `    git diff --stat ${range}...HEAD\n\n` +
     guidance.trim()
   );
 }
