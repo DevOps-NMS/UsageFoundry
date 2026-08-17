@@ -363,6 +363,46 @@ export interface RunTelemetryDTO {
   lastAt: number | null;
 }
 
+/**
+ * Whether the container's own Claude Code has a credential, and whose.
+ *
+ * Next to `AccountProfileDTO` and not merged into it because they answer
+ * different questions from different sources. That one reads the credential
+ * file to name a *plan*, and reports `UNKNOWN_ACCOUNT` for every failure — it
+ * cannot tell a missing file from an unparsable one, and it is not meant to.
+ * This one asks the CLI who it would authenticate as, which is the question a
+ * run ending on `Not logged in` actually raises.
+ */
+export interface ClaudeAuthDTO {
+  loggedIn: boolean;
+  /** `claude.ai` for a subscription, `none` when signed out. */
+  method: string | null;
+  email: string | null;
+  organization: string | null;
+  plan: string | null;
+  /**
+   * The variable an API key was found in. Non-null means that key, not the
+   * subscription below it, is what a work cycle will bill against.
+   */
+  apiKeySource: string | null;
+}
+
+/** `GET /api/claude-auth`. */
+export interface ClaudeAuthStateDTO {
+  /** Null exactly when the CLI could not be asked; `error` then says why. */
+  auth: ClaudeAuthDTO | null;
+  error: string | null;
+  /**
+   * A sign-in that has printed its link and is waiting for the code.
+   *
+   * Reported so the flow survives a page reload: the child holding the PKCE
+   * verifier outlives the tab that started it, and without this the operator
+   * would be shown a fresh Sign in button while the code in their clipboard
+   * still belonged to the old one.
+   */
+  pending: { url: string; startedAt: number } | null;
+}
+
 /** Names a plan. Carries no ceiling, no email, no account UUID. */
 export interface AccountProfileDTO {
   subscriptionType: string | null;

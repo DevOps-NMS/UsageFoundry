@@ -11,10 +11,13 @@ import type {
   AgentDTO,
   AmbientAgentDTO,
   BudgetPolicyDTO,
+  ClaudeAuthDTO,
+  ClaudeAuthStateDTO,
   RunGuardsDTO,
   SettingsDTO,
   StorageReportDTO,
 } from "@/lib/apiTypes";
+import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import {
   describeAmbientAgents,
   fmtBytes,
@@ -32,6 +35,7 @@ import {
   SegmentedControl,
   type SegmentedOption,
 } from "@/components/ui/SegmentedControl";
+import { Sheet } from "@/components/ui/Sheet";
 import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
 import { isPlainCommandChord } from "@/components/shell/shortcuts";
 
@@ -729,6 +733,258 @@ function FailedSignIns({ summary }: { summary: unknown }) {
   );
 }
 
+/**
+ * The container's own Claude Code login, and the two buttons that move it.
+ *
+ * This is the step every install has to take before a single run can work, and
+ * until now the only way to take it was `docker compose exec -it usagefoundry
+ * claude` and `/login` — a terminal on the host, for an app whose whole point
+ * is not needing one. Signing *out* had no procedure at all short of deleting a
+ * file inside the mounted directory.
+ *
+ * It sits beside "Sign-in" rather than replacing it because the two are
+ * different credentials that fail in different directions: that row is this
+ * app's own session, and losing it locks you out of the page. This one is the
+ * account the agents bill against, and losing it leaves the page working
+ * perfectly while every run ends on `Not logged in`.
+ *
+ * The pending sign-in is server state, not component state — the child holding
+ * the PKCE verifier outlives this tab. That is why a reload offers to *finish*
+ * a sign-in rather than silently starting a second one whose link would
+ * invalidate the code already sitting in somebody's clipboard.
+ */
+function ClaudeAccount() {
+  const [state, setState] = useState<ClaudeAuthStateDTO | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  /** The link being shown. Non-null is the sign-in sheet being open. */
+  const [linkUrl, setLinkUrl] = useState<string | null>(null);
+  const [code, setCode] = useState("");
+  const [confirmOut, setConfirmOut] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [flowError, setFlowError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const res = await jsonRequest<ClaudeAuthStateDTO>("/api/claude-auth");
+    if (!res.ok) {
+      setLoadError(
+        actionFailureMessage(res, "Could not read the Claude sign-in."),
+      );
+      return;
+    }
+    setLoadError(null);
+    setState(res.data);
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function begin() {
+    setBusy(true);
+    setFlowError(null);
+    const res = await jsonRequest<{ url: string }>("/api/claude-auth/login", {
+      method: "POST",
+      body: {},
+    });
+    setBusy(false);
+    if (!res.ok) {
+      setLoadError(actionFailureMessage(res, "Could not start the sign-in."));
+      return;
+    }
+    setCode("");
+    setLinkUrl(res.data.url);
+  }
+
+  async function finish() {
+    setBusy(true);
+    setFlowError(null);
+    const res = await jsonRequest<{ auth: ClaudeAuthDTO }>(
+      "/api/claude-auth/login/code",
+      { method: "POST", body: { code } },
+    );
+    if (res.ok) {
+      setBusy(false);
+      setLinkUrl(null);
+      setCode("");
+      setState({ auth: res.data.auth, error: null, pending: null });
+      return;
+    }
+
+    // A refused code leaves two very different situations, and the difference
+    // decides whether this sheet should stay open: the CLI rejects a truncated
+    // paste locally and keeps the same prompt — and the same link — alive,
+    // whereas a spent or expired one ends the child. Re-reading the server's
+    // own state is what tells them apart; inferring it from the message would
+    // put the operator in front of a dead link that still looks usable.
+    const message = actionFailureMessage(res, "That code was not accepted.");
+    const fresh = await jsonRequest<ClaudeAuthStateDTO>("/api/claude-auth");
+    setBusy(false);
+    if (fresh.ok) {
+      setState(fresh.data);
+      if (!fresh.data.pending) {
+        setLinkUrl(null);
+        setCode("");
+        setLoadError(message);
+        return;
+      }
+    }
+    setFlowError(message);
+  }
+
+  /** Closing the sheet abandons the child too, or it waits ten minutes alone. */
+  async function abandon() {
+    setLinkUrl(null);
+    setCode("");
+    setFlowError(null);
+    await jsonRequest("/api/claude-auth/login", { method: "DELETE" });
+    void load();
+  }
+
+  async function out() {
+    setBusy(true);
+    const res = await jsonRequest<{ auth: ClaudeAuthDTO }>(
+      "/api/claude-auth/logout",
+      { method: "POST", body: {} },
+    );
+    setBusy(false);
+    setConfirmOut(false);
+    if (!res.ok) {
+      setLoadError(actionFailureMessage(res, "Could not sign out."));
+      return;
+    }
+    setState({ auth: res.data.auth, error: null, pending: null });
+  }
+
+  const auth = state?.auth ?? null;
+  const pending = state?.pending ?? null;
+
+  return (
+    <>
+      <EnvRow label="Claude account">
+        {state === null && loadError === null ? (
+          <span>reading…</span>
+        ) : loadError ? (
+          <>
+            <Badge tone="danger">unavailable</Badge> <span>{loadError}</span>{" "}
+            <Button variant="secondary" onClick={() => void load()}>
+              Retry
+            </Button>
+          </>
+        ) : auth === null ? (
+          // The CLI answered something we cannot read. Distinct from signed
+          // out, and not fixed by signing in — so no Sign in button here.
+          <>
+            <Badge tone="danger">unreadable</Badge>{" "}
+            <span>{state?.error ?? "the CLI did not answer"}</span>
+          </>
+        ) : (
+          <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1.5">
+            {auth.loggedIn ? (
+              <>
+                <Badge tone="ok">signed in</Badge>
+                <span>
+                  {[auth.email, auth.organization, auth.plan]
+                    .filter(Boolean)
+                    .join(" · ") || auth.method || "no identity reported"}
+                </span>
+              </>
+            ) : (
+              <>
+                <Badge tone="danger">signed out</Badge>
+                <span>runs fail until this is signed in</span>
+              </>
+            )}
+            {/* Stated wherever it is true, because it silently outranks
+                everything to its left: with a key set, that key is what a work
+                cycle bills, and the subscription beside it is decoration. */}
+            {auth.apiKeySource && (
+              <>
+                <Badge tone="warn">{auth.apiKeySource}</Badge>
+                <span>this key is what runs bill, not the subscription</span>
+              </>
+            )}
+            {pending ? (
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setFlowError(null);
+                  setCode("");
+                  setLinkUrl(pending.url);
+                }}
+              >
+                Finish sign-in
+              </Button>
+            ) : auth.loggedIn ? (
+              <Button variant="secondary" onClick={() => setConfirmOut(true)}>
+                Sign out
+              </Button>
+            ) : (
+              <Button variant="secondary" busy={busy} onClick={() => void begin()}>
+                Sign in
+              </Button>
+            )}
+          </span>
+        )}
+      </EnvRow>
+
+      <Sheet
+        open={linkUrl !== null}
+        onDismiss={() => void abandon()}
+        title="Sign in to Claude"
+        confirmLabel="Finish"
+        confirmDisabled={code.trim() === ""}
+        busy={busy}
+        onConfirm={() => void finish()}
+      >
+        <p>
+          Open this page, approve access, then paste the code it gives you
+          back. The link works from any device.
+        </p>
+        <p className="mt-3">
+          <a href={linkUrl ?? "#"} target="_blank" rel="noopener noreferrer">
+            Open the Anthropic sign-in page
+          </a>
+        </p>
+        {/* The full URL as text as well as a link: the browser showing this
+            page is often not the one signed in to Anthropic, and on a remote
+            container it may not be able to reach the page at all. */}
+        <p className="mono mt-2 break-all text-xs text-ink-faint">{linkUrl}</p>
+        <Field
+          className="mt-4 mb-0"
+          label="Code"
+          htmlFor="claude-auth-code"
+          error={flowError}
+        >
+          <Input
+            id="claude-auth-code"
+            value={code}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(e) => setCode(e.target.value)}
+          />
+        </Field>
+      </Sheet>
+
+      <Sheet
+        open={confirmOut}
+        onDismiss={() => setConfirmOut(false)}
+        title="Sign out of Claude?"
+        confirmLabel="Sign out"
+        confirmVariant="danger"
+        busy={busy}
+        onConfirm={() => void out()}
+      >
+        <p>
+          Every run still working will end on{" "}
+          <span className="mono">Not logged in</span>, and no new run can start
+          until this is signed in again. This does not end your session on this
+          page.
+        </p>
+      </Sheet>
+    </>
+  );
+}
+
 function EnvRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex gap-2">
@@ -1083,6 +1339,7 @@ export default function SettingsPage() {
             </>
           )}
         </EnvRow>
+        <ClaudeAccount />
         <FailedSignIns summary={env.signIn} />
       </dl>
 

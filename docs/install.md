@@ -21,12 +21,12 @@ start work.
 ## Sign in once, inside the container
 
 The dashboard works immediately — it only reads transcripts. **Runs will fail
-with `Not logged in` until you authenticate the container's own Claude Code:**
+with `Not logged in` until you authenticate the container's own Claude Code.**
 
-```bash
-docker compose exec -it usagefoundry claude
-# then: /login
-```
+Go to **Settings → Claude account** and press **Sign in**. The container's CLI
+prints an Anthropic link, the page shows it, and you approve there and paste the
+code it gives you back. The row then names the account every run will bill
+against, and carries the **Sign out** that revokes it.
 
 The `~/.claude` mount carries your transcripts, settings, rules, and plugins,
 but **not** your credentials. On macOS the OAuth token lives in the login
@@ -36,6 +36,21 @@ mount to carry; a Linux container cannot read it either way.
 This is a one-time step. The login writes `.credentials.json` into
 `/home/node/.claude`, which *is* the mounted `~/.claude`, so it survives
 restarts, `docker compose down`, and image rebuilds.
+
+Sign in from the page rather than from a shell. The CLI keeps
+`.credentials.json` at mode 0600 owned by whoever wrote it, and the uid that has
+to open it afterwards is `UF_UID`/`UF_GID` — every work cycle runs as that uid,
+not as the server. The page's sign-in is dropped to it for exactly that reason.
+A `docker compose exec` defaults to root, so if you do sign in from a shell,
+name the uid rather than relying on the default:
+
+```bash
+docker compose exec -u "${UF_UID:-1000}" -it usagefoundry claude auth login
+```
+
+An API key in the environment outranks all of this. With `ANTHROPIC_API_KEY`
+set, that key is what runs bill against and the subscription login is ignored;
+the Settings row says so rather than reporting an account nothing uses.
 
 One thing the mount also cannot carry is `~/.claude.json` — it sits *next to*
 the directory, not inside it — so user-scoped MCP servers are not available to

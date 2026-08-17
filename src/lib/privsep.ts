@@ -146,10 +146,20 @@ export function privilegeSeparated(): boolean {
  *
  * `{}` when there is no separation, so the call is unchanged on a laptop and in
  * the tests. Every spawn site in the app takes this — `orchestrator.ts`'s work
- * cycle, `review.ts`, both of `chat.ts`'s, and both of `git.ts`'s. The git ones
- * are not an afterthought: they write into the operator's own repository, so a
- * root git would leave root-owned objects in a tree the operator has to be able
- * to use afterwards.
+ * cycle, `review.ts`, both of `chat.ts`'s, both of `git.ts`'s, and
+ * `claudeAuth.ts`'s. The git ones are not an afterthought: they write into the
+ * operator's own repository, so a root git would leave root-owned objects in a
+ * tree the operator has to be able to use afterwards.
+ *
+ * `claudeAuth.ts`'s is the one site where this is not a containment measure but
+ * a correctness one, and it runs the argument in the file header backwards. The
+ * others are dropped so an agent cannot reach what the server can; that one is
+ * dropped because `claude auth login` **writes** `~/.claude/.credentials.json`
+ * at 0600 owned by whoever wrote it, and the uid that has to open it afterwards
+ * is the agent's. Signed in with the server's own authority, the page would
+ * report an account in good standing while every work cycle ended on `Not
+ * logged in` — the file mode that excludes an agent from `/data` excluding it
+ * from the credential it bills against.
  */
 export function childCredentials(): { uid?: number; gid?: number } {
   const c = separation();

@@ -32,7 +32,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
 
 - **`src/lib/` generally, the module map, the three data sources** → `docs/agent/architecture.md`
   - Three cost sources, never summed or mixed in the UI. OTLP telemetry must never reach `buildSnapshot()` or `runs.spent_usd`.
-  - Four kinds of child process, from four modules. A fifth is a decision, not a detail.
+  - Four kinds of *agent* child process, from four modules, plus `claudeAuth.ts`'s, which starts no agent and is bounded by one pending login rather than by `maxConcurrentAssists`. Another is a decision, not a detail.
   - `emit()` persists to `run_events` **then** publishes. That order is what makes reconnect lossless.
 
 - **`windows.ts`, `transcripts.ts`, `pricing.ts`, `planUsage.ts`, `repoSpend.ts`, `otlp.ts`** → `docs/agent/metering.md`

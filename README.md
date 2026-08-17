@@ -75,11 +75,8 @@ including what a shared secret over HTTP does and does not buy.
 
 The dashboard works immediately. **Runs need one extra step** — the `~/.claude`
 mount carries your transcripts but not your credentials, so sign the container
-in once:
-
-```bash
-docker compose exec -it usagefoundry claude   # then: /login
-```
+in once, in **Settings → Claude account → Sign in**: it opens an Anthropic link,
+you approve, you paste the code back. The same row signs it out again.
 
 That login is what every run bills against, and an agent can read it: a work
 cycle runs as the uid that owns the mounted `~/.claude`, which is the only way
