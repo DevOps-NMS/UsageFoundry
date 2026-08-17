@@ -1626,6 +1626,33 @@ describe("buildArgs", () => {
     assert.equal(buildArgs({ ...base, isolated: false }).includes("--allowedTools"), false);
   });
 
+  it("carries plugin directories on a resumed cycle, not only the first", () => {
+    // The invariant this exists for: `--plugin-dir` is not restored by
+    // `--resume`. A version of this that sent it on the opening cycle alone
+    // would leave every later cycle of the same run without its plugins, and
+    // the symptom is nothing — an agent missing a hook behaves exactly like one
+    // that never had it, so no run fails and no page looks wrong.
+    const args = buildArgs({
+      ...base,
+      isolated: false,
+      resumeSessionId: "sess-1",
+      pluginDirs: ["/workspace/orient"],
+    });
+    const at = args.indexOf("--plugin-dir");
+    assert.notEqual(at, -1, "a resumed cycle must still be given its plugins");
+    assert.equal(args[at + 1], "/workspace/orient");
+    assert.ok(args.includes("--resume"));
+  });
+
+  it("names no plugin flag when none are enabled", () => {
+    // A bare `--plugin-dir` would swallow the following flag as its value.
+    assert.equal(buildArgs({ ...base, isolated: false }).includes("--plugin-dir"), false);
+    assert.equal(
+      buildArgs({ ...base, isolated: false, pluginDirs: [] }).includes("--plugin-dir"),
+      false,
+    );
+  });
+
   /**
    * The other direction, and the more expensive one. `next-server` is the
    * process title of both this server and any dev server an agent starts to

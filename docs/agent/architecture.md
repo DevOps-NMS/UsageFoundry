@@ -36,6 +36,23 @@ diff.ts         <base>...<branch> as a rendered, budgeted file list + patches
 review.ts       one-shot Claude calls outside the loop: review, conflict resolve
 land.ts         merge preview, AI conflict resolution, landing, deletion, inventory
 templates.ts    saved run configurations — form input, never a run
+plugins.ts      Claude Code plugins found in the mounts, switched on per install
+                and carried onto every work cycle as --plugin-dir. Deliberately
+                *not* `claude plugin install`: compose binds the operator's
+                ~/.claude onto /home/node/.claude, so the CLI's own registry is
+                one file shared by host and container and it records absolute
+                paths — whichever side installs last silently breaks the other,
+                since a plugin path that does not resolve is skipped with a
+                warning and exit 0. So this app owns the list, in its own
+                settings row (never a key of Settings — the settings form sends
+                the whole blob on Save, and this decides what code every agent
+                loads). Two invariants, both silent when broken: the flag goes
+                on **every** cycle's argv because --plugin-dir does not survive
+                --resume, and a stored path is proved contained in a mount again
+                at *use* time, not just when it was switched on, because what it
+                becomes is a directory whose hooks the container executes. An
+                enabled plugin that stops resolving reaches the run's own log
+                rather than being dropped
 agents.ts       saved agents — form input, never a run: the role a run itself
                 takes, carried onto a spawn by sessionAgentArgs as an --agents
                 definition *and* an --agent selection, built on the one encoder

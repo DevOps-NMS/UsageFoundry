@@ -13,6 +13,7 @@ import type {
   BudgetPolicyDTO,
   ClaudeAuthDTO,
   ClaudeAuthStateDTO,
+  PluginsReportDTO,
   RunGuardsDTO,
   SandboxDTO,
   SandboxStateDTO,
@@ -85,6 +86,7 @@ const SECTIONS = [
   { id: "runs", label: "Runs" },
   { id: "guards", label: "Default guards" },
   { id: "unattended", label: "Unattended runs" },
+  { id: "plugins", label: "Plugins" },
   { id: "storage", label: "Storage" },
   { id: "prompts", label: "Prompts" },
 ];
@@ -1077,6 +1079,12 @@ export default function SettingsPage() {
   // as "not measured" rather than as a store with nothing in it.
   const [storage, setStorage] = useState<StorageReportDTO | null>(null);
   const [storageError, setStorageError] = useState<string | null>(null);
+  // Plugins are not part of the settings form: they are switched on one at a
+  // time against their own route, so nothing here goes through `patch()` and
+  // Save never touches them. See `PluginDTO` for why that separation exists.
+  const [plugins, setPlugins] = useState<PluginsReportDTO | null>(null);
+  const [pluginsError, setPluginsError] = useState<string | null>(null);
+  const [pluginBusy, setPluginBusy] = useState<string | null>(null);
   const standalone = useStandalone();
 
   const load = useCallback(async () => {
@@ -1105,6 +1113,45 @@ export default function SettingsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const loadPlugins = useCallback(async () => {
+    const res = await jsonRequest<PluginsReportDTO>("/api/plugins");
+    if (!res.ok) {
+      setPluginsError(actionFailureMessage(res, "The plugin list could not be read."));
+      return;
+    }
+    setPluginsError(null);
+    setPlugins(res.data);
+  }, []);
+
+  useEffect(() => {
+    void loadPlugins();
+  }, [loadPlugins]);
+
+  const togglePlugin = useCallback(
+    async (dir: string, enabled: boolean) => {
+      setPluginBusy(dir);
+      const res = await jsonRequest<PluginsReportDTO>("/api/plugins", {
+        method: "POST",
+        body: { path: dir, enabled },
+      });
+      setPluginBusy(null);
+      if (!res.ok) {
+        // The refusal names the directory, so it is shown rather than folded
+        // into a generic failure: "outside a workspace mount" and "no
+        // plugin.json" are two different things for the operator to fix.
+        setPluginsError(
+          actionFailureMessage(res, `${enabled ? "Enabling" : "Disabling"} the plugin failed.`),
+        );
+        return;
+      }
+      setPluginsError(null);
+      // Answered with the whole list rather than the one row, so a second tab's
+      // change shows up here on the next press instead of being overwritten.
+      setPlugins(res.data);
+    },
+    [],
+  );
 
   useEffect(() => {
     fetch("/api/storage", { cache: "no-store" })
@@ -2450,6 +2497,76 @@ export default function SettingsPage() {
             />
           </SettingRow>
         </ListGroup>
+      </Section>
+
+      <Section
+        id="plugins"
+        title="Plugins"
+        lede="Claude Code plugins found in your mounted folders. Switching one on adds it to every work cycle this app starts, from the next cycle onward — including runs already in flight. These are saved as you press them, not on Save."
+      >
+        {pluginsError && (
+          <Notice tone="danger" className="mb-4">
+            {pluginsError}
+          </Notice>
+        )}
+
+        {plugins && plugins.problems.length > 0 && (
+          <Notice tone="warn" className="mb-4">
+            <ul className="list-disc pl-4">
+              {plugins.problems.map((p) => (
+                <li key={p}>{p}</li>
+              ))}
+            </ul>
+          </Notice>
+        )}
+
+        {plugins === null && !pluginsError ? (
+          <Empty>Looking for plugins in the mounted folders…</Empty>
+        ) : plugins && plugins.plugins.length === 0 ? (
+          <Empty>
+            No plugins in the mounted folders. A plugin is any directory holding a{" "}
+            <code>.claude-plugin/plugin.json</code>; clone one into a mounted folder and it
+            appears here.
+          </Empty>
+        ) : (
+          <ListGroup
+            label="Found in your mounts"
+            footnote="A plugin's hooks run inside the container with the same access an agent has. Enable ones you would run yourself"
+          >
+            {plugins?.plugins.map((p) => (
+              <SettingRow
+                key={p.path}
+                htmlFor={`plugin-${p.path}`}
+                label={
+                  <span className="flex flex-wrap items-baseline gap-x-2">
+                    {p.name}
+                    {p.version && <Badge tone="neutral">{p.version}</Badge>}
+                    {p.components.map((c) => (
+                      <Badge key={c} tone="neutral">
+                        {c}
+                      </Badge>
+                    ))}
+                  </span>
+                }
+                description={
+                  <>
+                    {p.description && <span className="block">{p.description}</span>}
+                    <span className="block font-mono text-2xs text-ink-muted">
+                      {p.mountLabel} / {p.relPath}
+                    </span>
+                  </>
+                }
+              >
+                <Switch
+                  id={`plugin-${p.path}`}
+                  checked={p.enabled}
+                  disabled={pluginBusy === p.path}
+                  onChange={(v) => void togglePlugin(p.path, v)}
+                />
+              </SettingRow>
+            ))}
+          </ListGroup>
+        )}
       </Section>
 
       <Section

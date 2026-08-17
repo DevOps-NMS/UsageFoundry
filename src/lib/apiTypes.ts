@@ -1707,6 +1707,50 @@ export interface SettingsDTO {
 /**
  * What each append-only store holds right now.
  *
+ * A Claude Code plugin found in a workspace mount.
+ *
+ * Its own payload rather than a block on `SettingsDTO`, and its own row in the
+ * database rather than a key of `Settings`, for one reason: the settings form
+ * sends the whole object on Save, so a plugin switched on in one tab would be
+ * switched back off by an unrelated save from a tab opened before it. That is a
+ * nuisance for a preference and the wrong failure entirely for the list
+ * deciding what code every unattended agent loads — the same reasoning that
+ * keeps `newWorkPaused` out of the blob.
+ */
+export interface PluginDTO {
+  /** Canonical absolute path as the server sees it, and the toggle's key. */
+  path: string;
+  /** Path relative to its mount root, which is what a person recognises. */
+  relPath: string;
+  mountId: string;
+  mountLabel: string;
+  name: string;
+  version: string | null;
+  description: string | null;
+  /**
+   * What the plugin ships — `hooks`, `skills`, `agents`, `commands`, `mcp`.
+   *
+   * Shown because the kinds differ in what switching one on costs. Skills,
+   * agents and MCP servers put definitions into every session's context; hooks
+   * and commands do not.
+   */
+  components: string[];
+  enabled: boolean;
+}
+
+export interface PluginsReportDTO {
+  plugins: PluginDTO[];
+  /**
+   * Malformed manifests, unavailable mounts, and enabled plugins that have
+   * stopped resolving. Carried beside the list rather than dropped, because
+   * every entry here is a plugin that is *absent* from it — and a list that
+   * silently omits them cannot explain why what an operator is looking for is
+   * not there.
+   */
+  problems: string[];
+}
+
+/**
  * Its own payload rather than a block on `SettingsDTO` because the two answer
  * different questions — the settings are the horizons, this is what is on disk
  * inside them — and because measuring it walks directories, which a form's own

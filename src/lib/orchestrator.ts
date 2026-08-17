@@ -50,6 +50,7 @@ import {
   type TelemetrySpend,
 } from "./otlp";
 import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
+import { enabledPluginDirs, pluginDirArgs } from "./plugins";
 import {
   noteLiveTick,
   noteLiveTickFailure,
@@ -4512,6 +4513,23 @@ export function buildArgs(opts: {
    * that makes the new shape safe.
    */
   forwardSubAgentText?: boolean;
+  /**
+   * Claude Code plugin directories to load, already proved inside a mount.
+   *
+   * Passed per cycle rather than once, and that is the property to preserve:
+   * `--plugin-dir` is **not** restored by `--resume`, so a version of this that
+   * only sent it on the opening cycle would leave every later cycle of the same
+   * run without the plugins — silently, since a session missing a hook behaves
+   * exactly like one that never had it. `buildArgs` already rebuilds the argv
+   * per cycle, so the correct shape is the default one; the test beside it
+   * asserts the flag survives a `resumeSessionId`.
+   *
+   * Optional so that the many call sites in the tests need not thread it, and
+   * absent means no plugins rather than a default set — this is the list that
+   * decides what code twenty-five unattended agents load, and it is not
+   * something to acquire by omission.
+   */
+  pluginDirs?: readonly string[];
 }): string[] {
   const args = ["-p", opts.prompt, "--output-format", "stream-json", "--verbose"];
   if (opts.model) args.push("--model", opts.model);
@@ -4532,6 +4550,9 @@ export function buildArgs(opts: {
   // worktree, and the kill does not care which.
   args.push("--disallowedTools", ...PROCESS_KILLERS);
   args.push("--append-system-prompt", SELF_HOSTING_NOTICE);
+  // Above `--resume` only for reading order. What matters is that it is here at
+  // all on a resumed cycle: see `pluginDirs`.
+  args.push(...pluginDirArgs(opts.pluginDirs ?? []));
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   // A hard stop inside the CLI, the same mechanism a chat turn and an
   // orchestrator block already carry — and the only one that can bound the
@@ -6238,11 +6259,27 @@ export async function startRun(id: string): Promise<void> {
         )
         .run(iterations, cycleStartedAt, id);
 
+      // Resolved per cycle, for the reason the sandbox policy below is: a run
+      // outlives the plugin list it started under, and each stored path is
+      // re-proved contained at the moment it is used rather than trusted from
+      // when it was switched on.
+      const plugins = enabledPluginDirs();
+      if (plugins.missing.length > 0) {
+        // On the run's own log rather than left to be inferred. An agent that
+        // stops receiving a plugin behaves exactly like one that never had it,
+        // so nothing else in this app would ever mention it.
+        log(
+          id,
+          `Enabled plugin${plugins.missing.length === 1 ? "" : "s"} not loaded for this cycle — no longer inside a workspace mount, or no longer a plugin directory: ${plugins.missing.join(", ")}`,
+        );
+      }
+
       const args = buildArgs({
         prompt,
         model: run.model,
         permissionMode: budget.permissionMode ?? "acceptEdits",
         resumeSessionId: sessionId,
+        pluginDirs: plugins.dirs,
         isolated: run.isolation === "worktree",
         // Written out as the guard's own expression rather than passed as one
         // number, because `buildArgs` is where the subtraction is tested and
