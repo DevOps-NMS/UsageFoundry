@@ -170,6 +170,7 @@ const EDITABLE_PATHS = [
   "isolationCopyGlobs",
   "isolationCopyGlobsByRepo",
   "landStrategy",
+  "resolveVerifyTools",
   "continuationPrompt",
   "donePushbackPrompt",
   "isolationPreamble",
@@ -1063,6 +1064,7 @@ export default function SettingsPage() {
   const [calError, setCalError] = useState<string | null>(null);
   /** Non-null only while the globs field is being edited. */
   const [copyGlobsText, setCopyGlobsText] = useState<string | null>(null);
+  const [verifyToolsText, setVerifyToolsText] = useState<string | null>(null);
   /** The same, for the per-repository overrides beneath it. */
   const [copyGlobsByRepoText, setCopyGlobsByRepoText] = useState<string | null>(null);
   // The registry, and the definitions this app did not write. Both are needed
@@ -1192,8 +1194,11 @@ export default function SettingsPage() {
     if (copyGlobsByRepoText !== null) {
       out = { ...out, isolationCopyGlobsByRepo: parseGlobsByRepo(copyGlobsByRepoText) };
     }
+    if (verifyToolsText !== null) {
+      out = { ...out, resolveVerifyTools: parseGlobs(verifyToolsText) };
+    }
     return out;
-  }, [s, copyGlobsText, copyGlobsByRepoText]);
+  }, [s, copyGlobsText, copyGlobsByRepoText, verifyToolsText]);
 
   const changed = useMemo(() => {
     if (!effective || !savedS) return new Set<string>();
@@ -2187,6 +2192,37 @@ export default function SettingsPage() {
               onChange={(v) => patch({ landStrategy: v })}
               label="Landing a branch"
             />
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="verifytools"
+            edited={isEdited("resolveVerifyTools")}
+            label="Checks a conflict resolution may run"
+            description={
+              <>
+                When Claude resolves a merge conflict it can edit the files and
+                run nothing, so the merge is judged by reading it. Name the
+                commands it may run and it will check its own work — write them
+                as tool patterns (
+                <span className="mono">Bash(npm run typecheck:*)</span>). Left
+                blank it runs none, which is the safe answer for a repository
+                whose checks need a dependency tree the resolver does not have
+              </>
+            }
+          >
+            {/* Raw text while editing, for the reason the globs field is. */}
+            <div className="w-72">
+              <Input
+                id="verifytools"
+                value={verifyToolsText ?? effective.resolveVerifyTools.join(", ")}
+                onChange={(e) => setVerifyToolsText(e.target.value)}
+                onBlur={() => {
+                  if (verifyToolsText === null) return;
+                  patch({ resolveVerifyTools: parseGlobs(verifyToolsText) });
+                  setVerifyToolsText(null);
+                }}
+              />
+            </div>
           </SettingRow>
         </ListGroup>
       </Section>

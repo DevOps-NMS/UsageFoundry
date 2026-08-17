@@ -269,6 +269,22 @@ export interface AssistRequest {
    */
   agents?: AgentDefinition[];
   /**
+   * Tool patterns this invocation may use without being asked, if any.
+   *
+   * `--allowedTools` is **additive** — it names what skips the prompt, and
+   * everything else still follows `permissionMode`. Not the exhaustive
+   * allowlist `chat.ts` runs under, where `manual` mode is what makes the same
+   * flag total.
+   *
+   * Absent means none, deliberately rather than by omission: this decides what
+   * an unattended child may run in somebody's repository, and a call site that
+   * could acquire it by forgetting is the wrong shape for that. The reviewer
+   * passes nothing and must keep passing nothing — it is `--permission-mode
+   * plan` precisely so that nothing it does can write, and a grant here would be
+   * the one hole in that.
+   */
+  allowedTools?: string[];
+  /**
    * Runs after the child exits and before the row is written, so a caller can
    * check what the agent actually did and downgrade a "completed" spawn to a
    * failure. A conflict resolution uses it to verify that no marker survived
@@ -588,7 +604,7 @@ export function settleOnExit(
 
 /** Spawn one, and record what it cost whatever happened. */
 function spawnAssist(id: string, req: AssistRequest): Promise<void> {
-  const { run, kind, cwd, prompt, permissionMode } = req;
+  const { run, kind, cwd, prompt, permissionMode, allowedTools } = req;
 
   return new Promise((resolve) => {
     const args = [
@@ -603,6 +619,12 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
     // One encoder for all four spawn sites — every way of getting this shape
     // wrong is silent, so there is one place that knows it.
     args.push(...agentsArgs(req.agents ?? []));
+
+    // Additive, exactly as `ISOLATED_GIT_TOOLS` is on a work cycle: this names
+    // what skips the prompt and everything else still follows the mode above.
+    // Emitted only when there is something to name — a bare `--allowedTools`
+    // with no values would take the next flag as its argument.
+    if (allowedTools?.length) args.push("--allowedTools", ...allowedTools);
 
     // What this child may write, if anything confines it at all. The same
     // encoder the work cycle and the chat use, handed the one thing that

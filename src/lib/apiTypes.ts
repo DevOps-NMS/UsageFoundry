@@ -1674,6 +1674,11 @@ export interface SettingsDTO {
   isolationCopyGlobs: string[];
   /** Folders whose seeding list replaces the one above. */
   isolationCopyGlobsByRepo: Record<string, string[]>;
+  /**
+   * `--allowedTools` patterns a conflict resolution may use to check its merge.
+   * Empty means none, which is what it had before this existed.
+   */
+  resolveVerifyTools: string[];
   isolationPreamble: string;
   /** What a run is told when it picks up the branch the run before it had. */
   continuedWorkPrompt: string;

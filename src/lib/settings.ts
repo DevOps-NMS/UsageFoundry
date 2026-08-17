@@ -197,6 +197,34 @@ export interface Settings {
    */
   maxConcurrentAssists: number | null;
   /**
+   * Tool patterns a conflict resolution may run to check the merge it wrote.
+   *
+   * `resolveConflicts` pins `acceptEdits`, which auto-approves file edits and
+   * read-only shell and holds everything else for a human — and a `-p` child has
+   * nobody to ask. So the resolver could edit the conflicted files and could not
+   * run a single command against the result. Measured across this install's
+   * whole window: 19 of 58 completed resolutions, $109.94 of $233.85, say in
+   * their own report text that they could not compile or test what they had
+   * merged. The same door `ISOLATED_GIT_TOOLS` opens for a work cycle, and it is
+   * `--allowedTools` here too — additive, so everything not named still follows
+   * the mode.
+   *
+   * **Empty by default, and that is not timidity.** This app runs against
+   * whatever repository is mounted, so there is no command it could ship that
+   * is right for one — `npm run typecheck` is this repository's answer and means
+   * nothing in a Go or Python tree. An operator naming the command is the only
+   * form that is correct anywhere, and a blank list leaves the resolver exactly
+   * as it is today rather than handing every install a grant nobody asked for.
+   *
+   * Granted only where a toolchain can exist: `resolveCheckout` reuses the run's
+   * **own** worktree when that tree is clean and on the branch, and otherwise
+   * cuts a fresh `git worktree add` with no dependency tree in it. A check run in
+   * the second case fails for a reason that has nothing to do with the merge,
+   * which is worse than not running it — an agent that reads a missing-module
+   * error as a conflict it resolved badly will "fix" working code.
+   */
+  resolveVerifyTools: string[];
+  /**
    * Gitignored files copied into a fresh checkout, newest-wins glob order.
    *
    * A worktree contains committed work only, so an isolated agent would
@@ -576,6 +604,7 @@ const DEFAULTS: Settings = {
   forwardSubAgentText: true,
   maxConcurrentRuns: 4,
   maxConcurrentAssists: 2,
+  resolveVerifyTools: [],
   isolationCopyGlobs: [".env", ".env.*", "!.env.example"],
   isolationCopyGlobsByRepo: {},
   isolationPreamble: DEFAULT_ISOLATION_PREAMBLE,

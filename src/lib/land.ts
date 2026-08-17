@@ -1182,6 +1182,13 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
     };
   }
 
+  // Only where a toolchain can exist. `resolveCheckout` reuses the run's own
+  // worktree when that tree is clean and standing on the branch, and otherwise
+  // cuts a fresh one that has no dependency tree in it — where a check fails for
+  // a reason that is not the merge, and an agent reading a missing-module error
+  // as its own bad resolution will "fix" code that was right.
+  const verifyTools = checkout.temporary ? [] : getSettings().resolveVerifyTools;
+
   const outcome = startAssist({
     run,
     kind: "resolve",
@@ -1190,7 +1197,8 @@ export async function resolveConflicts(runId: string): Promise<LandOutcome> {
     // given `bypassPermissions`, and it is not asked to run git — the commit is
     // made below, after the result has been checked.
     permissionMode: "acceptEdits",
-    prompt: resolvePrompt(branch, target, conflicted),
+    allowedTools: verifyTools,
+    prompt: resolvePrompt(branch, target, conflicted, verifyTools),
     counts: { files: conflicted.length, shown: conflicted.length, truncated: false },
     // Recorded now rather than derived later: the throwaway checkout is gone
     // minutes from here, and these paths are what makes the resolution's own
@@ -1318,7 +1326,20 @@ function readIfPossible(file: string): string | null {
   }
 }
 
-function resolvePrompt(branch: string, target: string, files: string[]): string {
+/**
+ * `verify` is the tool patterns this invocation was actually granted, so the
+ * prompt cannot promise a command the argv did not allow. Naming them rather
+ * than saying "run the tests" is what keeps the two in step: an agent told to
+ * verify and then refused reports the refusal as a finding about the merge,
+ * which is how nineteen resolutions came to carry a limitation in their report
+ * text instead of a result.
+ */
+function resolvePrompt(
+  branch: string,
+  target: string,
+  files: string[],
+  verify: readonly string[] = [],
+): string {
   return [
     `You are resolving a git merge conflict in an isolated checkout. \`${target}\` has just been`,
     `merged into \`${branch}\` and git could not reconcile these files:`,
@@ -1336,6 +1357,16 @@ function resolvePrompt(branch: string, target: string, files: string[]): string 
     "  been checked, and a merge with a marker left in it is rejected.",
     "- If two changes genuinely cannot both stand, keep the one from the branch being merged in",
     `  (\`${target}\`) and say so in your answer.`,
+    ...(verify.length
+      ? [
+          `- You may run these, and nothing else: ${verify.join(", ")}. Run them once the markers`,
+          "  are gone and say what they printed. If one fails, fix the resolution rather than the",
+          "  code around it — a failure here is almost always a merge you got wrong.",
+        ]
+      : [
+          "- You cannot run commands in this checkout, so do not try: judge the result by reading it.",
+          "  Say plainly in your answer what you could not check rather than treating it as a defect.",
+        ]),
     "",
     "When you are done, reply with one short paragraph per file saying what you kept and why.",
   ].join("\n");

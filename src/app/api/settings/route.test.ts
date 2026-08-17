@@ -75,6 +75,7 @@ const PROBES: Record<keyof Settings, Probe> = {
   forwardSubAgentText: { send: false },
   maxConcurrentRuns: { send: 3 },
   maxConcurrentAssists: { send: 5 },
+  resolveVerifyTools: { send: ["Bash(npm run typecheck:*)"] },
   isolationCopyGlobs: { send: [".env.local"] },
   isolationCopyGlobsByRepo: { send: { "acme/web": ["apps/web/.env"] } },
   isolationPreamble: { send: "CHANGED preamble" },
