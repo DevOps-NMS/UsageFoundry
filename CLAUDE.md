@@ -101,6 +101,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - `resolveInMount()` checks containment on the resolved path **and again** after `realpathSync`. Both are load-bearing.
   - Never a shell. Argv arrays only, at every spawn site.
   - `middleware.ts`'s five exemptions each stay paired with the check that stands in for them.
+  - `SELF_HOSTING_NOTICE` carries no literal an agent could `pgrep -f`: it is on every sibling's argv, so a literal matches the fleet.
 
 - **`src/components/`, route handlers, `globals.css`** → `docs/agent/conventions.md`
   - Variants are typed props with `Record<Union, string>` lookup maps, never `data-[…]` Tailwind variants.

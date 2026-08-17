@@ -4430,7 +4430,31 @@ const PROCESS_KILLERS = ["Bash(pkill:*)", "Bash(killall:*)"];
  * On the system prompt rather than in the task, because the task is only sent
  * on the first cycle of a session and this is true of every cycle. It says
  * nothing about docker on purpose: there is no docker in this image, and
- * warning about an absent command is how an agent learns to look for it.
+ * warning about an absent command is how an agent learns to look for it. For
+ * the same reason it names no tool the image does not carry: the Dockerfile
+ * installs `procps` and neither `psmisc` nor `iproute2`, so `fuser` and `ss`
+ * are absent and suggesting either teaches an agent to reach for a command that
+ * is not there.
+ *
+ * **This string is on every concurrent agent's argv, so any literal in it is a
+ * pattern that matches all of them.** It used to carry `kill $(pgrep -f 3100)`
+ * as the worked example, and `--append-system-prompt` put those four digits on
+ * the command line of every sibling `claude` process — so the one command this
+ * notice recommends by name matched the whole fleet. Measured twice: at
+ * 2026-08-15 23:39:42 run `b81e7c70` escalated from a narrow `pgrep -f "next dev
+ * -p 3100"` through an explicit pid to a bare `pgrep -f 3100`, and `9b98ddec`
+ * — a Go run in another repository, with no port-3100 process and no tool call
+ * of its own mentioning 3100 — died in the same second with "exited with code
+ * 143". Five dependents blocked behind it. It happened again on 2026-08-16 at
+ * 14:23:38, `02c3e132` taking down `8d6b1ffc`. No work was lost, because all
+ * four runs resumed the same session, but three were truncated at their cycle
+ * cap and every dependent needed picking up by hand.
+ *
+ * So the example is a variable now, and the mechanism is stated rather than the
+ * conclusion — an agent told only "do not use a bare number" reaches for a
+ * different literal, where one told *why* a literal is dangerous checks first.
+ * `pgrep -af` is named because looking is the habit that generalises to the next
+ * pattern nobody anticipated.
  */
 const SELF_HOSTING_NOTICE =
   "You are running inside a long-lived server process that is also supervising " +
@@ -4440,10 +4464,14 @@ const SELF_HOSTING_NOTICE =
   "(`cmd & pid=$!`) and use `kill \"$pid\"`; a dev server usually forks a child, " +
   "so `kill $(pgrep -P \"$pid\") \"$pid\"` or start it under `setsid` and use " +
   "`kill -- -$pid`. If you no longer have the pid, select on something unique to " +
-  "the process you started — the port you chose, e.g. `kill $(pgrep -f 3100)` — " +
-  "and never on `next-server`, `next dev` or `node`: this server's process title " +
-  "is `next-server`, which is also the title your own dev server takes, so a " +
-  "match on it cannot tell the two apart.";
+  "the process you started — the port you chose, held in a variable: " +
+  "`port=<the one you started>; kill $(pgrep -f \"$port\")`. Always read what a " +
+  "pattern matches with `pgrep -af <pattern>` before killing anything: every " +
+  "agent running beside you carries these very instructions on its command line, " +
+  "so any literal string that appears here matches all of them as well as you. " +
+  "And never match on `next-server`, `next dev` or `node`: this server's process " +
+  "title is `next-server`, which is also the title your own dev server takes, so " +
+  "a match on it cannot tell the two apart.";
 
 export function buildArgs(opts: {
   prompt: string;

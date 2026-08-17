@@ -1681,6 +1681,18 @@ describe("buildArgs", () => {
         assert.match(said, /next-server/, "must name the collision");
         assert.match(said, /pgrep -P/, "must give the child-process form");
         assert.match(said, /pid=\$!/, "must give the recipe, not just the ban");
+        // This string reaches the argv of *every* concurrent agent, so a literal
+        // in it is a pattern that matches all of them. The worked example used
+        // to be `pgrep -f 3100`, and twice — 2026-08-15 23:39:42 and 2026-08-16
+        // 14:23:38 — a run following it SIGTERM'd a sibling in another
+        // repository that had no such port and had never mentioned the number.
+        // Any run of digits here is the same trap under a different number.
+        assert.doesNotMatch(
+          said,
+          /\d\d+/,
+          "no multi-digit literal: it is on every sibling's command line",
+        );
+        assert.match(said, /pgrep -af/, "must say to look before killing");
       });
     }
   }
