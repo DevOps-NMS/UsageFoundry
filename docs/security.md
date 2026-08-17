@@ -28,6 +28,23 @@ app's defences are file modes that said nothing while they were:
 - the MCP capability file is written `0600`, which excludes nobody when the
   reader owns it.
 
+The chat and a workflow's orchestrator block take that same uid and a
+**different group**, `UF_CHAT_GID` (65533 in the shipped image, as `ufchat`).
+That group owns the per-turn MCP capability file — `0710` on its directory and
+`0040` on the file — so a work-cycle agent that knows the exact path fails the
+owner check, fails the group check, and is left with the "other" bits, which are
+zero. It is a group rather than a second uid because the chat child has to stay
+the uid that owns the mounted `~/.claude`: that credential is what it
+authenticates and bills with, and a second uid would need a second Claude
+account. The server refuses to boot when `UF_CHAT_GID` equals the gid the agents
+run as, since the file would then be handed to the group it is kept from.
+
+One visible consequence: files a chat turn writes — its own transcript under the
+mounted `~/.claude`, anything it touches in a checkout — carry that group, so
+`ls -l` on the host shows `65533` where a group name usually is. Nothing reads
+them by group. Every one is still owned by your uid, which is what both the
+other agents and the CLI's own 0600 credential file go through.
+
 It has to be this way round. The child must be the uid that owns the bind
 mounts, because an isolated run is *ordered* to commit and its commits land in
 your own `<repo>/.git`; and the server must be able to read
@@ -45,6 +62,15 @@ docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
 
 docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
   'test -w /data/usagefoundry.db && echo BAD-writable || echo ok'
+
+# and, with a run working and a chat turn sent at the same time — the config
+# a live turn is using, found the way an agent would find it
+docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
+  'for p in $(pgrep -x claude); do
+     tr "\0" "\n" < /proc/$p/cmdline | grep -A1 -x -- --mcp-config | tail -1
+   done | while read -r cfg; do
+     [ -n "$cfg" ] && { [ -r "$cfg" ] && echo BAD-readable || echo ok; }
+   done'
 ```
 
 **Switching it off is possible and silent by nature**, so the server says which
@@ -97,16 +123,19 @@ read — reaches something that is not this run's business.
   without it. An unattended agent can use everything that token can, which is
   why the advice to scope it to the repositories you actually run agents against
   is in `.env.example` rather than here.
-- **A concurrent chat turn's MCP capability, if it can find the path.** The
-  config file carrying it is no longer in `/tmp` — it is 0600 in a 0700 per-turn
-  directory under a base the server owns and nothing else can list, and both go
-  when the turn ends. But `--mcp-config <path>` is on the child's command line
-  and `/proc/<pid>/cmdline` is world-readable, so an agent that catches a turn
-  in flight can still read a capability it did not mint. That closes when a chat
-  turn runs as a different uid from a work cycle, which needs a second Claude
-  credential a subscription install does not have. What it opens is bounded by
-  its subject and dies with the turn: read-mostly tools for a `chat`, and
-  `emit_runs` — inside the block's own folder and fan-out cap — for a `block`.
+- **What a stolen capability would open, if one could be stolen.** This is the
+  one in this list that is now closed rather than sized, and it is here because
+  the shape of it matters: the config file is no longer in `/tmp`, and it is no
+  longer owned by the uid that would read it. An agent that catches a turn in
+  flight can still find the path — `--mcp-config <path>` is on the child's
+  command line and `/proc/<pid>/cmdline` is world-readable — and opening it
+  fails on the group. Clearing `UF_CHAT_GID`, or running without privilege
+  separation at all, puts this back: the boot log says which arrangement you are
+  in. What a capability opens is bounded by its subject and dies with the turn —
+  read-mostly tools for a `chat`, and `emit_runs`, inside the block's own folder
+  and fan-out cap, for a `block` — and `get_run_diff` is scoped to the caller's
+  own runs, so neither reaches the patch of a run in a repository it was not
+  working in.
 
 There is one thing the split *does* close that reads similarly and is worth not
 confusing with the above: an agent can no longer read the **server's**

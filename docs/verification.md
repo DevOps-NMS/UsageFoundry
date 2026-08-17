@@ -661,7 +661,8 @@ through before trusting this unattended:
 - **The whole privilege split, which is every part of it that matters.** The
   server now runs as root and drops each child to `UF_AGENT_UID`; `/data` is
   root-owned 0700 and reclaimed by an entrypoint; the MCP capability leaves
-  `/tmp`; the telemetry exporter carries a per-run capability instead of
+  `/tmp` and is owned by `UF_CHAT_GID`, a group only the chat and block child
+  is in; the telemetry exporter carries a per-run capability instead of
   `UF_AUTH_TOKEN`. `npm run typecheck` and `npm test` pass, the decision
   (`resolveChildCredentials`), the compose/Dockerfile pair, the capability file
   and `telemetryEnv` are all unit-tested, and **no container has been built or
@@ -673,7 +674,8 @@ through before trusting this unattended:
   ```sh
   docker compose up --build -d
   docker compose logs usagefoundry | grep 'privilege separation'
-  # expect "on: children run as 1000:1000, server as 0"
+  # expect "on: children run as 1000:1000, chat and block turns as 1000:65533,
+  # server as 0" — a line naming no chat gid is the capability boundary absent
 
   # #79 — the server's environment
   docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
@@ -690,6 +692,23 @@ through before trusting this unattended:
   docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c \
     'ls /tmp/uf-mcp-* 2>/dev/null; ls /run/uf-mcp 2>/dev/null; echo "exit=$?"'
   # expect nothing from the first and a permission error from the second
+
+  # #87 — and the read itself, which the group is what refuses. Prints modes
+  # and a byte count only: the file carries a live bearer token.
+  docker compose exec --user "${UF_UID:-1000}" usagefoundry sh -c '
+    for p in $(ls /proc | grep "^[0-9][0-9]*$"); do
+      cfg=$(tr "\0" "\n" < /proc/$p/cmdline 2>/dev/null |
+            grep -A1 -x -- --mcp-config | tail -1)
+      case "$cfg" in /run/uf-mcp/*)
+        echo "pid $p -> $cfg"
+        if [ -r "$cfg" ]; then echo "BAD-readable, $(wc -c < "$cfg") bytes"
+        else echo "ok: not readable"; fi ;;
+      esac
+    done'
+  # expect "ok: not readable", and `ls -ldn` of the directory to show group
+  # 65533 rather than the agents' gid. A run that finds no --mcp-config argv at
+  # all has proved nothing: the window is one turn, so send the chat message
+  # first and probe while it is still working.
 
   # #83 — with UF_AUTH_TOKEN set and a run under live enforcement
   #   task the agent with:  env | grep OTEL_EXPORTER_OTLP_HEADERS
@@ -711,11 +730,19 @@ through before trusting this unattended:
   `UF_AGENT_UID`/`UF_AGENT_GID` cleared, which is the previous behaviour whole
   and which the app detects and reports at boot.
 
-  Two things are known-not-closed rather than unverified, and are in
+  One thing is known-not-closed rather than unverified, and is in
   `docs/security.md` rather than here: an agent can still read
-  `~/.claude/.credentials.json` (it is what a work cycle bills against), and a
-  sibling agent can still read a live MCP capability's path out of
-  `/proc/<pid>/cmdline`. Both need a second Claude credential to close.
+  `~/.claude/.credentials.json`, because it is what a work cycle bills against,
+  and only a per-run credential Claude Code does not have would close it.
+
+  The MCP capability *path* is still readable out of `/proc/<pid>/cmdline` and
+  always will be — what changed is that the file it names is owned by
+  `UF_CHAT_GID` and mode 0040, so the path leads somewhere the reader cannot
+  open. That is a group check rather than a second Claude credential, and it is
+  unit-tested at `chat.test.ts` ("hands the config to a group…") and
+  `privsep.test.ts` (`resolveChatGid`) — but a unit test in one process has one
+  uid and **cannot observe the refusal**, which is why the probe above exists and
+  why this bullet is on this list rather than in the verified section.
 
   One thing that is *not* on this list and used to be: `npm run build` failing
   on a clean tree with `TypeError: generate is not a function`. That is the
@@ -1523,7 +1550,9 @@ through before trusting this unattended:
   `docker` binary, no `/var/run/docker.sock`, `apt-get` needs a root this had
   not got, and `unshare --user` answers `Operation not permitted` — so the
   image was never built, the container never started, and no `bwrap` has ever
-  run. Every command below is for a human and **none of them has been run**:
+  run. Every command below is for a human and **none of them has been run**; the
+  entry below on the CLI's own sandbox carries `scripts/sandbox-probe/`, which
+  runs the sketch's questions 0-8 outside this app's own wiring:
 
   ```sh
   # 0. are the two apt packages installable in this image at all? Dockerfile:92
@@ -1871,6 +1900,51 @@ through before trusting this unattended:
   close a hole nobody has shown is open. `policy-limits.json` was not traced at
   all. Both are worth an hour against a live binary before anyone calls the
   policy surface closed.
+- **The CLI's own sandbox — every claim about it, none of them executed.**
+  `proposals/Sandboxing/02x-option-cli-sandbox.md` establishes that the pinned
+  CLI (2.1.226) implements a bubblewrap sandbox configured by `sandbox.*`
+  settings keys, and `08-recommendation.md` recommends adopting it. All of that
+  was read out of the binary's strings with `strings`, and **not one line of it
+  has been run** — several runs have now written about the mechanism without
+  starting one, every one of them in an environment with no Docker, no root and a
+  seccomp profile that refuses `unshare --user` outright, which is the first
+  thing that would have to change. No stock install enables a sandbox either:
+  `UF_SANDBOX=1` is opt-in and off unless the operator sets it. What depends on
+  these answers is the wiring in the entries above, none of which has ever met a
+  running sandbox, and whatever gets built after that.
+
+  The harness is `scripts/sandbox-probe/` — a throwaway image on the same base
+  and the same CLI pin, a seccomp profile that is Docker's default plus user
+  namespaces, and one script that runs questions 0-8 of
+  `proposals/Sandboxing/09-implementation-sketch.md:134`-`200` and prints one
+  transcribable line each. `scripts/sandbox-probe/RUNBOOK.md` is the ordered
+  list of what to run, on which machine, and what each answer decides; steps 4
+  and 5 are billed. Its own answer logic is exercised against stubs by
+  `scripts/sandbox-probe/probe.test.sh` (37 assertions, no Docker and no
+  money) — which measures the harness and says nothing about the CLI.
+
+  **Nothing below has been measured.** Fill it in from the script's last block,
+  and record the CLI, bubblewrap and kernel versions it prints with it:
+
+  | Question | Answer | Recorded |
+  |---|---|---|
+  | Q0 — are `bubblewrap` and `socat` installable in this image? | *(unmeasured)* | |
+  | Q1 — does bubblewrap start under the relaxed profile? | *(unmeasured)* | |
+  | Q2 — does the CLI refuse to start when it cannot sandbox? | *(unmeasured)* | |
+  | Q3 — is the sandbox around the session or only around Bash? | *(unmeasured)* | |
+  | Q4 — does a credentials deny entry stop a shell reading the token? | *(unmeasured)* | |
+  | Q5 — does a user-settings write widen a managed policy? | *(unmeasured)* | |
+  | Q6 — what does one sandboxed command cost in tasks? | *(unmeasured)* | |
+  | Q7 — does the CLI's sandbox unshare PID? | *(unmeasured)* | |
+  | Q8a — which bubblewrap, and does it carry `--tmp-overlay`? | *(unmeasured)* | |
+  | Q8b — does `--unshare-pid` plus `--tmp-overlay` work here? | *(unmeasured)* | |
+  | Q8c — does one bubblewrap start inside another? | *(unmeasured)* | |
+  | Q8d — does the CLI's own bubblewrap start inside one we started? | *(unmeasured)* | |
+
+  Q3 and Q8d are the two that decide the shape rather than refine it: together
+  they say whether the vendor's sandbox stands alone, is replaced by a wrapper
+  this app puts around the whole `claude` process, or composes with one. The
+  others each move a phase of the plan; RUNBOOK.md's table says which.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

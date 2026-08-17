@@ -19,7 +19,14 @@ import { chatGuards, getSettings, type RunGuards } from "./settings";
 import { assistRefusal } from "./review";
 import { dataDirRefusal } from "./serverLock";
 import { installBudgetRefusal } from "./installBudget";
-import { childCredentials, chownForChild, privilegeSeparated } from "./privsep";
+import {
+  chatChildCredentials,
+  chownForChild,
+  chownToGroup,
+  mcpConfigOwnership,
+  privilegeSeparated,
+  type McpConfigOwnership,
+} from "./privsep";
 import {
   createRun,
   dependencyCycle,
@@ -349,6 +356,33 @@ export function getProposal(id: string): ChatProposalRow | null {
 
 export function pendingProposals(chatId: string): ChatProposalRow[] {
   return listProposals(chatId).filter((p) => p.status === "pending");
+}
+
+/**
+ * Did this conversation start that run?
+ *
+ * What `/api/mcp` scopes `get_run_diff` by. A capability token *is* the caller's
+ * identity, so nothing here can tell a chat's own turn from a work-cycle agent
+ * that read the token out of a sibling's config file — which means the only
+ * thing that bounds a stolen one is what its subject may ask for. Patch text is
+ * the expensive answer: a work cycle is confined to the folder it was started
+ * in (only `runOrchestratorChild` passes `--add-dir` for every mount), so an
+ * unscoped `get_run_diff` was the source of every repository this install has
+ * run against, reachable from a run that could not otherwise read any of them.
+ *
+ * Scoped to the runs this thread proposed rather than to the runs it *knows
+ * about*: `list_runs` and `get_run` stay install-wide on purpose, because
+ * "what is already in flight" is the question the orchestrator exists to answer
+ * and a file list is not a patch.
+ */
+export function chatOwnsRun(chatId: string, runId: string): boolean {
+  return (
+    db()
+      .prepare(
+        "SELECT 1 FROM chat_proposals WHERE chat_id = ? AND run_id = ? LIMIT 1",
+      )
+      .get(chatId, runId) !== undefined
+  );
 }
 
 export interface ProposalInput {
@@ -1668,7 +1702,10 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
       // Dropped like every other child, and this is the one that most needs it:
       // it runs `bypassPermissions` with no allowlist, so the only thing between
       // it and the server's own files is that it is not the server's uid.
-      ...childCredentials(),
+      //
+      // The agents' uid and *not* their gid: the group is what carries this
+      // turn's capability file, which every other child is kept out of.
+      ...chatChildCredentials(),
       stdio: ["ignore", "pipe", "pipe"],
       detached: settings.killProcessGroup && process.platform !== "win32",
     });
@@ -2233,26 +2270,47 @@ function mcpConfigBase(): string {
  * as the turn lasts. The file is written 0600, in a per-turn directory of its
  * own, and both are removed when the turn ends.
  *
- * The directory is the part that is new, and 0600 is the part that started
- * meaning something. Both are bounded by the fact that every child in this app
- * shares one uid: the chat's own turn has to be able to *read* this file, so it
- * has to be owned by the uid the agents run as, so a work-cycle agent that
- * reads the path out of `/proc/<pid>/cmdline` can still open it. What is closed
- * is the enumeration route — the directory does not list, and there is nothing
- * of ours left in `/tmp`. Closing the rest needs the chat's child to be a
- * different uid from a work cycle's, which needs a second Claude credential
- * that install does not have; `docs/security.md` says so rather than implying
- * this is airtight.
+ * **Who owns it is what decides, and the owner is a group.** The directory and
+ * the file were 0700/0600 owned by the agents' uid, which excluded nobody: this
+ * turn's child has to *read* the file, every child in this app is one uid, and
+ * `--mcp-config <path>` is an argv element that `/proc/<pid>/cmdline` publishes
+ * to every process on the box. A work-cycle agent read the path off a sibling's
+ * command line and opened a file its own uid owned. Moving out of `/tmp` closed
+ * the enumeration route and only that.
+ *
+ * So under `UF_CHAT_GID` both are handed to a group that the chat and block
+ * child is in and no work cycle is — 0710 on the directory (traverse by group,
+ * and no listing for anyone) and 0040 on the file. A work-cycle agent that knows
+ * the exact path now fails the owner check, fails the group check, and is left
+ * with the "other" bits, which are zero. See `privsep.ts` for why this is a gid
+ * rather than a second uid.
+ *
+ * Without that group — `UF_CHAT_GID` cleared, or no privilege separation at all
+ * — this falls back to the previous arrangement whole rather than half-applying
+ * it, because a config the child cannot read is a turn with no tools, which
+ * reads as a model that chose not to call any.
+ *
+ * @param ownership defaulted from `privsep.ts`; a parameter so the modes can be
+ *   tested without a second uid, which a unit test in this process cannot have.
  */
-export function writeMcpConfig(token: string): string {
+export function writeMcpConfig(
+  token: string,
+  ownership: McpConfigOwnership | null = mcpConfigOwnership(),
+): string {
   const dir = path.join(
     mcpConfigBase(),
     `uf-mcp-${randomBytes(9).toString("hex")}`,
   );
   const file = path.join(dir, "config.json");
+  const dirMode = ownership?.dirMode ?? 0o700;
+  const fileMode = ownership?.fileMode ?? 0o600;
   try {
-    fs.mkdirSync(dir, { recursive: false, mode: 0o700 });
-    fs.chmodSync(dir, 0o700);
+    fs.mkdirSync(dir, { recursive: false, mode: dirMode });
+    // `mkdir` masks the mode through the umask, and `writeFile`'s does the same,
+    // so both are set afterwards rather than requested — 0710 under the image's
+    // 0022 umask would otherwise arrive as 0710 by luck and 0700 under any
+    // umask an operator changed.
+    fs.chmodSync(dir, dirMode);
     fs.writeFileSync(
       file,
       JSON.stringify({
@@ -2264,13 +2322,19 @@ export function writeMcpConfig(token: string): string {
           },
         },
       }),
-      { mode: 0o600 },
+      { mode: fileMode },
     );
+    fs.chmodSync(file, fileMode);
     // Written by the server, read by the child, and they are no longer the same
     // uid. Both halves: a directory the child cannot enter is a turn with no
     // tools at all, which reads as a model that chose not to call any.
-    chownForChild(dir);
-    chownForChild(file);
+    if (ownership) {
+      chownToGroup(dir, ownership.gid);
+      chownToGroup(file, ownership.gid);
+    } else {
+      chownForChild(dir);
+      chownForChild(file);
+    }
   } catch (err) {
     // A write that fails part-way — ENOSPC, the likeliest of these — leaves the
     // file behind with whatever reached the disk, and what it carries is the

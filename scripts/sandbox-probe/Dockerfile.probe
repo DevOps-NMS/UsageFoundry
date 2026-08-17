@@ -1,0 +1,133 @@
+# syntax=docker/dockerfile:1
+
+# ---------------------------------------------------------------------------
+# The throwaway image behind scripts/sandbox-probe/RUNBOOK.md.
+#
+# Nothing here ships. `docker-compose.yml` does not know it exists, the real
+# `Dockerfile` is untouched, and no sandbox is enabled anywhere by building it.
+# It exists so one person can execute the nine questions in
+# `proposals/Sandboxing/09-implementation-sketch.md:134`-`200` once, against the
+# CLI this repository actually pins, and write the answers down.
+#
+# Derived from `Dockerfile` rather than copied from it: same base
+# (`node:22-bookworm-slim`, `Dockerfile:40`), same CLI pin
+# (`Dockerfile:194`-`195`), same `HOME` and `CLAUDE_CONFIG_DIR`. What is
+# deliberately left out is the 250 MB compiler, Go, `gh`, `tini`, `sqlite3` and
+# the application itself — none of which a bubblewrap namespace, a seccomp
+# profile or a `sandbox.*` settings key can see. If a question's answer here
+# would differ in the shipped image, that is a defect in this file; the two that
+# come closest are called out where they arise:
+#
+#   - the shipped image runs the server as root and drops children to
+#     `UF_AGENT_UID` (`src/lib/privsep.ts`); this one runs everything as root,
+#     which is what lets the probe write `/etc/claude-code` and run `apt-get`.
+#     Question 5 is the one to re-read with that in mind — it asks whether a
+#     *user settings* file widens a managed policy, and in the shipped image
+#     that file is written by the dropped uid rather than by root.
+#   - the shipped image has no apt lists (`Dockerfile:92` ends its install with
+#     `rm -rf /var/lib/apt/lists/*`, which is right for a 250 MB image and is
+#     exactly why question 0 cannot be answered from inside it). This one keeps
+#     them, so `apt-cache policy bubblewrap socat` has something to read.
+#
+# Build both targets — question 2 needs the one *without* bubblewrap, and a
+# missing `bwrap` is the whole point of it:
+#
+#   docker build -f scripts/sandbox-probe/Dockerfile.probe \
+#     --target probe-nobwrap -t usagefoundry:probe-nobwrap scripts/sandbox-probe
+#   docker build -f scripts/sandbox-probe/Dockerfile.probe \
+#     --target probe -t usagefoundry:probe scripts/sandbox-probe
+#
+# The build context is `scripts/sandbox-probe` and not the repository root: the
+# only thing copied in is the probe script beside this file.
+# ---------------------------------------------------------------------------
+
+FROM node:22-bookworm-slim AS base
+
+ENV HOME=/home/node \
+    CLAUDE_HOME=/home/node/.claude \
+    CLAUDE_CONFIG_DIR=/home/node/.claude \
+    NODE_ENV=production \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+# The subset of `Dockerfile:88`-`92` the questions can actually reach.
+#
+#   git, ca-certificates, curl  — a scratch repository, outbound TLS, and one
+#                                 command inside a sandboxed shell that opens a
+#                                 connection (question 6).
+#   procps                      — `ps` for counting `bwrap` and `socat` (6), and
+#                                 a sibling process to signal (7).
+#   ripgrep, less               — what a work cycle reaches for, so a tool call
+#                                 in questions 3-5 fails on the policy rather
+#                                 than on a missing binary.
+#
+# No `rm -rf /var/lib/apt/lists/*`, unlike the real image: see the note above.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates curl procps less
+
+# Same pin as `Dockerfile:194`, and it has to stay the same one. Every claim in
+# `proposals/Sandboxing/02x-option-cli-sandbox.md` was read out of *this* build's
+# strings, so a probe run against a different CLI measures a different program
+# and answers a different question. The build prints the version it got.
+ARG CLAUDE_CLI_VERSION=2.1.226
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" \
+ && npm cache clean --force \
+ && claude --version
+
+# Where the billed questions keep their throwaway `CLAUDE_CONFIG_DIR`. It is a
+# directory in the image rather than one the script creates so that the
+# operator's real `~/.claude/.credentials.json` can be bind-mounted *into* it
+# read-only: the probe then authenticates as the operator without the script
+# ever opening that file, which is the rule question 4 is written under.
+RUN mkdir -p /probe-home/.claude
+
+COPY probe.sh /probe/probe.sh
+RUN chmod 0755 /probe/probe.sh
+
+# ---------------------------------------------------------------------------
+# probe-nobwrap — question 2 only: does the CLI refuse to start when it cannot
+# sandbox? An image that *has* bubblewrap cannot answer that, and the probe
+# script refuses to try (it reads the marker below and says which image to use).
+# ---------------------------------------------------------------------------
+FROM base AS probe-nobwrap
+RUN echo probe-nobwrap > /etc/uf-sandbox-probe
+ENTRYPOINT ["/probe/probe.sh"]
+
+# ---------------------------------------------------------------------------
+# probe — everything else. Three dependencies, not one
+# (`02x-option-cli-sandbox.md:49`-`57`): the binary makes a missing `bwrap` or a
+# missing `socat` an error and a missing seccomp applier only a *warning*, which
+# is the piece that decides whether the network boundary is real or advisory.
+# ---------------------------------------------------------------------------
+FROM base AS probe
+
+# From Debian bookworm, which is what question 0 is asking about. Unpinned on
+# purpose: what the probe reports is whichever version the suite offers, since
+# that is what a change to `Dockerfile:88`-`92` would get.
+RUN apt-get install -y --no-install-recommends bubblewrap socat \
+ && bwrap --version \
+ && socat -V | head -1
+
+# The seccomp applier. Pinned because it is a second vendor contract on top of
+# the CLI pin and this image exists to measure one build of the pair. It ships
+# prebuilt `apply-seccomp` binaries per architecture — after a global install
+# they are at
+#   /usr/local/lib/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/<arm64|x64>/apply-seccomp
+# which is the path `sandbox.seccomp.applyPath` would name if the CLI does not
+# find them itself. The build asserts one exists for this architecture rather
+# than leaving question 6 to discover it.
+ARG SANDBOX_RUNTIME_VERSION=0.0.73
+RUN set -eux; \
+    npm install -g "@anthropic-ai/sandbox-runtime@${SANDBOX_RUNTIME_VERSION}"; \
+    npm cache clean --force; \
+    vendor=/usr/local/lib/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp; \
+    case "$(dpkg --print-architecture)" in \
+      arm64) apply="$vendor/arm64/apply-seccomp" ;; \
+      amd64) apply="$vendor/x64/apply-seccomp" ;; \
+      *) echo "no apply-seccomp for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    if [ ! -x "$apply" ]; then echo "sandbox-runtime shipped no apply-seccomp at $apply" >&2; exit 1; fi; \
+    echo "$apply" > /etc/uf-apply-seccomp-path
+
+RUN echo probe > /etc/uf-sandbox-probe
+ENTRYPOINT ["/probe/probe.sh"]

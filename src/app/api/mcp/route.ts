@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import {
   appendMessage,
+  chatOwnsRun,
   createProposal,
   listProposals,
   MAX_PENDING_PROPOSALS,
@@ -14,6 +15,7 @@ import {
   currentKnowledge,
   emitBlockRuns,
   folderRefusal,
+  instanceOwnsRun,
   lastRunAt,
   listWorkflows,
   liveBlocksOf,
@@ -190,7 +192,11 @@ const SHARED_TOOLS = [
     name: "get_run_diff",
     description:
       "The patch a run produced, truncated at a file boundary if it is large " +
-      "— the file list is always complete and the omitted files are named.",
+      "— the file list is always complete and the omitted files are named. " +
+      "Available for your own runs: in a chat, the runs this conversation " +
+      "proposed; in a workflow block, the runs of this instance. For any other " +
+      "run, get_run reports what it changed as a file summary, and you can read " +
+      "its folder directly.",
     inputSchema: {
       type: "object",
       properties: {
@@ -896,7 +902,7 @@ async function callTool(
       return getRunDetail(args);
 
     case "get_run_diff":
-      return getRunPatch(args);
+      return getRunPatch(args, subject);
 
     case "get_usage":
       return usageReport();
@@ -1048,10 +1054,39 @@ function clip(s: string, max = 600): string {
     : `${s.slice(0, max)}… [${s.length - max} more characters]`;
 }
 
-/** The patch, bounded — and saying so when it is, for `diffAsText`'s reason. */
-async function getRunPatch(args: Record<string, unknown>) {
+/**
+ * The patch, bounded — and saying so when it is, for `diffAsText`'s reason.
+ *
+ * Scoped to the caller's own runs, which is the one tool here that is. The
+ * refusal names what to do instead rather than stopping at "no": a chat and a
+ * block both have `--add-dir` on every mount, so the legitimate caller can read
+ * the checkout itself, and a model told only that it may not is one that stops
+ * looking. What the scope removes is the *stolen* token's reach — a work-cycle
+ * agent is confined to the folder it was started in, and this was the one tool
+ * that handed it source from every other repository. See `chatOwnsRun`.
+ */
+async function getRunPatch(
+  args: Record<string, unknown>,
+  subject: CapabilitySubject,
+) {
   const runId = String(args.runId ?? "").trim();
   if (!getRun(runId)) return text(`No run with id "${runId}". Call list_runs.`, true);
+
+  const mine =
+    subject.kind === "chat"
+      ? chatOwnsRun(subject.chatId, runId)
+      : instanceOwnsRun(subject.instanceId, runId);
+  if (!mine) {
+    return text(
+      `The patch for run ${runId} is not available here: ${
+        subject.kind === "chat"
+          ? "this conversation did not start that run"
+          : "that run is not part of this workflow instance"
+      }. get_run still reports its status, its spend, its log and the files it ` +
+        "changed, and its folder is one you can read directly.",
+      true,
+    );
+  }
 
   const diff = await runDiff(runId);
   if (diff.files.length === 0) {

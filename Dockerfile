@@ -298,6 +298,27 @@ RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.cl
  && chown root:root /data \
  && chmod 0700 /data
 
+# The group a chat or orchestrator-block turn runs in, and no work cycle does.
+#
+# It carries the per-turn MCP capability file, which is 0710/0040 owned by this
+# group — the whole of what keeps one of twenty-five concurrent agents from
+# reading a live capability off a sibling's `/proc/<pid>/cmdline` and speaking to
+# /api/mcp as the chat. `src/lib/privsep.ts` argues out why this is a gid and not
+# a second uid: the chat child must stay the uid that owns the mounted
+# `~/.claude`, because that credential is what it authenticates and bills with.
+#
+# 65533 rather than 1001, and the distance is the point: compose defaults
+# `UF_CHAT_GID` to this, and the app *refuses to boot* when it equals the gid the
+# agents run as, since the mode pair would then grant exactly what it refuses.
+# A number just above the operator's own is one an operator plausibly has;
+# 65533 is below `nogroup` and free on this base image.
+#
+# Only the numeric gid decides anything — the kernel never reads /etc/group for
+# a permission check, and both `spawn` and `chown` here are given numbers. The
+# entry exists so `ls -l` inside the container names it, and so this default has
+# one place it is written down rather than two.
+RUN groupadd -g 65533 ufchat
+
 # No `USER node`. The server runs as root and drops every child it spawns to
 # `UF_AGENT_UID`/`UF_AGENT_GID` — see `src/lib/privsep.ts`, which argues out why
 # the split has to be this way round rather than the other. In one sentence: the
