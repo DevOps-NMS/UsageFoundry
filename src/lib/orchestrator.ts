@@ -5724,12 +5724,31 @@ function handleStreamLine(
   }
 
   if (type === "system") {
-    emit({
-      runId,
-      ts: Date.now(),
-      kind: "log",
-      payload: { message: `system:${ev.subtype ?? ""}`, raw: ev },
-    });
+    // Dropped by name, and only this one. The CLI emits `thinking_tokens`
+    // several times per assistant turn carrying `{estimated_tokens,
+    // estimated_tokens_delta, uuid, session_id}` and nothing else — no text, no
+    // decision, nothing any reader of this log could act on — and `describeEvent`
+    // drops every `system:` line from the feed anyway, so each one was a
+    // synchronous SQLite insert and a bus publish for a row nothing would ever
+    // read. Measured on this install: 72,307 of 113,073 `run_events` rows (64%)
+    // and 16.4 MB of 47 MB of payload in eight days, against 2,898 for the next
+    // largest `system` subtype. `eventRetentionDays` is 30, so the steady state
+    // is roughly four times that.
+    //
+    // By name rather than by a shape test, and one subtype rather than a
+    // category, because the rest of them do carry information — `init` holds the
+    // tool list and the session id, `hook_response` is read four lines below,
+    // and `task_progress` is three orders of magnitude rarer. A rule broad
+    // enough to cover a future content-free subtype would be broad enough to
+    // lose those, silently, the way a deny list fails open.
+    if (ev.subtype !== "thinking_tokens") {
+      emit({
+        runId,
+        ts: Date.now(),
+        kind: "log",
+        payload: { message: `system:${ev.subtype ?? ""}`, raw: ev },
+      });
+    }
 
     // A hook that wrote into the session's context, said in words.
     //
