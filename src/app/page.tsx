@@ -933,9 +933,16 @@ export default function Dashboard() {
             </ListValue>
           </ListRow>
 
+          {/* The second clause used to read "which is why the dollar figures
+              track work and the token counts do not", and this install's own
+              telemetry says otherwise: across a week of run cycles, cache reads
+              were 60% of the *bill* as well as 96% of the tokens, with the
+              1-hour cache write another 26% and generated output 14%. Cheap per
+              token is not the same as small, and a reader told the dollars track
+              work will look for the expensive run rather than the long one. */}
           <ListRow
             label="Cache reads"
-            description="Share of all tokens, billed at 0.1× — which is why the dollar figures track work and the token counts do not"
+            description="Share of all tokens, billed at 0.1× — cheap each, and still the largest share of the bill once conversations run long"
           >
             <ListValue>{fmtPct(cacheShare)}</ListValue>
           </ListRow>
