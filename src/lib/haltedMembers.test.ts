@@ -306,6 +306,8 @@ function node(id: string, kind: WorkflowNode["kind"]): WorkflowNode {
     fanOut: kind === "orchestrator" ? 2 : null,
     mergeStrategy: null,
     mergeAutoResolve: false,
+    maxPasses: null,
+    maxLoopCostUSD: null,
   };
 }
 

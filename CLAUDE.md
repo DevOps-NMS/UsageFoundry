@@ -92,6 +92,9 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - Instantiation is topological, one synchronous pass, all or nothing. Half a graph is not a smaller workflow.
   - A node holds no permission mode, no budget and no model — guards come from its template.
   - An orchestrator block's `fanOut` is not nullable, and a workflow whose instance budget sets nothing cannot be scheduled.
+  - A loop block unrolls: every pass is a fresh run continuing the last one's branch, and `run_deps` never learns a loop exists.
+  - `planLoopPass` stops on `runs.reported_done`, never on `completed` — a used-up cycle cap writes that too. `maxPasses` is not nullable.
+  - `looping` is live everywhere `thinking` is, and settled nowhere.
   - An instance's status is four parts derived: `started` means something is live, never "not halted". Act on `instanceIsOpen`, never on `status === "started"`.
 
 - **`review.ts`, `git.ts`, `diff.ts`, `patch.ts`** → `docs/agent/git-and-review.md`

@@ -126,6 +126,8 @@ function runBlockGraph(kind: "run" | "orchestrator") {
         fanOut: kind === "orchestrator" ? 2 : null,
         mergeStrategy: null,
         mergeAutoResolve: false,
+        maxPasses: null,
+        maxLoopCostUSD: null,
       },
     ],
     edges: [],

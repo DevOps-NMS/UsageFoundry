@@ -161,6 +161,73 @@ end of a branch hand-over. And it needs at least one block in front of it that
 runs something whose guards isolate — both refused when you save the graph, not
 discovered an hour in.
 
+## A block that repeats itself
+
+Some work does not fit in one run. "Work through the failing tests until they
+pass" is a real task and an agent given one work cycle for it stops half way,
+`completed`, with the job undone. A **loop block** is the fourth kind: it holds
+one task and runs it again and again, one whole run per **pass**, each pass
+carrying on the branch the last one built.
+
+> A pass is not a work cycle. A work cycle is one invocation of Claude Code
+> inside a run; a pass is a whole run, with its own work cycles, its own guards
+> and its own spend. The interface never uses one word for the other, and
+> neither should you when reading a bill.
+
+**It unrolls; it does not loop.** The obvious implementation is an edge pointing
+backwards — pass 2 depends on the loop block, which depends on pass 1 — and that
+edge is refused by this tool at admission, deliberately. A run whose
+dependencies form a loop is never released and never terminated: it sits
+`waiting` for ever, holding a prompt you believe is queued. So each pass is a
+*fresh run* that depends on the previous pass's, the run graph stays acyclic,
+and every rule written against it — folder claims, releasing, landing, *Stop
+all* — applies to a pass with nothing new bolted on.
+
+**It stops on four things, and the first is what the agent said.**
+
+| It stops when | Because |
+|---|---|
+| The last pass's agent replied `DONE` | The work is finished, which is the ending you want. Read from what the agent actually said, never from the run's status — `completed` is also what a run that merely used up its work-cycle limit is written as, and that limit defaults to 1, so a loop keyed on the status would stop after every first pass |
+| A pass did not complete | A loop is not a retry mechanism. Connection blips and provider refusals are already retried and waited out *inside* one run, so a fault that got past those is one the next pass would meet too |
+| The pass cap is reached | The number you agreed to when you saved the graph |
+| The spending limit across passes is reached | Optional; blank means the pass cap is the only bound |
+
+A pass that somehow started no run at all stops it too, with a reason — because
+the next one would be created the same way and fail the same way, one billed
+attempt at a time.
+
+There is deliberately **no shell predicate** — no "repeat until `npm test`
+exits 0". Running one would be a fifth kind of child process in a tool that has
+exactly four and treats adding one as a decision rather than a detail. Ask the
+agent to reply `DONE` when the tests pass; that is the same test, run by
+something that is already there.
+
+**The pass cap is required**, for the reason a run needs either a work-cycle
+limit or a time limit: a loop decides for itself whether to start another billed
+run, and without a number that only goes up there is nothing that has to end. A
+graph with a loop block and no cap cannot be saved.
+
+**Neither cap is a guard.** Every pass takes its budget, permission mode,
+work-cycle limit and isolation from the block's template — or from the
+untemplated guard set in Settings — exactly as every other kind of block does.
+The two numbers on a loop bound how many times it *repeats*; they can only ever
+end it earlier, they can never raise what a pass may spend, and the
+workflow-wide limits below still apply on top of them.
+
+**One branch, all the passes.** Pass 2 carries on pass 1's branch through the
+same mechanism a *carry on its branch* link uses, so the whole loop is one chain
+on one ref: one *Land* button, owned by the last pass, and one row in the
+branches table. A block set to start after a loop starts after its **last** pass
+and can carry that branch on. While a loop is still repeating, landing,
+deleting or purging its branch — and paying for a conflict resolution on it — is
+refused by name: the run that will commit to it next has not been created yet,
+so nothing else would notice.
+
+The next pass is created only once the previous one has settled, which means
+that between two passes there is briefly nothing running. That is intended: the
+exit conditions are facts about the pass that just ended, and a pass created
+before them would have to be withdrawn.
+
 ## Limits for the whole workflow
 
 A block's guards bound one block. Ten blocks under a $5 block limit is a $50

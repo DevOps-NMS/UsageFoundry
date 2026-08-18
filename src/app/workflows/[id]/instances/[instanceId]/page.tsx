@@ -35,37 +35,44 @@ const CAUSE_LABEL: Record<"operator" | "guard" | "fleet", string> = {
 };
 
 type BlockStatus = WorkflowInstanceDTO["blocks"][number]["status"];
+type BlockKind = WorkflowInstanceDTO["blocks"][number]["kind"];
 
 /**
  * What a block's status is called on the page.
  *
  * `emitted` is deliberately not "completed": a block that decided there was
  * nothing to start is emitted with zero runs, and the row beside this says how
- * many — so the word has to leave room for none rather than imply work.
+ * many — so the word has to leave room for none rather than imply work. It is
+ * also the status a loop settles in, where the same reasoning gives a different
+ * word: "repeated" leaves room for a loop that took one pass and stopped.
  *
  * Per kind as well as per status, because the column holds one lifecycle for
  * every kind of block — see `BlockStatus`, which says why it is one vocabulary
- * and not three — and "deciding" is the wrong word for a merge in flight.
+ * and not four — and "deciding" is the wrong word for a merge in flight.
  */
 const BLOCK_LABEL: Record<BlockStatus, string> = {
   waiting: "waiting",
   thinking: "deciding",
+  looping: "repeating",
   emitted: "decided",
   failed: "failed",
   blocked: "blocked",
 };
 
-const MERGE_LABEL: Partial<Record<BlockStatus, string>> = {
-  thinking: "merging",
-  emitted: "landed",
+const KIND_LABEL: Partial<
+  Record<BlockKind, Partial<Record<BlockStatus, string>>>
+> = {
+  merge: { thinking: "merging", emitted: "landed" },
+  loop: { emitted: "repeated" },
 };
 
-const blockLabel = (b: { kind: string; status: BlockStatus }) =>
-  (b.kind === "merge" ? MERGE_LABEL[b.status] : null) ?? BLOCK_LABEL[b.status];
+const blockLabel = (b: { kind: BlockKind; status: BlockStatus }) =>
+  KIND_LABEL[b.kind]?.[b.status] ?? BLOCK_LABEL[b.status];
 
 const BLOCK_TONE: Record<BlockStatus, BadgeTone> = {
   waiting: "neutral",
   thinking: "accent",
+  looping: "accent",
   emitted: "ok",
   failed: "danger",
   blocked: "neutral",
@@ -217,6 +224,12 @@ function blockSummary(b: BlockDTO, waits: string[]): string {
     // Only for a merge that finished: one that failed with nothing queued has
     // not established that there was nothing to land, and its error says more.
     if (b.status === "emitted") return "no branches to land";
+  } else if (b.kind === "loop") {
+    // A pass is not a work cycle: it is a whole run, with its own cycles and
+    // its own spend. The two must never share a word. Read on every status but
+    // `waiting` rather than only the settled ones, because a loop still taking
+    // passes is exactly when the count is worth watching.
+    if (b.status !== "waiting") return `${b.emitted} pass(es)`;
   } else if (ran) {
     if (b.emitted > 0) return `started ${b.emitted} run(s)`;
     if (b.kind === "orchestrator") {
@@ -227,7 +240,9 @@ function blockSummary(b: BlockDTO, waits: string[]): string {
     }
   }
   if (b.kind === "run" && b.status !== "waiting") return "never started";
-  return waits.length === 0 ? "decides immediately" : `after ${waits.join(", ")}`;
+  if (waits.length > 0) return `after ${waits.join(", ")}`;
+  // A loop decides nothing: its first pass is the task it was given.
+  return b.kind === "loop" ? "starts immediately" : "decides immediately";
 }
 
 /**
@@ -526,8 +541,8 @@ export default function WorkflowInstancePage() {
             <TableWrap>
               <Table>
                 <caption className="sr-only">
-                  Blocks that decide what to run, blocks that land branches, and
-                  blocks waiting on one
+                  Blocks that decide what to run, blocks that repeat one, blocks
+                  that land branches, and blocks waiting on any of them
                 </caption>
                 <thead>
                   <tr>
@@ -584,8 +599,13 @@ export default function WorkflowInstancePage() {
                         <Td num className="whitespace-nowrap align-top text-ink-muted">
                           {b.startedAt === null ? "—" : fmtDateTime(b.startedAt)}
                         </Td>
+                        {/* Only the two kinds that pay a model for a turn of
+                            their own. A loop block spends nothing: every pass
+                            is a run, and its cost is on that run's row. */}
                         <Td num className="whitespace-nowrap align-top">
-                          {b.kind === "run" ? "—" : fmtUSD(b.costUSD)}
+                          {b.kind === "orchestrator" || b.kind === "merge"
+                            ? fmtUSD(b.costUSD)
+                            : "—"}
                         </Td>
                       </Tr>
                     );
@@ -602,6 +622,14 @@ export default function WorkflowInstancePage() {
               A deciding block&rsquo;s own spend is counted against this
               workflow&rsquo;s limit and never against a run
             </Hint>
+            {instance.blocks.some((b) => b.kind === "loop") && (
+              <Hint>
+                A repeating block starts one run per pass, each carrying on the
+                previous pass&rsquo;s branch — it stops when the agent reports
+                the work complete, a pass does not complete, or one of its caps
+                is reached
+              </Hint>
+            )}
             {instance.blocks.some((b) => b.kind === "merge") && (
               <Hint>
                 A merge block&rsquo;s branches are in the merge queue on

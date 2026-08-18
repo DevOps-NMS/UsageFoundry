@@ -73,6 +73,7 @@ export const KIND_LABEL: Record<WorkflowNodeKind, string> = {
   run: "Runs a task",
   orchestrator: "Decides what to run",
   merge: "Lands the branches",
+  loop: "Repeats a task",
 };
 
 /**
@@ -86,12 +87,15 @@ export const KIND_LABEL: Record<WorkflowNodeKind, string> = {
  * is for — it starts runs with no approval, and that is a standing fact about
  * the block rather than a conditional alarm. A merge block wears the accent one
  * for the milder version of the same fact: it is the only block that writes into
- * the operator's own checkout.
+ * the operator's own checkout. A loop block wears the warn tint for the
+ * orchestrator's reason read one level along: it too starts runs nobody approves
+ * one by one, however many its pass cap allows.
  */
 const CARD_REST: Record<WorkflowNodeKind, string> = {
   run: "border-line shadow-e1",
   orchestrator: "border-warn-line shadow-e1",
   merge: "border-accent-line shadow-e1",
+  loop: "border-warn-line shadow-e1",
 };
 
 /**

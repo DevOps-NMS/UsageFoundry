@@ -12,6 +12,7 @@ import {
   normalizeWorkflowInput,
   planEmission,
   planInstanceStep,
+  planLoopPass,
   planWorkflowProposal,
   summarizeProposedGraph,
   type BlockStatus,
@@ -20,10 +21,14 @@ import {
   type HaltCause,
   type HaltMember,
   type InstanceNodeState,
+  type LoopDecision,
+  type LoopPass,
+  type LoopPassInput,
   type WorkflowEdge,
   type WorkflowGraph,
   type WorkflowInstanceStatus,
   type WorkflowKnowledge,
+  type WorkflowNode,
 } from "./workflows";
 import { topologicalOrder, type RunStatus } from "./orchestrator";
 import type { TurnResult } from "./chat";
@@ -92,6 +97,11 @@ function decider(id: string, extra: Record<string, unknown> = {}) {
 /** A merge block, with the strategy a saved graph must carry. */
 function merger(id: string, extra: Record<string, unknown> = {}) {
   return node(id, { kind: "merge", mergeStrategy: "merge", ...extra });
+}
+
+/** A loop block, with the pass cap a saved graph must carry. */
+function repeater(id: string, extra: Record<string, unknown> = {}) {
+  return node(id, { kind: "loop", maxPasses: 3, ...extra });
 }
 
 function edge(
@@ -878,6 +888,95 @@ describe("mergeBlockOutcome — what a merge block reports", () => {
     const out = mergeBlockOutcome([]);
     assert.equal(out.ok, true);
     assert.match(out.note ?? "", /no branch to land/);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Loop blocks: what a saved graph may say                             */
+/* ------------------------------------------------------------------ */
+
+describe("normalizeWorkflowInput — loop blocks", () => {
+  it("keeps both caps on a loop block", () => {
+    const v = value(graph([repeater("a", { maxLoopCostUSD: 12.5 })]));
+    assert.equal(v.graph.nodes[0].kind, "loop");
+    assert.equal(v.graph.nodes[0].maxPasses, 3);
+    assert.equal(v.graph.nodes[0].maxLoopCostUSD, 12.5);
+  });
+
+  it("refuses a loop with no pass cap", () => {
+    // The `no_terminus` rule read one level up: a loop decides for itself
+    // whether to start another billed run, so without a quantity that only goes
+    // up there is nothing that has to end.
+    assert.match(
+      error(graph([repeater("a", { maxPasses: null })])),
+      /how many times it may repeat/,
+    );
+    assert.match(
+      error(graph([repeater("a", { maxPasses: 0 })])),
+      /how many times it may repeat/,
+    );
+    assert.match(
+      error(graph([repeater("a", { maxPasses: 2.5 })])),
+      /how many times it may repeat/,
+    );
+  });
+
+  it("refuses a pass cap past the ceiling", () => {
+    assert.match(error(graph([repeater("a", { maxPasses: 99 })])), /at most 20/);
+  });
+
+  it("reads a blank, zero or negative spending cap as no cap", () => {
+    // The rule every budget field in this app follows: a limit nobody typed is
+    // not a limit, and there is no default to restore.
+    for (const raw of ["", 0, -5, null, undefined]) {
+      const v = value(graph([repeater("a", { maxLoopCostUSD: raw })]));
+      assert.equal(v.graph.nodes[0].maxLoopCostUSD, null, `for ${String(raw)}`);
+    }
+  });
+
+  it("leaves both caps null on every other kind", () => {
+    // A `maxPasses` on a run block would be a number nothing reads, which is
+    // worse than a refusal: it looks like a limit.
+    const v = value(
+      graph(
+        [
+          node("a", { maxPasses: 4, maxLoopCostUSD: 9 }),
+          decider("b", { maxPasses: 4, maxLoopCostUSD: 9 }),
+          merger("m", { maxPasses: 4, maxLoopCostUSD: 9 }),
+        ],
+        [edge("a", "m")],
+      ),
+    );
+    assert.deepEqual(
+      v.graph.nodes.map((n) => [n.maxPasses, n.maxLoopCostUSD]),
+      [
+        [null, null],
+        [null, null],
+        [null, null],
+      ],
+    );
+  });
+
+  it("refuses a loop whose guards work directly in the folder", () => {
+    // Every pass carries on the one before it, which needs a checkout of its
+    // own. Refused here rather than at the first pass, where it would be a
+    // throw inside an instance that had already started.
+    assert.match(
+      error(graph([repeater("a", { templateId: "t-flat" })])),
+      /needs a checkout of its own/,
+    );
+  });
+
+  it("lets a block carry on a loop's branch", () => {
+    // A loop has a branch — its passes share one ref — so unlike an
+    // orchestrator block it is a legal end of a hand-over.
+    const v = value(
+      graph(
+        [repeater("a"), node("b")],
+        [edge("a", "b", { continueBranch: true })],
+      ),
+    );
+    assert.equal(v.graph.edges[0].continueBranch, true);
   });
 });
 
@@ -1836,37 +1935,40 @@ function decided(
   };
 }
 
+/** A `WorkflowNode` with everything filled in, so a case states what it varies. */
+function graphNode(
+  id: string,
+  name: string,
+  extra: Partial<WorkflowNode> = {},
+): WorkflowNode {
+  return {
+    id,
+    name,
+    kind: "run",
+    templateId: null,
+    mountId: "work",
+    folder: "repo",
+    task: name,
+    promptOverride: null,
+    agentId: null,
+    fanOut: null,
+    mergeStrategy: null,
+    mergeAutoResolve: false,
+    maxPasses: null,
+    maxLoopCostUSD: null,
+    ...extra,
+  };
+}
+
 /** A graph of one orchestrator block feeding one run block. */
 const FAN: WorkflowGraph = {
   nodes: [
-    {
-      id: "pick",
-      name: "Pick the work",
+    graphNode("pick", "Pick the work", {
       kind: "orchestrator",
-      templateId: null,
-      mountId: "work",
-      folder: "repo",
       task: "Decide",
-      promptOverride: null,
-      agentId: null,
       fanOut: 3,
-      mergeStrategy: null,
-      mergeAutoResolve: false,
-    },
-    {
-      id: "review",
-      name: "Review it",
-      kind: "run",
-      templateId: null,
-      mountId: "work",
-      folder: "repo",
-      task: "Review",
-      promptOverride: null,
-      agentId: null,
-      fanOut: null,
-      mergeStrategy: null,
-      mergeAutoResolve: false,
-    },
+    }),
+    graphNode("review", "Review it", { task: "Review" }),
   ],
   edges: [edge("pick", "review", { edge: "on-finish" })],
 };
@@ -1969,20 +2071,7 @@ describe("planInstanceStep — what an instance may do next", () => {
       ...FAN,
       nodes: [
         ...FAN.nodes,
-        {
-          id: "land",
-          name: "Land it",
-          kind: "run",
-          templateId: null,
-          mountId: "work",
-          folder: "repo",
-          task: "Land",
-          promptOverride: null,
-          agentId: null,
-          fanOut: null,
-          mergeStrategy: null,
-          mergeAutoResolve: false,
-        },
+        graphNode("land", "Land it", { task: "Land" }),
       ],
       edges: [...FAN.edges, edge("review", "land", { edge: "on-success" })],
     };
@@ -2021,20 +2110,7 @@ describe("planInstanceStep — what an instance may do next", () => {
       ...FAN,
       nodes: [
         ...FAN.nodes,
-        {
-          id: "land",
-          name: "Land it",
-          kind: "run",
-          templateId: null,
-          mountId: "work",
-          folder: "repo",
-          task: "Land",
-          promptOverride: null,
-          agentId: null,
-          fanOut: null,
-          mergeStrategy: null,
-          mergeAutoResolve: false,
-        },
+        graphNode("land", "Land it", { task: "Land" }),
       ],
       edges: [...FAN.edges, edge("review", "land", { edge: "on-success" })],
     };
@@ -2076,23 +2152,7 @@ describe("planInstanceStep — what an instance may do next", () => {
     // happened. Started before it, it decides against a repository in the state
     // the workflow began in, which is the one thing it exists not to do.
     const g: WorkflowGraph = {
-      nodes: [
-        {
-          id: "build",
-          name: "Build",
-          kind: "run",
-          templateId: null,
-          mountId: "work",
-          folder: "repo",
-          task: "Build",
-          promptOverride: null,
-          agentId: null,
-          fanOut: null,
-          mergeStrategy: null,
-          mergeAutoResolve: false,
-        },
-        FAN.nodes[0],
-      ],
+      nodes: [graphNode("build", "Build"), FAN.nodes[0]],
       edges: [edge("build", "pick", { edge: "on-success" })],
     };
     assert.deepEqual(
@@ -2135,21 +2195,14 @@ describe("planInstanceStep — what an instance may do next", () => {
  * writes, and reading a failed merge as satisfying either would start a run on a
  * target that never received the work.
  */
-function mergeNode(id: string, name: string) {
-  return {
-    id,
-    name,
-    kind: "merge" as const,
-    templateId: null,
+function mergeNode(id: string, name: string): WorkflowNode {
+  return graphNode(id, name, {
+    kind: "merge",
     mountId: "",
     folder: "",
     task: "",
-    promptOverride: null,
-    agentId: null,
-    fanOut: null,
-    mergeStrategy: "merge" as const,
-    mergeAutoResolve: false,
-  };
+    mergeStrategy: "merge",
+  });
 }
 
 describe("planInstanceStep — merge blocks", () => {
@@ -2417,5 +2470,273 @@ describe("bootBlockPlan — which waiting blocks a restart closes out", () => {
     const decided = [...plan.abandoned, ...plan.settled, ...plan.spared];
     assert.equal(decided.length, given.length);
     assert.deepEqual([...decided].sort(), given.map((i) => i.id).sort());
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Loop blocks: whether there is another pass                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The decision a loop makes over and over, with nothing else in the picture.
+ *
+ * It earns a test on the same grounds as `releasableRuns` and `landRefusal`,
+ * sharpened by what a *pass* costs: it is not a work cycle, it is a whole run
+ * with its own cycles and its own spend. A loop that never terminates bills one
+ * of those per pass for ever; a loop that stops one pass early is silent, in the
+ * shape a finished-looking branch with the last piece of work missing.
+ */
+
+/** One pass, stated as the status its single run ended in. */
+function pass(
+  n: number,
+  status: RunStatus,
+  opts: { done?: boolean; iterations?: number } = {},
+): LoopPass {
+  return {
+    pass: n,
+    runs: [
+      {
+        id: `r-${n}`,
+        status,
+        iterations: opts.iterations ?? 1,
+        reportedDone: opts.done ?? false,
+      },
+    ],
+  };
+}
+
+function loopOf(
+  passes: LoopPass[],
+  extra: Partial<LoopPassInput> = {},
+): LoopDecision {
+  return planLoopPass({
+    blockName: "Chip away at it",
+    passes,
+    maxPasses: 3,
+    maxCostUSD: null,
+    spentGuardUSD: 0,
+    ...extra,
+  });
+}
+
+describe("planLoopPass — whether a loop takes another pass", () => {
+  it("takes the first pass when nothing has run yet", () => {
+    assert.deepEqual(loopOf([]), { kind: "pass", pass: 1 });
+  });
+
+  it("waits while the last pass is still working", () => {
+    // Every other test here reads the outcome of a pass, and there is none yet.
+    // Unrolling ahead of it is also what would put two runs on one predecessor's
+    // branch, which admission refuses — so the symptom would be a throw rather
+    // than a decision.
+    for (const status of ["waiting", "queued", "running", "paused"] as const) {
+      assert.deepEqual(loopOf([pass(1, status)]), { kind: "wait" }, status);
+    }
+  });
+
+  it("takes another pass after one that completed without reporting done", () => {
+    // The ordinary case, and the one the whole feature exists for: `completed`
+    // is also what a run that merely used up its cycle cap is written as.
+    assert.deepEqual(loopOf([pass(1, "completed")]), { kind: "pass", pass: 2 });
+  });
+
+  it("stops when the agent reported the work complete", () => {
+    // Read off `reported_done`, never off the status. `maxIterations` defaults
+    // to 1, so a loop keyed on `completed` would stop after every first pass —
+    // a loop that does not loop.
+    const d = loopOf([pass(1, "completed", { done: true })]);
+    assert.equal(d.kind, "stop");
+    assert.equal(d.kind === "stop" && d.code, "done");
+    assert.match(
+      d.kind === "stop" ? d.reason : "",
+      /reported the work complete on pass 1/,
+    );
+  });
+
+  it("prefers done to the pass cap on the last pass", () => {
+    // Both hold at once on the final pass. "It finished" is the truer sentence,
+    // and the one that tells the operator not to raise the cap.
+    const d = loopOf([
+      pass(1, "completed"),
+      pass(2, "completed"),
+      pass(3, "completed", { done: true }),
+    ]);
+    assert.equal(d.kind === "stop" && d.code, "done");
+  });
+
+  it("stops when a run in the body did not complete, rather than trying again", () => {
+    // A loop is not a retry mechanism: the transient-error retries and the
+    // refusal backoff already sit inside one run, so a fault that got past them
+    // is one the next pass would meet too.
+    for (const status of ["failed", "stopped", "blocked"] as const) {
+      const d = loopOf([pass(1, "completed"), pass(2, status)]);
+      assert.equal(d.kind === "stop" && d.code, "failed", status);
+      assert.match(
+        d.kind === "stop" ? d.reason : "",
+        new RegExp(`Pass 2 .*ended ${status}`),
+      );
+    }
+  });
+
+  it("stops at the pass cap", () => {
+    const d = loopOf([
+      pass(1, "completed"),
+      pass(2, "completed"),
+      pass(3, "completed"),
+    ]);
+    assert.equal(d.kind === "stop" && d.code, "passes");
+    assert.match(d.kind === "stop" ? d.reason : "", /limit of 3 pass\(es\)/);
+  });
+
+  it("takes exactly one pass when the cap is one", () => {
+    // A cap of 1 is a loop that does not repeat, and it has to be a legal
+    // setting rather than an off-by-one: the first pass still happens.
+    assert.deepEqual(loopOf([], { maxPasses: 1 }), { kind: "pass", pass: 1 });
+    const after = loopOf([pass(1, "completed")], { maxPasses: 1 });
+    assert.equal(after.kind === "stop" && after.code, "passes");
+  });
+
+  it("stops when the passes have spent their own limit", () => {
+    const d = loopOf([pass(1, "completed")], {
+      maxCostUSD: 5,
+      spentGuardUSD: 5,
+    });
+    assert.equal(d.kind === "stop" && d.code, "cost");
+    assert.match(d.kind === "stop" ? d.reason : "", /5\.00 of its 5\.00 limit/);
+  });
+
+  it("carries on below the spending limit, and ignores a null one", () => {
+    assert.deepEqual(
+      loopOf([pass(1, "completed")], { maxCostUSD: 5, spentGuardUSD: 4.99 }),
+      { kind: "pass", pass: 2 },
+    );
+    assert.deepEqual(
+      loopOf([pass(1, "completed")], { maxCostUSD: null, spentGuardUSD: 900 }),
+      { kind: "pass", pass: 2 },
+    );
+  });
+
+  it("stops on a pass that produced no runs at all", () => {
+    // The hot loop. A pass whose `createRun` threw, or whose run row has been
+    // deleted, has nothing to carry on from — and another pass would be created
+    // the same way and fail the same way, for ever, one billed attempt at a
+    // time.
+    const d = loopOf([{ pass: 1, runs: [] }]);
+    assert.equal(d.kind === "stop" && d.code, "empty");
+    assert.match(d.kind === "stop" ? d.reason : "", /started no run/);
+  });
+
+  it("reads the empty pass before the caps, so the sentence names the cause", () => {
+    const d = loopOf([{ pass: 1, runs: [] }], {
+      maxPasses: 1,
+      maxCostUSD: 1,
+      spentGuardUSD: 99,
+    });
+    assert.equal(d.kind === "stop" && d.code, "empty");
+  });
+});
+
+describe("planInstanceStep — a loop block among the others", () => {
+  /** One loop block, with a run block set to follow it. */
+  const LOOP: WorkflowGraph = {
+    nodes: [
+      graphNode("chip", "Chip away at it", { kind: "loop", maxPasses: 3 }),
+      graphNode("review", "Review it"),
+    ],
+    edges: [edge("chip", "review", { edge: "on-success", continueBranch: true })],
+  };
+
+  it("asks for a loop's first pass rather than creating it as a run", () => {
+    const step = stepOf({ chip: decided("waiting") }, LOOP);
+    assert.deepEqual(step.loop, [{ nodeId: "chip", dependsOn: [] }]);
+    assert.deepEqual(step.create, []);
+    assert.deepEqual(step.spawn, []);
+  });
+
+  it("holds everything behind a loop while it is still repeating", () => {
+    // The window that matters: between two passes there is no unsettled run on
+    // the branch at all, so a successor released here would review and land a
+    // ref that is about to move.
+    const step = stepOf(
+      { chip: decided("looping", [["r-1", "completed"]]) },
+      LOOP,
+    );
+    assert.deepEqual(step.create, []);
+    assert.deepEqual(step.block, []);
+  });
+
+  it("creates the block behind it against the last pass, carrying the branch", () => {
+    // The last pass and no other: the passes are a chain, so waiting for it is
+    // waiting for all of them, and it is the only run a successor can continue
+    // without becoming a second run on one predecessor.
+    const step = stepOf(
+      {
+        chip: decided("emitted", [
+          ["r-1", "completed"],
+          ["r-2", "completed"],
+        ]),
+      },
+      LOOP,
+    );
+    assert.deepEqual(step.create, [
+      {
+        nodeId: "review",
+        dependsOn: [{ runId: "r-2", edge: "on-success", continueBranch: true }],
+      },
+    ]);
+  });
+
+  it("blocks what is behind a loop whose last pass did not qualify", () => {
+    const step = stepOf(
+      {
+        chip: decided("emitted", [
+          ["r-1", "completed"],
+          ["r-2", "failed"],
+        ]),
+      },
+      LOOP,
+    );
+    assert.deepEqual(step.create, []);
+    assert.match(step.block[0].reason, /whose last pass ended failed/);
+  });
+
+  it("blocks what is behind a loop that took no passes", () => {
+    const step = stepOf({ chip: decided("emitted", []) }, LOOP);
+    assert.match(step.block[0].reason, /took no passes/);
+  });
+
+  it("never asks for a first pass twice", () => {
+    // Every terminal run transition in the app triggers an advance, so a loop
+    // selected again while it is repeating is a second run in the same folder.
+    assert.deepEqual(stepOf({ chip: decided("looping") }, LOOP).loop, []);
+    assert.deepEqual(stepOf({ chip: decided("emitted") }, LOOP).loop, []);
+    assert.deepEqual(stepOf({ chip: decided("failed") }, LOOP).loop, []);
+  });
+
+  it("waits for what is in front of a loop before its first pass", () => {
+    const g: WorkflowGraph = {
+      nodes: [graphNode("build", "Build"), ...LOOP.nodes],
+      edges: [edge("build", "chip", { edge: "on-success" }), ...LOOP.edges],
+    };
+    assert.deepEqual(
+      stepOf(
+        { build: ran("r-build", "running", 0), chip: decided("waiting") },
+        g,
+      ).loop,
+      [],
+    );
+    assert.deepEqual(
+      stepOf({ build: ran("r-build", "completed"), chip: decided("waiting") }, g)
+        .loop,
+      [
+        {
+          nodeId: "chip",
+          dependsOn: [
+            { runId: "r-build", edge: "on-success", continueBranch: false },
+          ],
+        },
+      ],
+    );
   });
 });

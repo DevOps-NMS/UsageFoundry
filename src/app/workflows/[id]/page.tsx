@@ -455,6 +455,17 @@ export default function WorkflowPage() {
                             : " — a conflicting branch is left alone"}
                         </div>
                       )}
+                      {n.kind === "loop" && (
+                        // And again: a repeating block is one run per pass, so
+                        // the caps are the number of runs the operator agrees
+                        // to when they press Run.
+                        <div className="mt-0.5 text-warn">
+                          Repeats until done — up to {n.maxPasses} pass(es), one
+                          run each
+                          {n.maxLoopCostUSD !== null &&
+                            `, or ${fmtUSD(n.maxLoopCostUSD)} across them`}
+                        </div>
+                      )}
                       {n.kind !== "merge" && (
                         <>
                           <div className="mono mt-0.5 text-ink-muted">

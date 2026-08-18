@@ -16,6 +16,7 @@ import type {
 } from "@/lib/apiTypes";
 import {
   MAX_FAN_OUT,
+  MAX_LOOP_PASSES,
   MAX_WORKFLOW_NAME,
   MAX_WORKFLOW_NODES,
 } from "@/lib/apiTypes";
@@ -29,6 +30,7 @@ import {
 } from "@/lib/canvasGraph";
 import {
   describeAmbientAgents,
+  fmtUSD,
   pctField,
   pctSubmit,
   pollFailureMessage,
@@ -64,9 +66,10 @@ import { Notice } from "@/components/ui/Notice";
  * regardless and `on-finish` starts a run on top of a dependency that crashed,
  * so a pre-selected condition is wrong half the time in both directions.
  *
- * **Nothing here decides what a workflow may be.** A loop, a template that has
+ * **Nothing here decides what a workflow may be.** A cycle, a template that has
  * been deleted, a workspace that is not mounted, a folder that cannot be
- * resolved, a block with no task: every one of those is
+ * resolved, a block with no task, a loop block whose guards give it no checkout
+ * of its own to carry between passes: every one of those is
  * `normalizeWorkflowInput`'s answer, asked over `/api/workflows/validate` while
  * the graph is being drawn and shown in its own words. A second copy of those
  * rules here would be a second set to keep in step, and the day one of them
@@ -154,6 +157,7 @@ function writeLayout(id: string, at: Record<string, Point>): void {
 /* ------------------------------------------------------------------ */
 
 const DEFAULT_FAN_OUT = "3";
+const DEFAULT_MAX_PASSES = "3";
 
 /** The condition picker, with the unanswered state as a real option. */
 const CONDITIONS: Array<{ id: LinkDraft["edge"]; label: string }> = [
@@ -193,6 +197,8 @@ function emptyBlock(id: string, mountId: string, kind: WorkflowNodeKind): BlockD
     fanOut: DEFAULT_FAN_OUT,
     mergeStrategy: DEFAULT_MERGE_STRATEGY,
     mergeAutoResolve: false,
+    maxPasses: DEFAULT_MAX_PASSES,
+    maxLoopCostUSD: "",
   };
 }
 
@@ -210,6 +216,10 @@ function toBlocks(workflow: WorkflowDTO): BlockDraft[] {
     fanOut: n.fanOut?.toString() ?? DEFAULT_FAN_OUT,
     mergeStrategy: n.mergeStrategy ?? DEFAULT_MERGE_STRATEGY,
     mergeAutoResolve: n.mergeAutoResolve ?? false,
+    maxPasses: n.maxPasses?.toString() ?? DEFAULT_MAX_PASSES,
+    // Null is "no cap", and a number field says that with "" — never a 0, which
+    // `normalizeWorkflowInput` reads as off but a reader would take for a limit.
+    maxLoopCostUSD: n.maxLoopCostUSD?.toString() ?? "",
   }));
 }
 
@@ -853,13 +863,15 @@ export function WorkflowEditor({
  * is the copy a press of Run is approved against — which guard set applies (or
  * that it is the untemplated one from Settings), where it runs, which saved
  * agent its child is started as, how many runs a deciding block may start with
- * nobody looking, and whether a merge block may pay a model to reconcile a
- * conflict. Every one of those is a fact somebody would otherwise have to
- * assemble by reading five separate pickers.
+ * nobody looking, how many times a repeating one may start one and what those
+ * passes may spend together, and whether a merge block may pay a model to
+ * reconcile a conflict. Every one of those is a fact somebody would otherwise
+ * have to assemble by reading five separate pickers.
  *
- * It is deliberately not a warning: an orchestrator block's fan-out and a merge
- * block's authorisation are ordinary properties of a block that was configured
- * that way. The tone is on the number itself, where it belongs.
+ * It is deliberately not a warning: an orchestrator block's fan-out, a loop
+ * block's pass cap and a merge block's authorisation are ordinary properties of
+ * a block that was configured that way. The tone is on the number itself, where
+ * it belongs.
  */
 function BlockStatement({
   block,
@@ -924,6 +936,41 @@ function BlockStatement({
     );
   }
 
+  if (block.kind === "loop") {
+    const passes = Number(block.maxPasses);
+    const spend = Number(block.maxLoopCostUSD);
+    // "" is off, so the sentence names the spending cap only where there is one
+    // — a clause saying "and no limit on what they spend together" would put a
+    // permanent alarm on the ordinary loop, whose pass cap already ends it.
+    const capped =
+      block.maxLoopCostUSD !== "" && Number.isFinite(spend) && spend > 0;
+    return (
+      <p className="mb-3.5 text-sm leading-normal text-ink-muted">
+        Repeats in {where}, each pass a whole run under {guards}
+        {asAgent ? <>, as {asAgent}</> : null}. It stops when the agent reports
+        the work complete, when a pass does not complete,{" "}
+        {capped ? "after " : "or after "}
+        {Number.isInteger(passes) && passes > 0 ? (
+          <strong className="font-semibold text-warn">
+            {passes} pass{passes === 1 ? "" : "es"}
+          </strong>
+        ) : (
+          <strong className="font-semibold text-danger">
+            an unstated number of passes
+          </strong>
+        )}
+        {capped && (
+          <>
+            , or once they have spent{" "}
+            <strong className="font-semibold text-warn">{fmtUSD(spend)}</strong>{" "}
+            between them
+          </>
+        )}
+        .
+      </p>
+    );
+  }
+
   return (
     <p className="mb-3.5 text-sm leading-normal text-ink-muted">
       Runs in {where}, under {guards}
@@ -962,6 +1009,9 @@ function BlockPanel({
   // Only once the registry has answered — see `agentsLoaded`.
   const missingAgent = block.agentId !== "" && agentsLoaded && agent === null;
   const orchestrator = block.kind === "orchestrator";
+  // A loop block holds every field a run block does — it *is* a run block
+  // repeated — plus the two caps that make the repetition finite.
+  const loop = block.kind === "loop";
   // A merge block holds none of the fields below the kind picker: no guards,
   // because it starts no agent; no workspace or folder, because it works in
   // whichever repository each branch came from; and no task, because what it
@@ -1076,6 +1126,54 @@ function BlockPanel({
         </ListGroup>
       )}
 
+      {loop && (
+        <ListGroup
+          className="mb-4"
+          footnote={
+            <span className="text-warn">
+              Each pass is a whole run, with its own work cycles and its own
+              spend — the pass cap is the whole of what you are agreeing to
+            </span>
+          }
+        >
+          <ListRow label="Most passes" htmlFor={`${block.id}-passes`}>
+            <div className={ROW_CONTROL_NARROW}>
+              <Input
+                id={`${block.id}-passes`}
+                type="number"
+                min={1}
+                max={MAX_LOOP_PASSES}
+                className="tabular-nums"
+                value={block.maxPasses}
+                onChange={(e) => onChange({ maxPasses: e.target.value })}
+              />
+            </div>
+          </ListRow>
+
+          {/* On the row for the guards picker's reason: it is a fact about what
+              this control does, and only a row's description reaches it. */}
+          <ListRow
+            label="Spending limit across passes"
+            htmlFor={`${block.id}-loopcost`}
+            description="Checked between passes; it never widens the limit for the whole workflow"
+          >
+            <div className={ROW_CONTROL}>
+              <Input
+                id={`${block.id}-loopcost`}
+                type="number"
+                min={0}
+                step="0.5"
+                placeholder="off"
+                unit="USD"
+                className="tabular-nums"
+                value={block.maxLoopCostUSD}
+                onChange={(e) => onChange({ maxLoopCostUSD: e.target.value })}
+              />
+            </div>
+          </ListRow>
+        </ListGroup>
+      )}
+
       {merge && (
         <ListGroup
           className="mb-4"
@@ -1139,7 +1237,13 @@ function BlockPanel({
             }
           >
             <ListRow
-              label={orchestrator ? "Guards for the runs it starts" : "Guards"}
+              label={
+                orchestrator
+                  ? "Guards for the runs it starts"
+                  : loop
+                    ? "Guards for each pass"
+                    : "Guards"
+              }
               htmlFor={`${block.id}-template`}
               description={
                 missingTemplate ? (
@@ -1252,7 +1356,13 @@ function BlockPanel({
               }
             >
               <ListRow
-                label={orchestrator ? "This turn is" : "This run is"}
+                label={
+                  orchestrator
+                    ? "This turn is"
+                    : loop
+                      ? "Each pass is"
+                      : "This run is"
+                }
                 htmlFor={`${block.id}-agent`}
                 description={
                   missingAgent ? (
@@ -1304,8 +1414,18 @@ function BlockPanel({
               exception the run form and Settings make: a nine-line text region
               has nothing to align a right edge against. */}
           <Field
-            label={orchestrator ? "What to decide" : "Task"}
+            label={
+              orchestrator ? "What to decide" : loop ? "Task to repeat" : "Task"
+            }
             htmlFor={`${block.id}-task`}
+            // How the loop *ends*, and it belongs on the field that decides it:
+            // `reported_done` is set by the agent printing DONE on a line of its
+            // own, so a task that never asks for it can only stop on a cap.
+            hint={
+              loop
+                ? "Every pass gets this same text — ask for DONE when the work is complete, which is what ends the loop"
+                : undefined
+            }
           >
             <Textarea
               id={`${block.id}-task`}
@@ -1323,7 +1443,9 @@ function BlockPanel({
             label={
               orchestrator
                 ? "Standing instructions for the runs it starts"
-                : "Standing instructions"
+                : loop
+                  ? "Standing instructions for every pass"
+                  : "Standing instructions"
             }
             htmlFor={`${block.id}-prompt`}
             hint="Replaces the template's own prompt"

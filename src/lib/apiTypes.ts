@@ -871,6 +871,15 @@ export const MAX_WORKFLOW_NODES = 25;
 export const MAX_FAN_OUT = 10;
 
 /**
+ * How many passes one loop block may take.
+ *
+ * The ceiling on the cap an operator sets, exactly as `MAX_FAN_OUT` is: a loop
+ * unrolls into one fresh run per pass, so this bounds what one press of Run can
+ * put on the machine over the life of a block whose repetitions nobody watches.
+ */
+export const MAX_LOOP_PASSES = 20;
+
+/**
  * What a block *is*.
  *
  * `run` is the original and the default: a fixed task, decided when the graph
@@ -880,9 +889,11 @@ export const MAX_FAN_OUT = 10;
  * graph naming this block's folder, its guard set and its fan-out cap. `merge`
  * spawns no agent of its own: it lands the branches the blocks in front of it
  * left behind, through the same queue the Branches page uses, and its one
- * optional expense is paying a model to reconcile a conflict.
+ * optional expense is paying a model to reconcile a conflict. `loop` repeats one
+ * task until the agent reports it done, a pass fails, or one of its two caps is
+ * reached — a fresh run per pass, each carrying on the previous pass's branch.
  */
-export type WorkflowNodeKind = "run" | "orchestrator" | "merge";
+export type WorkflowNodeKind = "run" | "orchestrator" | "merge" | "loop";
 
 /** How a branch is put onto its target. `settings.landStrategy`'s vocabulary. */
 export type MergeStrategyDTO = "merge" | "squash";
@@ -950,6 +961,26 @@ export interface WorkflowNodeDTO {
    * saving the workflow with this on *is* that authorisation.
    */
   mergeAutoResolve: boolean;
+  /**
+   * How many passes a loop block may take. Null on every other kind, and
+   * **never** null on a loop one.
+   *
+   * The `maxIterations`/`maxDurationMinutes` argument applied one level up: a
+   * loop manufactures its own next unit of work, so it needs a quantity that
+   * moves one way and keeps moving, and this is the only one it has. Refused at
+   * save rather than at Run.
+   */
+  maxPasses: number | null;
+  /**
+   * Everything this loop's passes may spend together, or null for no cap.
+   *
+   * Nullable because the pass cap is already the terminus. It is a *bound on
+   * repetition*, not a guard on an agent — it can only end the loop earlier, it
+   * never reaches a run's own budget, a permission mode or an isolation choice,
+   * and it never widens the workflow-wide limit, which still halts the whole
+   * instance at every member's cycle boundary.
+   */
+  maxLoopCostUSD: number | null;
 }
 
 export interface WorkflowEdgeDTO {
@@ -1085,22 +1116,25 @@ export interface WorkflowInstanceNodeDTO {
  * One block of an instance that never became a run.
  *
  * An orchestrator turn — with its own spend, which is never a run's — a merge
- * block, or a block that was never created because the block in front of it had
- * nothing to hand it. All three are here for the same reason: a block that
- * simply disappears from the instance is indistinguishable from one still
- * waiting.
+ * block, a loop block, which is not a run either but creates one per pass, or a
+ * block that was never created because the block in front of it had nothing to
+ * hand it. All four are here for the same reason: a block that simply disappears
+ * from the instance is indistinguishable from one still waiting.
  */
 export interface WorkflowInstanceBlockDTO {
   nodeId: string;
   nodeName: string;
   position: number;
   kind: WorkflowNodeKind;
-  status: "waiting" | "thinking" | "emitted" | "failed" | "blocked";
+  status: "waiting" | "thinking" | "looping" | "emitted" | "failed" | "blocked";
   startedAt: number | null;
   finishedAt: number | null;
   /** The turn's own cost. Never added to a run's spend or to a meter. */
   costUSD: number;
-  /** How many runs this block started. 0 is a real answer, not "not yet". */
+  /**
+   * How many runs this block started — passes, for a loop block. 0 is a real
+   * answer, not "not yet".
+   */
   emitted: number;
   /**
    * Whether the turn ever called `emit_runs`. The two ways a block starts

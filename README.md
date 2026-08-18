@@ -37,8 +37,9 @@ branch, so several agents work one repository at once. Review the diff, resolve
 conflicts, and merge from the UI when you're ready.
 
 **Chain the work.** Saved workflows are graphs of run blocks — including blocks
-that *decide* what to run next, and blocks that land what the ones before them
-built. Run one on a schedule, under a budget that covers the whole graph.
+that *decide* what to run next, blocks that *repeat* one task until the agent
+reports it done, and blocks that land what the ones before them built. Run one on
+a schedule, under a budget that covers the whole graph.
 
 Everything runs on your machine, in one Docker container. No account, no
 telemetry back to us, no third-party service.
@@ -480,6 +481,7 @@ first two.
 | A template | what the run form starts on when you load it | at load |
 | Workflow block (a run block's run, or a deciding block's own turn) | what that block's child is started as | at each press of *Run* |
 | A deciding block's emitted runs | one per run, by name, chosen by the block | as each run is created |
+| A repeating block's passes | the block's own agent, on every pass | as each pass is created |
 | Orchestrator chat | what the proposed run is started as | at *Approve* |
 
 In the chat, type `@` in the composer to insert a name — Tab inserts, Enter still
@@ -775,7 +777,7 @@ Two notes:
 | **[Backup and restore](docs/backup-and-restore.md)** | The one file that has no second copy, how to snapshot it safely, and how to put it back |
 | **[Limits and accuracy](docs/limits-and-accuracy.md)** | What the two views measure, what they cannot see, and how exact each figure is |
 | **[Runs](docs/runs.md)** | The run loop, budget policy, pausing and resuming, two runs on one project |
-| **[Workflows](docs/workflows.md)** | Graphs of blocks, orchestrator and merge blocks, whole-graph budgets, schedules |
+| **[Workflows](docs/workflows.md)** | Graphs of blocks, orchestrator, repeating and merge blocks, whole-graph budgets, schedules |
 | **[The orchestrator chat](docs/orchestrator-chat.md)** | A conversation that proposes work; nothing starts without approval |
 | **[Reviewing and landing](docs/review-and-land.md)** | Diffs, AI review, conflict resolution, the merge queue |
 | **[Architecture](docs/architecture.md)** | Module map and how transcripts are parsed |
@@ -785,6 +787,17 @@ Two notes:
 That last one is not boilerplate. It carries an explicit *"Not yet verified"*
 list, which is the honest boundary of what this has been exercised against.
 Read it before running anything unattended.
+
+The newest thing on that boundary is the **repeating block**, which has never
+been run against a real CLI. Its pass decision and the scheduling around it are
+unit tested, and the wiring was driven once by hand against a real database and
+a real git workspace — in a throwaway script, under a concurrency cap that held
+every pass `queued`. No page has rendered a repeating block, no browser has
+saved one, and no `claude` child has ever worked a pass. What to watch on the
+first real one is what ends it: a block stops repeating because the agent
+replied `DONE`, and a run that merely used up its work-cycle limit is written
+`completed` as well — so a block that quietly gave up after one pass and a block
+that finished the job look the same until you read what the agent said.
 
 ---
 

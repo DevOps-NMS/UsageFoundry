@@ -48,6 +48,8 @@ function block(id: string, over: Partial<BlockDraft> = {}): BlockDraft {
     fanOut: "3",
     mergeStrategy: "merge",
     mergeAutoResolve: false,
+    maxPasses: "",
+    maxLoopCostUSD: "",
     ...over,
   };
 }

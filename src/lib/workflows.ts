@@ -82,6 +82,7 @@ import { WORKSPACE_MOUNTS, mountById } from "./config";
 import { dataDirRefusal } from "./serverLock";
 import {
   MAX_FAN_OUT,
+  MAX_LOOP_PASSES,
   MAX_WORKFLOW_NAME,
   MAX_WORKFLOW_NODES,
   type WorkflowNodeKind,
@@ -149,6 +150,17 @@ import {
  * once, that a conflict may be reconciled by a model. It is on the node rather
  * than in settings for `merge_queue.auto_resolve`'s reason — configuration that
  * could change under a graph already running is not authorisation.
+ *
+ * **A node can also repeat itself, and it repeats by unrolling rather than by
+ * pointing backwards.** A loop block is the obvious place to reach for a back
+ * edge in `run_deps`, and a back edge is precisely the row nothing ever wakes:
+ * `dependencyCycle` refuses one at admission because `releasableRuns` reaches a
+ * fixed point and leaves a cyclic set alone. So the loop lives here, in the
+ * workflow layer, and `run_deps` never learns about it — each pass is a fresh
+ * run depending on the previous pass's, so the run graph stays a DAG and every
+ * rule written against one still holds. What decides whether there is another
+ * pass is `planLoopPass`, and it is pure for `releasableRuns`' reason: a loop
+ * that never terminates is billed, and one that stops a pass early is silent.
  */
 
 /* ------------------------------------------------------------------ */
@@ -272,6 +284,32 @@ export interface WorkflowNode {
    * the same act, one level up.
    */
   mergeAutoResolve: boolean;
+  /**
+   * How many passes a loop block may take. Null on every other kind.
+   *
+   * Never null on a loop block, refused at save for `fanOut`'s reason read one
+   * level along: a loop manufactures its own next unit of work, so it needs a
+   * quantity that moves one way and keeps moving — the same argument that makes
+   * `maxIterations` and `maxDurationMinutes` nullable only as a pair. Nothing
+   * else here qualifies. Spend can be refunded, a window fraction can fall, and
+   * an agent can report `DONE` for ever.
+   */
+  maxPasses: number | null;
+  /**
+   * Everything this loop's passes may spend together, or null for no cap.
+   *
+   * The one number on a node that reads like a budget, and it is not one. A
+   * guard decides what an agent *may do* — `--permission-mode`, an isolation
+   * choice, a per-run ceiling — and every one of those still comes from the
+   * block's template or from `settings.chatDefaultGuards`, exactly as they do
+   * for every other kind of block. This is a **terminus**, the same kind of
+   * number `fanOut` is: it bounds how many times a block repeats and can only
+   * ever end the loop earlier. It cannot raise a run's budget, it is unreachable
+   * from anything a model emits, and it never widens the workflow-wide limit —
+   * `evaluateInstanceBudget` does not read it, and that guard still halts the
+   * whole instance at every member's cycle boundary whatever this says.
+   */
+  maxLoopCostUSD: number | null;
 }
 
 /** "Start `to` after `from` has settled." */
@@ -357,7 +395,7 @@ const NODE_ID = /^[A-Za-z0-9_-]{1,64}$/;
  * scheduler has no branch for — the `as const` makes every reader exhaustive
  * against `WorkflowNodeKind` at the same time.
  */
-const NODE_KINDS = ["run", "orchestrator", "merge"] as const satisfies readonly WorkflowNodeKind[];
+const NODE_KINDS = ["run", "orchestrator", "merge", "loop"] as const satisfies readonly WorkflowNodeKind[];
 
 const MAX_NODE_NAME = 60;
 
@@ -415,6 +453,17 @@ export function normalizeWorkflowInput(
   const nodes: WorkflowNode[] = [];
   const byId = new Map<string, WorkflowNode>();
 
+  /**
+   * Whether a block's guards give it a checkout of its own.
+   *
+   * Read twice — once for a loop block, whose passes hand a branch along, and
+   * once for either end of a hand-over edge — so it is resolved in one place.
+   */
+  const isolatedTemplate = (templateId: string | null) =>
+    templateId === null
+      ? known.defaultIsolate
+      : (known.templates.get(templateId)?.isolate ?? false);
+
   for (const [index, entry] of rawNodes.entries()) {
     const n = (entry ?? {}) as Record<string, unknown>;
     const position = `Block ${index + 1}`;
@@ -467,7 +516,9 @@ export function normalizeWorkflowInput(
         error:
           kind === "orchestrator"
             ? `“${nodeName}” has nothing to decide. An orchestrator block with no brief is a billed turn that starts whatever it feels like.`
-            : `“${nodeName}” has no task. A block with nothing to do is a run that spends a work cycle finding that out.`,
+            : kind === "loop"
+              ? `“${nodeName}” has no task to repeat. A loop with nothing to do is a billed run per pass that spends a work cycle finding that out.`
+              : `“${nodeName}” has no task. A block with nothing to do is a run that spends a work cycle finding that out.`,
       };
     }
 
@@ -523,6 +574,48 @@ export function normalizeWorkflowInput(
       mergeAutoResolve = n.mergeAutoResolve === true;
     }
 
+    // The pass cap and the loop's own spending cap, on a loop block and nowhere
+    // else. The first is required for `fanOut`'s reason one level along: this is
+    // the block that manufactures its own next unit of work, so without a
+    // quantity that only goes up it has no terminus at all — the run loop's own
+    // rule, and the reason `maxIterations` may only be null alongside
+    // `maxDurationMinutes`. The second is optional because the first already
+    // terminates it, and `null`/`""`/`0` all mean off, this app's standing rule
+    // for a number that bounds spending.
+    let maxPasses: number | null = null;
+    let maxLoopCostUSD: number | null = null;
+    if (kind === "loop") {
+      const raw = Number(n.maxPasses);
+      if (!Number.isInteger(raw) || raw < 1) {
+        return {
+          ok: false,
+          error:
+            `“${nodeName}” needs a limit on how many times it may repeat. A ` +
+            "loop decides for itself whether to start another run, so without " +
+            "one it has nothing that has to end.",
+        };
+      }
+      if (raw > MAX_LOOP_PASSES) {
+        return {
+          ok: false,
+          error:
+            `“${nodeName}” may take at most ${MAX_LOOP_PASSES} passes; it is ` +
+            `set to ${raw}.`,
+        };
+      }
+      maxPasses = raw;
+
+      const cost = Number(n.maxLoopCostUSD);
+      maxLoopCostUSD =
+        n.maxLoopCostUSD === null ||
+        n.maxLoopCostUSD === undefined ||
+        String(n.maxLoopCostUSD) === "" ||
+        !Number.isFinite(cost) ||
+        cost <= 0
+          ? null
+          : cost;
+    }
+
     // Null is "no template — use the guards in Settings", which is a real
     // answer rather than a missing one. Anything else has to exist now: a
     // graph naming a template nobody can find is one that can be saved and
@@ -545,6 +638,22 @@ export function normalizeWorkflowInput(
           `“${nodeName}” names a template that no longer exists, so there are ` +
           "no guards to start it under. Pick another, or none, which uses the " +
           "guards in Settings.",
+      };
+    }
+
+    // A loop accumulates: every pass carries on the previous pass's branch,
+    // through the same `continue_branch` mechanism a hand-over edge uses. Guards
+    // that work directly in the folder have no branch to carry, so the loop
+    // would be a run repeated on top of itself with no record of what each pass
+    // added. Refused here rather than at the first pass, where it would surface
+    // as a throw in the middle of an instance that had already started.
+    if (kind === "loop" && !isolatedTemplate(templateId)) {
+      return {
+        ok: false,
+        error:
+          `“${nodeName}” repeats, and each pass carries on the one before it — ` +
+          "which needs a checkout of its own. Its guards work directly in the " +
+          "folder instead.",
       };
     }
 
@@ -622,6 +731,8 @@ export function normalizeWorkflowInput(
       fanOut,
       mergeStrategy,
       mergeAutoResolve,
+      maxPasses,
+      maxLoopCostUSD,
     });
     byId.set(id, nodes[nodes.length - 1]);
   }
@@ -639,11 +750,13 @@ export function normalizeWorkflowInput(
    * answer lives: a node names a template or names none and takes
    * `chatDefaultGuards`. It holds for an orchestrator block too — the runs it
    * emits take that same guard set, which is the whole of `guardsFor`'s point.
+   *
+   * The node-shaped reader and `isolatedTemplate` are one answer with two call
+   * shapes rather than two answers: the loop check above runs while a node is
+   * still being normalised and has only a template id, where the edge checks
+   * below run over nodes that exist.
    */
-  const isolated = (node: WorkflowNode) =>
-    node.templateId === null
-      ? known.defaultIsolate
-      : (known.templates.get(node.templateId)?.isolate ?? false);
+  const isolated = (node: WorkflowNode) => isolatedTemplate(node.templateId);
 
   for (const [index, entry] of rawEdges.entries()) {
     const e = (entry ?? {}) as Record<string, unknown>;
@@ -695,14 +808,16 @@ export function normalizeWorkflowInput(
     // safe.
     const continueBranch = e.continueBranch === true;
     if (continueBranch) {
-      // Only a run block has a checkout of its own. An orchestrator block
-      // decides and spends nothing on disk; a merge block writes into somebody
-      // else's checkout and cuts no branch. Refused by name at either end rather
-      // than left to the isolation test below, which would say "its guards work
-      // directly in the folder" — true of neither and misleading about what
-      // would have to change.
+      // A run block has a checkout of its own, and so does a loop — its passes
+      // are runs on one shared ref, which is the whole of why a non-isolated
+      // loop is refused above. An orchestrator block decides and spends nothing
+      // on disk; a merge block writes into somebody else's checkout and cuts no
+      // branch. Those two are refused by name at either end rather than left to
+      // the isolation test below, which would say "its guards work directly in
+      // the folder" — true of neither and misleading about what would have to
+      // change.
       for (const node of [source, target]) {
-        if (node.kind === "run") continue;
+        if (node.kind === "run" || node.kind === "loop") continue;
         return {
           ok: false,
           error:
@@ -739,7 +854,7 @@ export function normalizeWorkflowInput(
             "their own.",
         };
       }
-      if (!isolated(target)) {
+      if (!isolatedTemplate(target.templateId)) {
         return {
           ok: false,
           error:
@@ -1508,6 +1623,165 @@ export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan
 }
 
 /* ------------------------------------------------------------------ */
+/* Whether a loop takes another pass — pure                            */
+/* ------------------------------------------------------------------ */
+
+/** One run of a loop's body, and the one extra fact the loop reads off it. */
+export interface LoopRunState extends DependencyState {
+  /**
+   * Whether the agent actually replied `DONE`.
+   *
+   * Read instead of the status, and the difference is the whole exit condition:
+   * `completed` is written both for that reply *and* for a run that merely used
+   * up its cycle cap, and `maxIterations` defaults to 1 — so a loop keyed on the
+   * status would stop after its first pass every time, which is a loop that does
+   * not loop. `runs.reported_done` is what the agent said.
+   */
+  reportedDone: boolean;
+}
+
+/** One pass of a loop's body: the runs it created, in creation order. */
+export interface LoopPass {
+  /** 1-based, and the number the page shows. */
+  pass: number;
+  /**
+   * Empty is a real state, not a missing one: a pass whose `createRun` threw,
+   * or whose run row has since been deleted, produced nothing. It is the case
+   * that would otherwise loop for ever creating nothing at all.
+   */
+  runs: readonly LoopRunState[];
+}
+
+export interface LoopPassInput {
+  blockName: string;
+  /** Every pass so far, oldest first. */
+  passes: readonly LoopPass[];
+  /** The cap a person saved. Never null — `normalizeWorkflowInput` sees to it. */
+  maxPasses: number;
+  /** What the passes may spend together, or null when no cap was set. */
+  maxCostUSD: number | null;
+  /**
+   * What they have spent, the guard's figure: each pass's measured cost plus the
+   * reconciled estimate for a cycle killed before it could report. The same
+   * `*Guard*` reading `evaluateInstanceBudget` acts on, and for the same reason
+   * — a floor would let a loop run on past its cap on cycles that never
+   * reported.
+   */
+  spentGuardUSD: number;
+}
+
+/** Why a loop stopped, in a word the caller can branch on. */
+export type LoopStopCode = "done" | "failed" | "passes" | "cost" | "empty";
+
+export type LoopDecision =
+  /** Create pass `pass`. Nothing else has to be true for it to go ahead. */
+  | { kind: "pass"; pass: number }
+  /** The last pass has not settled; ask again when it does. */
+  | { kind: "wait" }
+  | { kind: "stop"; code: LoopStopCode; reason: string };
+
+/**
+ * Whether a loop takes another pass, and if not, why it stopped.
+ *
+ * **The loop unrolls; it is not a back edge.** `dependencyCycle` refuses a
+ * cyclic run graph at admission, and the reason is not tidiness:
+ * `releasableRuns` reaches a fixed point and leaves a cyclic set alone, so an
+ * edge from a pass back to its own block would be precisely the row nothing ever
+ * wakes. So each pass is a *fresh* run depending on the previous pass's, the run
+ * graph stays a DAG, and every rule written against one — release, folder
+ * claim, landing, halt — holds unchanged. `run_deps` never learns that a loop
+ * exists. The next reader will reach for the back edge first; this is why there
+ * is not one.
+ *
+ * Pure and unit-tested for `releasableRuns`' reason, sharpened by what a loop
+ * costs: a loop that never terminates is billed one whole run per pass, for ever
+ * — and a loop that stops one pass early is silent, because a run that was going
+ * to finish the job simply never happens and the branch looks finished.
+ *
+ * The order of the tests is load-bearing:
+ *
+ *   1. **An unsettled pass waits.** Nothing else can be read off a pass that is
+ *      still working, and unrolling ahead of it is what would put two runs on
+ *      one predecessor's branch — which admission refuses, so it would surface
+ *      as a throw rather than a decision.
+ *   2. **A pass that produced nothing stops it.** Another pass would be created
+ *      exactly the same way and fail exactly the same way, which is a hot loop
+ *      rather than a retry.
+ *   3. **A run in the body that did not complete stops it**, rather than trying
+ *      again. A loop is not a retry mechanism: `MAX_TRANSIENT_RETRIES` and the
+ *      refusal backoff already sit inside a single run, so a fault that got past
+ *      them is one the next pass would meet too.
+ *   4. **`reportedDone` stops it**, because that is the loop finishing rather
+ *      than being cut off — and it outranks the two caps so a loop that got
+ *      there on its last pass says it finished rather than that it ran out.
+ *   5. **The caps.** The pass cap before the spend cap: it is the one a person
+ *      always set, and the one that has to hold when nothing else does.
+ */
+export function planLoopPass(input: LoopPassInput): LoopDecision {
+  const last = input.passes.at(-1);
+
+  if (last) {
+    if (last.runs.some((r) => !TERMINAL_STATUSES.includes(r.status))) {
+      return { kind: "wait" };
+    }
+
+    if (last.runs.length === 0) {
+      return {
+        kind: "stop",
+        code: "empty",
+        reason:
+          `Pass ${last.pass} of “${input.blockName}” started no run, so there ` +
+          "is nothing to carry on from. Another pass would be created the same " +
+          "way.",
+      };
+    }
+
+    const broken = last.runs.find((r) => r.status !== "completed");
+    if (broken) {
+      return {
+        kind: "stop",
+        code: "failed",
+        reason:
+          `Pass ${last.pass} of “${input.blockName}” ended ${broken.status}, so ` +
+          "the loop stopped rather than repeating on top of it.",
+      };
+    }
+
+    // The last run of the body is the one that says whether the work is done —
+    // the earlier ones in a pass are steps towards it.
+    if (last.runs.at(-1)!.reportedDone) {
+      return {
+        kind: "stop",
+        code: "done",
+        reason: `“${input.blockName}” reported the work complete on pass ${last.pass}.`,
+      };
+    }
+  }
+
+  if (input.passes.length >= input.maxPasses) {
+    return {
+      kind: "stop",
+      code: "passes",
+      reason:
+        `“${input.blockName}” reached its limit of ${input.maxPasses} pass(es) ` +
+        "without reporting the work complete.",
+    };
+  }
+
+  if (input.maxCostUSD !== null && input.spentGuardUSD >= input.maxCostUSD) {
+    return {
+      kind: "stop",
+      code: "cost",
+      reason:
+        `“${input.blockName}” has spent ${input.spentGuardUSD.toFixed(2)} of its ` +
+        `${input.maxCostUSD.toFixed(2)} limit across ${input.passes.length} pass(es).`,
+    };
+  }
+
+  return { kind: "pass", pass: input.passes.length + 1 };
+}
+
+/* ------------------------------------------------------------------ */
 /* What the instance does next — pure                                  */
 /* ------------------------------------------------------------------ */
 
@@ -1522,10 +1796,19 @@ export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan
  * — one of them missed being a merge running under an instance the page says is
  * stopped. The page says "merging" and "merged" for a merge block; the column
  * says what the machinery reads.
+ *
+ * `looping` is the one exception, and it is an exception rather than a
+ * precedent. A loop block is not a child in flight: between passes it has no
+ * child at all and is still not settled, because it may yet commit another pass
+ * to the branch — so `thinking` would be a lie for the gap and `emitted` would
+ * release the block behind it into a branch the loop is still writing to. It
+ * therefore counts as live everywhere `thinking` does, and every one of the
+ * places this docblock warns about has to name it too.
  */
 export type BlockStatus =
   | "waiting"
   | "thinking"
+  | "looping"
   | "emitted"
   | "failed"
   | "blocked";
@@ -1580,6 +1863,12 @@ export interface InstanceStep {
   merge: InstanceMerge[];
   /** Run blocks that may now be created. */
   create: InstanceCreation[];
+  /**
+   * Loop blocks whose first pass may now be created. Only the first: every pass
+   * after it is decided by `planLoopPass` off the pass before it, which is what
+   * keeps the unrolling one link at a time.
+   */
+  loop: InstanceCreation[];
   /** Nodes that can never start, each with the sentence naming what stopped it. */
   block: Array<{ nodeId: string; reason: string }>;
 }
@@ -1644,7 +1933,7 @@ export function planInstanceStep(
     live.set(node.id, state.get(node.id) ?? { run: null, block: null });
   }
 
-  const step: InstanceStep = { spawn: [], merge: [], create: [], block: [] };
+  const step: InstanceStep = { spawn: [], merge: [], create: [], loop: [], block: [] };
   const decided = new Set<string>();
 
   for (;;) {
@@ -1692,6 +1981,8 @@ export function planInstanceStep(
           nodeId: node.id,
           runIds: [...new Set(dependsOn.map((d) => d.runId))],
         });
+      } else if (node.kind === "loop") {
+        step.loop.push({ nodeId: node.id, dependsOn });
       } else {
         step.create.push({ nodeId: node.id, dependsOn });
       }
@@ -1706,13 +1997,16 @@ export function planInstanceStep(
 /**
  * What one edge says, and — when it says "go ahead" — which runs it resolves to.
  *
- * The three kinds of predecessor answer differently. A run block is one run,
- * decided when the graph was written; an orchestrator block is however many runs
- * it turned out to emit, and a successor waits for *all* of them, which is
+ * The four kinds of predecessor answer differently, and the differences are the
+ * whole point of the three that are not runs. A run block is one run, decided
+ * when the graph was written. An orchestrator block is however many runs it
+ * turned out to emit, and a successor waits for *all* of them, which is
  * `admitDependencies`' fan-in rule applied to a fan-in nobody could write down.
  * A merge block resolves to **no runs at all** — it created none — so it can
  * only sequence what follows it, which is exactly what a block set to run "after
- * the work has landed" is asking for.
+ * the work has landed" is asking for. A loop block is a *chain*: every pass
+ * carries on the one before it, so waiting for the last pass is waiting for all
+ * of them, and it is the last pass that a successor carries the branch on from.
  */
 function edgeVerdict(
   from: WorkflowNode,
@@ -1750,6 +2044,8 @@ function edgeVerdict(
     // ordinary queued run — "start once the work has landed".
     return SATISFIED;
   }
+
+  if (from.kind === "loop") return loopVerdict(from, state, edge, dependsOn);
 
   if (from.kind === "run") {
     if (!state.run) {
@@ -1825,6 +2121,70 @@ function edgeVerdict(
     dependsOn.push({ runId: run.id, edge: edge.edge, continueBranch: false });
   }
   return SATISFIED;
+}
+
+/**
+ * What a loop block says to the block behind it.
+ *
+ * It resolves to the **last pass** and to nothing else, which is the reading a
+ * chain makes true: pass N depends on pass N-1, so the last one having settled
+ * means every one of them has. It is also the only run a successor can carry the
+ * branch on from — the earlier passes' commits are on that same ref, reachable
+ * from its tip, and naming an earlier one would put two runs on one predecessor,
+ * which admission refuses by name.
+ *
+ * `looping` is pending rather than settled, and that is what stops a successor
+ * being created between two passes: the block can still start another run on
+ * that branch, so anything behind it would be reviewing or landing a moving ref.
+ */
+function loopVerdict(
+  from: WorkflowNode,
+  state: InstanceNodeState,
+  edge: WorkflowEdge,
+  dependsOn: InstanceCreation["dependsOn"],
+): EdgeVerdict {
+  const block = state.block;
+  if (!block || block.status === "waiting" || block.status === "looping") {
+    return PENDING;
+  }
+  if (block.status === "thinking") return PENDING;
+  if (block.status === "failed") {
+    return {
+      kind: "blocked",
+      reason: `“${from.name}” could not repeat its task: ${block.error ?? "the block failed."}`,
+    };
+  }
+  if (block.status === "blocked") {
+    return {
+      kind: "blocked",
+      reason: `“${from.name}” never ran: ${block.error ?? "no reason recorded."}`,
+    };
+  }
+
+  const last = block.emitted.at(-1);
+  if (!last) {
+    return {
+      kind: "blocked",
+      reason:
+        `“${from.name}” took no passes, so there is no work for this block to ` +
+        "follow.",
+    };
+  }
+  if (edgeSatisfied(last, edge.edge)) {
+    dependsOn.push({
+      runId: last.id,
+      edge: edge.edge,
+      continueBranch: edge.continueBranch,
+    });
+    return SATISFIED;
+  }
+  if (TERMINAL_STATUSES.includes(last.status)) {
+    return {
+      kind: "blocked",
+      reason: `Set to start after “${from.name}”, whose last pass ended ${last.status}.`,
+    };
+  }
+  return PENDING;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2187,23 +2547,24 @@ interface InstanceRow {
  * `active_started_at` when the container dies mid-cycle, so a `failed` row can
  * still name a cycle that ended hours ago.
  */
-export function instanceSpend(instanceId: string): InstanceProgress {
-  const rows = db()
-    .prepare(
-      `SELECT r.id AS id, r.status AS status, r.spent_usd AS spent,
-              r.spent_usd_est AS est, r.active_started_at AS cycleStartedAt
-         FROM workflow_instance_runs w
-         JOIN runs r ON r.id = w.run_id
-        WHERE w.instance_id = ?`,
-    )
-    .all(instanceId) as Array<{
-    id: string;
-    status: string;
-    spent: number;
-    est: number;
-    cycleStartedAt: number | null;
-  }>;
+/** What one member row contributes to a spend figure, and nothing else. */
+interface MemberSpendRow {
+  id: string;
+  status: string;
+  spent: number;
+  est: number;
+  cycleStartedAt: number | null;
+}
 
+/**
+ * The two figures a set of member runs adds up to.
+ *
+ * One summation rather than two, because a loop block asks the same question of
+ * its own passes that an instance asks of every member, and a second copy of
+ * "which of these three readings goes in which figure" is a second chance to put
+ * a `*Guard*` reading somewhere it must never be.
+ */
+function sumMemberSpend(rows: readonly MemberSpendRow[]): InstanceProgress {
   let spentUSD = 0;
   let spentGuardUSD = 0;
   for (const row of rows) {
@@ -2213,6 +2574,21 @@ export function instanceSpend(instanceId: string): InstanceProgress {
       spentGuardUSD += telemetrySpendSince(row.id, row.cycleStartedAt).costUSD;
     }
   }
+  return { spentUSD, spentGuardUSD };
+}
+
+const MEMBER_SPEND_COLUMNS =
+  `SELECT r.id AS id, r.status AS status, r.spent_usd AS spent,
+          r.spent_usd_est AS est, r.active_started_at AS cycleStartedAt
+     FROM workflow_instance_runs w
+     JOIN runs r ON r.id = w.run_id`;
+
+export function instanceSpend(instanceId: string): InstanceProgress {
+  const { spentUSD, spentGuardUSD } = sumMemberSpend(
+    db()
+      .prepare(`${MEMBER_SPEND_COLUMNS} WHERE w.instance_id = ?`)
+      .all(instanceId) as MemberSpendRow[],
+  );
 
   // What this instance's orchestrator blocks spent deciding.
   //
@@ -2246,6 +2622,25 @@ export interface InstanceMemberTally {
 }
 
 /**
+ * What one loop block's passes have spent so far.
+ *
+ * `instanceSpend` narrowed to the members one block created, and it reads the
+ * **guard** figure for that function's reason: a cycle killed before it reported
+ * contributes nothing to `spent_usd`, so a loop measured on the floor alone
+ * would take another pass on money it had already spent. It is never added to
+ * `runs.spent_usd`, never to `buildSnapshot()` and never to a meter — the loop's
+ * cap is the only thing that reads it, and the instance's own guard still reads
+ * every member including these.
+ */
+function loopSpend(instanceId: string, nodeId: string): number {
+  return sumMemberSpend(
+    db()
+      .prepare(`${MEMBER_SPEND_COLUMNS} WHERE w.instance_id = ? AND w.emitted_by = ?`)
+      .all(instanceId, nodeId) as MemberSpendRow[],
+  ).spentGuardUSD;
+}
+
+/**
  * How much of this instance has not finished, and how much of it never ran.
  *
  * The block half of `live` is not decorative. `stopped` is derived from "nothing
@@ -2258,6 +2653,8 @@ export interface InstanceMemberTally {
  * can be written off for it — a run by `releasableRuns`, a node still in the
  * ledger by `planInstanceStep`. An instance that counted only one of them would
  * report a graph missing its tail as a graph that reached its end.
+ * A `looping` block is live for the same reason one step along: it has another
+ * pass to start.
  */
 function memberTally(instanceId: string): InstanceMemberTally {
   const runs = db()
@@ -2274,7 +2671,10 @@ function memberTally(instanceId: string): InstanceMemberTally {
     .get(...LIVE_STATUSES, instanceId) as InstanceMemberTally;
   const blocks = db()
     .prepare(
-      "SELECT COALESCE(SUM(CASE WHEN status IN ('waiting','thinking')" +
+      // `looping` sits in the live set beside `thinking`: between passes a loop
+      // has no child in flight and is still not finished, so an instance that
+      // counted only `thinking` would read as stopped with a pass still to come.
+      "SELECT COALESCE(SUM(CASE WHEN status IN ('waiting','thinking','looping')" +
         " THEN 1 ELSE 0 END), 0) AS live," +
         " COALESCE(SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END), 0)" +
         " AS blocked" +
@@ -2341,9 +2741,28 @@ export function blocksOf(instanceId: string): WorkflowInstanceBlock[] {
       notes: string | null;
     }
   >;
+  // A loop block emits nothing — it creates one run per pass — so its count is
+  // the members it has created, read once for the whole instance rather than
+  // per row. The orchestrator block's count stays the *specs* it accepted: a
+  // spec whose `createRun` was refused is still something it decided on, and
+  // `createEmitted` records that failure separately.
+  const passes = new Map(
+    (
+      db()
+        .prepare(
+          "SELECT emitted_by AS nodeId, COUNT(*) AS n FROM workflow_instance_runs" +
+            " WHERE instance_id = ? AND emitted_by IS NOT NULL GROUP BY emitted_by",
+        )
+        .all(instanceId) as Array<{ nodeId: string; n: number }>
+    ).map((r) => [r.nodeId, r.n] as const),
+  );
+
   return rows.map(({ specs, batchId, notes, ...row }) => ({
     ...row,
-    emitted: parseSpecs(specs).length,
+    emitted:
+      row.kind === "loop"
+        ? (passes.get(row.nodeId) ?? 0)
+        : parseSpecs(specs).length,
     // The column itself, not its contents: `[]` is a turn that called the tool
     // and named nothing, which is a decision, and null is a turn that never
     // reached one.
@@ -2532,7 +2951,7 @@ export function liveBlocksOf(workflowId: string): number {
       `SELECT COUNT(*) AS n
          FROM workflow_instance_blocks b
          JOIN workflow_instances i ON i.id = b.instance_id
-        WHERE i.workflow_id = ? AND b.status IN ('waiting','thinking')`,
+        WHERE i.workflow_id = ? AND b.status IN ('waiting','thinking','looping')`,
     )
     .get(workflowId) as { n: number };
   return row.n;
@@ -2724,20 +3143,29 @@ export function startWorkflow(
   // ordinary — a subdirectory of a repository, submodules, no commits yet — and
   // every one of them would otherwise surface as a throw part-way through the
   // creating pass. Read-only, so asking early costs a few git processes.
+  // A loop block is in the same position as either end of a hand-over: every
+  // pass carries on the one before it, so it needs a checkout of its own for
+  // exactly the same reason and fails in exactly the same way without one.
   const nodeById = new Map(graph.nodes.map((n) => [n.id, n]));
+  const needBranch = new Set<WorkflowNode>(graph.nodes.filter((n) => n.kind === "loop"));
   for (const link of graph.edges.filter((e) => e.continueBranch)) {
-    for (const node of [nodeById.get(link.from)!, nodeById.get(link.to)!]) {
-      const probe = probeIsolation(
-        resolveWorkspaceFolder(node.folder, node.mountId),
-      );
-      if (probe.mode !== "worktree") {
-        return {
-          ok: false,
-          reason:
-            `“${node.name}” is part of a branch hand-over, which needs a ` +
-            `checkout of its own. ${probe.reason ?? "It cannot have one."}`,
-        };
-      }
+    needBranch.add(nodeById.get(link.from)!);
+    needBranch.add(nodeById.get(link.to)!);
+  }
+  for (const node of needBranch) {
+    const probe = probeIsolation(
+      resolveWorkspaceFolder(node.folder, node.mountId),
+    );
+    if (probe.mode !== "worktree") {
+      return {
+        ok: false,
+        reason:
+          node.kind === "loop"
+            ? `“${node.name}” repeats, and each pass carries on the one before ` +
+              `it, which needs a checkout of its own. ${probe.reason ?? "It cannot have one."}`
+            : `“${node.name}” is part of a branch hand-over, which needs a ` +
+              `checkout of its own. ${probe.reason ?? "It cannot have one."}`,
+      };
     }
   }
 
@@ -2797,6 +3225,10 @@ export function startWorkflow(
   try {
     for (const [position, nodeId] of order.entries()) {
       const node = byId.get(nodeId)!;
+      // A block that is not a run gets a ledger row rather than a run: an
+      // orchestrator block has a decision to make first, a merge block lands
+      // what is already there, and a loop block has a pass to create rather
+      // than being one.
       if (node.kind !== "run" || deferred.has(nodeId)) {
         addBlock.run(instanceId, nodeId, node.name, position, node.kind);
         continue;
@@ -2854,9 +3286,9 @@ export function startWorkflow(
   // last one made startable, exactly as the chat's approval route relies on.
   promoteQueued();
 
-  // And the other half of "start whatever can start": an orchestrator block
-  // with nothing in front of it is ready the moment the graph exists. Outside
-  // the creating pass, because it spawns.
+  // And the other half of "start whatever can start": an orchestrator block or
+  // a loop block with nothing in front of it is ready the moment the graph
+  // exists. Outside the creating pass, because the first of those spawns.
   advanceInstances();
   return { ok: true, instance: getInstance(instanceId)! };
 }
@@ -2884,11 +3316,12 @@ function recordMember(instanceId: string, node: WorkflowInstanceNode): void {
  *
  * Everything reachable *from* a block that is not a run, transitively. A node
  * here has at least one dependency that is not a run — an orchestrator block's
- * decision that may turn out to be several runs, or a merge block that creates
- * none at all — so there is nothing for `createRun` to name, and admitting it as
- * `waiting` with no edges would release it immediately: a run started ahead of
- * the decision that was supposed to shape it, or ahead of the merge it was meant
- * to follow.
+ * decision that may turn out to be several runs, a merge block that creates none
+ * at all, or a loop block that may turn out to be however many passes it takes —
+ * so there is nothing for `createRun` to name, and admitting it as `waiting`
+ * with no edges would release it immediately: a run started ahead of the
+ * decision that was supposed to shape it, ahead of the merge it was meant to
+ * follow, or ahead of the passes it was meant to come after.
  *
  * Costing nothing is what makes the deferral safe: a node that has not been
  * created holds no folder, no checkout slot and no place in the queue, which is
@@ -3206,7 +3639,8 @@ export function stopInstance(instanceId: string, cause: HaltCause): HaltOutcome 
 
   const members = membersOf(instanceId);
   const liveBlocks = instance.blocks.filter(
-    (b) => b.status === "waiting" || b.status === "thinking",
+    (b) =>
+      b.status === "waiting" || b.status === "thinking" || b.status === "looping",
   ).length;
   const plan = haltPlan({ ...instance, liveBlocks }, members, cause);
   const report: HaltReport = {
@@ -3315,10 +3749,13 @@ function walkMembers(
  *
  * `blocked` for a block that never started — the status this app already writes
  * for work refused before it cost anything, and the true thing to say — and
- * `failed` for one whose child was in flight, because that turn was billed and
- * saying it never ran would hide the spend already on its row. Both are written
- * *before* the child is signalled, so the guarded UPDATE in `emitBlockRuns` and
- * the one in `settleBlock` both refuse whatever the dying turn still tries to do.
+ * `failed` for one whose child was in flight or whose passes had begun, because
+ * that work was billed and saying it never ran would hide the spend already
+ * recorded against it. All three are written *before* the child is signalled, so
+ * the guarded UPDATE in `emitBlockRuns`, the one in `settleBlock` and the one in
+ * `settleLoop` all refuse whatever the dying block still tries to do — a loop in
+ * particular, because a `looping` row is the only thing standing between a
+ * settling pass and the creation of the next one.
  *
  * The signal ladder is the one every other child here gets, `SIGINT` first.
  */
@@ -3355,7 +3792,16 @@ function haltBlocks(instanceId: string, cause: string): number {
         `${cause} while it was landing branches.`,
         `${cause} while it was deciding what to start.`,
         instanceId,
-      ).changes;
+      ).changes +
+    // A separate statement rather than a third arm of the CASE above, because
+    // this one selects a different status: a loop between passes has no child
+    // in flight and is `looping`, not `thinking`.
+    db()
+      .prepare(
+        "UPDATE workflow_instance_blocks SET status='failed', finished_at=?, error=?" +
+          " WHERE instance_id=? AND status='looping'",
+      )
+      .run(now, `${cause} while it was repeating its task.`, instanceId).changes;
 
   for (const [key, child] of blockTurns) {
     if (!key.startsWith(`${instanceId}:`)) continue;
@@ -3787,6 +4233,10 @@ export function reviveBlockedBlocks(roots: readonly string[]): number {
  * front of it is ready immediately), `releaseDependents` (every terminal run
  * transition in the app, which is where a block's dependencies settle), and the
  * settling of a block turn (which may release the next one).
+ *
+ * `looping` joins `waiting` in the selection because a loop's next pass hangs
+ * off exactly the same signal: the pass in front of it reaching a terminal
+ * status, which is what `releaseDependents` fires on.
  */
 export function advanceInstances(): void {
   const rows = db()
@@ -3794,7 +4244,7 @@ export function advanceInstances(): void {
       `SELECT DISTINCT b.instance_id AS id
          FROM workflow_instance_blocks b
          JOIN workflow_instances i ON i.id = b.instance_id
-        WHERE b.status = 'waiting' AND i.status = 'started'`,
+        WHERE b.status IN ('waiting','looping') AND i.status = 'started'`,
     )
     .all() as Array<{ id: string }>;
   for (const row of rows) advanceInstance(row.id);
@@ -3802,6 +4252,13 @@ export function advanceInstances(): void {
 
 /** One instance: apply whatever `planInstanceStep` says can happen now. */
 function advanceInstance(instanceId: string): void {
+  // Loops first, so a loop that settles here is already settled when the plan
+  // below is computed and what is behind it is released in this pass rather
+  // than one advance later. It cannot go the other way round: a loop that takes
+  // another pass writes nothing the plan reads, since a `looping` block is
+  // pending to everything behind it either way.
+  advanceLoops(instanceId);
+
   const instance = getInstance(instanceId);
   if (!instance || !instanceIsOpen(instance.status)) return;
 
@@ -3876,6 +4333,16 @@ function advanceInstance(instanceId: string): void {
     }
   }
 
+  // A loop's first pass. Claimed and created in the same event-loop turn, so a
+  // second advance arriving afterwards finds the block `looping` with a pass in
+  // flight and `planLoopPass` tells it to wait — which is the same guarded-UPDATE
+  // shape `claimBlock` uses, without the spawn that made that one asynchronous.
+  for (const creation of step.loop) {
+    const node = instance.graph.nodes.find((n) => n.id === creation.nodeId);
+    if (!node || !claimLoop(instanceId, creation.nodeId)) continue;
+    createPass(instanceId, node, 1, creation.dependsOn);
+  }
+
   // Claimed synchronously, spawned after. The claim is what makes this
   // re-entrant safe; the spawn is what makes it worth doing.
   //
@@ -3931,7 +4398,8 @@ function instanceState(
               r.status AS status, r.iterations AS iterations
          FROM workflow_instance_runs w
          LEFT JOIN runs r ON r.id = w.run_id
-        WHERE w.instance_id = ?`,
+        WHERE w.instance_id = ?
+        ORDER BY w.position`,
     )
     .all(instance.id) as Array<{
     nodeId: string;
@@ -3941,6 +4409,8 @@ function instanceState(
     iterations: number | null;
   }>;
 
+  // Ordered by position, which for a loop block's passes is pass order — the
+  // property `loopVerdict` reads when it takes the last one.
   const emitted = new Map<string, DependencyState[]>();
   for (const row of runs) {
     // A row whose run has been deleted is treated as gone rather than as
@@ -4008,7 +4478,7 @@ function upsertBlock(
   const changed = db()
     .prepare(
       "UPDATE workflow_instance_blocks SET status=?, error=?, finished_at=?" +
-        " WHERE instance_id=? AND node_id=? AND status IN ('waiting','thinking')",
+        " WHERE instance_id=? AND node_id=? AND status IN ('waiting','thinking','looping')",
     )
     .run(status, reason, now, instanceId, node?.id ?? "").changes;
   if (changed > 0 || !node) return;
@@ -4049,6 +4519,233 @@ function claimBlock(instanceId: string, nodeId: string): boolean {
       )
       .run(Date.now(), instanceId, nodeId).changes === 1
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* Loop blocks: one pass at a time, unrolled                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Open a loop, or return false because another pass already has.
+ *
+ * `claimBlock`'s shape, for the status a loop lives in. It is what stops two
+ * overlapping advances both creating pass 1 — after which one of them would be a
+ * second run continuing the same predecessor, which admission refuses, so the
+ * symptom would be a throw in a place with nobody to show it to.
+ */
+function claimLoop(instanceId: string, nodeId: string): boolean {
+  return (
+    db()
+      .prepare(
+        "UPDATE workflow_instance_blocks SET status='looping', started_at=?, error=NULL" +
+          " WHERE instance_id=? AND node_id=? AND status='waiting'",
+      )
+      .run(Date.now(), instanceId, nodeId).changes === 1
+  );
+}
+
+/**
+ * Record how a loop ended, once.
+ *
+ * Guarded on `looping`, which is the same latch `settleBlock` puts on `thinking`
+ * and for the same reason: a halt that got here first keeps its own wording, and
+ * a second settle changes nothing. `emitted` is the ordinary ending whatever
+ * stopped it — the block did what it was asked, and whether the *work* finished
+ * is a fact about its last pass that `loopVerdict` reads off that run's status.
+ * `failed` is reserved for the loop machinery itself failing.
+ */
+function settleLoop(
+  instanceId: string,
+  nodeId: string,
+  status: "emitted" | "failed",
+  reason: string,
+): void {
+  db()
+    .prepare(
+      "UPDATE workflow_instance_blocks SET status=?, finished_at=?, error=?" +
+        " WHERE instance_id=? AND node_id=? AND status='looping'",
+    )
+    .run(status, Date.now(), reason, instanceId, nodeId);
+}
+
+/**
+ * Every pass a loop block has taken, oldest first.
+ *
+ * `LEFT JOIN`, so a member whose run row has been deleted is a pass with no
+ * runs rather than a pass that is silently missing — which is what makes
+ * `planLoopPass`'s empty case reachable from real data rather than only from a
+ * creation that threw.
+ */
+function loopPasses(instanceId: string, nodeId: string): LoopPass[] {
+  const rows = db()
+    .prepare(
+      `SELECT r.id AS id, r.status AS status, r.iterations AS iterations,
+              r.reported_done AS reportedDone
+         FROM workflow_instance_runs w
+         LEFT JOIN runs r ON r.id = w.run_id
+        WHERE w.instance_id = ? AND w.emitted_by = ?
+        ORDER BY w.position`,
+    )
+    .all(instanceId, nodeId) as Array<{
+    id: string | null;
+    status: RunStatus | null;
+    iterations: number | null;
+    reportedDone: number | null;
+  }>;
+
+  return rows.map((row, index) => ({
+    pass: index + 1,
+    runs:
+      row.id && row.status
+        ? [
+            {
+              id: row.id,
+              status: row.status,
+              iterations: row.iterations ?? 0,
+              reportedDone: !!row.reportedDone,
+            },
+          ]
+        : [],
+  }));
+}
+
+/** Every loop of one instance that has another pass to decide on. */
+function advanceLoops(instanceId: string): void {
+  const rows = db()
+    .prepare(
+      "SELECT node_id AS nodeId FROM workflow_instance_blocks" +
+        " WHERE instance_id = ? AND kind = 'loop' AND status = 'looping'" +
+        " ORDER BY position",
+    )
+    .all(instanceId) as Array<{ nodeId: string }>;
+  for (const row of rows) advanceLoop(instanceId, row.nodeId);
+}
+
+/**
+ * Decide whether one loop takes another pass, and act on the answer.
+ *
+ * The writing half of `planLoopPass`, and it is synchronous end to end for
+ * `createRun`'s reason — one event-loop turn covers reading the passes,
+ * deciding, and claiming a folder for the next one.
+ */
+function advanceLoop(instanceId: string, nodeId: string): void {
+  const instance = getInstance(instanceId);
+  if (!instance || instance.status !== "started") return;
+
+  const node = instance.graph.nodes.find((n) => n.id === nodeId);
+  // `typeof` rather than `!== null`, and that is the difference between a loop
+  // that ends and one that does not: an instance blob written before this
+  // column existed, or by anything but `normalizeWorkflowInput`, carries
+  // `undefined` here — and `passes.length >= undefined` is false for ever.
+  if (!node || node.kind !== "loop" || typeof node.maxPasses !== "number") {
+    settleLoop(
+      instanceId,
+      nodeId,
+      "failed",
+      "This block is no longer in the workflow this run was started from.",
+    );
+    return;
+  }
+
+  const passes = loopPasses(instanceId, nodeId);
+  const decision = planLoopPass({
+    blockName: node.name,
+    passes,
+    maxPasses: node.maxPasses,
+    maxCostUSD: node.maxLoopCostUSD,
+    spentGuardUSD: loopSpend(instanceId, nodeId),
+  });
+
+  if (decision.kind === "wait") return;
+  if (decision.kind === "stop") {
+    settleLoop(instanceId, nodeId, "emitted", decision.reason);
+    return;
+  }
+
+  // Pass 2 and after carry on the pass in front of them, through the same
+  // `continue_branch` mechanism a hand-over edge uses — so the chain rules in
+  // `land.ts` see one branch with one owner, and nothing here is a second
+  // definition of what continuing a branch means. `on-success` rather than
+  // `on-finish` because a pass that did not complete has already stopped the
+  // loop above: stating it on the edge means a race could only ever be refused
+  // at admission rather than start a pass on top of a failure.
+  const previous = passes.at(-1)?.runs.at(-1);
+  createPass(
+    instanceId,
+    node,
+    decision.pass,
+    previous
+      ? [{ runId: previous.id, edge: "on-success", continueBranch: true }]
+      : [],
+  );
+}
+
+/**
+ * Create one pass's run.
+ *
+ * The run is an ordinary member of the instance, recorded with `emitted_by` set
+ * to the loop block — the column an orchestrator block's runs already use — so
+ * the instance budget guard, `stopInstance`, the second-press refusal and the
+ * instance page all cover a pass with no new code.
+ *
+ * A failure here **ends the loop** rather than being retried. The next pass
+ * would be created the same way against the same folder and fail the same way,
+ * which is a hot loop rather than a retry, and `planLoopPass` says the same
+ * thing about a pass that produced nothing.
+ */
+function createPass(
+  instanceId: string,
+  node: WorkflowNode,
+  pass: number,
+  dependsOn: InstanceCreation["dependsOn"],
+): void {
+  const plan = planNode(
+    node,
+    node.templateId ? getTemplate(node.templateId) : null,
+    chatGuards(),
+    // Asked again for every pass, `planInstanceStep`'s reason one loop along: a
+    // pass is created minutes or hours after the one before it, so an agent
+    // deleted in between blocks this loop by name rather than quietly starting
+    // a pass that is not the thing the graph named.
+    node.agentId ? getAgent(node.agentId) : null,
+  );
+  if (!plan.ok) {
+    settleLoop(instanceId, node.id, "failed", plan.reason);
+    return;
+  }
+
+  const instance = getInstance(instanceId);
+
+  try {
+    const run = createRun({
+      ...plan.input,
+      dependsOn,
+      // The instance's own, exactly as a deferred node takes it. A pass is not
+      // an `orchestrator-block` run: no model decided it — `planLoopPass` did,
+      // off the pass before it — and the press of Run that authorised the graph
+      // authorised every pass its cap allows.
+      origin: instance?.origin ?? "workflow",
+      originRef: instance?.originRef ?? instanceId,
+    });
+    recordMember(instanceId, {
+      // Its own row in the members table, which is keyed on the node id — so a
+      // pass is addressable and the block's own ledger row stays where it is.
+      nodeId: `${node.id}#pass-${pass}`,
+      nodeName: `${node.name} — pass ${pass}`,
+      position: nextPosition(instanceId),
+      runId: run.id,
+      emittedBy: node.id,
+    });
+  } catch (err) {
+    settleLoop(
+      instanceId,
+      node.id,
+      "failed",
+      `Pass ${pass} could not be started: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
 }
 
 /**
@@ -5186,6 +5883,18 @@ export function reconcileBlocksOnBoot(): void {
       "The server restarted while this block was deciding what to start.",
     ).changes;
 
+  // A loop is closed out for the queued-run reason rather than the `thinking`
+  // one: its passes were failed by the same boot, so another pass would be an
+  // unattended agent started hours after anyone asked for it — and `failed`
+  // rather than `blocked` because the passes it already took were billed.
+  const looping = db()
+    .prepare(
+      "UPDATE workflow_instance_blocks SET status='failed', finished_at=?," +
+        " error='The server restarted while this block was repeating its task, and the pass it was working on was closed out by the same restart.'" +
+        " WHERE status='looping'",
+    )
+    .run(now).changes;
+
   // Read after the sweep above, so a block that was deciding counts as the
   // decision that will never arrive rather than as something still to come.
   // One row per member; instances with no `waiting` block are not asked about.
@@ -5238,9 +5947,9 @@ export function reconcileBlocksOnBoot(): void {
       "The server restarted while this block was waiting for earlier work, and its workflow was no longer running.",
     );
 
-  if (thinking + waiting > 0) {
+  if (thinking + waiting + looping > 0) {
     console.warn(
-      `[usagefoundry] Closed out ${thinking + waiting} workflow block(s) interrupted by a restart.`,
+      `[usagefoundry] Closed out ${thinking + waiting + looping} workflow block(s) interrupted by a restart.`,
     );
   }
   if (plan.spared.length > 0) {
