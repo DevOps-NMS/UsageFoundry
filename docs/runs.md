@@ -92,9 +92,17 @@ changed. Its own conversation is intact; the files may not be what it left.
 
 Concurrency multiplies the overshoot in every mode. `maxRunCostUSD` applies to
 each run separately, so three runs with a $5 limit each is a $15 worst case, not
-$5. Set **Runs allowed at the same time** in Settings if you want that bounded;
-it is unlimited by default, and a run over the limit waits rather than being
-refused. A parked run does not count against it — it is spending nothing.
+$5. **Settings → Runs at the same time** bounds that multiplier, and it ships at
+**4** rather than off — a run over the limit waits rather than being refused, and
+queued or parked runs do not count against it, since they are spending nothing.
+The number is measured rather than reasoned: it was raised from no limit to 4
+after sixteen concurrent runs met the provider's 5-hour wall inside a 44-second
+span and every one of them lost its first cycle.
+
+Reviews, chat turns and workflow orchestrator blocks do **not** come out of that
+cap. They share a second one, **Settings → Other Claude processes at the same
+time**, which ships at 2. Together the two are the most Claude processes the
+container will ever carry.
 
 A cap on how many runs work at once still says nothing about the total, because
 nothing bounds how many *waves* there are: a slot that frees is refilled
