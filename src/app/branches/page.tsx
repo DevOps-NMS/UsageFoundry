@@ -1381,241 +1381,276 @@ function BranchTable({
   onAct?: (b: BranchSummaryDTO, action: "delete" | "commit" | "purge") => void;
 }) {
   return (
-    <TableWrap>
-      <Table stack>
-        <caption className="sr-only">
-          Every branch an isolated run has made, newest first
-        </caption>
-        <THead>
-          <tr>
-            <Th scope="col" className="w-[56px]">
-              <span className="sr-only">Land</span>
-            </Th>
-            <Th scope="col" className="w-[140px]">
-              State
-            </Th>
-            <Th scope="col" className="w-full">
-              Branch
-            </Th>
-            <Th scope="col" className="w-[120px]">
-              Repository
-            </Th>
-            <Th scope="col" className="w-[120px]">
-              Lands into
-            </Th>
-            <Th
-              scope="col"
-              num
-              className="w-[76px]"
-              title="Commits this branch has that the branch it lands into does not"
-            >
-              Ahead
-            </Th>
-            <Th scope="col" num className="w-[112px]">
-              Created
-            </Th>
-            <Th scope="col" num className="w-[176px]">
-              Actions
-            </Th>
-          </tr>
-        </THead>
-        <TBody>
-          {loading ? (
-            <SkeletonRows />
-          ) : (
-            branches.map((b) => {
-              const order = selected.indexOf(b.runId);
-              const queued = inQueue?.has(b.runId) ?? false;
-              const working = busy === b.runId;
+    <>
+      <TableWrap>
+        <Table stack>
+          <caption className="sr-only">
+            Every branch an isolated run has made, newest first
+          </caption>
+          <THead>
+            {/* Every fixed column is a floor and not a width. Auto table layout
+                treats a `width` on a cell as a preference and hands it back to
+                the column that asked for `w-full`, which is exactly what the
+                branch column does — measured, the 176px Actions column rendered
+                at 77 and the 56px tick box at 20, so the row of buttons wrapped
+                onto three lines and the order number sat under its checkbox. A
+                `min-w` is the only thing the algorithm has to honour, and none of
+                it reaches the stacked layout: `THead` is `max-md:hidden` on a
+                `stack` table, so below the breakpoint these cells do not render
+                and each `Td` names its own field instead. */}
+            <tr>
+              <Th scope="col" className="min-w-[56px]">
+                <span className="sr-only">Land</span>
+              </Th>
+              <Th scope="col" className="min-w-[140px]">
+                State
+              </Th>
+              <Th scope="col" className="w-full">
+                Branch
+              </Th>
+              <Th scope="col" className="min-w-[120px]">
+                Repository
+              </Th>
+              <Th scope="col" className="min-w-[120px]">
+                Lands into
+              </Th>
+              <Th scope="col" num className="min-w-[76px]">
+                Ahead
+              </Th>
+              <Th scope="col" num className="min-w-[112px]">
+                Created
+              </Th>
+              <Th scope="col" num className="min-w-[176px]">
+                Actions
+              </Th>
+            </tr>
+          </THead>
+          <TBody>
+            {loading ? (
+              <SkeletonRows />
+            ) : (
+              branches.map((b) => {
+                const order = selected.indexOf(b.runId);
+                const queued = inQueue?.has(b.runId) ?? false;
+                const working = busy === b.runId;
 
-              return (
-                <Tr
-                  key={b.branch}
-                  className="transition-colors duration-150 hover:bg-inset focus-within:bg-inset"
-                >
-                  <Td className="align-top">
-                    {queueable(b) ? (
-                      // The negative margin buys a 32px hit target without
-                      // changing what the cell occupies; below the breakpoint
-                      // the app's own floor is 44px and the box grows to it,
-                      // which costs nothing because the row is a block there
-                      // and the cell no longer sets a column's width.
-                      <label
-                        className={`-m-2 flex w-max items-center gap-1.5 p-2 max-md:min-h-11 ${
-                          queued ? "cursor-not-allowed" : "cursor-pointer"
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 shrink-0 cursor-pointer accent-accent disabled:cursor-not-allowed disabled:opacity-50"
-                          checked={order >= 0}
-                          disabled={queued}
-                          onChange={() => onToggle?.(b.runId)}
-                          aria-label={
-                            queued
-                              ? `${b.branch} is already in the merge queue`
-                              : `Land ${b.branch}`
-                          }
-                          title={
-                            queued ? "Already in the merge queue" : undefined
-                          }
-                        />
-                        {/* The column head is `sr-only` because a tick box under
-                            the word "Land" needs no second label — but below the
-                            breakpoint the head is gone entirely, and a bare
-                            checkbox at the top of a card says nothing about what
-                            ticking it does. The word is what the head was. */}
-                        <span
-                          aria-hidden="true"
-                          className="text-sm text-ink-muted md:hidden"
-                        >
-                          Land
-                        </span>
-                        {/* Fixed width whether or not it holds a number, so
-                            ticking a box moves nothing. */}
-                        <span
-                          aria-hidden="true"
-                          className="w-3 text-right text-2xs font-semibold tabular-nums text-accent"
-                        >
-                          {order >= 0 ? order + 1 : ""}
-                        </span>
-                      </label>
-                    ) : null}
-                  </Td>
-
-                  <Td className="align-top">
-                    <StateBadge b={b} />
-                    {/* Work in the checkout, not on the branch. A run that could
-                        not commit reads as "unmerged, 0 ahead", which looks like
-                        a run that did nothing. */}
-                    {!!b.uncommitted && (
-                      <div
-                        className="mt-1 text-2xs font-semibold uppercase tracking-wide text-warn"
-                        title="Changed paths in the run's own checkout, not on the branch"
-                      >
-                        {b.uncommitted} uncommitted
-                      </div>
-                    )}
-                  </Td>
-
-                  <Td className="align-top">
-                    <Link
-                      href={`/runs/${b.runId}`}
-                      className="mono block max-w-[40ch] truncate font-medium"
-                      title={b.branch}
-                    >
-                      {b.branch}
-                    </Link>
-                    <div
-                      className="mt-0.5 max-w-[40ch] truncate text-xs text-ink-muted"
-                      title={b.prompt}
-                    >
-                      {b.prompt}
-                    </div>
-                  </Td>
-
-                  <Td label="Repository" className="align-top">
-                    <div className="mono max-w-[16ch] truncate" title={b.repoLabel}>
-                      {b.repoLabel}
-                    </div>
-                  </Td>
-
-                  <Td label="Lands into" className="align-top">
-                    <div
-                      className="mono max-w-[16ch] truncate"
-                      title={b.target ?? "This branch has no recorded target"}
-                    >
-                      {b.target ?? "—"}
-                    </div>
-                  </Td>
-
-                  <Td num label="Ahead" className="align-top">
-                    {b.exists ? b.ahead : "—"}
-                  </Td>
-
-                  <Td
-                    num
-                    label="Created"
-                    className="whitespace-nowrap align-top text-ink-muted"
+                return (
+                  <Tr
+                    key={b.branch}
+                    className="transition-colors duration-150 hover:bg-inset focus-within:bg-inset"
                   >
-                    {fmtDateTime(b.createdAt)}
-                  </Td>
-
-                  <Td className="align-top">
-                    <div className="flex flex-wrap items-center justify-end gap-1.5">
-                      {/* Puts what the agent wrote onto the branch, under the
-                          run's own task as the subject. Also what frees the
-                          checkout slot: one with work in it is not reusable. */}
-                      {b.exists && !b.active && !!b.uncommitted && (
-                        <Button
-                          variant="secondary"
-                          className="min-w-[92px]"
-                          onClick={() => onAct?.(b, "commit")}
-                          disabled={working}
+                    <Td className="align-top">
+                      {queueable(b) ? (
+                        // The negative margin buys a 32px hit target without
+                        // changing what the cell occupies; below the breakpoint
+                        // the app's own floor is 44px and the box grows to it,
+                        // which costs nothing because the row is a block there
+                        // and the cell no longer sets a column's width.
+                        <label
+                          className={`-m-2 flex w-max items-center gap-1.5 p-2 max-md:min-h-11 ${
+                            queued ? "cursor-not-allowed" : "cursor-pointer"
+                          }`}
                         >
-                          {working ? "Working…" : "Commit"}
-                        </Button>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 shrink-0 cursor-pointer accent-accent disabled:cursor-not-allowed disabled:opacity-50"
+                            checked={order >= 0}
+                            disabled={queued}
+                            onChange={() => onToggle?.(b.runId)}
+                            aria-label={
+                              queued
+                                ? `${b.branch} is already in the merge queue`
+                                : `Land ${b.branch}`
+                            }
+                            title={
+                              queued ? "Already in the merge queue" : undefined
+                            }
+                          />
+                          {/* The column head is `sr-only` because a tick box under
+                              the word "Land" needs no second label — but below the
+                              breakpoint the head is gone entirely, and a bare
+                              checkbox at the top of a card says nothing about what
+                              ticking it does. The word is what the head was. */}
+                          <span
+                            aria-hidden="true"
+                            className="text-sm text-ink-muted md:hidden"
+                          >
+                            Land
+                          </span>
+                          {/* Fixed width whether or not it holds a number, so
+                              ticking a box moves nothing. */}
+                          <span
+                            aria-hidden="true"
+                            className="w-3 text-right text-2xs font-semibold tabular-nums text-accent"
+                          >
+                            {order >= 0 ? order + 1 : ""}
+                          </span>
+                        </label>
+                      ) : null}
+                    </Td>
+
+                    <Td className="align-top">
+                      <StateBadge b={b} />
+                      {/* Work in the checkout, not on the branch. A run that could
+                          not commit reads as "unmerged, 0 ahead", which looks like
+                          a run that did nothing.
+
+                          That distinction is the whole reason the line is here,
+                          so it is in the words rather than in a `title` a
+                          finger cannot reach. The three words added are the
+                          hover's own — it read "changed paths in the run's own
+                          checkout, not on the branch" — and not a fourth name
+                          for the state: the storage table above says "holding
+                          uncommitted work" and `RunLand` says "uncommitted
+                          paths", and both are about the same checkout this is.
+                          C10 cut three wordings to two and this must not make
+                          it three again, so anything reworded here is reworded
+                          in all of them. */}
+                      {!!b.uncommitted && (
+                        <div className="mt-1 text-2xs font-semibold uppercase tracking-wide text-warn">
+                          {b.uncommitted} uncommitted in the checkout
+                        </div>
                       )}
+                    </Td>
 
-                      {/* Delete is the safe door — git can see the work is in
-                          the target. Purge is the other one, and it takes a
-                          second press that names what goes with it. */}
-                      {b.exists && (b.merged || b.landedUnchanged) && !b.active ? (
-                        <Button
-                          variant="ghost"
-                          className="min-w-[92px]"
-                          onClick={() => onAct?.(b, "delete")}
-                          disabled={working}
-                        >
-                          {working ? "Deleting…" : "Delete"}
-                        </Button>
-                      ) : b.exists && !b.active ? (
-                        armedPurge === b.runId ? (
-                          <>
-                            <Button
-                              variant="ghost"
-                              onClick={() => onArm?.(null)}
-                              disabled={working}
-                            >
-                              Cancel
-                            </Button>
-                            <Button
-                              variant="danger"
-                              className="min-w-[136px]"
-                              title="Deletes the branch and its checkout. Nothing on it is recoverable afterwards."
-                              onClick={() => onAct?.(b, "purge")}
-                              disabled={working}
-                            >
-                              {working
-                                ? "Purging…"
-                                : `Purge ${b.ahead} commit${b.ahead === 1 ? "" : "s"}`}
-                            </Button>
-                          </>
-                        ) : (
+                    <Td className="align-top">
+                      <Link
+                        href={`/runs/${b.runId}`}
+                        className="mono block max-w-[40ch] truncate font-medium"
+                        title={b.branch}
+                      >
+                        {b.branch}
+                      </Link>
+                      <div
+                        className="mt-0.5 max-w-[40ch] truncate text-xs text-ink-muted"
+                        title={b.prompt}
+                      >
+                        {b.prompt}
+                      </div>
+                    </Td>
+
+                    <Td label="Repository" className="align-top">
+                      <div className="mono max-w-[16ch] truncate" title={b.repoLabel}>
+                        {b.repoLabel}
+                      </div>
+                    </Td>
+
+                    <Td label="Lands into" className="align-top">
+                      <div
+                        className="mono max-w-[16ch] truncate"
+                        title={b.target ?? "This branch has no recorded target"}
+                      >
+                        {b.target ?? "—"}
+                      </div>
+                    </Td>
+
+                    <Td num label="Ahead" className="align-top">
+                      {b.exists ? b.ahead : "—"}
+                    </Td>
+
+                    <Td
+                      num
+                      label="Created"
+                      className="whitespace-nowrap align-top text-ink-muted"
+                    >
+                      {fmtDateTime(b.createdAt)}
+                    </Td>
+
+                    <Td className="align-top">
+                      <div className="flex flex-wrap items-center justify-end gap-1.5">
+                        {/* Puts what the agent wrote onto the branch, under the
+                            run's own task as the subject. Also what frees the
+                            checkout slot: one with work in it is not reusable. */}
+                        {b.exists && !b.active && !!b.uncommitted && (
                           <Button
-                            variant="ghost"
-                            onClick={() => onArm?.(b.runId)}
+                            variant="secondary"
+                            className="min-w-[92px]"
+                            onClick={() => onAct?.(b, "commit")}
                             disabled={working}
                           >
-                            Purge
+                            {working ? "Working…" : "Commit"}
                           </Button>
-                        )
-                      ) : (
-                        <Link
-                          href={`/runs/${b.runId}`}
-                          className="inline-flex max-md:min-h-11 items-center rounded-sm px-3 py-2 text-sm font-medium text-ink-muted no-underline transition-colors duration-150 hover:bg-inset hover:text-ink hover:no-underline"
-                        >
-                          Open run
-                        </Link>
-                      )}
-                    </div>
-                  </Td>
-                </Tr>
-              );
-            })
-          )}
-        </TBody>
-      </Table>
-    </TableWrap>
+                        )}
+
+                        {/* Delete is the safe door — git can see the work is in
+                            the target. Purge is the other one, and it takes a
+                            second press that names what goes with it. */}
+                        {b.exists && (b.merged || b.landedUnchanged) && !b.active ? (
+                          <Button
+                            variant="ghost"
+                            className="min-w-[92px]"
+                            onClick={() => onAct?.(b, "delete")}
+                            disabled={working}
+                          >
+                            {working ? "Deleting…" : "Delete"}
+                          </Button>
+                        ) : b.exists && !b.active ? (
+                          armedPurge === b.runId ? (
+                            <>
+                              {/* What the second press costs, where the second
+                                  press is. It was a `title` on the button, and
+                                  the one consequence in this app with no undo
+                                  is the last one that may be hover-only — this
+                                  row only draws it once the purge is armed, so
+                                  it costs nothing until it is the sentence the
+                                  operator is deciding against. */}
+                              <p className="w-full text-right text-xs leading-snug text-warn">
+                                Deletes the branch and its checkout. Nothing on
+                                it is recoverable afterwards.
+                              </p>
+                              <Button
+                                variant="ghost"
+                                onClick={() => onArm?.(null)}
+                                disabled={working}
+                              >
+                                Cancel
+                              </Button>
+                              <Button
+                                variant="danger"
+                                className="min-w-[136px]"
+                                onClick={() => onAct?.(b, "purge")}
+                                disabled={working}
+                              >
+                                {working
+                                  ? "Purging…"
+                                  : `Purge ${b.ahead} commit${b.ahead === 1 ? "" : "s"}`}
+                              </Button>
+                            </>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              onClick={() => onArm?.(b.runId)}
+                              disabled={working}
+                            >
+                              Purge
+                            </Button>
+                          )
+                        ) : (
+                          <Link
+                            href={`/runs/${b.runId}`}
+                            className="inline-flex max-md:min-h-11 items-center rounded-sm px-3 py-2 text-sm font-medium text-ink-muted no-underline transition-colors duration-150 hover:bg-inset hover:text-ink hover:no-underline"
+                          >
+                            Open run
+                          </Link>
+                        )}
+                      </div>
+                    </Td>
+                  </Tr>
+                );
+              })
+            )}
+          </TBody>
+        </Table>
+      </TableWrap>
+      {/* The one column whose head is not its own definition, said on the page
+          rather than in a `title` on that head. A hover has no touch
+          equivalent, and this table stacks: below the breakpoint `THead` is
+          hidden outright, so the column head the sentence hung off did not
+          render at all and the number stood alone under the word "Ahead". */}
+      <p className="mt-2 text-xs text-ink-muted">
+        Ahead counts the commits this branch has that the branch it lands into
+        does not.
+      </p>
+    </>
   );
 }
