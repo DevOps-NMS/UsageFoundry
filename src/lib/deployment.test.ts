@@ -655,9 +655,14 @@ describe("gh extensions survive the rebuild that installs them by hand does not"
  * And the direction this run had to get right at all: the switch ships off, and
  * `security_opt` ships commented. An uncommented seccomp line would make every
  * stock `docker compose up` depend on a profile file the daemon may reject, for
- * a sandbox nobody asked for. Docker is not available where these tests run, so
- * this pins the files against each other; `docs/verification.md` carries the
- * commands that check the behaviour, every one of them still unrun.
+ * a sandbox nobody asked for. That reading is now measured rather than argued:
+ * with the profile applied `bwrap` starts and without it the same command fails
+ * at both uids, so the line decides something on every install that has one.
+ * An operator who wants it puts it in a `docker-compose.override.yml`, which is
+ * why this assertion did not have to move to enable a sandbox here. Docker is
+ * not available where these tests run, so this pins the files against each
+ * other; `docs/verification.md` carries the commands that check the behaviour,
+ * and two of them now have answers.
  */
 describe("the sandbox ships off, and its switch reaches the container", () => {
   const entrypoint = fs.readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8");

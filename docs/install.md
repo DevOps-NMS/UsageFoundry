@@ -323,8 +323,8 @@ Then start one short run and read its log. A **`sandbox` row** — "bubblewrap
 could not build the namespace the sandbox needs, so this command never ran" —
 under a failed tool call means every `Bash` call is being wrapped in a program
 that exits before the command does. Look for it deliberately: this install spent
-thirteen hours in exactly that state — eight runs, 170 failed `Bash` calls, at
-least $210 of spend — with nothing anywhere naming the cause, because
+fifteen hours in exactly that state — ten runs, 214 failed `Bash` calls,
+$407 of spend between them — with nothing anywhere naming the cause, because
 `UF_SANDBOX_ENFORCEMENT=refuse` does not catch it. The CLI's availability check
 asks whether `bwrap` and `socat` exist and are executable; it never runs one, so
 a bubblewrap the kernel refuses is not "unavailable" to it and nothing stops.

@@ -48,6 +48,15 @@ process.env.CLAUDE_CONFIG_DIR = path.join(tmp, "claude");
 // `claude` that does not exist makes a regression that gets as far as a spawn a
 // failed test rather than a billed one.
 process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
+// `BUILD_CACHE_DIRS` reads GOPATH once, at import, and falls back to `$HOME/go`.
+// The image sets the two equal; a developer's shell need not, and a test that
+// asserted the fallback while the code read the variable would pass or fail on
+// whoever ran it. Pinned above the `require` for the same reason as the others.
+process.env.GOPATH = path.join(tmp, "gopath");
+// And TMPDIR, which the write set follows for the same reason: the sandbox
+// creates its sockets under it, and `os.tmpdir()` reads it at every call.
+process.env.TMPDIR = path.join(tmp, "tmp");
+fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 
 // `require`, not `import`: imports are hoisted above the environment setup
 // above, and the module reads WORKSPACE_ROOTS once at load.
@@ -2422,10 +2431,16 @@ describe("sandboxSettings — what one child may write", () => {
     // never reads. `/tmp` is where the CLI puts its own shell snapshots — the
     // first `Bash` call is where that shows up — and the caches are where a
     // first `npm install` or `go build` writes.
-    assert.equal(writable(isolated, "/tmp"), true);
-    assert.equal(writable(isolated, "/tmp/claude-shell-snapshot-x"), true);
+    assert.equal(writable(isolated, os.tmpdir()), true);
+    assert.equal(writable(isolated, path.join(os.tmpdir(), "cc-socks")), true);
     assert.equal(writable(isolated, path.join(os.homedir(), ".npm")), true);
-    assert.equal(writable(isolated, path.join(os.homedir(), "go", "pkg", "mod")), true);
+    // The pinned GOPATH above, not the fallback: this asserts that the variable
+    // is what the set follows, which is the half a developer's own `$HOME/go`
+    // would otherwise hide.
+    assert.equal(
+      writable(isolated, path.join(process.env.GOPATH as string, "pkg", "mod")),
+      true,
+    );
 
     // And the resolver gets them too: it is the other child an operator can
     // point at a build command, through `settings.resolveVerifyTools`.
@@ -2434,7 +2449,7 @@ describe("sandboxSettings — what one child may write", () => {
       cwd: own,
       permissionMode: "acceptEdits",
     });
-    assert.equal(writable(resolver, "/tmp"), true);
+    assert.equal(writable(resolver, os.tmpdir()), true);
     assert.equal(writable(resolver, path.join(os.homedir(), ".npm")), true);
   });
 
@@ -2490,7 +2505,7 @@ describe("sandboxSettings — what one child may write", () => {
     });
     assert.deepEqual(
       reviewer.kind === "confined" ? reviewer.allowWrite : null,
-      [CLAUDE_CONFIG_DIR, "/tmp"],
+      [CLAUDE_CONFIG_DIR, os.tmpdir()],
     );
 
     // The conflict resolver edits markers in a throwaway checkout and is

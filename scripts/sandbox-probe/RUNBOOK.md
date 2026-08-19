@@ -5,13 +5,19 @@
 
 `proposals/Sandboxing/` recommends letting the pinned Claude CLI sandbox itself
 with bubblewrap (Option B). **Every claim about that mechanism was read out of
-the pinned binary's strings and none of it has ever been executed.** Two runs
-have now written about it without starting one. This directory is the harness
+the pinned binary's strings.** A narrow slice has since been executed by hand —
+`bwrap` under and without the seccomp profile, and three `claude -p` calls, two
+of them against a sandbox that started — and `docs/verification.md` is the
+ledger of exactly which. None of it came from this harness. This directory is the harness
 for the measurement — Phase 1, questions 0 through 8 of
 `09-implementation-sketch.md:134`–`200` — and running it is a person's job on a
 machine with Docker, not an agent's.
 
-**Nothing here has been executed either.** No question in it has an answer. The
+**Nothing here has been executed either.** No question in it has an answer from
+this script — questions 0, 1 and 2 have answers in `docs/verification.md` that
+came from running the underlying commands by hand, and Q1's shape is worth
+knowing before you trust it: it omits `--proc /proc`, so it reports `BWRAP-OK`
+on an install where the CLI's own default bubblewrap argv still fails. The
 container this was written in has no `docker` binary, no `/var/run/docker.sock`,
 no root for `apt-get`, and `unshare --user` returns `Operation not permitted`
 under Docker's default seccomp profile — which is the very thing question 1 is

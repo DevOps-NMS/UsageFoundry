@@ -63,7 +63,7 @@ export interface SandboxRefusal {
  * `strings` and have never been executed (`proposals/Sandboxing/10-validation.md`,
  * "What this validation did not check"). The `bwrap:` entries below were read
  * off this install's own `run_events` after a sandbox that could not start went
- * unnoticed for thirteen hours — which is the measurement the paragraph above
+ * unnoticed for fifteen hours — which is the measurement the paragraph above
  * asks for, arriving the expensive way.
  *
  * The matching rule does not change with the provenance. Every needle is a

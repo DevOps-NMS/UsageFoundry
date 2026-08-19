@@ -173,8 +173,8 @@ not check that either — its availability probe asks only whether `bwrap` and
 `socat` exist and are executable, never runs one, so `failIfUnavailable`, which
 is what `UF_SANDBOX_ENFORCEMENT=refuse` sets, never fires against a bubblewrap
 the kernel refuses. Every `Bash` call is instead wrapped in a program that exits
-1 before the command runs. On this install that lasted thirteen hours: eight
-runs, 170 failed `Bash` calls, at least $210 of spend, and nothing in
+1 before the command runs. On this install that lasted fifteen hours: ten
+runs, 214 failed `Bash` calls, $407 of spend, and nothing in
 `run_events` naming a cause — from the outside, agents that had stopped being
 productive. What surfaces it is a **`sandbox` row on the run's log**, under the
 `tool failed` row for the same call, reading "bubblewrap could not build the

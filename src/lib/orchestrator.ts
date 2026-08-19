@@ -4630,7 +4630,7 @@ const ISOLATED_GIT_TOOLS = ["Bash(git add:*)", "Bash(git commit:*)"];
  * puts both back in the list and changes nothing else in it.
  *
  * The fallback the CLI points at is exactly what a broken sandbox took away:
- * for thirteen hours every `Bash` call on this install died inside bubblewrap,
+ * for fifteen hours every `Bash` call on this install died inside bubblewrap,
  * which left agents with `Read` and a directory they could not list. One of
  * them recovered a file list by parsing `.git/index` by hand. Two independent
  * defects, and this is the half that does not need a container restart to fix.
@@ -5082,18 +5082,27 @@ export function sandboxSettings(scope: SandboxScope): SandboxPolicy {
  * the agent's uid, policy integrity needs the settings file inside it not to be.
  * The resolution is per-entry ownership, and it is not this function's.
  *
- * `/tmp` is here for the same "no call site can leave it out" reason, and it is
- * not this app's path at all: the CLI writes its shell snapshots and its own
- * temporary files there, so a child that cannot write `/tmp` has a `Bash` tool
- * that fails for a reason with nothing to do with what it was asked to do.
- * `scripts/sandbox-probe/probe.sh` names it in all six of its allowlists on
- * exactly this ground, and it is given even to the reviewer — whose set is
- * otherwise empty, and which still runs read-only shell under `plan`.
+ * The temporary directory is here for the same "no call site can leave it out"
+ * reason, and it is not this app's path at all — it is the **sandbox's own**.
+ * Measured inside a container running a live policy: a sandboxed session
+ * creates `cc-socks/` and `srt-mux-<pid>-0.sock` there, plus `claude-<uid>/`
+ * for its own state, all owned by the agent's uid. So a child that cannot write
+ * it has a `Bash` tool that fails for a reason with nothing to do with what it
+ * was asked to do — which is why `scripts/sandbox-probe/probe.sh` names it in
+ * all six of its allowlists, and why it is given even to the reviewer, whose
+ * set is otherwise empty and which still runs read-only shell under `plan`.
+ * (Shell *snapshots* are not the reason: those go to
+ * `$CLAUDE_CONFIG_DIR/shell-snapshots`, which is already named.)
+ *
+ * `os.tmpdir()` rather than the literal, because the child inherits this
+ * process's `TMPDIR` and the CLI resolves its own paths the same way: an
+ * install that sets one would otherwise have a write set naming a directory
+ * nothing uses.
  */
 function writeSet(paths: readonly (string | null)[], empty: string): SandboxPolicy {
   const allowWrite: string[] = [];
 
-  for (const candidate of [...paths, CLAUDE_CONFIG_DIR, "/tmp"]) {
+  for (const candidate of [...paths, CLAUDE_CONFIG_DIR, os.tmpdir()]) {
     if (candidate === null || candidate === "") continue;
     // A relative entry is not a path the CLI can bind either, and this app's
     // own paths are absolute — one arriving here means a caller passed

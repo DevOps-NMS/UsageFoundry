@@ -117,13 +117,21 @@ services:
       # so an install where the write failed says there is no sandbox rather
       # than repeating what this variable claims.
       #
-      # It needs the security_opt block at the bottom of this file uncommented.
-      # Without it bubblewrap cannot start, and what happens then is
-      # UF_SANDBOX_ENFORCEMENT's answer.
+      # It needs the seccomp profile from the security_opt block at the bottom
+      # of this file — see there for where to put it. Without it bubblewrap
+      # cannot create a namespace, and **UF_SANDBOX_ENFORCEMENT does not catch
+      # that**: the CLI's availability check asks whether bwrap and socat exist
+      # and are executable and never runs one, so nothing is "unavailable", the
+      # gate below never fires at either setting, and every Bash call is wrapped
+      # in a program that exits 1 before the command does. Measured here, over
+      # fifteen hours and ten runs. The `sandbox` row on a run's log is what
+      # names it; docs/install.md carries the check to run first.
       UF_SANDBOX: "${UF_SANDBOX:-}"
-      # What a sandbox that cannot start does. "refuse" (the default, and what
-      # blank means) exits the CLI non-zero rather than running unconfined;
-      # "warn" runs the command anyway. Refusing is loud and recoverable — the
+      # What a sandbox the CLI *knows* it cannot start does — i.e. a missing
+      # bwrap or socat binary, which is the only unavailability it detects.
+      # "refuse" (the default, and what blank means) exits the CLI non-zero
+      # rather than running unconfined; "warn" runs the command anyway.
+      # Refusing is loud and recoverable — the
       # run's own log names it — where the alternative is a fleet that works
       # perfectly and confines nothing.
       UF_SANDBOX_ENFORCEMENT: "${UF_SANDBOX_ENFORCEMENT:-}"

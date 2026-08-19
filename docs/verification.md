@@ -525,14 +525,18 @@ Built and exercised against real transcripts:
   `access(X_OK)`s the `bwrap` and `socat` binaries and never runs one, so
   `getSandboxUnavailableReason()` was undefined, `failIfUnavailable` never fired,
   and every `Bash` command was wrapped in a `bwrap` that exited 1 before reaching
-  the command. **170 failed `Bash` calls across 8 runs, 2026-08-18 18:12:12 UTC
-  to 2026-08-19 07:39:57 UTC.** Those runs record $210.12 and 123.2M tokens,
-  which is a floor and not a total: two were still running, and a run writes its
-  spend at the end of a cycle. The most expensive of them (`6052f120`, $139.12)
+  the command. **214 failed `Bash` calls across 10 runs, 2026-08-18 18:12:12 UTC
+  to 2026-08-19 09:38:51 UTC** — fifteen and a half hours, and the last of them
+  landed 22 minutes after the failure was diagnosed, because the fleet kept
+  going. Those ten runs record $407.26 and 260.5M tokens between them; the
+  figure is what they spent while degraded rather than what the degradation
+  cost, and the first reading taken during the incident said 170 calls across 8
+  runs for $210, which is worth keeping here as an illustration of what a
+  snapshot of a live fleet is worth. The most expensive (`6052f120`, $139.12)
   finished by parsing `.git/index` by hand to enumerate the files it could not
-  list. **UsageFoundry reported none of it**: `run_events` held 484 `tool_error`
-  rows and **zero** `sandbox` rows, and the only `ops_events` row in the window
-  was an unrelated boot reconciliation. The three `bwrap:` markers now in
+  list. **UsageFoundry reported none of it**: `run_events` holds 484 `tool_error`
+  rows all time and **zero** `sandbox` rows, ever, and the only `ops_events` row
+  in the window was an unrelated boot reconciliation. The three `bwrap:` markers now in
   `src/lib/sandbox.ts` are that transcript read back out.
 
   Two things this settles that were open below. The generated policy does
@@ -2017,18 +2021,20 @@ through before trusting this unattended:
 
 - **`SEARCH_TOOLS` on a real spawn from this app.** That naming `Grep` and
   `Glob` on `--allowedTools` puts both back in the tool list is measured
-  (*Verified*) — on **one `system:init` event in a throwaway container**, with
-  no other flag on the argv, and that is the whole of it.
+  (*Verified*) — on two `system:init` events, one in a throwaway container and
+  one on the real image in the live container, both with nothing but the two
+  tool names on the flag; a third, in a throwaway container, adds the two
+  `Bash(git …:*)` grants in front of them and still lists both, and a fourth
+  does the same under `--permission-mode plan`. What none of them is, is a
+  spawn from this app.
   `src/lib/orchestrator.ts` now carries them on one `--allowedTools` at every
   `claude` spawn: `buildArgs` after `ISOLATED_GIT_TOOLS`, `review.ts`'s
   `spawnAssist` before the operator's list, and `chat.ts`. `npm run typecheck`
-  passes and the argv is unit-tested in `orchestrator.test.ts`. Four things
-  nobody has watched, each of which is an argv that throwaway container did not
-  run. Whether a **mixed** list — two `Bash(git …:*)` grants and two tool names
-  on one flag — still opts the search tools in and still grants the two
-  commands, which is the isolated work cycle's argv and the one the git grant
-  was measured without. Whether `--permission-mode plan`
-  offers them at all, which is the reviewer's. Whether they appear in a
+  passes and the argv is unit-tested in `orchestrator.test.ts`. Two things
+  nobody has watched. The mixed list and `plan` mode are settled above for the
+  *tool list*; what is not is whether the mixed list still grants the two git
+  **commands** it also names, which is the isolated work cycle's argv and the
+  one the git grant was measured without. Whether they appear in a
   `bypassPermissions` chat turn, where the flag has no prompt to skip and is
   there purely for the opt-in. And whether `--resume` keeps them at cycle 2, the
   way `--plugin-dir` does not — it is on every cycle's argv either way, so a
@@ -2213,14 +2219,16 @@ through before trusting this unattended:
   settings keys, and `08-recommendation.md` recommends adopting it. All of that
   was read out of the binary's strings with `strings`, and until 2026-08-19 not
   one line of it had been run. What has been run since is narrow, is in
-  *Verified* above, and is two things: `bwrap` itself, with and without the
-  seccomp profile and with each of the two argv shapes the binary contains; and
-  one install that ran thirteen hours with `UF_SANDBOX=1` and a sandbox that
-  never started. **No `claude` has ever completed work inside a sandbox that
-  started.** No policy has confined a tool call here, the network allowlist and
-  the credential deny have never been exercised at all, and what depends on
-  those answers is the wiring in the entries above and whatever gets built after
-  it. No stock install enables a sandbox either: `UF_SANDBOX=1` is opt-in and
+  *Verified* above, and is three things: `bwrap` itself, with and without the
+  seccomp profile and with each of the two argv shapes the binary contains; one
+  install that ran fifteen hours with `UF_SANDBOX=1` and a sandbox that never
+  started; and three hand-run `claude -p` calls against one that did, of which
+  one ran a shell command through it and one was refused the credentials file
+  its own uid owns. **No work cycle has run inside a sandbox that started** —
+  nothing this app spawned has met a live policy, so no per-run `--settings`
+  overlay has ever been honoured and the network allowlist has never been
+  exercised at all. What depends on those answers is the wiring in the entries
+  above and whatever gets built after it. No stock install enables a sandbox either: `UF_SANDBOX=1` is opt-in and
   off unless the operator sets it.
 
   The harness is `scripts/sandbox-probe/` — a throwaway image on the same base

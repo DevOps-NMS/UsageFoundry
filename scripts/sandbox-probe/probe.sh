@@ -16,9 +16,9 @@
 # machine, and what each answer decides.
 #
 # Why this exists: every claim in `02x-option-cli-sandbox.md` was read out of
-# the pinned binary's strings and none of it has ever been executed. Two runs
-# have now written about the mechanism without starting one. Questions 3, 5, 7
-# and 8 each change what gets built.
+# the pinned binary's strings. What has been executed since was executed by
+# hand rather than by this script, and `docs/verification.md` says which parts.
+# Questions 3, 5, 7 and 8 each change what gets built.
 #
 #   ./probe.sh --free                      # 0, 1, 8a-8c — costs nothing
 #   ./probe.sh --billed --yes-bill         # 2-7 and 8d — billed
