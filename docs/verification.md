@@ -702,7 +702,12 @@ through before trusting this unattended:
   hand-written controls that carry their own `text-sm` and so beat that layer —
   the chat composer and the branches page's strategy `select`. Every
   `page.tsx` under `src/app/` and every file in `src/components/` was read to
-  establish that those are the only two). `CONTROL_LINE`, `Toggle`,
+  establish that those were the only two. **The density pass has since made it
+  one**: the strategy `select` is now the kit's `Select` inside a `Field`, so it
+  takes the floor from `CONTROL_BASE` like everything else, and the chat
+  composer is what is left. The device check below is unchanged either way —
+  it is about whether the class reached the stylesheet, not about how many call
+  sites state it.) `CONTROL_LINE`, `Toggle`,
   `ListRow`, `QuickOpen`'s result rows, the settings section chips and the run
   form's link-shaped button took `max-md:min-h-11`, `SegmentedControl`'s segment
   a `max-md:min-w-11` beside it, and `Switch` a 44×44 `::after` overlay.
@@ -785,6 +790,60 @@ through before trusting this unattended:
   and confirm no row of the second carries anything that is not on that list.
   Runs created before this landed read `origin` NULL, and the run page says so
   in words rather than guessing.
+- **The whole UI density restructure — every surface of it, at every width.**
+  Five build runs regrouped `/settings`, `/runs/new`, `/runs/[id]`, the three
+  workflow surfaces, the dashboard, `/runs`, `/branches`, `/chat` and
+  `/account` against `docs/ui-density-audit.md`, and built two primitives
+  (`ui/Disclosure`, `ui/ListView`) that every fold and every list box in the app
+  now goes through. What *has* been checked, on the last of the five runs and
+  reported with its output: `npm run typecheck` clean, `npm test` 1335 passing
+  across 210 suites, and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build`
+  compiling and emitting the standalone bundle. Every class spelling the last
+  run wrote was then looked up **in the emitted stylesheet** rather than
+  assumed, which is how the one silent defect in it was found and fixed before
+  it shipped: Tailwind emits a numeric utility's values ascending, so
+  `.mb-0{` sits at byte 10980 of the sheet and `.mb-3\.5{` at 11276, and a
+  caller's `className="mb-0"` on a `Field` is a no-op. (**The same read says
+  three landed `CardTitle className="mb-0"` call sites are also no-ops** —
+  `page.tsx`'s *Where it went*, `RepoSpendCard` and `UsagePeriods`. Left alone
+  deliberately: fixing them is a desktop spacing change nothing asked for, and
+  it is recorded here rather than quietly made.)
+
+  **No browser was opened and Docker is not available in this container**, so
+  `docker compose up --build` — half this repository's real verification loop —
+  was not run by any of the five. Nothing below has been *seen*:
+
+  - Every restructured page top to bottom at **390×844** with no horizontal
+    scroll, and at **1440px** with nothing moved that the audit did not name.
+    The audit authorises exactly four deliberate desktop changes — the
+    dashboard's and the run inspector's region headings, the dashboard's card
+    emphasis, and the one line on `/branches` that grows to `text-sm` while
+    auto-resolve is on — and every other new class carries `max-md:`/`md:`.
+    That claim is by argument, not by measurement.
+  - The **dashboard's three bands**: that a card sits under exactly one of
+    them, that nothing draws a figure at band level, and that the three
+    statements read as provenance rather than as headings for a total.
+  - The **`Land N branches` confirmation**: that the sheet opens only with
+    *Have Claude resolve conflicts* on, opens with **Cancel** focused, and that
+    pressing Land with the toggle off still queues immediately with no dialog.
+  - The **land-strategy picker in the fixed bar** at both widths: the wrapper's
+    `-mb-3.5 self-end` is what keeps a labelled `Field` aligned with the
+    buttons beside it in a row `ButtonRow` centres, and that is arithmetic
+    rather than a reading. At 390px it goes full width above the buttons; the
+    reserved spacer (`max-md:h-80`) has to stay taller than the bar, and the
+    bar has grown by one label line.
+  - Every migrated **`Disclosure`** opening and closing, and the branches
+    history one still fetching on open rather than on mount — the closed case
+    staying cheap is what keeps an idle install off `?history=1` every three
+    seconds.
+  - The **chat approval correspondence** through a real thread: that Approve
+    still sends exactly the ids the panel displayed. Nothing in this pass
+    touched the approve path, the selection state or the row that renders it,
+    so the correspondence is preserved by *absence of change* rather than by a
+    new test — and one gap it already had is worth naming while somebody is
+    looking: `selected` is not pruned against `pending` when the poll answers,
+    so a proposal decided in another tab leaves a stale id in the set that the
+    next press sends. The route refuses it by id; nothing on the page says so.
 - **`/api/status` against a real fleet, and the structured lines on real
   stdout.** The route is driven by `npm test` against a seeded database — the
   counts, the documented keys, the read-only credential, the absence of prompts,
