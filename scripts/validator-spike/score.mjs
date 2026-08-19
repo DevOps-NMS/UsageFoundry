@@ -36,12 +36,54 @@ const EXPECTED = {
 };
 
 /**
- * A case whose diff could not be rebuilt presents an empty diff to the model
- * even though the run committed. Any verdict on it measures the reconstruction,
- * not the validator, so it is held out of the headline and reported on its own.
+ * True when this harness cannot vouch that the model was shown the run's whole
+ * diff. A verdict there measures buildCases.mjs, not the validator.
+ *
+ * The rule is deliberately label-independent, so it cannot be tuned after the
+ * fact to improve a number — it holds out a row whichever way that row went:
+ *
+ *   - `ambiguous` — the run typed a commit subject that matches more than one
+ *     commit in the repository, so a commit that demonstrably exists was
+ *     dropped. The model saw a genuinely short diff and is right to notice a
+ *     deliverable missing from it.
+ *   - `unattributed` — the run typed a commit and none of its subjects resolved
+ *     at all, so the model was shown an empty diff for a run that may well have
+ *     committed.
+ *
+ * It costs something to apply honestly: one of the two `not-done` rows is
+ * `unattributed`, so the held-out figures leave the positive class at n=1. Both
+ * cuts are reported for that reason.
  */
 function isReconstructionFailure(c) {
-  return c.diff?.mode === "empty" && c.attribution === "unattributed" && c.label !== "not-done";
+  return (c.unresolvedSubjects?.ambiguous?.length ?? 0) > 0 || c.attribution === "unattributed";
+}
+
+/**
+ * The `file` transport cannot see what the answer cost — the sender is not this
+ * process. If the host measured it, drop the figures in <io-dir>/usage.json as
+ * `{ "<case name>": { tokens, ms } }` and they are reported here rather than
+ * silently omitted.
+ *
+ * `tokens` is a total, not a split, so it is priced as input with a fixed
+ * output allowance carved out. That is an over-estimate for a single API call
+ * in one direction (a multi-turn sender re-sends the prompt, mostly from cache,
+ * and cache reads bill at a tenth) and an under-estimate in the other (the
+ * sender's own system prompt rides along). It is a scale, not an invoice, and
+ * the report says so on the line it prints.
+ */
+const SONNET_INPUT_PER_TOKEN = 3 / 1e6;
+const SONNET_OUTPUT_PER_TOKEN = 15 / 1e6;
+const ASSUMED_OUTPUT_TOKENS = 450;
+
+function readMeasuredUsage(ioDir) {
+  const file = path.join(ioDir, "usage.json");
+  if (!fs.existsSync(file)) return null;
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+function priceTokens(tokens) {
+  const output = Math.min(ASSUMED_OUTPUT_TOKENS, tokens);
+  return (tokens - output) * SONNET_INPUT_PER_TOKEN + output * SONNET_OUTPUT_PER_TOKEN;
 }
 
 function pct(n, d) {
@@ -63,6 +105,7 @@ async function main() {
     withTestimony: argv.includes("--with-testimony"),
   };
   const emitOnly = argv.includes("--emit");
+  const measuredUsage = readMeasuredUsage(options.ioDir);
 
   const files = fs.readdirSync(CASES).filter((f) => f.endsWith(".json")).sort();
   const results = [];
@@ -72,8 +115,26 @@ async function main() {
       results.push({ ...c, status: "unreachable" });
       continue;
     }
-    const r = await validate(c, { ...options, name: path.basename(file, ".json") });
-    results.push({ ...r, label: c.label, folder: c.folder, stop: c.stop, labelReason: c.labelReason, reconstructionFailure: isReconstructionFailure(c) });
+    const name = path.basename(file, ".json");
+    const r = await validate(c, { ...options, name });
+    const measured = measuredUsage?.[name];
+    results.push({
+      ...r,
+      label: c.label,
+      folder: c.folder,
+      stop: c.stop,
+      labelReason: c.labelReason,
+      reconstructionFailure: isReconstructionFailure(c),
+      diffIntegrity:
+        (c.unresolvedSubjects?.ambiguous?.length ?? 0) > 0
+          ? `${c.unresolvedSubjects.ambiguous.length} ambiguous`
+          : c.attribution === "unattributed"
+            ? "unattributed"
+            : "complete",
+      ms: r.ms ?? measured?.ms ?? null,
+      costUSD: r.costUSD ?? (measured ? priceTokens(measured.tokens) : null),
+      measuredTokens: measured?.tokens ?? null,
+    });
   }
 
   if (emitOnly) {
@@ -106,7 +167,8 @@ async function main() {
   say(`model: ${options.model} · transport: ${options.transport} · testimony: ${options.withTestimony ? "given" : "withheld"}`);
   say();
   say(`cases: ${results.length} · answered: ${answered.length} · unparseable: ${results.filter((r) => r.status === "unparseable").length} · awaiting: ${results.filter((r) => r.status === "awaiting-response").length}`);
-  say(`held out as reconstruction failures: ${answered.filter((r) => r.reconstructionFailure).length}`);
+  const heldOut = answered.filter((r) => r.reconstructionFailure);
+  say(`held out — this harness cannot vouch the model saw the whole diff: ${heldOut.length} (cases ${heldOut.map((r) => r.n).join(", ") || "none"})`);
   say();
 
   say(`## Agreement`);
@@ -157,8 +219,13 @@ async function main() {
 
   say(`## Cost, wall clock, and diff size`);
   say();
+  const tokenCounts = answered.map((r) => r.measuredTokens).filter((t) => t != null);
   say(`- cost per verdict: ${costs.length ? `median $${median(costs).toFixed(4)}, total $${costs.reduce((a, b) => a + b, 0).toFixed(2)} over ${costs.length}` : "not measured by this transport"}`);
-  say(`- wall clock per verdict: ${times.length ? `median ${(median(times) / 1000).toFixed(1)} s` : "not measured by this transport"}`);
+  if (tokenCounts.length) {
+    say(`  - priced from measured totals at Sonnet list ($3/$15 per Mtok), ${ASSUMED_OUTPUT_TOKENS} tokens of it treated as output`);
+    say(`  - tokens per verdict: median ${median(tokenCounts)}, min ${Math.min(...tokenCounts)}, max ${Math.max(...tokenCounts)}`);
+  }
+  say(`- wall clock per verdict: ${times.length ? `median ${(median(times) / 1000).toFixed(1)} s, min ${(Math.min(...times) / 1000).toFixed(1)} s, max ${(Math.max(...times) / 1000).toFixed(1)} s` : "not measured by this transport"}`);
   say(`- prompt size: median ${median(answered.map((r) => r.promptChars))} chars`);
   say(`- diff size (whole branch diff, before shortening): median ${median(diffTotals)} B, max ${Math.max(...diffTotals)} B over ${diffTotals.length} non-empty`);
   say(`- shortened to fit: ${answered.filter((r) => r.diffTruncated).length} of ${answered.length}`);
@@ -167,15 +234,15 @@ async function main() {
 
   say(`## Every verdict`);
   say();
-  say(`| # | label | verdict | ok | attribution | diff B | reason |`);
+  say(`| # | label | verdict | ok | diff | diff B | reason |`);
   say(`|---|---|---|---|---|---:|---|`);
   for (const r of results) {
     if (r.status !== "ok") {
-      say(`| ${r.n} | ${r.label} | _${r.status}_ | | ${r.attribution ?? ""} | | |`);
+      say(`| ${r.n} | ${r.label} | _${r.status}_ | | ${r.diffIntegrity ?? ""} | | |`);
       continue;
     }
     const ok = r.verdict === EXPECTED[r.label] ? "✓" : r.reconstructionFailure ? "—" : "✗";
-    say(`| ${r.n} | ${r.label} | ${r.verdict} | ${ok} | ${r.attribution} | ${r.diffBytesTotal} | ${r.reason.replace(/\|/g, "\\|")} |`);
+    say(`| ${r.n} | ${r.label} | ${r.verdict} | ${ok} | ${r.diffIntegrity} | ${r.diffBytesTotal} | ${r.reason.replace(/\|/g, "\\|")} |`);
   }
   say();
 
