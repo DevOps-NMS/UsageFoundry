@@ -29,7 +29,11 @@ export type IconName =
   // The shell's own two controls: collapse the source list, and quick open.
   | "sidebar"
   | "search"
-  // Disclosure.
+  // `chevron-down` is the chat's jump-to-latest button, and `chevron-right`
+  // has no caller at all. Both were drawn for a disclosure component, and the
+  // one that was eventually built uses the native `<summary>` marker instead:
+  // the triangle comes from `list-item` display, so a glyph beside it would be
+  // two of them and a glyph replacing it costs the display that draws it.
   | "chevron-right"
   | "chevron-down"
   // The two facts a chat proposal is decided on: where it runs, and under

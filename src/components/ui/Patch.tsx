@@ -2,6 +2,7 @@
 
 import type { DiffFileDTO } from "@/lib/apiTypes";
 import { gutterDigits, patchRows, type PatchRowKind } from "@/lib/patch";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Hint } from "@/components/ui/Hint";
 
 /**
@@ -138,31 +139,40 @@ const STATUS_LABEL: Record<DiffFileDTO["status"], string> = {
 /** One changed file, its patch behind a disclosure. */
 export function DiffFileRow({ file }: { file: DiffFileDTO }) {
   return (
-    <details className="border-b border-line py-1.5 last:border-b-0">
-      {/* The row is the control, so the whole row answers the pointer and the
-          whole row takes focus. The disclosure triangle stays: it is the only
-          thing on screen that says there is more behind this line.
-
-          Sticky, for the log's work-cycle header reason: an open patch runs to
-          hundreds of lines and the fact that scrolls away first is which file
-          they are in. It needs the card's own background under it, because the
-          patch passes beneath rather than pushing it along. */}
-      <summary className="ui-transition sticky top-0 z-10 -mx-1 flex min-h-[var(--control-h)] cursor-pointer flex-wrap items-center gap-2 rounded-sm bg-surface px-1 text-sm hover:bg-inset">
-        <span className="mono min-w-0 flex-1 break-all text-ink">
-          {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
-        </span>
-        <span className="text-2xs uppercase tracking-wide text-ink-faint">
-          {STATUS_LABEL[file.status]}
-        </span>
-        {file.binary ? (
-          <span className="text-2xs text-ink-faint">binary</span>
-        ) : (
-          <span className="whitespace-nowrap tabular-nums text-xs">
-            <span className="text-ok">+{file.added ?? 0}</span>{" "}
-            <span className="text-danger">−{file.deleted ?? 0}</span>
+    <Disclosure
+      className="border-b border-line py-1.5 last:border-b-0"
+      // The row is the control, so the whole row answers the pointer and the
+      // whole row takes focus.
+      //
+      // Sticky, for the log's work-cycle header reason: an open patch runs to
+      // hundreds of lines and the fact that scrolls away first is which file
+      // they are in. It needs the card's own background under it, because the
+      // patch passes beneath rather than pushing it along — and it has to sit
+      // on the summary, since the `<details>` around it is the height of the
+      // whole patch and pinning that pins nothing.
+      //
+      // `--control-h` for the pointer, because `Disclosure` states only the
+      // finger's target and leaves the desktop box to the row it is in.
+      summaryClassName="sticky top-0 z-10 -mx-1 flex min-h-[var(--control-h)] flex-wrap items-center gap-2 rounded-sm bg-surface px-1 text-sm hover:bg-inset"
+      summary={
+        <>
+          <span className="mono min-w-0 flex-1 break-all text-ink">
+            {file.oldPath ? `${file.oldPath} → ${file.path}` : file.path}
           </span>
-        )}
-      </summary>
+          <span className="text-2xs uppercase tracking-wide text-ink-faint">
+            {STATUS_LABEL[file.status]}
+          </span>
+          {file.binary ? (
+            <span className="text-2xs text-ink-faint">binary</span>
+          ) : (
+            <span className="whitespace-nowrap tabular-nums text-xs">
+              <span className="text-ok">+{file.added ?? 0}</span>{" "}
+              <span className="text-danger">−{file.deleted ?? 0}</span>
+            </span>
+          )}
+        </>
+      }
+    >
       <div className="mt-2">
         {file.patch === null ? (
           <Hint tone="warn">
@@ -179,6 +189,6 @@ export function DiffFileRow({ file }: { file: DiffFileDTO }) {
           </>
         )}
       </div>
-    </details>
+    </Disclosure>
   );
 }
