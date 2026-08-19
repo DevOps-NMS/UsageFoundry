@@ -154,12 +154,15 @@ refused.
 | `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. Absolute path; compose refuses to start without it. |
 | `UF_AUTH_TOKEN` | Shared secret for the UI. Blank makes the server **refuse to start** unless `UF_ALLOW_NO_AUTH=1` is also set. |
 | `UF_ALLOW_NO_AUTH` | `1` to run with no authentication at all. Only for a loopback-bound install on a machine you alone use; every page then says so. |
+| `UF_STATUS_TOKEN` | Optional. A second, read-only credential, for `/api/status` and nothing else — never point a monitor at any other route, because `UF_AUTH_TOKEN` also starts billed runs. Blank leaves that route behind the ordinary gate, so a monitor gets a 401 rather than the endpoint being public. |
 | `UF_BIND_ADDRESS` | Which host interface the port is published on. Default `127.0.0.1` — this machine only. See *Reaching it from another machine* below. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
 | `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only, and every repository. |
 | `UF_GITHUB_TOKENS` | Optional. `folder=token` entries separated by `\|`, narrowing the credential to the repository a run is working in. |
 | `UF_GH_EXTENSIONS` | Optional. `gh` extensions to install at boot, `owner/repo` or `owner/repo@tag`, space-separated. Kept in a named volume, so a rebuild does not lose them. Needs `UF_GITHUB_TOKEN`. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid every spawned agent runs as; must own the mounts. The server itself runs as root and drops to this. Default 1000. |
+| `UF_CHAT_GID` | The group the orchestrator chat runs in, which owns the per-turn MCP capability file that a concurrent agent must not read. Default 65533. **Must differ from `UF_GID`** — the server refuses to boot when they match rather than hand that file to the group it is being kept from. |
+| `UF_BACKUP_DIR` | Host directory mounted at `/backups`, where `scripts/backup-db.mjs` writes. Default `./backups`, which this repository ships. Point it elsewhere and create that directory first: Docker makes a missing bind source root-owned, and the children that write it are `UF_UID`. |
 | `UF_MEM_LIMIT` | What the container may take before Docker kills it. Default `10g`, sized for the shipped 4 runs plus 2 other Claude processes. |
 | `UF_NODE_HEAP_MB` | The server's own heap ceiling, in MiB. Default 2048. |
 | `UF_PIDS_LIMIT` | Tasks the container may hold. Default 2048. |
@@ -217,6 +220,12 @@ run fails. So on Linux:
 echo "UF_UID=$(id -u)" >> .env
 echo "UF_GID=$(id -g)" >> .env
 ```
+
+If `id -g` comes back **65533**, set `UF_CHAT_GID` to some other unused gid in
+the same file. That is the default group the orchestrator chat runs in, and it
+is chosen to be one no agent is in — so a `UF_GID` that equals it refuses the
+boot rather than handing the chat's capability file to the group it is being
+kept from. Rare, and the symptom is a container that will not start.
 
 Run compose as yourself, not under `sudo`: `$HOME` comes from your shell, and
 `sudo` would point the credential mount at root's home.
