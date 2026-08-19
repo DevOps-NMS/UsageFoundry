@@ -968,10 +968,14 @@ export default function RunDetail({
           )}
 
           {/* Up to four of these render together, and the variants are what say
-              which one the page is for. Exactly one `primary` in every reachable
-              state: `Try now` asks a parked run to rejoin the queue early and is
-              the same act as the pick-up one row down, so it is the secondary
-              spelling of it and never a second filled button beside it. */}
+              which one the page is for. **At most one `primary` in every
+              reachable state**, and the pick-up is the one that gets it: a run
+              still working has none, because the only thing to do to it is stop
+              it. `Try now` never becomes a second one — it and the pick-up
+              cannot co-render, `paused` being the one status that is not
+              pickupable — and it is deliberately the quieter of the two, since
+              the run rejoins the queue on its own and pressing it does not
+              bypass the guard that parked it. */}
           <ButtonRow className="mt-3">
             {run.status === "paused" && (
               <Button variant="secondary" onClick={tryNow}>
