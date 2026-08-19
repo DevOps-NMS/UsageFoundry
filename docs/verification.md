@@ -678,7 +678,7 @@ through before trusting this unattended:
   `c9d0b3c`, and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` exit 0
   with `.next/standalone` written at `a294ed2` — two documentation-only commits
   above the same source. **What is still open is the browser**, which is the rest
-  of this entry and none of it was run: at 390×844: every page that holds one of
+  of this entry and none of it was run. At 390×844: every page that holds one of
   them read top to bottom with **no horizontal scroll**, every figure still
   `tabular-nums` and every unknown reading still hatched, the branches selection
   bar starting at the window's left edge rather than 224px in with its Land,
