@@ -101,7 +101,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - An instance's status is four parts derived: `started` means something is live, never "not halted". Act on `instanceIsOpen`, never on `status === "started"`.
 
 - **`review.ts`, `git.ts`, `diff.ts`, `patch.ts`** → `docs/agent/git-and-review.md`
-  - Every `git diff` carries `--no-ext-diff --no-textconv`; paths that go back out as pathspecs are pinned `:(top,literal)`.
+  - Every `git diff` that reads contents carries `--no-ext-diff --no-textconv`; the one exempt call site is named in the doc. Paths that go back out as pathspecs are pinned `:(top,literal)`.
   - A shortened diff says so and names the omitted files in the prompt.
   - `GIT_CONFIG_COUNT` must equal the number of pairs, or git discards the whole block silently.
   - The resolver may run a check only on `resolveCheckout`'s reuse branch, and only what `resolveVerifyTools` names. The reviewer gets none.
