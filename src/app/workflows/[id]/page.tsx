@@ -288,6 +288,12 @@ export default function WorkflowPage() {
         </Link>
         <div className="mt-1 flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-xl font-semibold tracking-tight">{workflow.name}</h1>
+          {/* One primary in the row, and it is Run: everything else here is a
+              way of reaching another screen. Delete takes `danger` rather than
+              `ghost` — a control that cannot be undone says so before it is
+              pressed, and `ghost` drew the one destructive button here quieter
+              than Duplicate beside it. The sheet behind it is unchanged and is
+              still what actually confirms. */}
           <ButtonRow>
             <Button
               onClick={() => act("run", `/api/workflows/${id}/run`, "POST")}
@@ -318,7 +324,7 @@ export default function WorkflowPage() {
                 then drop the operator at the top of the page. The sheet is
                 modal, so a second press is impossible anyway. */}
             <Button
-              variant="ghost"
+              variant="danger"
               onClick={() => setConfirmDelete(true)}
               disabled={busy !== null}
             >
@@ -406,8 +412,11 @@ export default function WorkflowPage() {
         onChanged={load}
       />
 
+      {/* `default` rather than `primary`, and no card on this page takes that
+          weight: the subject here is the graph, and the graph is on the canvas
+          one route over. Two cards asking to lead is neither of them leading. */}
       <CardTitle className="mt-8">Blocks</CardTitle>
-      <Card emphasis="primary">
+      <Card>
         <TableWrap>
           <Table stack>
             <caption className="sr-only">
@@ -528,7 +537,9 @@ export default function WorkflowPage() {
 
       <div className="mt-8">
         <CardTitle>Runs of this workflow</CardTitle>
-        <Card emphasis="quiet">
+        {/* What the reader came for, beside the blocks — the two limit cards
+            above are the scaffolding a press of Run is checked against. */}
+        <Card>
           {instances.length === 0 ? (
             <Empty>
               <div className="text-ink-muted">This workflow has not been run.</div>
