@@ -10,7 +10,10 @@ import {
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
-import { Hint, type HintTone } from "@/components/ui/Hint";
+// Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
+// rewrites the path alias at runtime, so a tested component has to import the
+// way src/lib, Meter.tsx and LiveTelemetry.tsx already do.
+import { Hint, type HintTone } from "./Hint";
 
 /**
  * Width is deliberately not in here. Two width utilities on one element do not
@@ -296,6 +299,7 @@ export function Textarea({
  */
 export function LimitField({
   id,
+  modeId,
   enabled,
   onEnabledChange,
   value,
@@ -304,11 +308,23 @@ export function LimitField({
   offLabel,
   onLabel = "Stop after…",
   modeLabel,
+  invalid = false,
   min = 1,
   step,
   disabled,
 }: {
   id: string;
+  /**
+   * Names the picker, for the one caller that has to be able to *send the
+   * cursor* to a limit that is switched off.
+   *
+   * `id` is the value box, which only exists while the limit is on — so a
+   * validation error whose whole message is "switch one of these back on" has
+   * nothing to point at through it. The picker is the half that is there in
+   * both states, which is exactly why the error points at it. Optional because
+   * a caller with no such error owes the DOM no second id.
+   */
+  modeId?: string;
   enabled: boolean;
   onEnabledChange: (on: boolean) => void;
   value: string;
@@ -317,14 +333,26 @@ export function LimitField({
   offLabel: string;
   onLabel?: string;
   modeLabel: string;
+  /**
+   * What the two written-out controls cannot read off `Field`'s context: a
+   * `ListRow` provides that context with `invalid: false` fixed, so a row whose
+   * value is missing had a red border through `Field` and none through a
+   * grouped list. Stated as a prop rather than by widening the context, because
+   * the row is a layout and the error belongs to the control.
+   */
+  invalid?: boolean;
   min?: number;
   step?: string;
   disabled?: boolean;
 }) {
-  const bits = useControlBits({ disabled });
+  const bits = useControlBits({
+    disabled,
+    "aria-invalid": invalid ? true : undefined,
+  });
   return (
     <div className="flex items-center gap-2">
       <select
+        id={modeId}
         className={`${CONTROL_BASE} ${CONTROL_LINE} ${bits.border} w-auto shrink-0`}
         value={enabled ? "on" : "off"}
         onChange={(e) => onEnabledChange(e.target.value === "on")}
