@@ -42,11 +42,23 @@ Sign in from the page rather than from a shell. The CLI keeps
 to open it afterwards is `UF_UID`/`UF_GID` — every work cycle runs as that uid,
 not as the server. The page's sign-in is dropped to it for exactly that reason.
 A `docker compose exec` defaults to root, so if you do sign in from a shell,
-name the uid rather than relying on the default:
+name the uid rather than relying on the default — and read it out of the
+container, which is the only place it is certain to be right:
 
 ```bash
-docker compose exec -u "${UF_UID:-1000}" -it usagefoundry claude auth login
+uid=$(docker compose exec -T usagefoundry printenv UF_AGENT_UID)
+docker compose exec -u "$uid" -it usagefoundry claude auth login
 ```
+
+**Not `-u "${UF_UID:-1000}"`, which is where this page used to send you.** Your
+own shell expands that, and `.env` is not in your shell: compose reads that file
+to interpolate `docker-compose.yml`, and exports nothing back to the caller. So
+on every install that followed *On Linux, set `UF_UID` and `UF_GID`* below, it
+resolves to 1000 whatever `.env` says. Sign in as 1000 while the cycles run as
+your own uid and the login writes a `.credentials.json` at mode 0600 that no
+work cycle can open — every run then fails with `Not logged in`, which is the
+symptom of not having signed in at all, so the obvious response is to do it
+again the same way.
 
 An API key in the environment outranks all of this. With `ANTHROPIC_API_KEY`
 set, that key is what runs bill against and the subscription login is ignored;
@@ -322,7 +334,9 @@ the boot line and **Settings → Sandbox** read the managed policy, so both say
 docker compose logs usagefoundry | grep 'sandbox:'
 # [usagefoundry] sandbox: on — enabled by /etc/claude-code/managed-settings.json
 
-docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+# the uid from the container, not from your shell — see *Sign in once* above
+uid=$(docker compose exec -T usagefoundry printenv UF_AGENT_UID)
+docker compose exec --user "$uid" usagefoundry \
   bwrap --dev-bind / / --unshare-user --unshare-pid true && echo ok
 # expect ok. "No permissions to create new namespace" means half two never
 # arrived — no override file, or a container that was restarted, not recreated.
