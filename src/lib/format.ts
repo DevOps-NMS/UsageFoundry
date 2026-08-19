@@ -339,6 +339,51 @@ export function guardBadge(
 }
 
 /**
+ * When a workflow's own limits are checked, in the words both surfaces use.
+ *
+ * The editor and the instance page each carried this sentence in full, and it
+ * is the sentence that says the limit is a *boundary* rather than a live cut-off
+ * — so an edit that lands on one copy leaves the other claiming the opposite of
+ * what the guard does, which is a promise about money and nothing reports the
+ * divergence. One constant is what makes the two the same claim.
+ */
+export const WORKFLOW_LIMIT_TIMING_NOTE =
+  "Checked before a block starts a work cycle and again as each block finishes, " +
+  "never during one — a block already working carries on until it or another " +
+  "reaches one of those boundaries, so the total can overshoot by up to one work " +
+  "cycle per block running at the time, and blocks running at once multiply that";
+
+/**
+ * The two answers a drawn link may carry, and the unanswered state beside them.
+ *
+ * **The `""` key is a real option and must never be dropped.** A drawn link
+ * carries `edge: ""` all the way onto the wire and is refused there by name:
+ * `on-success` terminates a chain the operator meant to run regardless and
+ * `on-finish` starts a run on top of a dependency that crashed, so the picker
+ * offers the unanswered state rather than pre-selecting one of two answers that
+ * is wrong half the time in both directions. A form-hygiene pass that removes
+ * the empty option pre-selects a condition nobody chose, and the graph saves.
+ *
+ * Two maps because the picker and the chip are read in different places — a
+ * `<select>` option is read once, deliberately, and the chip on the canvas is
+ * read at a glance beside forty others — and one file because three files held
+ * four phrasings of the same two conditions, which is how a reader ends up
+ * believing an edge means two different things on two screens.
+ */
+export const EDGE_OPTION_LABEL: Record<"" | "on-success" | "on-finish", string> = {
+  "": "Choose a condition",
+  "on-success": "Only if it completes",
+  "on-finish": "Once it finishes, either way",
+};
+
+/** The same three, as the canvas chip and every parenthetical say them. */
+export const EDGE_CHIP_LABEL: Record<"" | "on-success" | "on-finish", string> = {
+  "": "needs a condition",
+  "on-success": "if it completes",
+  "on-finish": "either way",
+};
+
+/**
  * What the operator's own `~/.claude` puts in play whatever a picker picks.
  *
  * The saved registry is a *part* of the set of agents in play and never the

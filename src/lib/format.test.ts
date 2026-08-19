@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import {
+  EDGE_CHIP_LABEL,
+  EDGE_OPTION_LABEL,
   fmtCycleInFlight,
   fmtCycles,
   guardBadge,
@@ -180,4 +182,41 @@ test("only a template that is genuinely absent is called deleted", () => {
   ]) {
     assert.equal(badge.tone, "neutral");
   }
+});
+
+/**
+ * The unanswered edge, which is a real option and reads as an oversight.
+ *
+ * These two maps replaced three that lived in three files, and consolidating
+ * them puts every surface that names a link condition behind one object — so
+ * the tidy-up that looks obvious here ("a picker should not offer a blank") is
+ * now one edit away from pre-selecting a condition on every drawn link in the
+ * app. That failure is silent in the direction that costs the most: the graph
+ * saves, the canvas draws a chosen edge, and `on-success` quietly terminates a
+ * chain the operator meant to run regardless — or `on-finish` starts a run on
+ * top of a dependency that crashed. Nothing throws and nothing typechecks
+ * differently, because the key is optional to *use* and mandatory to *offer*.
+ *
+ * The `Record` type already forces all three keys to exist; what it cannot say
+ * is that each carries words a person can act on, which is what an empty string
+ * or a placeholder would take away while still compiling.
+ */
+
+test("both edge maps offer the unanswered state as a real option", () => {
+  for (const map of [EDGE_OPTION_LABEL, EDGE_CHIP_LABEL]) {
+    assert.deepEqual(Object.keys(map), ["", "on-success", "on-finish"]);
+    for (const [edge, label] of Object.entries(map)) {
+      assert.ok(label.trim().length > 0, `\`${edge}\` renders as nothing`);
+    }
+  }
+});
+
+test("the unanswered state reads as unanswered rather than as a condition", () => {
+  // The words matter as much as the key: an empty option labelled "—" is a
+  // picker that looks broken rather than one asking a question, and the two
+  // real answers must stay distinguishable from it and from each other.
+  assert.notEqual(EDGE_OPTION_LABEL[""], EDGE_OPTION_LABEL["on-success"]);
+  assert.notEqual(EDGE_OPTION_LABEL[""], EDGE_OPTION_LABEL["on-finish"]);
+  assert.notEqual(EDGE_CHIP_LABEL[""], EDGE_CHIP_LABEL["on-success"]);
+  assert.notEqual(EDGE_CHIP_LABEL[""], EDGE_CHIP_LABEL["on-finish"]);
 });

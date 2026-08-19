@@ -21,6 +21,7 @@ import {
   type LinkDraft,
   type Point,
 } from "@/lib/canvasGraph";
+import { EDGE_CHIP_LABEL } from "@/lib/format";
 import { isTextEntry } from "@/components/shell/shortcuts";
 import { Badge } from "@/components/ui/Badge";
 import { Empty } from "@/components/ui/Card";
@@ -133,13 +134,6 @@ const LINK_WIDTH: Record<LinkTone, number> = {
   chosen: 1.25,
   unchosen: 1.25,
   selected: 2,
-};
-
-/** What the link's own control says. Never a default — see `LinkDraft`. */
-const CONDITION_CHIP: Record<LinkDraft["edge"], string> = {
-  "": "needs a condition",
-  "on-success": "if it completes",
-  "on-finish": "either way",
 };
 
 /** How far a block moves per arrow key, and per arrow key with Shift held. */
@@ -721,7 +715,7 @@ export function WorkflowCanvas({
                   onRemoveLink(link.from, link.to);
                 }}
                 aria-label={`${label(target)} starts after ${label(source)}, ${
-                  CONDITION_CHIP[link.edge]
+                  EDGE_CHIP_LABEL[link.edge]
                 }${link.continueBranch ? ", carries on its branch" : ""}. Delete removes this link.`}
                 style={{ left: mid.x, top: mid.y }}
                 // 44px below the breakpoint, beside the pointer's height for
@@ -733,7 +727,7 @@ export function WorkflowCanvas({
                   gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-2xs font-semibold
                   ${LINK_CHIP[tone]}`}
               >
-                {CONDITION_CHIP[link.edge]}
+                {EDGE_CHIP_LABEL[link.edge]}
                 {link.continueBranch && <span className="text-accent">· branch</span>}
               </button>
             );

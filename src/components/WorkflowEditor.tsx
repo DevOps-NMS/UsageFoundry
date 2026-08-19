@@ -29,6 +29,8 @@ import {
   type Point,
 } from "@/lib/canvasGraph";
 import {
+  EDGE_OPTION_LABEL,
+  WORKFLOW_LIMIT_TIMING_NOTE,
   describeAmbientAgents,
   fmtUSD,
   pctField,
@@ -158,13 +160,6 @@ function writeLayout(id: string, at: Record<string, Point>): void {
 
 const DEFAULT_FAN_OUT = "3";
 const DEFAULT_MAX_PASSES = "3";
-
-/** The condition picker, with the unanswered state as a real option. */
-const CONDITIONS: Array<{ id: LinkDraft["edge"]; label: string }> = [
-  { id: "", label: "Choose a condition" },
-  { id: "on-success", label: "Only if it completes" },
-  { id: "on-finish", label: "Once it finishes, either way" },
-];
 
 /**
  * How a merge block lands, before anyone picks.
@@ -486,7 +481,7 @@ export function WorkflowEditor({
       prev.some((l) => l.from === from && l.to === to)
         ? prev
         : // Drawn with no condition, and it stays that way until the operator
-          // answers: see `CONDITIONS`.
+          // answers: see `EDGE_OPTION_LABEL`.
           [...prev, { from, to, edge: "", continueBranch: false }],
     );
     setSelection({ kind: "link", from, to });
@@ -817,13 +812,7 @@ export function WorkflowEditor({
               )}
             </Field>
 
-            <Hint>
-              Checked before a block starts a work cycle and again as each block
-              finishes, never during one — a block already working carries on
-              until it or another reaches one of those boundaries, so the total
-              can overshoot by up to one work cycle per block running at the
-              time, and blocks running at once multiply that
-            </Hint>
+            <Hint>{WORKFLOW_LIMIT_TIMING_NOTE}</Hint>
           </Card>
         </div>
       </div>
@@ -1529,9 +1518,13 @@ function LinkPanel({
                 onChange({ edge: e.target.value as LinkDraft["edge"] })
               }
             >
-              {CONDITIONS.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label}
+              {/* Declaration order, which puts the unanswered state first —
+                  the same walk the kind picker above takes over `KIND_LABEL`. */}
+              {(
+                Object.keys(EDGE_OPTION_LABEL) as Array<LinkDraft["edge"]>
+              ).map((edge) => (
+                <option key={edge} value={edge}>
+                  {EDGE_OPTION_LABEL[edge]}
                 </option>
               ))}
             </Select>

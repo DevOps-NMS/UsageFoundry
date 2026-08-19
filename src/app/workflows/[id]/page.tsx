@@ -11,6 +11,7 @@ import type {
 } from "@/lib/apiTypes";
 import type { BadgeTone } from "@/lib/format";
 import {
+  EDGE_CHIP_LABEL,
   fmtDateTime,
   fmtPct,
   fmtUSD,
@@ -36,11 +37,6 @@ import {
 import { WorkflowSchedule } from "@/components/WorkflowSchedule";
 
 const POLL_MS = 10_000;
-
-const CONDITION_LABEL: Record<"on-success" | "on-finish", string> = {
-  "on-success": "only if it completes",
-  "on-finish": "once it finishes",
-};
 
 type InstanceStatus = WorkflowInstanceDTO["status"];
 
@@ -206,7 +202,10 @@ export default function WorkflowPage() {
       list.push({
         from: e.from,
         name: names.get(e.from) ?? e.from,
-        edge: CONDITION_LABEL[e.edge],
+        // The canvas chip's own words, so a condition an operator read while
+        // drawing the link is the condition they read here — this page carried
+        // a third phrasing of the same two answers.
+        edge: EDGE_CHIP_LABEL[e.edge],
         branch: e.continueBranch,
       });
       map.set(e.to, list);
