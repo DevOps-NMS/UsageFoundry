@@ -52,12 +52,20 @@ Three things the measurement settled, and each of them narrows the bet:
    deliverable that never enters the repository. That is a ceiling on coverage,
    not a quality target.
 
-3. **The one artefact that would close the biggest gap is the run's own
-   testimony.** Five sampled runs correctly produced an empty diff and two
-   wrongly produced one; nothing but the run's own final text separates them, and
-   that text is in `run_events`. So this document uses **external** to mean *not
-   the author, adversarially prompted, judged against the task text* — not
-   *evidence-independent*, which it cannot be.
+3. **~~The one artefact that would close the biggest gap is the run's own
+   testimony.~~ Measured since, and it closed nothing.** The reasoning was: five
+   sampled runs correctly produced an empty diff and two wrongly produced one,
+   and nothing but the run's own final text separates them. The spike tested that
+   on all eight empty-diff cases and **zero of eight verdicts changed**
+   (`RESULT.md`, *The testimony arm*). What separates them is the **task text**,
+   which the validator already gets: every correctly-`unjudgeable` run was told
+   in its own prompt not to commit or was asked a question, and both `not-done`
+   runs were told to commit and did not. Testimony is still worth *having* —
+   given it, the model named it and declined to lean on it (*"only testimony
+   claims filing, which isn't evidence"*), which is evidence about the prompt —
+   but it is not the thing that closes the gap. This document still uses
+   **external** to mean *not the author, adversarially prompted, judged against
+   the task text* — not *evidence-independent*, which it cannot be.
 
 So the shape recommended here is: **an assist, not a run; fired after the run has
 already released everything; three-valued; notify-only.** It writes nothing on
@@ -501,7 +509,9 @@ the third of the fleet that carries every known failure. **It is also the gate:*
 The thinnest path that touches every layer: `kind='validate'` on `run_reviews`, a
 `verdict` column and the two judged shas, a prompt composed from task text +
 branch diff + the run row's own facts + the last cycle's final text marked as
-testimony, `--permission-mode plan`, `--max-budget-usd` off a new setting, a
+testimony — **and see decision 2: the spike measured that last term buying zero
+verdict changes, so M1 should compose it both ways and score the difference
+rather than assume it** — `--permission-mode plan`, `--max-budget-usd` off a new setting, a
 three-valued verdict parsed and written. No UI, no automatic firing — invoked by
 a script against a finished run id. Ugly and hardcoded is fine.
 *Acceptance:* Given a finished isolated run, when the script is run against its
@@ -650,9 +660,21 @@ Five, each answerable with "defaults are fine".
    precedent, and it costs nothing if the validator is never built.*
 2. **Does the validator get the run's own final text?** It is testimony, not
    independent evidence, and it widens a decision `review.ts` took deliberately.
-   *Recommended default: **yes**, one turn only, marked as testimony in the
+   ~~*Recommended default: **yes**, one turn only, marked as testimony in the
    prompt — it is the only thing that separates a correct empty diff from a wrong
-   one, which is the largest gap the measurement found.*
+   one, which is the largest gap the measurement found.*~~ **That premise has
+   been measured false.** The spike re-ran all eight empty-diff cases with
+   `--with-testimony` (`scripts/validator-spike/io-testimony/`,
+   `score-report-testimony.md`, commit `5c49a08`) and **zero of eight verdicts
+   changed** — six of six identical on the scored subset, case for case. The
+   discrimination was never in the testimony; the task text carries it.
+   *Recommended default: **measure it in M1 before paying for it.** Not "no":
+   n = 8, one stratum, one sample per case, and testimony on a 100 kB patch is
+   untested. But it is no longer "yes on reasoning" — the one place the document
+   claimed it mattered is the one place it was tried and bought nothing, and
+   shipping it means more prompt tokens on every verdict, a testimony field in
+   the prompt contract, and a `review.ts` decision reversed for no measured
+   change.*
 3. **Which runs get validated in M2?** *Recommended default: **only `completed`
    runs that ended without `DONE`, and only isolated ones.** That is ~30% of the
    fleet and carries 100% of the measured defect; widen to all `completed` runs
