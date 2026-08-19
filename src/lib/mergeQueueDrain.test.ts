@@ -60,7 +60,16 @@ const git = (cwd: string, ...args: string[]) =>
   });
 
 before(async () => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), "uf-merge-drain-"));
+  // `realpathSync` around the temp root, which eight sibling test files already
+  // do and this one did not. On macOS `os.tmpdir()` is `/var/folders/…`, a
+  // symlink to `/private/var/folders/…`, and `resolveInMount` checks
+  // containment on the resolved path *and again* after `realpathSync` —
+  // `security.md` says both are load-bearing. So a mount registered at the
+  // unresolved path refuses its own checkout, and all three tests in this file
+  // failed off Linux with "This run's repository is no longer inside a
+  // workspace mount." A fixture bug, not a landing bug: the assertion it broke
+  // is the one proving a clean branch lands.
+  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "uf-merge-drain-")));
   process.env.DATA_DIR = path.join(root, "data");
   process.env.CLAUDE_HOME = path.join(root, "claude");
   // Nothing here resolves a conflict, so nothing here should reach a spawn. A
