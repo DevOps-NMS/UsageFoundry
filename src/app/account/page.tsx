@@ -6,6 +6,7 @@ import { fmtTokens, fmtUSD } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Notice } from "@/components/ui/Notice";
 import {
   TBody,
@@ -50,13 +51,23 @@ function Lede() {
         was billed, and the rate limits it is configured with. These numbers are
         authoritative.
       </p>
-      <p className="text-xs leading-relaxed">
-        A Pro or Max subscription is invisible here — Anthropic publishes no
-        endpoint for one, and no numeric value for its limits. That is why the
-        dashboard estimates from local transcripts instead, and why the ceilings
-        under Settings have to be calibrated from your own history rather than
-        read from an account. The two views are never added together.
-      </p>
+      {/* Folded, and this is the one paragraph on the page that may be: it is
+          read once, it explains why something is *not* here, and no decision on
+          this page is approved against it — there are no controls on this page
+          at all while it is working. Three sentences of standing prose above
+          four figures is what somebody arrives here to read past. The `Not
+          configured` state keeps its own full explanation, because that is the
+          state where the sentence is load-bearing. */}
+      <Disclosure summary="Why a Pro or Max subscription is not shown here">
+        <p className="mt-2 text-xs leading-relaxed">
+          A Pro or Max subscription is invisible here — Anthropic publishes no
+          endpoint for one, and no numeric value for its limits. That is why the
+          dashboard estimates from local transcripts instead, and why the
+          ceilings under Settings have to be calibrated from your own history
+          rather than read from an account. The two views are never added
+          together.
+        </p>
+      </Disclosure>
     </div>
   );
 }

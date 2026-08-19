@@ -24,6 +24,7 @@ import { Markdown } from "@/components/Markdown";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, type CardEmphasis } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Hint } from "@/components/ui/Hint";
 import { Icon } from "@/components/ui/Icon";
 import { ListGroup } from "@/components/ui/List";
@@ -641,14 +642,10 @@ export default function ChatPage() {
           you, and then runs under the guards of the template it names — never
           under anything the chat chose.
         </p>
-        <details className="mt-1.5">
-          {/* Padding rather than `max-md:min-h-11`, for the reason the runs
-              list's disclosure states: a min-height on a `list-item` leaves the
-              word and its triangle at the top of a box the finger is aiming at
-              the middle of. */}
-          <summary className="ui-transition cursor-pointer max-md:py-3.5 marker:text-ink-faint hover:text-ink">
-            What the chat itself may do, and what its turns cost
-          </summary>
+        <Disclosure
+          className="mt-1.5"
+          summary="What the chat itself may do, and what its turns cost"
+        >
           <p className="mt-2">
             A proposal that names no template runs under the default guard set
             in <Link href="/settings">Settings</Link>.
@@ -661,7 +658,7 @@ export default function ChatPage() {
             same 5-hour window as everything else, and that cost is shown here
             only — never added to a run&rsquo;s, or to the dashboard meters.
           </p>
-        </details>
+        </Disclosure>
       </Notice>
 
       {pollError && <Notice tone="danger">{pollError}</Notice>}
@@ -1279,6 +1276,12 @@ function Proposal({
                   GUARD_TONE[proposal.agentMissing ? "missing" : "set"]
                 }`}
               >
+                {/* Its own glyph, and emphatically not the guard's. The row
+                    read icon, icon, bare text — so the two facts that carry a
+                    mark looked like the row and this one looked like a
+                    remainder. `agents` is the pane's own glyph, which is where
+                    a definition for this name would be found. */}
+                <Icon name="agents" size="sm" />
                 <span className="truncate">
                   {proposal.agentName
                     ? `as ${proposal.agentName}`
@@ -1286,7 +1289,16 @@ function Proposal({
                 </span>
               </span>
             )}
-            {proposal.promptRewritten && <span>prompt rewritten</span>}
+            {/* The model rewrote the operator's own words, and this said so in
+                the same muted grey as the folder beside it — the least visible
+                fact on the card and the one a person is most likely to want
+                back. Toned and weighted rather than given a glyph: `IconName`
+                is a closed union with no warning or edit mark in it, and the
+                shield is ruled out for the reason the agent phrase above is
+                kept outside it. The text is unchanged and stays in this row. */}
+            {proposal.promptRewritten && (
+              <span className="font-medium text-warn">prompt rewritten</span>
+            )}
           </div>
         )}
 
