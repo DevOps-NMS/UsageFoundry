@@ -23,7 +23,15 @@ import { Hint } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import { Sheet } from "@/components/ui/Sheet";
-import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
+import {
+  TBody,
+  THead,
+  Table,
+  TableWrap,
+  Td,
+  Th,
+  Tr,
+} from "@/components/ui/Table";
 
 const POLL_MS = 10_000;
 
@@ -102,7 +110,7 @@ function RunRows({
   nodeName: Map<string, string>;
 }) {
   return (
-    <tbody>
+    <TBody>
       {nodes.map((n) => {
         const waits = n.waitsFor.map((from) => nodeName.get(from) ?? from);
         // Reads the run's own `fmtCycleInFlight`, in that function's argument
@@ -161,25 +169,33 @@ function RunRows({
                 </div>
               )}
             </Td>
-            <Td num className="whitespace-nowrap align-top text-ink-muted">
+            <Td
+              num
+              label="Cycles"
+              className="whitespace-nowrap align-top text-ink-muted"
+            >
               {n.run ? fmtCycles(n.run.iterations, n.run.maxIterations) : "—"}
             </Td>
-            <Td num className="whitespace-nowrap align-top">
+            <Td num label="Spent" className="whitespace-nowrap align-top">
               {n.run ? fmtUSD(n.run.spentUSD) : "—"}
             </Td>
-            <Td num className="whitespace-nowrap align-top text-ink-muted">
+            <Td
+              num
+              label="Started"
+              className="whitespace-nowrap align-top text-ink-muted"
+            >
               {n.run?.startedAt ? fmtDateTime(n.run.startedAt) : "—"}
             </Td>
           </Tr>
         );
       })}
-    </tbody>
+    </TBody>
   );
 }
 
 function RunTableHead() {
   return (
-    <thead>
+    <THead>
       <tr>
         <Th scope="col" className="w-[116px]">
           Status
@@ -202,7 +218,7 @@ function RunTableHead() {
           Started
         </Th>
       </tr>
-    </thead>
+    </THead>
   );
 }
 
@@ -539,12 +555,12 @@ export default function WorkflowInstancePage() {
           <CardTitle className="mt-8">Blocks not yet runs</CardTitle>
           <Card emphasis="quiet">
             <TableWrap>
-              <Table>
+              <Table stack>
                 <caption className="sr-only">
                   Blocks that decide what to run, blocks that repeat one, blocks
                   that land branches, and blocks waiting on any of them
                 </caption>
-                <thead>
+                <THead>
                   <tr>
                     <Th scope="col" className="w-[116px]">
                       Status
@@ -559,8 +575,8 @@ export default function WorkflowInstancePage() {
                       Spent
                     </Th>
                   </tr>
-                </thead>
-                <tbody>
+                </THead>
+                <TBody>
                   {instance.blocks.map((b) => {
                     const waits = b.waitsFor.map(
                       (from) => nodeName.get(from) ?? from,
@@ -596,13 +612,21 @@ export default function WorkflowInstancePage() {
                             </div>
                           )}
                         </Td>
-                        <Td num className="whitespace-nowrap align-top text-ink-muted">
+                        <Td
+                          num
+                          label="Started"
+                          className="whitespace-nowrap align-top text-ink-muted"
+                        >
                           {b.startedAt === null ? "—" : fmtDateTime(b.startedAt)}
                         </Td>
                         {/* Only the two kinds that pay a model for a turn of
                             their own. A loop block spends nothing: every pass
                             is a run, and its cost is on that run's row. */}
-                        <Td num className="whitespace-nowrap align-top">
+                        <Td
+                          num
+                          label="Spent"
+                          className="whitespace-nowrap align-top"
+                        >
                           {b.kind === "orchestrator" || b.kind === "merge"
                             ? fmtUSD(b.costUSD)
                             : "—"}
@@ -610,7 +634,7 @@ export default function WorkflowInstancePage() {
                       </Tr>
                     );
                   })}
-                </tbody>
+                </TBody>
               </Table>
             </TableWrap>
             <Hint>
@@ -653,7 +677,10 @@ export default function WorkflowInstancePage() {
           </Empty>
         ) : (
           <TableWrap>
-            <Table>
+            {/* Both of these tables are one `RunTableHead` and one `RunRows`,
+                so the stacked presentation is one component too — a second copy
+                would be the column that gained a fix here and not there. */}
+            <Table stack>
               <caption className="sr-only">
                 Each block of the workflow and the run it created
               </caption>
@@ -672,7 +699,7 @@ export default function WorkflowInstancePage() {
           <CardTitle className="mt-8">Runs a block started</CardTitle>
           <Card emphasis={savedRuns.length > 0 ? "default" : "primary"}>
             <TableWrap>
-              <Table>
+              <Table stack>
                 <caption className="sr-only">
                   Runs an orchestrator block decided on, and where each has got to
                 </caption>

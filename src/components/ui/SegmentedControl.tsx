@@ -97,7 +97,13 @@ export function SegmentedControl<T extends string>({
     <div
       role="radiogroup"
       aria-label={label}
-      className={`inline-flex items-center gap-0.5 rounded-sm border border-line bg-inset p-0.5 ${className}`}
+      // `flex-wrap` below the breakpoint and nowhere else: a five-option group
+      // is about 330px of segments, which a 390px phone has almost exactly none
+      // of to spare once the pane's own gutter is off — and an `inline-flex`
+      // that cannot wrap answers that by pushing the pane sideways, which is the
+      // scroll this whole breakpoint exists to remove. It changes nothing above
+      // the line, where no group here comes near the width.
+      className={`inline-flex max-md:flex-wrap items-center gap-0.5 rounded-sm border border-line bg-inset p-0.5 ${className}`}
     >
       {options.map((option, index) => {
         const selected = option.value === value;
@@ -117,7 +123,27 @@ export function SegmentedControl<T extends string>({
             onClick={() => onChange(option.value)}
             onKeyDown={(e) => onKeyDown(e, index)}
             className={
-              "ui-transition inline-flex min-h-[var(--control-h)] cursor-pointer " +
+              // 44px below the shell's breakpoint, against --control-h above
+              // it — the app's hit target, applied as an override rather than
+              // as a change to the token. See Button's SIZE map.
+              //
+              // In both axes here, and the width is the half easily missed: a
+              // `labels="hidden"` group is a 16px glyph in 10px of padding, so
+              // the theme picker's three segments were 38px wide and cleared
+              // the floor vertically only. A `min-w` and so a floor rather than
+              // a size — the only *labelled* segment it reaches is the runs
+              // list's "All" at ~37px — and the same figure in both states, so
+              // pressing a segment still moves nothing. `Switch`'s `::after`
+              // recipe is not available: segments sit 2px apart, so any bleed
+              // would take the tap aimed at the neighbour.
+              //
+              // The cost lands in one place and is taken deliberately.
+              // `ThemeToggle` is three of these on the toolbar, so the strip's
+              // right-hand group grows ~20px and the title beside it — the one
+              // item there that shrinks — truncates that much sooner. That
+              // title is derived from the route and the page under it carries
+              // its own <h1>, so what gives way is a duplicate.
+              "ui-transition inline-flex min-h-[var(--control-h)] max-md:min-h-11 max-md:min-w-11 cursor-pointer " +
               "items-center justify-center gap-1.5 rounded-[4px] border px-2.5 text-sm " +
               `${SEGMENT[selected ? "selected" : "unselected"]}`
             }

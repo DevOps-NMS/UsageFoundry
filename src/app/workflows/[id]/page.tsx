@@ -24,7 +24,15 @@ import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import { Sheet } from "@/components/ui/Sheet";
-import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
+import {
+  TBody,
+  THead,
+  Table,
+  TableWrap,
+  Td,
+  Th,
+  Tr,
+} from "@/components/ui/Table";
 import { WorkflowSchedule } from "@/components/WorkflowSchedule";
 
 const POLL_MS = 10_000;
@@ -402,11 +410,11 @@ export default function WorkflowPage() {
       <CardTitle className="mt-8">Blocks</CardTitle>
       <Card emphasis="primary">
         <TableWrap>
-          <Table>
+          <Table stack>
             <caption className="sr-only">
               The blocks of this workflow, and what each one waits for
             </caption>
-            <thead>
+            <THead>
               <tr>
                 <Th scope="col" className="w-[40px]" />
                 <Th scope="col" className="w-full">
@@ -419,8 +427,8 @@ export default function WorkflowPage() {
                   Starts after
                 </Th>
               </tr>
-            </thead>
-            <tbody>
+            </THead>
+            <TBody>
               {workflow.nodes.map((n, i) => {
                 const guards = guardBadge(n.templateId, templates);
                 const waits = waitsFor.get(n.id) ?? [];
@@ -480,10 +488,17 @@ export default function WorkflowPage() {
                         </>
                       )}
                     </Td>
-                    <Td className="align-top">
+                    <Td label="Guards" className="align-top">
                       <Badge tone={guards.tone}>{guards.text}</Badge>
                     </Td>
-                    <Td className="align-top text-ink-muted">
+                    {/* Above the value: this is a list of block names with a
+                        condition on each, not a reading, and in the right half
+                        of a 390px row it is one word per line. */}
+                    <Td
+                      label="Starts after"
+                      labelPlacement="above"
+                      className="align-top text-ink-muted"
+                    >
                       {waits.length === 0 ? (
                         "nothing — starts immediately"
                       ) : (
@@ -507,7 +522,7 @@ export default function WorkflowPage() {
                   </Tr>
                 );
               })}
-            </tbody>
+            </TBody>
           </Table>
         </TableWrap>
       </Card>
@@ -521,11 +536,11 @@ export default function WorkflowPage() {
             </Empty>
           ) : (
             <TableWrap>
-              <Table>
+              <Table stack>
                 <caption className="sr-only">
                   Every press of Run, newest first
                 </caption>
-                <thead>
+                <THead>
                   <tr>
                     <Th scope="col" className="w-[180px]">
                       Started
@@ -539,10 +554,12 @@ export default function WorkflowPage() {
                       Runs
                     </Th>
                   </tr>
-                </thead>
-                <tbody>
+                </THead>
+                <TBody>
                   {instances.map((inst) => (
                     <Tr key={inst.id}>
+                      {/* No label: when it was pressed is what identifies the
+                          press, and it is the link into it. */}
                       <Td className="whitespace-nowrap align-top">
                         <Link
                           href={`/workflows/${id}/instances/${inst.id}`}
@@ -551,18 +568,24 @@ export default function WorkflowPage() {
                           {fmtDateTime(inst.createdAt)}
                         </Link>
                       </Td>
-                      <Td className="align-top text-ink-muted">
+                      {/* Above the value: a badge plus a clause naming how many
+                          blocks never ran is a sentence, not a reading. */}
+                      <Td
+                        label="Outcome"
+                        labelPlacement="above"
+                        className="align-top text-ink-muted"
+                      >
                         <Badge tone={OUTCOME_TONE[inst.status]}>
                           {OUTCOME_LABEL[inst.status]}
                         </Badge>{" "}
                         {outcomeDetail(inst)}
                       </Td>
-                      <Td num className="align-top text-ink-muted">
+                      <Td num label="Runs" className="align-top text-ink-muted">
                         {inst.nodes.length}
                       </Td>
                     </Tr>
                   ))}
-                </tbody>
+                </TBody>
               </Table>
             </TableWrap>
           )}

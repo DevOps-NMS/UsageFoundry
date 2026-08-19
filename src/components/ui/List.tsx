@@ -88,9 +88,32 @@ export function ListRow({
 
   return (
     <div
-      className={`relative flex min-h-[var(--control-h-lg)] items-center justify-between gap-4 px-3.5 py-2.5 ${className}`}
+      // The row is inert, so the 44px below the breakpoint is not a hit target
+      // — it is the box the switch's own 44px overlay has to fit inside
+      // without reaching into the row above or below it.
+      //
+      // And it wraps there, which is the whole of what makes this row usable on
+      // a phone. Every caller states the control's width on a wrapper (see the
+      // note in Field) and those widths are absolute: `w-72` is 288px against
+      // the ~288px a 390px screen leaves inside a `primary` card, this box's
+      // border and this padding, so the label was squeezed to nothing and its
+      // description came out as a column of single letters.
+      //
+      // `min-w-32` on the label is what decides *when*. Flex line breaking
+      // clamps an item's hypothetical main size by its min-width, so a label
+      // that cannot have 128px sends the control to a line of its own, and a
+      // switch or a short number field — which can — stays on the right where
+      // a grouped list puts it. A blanket `basis-full` would have moved every
+      // switch in Settings off the right edge to fix the four wide selects.
+      // `justify-end` is what keeps one group from showing two alignments. The
+      // label is `flex-1`, so on a line it shares there is no free space and
+      // the two are identical; on a *wrapped* line the control is the only
+      // item, and `space-between` resolves to flex-start for one item — which
+      // would put some of a group's controls at the right edge and the wrapped
+      // ones at the left.
+      className={`relative flex min-h-[var(--control-h-lg)] max-md:min-h-11 max-md:flex-wrap items-center justify-between max-md:justify-end gap-4 px-3.5 py-2.5 ${className}`}
     >
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 max-md:min-w-32 flex-1">
         {htmlFor ? (
           <label htmlFor={htmlFor} className={labelClasses}>
             {label}

@@ -12,7 +12,7 @@ import { Hint } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
-import { Table, Td, Th, Tr } from "@/components/ui/Table";
+import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
 import { PERIOD_OPTIONS, UsagePeriods } from "@/components/UsagePeriods";
 import type {
   PeriodGranularityDTO,
@@ -141,8 +141,16 @@ interface Breakdown {
  * are unit-tested against the plain CommonJS `tsconfig.test.json` emits, where
  * a path alias does not resolve, so a shared module would have to be reachable
  * relatively from both — a fourth file holding two class strings.
+ *
+ * Both halves are released below the breakpoint, and it is the same reason
+ * twice: the head is hidden there and the rows are blocks, so a 320px scroll
+ * region inside a scrolling pane is a nested scroller with nothing pinned to
+ * the top of it — a trap on touch, where the only way past a list is through
+ * it, and no longer a box for a sticky head to stick inside.
  */
-const LIST_VIEW = "max-h-80 overflow-auto rounded-sm border border-line";
+const LIST_VIEW =
+  "max-h-80 overflow-auto max-md:max-h-none max-md:overflow-visible " +
+  "rounded-sm border border-line";
 
 /**
  * `bg-surface` because the rows scroll under it, and the inset shadow because a
@@ -1006,12 +1014,12 @@ export default function Dashboard() {
           <Empty>No usage in this window.</Empty>
         ) : (
           <div className={LIST_VIEW}>
-            <Table>
+            <Table stack>
               <caption className="sr-only">
                 Cost by {DIMENSION_LABEL[dimension].toLowerCase()} over{" "}
                 {s.weekly.label.toLowerCase()}, highest first
               </caption>
-              <thead>
+              <THead>
                 <tr>
                   <Th className={STICKY_HEAD}>{DIMENSION_LABEL[dimension]}</Th>
                   <Th num className={STICKY_HEAD}>
@@ -1021,14 +1029,19 @@ export default function Dashboard() {
                     Share
                   </Th>
                 </tr>
-              </thead>
-              <tbody>
+              </THead>
+              <TBody>
                 {/* Every turn lands in some bucket — including explicit
                     "(main thread)" / "(no skill)" rows — so the column adds to
                     100% instead of quietly omitting a remainder. */}
                 {current.rows.slice(0, MAX_BREAKDOWN_ROWS).map((r) => (
                   <Tr key={r.label}>
-                    <Td>
+                    {/* No label: the bucket's own name is what the record is,
+                        and the picker above already says which of the five
+                        dimensions is being named. `break-all` below the
+                        breakpoint because a project bucket is a path, which has
+                        no space to wrap at and would take the pane sideways. */}
+                    <Td className="max-md:break-all">
                       <span className="mono">{r.label}</span>
                       {r.mark && (
                         <>
@@ -1037,15 +1050,17 @@ export default function Dashboard() {
                         </>
                       )}
                     </Td>
-                    <Td num>{fmtUSD(r.cost)}</Td>
-                    <Td num>
+                    <Td num label="Cost">
+                      {fmtUSD(r.cost)}
+                    </Td>
+                    <Td num label="Share">
                       {s.weekly.costUSD > 0
                         ? fmtPct(r.cost / s.weekly.costUSD)
                         : "—"}
                     </Td>
                   </Tr>
                 ))}
-              </tbody>
+              </TBody>
             </Table>
           </div>
         )}
@@ -1068,11 +1083,11 @@ export default function Dashboard() {
       <Card emphasis="quiet">
         <CardTitle>Recent 5-hour blocks</CardTitle>
         <div className={LIST_VIEW}>
-          <Table>
+          <Table stack>
             <caption className="sr-only">
               Each recorded 5-hour window, newest first
             </caption>
-            <thead>
+            <THead>
               <tr>
                 <Th className={STICKY_HEAD}>Started</Th>
                 <Th num className={STICKY_HEAD}>
@@ -1086,10 +1101,12 @@ export default function Dashboard() {
                 </Th>
                 <Th className={STICKY_HEAD}>Models</Th>
               </tr>
-            </thead>
-            <tbody>
+            </THead>
+            <TBody>
               {s.blocks.slice(0, MAX_BLOCK_ROWS).map((b) => (
                 <Tr key={b.startsAt}>
+                  {/* No label: when the window started is what identifies the
+                      block, and the "live" badge beside it is part of that. */}
                   <Td className="whitespace-nowrap tabular-nums">
                     <span title={new Date(b.startsAt).toLocaleString()}>
                       {fmtDateTime(b.startsAt)}
@@ -1101,7 +1118,7 @@ export default function Dashboard() {
                       </>
                     )}
                   </Td>
-                  <Td num>
+                  <Td num label="Tokens">
                     {fmtTokens(
                       b.agg.tokens.input +
                         b.agg.tokens.output +
@@ -1110,14 +1127,20 @@ export default function Dashboard() {
                         b.agg.tokens.cacheWrite1h,
                     )}
                   </Td>
-                  <Td num>{fmtUSD(b.agg.costUSD)}</Td>
-                  <Td num>{b.agg.entryCount}</Td>
-                  <Td className="mono">
+                  <Td num label="Cost">
+                    {fmtUSD(b.agg.costUSD)}
+                  </Td>
+                  <Td num label="Turns">
+                    {b.agg.entryCount}
+                  </Td>
+                  {/* Above the value: a window with three model families in it
+                      is a longer string than anything else in the row. */}
+                  <Td label="Models" labelPlacement="above" className="mono">
                     {b.models.map((m) => m.replace("claude-", "")).join(", ")}
                   </Td>
                 </Tr>
               ))}
-            </tbody>
+            </TBody>
           </Table>
         </div>
         {blocksOmitted > 0 && (

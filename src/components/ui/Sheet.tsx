@@ -1,7 +1,39 @@
 "use client";
 
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, type CSSProperties, type ReactNode } from "react";
 import { Button, ButtonRow, type ButtonVariant } from "@/components/ui/Button";
+
+/**
+ * A `<dialog>` is in the top layer, so it is outside `AppShell`'s box and owes
+ * the window's own edges itself — the same distinction `SidebarDrawer` already
+ * makes one component over. All four are 0px in a browser tab, on the desktop
+ * and in an installed desktop window, and non-zero only under
+ * `viewportFit: "cover"`, which is the iOS home-screen install: without this
+ * the panel's title sits under the notch, because `inset-0` means the whole
+ * screen and not the part of it the OS has left alone.
+ */
+const VIEWPORT_INSETS: CSSProperties = {
+  paddingTop: "env(safe-area-inset-top, 0px)",
+  paddingBottom: "env(safe-area-inset-bottom, 0px)",
+  paddingLeft: "env(safe-area-inset-left, 0px)",
+  paddingRight: "env(safe-area-inset-right, 0px)",
+};
+
+/**
+ * What is left for the panel once the OS and a software keyboard have taken
+ * their share.
+ *
+ * `dvh` rather than `vh`: on a phone `100vh` is the viewport with the browser's
+ * chrome *hidden*, so a sheet capped at it is taller than the screen and its
+ * one default action is below the fold — on the one element in the app whose
+ * whole job is to be answered. `--keyboard-inset` is the other half and cannot
+ * come from a unit at all: a software keyboard resizes the visual viewport and
+ * leaves every vh unit exactly as it was. AppShell publishes it; it is 0px
+ * anywhere there is no keyboard up, which is everywhere this app runs on a
+ * pointer.
+ */
+const PANEL_MAX_H =
+  "calc(100dvh - var(--keyboard-inset, 0px) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 3rem)";
 
 /**
  * A modal that arrives from the top of the pane, the way a macOS sheet drops
@@ -78,12 +110,16 @@ export function Sheet({
       // so the panel below can sit at the top of it. The three `-none`s defeat
       // the UA's own max-width/max-height on a modal dialog.
       className="fixed inset-0 m-0 h-auto max-h-none w-auto max-w-none overflow-hidden bg-transparent p-0 [&::backdrop]:bg-black/25"
+      style={VIEWPORT_INSETS}
     >
       <div
         className="sheet-enter mx-auto w-[min(34rem,calc(100%-2rem))] rounded-b-lg border border-t-0 border-line bg-surface shadow-e3"
         // The panel scrolls, not the viewport-sized dialog around it: a long
-        // sheet has to stay reachable without the page behind it moving.
-        style={{ maxHeight: "calc(100vh - 3rem)", overflowY: "auto" }}
+        // sheet has to stay reachable without the page behind it moving. That
+        // is also what keeps Cancel and the default action reachable with a
+        // keyboard up — the cap shrinks with the visible area and the footer
+        // is at the end of a scroll region rather than under the keyboard.
+        style={{ maxHeight: PANEL_MAX_H, overflowY: "auto" }}
       >
         <div className="p-5">
           <h2 id={titleId} className="text-sm font-semibold text-ink">

@@ -170,9 +170,42 @@
      strip at the top of the content pane. --toolbar-h is a floor rather than
      the height — under Window Controls Overlay the strip takes
      env(titlebar-area-height) instead, which is the window's own titlebar. */
-  --sidebar-w: 14rem;             /* 224 — expanded */
+  --sidebar-w-list: 14rem;        /* 224 — the source list */
   --sidebar-w-rail: 3.5rem;       /* 56  — collapsed to glyphs */
+  /* What the shell's geometry reads, and the one of the three the collapse
+     below swaps. The list width is named separately because the mobile drawer
+     needs it *unswapped*: [data-sidebar="collapsed"] is a desktop state settled
+     before paint, and a drawer that is closed on every page load has nothing to
+     collapse — reading --sidebar-w there would open a 56px rail with its labels
+     removed from the screen. See Sidebar.tsx's ROOT map. */
+  --sidebar-w: var(--sidebar-w-list);
   --toolbar-h: 3.25rem;           /* 52  — the macOS unified toolbar */
+
+  /* How much of the window's left edge the source list has already taken, which
+     is what the toolbar subtracts from env(titlebar-area-x) to find the part of
+     the traffic lights it still has to clear. A separate name because the
+     answer is not always --sidebar-w: below the shell's mobile breakpoint the
+     list is a drawer and absorbs nothing, and an installed window narrowed past
+     that point would otherwise put the toolbar's first button under the OS's
+     own buttons — the subtraction would still be negative, the max() would
+     still pick the 12px padding, and nothing would report it. Toolbar.tsx
+     overrides this to 0px with a `max-md:` arbitrary property, so the
+     breakpoint stays spelled `md` in exactly one vocabulary. */
+  --sidebar-w-absorbed: var(--sidebar-w);
+
+  /* How much of the window a software keyboard is covering. AppShell publishes
+     it from `visualViewport`; it is 0px everywhere else — on the desktop, in an
+     installed window, on the server, and on a phone with nothing focused — so
+     it is additive on exactly the grounds env(safe-area-inset-*) is.
+
+     It exists because no viewport unit can answer this. `dvh` tracks the
+     *browser's* chrome; a software keyboard resizes the **visual** viewport and
+     leaves the layout viewport, and every vh unit derived from it, exactly as
+     it was. So the pane's `sticky bottom-0` footers and the chat composer
+     pinned under its thread end up behind the keyboard — the one place in this
+     app where the box being typed into and the button that commits it are both
+     off screen at once. */
+  --keyboard-inset: 0px;
 
   /* The strip's *used* height, and the pane's, in one place. The toolbar and
      the sidebar's brand strip both compute the max() inline because they set
@@ -181,13 +214,31 @@
      an installed window whose titlebar is taller than 52px would otherwise
      leave every pane-sized box hanging that much past the bottom edge.
 
-     --pane-h is what <main> is: the window less the strip. It is deliberately
-     *not* the space a page has to fill, which is this minus the pane's own
-     padding and whatever heading stands above the box in question — that is
-     what the flex column in AppShell is for, and a box that can be told to
-     fill it must never be given a vh figure instead. */
+     --pane-h is what <main> is: the window less the strip, and less whatever
+     the OS has taken off the top and the bottom of the window — AppShell pads
+     its outer box by both, so an install to an iOS home screen (which runs
+     under the notch and over the home indicator) would otherwise leave every
+     pane-sized box hanging that much past the edge, which is the same failure
+     the titlebar sum above exists to prevent. Both insets are 0px in a browser
+     tab and on the desktop, so this is the figure it always was there.
+
+     It is deliberately *not* the space a page has to fill, which is this minus
+     the pane's own padding and whatever heading stands above the box in
+     question — that is what the flex column in AppShell is for, and a box that
+     can be told to fill it must never be given a vh figure instead.
+
+     --keyboard-inset is subtracted here and from the shell's own height, so a
+     box measured against the pane moves up with the pane rather than staying
+     behind the keyboard while the pane above it does not. */
   --toolbar-actual: max(var(--toolbar-h), env(titlebar-area-height, 0px));
-  --pane-h: calc(100dvh - var(--toolbar-actual));
+  /* The keyboard term carries a fallback for the reason every env() here does:
+     a var() that resolves to nothing makes the whole calc() invalid at
+     computed-value time, and every box sized against --pane-h would then fall
+     back to `auto` — a failure with no error and no obvious cause. */
+  --pane-h: calc(
+    100dvh - var(--toolbar-actual) - var(--keyboard-inset, 0px) -
+      env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)
+  );
 
   /* Consumed only by the legacy layer below; delete with the last rule
      that reads them. Everything new reads the @theme names instead. */
@@ -464,6 +515,22 @@
   to   { transform: translateY(0); opacity: 1; }
 }
 
+/* The mobile source list arrives from the edge it is anchored to, which is the
+   same argument `sheet-enter` makes one direction over: where a panel came from
+   is what says which control opened it. It travels its whole width rather than
+   16px because it is a drawer and not a sheet — there is no "still mostly in
+   place" reading of a panel that covers half the window. Transform is legal
+   here for `sheet-enter`'s reason, and @layer base flattens the duration under
+   prefers-reduced-motion, which leaves the drawer simply present. */
+@utility drawer-enter {
+  animation: uf-drawer-in var(--motion-base) var(--ease-entrance);
+}
+
+@keyframes uf-drawer-in {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(0); }
+}
+
 /* Window Controls Overlay: which parts of the toolbar drag the window.
    Named utilities rather than arbitrary values because the property is
    `-webkit-app-region` — vendor-prefixed with no standard spelling that ships
@@ -631,6 +698,28 @@ input[type="text"], input[type="number"], input[type="password"], select, textar
   font-size: 13px;
 }
 textarea { font-family: var(--mono); font-size: 12.5px; resize: vertical; min-height: 90px; }
+
+/* 16px is the size below which iOS Safari zooms the page in when a control
+   takes focus — and it never zooms back out, so every screen after the first
+   tap is offset sideways for the rest of the session. 13px and 12.5px are both
+   under it, so every text control in the app did this.
+
+   Three things this deliberately is not. Not a change to --text-sm: twenty
+   other things read it, and the note beside it in @theme is the reason it and
+   --text-base are both 13. Not a `font-size` on `html`, which redefines `rem`
+   and silently takes 12.5% off every spacing and type utility in the app. And
+   not unlayered: a control that states its own size in a utility still wins
+   here, which is why the kit's own controls carry `max-md:text-[16px]`
+   themselves — see CONTROL_BASE in components/ui/Field.tsx. This rule is the
+   floor under everything still reaching for the element selectors above.
+
+   The query is the one Tailwind v4 emits for `max-md:`, character for
+   character, rather than a max-width — so the breakpoint is one boundary and
+   not two that agree to within a fraction of a pixel. */
+@media (width < 48rem) {
+  input[type="text"], input[type="number"], input[type="password"],
+  select, textarea { font-size: 16px; }
+}
 
 /* `outline: none` and a box-shadow ring used to live here, and between them
    they were the reason text controls could not share the app's focus style —

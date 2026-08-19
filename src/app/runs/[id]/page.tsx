@@ -863,7 +863,20 @@ export default function RunDetail({
       <div className="grid gap-5 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_21rem]">
         <Card
           emphasis={active ? "primary" : "default"}
-          className={`border-l-[3px] ${STATE_ACCENT[state.tone]} lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(var(--pane-h)-2rem)] lg:overflow-y-auto`}
+          // `max-lg:min-w-0` is the pane column's own `min-w-0` on the other
+          // half of the split, and it is missing rather than withheld. Below
+          // `lg` the two stack into one implicit `auto` track, whose floor is
+          // this card's min-content — and the Task block inside it is
+          // `whitespace-pre-wrap break-words`, where `overflow-wrap:break-word`
+          // deliberately does *not* shorten a min-content measurement. So one
+          // unbroken token in a prompt — a path, a URL, which is most of them —
+          // is a floor under the whole grid, and the page scrolls sideways for
+          // it. With the floor at 0 the box is the pane's width and its own
+          // `overflow-auto` scrolls the line, which is what that class is for.
+          // Scoped to `max-lg:` rather than stated plainly: above the
+          // breakpoint the track is a fixed 21rem and this would change which
+          // way a pathological prompt overflows.
+          className={`max-lg:min-w-0 border-l-[3px] ${STATE_ACCENT[state.tone]} lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(var(--pane-h)-2rem)] lg:overflow-y-auto`}
         >
           {/* Announced, because it is the one thing on the page that changes
               on its own and matters. The detail below it is not: while the

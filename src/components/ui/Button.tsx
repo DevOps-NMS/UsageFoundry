@@ -68,10 +68,23 @@ const BUSY_RING: Record<ButtonVariant, string> = {
   ghost: "border-line-strong border-t-accent",
 };
 
-/** Height, not padding — see --control-h in globals.css. */
+/**
+ * Height, not padding — see --control-h in globals.css.
+ *
+ * A button is 44px below the shell's breakpoint, which is the app's hit target
+ * for a finger, and `--control-h`/`--control-h-lg` above it, which is the
+ * pointer's. It is a `max-md:` override rather than a change to the token
+ * because the token is the pointer's floor and the whole kit is built on it.
+ *
+ * The two heights sit in one entry so a size reads as one decision — *not* for
+ * VARIANT's reason, which does not apply: a base utility and a `max-md:` one
+ * are ordered by Tailwind whichever string they are written in. Co-location is
+ * load-bearing only where both candidates carry the *same* variant, which is
+ * what `Table`'s STACKED_CELL has and this does not.
+ */
 const SIZE: Record<ButtonSize, string> = {
-  default: "min-h-[var(--control-h-lg)] px-3.5 py-1.5",
-  compact: "min-h-[var(--control-h)] px-2.5 py-1",
+  default: "min-h-[var(--control-h-lg)] max-md:min-h-11 px-3.5 py-1.5",
+  compact: "min-h-[var(--control-h)] max-md:min-h-11 px-2.5 py-1",
 };
 
 export function Button({

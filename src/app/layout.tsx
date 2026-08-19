@@ -59,6 +59,20 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
+  // What makes every `env(safe-area-inset-*)` in the app resolve to anything
+  // other than 0. The default is `auto`, which letterboxes an installed iOS app
+  // inside the safe area and reports all four insets as zero — the shell then
+  // has nothing to keep clear of and nothing to keep clear of it, which reads
+  // as correct right up until the day something needs the space under the
+  // notch. `cover` hands the page the whole screen and states the four insets,
+  // and this app is in exactly the case that makes that the right trade:
+  // `appleWebApp.capable` above and `display: "standalone"` in manifest.ts mean
+  // an install to an iOS home screen runs full-screen, under the notch and over
+  // the home indicator. AppShell pads its outer box by all four and the drawer,
+  // which is a `fixed` dialog and so outside that box, pads by three; all four
+  // are 0 in an ordinary desktop browser and in an installed desktop window, so
+  // nothing there moves.
+  viewportFit: "cover",
   // Both entries, because the app follows the OS when no theme is stored and
   // a single colour would leave the browser chrome fighting the page in one
   // of the two. The values are --bg from globals.css — they were the previous

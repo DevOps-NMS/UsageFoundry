@@ -8,7 +8,15 @@ import { Badge } from "@/components/ui/Badge";
 import { ButtonLink } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
-import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
+import {
+  TBody,
+  THead,
+  Table,
+  TableWrap,
+  Td,
+  Th,
+  Tr,
+} from "@/components/ui/Table";
 
 /** The dashboard's cadence. Nothing here moves faster than a run's status. */
 const POLL_MS = 10_000;
@@ -91,9 +99,9 @@ export default function WorkflowsPage() {
           </Empty>
         ) : (
           <TableWrap>
-            <Table>
+            <Table stack>
               <caption className="sr-only">Saved workflows, by name</caption>
-              <thead>
+              <THead>
                 <tr>
                   <Th scope="col" className="w-full">
                     Workflow
@@ -105,8 +113,8 @@ export default function WorkflowsPage() {
                     Last run
                   </Th>
                 </tr>
-              </thead>
-              <tbody>
+              </THead>
+              <TBody>
                 {workflows.map((w) => (
                   <Tr key={w.id}>
                     <Td className="align-top">
@@ -138,15 +146,18 @@ export default function WorkflowsPage() {
                         </div>
                       )}
                     </Td>
-                    <Td num className="align-top text-ink-muted">
+                    <Td num label="Blocks" className="align-top text-ink-muted">
                       {w.nodes.length}
                     </Td>
-                    <Td className="whitespace-nowrap align-top text-ink-muted">
+                    <Td
+                      label="Last run"
+                      className="whitespace-nowrap align-top text-ink-muted"
+                    >
                       {w.lastRunAt ? fmtDateTime(w.lastRunAt) : "never"}
                     </Td>
                   </Tr>
                 ))}
-              </tbody>
+              </TBody>
             </Table>
           </TableWrap>
         )}

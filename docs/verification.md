@@ -279,6 +279,16 @@ Built and exercised against real transcripts:
   inline text boxes wrapping inside a paragraph, and the save bar overlaying the
   page as a sticky bar is meant to.
 
+  **Those measurements are of a layout that no longer exists below 768px**, and
+  the entry stays for the method rather than for the readings: the sweep was run
+  before the source list became a drawer and before seventeen tables started
+  stacking at `md`, so every width it reports under that line describes a table
+  being scrolled sideways rather than what is drawn there now. The harness is the
+  thing worth keeping — a production build, fabricated API responses covering
+  each status, twelve widths, both themes, and the geometry read back out of the
+  DOM rather than looked at. Re-running it is the entry under *Not yet verified*
+  below.
+
 - **The orchestrator chat, end to end against the real CLI.** A template was
   saved, a chat asked to list what it could see and propose one run, the
   proposal was approved, and the resulting run started and completed — $0.22 for
@@ -530,6 +540,100 @@ through before trusting this unattended:
   with the token, and reload a page — a redirect back to `/login` after an
   apparently successful sign-in means `UF_COOKIE_SECURE` is `1` (or blank behind
   something setting `X-Forwarded-Proto: https`) and not `0`.
+- **The stacked tables at 390px — and, uniquely on this list, the three
+  commands themselves.** `Table`'s `stack` turns seventeen of the app's twenty
+  tables into one block per record below `md`: `/runs` (both lists), `/branches`
+  (the inventory and the checkout-slot table), `/agents` (saved and on-disk),
+  the five on the dashboard, all six across the three workflow pages, and
+  `/account`'s rate limits. The three left flat are the settings page's storage
+  report and `RunAgentCost`, both out of the scope this landed under, and
+  `/account`'s daily cost — which has no `<thead>` at all, so it has no column
+  name to lose and a date beside a dollar figure already fits.
+  `src/components/ui/Table.test.tsx` pins the two halves that fail
+  silently — that a stacked cell names its own field and keeps the ARIA roles
+  `display: block` strips, and that a table which did **not** ask to stack emits
+  no `md:`-prefixed rule at all, which is the whole of the "1440px is unchanged"
+  claim in one assertion. What has not happened is anything else. The run that
+  wrote this had **no working shell at all** — every command, `git` included,
+  died in the sandbox with `bwrap: No permissions to create new namespace` — so
+  `npm run typecheck`, `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG
+  npm run build` were **not run**, and neither was a browser. Treat it as
+  unbuilt until those three pass. Then, at 390×844: every page that holds one of
+  them read top to bottom with **no horizontal scroll**, every figure still
+  `tabular-nums` and every unknown reading still hatched, the branches selection
+  bar starting at the window's left edge rather than 224px in with its Land,
+  Clear and strategy picker all reachable, and the reserved spacer under it
+  (`max-md:h-80`, chosen by arithmetic rather than measurement) actually taller
+  than the bar — a bar taller than its spacer hides the last row of the table.
+  The workflow instance page is the one worth opening first: its two run tables
+  are one `RunTableHead` and one `RunRows`, so they are also the proof that the
+  context carries `stack` across a component boundary rather than only down one
+  file's JSX. Two Tailwind spellings
+  are load-bearing and emit nothing at all if wrong: `md:contents` on the value
+  wrapper, whose loss is a silent *desktop* change in all seventeen, and
+  `max-md:last:border-b-0` on the row, whose loss is one doubled hairline.
+  `grep -c 'md:contents' .next/static/css/*.css` after a build is the cheap form
+  of both.
+
+  The right form of it is the harness already in *Verified* above — a production
+  build in a headless browser against fabricated API responses, both themes,
+  geometry read out of the DOM rather than looked at. Its readings now describe a
+  layout that is gone below 768px, so re-running it is what replaces them, and it
+  is the only thing that can check the two claims a human eye is bad at: that
+  **no** page scrolls sideways at 380px, and that every box at 1440px is where it
+  was before.
+- **The mobile form pass — and two of its three defects cannot be observed
+  without a real iOS device.** Every text control gained `max-md:text-[16px]`
+  (once, in `CONTROL_BASE`, which `Input`, `Select`, `Textarea` and `LimitField`
+  all concatenate; plus the legacy layer's element selectors, and the two
+  hand-written controls that carry their own `text-sm` and so beat that layer —
+  the chat composer and the branches page's strategy `select`. Every
+  `page.tsx` under `src/app/` and every file in `src/components/` was read to
+  establish that those are the only two). `CONTROL_LINE`, `Toggle`,
+  `ListRow`, `QuickOpen`'s result rows, the settings section chips and the run
+  form's link-shaped button took `max-md:min-h-11`, `SegmentedControl`'s segment
+  a `max-md:min-w-11` beside it, and `Switch` a 44×44 `::after` overlay.
+  `ListRow` learned to wrap (`max-md:flex-wrap` with `max-md:min-w-32` on the
+  label deciding when, and `max-md:justify-end` so a wrapped control does not
+  change edges). Three `<summary>` elements took `max-md:py-3.5` rather than a
+  min-height, for the reason the runs list already gives; the four in the run
+  detail pane are the one gap left, and are that run's files. `AppShell`
+  publishes `--keyboard-inset` from
+  `visualViewport`; the shell's height, `--pane-h`, `Sheet`'s panel cap and the
+  branches page's `fixed` selection bar all subtract it — the last two because
+  they sit outside `AppShell`'s box and so owe the edge themselves. All of it was reasoned from documented platform behaviour. **None
+  of it was watched.**
+
+  **This run had no working shell either** — every command died with `bwrap: No
+  permissions to create new namespace`, `git` included — so `npm run typecheck`,
+  `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` were
+  **not run**, no browser was driven, and **nothing was committed**: this change
+  and the two before it sit uncommitted in the worktree. Treat it as unbuilt.
+
+  Narrowing a desktop window is not a substitute for either device-only check.
+  **The zoom**: on real iOS Safari at 390px, tap into any field on `/runs/new`
+  and the page must not scale — if it does, the class did not reach the emitted
+  stylesheet. **The keyboard**: on the same device, focus the chat composer and
+  confirm the composer, the run form's save bar and a `Sheet`'s Cancel/confirm
+  pair all stay above the keyboard rather than behind it; then blur the field
+  and confirm `--keyboard-inset` returns to `0px`, which is what a shell left
+  stuck at two-thirds height would be reporting. **The targets** can be measured
+  anywhere: at ≤767px every control's border box ≥44px in both axes, and
+  `Switch`'s is its `::after` and not the pill.
+
+  Five spellings are load-bearing and emit nothing at all if Tailwind does not
+  know them: `max-md:text-[16px]` (the zoom), `max-md:min-w-32` (without it a
+  `ListRow` never wraps and a `w-72` select squeezes its label to nothing),
+  `max-md:min-w-11` (an icon-only segment still 38px wide), and
+  `max-md:after:-inset-y-[11px]` / `-inset-x-[3px]` (a switch still 38×32).
+  `grep -o 'font-size:16px\|min-width:8rem' .next/static/css/*.css | sort |
+  uniq -c` after a build is the cheap form of the first two. The 1440px claim
+  needs the harness above: the only unprefixed edits are `AppShell`'s root
+  height (`h-dvh` → an inline `calc(100dvh - var(--keyboard-inset, 0px))`),
+  `--pane-h`'s extra term, `Sheet`'s panel cap and safe-area padding, and the
+  branches bar's inline `bottom: var(--keyboard-inset, 0px)` — each
+  identical while the variable and the insets are `0px`, which is every desktop,
+  but identical *by argument* rather than by measurement.
 - **Checkout-slot exhaustion end to end, and the store inventory behind it.**
   `resolveIsolation`'s refusal is unit-tested in both directions (it was seen to
   fail against the old downgrade and to pass against the refusal), and

@@ -247,7 +247,11 @@ export function QuickOpen({
                   onClick={() => go(item)}
                   onMouseMove={() => setHighlight(i)}
                   className={
-                    "ui-transition mt-0.5 flex min-h-[var(--control-h)] cursor-pointer " +
+                    // A row is the whole control here — the click navigates and
+                    // the Open button is a formality — so it takes the 44px
+                    // target below the breakpoint that every other tappable
+                    // row in the shell does. See Sidebar's pane link.
+                    "ui-transition mt-0.5 flex min-h-[var(--control-h)] max-md:min-h-11 cursor-pointer " +
                     `items-center gap-2 rounded-[6px] px-2 text-sm ${ITEM[state]}`
                   }
                 >

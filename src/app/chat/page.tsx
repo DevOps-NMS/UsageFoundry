@@ -642,7 +642,11 @@ export default function ChatPage() {
           under anything the chat chose.
         </p>
         <details className="mt-1.5">
-          <summary className="ui-transition cursor-pointer marker:text-ink-faint hover:text-ink">
+          {/* Padding rather than `max-md:min-h-11`, for the reason the runs
+              list's disclosure states: a min-height on a `list-item` leaves the
+              word and its triangle at the top of a box the finger is aiming at
+              the middle of. */}
+          <summary className="ui-transition cursor-pointer max-md:py-3.5 marker:text-ink-faint hover:text-ink">
             What the chat itself may do, and what its turns cost
           </summary>
           <p className="mt-2">
@@ -809,7 +813,13 @@ export default function ChatPage() {
               // focusable thing in the app, and the `outline-none` plus 3px
               // box-shadow that used to be here was the second treatment that
               // rule exists to have none of.
-              className="ui-transition min-h-[4.5rem] w-full resize-none overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 font-sans text-sm leading-normal text-ink placeholder:text-ink-faint hover:border-line-strong focus:border-accent"
+              //
+              // `max-md:text-[16px]` for the reason CONTROL_BASE in ui/Field
+              // states it: under 16px iOS Safari zooms the page in on focus and
+              // never zooms back out. This is the one text control in the app
+              // written by hand rather than taken from the kit, so it is the
+              // one that has to repeat it.
+              className="ui-transition min-h-[4.5rem] w-full resize-none overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 font-sans text-sm max-md:text-[16px] leading-normal text-ink placeholder:text-ink-faint hover:border-line-strong focus:border-accent"
               rows={3}
               placeholder="Ask the orchestrator to look at something and propose runs…"
               value={draft}

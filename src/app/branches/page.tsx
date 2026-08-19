@@ -30,7 +30,15 @@ import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
 import { Spinner } from "@/components/ui/Log";
 import { Select, Toggle } from "@/components/ui/Field";
-import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
+import {
+  TBody,
+  THead,
+  Table,
+  TableWrap,
+  Td,
+  Th,
+  Tr,
+} from "@/components/ui/Table";
 
 /**
  * Every branch the tool has produced, in one place — and the queue that lands
@@ -509,7 +517,12 @@ function QueuePanel({
           open={historyOpen}
           onToggle={(e) => onToggleHistory(e.currentTarget.open)}
         >
-          <summary className="ui-transition cursor-pointer text-sm text-ink-muted marker:text-ink-faint hover:text-ink">
+          {/* Padding rather than `max-md:min-h-11`, which is what every other
+              control below the breakpoint takes: a min-height on a `list-item`
+              leaves the word and its triangle at the top of a box the finger is
+              aiming at the middle of. Same figure as the runs list's disclosure
+              — see the note there. */}
+          <summary className="ui-transition cursor-pointer max-md:py-3.5 text-sm text-ink-muted marker:text-ink-faint hover:text-ink">
             {queue.historyCount === 1
               ? "1 earlier press of Land"
               : `${queue.historyCount} earlier presses of Land`}
@@ -575,25 +588,27 @@ function CheckoutStores({ stores }: { stores: CheckoutStoreDTO[] }) {
         </Notice>
       )}
       <TableWrap>
-        <Table>
-          <thead>
+        <Table stack>
+          <THead>
             <Tr>
               <Th>Repository</Th>
               <Th num>Free</Th>
               <Th num>In use</Th>
               <Th>Holding uncommitted work</Th>
             </Tr>
-          </thead>
-          <tbody>
+          </THead>
+          <TBody>
             {notable.map((s) => (
               <Tr key={s.repoRoot}>
                 <Td>
                   <div className="font-medium text-ink">{s.repoLabel}</div>
-                  <div className="mono mt-0.5 text-xs text-ink-muted">
+                  {/* A store path has no space to wrap at, so below the
+                      breakpoint it is what would push the pane sideways. */}
+                  <div className="mono mt-0.5 text-xs text-ink-muted max-md:break-all">
                     {s.store}
                   </div>
                 </Td>
-                <Td num>
+                <Td num label="Free">
                   {s.free === null ? (
                     // Not zero. The probe cap stopped the walk, so this says
                     // nothing about how many are left.
@@ -604,8 +619,12 @@ function CheckoutStores({ stores }: { stores: CheckoutStoreDTO[] }) {
                     </span>
                   )}
                 </Td>
-                <Td num>{s.heldByRuns}</Td>
-                <Td>
+                <Td num label="In use">
+                  {s.heldByRuns}
+                </Td>
+                {/* Above the value: this one is a list of checkout names, and
+                    the label is four words wide before it starts. */}
+                <Td label="Holding uncommitted work" labelPlacement="above">
                   {s.dirty.length === 0 ? (
                     <span className="text-ink-muted">none</span>
                   ) : (
@@ -625,7 +644,7 @@ function CheckoutStores({ stores }: { stores: CheckoutStoreDTO[] }) {
                 </Td>
               </Tr>
             ))}
-          </tbody>
+          </TBody>
         </Table>
       </TableWrap>
     </Card>
@@ -1001,7 +1020,7 @@ export default function Branches() {
                 // cannot take back out — so changing what is on screen clears it.
                 setSelected([]);
               }}
-              className="w-[34ch] max-w-full"
+              className="w-[34ch] max-w-full max-md:min-h-11"
             >
               <option value="">All repositories</option>
               {(data?.repos ?? []).map((r) => (
@@ -1105,15 +1124,45 @@ export default function Branches() {
         <>
           {/* The bar is fixed, so nothing above it moves as rows are ticked —
               the row you are aiming at stays where your eye left it. This
-              reserves the height it covers at the foot of the page. */}
-          <div aria-hidden="true" className="h-28" />
+              reserves the height it covers at the foot of the page. The three
+              groups sit on one line above the breakpoint and stack below it, so
+              the reservation has to as well; it deliberately over-reserves
+              rather than under-, because the cost of guessing high is blank
+              space past the last row and the cost of guessing low is a row that
+              cannot be reached. */}
+          <div aria-hidden="true" className="h-28 max-md:h-80" />
           <div
             role="region"
             aria-label="Selected branches"
             // Fixed, so it is positioned against the viewport rather than the
             // content pane — which means it has to step around the source list
             // itself. `--sidebar-w` follows the collapse, so this does too.
-            className="fixed right-0 bottom-0 left-[var(--sidebar-w)] z-30 border-t border-line bg-surface shadow-bar"
+            //
+            // Below the breakpoint there is no source list to step around: it
+            // is a drawer, which absorbs none of the window's left edge — the
+            // same distinction `--sidebar-w-absorbed` exists to make for the
+            // toolbar. Left at `--sidebar-w` this bar would start 224px in on a
+            // 390px window and show about a third of itself.
+            className="fixed right-0 bottom-0 left-[var(--sidebar-w)] max-md:left-0 z-30 border-t border-line bg-surface shadow-bar"
+            // A `fixed` element is outside AppShell's box and so outside the
+            // padding it applies, which is why the drawer pads itself too. 0px
+            // in a browser tab and on the desktop; on an iOS home-screen install
+            // it is the home indicator, which would otherwise sit on Land.
+            //
+            // `bottom` is the same argument one property over: AppShell shrinks
+            // its own box by `--keyboard-inset` so the pane's sticky footers
+            // clear a software keyboard, and this bar is not in that box. The
+            // picker iOS opens for the strategy `select` below is an
+            // interactive widget like the keyboard, and it is this bar's own
+            // control — so without this the operator picks a strategy behind
+            // the thing they are picking it with. Inline rather than a
+            // `bottom-[var(…)]` class so the `bottom-0` above stays the
+            // readable default and the override is unambiguous; both are 0px
+            // wherever there is no keyboard, which is every pointer device.
+            style={{
+              bottom: "var(--keyboard-inset, 0px)",
+              paddingBottom: "env(safe-area-inset-bottom, 0px)",
+            }}
           >
             <div className="mx-auto flex max-w-shell flex-wrap items-center gap-x-5 gap-y-3 px-5 py-3">
               <div className="min-w-0">
@@ -1144,9 +1193,19 @@ export default function Branches() {
                 </div>
               </div>
 
-              <ButtonRow className="ml-auto">
+              {/* Full width below the breakpoint rather than pushed right: at
+                  390px "ml-auto" is the left edge anyway, and a picker whose
+                  longest option is "Merge, keeping their commits" is the widest
+                  thing in the bar. */}
+              <ButtonRow className="ml-auto max-md:w-full">
                 <select
-                  className="w-auto rounded-sm border border-line bg-inset px-2.5 py-2 text-sm text-ink"
+                  // `max-md:text-[16px]` for the reason CONTROL_BASE in
+                  // ui/Field states it: under 16px iOS Safari zooms the page in
+                  // on focus and never zooms back out. The floor in the legacy
+                  // layer does not reach this one — it is in `legacy` and loses
+                  // to the `text-sm` beside it — so the last hand-written
+                  // `select` in the app has to say it itself.
+                  className="w-auto rounded-sm border border-line bg-inset px-2.5 py-2 text-sm max-md:text-[16px] text-ink max-md:min-h-11 max-md:w-full"
                   value={strategy}
                   onChange={(e) =>
                     setStrategy(e.target.value as "merge" | "squash")
@@ -1159,7 +1218,7 @@ export default function Branches() {
                 <Button
                   onClick={queueSelected}
                   disabled={queueBusy}
-                  className="min-w-[140px]"
+                  className="min-w-[140px] max-md:flex-1"
                 >
                   {queueBusy
                     ? "Queueing…"
@@ -1213,11 +1272,11 @@ function BranchTable({
 }) {
   return (
     <TableWrap>
-      <Table>
+      <Table stack>
         <caption className="sr-only">
           Every branch an isolated run has made, newest first
         </caption>
-        <thead>
+        <THead>
           <tr>
             <Th scope="col" className="w-[56px]">
               <span className="sr-only">Land</span>
@@ -1249,8 +1308,8 @@ function BranchTable({
               Actions
             </Th>
           </tr>
-        </thead>
-        <tbody>
+        </THead>
+        <TBody>
           {loading ? (
             <SkeletonRows />
           ) : (
@@ -1267,9 +1326,12 @@ function BranchTable({
                   <Td className="align-top">
                     {queueable(b) ? (
                       // The negative margin buys a 32px hit target without
-                      // changing what the cell occupies.
+                      // changing what the cell occupies; below the breakpoint
+                      // the app's own floor is 44px and the box grows to it,
+                      // which costs nothing because the row is a block there
+                      // and the cell no longer sets a column's width.
                       <label
-                        className={`-m-2 flex w-max items-center gap-1.5 p-2 ${
+                        className={`-m-2 flex w-max items-center gap-1.5 p-2 max-md:min-h-11 ${
                           queued ? "cursor-not-allowed" : "cursor-pointer"
                         }`}
                       >
@@ -1288,6 +1350,17 @@ function BranchTable({
                             queued ? "Already in the merge queue" : undefined
                           }
                         />
+                        {/* The column head is `sr-only` because a tick box under
+                            the word "Land" needs no second label — but below the
+                            breakpoint the head is gone entirely, and a bare
+                            checkbox at the top of a card says nothing about what
+                            ticking it does. The word is what the head was. */}
+                        <span
+                          aria-hidden="true"
+                          className="text-sm text-ink-muted md:hidden"
+                        >
+                          Land
+                        </span>
                         {/* Fixed width whether or not it holds a number, so
                             ticking a box moves nothing. */}
                         <span
@@ -1331,13 +1404,13 @@ function BranchTable({
                     </div>
                   </Td>
 
-                  <Td className="align-top">
+                  <Td label="Repository" className="align-top">
                     <div className="mono max-w-[16ch] truncate" title={b.repoLabel}>
                       {b.repoLabel}
                     </div>
                   </Td>
 
-                  <Td className="align-top">
+                  <Td label="Lands into" className="align-top">
                     <div
                       className="mono max-w-[16ch] truncate"
                       title={b.target ?? "This branch has no recorded target"}
@@ -1346,11 +1419,15 @@ function BranchTable({
                     </div>
                   </Td>
 
-                  <Td num className="align-top">
+                  <Td num label="Ahead" className="align-top">
                     {b.exists ? b.ahead : "—"}
                   </Td>
 
-                  <Td num className="whitespace-nowrap align-top text-ink-muted">
+                  <Td
+                    num
+                    label="Created"
+                    className="whitespace-nowrap align-top text-ink-muted"
+                  >
                     {fmtDateTime(b.createdAt)}
                   </Td>
 
@@ -1416,7 +1493,7 @@ function BranchTable({
                       ) : (
                         <Link
                           href={`/runs/${b.runId}`}
-                          className="inline-flex items-center rounded-sm px-3 py-2 text-sm font-medium text-ink-muted no-underline transition-colors duration-150 hover:bg-inset hover:text-ink hover:no-underline"
+                          className="inline-flex max-md:min-h-11 items-center rounded-sm px-3 py-2 text-sm font-medium text-ink-muted no-underline transition-colors duration-150 hover:bg-inset hover:text-ink hover:no-underline"
                         >
                           Open run
                         </Link>
@@ -1427,7 +1504,7 @@ function BranchTable({
               );
             })
           )}
-        </tbody>
+        </TBody>
       </Table>
     </TableWrap>
   );

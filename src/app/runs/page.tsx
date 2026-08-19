@@ -25,7 +25,7 @@ import {
   SegmentedControl,
   type SegmentedOption,
 } from "@/components/ui/SegmentedControl";
-import { Table, Td, Th, Tr } from "@/components/ui/Table";
+import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
 
 /**
  * Runs the orchestrator still owns: they will spend again on their own.
@@ -102,8 +102,12 @@ const FILTERS: readonly SegmentedOption<Filter>[] = [
  * never scrolls, which is a no-op dressed as a feature. Without it the
  * scrollport is the content pane, so the header pins under the toolbar as the
  * page scrolls, which is what a Finder list does and the whole point of it.
- * The cost is a horizontal page scrollbar on a window narrower than this app's
- * own sidebar plus about 640px.
+ *
+ * That cost the page a horizontal scrollbar on a window narrower than this
+ * app's own sidebar plus about 640px, which is every phone. `Table`'s `stack`
+ * is what answers it rather than a wrapper: below `md` there are no columns to
+ * be too wide for, the pinned header goes with them, and the scrollport is
+ * still the pane.
  */
 const LIST_VIEW = "rounded-lg border border-line bg-surface";
 
@@ -209,8 +213,10 @@ function SkeletonRows() {
             <SkeletonBar className="w-16" />
           </Td>
           {/* The same `w-full max-w-0` the task cell carries, so the column
-              edges do not move when the poll answers. */}
-          <Td aria-hidden="true" className="w-full max-w-0">
+              edges do not move when the poll answers — and the same release of
+              it below the breakpoint, where a zero max-width is a zero-width
+              block rather than the column that gives. */}
+          <Td aria-hidden="true" className="w-full max-w-0 max-md:max-w-none">
             <SkeletonBar className="w-[58%]" />
             <SkeletonBar className="mt-3 w-[30%]" />
           </Td>
@@ -261,9 +267,9 @@ function RunList({
 }) {
   return (
     <div className={LIST_VIEW}>
-      <Table>
+      <Table stack>
         <caption className="sr-only">{caption}</caption>
-        <thead>
+        <THead>
           <tr>
             <Th scope="col" className={`w-[150px] ${STICKY_HEAD}`}>
               Status
@@ -302,8 +308,8 @@ function RunList({
               </Th>
             )}
           </tr>
-        </thead>
-        <tbody>
+        </THead>
+        <TBody>
           {loading ? (
             <SkeletonRows />
           ) : (
@@ -352,8 +358,13 @@ function RunList({
                       cell's *max* content contribution and 100% as its
                       preference leaves the fixed columns their widths and hands
                       this one whatever is left, which is what the ellipsis was
-                      for. */}
-                  <Td className="w-full max-w-0 align-top">
+                      for.
+
+                      Released below the breakpoint, and it has to be: there are
+                      no columns to give to there, so a zero max-width is simply
+                      a block of zero width with the task overflowing out of it.
+                      The truncation still holds the line to the pane. */}
+                  <Td className="w-full max-w-0 align-top max-md:max-w-none">
                     {/* The task is what tells two runs in the same project
                         apart, so it leads and the folder hangs under it. Both
                         truncate; both keep the whole value in `title`. 56ch is
@@ -372,7 +383,11 @@ function RunList({
                       {folderLabel(r)}
                     </div>
                   </Td>
-                  <Td num className="whitespace-nowrap align-top text-ink-muted">
+                  <Td
+                    num
+                    label="Cycles"
+                    className="whitespace-nowrap align-top text-ink-muted"
+                  >
                     {fmtCycles(r.iterations, r.max_iterations)}
                   </Td>
                   {kind === "active" ? (
@@ -381,20 +396,35 @@ function RunList({
                     // 0/2 for the whole of its first one — which is exactly what
                     // a run that was marked running and never started reads.
                     // `fmtCycleInFlight` is the only decider, wording included,
-                    // and it refuses the column on any status but running.
-                    <Td className="whitespace-nowrap align-top text-xs text-ink-muted">
+                    // and it refuses the column on any status but running. The
+                    // stacked label is the same word the column head uses, for
+                    // the same reason: two names for this one would be two
+                    // descriptions of a running run, which is what the split
+                    // from the count beside it exists to prevent.
+                    <Td
+                      label="In flight"
+                      className="whitespace-nowrap align-top text-xs text-ink-muted"
+                    >
                       {fmtCycleInFlight(r) ?? "—"}
                     </Td>
                   ) : (
-                    <Td num className="whitespace-nowrap align-top text-ink-muted">
+                    <Td
+                      num
+                      label="Tokens"
+                      className="whitespace-nowrap align-top text-ink-muted"
+                    >
                       {fmtTokens(r.spent_tokens)}
                     </Td>
                   )}
-                  <Td num className="whitespace-nowrap align-top">
+                  <Td num label="Spent" className="whitespace-nowrap align-top">
                     {fmtUSD(r.spent_usd)}
                   </Td>
                   {kind === "history" && (
-                    <Td num className="whitespace-nowrap align-top text-ink-muted">
+                    <Td
+                      num
+                      label="Finished"
+                      className="whitespace-nowrap align-top text-ink-muted"
+                    >
                       {fmtDateTime(r.finished_at ?? r.started_at ?? r.created_at)}
                     </Td>
                   )}
@@ -429,7 +459,7 @@ function RunList({
               );
             })
           )}
-        </tbody>
+        </TBody>
       </Table>
     </div>
   );
@@ -715,8 +745,12 @@ export default function RunsPage() {
         <details>
           {/* No `display` utility here on purpose: anything but `list-item`
               drops the native disclosure triangle, and the triangle is the
-              only thing saying this opens. */}
-          <summary className="ui-transition mb-3 cursor-pointer py-2 text-sm font-semibold text-ink-muted marker:text-ink-faint hover:text-ink">
+              only thing saying this opens — which is also why the 44px target
+              below the breakpoint is bought with padding rather than with the
+              `max-md:min-h-11` every other control here takes: a min-height on
+              a list-item leaves the word and its triangle at the top of a box
+              the finger is aiming at the middle of. */}
+          <summary className="ui-transition mb-3 cursor-pointer py-2 max-md:py-3.5 text-sm font-semibold text-ink-muted marker:text-ink-faint hover:text-ink">
             Older runs ({older.length})
           </summary>
           <div className="mb-3">
