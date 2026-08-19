@@ -131,7 +131,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
 
 - **The UI says "work cycle", the code says "iteration".** User-facing copy names the unit a first-time user must reason about; `Settings`, `BudgetPolicy`, the API payloads and the `runs` table keep `iteration`/`maxIterations`. Don't rename the internals to match the copy, and don't reintroduce "iteration" into the UI.
 - **Comments explain *why* a decision was made** — usually a correctness or safety trade-off — never what the code does. Match that when editing.
-- **Long-lived module state goes on `globalThis`** (`__ufDb`, `__ufBus`, `__ufProcs`, `__ufCancelled`, `__ufTranscriptCache`), or it silently resets on every request in dev.
+- **Long-lived module state goes on `globalThis`** (e.g. `__ufDb`, `__ufBus`, `__ufProcs`, `__ufInterrupts`, `__ufTranscriptCache`), or it silently resets on every request in dev. Those five are examples and not the roster — there are thirty-odd such keys; `grep -rn "globalThis as unknown" src/` finds every one. Note `__ufInterrupts`: reusing a key whose *shape* changed is the trap `orchestrator.ts:373` records, because `??=` only initialises when absent, so a pre-upgrade value survives a dev hot reload and every call on it throws.
 - **Schema changes** are idempotent statements in `migrate()` in `db.ts`. A destructive one is the exception and runs inside a single `db.transaction`.
 - **A pure function whose failure mode is silent gets a unit test.** That is the bar the existing suite was built to; `docs/agent/testing.md` records what each one earned.
 
