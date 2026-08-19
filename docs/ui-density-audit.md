@@ -1,5 +1,10 @@
 # UI density audit and restructure specification
 
+> **All five runs have landed. §8 is the record of what each one actually did**
+> — including the one change that landed partially and the deviations from the
+> text above. Read it before acting on anything in §3 as though it describes
+> the repository; §3 describes what was *asked for*.
+>
 > This document is the specification for five build runs. It decides, once, the
 > things those runs would otherwise each decide differently. Where it names a
 > control it names it by its exact current string, so a build run can grep for
@@ -28,6 +33,7 @@
 | 5 | **What must not change** | **always, first** |
 | 6 | Recommend removing — needs a human decision | never act on it |
 | 7 | Additions to `docs/agent/conventions.md` | |
+| 8 | **What actually landed, by run** — written after all five ran | **before you believe anything in §3 shipped** |
 
 ---
 
@@ -2274,3 +2280,245 @@ Items 1 and 2 and the storage-report correction are written by this document.
 Item 3 is run (e)'s and item 4 is run (a)'s, because each has to land in the
 same commit as the code it describes. **No other run may edit
 `conventions.md`.**
+
+---
+
+## 8. What actually landed, by run
+
+> **Written by run (e), the last of the five, after all five had landed.**
+> Everything above this line is the specification; everything below is the
+> record. Where the two disagree, the record is what the repository does.
+>
+> How it was established: each of §3.A–§3.D was re-read against the current
+> source, change id by change id and acceptance criterion by acceptance
+> criterion, by a separate read-only pass per run, with a file:line for every
+> verdict. §3.E was checked by the run that wrote it. **Nothing here was seen
+> in a browser** — there is none in this container, and Docker is not available
+> either, so the `docker compose up --build` smoke test that is half this
+> repository's verification loop did not run. `docs/verification.md` carries
+> that in full.
+
+### 8.1 Run (a) — the shell and the shared primitives
+
+| Change | Verdict |
+|---|---|
+| §3.A.1 the shell does not change | **held** — `src/components/shell/` has no commit since the audit; `Sidebar` still carries no count badge and the toolbar title is still a non-heading `div` |
+| §3.A.2 build `Disclosure`, migrate `ui/Patch`, correct the `Icon` comment | **implemented** |
+| §3.A.3 extract `ListView`, typed `box` | **implemented** — the three box strings and both sticky heads are character-for-character §3.A.3's table, and all five call sites carry the box the table names |
+| §3.A.4 move `Subsection` to `Card.tsx` | **implemented** |
+
+Acceptance 1–6 hold. Four things the spec did not say, recorded because a
+future editor would otherwise read them as drift:
+
+- **`Disclosure` has an eighth prop, `summaryClassName`, which §1.3's contract
+  does not list.** It exists for a `<summary>` that has to be `sticky` — the
+  header of an open patch — and it is argued in the component. It is not a
+  `tone` or a `size`, so it does not open the variant hatch §1.3 closes, but
+  the contract in §1.3 is now incomplete rather than wrong. Five call sites
+  use it.
+- **`Icon.tsx`'s stale comment was rewritten rather than deleted**, and both
+  glyphs were kept. `chevron-right` still has **no caller anywhere in `src/`**;
+  `chevron-down` has one, the chat's jump-to-latest button.
+- **§3.A.4's "update every import" was vacuous.** `Subsection` had no importer
+  before the move and has none now.
+- **Acceptance 7 was not closed by run (a).** `Disclosure.test.tsx` asserts the
+  class string reaches the rendered markup, which is not the same claim as
+  Tailwind emitting a rule for the `max-md:` spelling. **Run (e) closed it** by
+  reading the emitted stylesheet after a build: `.max-md\:py-3\.5`,
+  `.max-md\:max-h-none` and `.max-md\:overflow-visible` are all in it.
+
+### 8.2 Run (b) — `/settings`
+
+| Change | Verdict |
+|---|---|
+| B1 chip nav as a typed map, hash-driven | **implemented**, with a deviation below |
+| B2 the three naming defects | **implemented** — `Default guard set`, the two `… token ceiling` labels, and the merged `Spending limits` group |
+| B3 the folds, and `nonDefaultKeys` on `/api/settings` | **implemented**, with a deviation below |
+| B4 what does not change | **held** — all six sub-points |
+
+Acceptance 1–7 hold. Acceptance 8 (`typecheck`, `test`) was not run by run (b);
+**run (e) ran both and they pass** — see §8.6. Four deviations:
+
+- **B1's `CHIP` map is not the two strings the spec wrote.** `plain` is a full
+  set of colour utilities rather than `""`, because those utilities moved out
+  of the shared anchor class string into the map. The emitted CSS for a
+  non-current chip is unchanged; the spec's `current` entry is the same three
+  utilities reordered.
+- **`nonDefaultKeys` walks `SETTINGS_KEYS`, not `EDITABLE_PATHS`.** A
+  `"use client"` module cannot be imported by a route handler. The answer is a
+  superset and the page filters it; the failure the spec was guarding against —
+  a guard-set path spelled at the top level — is avoided by splitting
+  `chatDefaultGuards` into dotted leaf paths.
+- **`src/lib/settings.ts` also newly exports `DEFAULTS`**, where §4 scoped run
+  (b) to "export `sameValue` only".
+- **Run (b) also edited `src/app/api/settings/route.test.ts`**, which is not one
+  of the three files §4 gives it. Widening a test beside a route it owns is the
+  benign direction, and it is recorded rather than waved through.
+
+One caveat on acceptance 2: with no hash in the URL — which includes the server
+render and every first load that did not arrive through a chip — **zero** chips
+carry `aria-current`, so "exactly one at a time" is true of every state except
+the opening one. And §6 item 10 (`discard()` resets `copyGlobsText` and not its
+two neighbours) is **still present**: run (b) rearranged the rows it sits in
+without fixing it, which is what the audit asked for.
+
+### 8.3 Run (c) — `/runs/new` and `/runs/[id]`
+
+| Change | Verdict |
+|---|---|
+| C1 `as its own cap`, not `as a ceiling` | **implemented** — zero occurrences of the old phrase |
+| C2 promote the stop summary, never foldable | **implemented** |
+| C3 three switch-plus-input pairs → `LimitField` | **implemented** — a limit switched off still keeps its number |
+| C4 move five trailing blocks onto the control they are about | **implemented** — all five, as `description`/`footnote`, none as `hint` |
+| C5 what does not change | **held** |
+| C6 four inspector regions | **implemented** — a `div` with an `h2`, never a `<section>` |
+| C7 fold the superseded terminal card | **implemented** — nothing deleted, the `mergeBlocked` withholding preserved |
+| C8 one primary action in the ButtonRow | **implemented** — and no state renders two |
+| C9 the reopen submit agrees with the opener | **implemented** |
+| C10 one name for the uncommitted list | **implemented** — three wordings down to two, and the two are a real distinction |
+| C11 migrate the three `<details>` | **implemented** |
+| C12 what does not change | **held** |
+
+Acceptance 1–9 hold. Acceptance 10 was not run by run (c); **run (e) ran both**.
+One stale comment survives: `RunDiff.tsx:22` still says "Every row is a
+collapsed `<details>`" where the rows are now `ui/Patch`'s `DiffFileRow`. It is
+a comment, the element is gone, and `ui/Patch` is run (a)'s file.
+
+### 8.4 Run (d) — the workflow surfaces
+
+| Change | Verdict |
+|---|---|
+| D1 one home for the shared copy | **implemented** — three exports in `format.ts`, three local maps deleted, `LinkPanel`'s own prose kept |
+| D2 rename the colliding map | **implemented** |
+| D3 seven hints → three visible and one fold | **implemented** — `count` is the number actually rendered |
+| D4 label the editor's block-inspector groups | **PARTIAL — see below** |
+| D4b `/workflows` and the two editor wrappers unchanged | **held** |
+| D5 `/workflows/[id]`: one primary action | **implemented** |
+| D6 what does not change | **held** — `BlockStatement` is byte-identical |
+
+**D4 is the one change in the five runs that did not fully land, and it is
+recorded here rather than quietly counted.** The four group labels, their order
+and their footnotes are all in place. What is not is the spec's placement of
+`Task` and `Standing instructions`: they were moved up from the foot of the
+panel, but they render as bare `<Field>`s *outside* the `What it does`
+`ListGroup` rather than as rows of it. The reason is argued in the file — a
+nine-line text region has no right edge to align a grouped row against — and it
+is a defensible answer to a real problem the spec did not anticipate. Its
+consequence is the part a future editor needs: **a `run` block has no caps, so
+for that kind the `What it does` group does not render at all**, and the panel
+goes from the unlabelled name/kind group straight to two unlabelled fields
+before the first heading. Whether those two fields want a heading of their own
+is an open question, not a decided one.
+
+One caveat on acceptance 6: `WorkflowSchedule` mounts on `/workflows/[id]`, and
+while its editor is open it renders a second default-variant (`primary`) `Save
+schedule` button. D6 froze that surface, so it is pre-existing and untouched —
+but the page does hold two primary buttons in that state, and criterion 6 read
+literally does not survive it.
+
+Acceptance 7 was not run by run (d); **run (e) ran both**.
+
+### 8.5 Run (e) — dashboard, runs list, branches, chat, agents, account
+
+| Change | Verdict |
+|---|---|
+| E1 three named regions on `/` | **implemented** — a `div` with an `h2`, no figure at region level |
+| E2 emphasis per card | **implemented** — still exactly one `primary` |
+| E3 separate the standing caveat from the exceptions | **implemented** — it is the last line of card 1's own footnote block, and four conditional `Notice`s remain between card 1 and region 1 |
+| E4 what does not change on `/` | **held** — `Meter.tsx` untouched, the telemetry card still gated on the *setting*, `RepoSpendCard` still draws no meter and no percentage, the poll still 120s/60s, the fleet-hold sentence still in words, `UsagePeriods`' two unread props kept |
+| E5 migrate the runs list `<details>` | **implemented** — renders `Older runs (n)` as before |
+| E5b `RestartClosed` unchanged | **held** — the file is untouched |
+| E6 `FleetControls` unchanged | **held** — the file is untouched |
+| E7 emphasis on `/branches` | **implemented** — all three cards now declare one; the queue rises while the worker is on it |
+| E8 land strategy → kit `Select` in a `Field` | **implemented**, and `conventions.md`'s "exactly two" is now one, named, in the same commit |
+| E9 raise the auto-resolve consequence | **implemented** — `text-sm` while the toggle is on, text and tone unchanged |
+| E10 confirm a paid landing | **implemented** — a `danger` `Sheet`, opened only when auto-resolve is on, with the spec's exact strings |
+| E11 `prompt rewritten` takes a warn tone | **implemented** — `font-medium text-warn`, text unchanged, no glyph |
+| E12 `as {agent}` takes the agents glyph | **implemented** — outside the guard mark |
+| E13 replace the two literal copy comparisons | **withdrawn by the audit** — the comparisons at `chat/page.tsx` and the strings they compare are untouched. §6 item 13 |
+| E14 migrate the chat `<details>` | **implemented** — contents unchanged, and the no-tool-restrictions sentence stays inside the fold |
+| E15 `/agents` | **withdrawn by the audit** — the file is untouched. §6 item 12 |
+| E16 fold the account page's second lede paragraph | **implemented** — the paragraph is verbatim behind the spec's exact summary |
+
+**One ambiguity in §3.E had to be resolved and is recorded rather than silently
+chosen.** E1's region table numbers the bands 1, 2, 3 in the order *Your
+subscription*, *What this app spent*, *Live from runs*; E2's emphasis table
+lists the same cards grouped `{1}`, `{3,6}`, `{4,5,7,8}`, `{2}`, which is bands
+2, 1, 3. E2 is a table of emphasis rather than of order, and E1's numbering is
+explicit, so the page follows **E1**: card 1, then the four transcript-derived
+cards, then the two `runs.spent_usd` ones, then telemetry. It also puts the
+band that reads the same source as card 1 directly under it.
+
+Acceptance 1–10 hold. **Acceptance 9 holds repo-wide**: `grep -rn '<details'
+src/` returns three hits and all three are prose inside comments — no raw
+`<details>` element remains anywhere in the app.
+
+### 8.6 What was checked, and by what
+
+Run (e) ran all four commands on the finished tree and reports each:
+
+- `NODE_ENV=development npm ci --include=dev` — dev dependencies present.
+- `npm run typecheck` — clean.
+- `npm test` — 1335 tests, 210 suites, 0 failures. `Meter.test.tsx`,
+  `ui/Table.test.tsx`, `ui/ListView.test.tsx`, `ui/Disclosure.test.tsx` and
+  `ui/LimitField.test.tsx` all in it.
+- `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` — compiles, and emits
+  the standalone bundle and one stylesheet.
+
+Every class spelling run (e) wrote was then **looked up in that stylesheet**
+rather than assumed, along with the load-bearing spellings from the landed
+narrow-viewport work: 21 of them, all present. That check is not ceremony — it
+is what found the one silent defect in run (e) before it shipped. See §8.7.
+
+**Nothing was checked in a browser, at any width, by any of the five runs.**
+`docs/verification.md`'s *Not yet verified* list now carries the specific
+readings that need a device or a headless harness, including the three that
+only arithmetic stands behind today: the dashboard's bands at 390px, the
+`Land N` sheet's focus landing on Cancel, and the land-strategy `Field`
+aligning with the buttons beside it in a row `ButtonRow` centres.
+
+### 8.7 Defects found while doing this, and deliberately left
+
+Each is real, none is a density change, and fixing any of them uninvited would
+have been a change nobody asked for.
+
+1. **`className="mb-0"` on a kit component is a no-op.** Tailwind emits a
+   numeric utility's values *ascending*, so `.mb-0{` is at byte 10980 of the
+   emitted sheet and `.mb-3{` at 11231 — the component's own larger value wins
+   whatever the call site wrote. Three landed `CardTitle className="mb-0"` call
+   sites therefore render 12px of margin and read as though they render none:
+   `page.tsx`'s *Where it went*, `RepoSpendCard` and `UsagePeriods`. Run (e)
+   hit the same trap on `Field`'s `mb-3.5` and cancelled it on a wrapper
+   instead. The general rule is now in `conventions.md` beside `Field`'s width
+   note, which is the same rule one property over.
+2. **The chat's `selected` set is not pruned against `pending` when the poll
+   answers.** A proposal decided in another tab leaves a stale id in the set,
+   and the next press of Approve sends it. The route refuses it by id, so
+   nothing wrong happens — but "the explicit list of the ids the page
+   displayed" is true of what the page *rendered a moment ago* rather than of
+   what it is rendering now, and `allSelected` can read true while a visible
+   row is unticked. Not touched: E13's own reasoning applies, and no run in
+   this plan owns the fix.
+3. **`RunDiff.tsx:22`'s comment** still describes rows as raw `<details>`.
+4. **`Icon`'s `chevron-right` has no caller.** §3.A.2 asked for "use them or
+   delete the comment"; the comment was rewritten and the glyph kept.
+
+### 8.8 Tests
+
+**No run in the five added a test to the pure suite, and run (e) did not
+either.** `docs/agent/testing.md`'s bar is a pure function whose failure is
+silent and expensive, or a rendering that pins something a reader would act on
+that is wrong in a way that typechecks — and it names `STATUS_TONE` and
+`describeRun` as things deliberately *not* tested on exactly that ground. Runs
+(a) and (b) added five files between them (`Disclosure`, `ListView`,
+`LimitField`, `format`, the settings route), each pinning a primitive's own
+decision. Run (e)'s two candidates both failed the bar for the same mechanical
+reason: the chat's approval correspondence and the branches sheet's gate live
+inside `"use client"` page components that import through the `@/` alias, and
+`tsconfig.test.json` emits plain CommonJS with nothing rewriting that alias at
+runtime — which is why every tested component in this app imports relatively.
+Extracting a page component to make it importable is a restructure this
+specification did not ask for. The correspondence is therefore preserved by
+**absence of change** — the approve path, the selection state and the row that
+renders it are untouched — and that is a weaker claim than a test, which is why
+it is written here and in `docs/verification.md` rather than left implied.
