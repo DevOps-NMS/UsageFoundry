@@ -219,13 +219,12 @@ export function Disclosure({
   children,
   className,
 }: { ... })
+```
 
 **It has no variants.** No `tone`, no `size`, no `Record<Union, string>` map:
 every call site in §3 wants the same thing, and a variant nobody passes is a
-decision nobody made. The 44px recipe is therefore unconditional rather than an
-entry in a `SIZE` map. If a later surface genuinely needs a second size, it adds
+decision nobody made. If a later surface genuinely needs a second size it adds
 the union then — with a call site in the same commit.
-```
 
 - **Native `<details>`/`<summary>`.** Not a hand-rolled show/hide. The browser
   gives keyboard operation, the disclosure triangle, find-in-page expansion in
@@ -249,10 +248,10 @@ the union then — with a call site in the same commit.
   queue history on every tick. When `open` is supplied the component still
   renders a native `<details>` and still lets the browser drive the toggle; it
   reports the new state and never forces it.
-- **Variants are `Record<Union, string>` maps** — `TONE` and `SIZE` — with the
-  `max-md:py-3.5` in the same map entry as the pointer padding, because both
-  candidates carry the same variant and Tailwind's sort order decides otherwise
-  (`conventions.md`, the co-location rule).
+- **The 44px recipe is unconditional**, stated once in the component's own
+class string. `conventions.md`'s co-location rule — two candidates for one
+property go in the same `Record` entry — does not apply here, because with no
+variants there is no entry to split across.
 - **Five interaction states with no layout shift**, and the focus ring comes
   from `@layer base` — this component states no outline width or offset.
 - `count` exists because a fold that does not say how much is behind it is a
@@ -565,9 +564,11 @@ All three are in §6 as questions for a person.
    and adds no ARIA.
 2. `ui/Patch.tsx`'s `DiffFileRow` uses it. The sticky `z-10` summary behaviour
    is preserved.
-3. `src/components/ui/ListView.tsx` exists with the typed `cap` and an exported
-   `STICKY_HEAD`; all five call sites use it; all five `LIST_VIEW` and five
-   `STICKY_HEAD` local consts are deleted.
+   3. `src/components/ui/ListView.tsx` exists with the typed `box` (`capped` /
+   `scrolling` / `plain`) and exports both `STICKY_HEAD` and
+   `STICKY_HEAD_FLAT`; all five call sites use them as §3.A.3's table says;
+   all five `LIST_VIEW` and all five `STICKY_HEAD` local consts are deleted;
+   the emitted CSS at each of the five is byte-identical to today.
 4. `Subsection` is exported from `ui/Card.tsx` and no longer from `ui/Field.tsx`.
 5. `npm run typecheck` passes. `npm test` passes — including
    `src/components/ui/Table.test.tsx` and `src/components/Meter.test.tsx`.
@@ -580,10 +581,12 @@ ordering, no copy.
    Tailwind emits nothing for a spelling it does not know, silently
    (`conventions.md`).
 
-**Run (a) must not touch:** `src/app/settings/`, `src/app/runs/`,
-`src/components/Workflow*`, `src/app/page.tsx`'s structure (only its
-`LIST_VIEW` import), `src/app/branches/`, `src/app/chat/`, `src/app/agents/`,
-`src/app/account/`. Later runs own all of those.
+**Run (a) must not touch:** `src/app/settings/`, `src/components/Workflow*`,
+`src/app/branches/`, `src/app/chat/`, `src/app/agents/`, `src/app/account/`,
+`src/app/runs/new/` or `src/app/runs/[id]/`. In `src/app/page.tsx` and
+`src/app/runs/page.tsx` it touches **only** the `LIST_VIEW`/`STICKY_HEAD`
+consts and the one element each wraps, per the migration table above. Later
+runs own everything else.
 
 ---
 
@@ -685,7 +688,8 @@ dollar caps on a unit of work, which is what C1's table calls a limit.
 
 **B3 — Fold what is set once, using `Disclosure` (required).**
 
-Four folds, and no others:
+**Four fold sites — seven `Disclosure` elements**, because `Prompts` gets one
+per prompt. No others:
 
 | Section | Fold summary | What goes in | Why |
 |---|---|---|---|
@@ -694,8 +698,13 @@ Four folds, and no others:
 | `Runs` | `Isolated runs` | the existing group — `Files copied into a new checkout`, `Per-repository overrides`, `Landing a branch`, `Checks a conflict resolution may run` | Once per repository. |
 | `Prompts` | one fold **per prompt**, summary = the field's own label | each `FormField` | Four strings, ~500px, edited least on the page. |
 
-**The open-by-default rule from §2.2 applies to all four**, and it is what makes
-this safe rather than a way to hide a surprise:
+**The open-by-default rule from §2.2 governs the six folds that hold
+settings** — `When a window turns over`, `Isolated runs` and the four prompts
+— and it is what makes them safe rather than a way to hide a surprise. The
+seventh, `Estimate a ceiling from your own history`, holds **no settings key
+at all**: it is a tool, it is governed by §1.1 rule 5's evidence clause, and
+it takes **neither `defaultOpen` nor `count`** — a `count` there would be
+permanently 0, which §1.3 forbids.
 
 > `GET /api/settings` gains a `nonDefaultKeys: string[]` field, computed
 > server-side with the **existing** `sameValue` in `src/lib/settings.ts:706`
@@ -710,8 +719,8 @@ wrong guess is silent:
 - **`nonDefaultKeys` is a third top-level key on the GET response, beside
 `settings` and `env`.** Not inside `env` — that object is about the
 environment the container was given, and this is about the stored blob.
-`src/app/api/settings/route.ts:32-64`. - **It is spelled in `EDITABLE_PATHS`'
-dotted form**, not in `SETTINGS_KEYS`' top-level form. `saveSettings` compares
+`src/app/api/settings/route.ts:32-64`.
+- **It is spelled in `EDITABLE_PATHS`' dotted form**, not in `SETTINGS_KEYS`' top-level form. `saveSettings` compares
 whole top-level keys (`settings.ts:684-690`), but the page's folds and its
 edited rail both key on the 38 dotted paths at `settings/page.tsx:147+` (e.g.
 `chatDefaultGuards.budget.maxIterations`). So the route walks
@@ -1222,14 +1231,13 @@ consolidation of *maps*, not of every string.
 The instance page's local `KIND_LABEL` (`:70`) becomes `STATUS_BY_KIND`. No
 behaviour change.
 
-**D3 — The instance page's eight hints become two visible and one fold
+**D3 — The instance page's seven hints become three visible and one fold
 (required).**
 
 - The two at `:539-550` — what bounds the workflow, and the cycle-in-flight
   floor — **stay visible**. They are about the meter directly above them.
-- The four kind-conditional ones at `:640-662` move, whole and unchanged, into
-  a single `Disclosure summary="What these block kinds do"` at the foot of the
-  `Blocks not yet runs` card, with `count` = the number rendered.
+- The four at the foot of the `Blocks not yet runs` card (`:640`, `:645`, `:650`, `:658` — two unconditional, two kind-conditional) move, whole and unchanged, into a single `Disclosure summary="What these block kinds do"` at the foot of that card, with `count` = the number actually rendered, which is two, three or four depending on the graph.
+- The seventh (`:712`, under `Runs a block started`) stays where it is: it is about the table it sits under.
 
 > **This applies to the instance page only.** `BlockStatement` in the editor
 > and every sentence on `/workflows/[id]`'s `Blocks` table stay exactly where
@@ -1694,7 +1702,8 @@ sentence is load-bearing.
 7. `/chat` renders `prompt rewritten` with `text-warn font-medium`; the two
 rendered-copy comparisons at `:1386` and `:1396` are **untouched**, as are the
 strings they compare.
-8. `/agents` has no `CardTitle` outside a `Card`.
+   8. `/agents` is **unmodified** — E15 was withdrawn, and its `CardTitle`
+   placement is §6 item 12's question, not run (e)'s to answer.
 9. No raw `<details>` element remains in run (e)'s own files —
 `runs/page.tsx`, `branches/page.tsx`, `chat/page.tsx`. Run (e) is the last of
 (b)–(e), so if runs (a), (c) and (d) have landed, `grep -rn '<details' src/`
@@ -1834,12 +1843,15 @@ this document asks for (`max-md:`, `md:`) is already in the emitted CSS, so in
 practice only run (a)'s new components could need it.
 3. Verify any new Tailwind variant spelling **in the emitted CSS**. Tailwind
    emits nothing for a spelling it does not know, silently.
-4. Check every change you make against §5.9: it must survive at 390px and it
-   must leave 1440px pixel-identical. Concretely — every new class is either
-   unprefixed and additive, or carries `max-md:`/`md:`; every new interactive
-   element clears 44px below the breakpoint (a `<summary>` via `Disclosure`,
-   everything else via `max-md:min-h-11`); and no new `Td` is added to a
-   `stack` table without a `label` unless it is the headline cell.
+4. Check every change you make against §5.9. It must survive at 390px, and —
+read §5.9's own scoping note — **a narrow-viewport fix may never be bought by
+editing an unprefixed class**. The desktop changes this document authorises by
+name (E2's emphasis, C6 and E1's region headings, E9's one line) are
+deliberate and are not covered by that rule. Concretely: every new class is
+either unprefixed and deliberate, or carries `max-md:`/`md:`; every new
+interactive element clears 44px below the breakpoint (a `<summary>` via
+`Disclosure`, everything else via `max-md:min-h-11`); and no new `Td` is added
+to a `stack` table without a `label` unless it is the headline cell.
 5. Commit in logical steps with messages in this repository's style: what
    changes and *why*, imperative, under ~60 characters.
 6. If this document is silent or contradicts itself on something you need,
@@ -1872,8 +1884,8 @@ Rules a build run must not break:
 
 - **No card, region, header or badge may add two of them.** Adjacency is not
   permission: `budgets-and-guards.md` argues the install ceiling's separate card
-  explicitly *because adjacency implies summability*. This is why §3.C.6 and
-  §3.E.1 forbid a figure at region level.
+  explicitly *because adjacency implies summability*.   This is why changes **C6** (the run page) and **E1** (the dashboard) each
+  forbid a figure at region level.
 - **Telemetry reaches a budget decision through one door only** —
   `telemetrySpendSince` → a `*Guard*` figure — and the display half stays
   `result`-derived. Never label `spentGuardUSD` "spent" beside a limit.
@@ -2160,8 +2172,7 @@ I would ask.
    pane?* If not, deleting it removes a whole card, two sub-headings and a
    notice from the busiest tab in the app.
 2. **`Have Claude resolve conflicts` defaults to on** (`branches/page.tsx:709`).
-   It spends money, unattended, on the first press of Land. §3.E.10 adds a
-   confirmation instead of changing the default, because the default is a
+   It spends money, unattended, on the first press of Land. Change **E10** adds a confirmation instead of changing the default, because the default is a
    behaviour decision. *Question: should it default off?*
 3. **The chat's no-tool-restrictions sentence** (`chat/page.tsx:656-663`) is
    behind a closed disclosure. The comment at `:629-637` argues that trade and I
@@ -2230,7 +2241,8 @@ here.
 
 1. **The grouping vocabulary**, in one paragraph: the seven affordances, the
    caps, and the closed "never" list — pointing at this document for the
-   reasoning.
+   reasoning. It is kept word-for-word in step with §1.1 and §1.2; if either
+   moves, that paragraph moves with it in the same commit.
 2. **`ceiling` / `guard` / `limit`**, the three-word table from §3.C.1.
 3. **The correction E8 forces**: `conventions.md` currently says there are
    "exactly two" hand-written controls carrying their own `text-sm` and
@@ -2249,8 +2261,8 @@ here.
    comment now carries. Run (a) writes it once; runs (c) and (e) migrate their
    call sites into a sentence that is already true of them.
 
-A fourth correction is **already made** by this document, because it depends on
-no code change: `conventions.md`'s `Table`/`stack` paragraph named "the settings
+A fifth correction is **already made** by this document, because it depends on
+no code change and on nobody's schedule: `conventions.md`'s `Table`/`stack` paragraph named "the settings
 page's storage report" as one of the three tables without `stack`. Measured —
 `grep -c '<Table[ >]'` is 20, `<Table stack` is 17 — the counts were right and
 one of the three names was not. The storage report is no longer a table at all
