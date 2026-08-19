@@ -3,9 +3,12 @@ import { NextResponse } from "next/server";
 // rewrites the path alias at runtime, so a module a test loads has to import
 // the way src/lib and the chat route already do.
 import {
+  DEFAULTS,
   getSettings,
   PERMISSION_MODES,
+  sameValue,
   saveSettings,
+  SETTINGS_KEYS,
   type Settings,
 } from "../../../lib/settings";
 import { normalizePolicy } from "../../../lib/budget";
@@ -29,9 +32,78 @@ import { auditMutation } from "../../../lib/requestLog";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * The one key of `Settings` the settings form draws as more than one field.
+ *
+ * Everything else is a single control, so its key and the path that page marks
+ * it by are the same string. `chatDefaultGuards` is seven controls, and
+ * reporting it whole would tell the page that a fold holding one guard row
+ * holds a change when what actually moved was one of the other six.
+ */
+const SPLIT_KEY = "chatDefaultGuards";
+
+/** Every leaf under a fixed-shape value, as the dotted path that reaches it. */
+function leafPaths(value: unknown, prefix: string): string[] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return [prefix];
+  }
+  return Object.keys(value).flatMap((key) =>
+    leafPaths((value as Record<string, unknown>)[key], `${prefix}.${key}`),
+  );
+}
+
+function at(obj: unknown, path: string): unknown {
+  return path
+    .split(".")
+    .reduce<unknown>(
+      (v, k) =>
+        v && typeof v === "object" ? (v as Record<string, unknown>)[k] : undefined,
+      obj,
+    );
+}
+
+/**
+ * Which settings this install has moved off the value this build ships.
+ *
+ * It exists so the settings page can fold a control that is set once per
+ * install without hiding one that is *not* at its shipped value — a setting
+ * behind a summary at a number the reader does not expect is the standard way
+ * a fold costs more than it saves.
+ *
+ * Derived from `SETTINGS_KEYS` rather than copied from the page's
+ * `EDITABLE_PATHS`, which lives in a `"use client"` module a route cannot
+ * import: one list is the settings there are, the other is the settings that
+ * page draws, and a copy of the second over here would be right on the day it
+ * was written and silently short a key afterwards. The page asks about the
+ * paths it draws and ignores the rest.
+ *
+ * The guard set is walked against `DEFAULTS`' own shape, which is safe because
+ * `normalizePolicy` below fills every policy field in on the way through — a
+ * stored guard set always has exactly those leaves.
+ */
+function nonDefaultKeys(settings: Settings): string[] {
+  const paths: string[] = [];
+  for (const key of SETTINGS_KEYS) {
+    if (sameValue(settings[key], DEFAULTS[key])) continue;
+    if (key !== SPLIT_KEY) {
+      paths.push(key);
+      continue;
+    }
+    for (const path of leafPaths(DEFAULTS[key], key)) {
+      if (!sameValue(at(settings, path), at(DEFAULTS, path))) paths.push(path);
+    }
+  }
+  return paths;
+}
+
 export async function GET() {
+  const settings = getSettings();
   return NextResponse.json({
-    settings: getSettings(),
+    settings,
+    // A third top-level field rather than a member of `env`: that object is
+    // about the environment the container was given, and this is about the
+    // stored blob.
+    nonDefaultKeys: nonDefaultKeys(settings),
     env: {
       workspaceRoot: WORKSPACE_ROOT,
       workspaceMounts: WORKSPACE_MOUNTS,
@@ -385,7 +457,11 @@ async function putHandler(req: Request) {
     patch.installDailyCostLimitUSD = optionalNumber(body.installDailyCostLimitUSD);
   }
 
-  return NextResponse.json({ settings: saveSettings(patch) });
+  const settings = saveSettings(patch);
+  // Answered on the PUT as well as the GET: the page sets its state from this
+  // response, so without it every fold's count would be stale from the moment
+  // the operator pressed Save.
+  return NextResponse.json({ settings, nonDefaultKeys: nonDefaultKeys(settings) });
 }
 
 /** Wrapped so the request that changed something is on the audit log. */

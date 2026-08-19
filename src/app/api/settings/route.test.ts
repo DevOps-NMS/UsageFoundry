@@ -141,13 +141,18 @@ function expected(probe: Probe): unknown {
   return "stored" in probe ? probe.stored : probe.send;
 }
 
-async function read(): Promise<Settings> {
+type Answer = { settings: Settings; nonDefaultKeys: string[] };
+
+async function readAll(): Promise<Answer> {
   const { GET } = await import("./route");
-  const body = (await (await GET()).json()) as { settings: Settings };
-  return body.settings;
+  return (await (await GET()).json()) as Answer;
 }
 
-async function write(key: string, value: unknown): Promise<Settings> {
+async function read(): Promise<Settings> {
+  return (await readAll()).settings;
+}
+
+async function writeAll(key: string, value: unknown): Promise<Answer> {
   const { PUT } = await import("./route");
   const res = await PUT(
     new Request("http://localhost/api/settings", {
@@ -156,14 +161,29 @@ async function write(key: string, value: unknown): Promise<Settings> {
       body: JSON.stringify({ [key]: value }),
     }),
   );
-  const body = (await res.json()) as { settings?: Settings; error?: string };
+  const body = (await res.json()) as {
+    settings?: Settings;
+    nonDefaultKeys?: string[];
+    error?: string;
+  };
   assert.equal(
     res.status,
     200,
     `PUT /api/settings refused ${key}: ${body.error ?? "(no message)"}`,
   );
   assert.ok(body.settings, `PUT /api/settings answered without settings`);
-  return body.settings;
+  const moved = body.nonDefaultKeys;
+  assert.ok(
+    Array.isArray(moved),
+    `PUT /api/settings answered without nonDefaultKeys — the settings page ` +
+      `sets its state from this response, so every fold's count would be ` +
+      `stale from the moment the operator pressed Save`,
+  );
+  return { settings: body.settings, nonDefaultKeys: moved };
+}
+
+async function write(key: string, value: unknown): Promise<Settings> {
+  return (await writeAll(key, value)).settings;
 }
 
 test("the probe table covers exactly the keys Settings has", async () => {
@@ -223,4 +243,57 @@ test("a blank prompt keeps whatever is stored", async () => {
     assert.equal(answered[key], kept, `a blank ${key} was answered as empty`);
     assert.equal((await read())[key], kept, `a blank ${key} was stored`);
   }
+});
+
+/**
+ * What the settings page folds on.
+ *
+ * A fold whose contents differ from their defaults opens by default, and that
+ * rule is the whole reason folding a once-per-install control is safe rather
+ * than a way to hide a surprise. The page cannot compute it — `DEFAULTS` is
+ * server-side — so it reads this field, and every failure mode here is silent:
+ * a key missing from the list is a setting left behind a summary at a value
+ * nobody expects, and a key reported too coarsely opens a fold that holds
+ * nothing the operator changed.
+ *
+ * The spelling is the other half of it. The page marks its fields by the dotted
+ * path that reaches one control, so the guard set has to arrive split into its
+ * leaves; reported whole it would say a fold holding one guard row holds a
+ * change when what moved was one of the other six.
+ */
+test("the answer names which settings this install has moved, per control", async () => {
+  const { DEFAULTS } = await import("../../../lib/settings");
+
+  // One leaf of the guard set moved and the rest of it left at the shipped
+  // value, so the dotted spelling is proved rather than incidental.
+  await write("chatDefaultGuards", {
+    ...DEFAULTS.chatDefaultGuards,
+    budget: { ...DEFAULTS.chatDefaultGuards.budget, maxIterations: 9 },
+  });
+  await write("continuationPrompt", "CHANGED continuation, again");
+
+  const moved = new Set((await readAll()).nonDefaultKeys);
+  assert.ok(
+    moved.has("chatDefaultGuards.budget.maxIterations"),
+    "a guard field this install moved is not on the list",
+  );
+  assert.ok(
+    !moved.has("chatDefaultGuards.budget.maxDurationMinutes"),
+    "a guard field still at the shipped value is reported as moved",
+  );
+  assert.ok(
+    !moved.has("chatDefaultGuards"),
+    "the guard set is reported whole, which opens a fold holding one of its " +
+      "rows for a change to any of the other six",
+  );
+  assert.ok(moved.has("continuationPrompt"), "a moved prompt is not on the list");
+
+  // And it drops off again. This is the case the page's badge has to follow:
+  // a prompt saved back to the shipped text is no longer a reason to fold it
+  // open, and the count beside its summary says so.
+  const restored = await writeAll("continuationPrompt", DEFAULTS.continuationPrompt);
+  assert.ok(
+    !restored.nonDefaultKeys.includes("continuationPrompt"),
+    "a prompt restored to the shipped default is still reported as moved",
+  );
 });

@@ -587,7 +587,18 @@ export const DEFAULT_CHAT_GUARDS: RunGuards = {
   },
 };
 
-const DEFAULTS: Settings = {
+/**
+ * What this build ships, and therefore the only thing "unset" can be compared
+ * against.
+ *
+ * Exported because `saveSettings` is no longer the only reader: the settings
+ * route answers with which keys an install has moved off these values, so its
+ * page can open a fold over a setting that is not what was shipped rather than
+ * hide one. That answer has to be computed from the same table the Save writes
+ * against, or the page would fold on one definition of "default" and the blob
+ * would be written against another.
+ */
+export const DEFAULTS: Settings = {
   sessionCostLimit: null,
   weeklyCostLimit: null,
   sessionTokenLimit: null,
@@ -702,8 +713,13 @@ export function saveSettings(patch: Partial<Settings>): Settings {
  * in a different order than `DEFAULT_CHAT_GUARDS` declares them would read as a
  * change and be stored forever — the exact failure being fixed, arriving through
  * the fix.
+ *
+ * Exported so the settings route can ask the same question about one key that a
+ * Save asks about all of them. A second definition beside it would be the usual
+ * shape of this bug: the two would agree until the day one of them was made
+ * order-sensitive again, and nothing would report the disagreement.
  */
-function sameValue(a: unknown, b: unknown): boolean {
+export function sameValue(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a === null || b === null) return false;
   if (typeof a !== "object" || typeof b !== "object") return false;
