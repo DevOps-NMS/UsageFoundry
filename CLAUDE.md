@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Next.js 15 (App Router) app that (a) reads Claude Code's local session transcripts to show subscription usage against 5-hour / weekly windows, and (b) runs Claude Code headlessly against a mounted folder, stopping between iterations when a budget guard trips. Ships as a single Docker container. `README.md` explains the domain reasoning in depth — read it before changing anything in `src/lib/`.
+A Next.js 15 (App Router) app that (a) reads Claude Code's local session transcripts to show subscription usage against 5-hour / weekly windows, and (b) runs Claude Code headlessly against a mounted folder, stopping between iterations when a budget guard trips. Ships as a single Docker container. `docs/architecture.md` is the `src/lib/` module map and `docs/agent/` carries the per-area reasoning behind each one — read the relevant one before changing anything in `src/lib/`. `README.md` is the landing page and says nothing about `src/lib/`.
 
 ## Commands
 
