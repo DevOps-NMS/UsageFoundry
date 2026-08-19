@@ -64,6 +64,31 @@ export function CardTitle({
   );
 }
 
+/**
+ * A labelled group of related fields inside a card, e.g. a run's stop limits.
+ *
+ * Here rather than in `Field.tsx`, where it sat between `Textarea` and
+ * `LimitField`: it is a way of dividing a card and takes no value, no label
+ * association and none of the field context, so a reader looking for the kit's
+ * composition pieces had one file to read and then another one to read past.
+ */
+export function Subsection({
+  title,
+  children,
+  className = "",
+}: {
+  title: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={`mt-4 border-t border-line pt-3.5 ${className}`}>
+      <div className="mb-2.5 text-xs font-semibold text-ink">{title}</div>
+      {children}
+    </div>
+  );
+}
+
 /** The headline figure on a card. Tabular so it does not jitter while polling. */
 export function Stat({
   children,

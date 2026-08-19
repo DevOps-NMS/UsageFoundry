@@ -281,24 +281,6 @@ export function Textarea({
   );
 }
 
-/** A labelled group of related fields inside a card, e.g. a run's stop limits. */
-export function Subsection({
-  title,
-  children,
-  className = "",
-}: {
-  title: ReactNode;
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={`mt-4 border-t border-line pt-3.5 ${className}`}>
-      <div className="mb-2.5 text-xs font-semibold text-ink">{title}</div>
-      {children}
-    </div>
-  );
-}
-
 /**
  * A limit that can be switched off entirely: an on/off picker, and the value
  * only when it is on.
