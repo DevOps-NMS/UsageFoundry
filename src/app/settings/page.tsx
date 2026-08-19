@@ -93,6 +93,53 @@ const SECTIONS = [
   { id: "prompts", label: "Prompts" },
 ];
 
+type ChipState = "current" | "plain";
+
+/**
+ * Whether a chip is the section you are standing in.
+ *
+ * The selected pair is `QuickOpen`'s, which is the app's existing answer for a
+ * row that is the one a keypress would act on, rather than a second treatment
+ * invented here.
+ *
+ * Both entries carry the whole of what differs — border, fill and label — for
+ * the reason `conventions.md` states rather than as a style: a shared string
+ * holding `bg-bezel` with `bg-tint` added per state is two `background-color`
+ * utilities on one element, and the winner is Tailwind's own sort order rather
+ * than anything written down here. The hover states belong to `plain` for the
+ * same reason and a second one: a chip that is already selected has nothing to
+ * answer the pointer with.
+ */
+const CHIP: Record<ChipState, string> = {
+  current: "border-tint bg-tint text-tint-fg",
+  plain:
+    "border-line bg-bezel text-ink-muted hover:border-line-strong hover:bg-bezel-hover hover:text-ink",
+};
+
+/**
+ * Which section anchor the location is standing on.
+ *
+ * `hashchange` and the press together: a press that lands on the hash already
+ * in the bar fires no event, and the event is what carries a Back, a typed URL
+ * and a link from somewhere else. Empty on the server and on the first paint,
+ * then corrected — the same arrangement `useStandalone` uses, and it costs
+ * nothing because what it decides is which chip is filled.
+ *
+ * Deliberately not an `IntersectionObserver` scroll-spy: the pane is its own
+ * scroll region, so the observer would need a `root` that is not the viewport,
+ * which is a second mechanism with a second failure mode for a marginal gain.
+ */
+function useSectionHash(): [string, (id: string) => void] {
+  const [hash, setHash] = useState("");
+  useEffect(() => {
+    const read = () => setHash(window.location.hash.replace(/^#/, ""));
+    read();
+    window.addEventListener("hashchange", read);
+    return () => window.removeEventListener("hashchange", read);
+  }, []);
+  return [hash, setHash];
+}
+
 /**
  * Least to most permissive, rather than the order the literals happen to be
  * declared in. The list is a scale, so it should read as one.
@@ -1090,6 +1137,7 @@ export default function SettingsPage() {
   const [pluginsError, setPluginsError] = useState<string | null>(null);
   const [pluginBusy, setPluginBusy] = useState<string | null>(null);
   const standalone = useStandalone();
+  const [sectionHash, setSectionHash] = useSectionHash();
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -1460,15 +1508,22 @@ export default function SettingsPage() {
         aria-label="Settings sections"
         className="mb-6 flex flex-wrap gap-1.5 border-b border-line pb-4"
       >
-        {SECTIONS.map((sec) => (
-          <a
-            key={sec.id}
-            href={`#${sec.id}`}
-            className="ui-transition inline-flex min-h-[var(--control-h)] max-md:min-h-11 items-center rounded-sm border border-line bg-bezel px-2.5 text-xs font-medium text-ink-muted no-underline shadow-e1 hover:border-line-strong hover:bg-bezel-hover hover:text-ink hover:no-underline"
-          >
-            {sec.label}
-          </a>
-        ))}
+        {SECTIONS.map((sec) => {
+          const current = sec.id === sectionHash;
+          return (
+            <a
+              key={sec.id}
+              href={`#${sec.id}`}
+              onClick={() => setSectionHash(sec.id)}
+              aria-current={current ? "true" : undefined}
+              className={`ui-transition inline-flex min-h-[var(--control-h)] max-md:min-h-11 items-center rounded-sm border px-2.5 text-xs font-medium no-underline shadow-e1 hover:no-underline ${
+                CHIP[current ? "current" : "plain"]
+              }`}
+            >
+              {sec.label}
+            </a>
+          );
+        })}
       </nav>
 
       <Section
