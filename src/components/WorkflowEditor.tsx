@@ -1096,9 +1096,17 @@ function BlockPanel({
         </ListRow>
       </ListGroup>
 
+      {/* Three named groups from here down, in a fixed order: what the block
+          does, where it runs and under what, and what its child is started as.
+          Thirteen rows under one card title read as a form to fill in; three
+          questions read as a block to check. The agent group stays the third
+          rather than becoming a row of the second — an agent holds no tool list
+          and no permission mode, so a row inside the guards group would claim
+          it bounds something. */}
       {orchestrator && (
         <ListGroup
           className="mb-4"
+          label="What it does"
           footnote={
             <span className="text-warn">
               What this block decides on starts with no approval — this number is
@@ -1125,6 +1133,7 @@ function BlockPanel({
       {loop && (
         <ListGroup
           className="mb-4"
+          label="What it does"
           footnote={
             <span className="text-warn">
               Each pass is a whole run, with its own work cycles and its own
@@ -1173,6 +1182,7 @@ function BlockPanel({
       {merge && (
         <ListGroup
           className="mb-4"
+          label="What it does"
           footnote={
             <>
               Each branch goes onto the target its own run recorded, not one
@@ -1216,7 +1226,63 @@ function BlockPanel({
 
       {!merge && (
         <>
-          {/* The conditional sentences ride the *row's* description rather than
+          {/* The task is the rest of "what it does", so it sits with the caps
+              that bound it rather than at the foot of the panel — a run block,
+              which has no caps, has these two and nothing else under that
+              heading. Label above the control rather than beside it, which is
+              the same exception the run form and Settings make: a nine-line
+              text region has nothing to align a right edge against, which is
+              also why neither is a row of a `ListGroup`. */}
+          <Field
+            label={
+              orchestrator ? "What to decide" : loop ? "Task to repeat" : "Task"
+            }
+            htmlFor={`${block.id}-task`}
+            // How the loop *ends*, and it belongs on the field that decides it:
+            // `reported_done` is set by the agent printing DONE on a line of its
+            // own, so a task that never asks for it can only stop on a cap.
+            hint={
+              loop
+                ? "Every pass gets this same text — ask for DONE when the work is complete, which is what ends the loop"
+                : undefined
+            }
+          >
+            <Textarea
+              id={`${block.id}-task`}
+              value={block.task}
+              onChange={(e) => onChange({ task: e.target.value })}
+              placeholder={
+                orchestrator
+                  ? "What this block should look at, and what makes a piece of work worth starting."
+                  : "What this block asks the agent to do."
+              }
+            />
+          </Field>
+
+          <Field
+            label={
+              orchestrator
+                ? "Standing instructions for the runs it starts"
+                : loop
+                  ? "Standing instructions for every pass"
+                  : "Standing instructions"
+            }
+            htmlFor={`${block.id}-prompt`}
+            hint="Replaces the template's own prompt"
+          >
+            <Textarea
+              id={`${block.id}-prompt`}
+              value={block.promptOverride}
+              onChange={(e) => onChange({ promptOverride: e.target.value })}
+              className="min-h-[64px]"
+            />
+          </Field>
+
+          {/* One group rather than two, because "under what" and "where" are
+              one question a press of Run is approved against, and the guards
+              picker alone was a labelled box holding a single row.
+
+              The conditional sentences ride the *row's* description rather than
               the group's footnote, because that is the one `ListRow` wires to
               the control as `aria-describedby` — a footnote is an unlabelled
               paragraph, so a screen reader hears the picker and not what is
@@ -1224,6 +1290,7 @@ function BlockPanel({
               footnote, where it belongs to the group. */}
           <ListGroup
             className="mb-4"
+            label="Where it runs, and under what"
             footnote={
               missingTemplate
                 ? undefined
@@ -1271,9 +1338,7 @@ function BlockPanel({
                 </Select>
               </div>
             </ListRow>
-          </ListGroup>
 
-          <ListGroup className="mb-4">
             <ListRow label="Workspace" htmlFor={`${block.id}-mount`}>
               <div className={ROW_CONTROL}>
                 <Select
@@ -1340,6 +1405,7 @@ function BlockPanel({
           {(agents.length > 0 || block.agentId !== "") && (
             <ListGroup
               className="mb-4"
+              label="What it is started as"
               footnote={
                 ambientLine ? (
                   <>
@@ -1406,53 +1472,6 @@ function BlockPanel({
             </ListGroup>
           )}
 
-          {/* Label above the control rather than beside it, which is the same
-              exception the run form and Settings make: a nine-line text region
-              has nothing to align a right edge against. */}
-          <Field
-            label={
-              orchestrator ? "What to decide" : loop ? "Task to repeat" : "Task"
-            }
-            htmlFor={`${block.id}-task`}
-            // How the loop *ends*, and it belongs on the field that decides it:
-            // `reported_done` is set by the agent printing DONE on a line of its
-            // own, so a task that never asks for it can only stop on a cap.
-            hint={
-              loop
-                ? "Every pass gets this same text — ask for DONE when the work is complete, which is what ends the loop"
-                : undefined
-            }
-          >
-            <Textarea
-              id={`${block.id}-task`}
-              value={block.task}
-              onChange={(e) => onChange({ task: e.target.value })}
-              placeholder={
-                orchestrator
-                  ? "What this block should look at, and what makes a piece of work worth starting."
-                  : "What this block asks the agent to do."
-              }
-            />
-          </Field>
-
-          <Field
-            label={
-              orchestrator
-                ? "Standing instructions for the runs it starts"
-                : loop
-                  ? "Standing instructions for every pass"
-                  : "Standing instructions"
-            }
-            htmlFor={`${block.id}-prompt`}
-            hint="Replaces the template's own prompt"
-          >
-            <Textarea
-              id={`${block.id}-prompt`}
-              value={block.promptOverride}
-              onChange={(e) => onChange({ promptOverride: e.target.value })}
-              className="min-h-[64px]"
-            />
-          </Field>
         </>
       )}
 
