@@ -408,7 +408,11 @@ function QueueBatchSection({
 }) {
   const waiting = batch.items.filter((i) => i.status === "queued").length;
   return (
-    <section className="border-t border-line pt-3 first:border-0 first:pt-0">
+    // A div, not a <section> — the same rule Card records being bitten by. The
+    // legacy layer still carries `section + section { margin-top: 24px }`
+    // (globals.css:621), which fired between two sibling batches and added 24px
+    // nobody wrote on top of the hairline and padding this row states itself.
+    <div className="border-t border-line pt-3 first:border-0 first:pt-0">
       <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
         <span className="text-xs text-ink-muted">
           Queued {fmtDateTime(batch.createdAt)}
@@ -440,7 +444,7 @@ function QueueBatchSection({
           />
         ))}
       </ol>
-    </section>
+    </div>
   );
 }
 
