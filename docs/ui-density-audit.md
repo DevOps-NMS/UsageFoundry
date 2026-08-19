@@ -339,6 +339,11 @@ with** (from `git log --follow`, because the provenance *is* the diagnosis),
 
 Subsections are ordered by build run (§4), so a run reads only its own.
 
+**Two numbering schemes, deliberately.** `§3.C.2` is a *section* (the run detail
+page). `C6` is a *change* inside it. Sections are cited with `§`, changes never
+are — so `§3.E.1` is the dashboard and `E1` is the change that gives it regions.
+Every change identifier is unique across the document.
+
 ### 3.0 The diagnosis, in one paragraph
 
 Every page in this app grew the same way. A feature landed, and its controls
@@ -1564,7 +1569,7 @@ Three rules apply to all twelve and none of the five runs may bend one:
   all four `env(safe-area-inset-*)`, and its panel cap subtracts
   `--keyboard-inset`. §5.9.
 
-**§3.E.10 adds the thirteenth** — a confirmation on `Land N branches` when
+**Change E10 adds the thirteenth** — a confirmation on `Land N branches` when
 auto-resolve is on. It is the only dialog this document creates, and it obeys
 all three rules above.
 
@@ -1735,7 +1740,7 @@ Rules a build run must not break:
 | The branches repository filter | `src/lib/land.ts` (`selectBranchCandidates`) | `repos` is counted over the **unfiltered** set — "a filter that hides the repositories you would use to change it is a filter you cannot get out of". |
 | `targetInferred` | `src/lib/land.ts:191`, `RunLand.tsx:341` | The deduction caveat stays on the land card. Do not drop it for width. |
 | A shortened diff | `src/lib/diff.ts`, `RunDiff.tsx`, `ui/Patch.tsx` | The **file list is always complete**; omitted bodies are counted as "N files listed without contents". Do not paginate or virtualise the list, do not drop the count row. |
-| The handoff card's `git merge` | `src/lib/land.ts` (`emitHandoff`), `RunLand.tsx` | **Withheld entirely** while the operator's checkout is dirty — never shown with a warning. §3.C.7 folds the card; it must not change what the card withholds. |
+| The handoff card's `git merge` | `src/lib/land.ts` (`emitHandoff`), `RunLand.tsx` | **Withheld entirely** while the operator's checkout is dirty — never shown with a warning. Change **C7** folds the card; it must not change what the card withholds. |
 | "no live mode" on workflows | `WorkflowEditor.tsx`, the instance page | Said in words on both. The missing-ceiling warning stays **beside the field**. |
 | The schedule's next fire time | `WorkflowSchedule.tsx`, `src/lib/schedules.ts` | An **absolute** instant, not a relative one. |
 | A held fleet | `FleetControls.tsx`, `src/app/page.tsx` | Stated **in words on the dashboard** — a held fleet and a quiet one are otherwise identical. Not an icon, not a toggle position. |
@@ -1926,7 +1931,7 @@ change in §3 must survive at 390px as well as at 1440px.**
 I would ask.
 
 1. **The `In your own terminal` card** (`src/app/runs/[id]/page.tsx:1386-1444`).
-   §3.C.7 folds it. It arrived with `6c1a270`; the Land tab that does the same
+   Change **C7** folds it. It arrived with `6c1a270`; the Land tab that does the same
    job arrived with `36a0dbf` and supersedes most of it. *Question: does anyone
    still use the copyable commands now that Land, Review and Changes are in the
    pane?* If not, deleting it removes a whole card, two sub-headings and a
