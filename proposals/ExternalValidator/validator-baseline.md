@@ -7,6 +7,14 @@ the artefacts an external validator would have.
 
 It measures. It proposes nothing and changes no product code.
 
+> **An offline spike has since run against these labels**, and it is the reason
+> parts of this document carry corrections rather than only their original text.
+> [`scripts/validator-spike/RESULT.md`](../../scripts/validator-spike/RESULT.md) is
+> its reading; the pitch it feeds is
+> [`external-validator.md`](external-validator.md). Nothing shipped —
+> `AssistKind` is still `"review" | "resolve"` (`src/lib/review.ts:51`) and no
+> run is validated today.
+
 ---
 
 ## 1. What could not be reached, first
@@ -169,7 +177,7 @@ column disambiguates.
 | 5 | `59316d77` | `3206acaf` | UsageFoundry | done | finished | The pre-promise window named in #19 is wrapped so a throw fails the turn instead of stranding it | diff of `chat.ts`; new `chatTurn.test.ts` (98 lines) |
 | 6 | `ddff2cf3` | `dc1d43af` | RSSDashboard | done | **unjudgeable** | Read-only context audit; the run was forbidden to write anything and its whole output was stdout prose | empty diff (correct); branch deleted |
 | 7 | `41397184` | `a3c09412` | UsageFoundry | done | finished | Both owned pages rewritten, nothing else touched, and the section list regrouped from schema fields to decisions — the stated Done test | `settings/page.tsx` (+1111/−493), `account/page.tsx` |
-| 8 | `dd927763` | `a20af8db` | UsageFoundry | done | **unjudgeable** | The entire task text is "Implement WF1"; the specification it names is not in the artefacts, so a large diff has nothing to be checked against | task text; 5 commits exist |
+| 8 | `dd927763` | `a20af8db` | UsageFoundry | done | ~~**unjudgeable**~~ → **finished** (corrected, see below) | The entire task text is "Implement WF1"; the specification it names is not in the artefacts, so a large diff has nothing to be checked against | task text; 5 commits exist |
 | 9 | `e0cbde08` | `bfc4a3c3` | UsageFoundry | done | finished | The complaint was that a deciding block leaves no account of itself; the diff puts its reply, its refusals and a status line on the instance page | `workflows.ts`, instance page, `db.ts` columns, `workflows.test.ts` |
 | 10 | `504855a6` | `10ae0848` | UsageFoundry | cap? | **unjudgeable** | Triage run explicitly forbidden to commit; the deliverable is GitHub issues, which are not in the repository | empty diff (correct) |
 | 11 | `7c219726` | `4961e361` | UsageFoundry | done | finished | The land card's strategy splits into chosen-vs-default so a re-read stops overwriting the operator's pick — the defect as described | diff of `RunLand.tsx` (the GitHub close step is not visible) |
@@ -197,36 +205,73 @@ column disambiguates.
 | 33 | `6fe5ac47` | `567e63d6` | VisualMerge | done | finished | Documents-only shaping run: the shape doc gains the third layout and refuses the diagram, the plan gains a work package, `src/ bin/ test/ scripts/` untouched | 3 doc commits over `docs/00-shape.md`, `docs/01-implementation-plan.md`, `CLAUDE.md` |
 | 34 | `4f89e703` | `96583812` | VibeHub | cap? | **not-done** | The audit was to run the `poc` suite from a cold install and correct every number that does not reproduce; nothing in the tree changed | empty diff; no commits in window |
 | 35 | `c55bc71b` | `c742c8ef` | UsageFoundry | done | finished | The check and the claim are one guarded write in `sendChatMessage`, with a regression test around the race | `chat.ts` (+54), `chat.test.ts` (+147) |
-| 36 | `dd927763` | `b7ed0edf` | UsageFoundry | done | **unjudgeable** | The entire task text is "Implement WF2" — same as run 8, the specification is not in the artefacts | task text; 7 commits exist |
+| 36 | `dd927763` | `b7ed0edf` | UsageFoundry | done | ~~**unjudgeable**~~ → **finished** (corrected, see below) | The entire task text is "Implement WF2" — same as run 8, the specification is not in the artefacts | task text; 7 commits exist |
 | 37 | `f0ab2ed8` | `ba4fd162` | UsageFoundry | done | finished | #54 releases the chat's busy flag through `chatRequest`, #56 stops an unread template list reading as deleted; both with tests | 2 commits; `chatRequest.test.ts`, `format.test.ts` |
 | 38 | `4041605f` | `def257d1` | UsageFoundry | done | finished | `docker-compose.yml` gains `mem_limit`, `pids_limit`, `ulimits` and `security_opt` with the numbers justified, and `deployment.test.ts` is revised to match | commit `b73546d`, identified out of 26 commits in the window |
 | 39 | `f8da8c51` | `f33e8480` | VisualMerge | done | finished | `docs/01-implementation-plan.md` exists at 1175 lines and takes a position on each numbered question the task listed | commit `fed425c` |
 | 40 | `a6c9d659` | `a600983d` | VibeHub | done | finished | `docs/08-track-b-shape.md` is written and `docs/06` reconciled in place, which is what the task named | 4 commits; `docs/08-track-b-shape.md` new at 486 lines, `docs/06` +45/−13 |
 
+### Correction to rows 8 and 36
+
+**Both labels were wrong, and for the same reason: this measurement read
+`runs.task` where a validator reads the composed prompt.** `runs.task` on a
+workflow member is the *node's own title* — here, literally `Implement WF1` and
+`Implement WF2` — and the reason column above describes that title. The prompt
+the run actually received is far longer and carries the specification in full.
+
+Re-derived from the spike's own committed case files
+(`scripts/validator-spike/cases/08-a20af8db.json`, `36-b7ed0edf.json`), which
+hold the composed prompt under `task`:
+
+| | case 8 (`a20af8db`) | case 36 (`b7ed0edf`) |
+|---|---:|---:|
+| prompt length | **4,953 characters** | **6,210 characters** |
+| sections | `# Task`, `## Order`, `## What must survive it`, `## Afterwards`, `## Out of scope`, `# Tests`, `# Verify` | `# Task`, `## Reuse the budget machinery`, `## Enforcement and overshoot`, `## When it trips`, `## Counting the spend`, `## Who sets it`, `# Tests`, `# Verify` |
+| where `WF1`/`WF2` appears | once, under `## This run specifically` | once, under `## This run specifically` |
+
+Named deliverables, ordering constraints and a definition of done are all in the
+prompt. `WF1`/`WF2` is a label, not the specification. On the input a validator
+actually receives, both rows are judgeable and `finished` is defensible — which
+is what the spike returned for both.
+
+**The row labels above are struck through rather than rewritten, and the reason
+column is left as the measurement run wrote it.** `scripts/validator-spike/RESULT.md`
+deliberately did *not* rescore: both rows are still counted as misses in the
+spike's 34/37, and had they been rescored it would read 36/37. Keeping the
+original text here is what makes that decision checkable. **The counts in §4 and
+§5 below are the corrected ones**, because a base rate that a reader carries into
+a build decision should not be the superseded number.
+
 ---
 
 ## 4. Base rate
 
-**n = 40.**
+**n = 40.** Corrected for rows 8 and 36 above; the original figures are kept
+beside each.
 
-| Label | Count | Share of n = 40 |
-|---|---:|---:|
-| `finished` | 31 | 77.5% |
-| `partial` | 0 | 0% |
-| `not-done` | 2 | 5.0% |
-| `unjudgeable` | 7 | 17.5% |
+| Label | Count | Share of n = 40 | As originally labelled |
+|---|---:|---:|---|
+| `finished` | 33 | 82.5% | 31 / 77.5% |
+| `partial` | 0 | 0% | 0 / 0% |
+| `not-done` | 2 | 5.0% | 2 / 5.0% |
+| `unjudgeable` | **5** | **12.5%** | 7 / 17.5% |
 
-Split by the one signal that separates the two ways a run becomes `completed`:
+Split by the one signal that separates the two ways a run becomes `completed`
+(both corrected rows are `DONE` runs, so the whole change lands in the top row):
 
 | | n | `finished` | `partial` | `not-done` | `unjudgeable` |
 |---|---:|---:|---:|---:|---:|
-| `reported_done = 1` — certainly `completed` | **32** | 29 (90.6%) | 0 | **0 (0%)** | 3 (9.4%) |
+| `reported_done = 1` — certainly `completed` | **32** | 31 (96.9%) | 0 | **0 (0%)** | 1 (3.1%) |
 | no `DONE` — inferred `completed` via the cycle cap | **8** | 2 (25%) | 0 | **2 (25%)** | 4 (50%) |
 
-**That split is the result.** Both runs that failed to do the work were runs that never
-said `DONE`. Among the 32 that did, every judgeable one had the work in the diff — 29
-for 29. Among the 8 that did not, the judgeable ones split evenly: two did the work, two
-did not.
+*As originally labelled the top row read 29 (90.6%) / 3 (9.4%). The bottom row is
+untouched by the correction.*
+
+**That split is the result**, and the correction sharpens rather than softens it.
+Both runs that failed to do the work were runs that never said `DONE`. Among the
+32 that did, every judgeable one had the work in the diff — **31 for 31**, where
+the original labelling said 29 for 29. Among the 8 that did not, the judgeable
+ones split evenly: two did the work, two did not.
 
 The honest reading is narrower than "DONE is trustworthy". `reported_done` and the
 cycle-cap ending are already distinguishable in the database — `reported_done` is its own
@@ -249,28 +294,50 @@ Three cautions on the numbers, all of which push the same way:
 
 ---
 
-## 5. Unjudgeable: 7 of 40 (17.5%), and why
+## 5. Unjudgeable: 5 of 40 (12.5%), and why
+
+*Originally 7 of 40 (17.5%). Rows 8 and 36 were corrected out of this count —
+see §3 — and with them the entire middle category below, which now has **no
+members in this sample**.*
 
 This is the number the validator idea turns on, because it is a ceiling no validator
-clears however good it is. All seven are about the **task**, not the run.
+clears however good it is. All five are about the **task**, not the run — and all
+five are now one thing: **an empty diff that is correct.**
 
 | Kind | Runs | Why nothing can decide it |
 |---|---|---|
 | **The deliverable never enters the repository** — 4 runs | 6, 10, 15, 31 | Two triage runs whose product is GitHub issues and that were *forbidden* to commit; one read-only context audit whose whole output is stdout; one question ("can you tell me whats going on in this repo?"). The correct diff is empty, and an empty diff is also what a run that did nothing leaves. Run 1 below is a fifth empty diff, and runs 2 and 34 — the two `not-done` cases — are empty diffs as well. **The artefacts cannot separate the five correct empties from the two wrong ones.** |
-| **The task names a specification the artefacts do not contain** — 2 runs | 8, 36 | The complete task text is `Implement WF1` and `Implement WF2`. Both produced large, coherent diffs. Neither can be checked against anything. |
+| ~~**The task names a specification the artefacts do not contain** — 2 runs~~ | ~~8, 36~~ | **Retracted — this category is empty.** The claim was that the complete task text is `Implement WF1` / `Implement WF2`. That is `runs.task`, the workflow node's title; the composed prompt those runs received is 4,953 and 6,210 characters and carries the specification in full. The measurement was reading the wrong field, not describing a class of task. |
 | **The deliverable is an analysis, not a change** — 1 run | 1 | "can you check for code quality problems?" — the answer is prose, and the run correctly wrote no code. |
 
-**17.5% is a floor, not the whole ceiling.** A second, larger group was judged
+That collapse matters more than the two percentage points. The 17.5% figure was
+carried by *two* different problems, and one of them was an artefact of how this
+document read the database. What is left is a single problem — a correct empty
+diff — with a single candidate fix, and it is the one the spike's testimony arm
+went after and found did not work (`RESULT.md`, *The testimony arm*): the
+discrimination is in the task text, which a validator already reads.
+
+**12.5% is a floor, not the whole ceiling.** A second, larger group was judged
 `finished` on a *restatement* of the specification rather than the specification itself:
 **14 of 40 runs (35%) point at a GitHub issue** ("every acceptance-criteria box is a
 requirement") that the artefacts do not contain. They were judgeable only because the
 prompt happened to restate the defect and a "Done looks like" sentence. Where the run
-prompt is generated from a template that does *not* restate it, those 14 collapse into
-the same bucket as runs 8 and 36. **A validator's reach is set by how much of the
+prompt is generated from a template that does *not* restate it, those 14 lose their
+specification the same way. **A validator's reach is set by how much of the
 specification the prompt writer chose to inline — not by the validator.**
 
-Counting both: **21 of 40 (52.5%) of these tasks are specified somewhere the validator
-cannot read.**
+Counting both: **19 of 40 (47.5%)**, down from the 21 of 40 (52.5%) this section
+originally reported.
+
+**Two cautions on that figure, and the second is the important one.** It is
+arithmetic over this document's own two components — the corrected 5 plus the
+unchanged 14 — not a fresh count. And **the 14 has not been re-derived.** It came
+from the same measurement run, on the same basis, and the defect just corrected
+in rows 8 and 36 was precisely that `runs.task` is not the prompt. Whether some
+of those 14 also carry their specification in a composed prompt nobody read is
+open; if they do, 47.5% is itself too high. Re-deriving it needs the case files
+under `scripts/validator-spike/cases/`, which now hold every composed prompt, and
+was not done here.
 
 ---
 
@@ -297,14 +364,20 @@ cannot read.**
 **What I wanted and did not have, in the order I wanted it:**
 
 - **A way to tell a correct empty diff from a wrong one.** This is the single largest
-  gap. Seven sampled runs produced nothing; five were right to and two were not, and
-  only the run's own final text distinguishes them. That text *is* in `run_events`, so a
-  validator would in fact have it — it is the cheapest thing to add, and it converts
-  five of the seven `unjudgeable` and both `not-done` detections from guesswork to
-  reading. It is also the run's own account of itself, which is the caveat at the foot
-  of this list.
-- **The specification the task points at.** §5. No amount of diff-reading recovers a
-  GitHub issue body.
+  gap, and after the §3 correction it is the *only* thing left in §5. Seven sampled
+  runs produced nothing; five were right to and two were not. **What I wanted here
+  was the run's own final text, and that turned out to be the wrong ask.** The
+  spike gave the validator exactly that, on all eight empty-diff cases, and
+  **zero of eight verdicts changed** (`scripts/validator-spike/RESULT.md`, *The
+  testimony arm*). What separates them is the task text: every one of the five
+  correct empties was told not to commit or was asked a question, and both
+  `not-done` runs were told to commit and did not. The sentence above — "only the
+  run's own final text distinguishes them" — is kept because it is what this
+  measurement concluded, but it is measured false on n = 8.
+- ~~**The specification the task points at.**~~ **Half retracted.** No amount of
+  diff-reading recovers a GitHub issue body, and that is still true of the 14 in
+  §5. But the two rows I filed under it — 8 and 36 — did not have a missing
+  specification at all; I was reading `runs.task` rather than the prompt. See §3.
 - **A run of the suite.** Nothing in the artefacts establishes that anything *works*.
   Every `finished` label above means "the change asked for is present", never "the
   change asked for is correct". Runs 3, 12, 24, 28 and 33 make claims about rendering,

@@ -1,4 +1,4 @@
-# Validator spike — score against docs/validator-baseline.md §3
+# Validator spike — score against proposals/ExternalValidator/validator-baseline.md §3
 
 model: claude-sonnet-4-5 · transport: file · testimony: given
 

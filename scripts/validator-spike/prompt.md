@@ -10,7 +10,7 @@ Placeholders, all substituted verbatim:
                 turn, already marked as testimony)
 
 The three verdict names here are the brief's. They map one-to-one onto
-docs/external-validator.md §5's proposed column values: finished =
+proposals/ExternalValidator/external-validator.md §5's proposed column values: finished =
 `did-the-work`, not-finished = `did-not`, unjudgeable = `cannot-tell`.
 -->
 

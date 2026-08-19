@@ -15,8 +15,8 @@ docker compose up --build
 open http://localhost:3000
 ```
 
-Then in the UI: **Settings → Calibrate** to set ceilings, **Runs → New run** to
-start work.
+Then in the UI: **Settings → Estimate a ceiling from your own history** (press
+**Scan history**) to set ceilings, **Runs → New run** to start work.
 
 ## Sign in once, inside the container
 
@@ -42,11 +42,23 @@ Sign in from the page rather than from a shell. The CLI keeps
 to open it afterwards is `UF_UID`/`UF_GID` — every work cycle runs as that uid,
 not as the server. The page's sign-in is dropped to it for exactly that reason.
 A `docker compose exec` defaults to root, so if you do sign in from a shell,
-name the uid rather than relying on the default:
+name the uid rather than relying on the default — and read it out of the
+container, which is the only place it is certain to be right:
 
 ```bash
-docker compose exec -u "${UF_UID:-1000}" -it usagefoundry claude auth login
+uid=$(docker compose exec -T usagefoundry printenv UF_AGENT_UID)
+docker compose exec -u "$uid" -it usagefoundry claude auth login
 ```
+
+**Not `-u "${UF_UID:-1000}"`, which is where this page used to send you.** Your
+own shell expands that, and `.env` is not in your shell: compose reads that file
+to interpolate `docker-compose.yml`, and exports nothing back to the caller. So
+on every install that followed *On Linux, set `UF_UID` and `UF_GID`* below, it
+resolves to 1000 whatever `.env` says. Sign in as 1000 while the cycles run as
+your own uid and the login writes a `.credentials.json` at mode 0600 that no
+work cycle can open — every run then fails with `Not logged in`, which is the
+symptom of not having signed in at all, so the obvious response is to do it
+again the same way.
 
 An API key in the environment outranks all of this. With `ANTHROPIC_API_KEY`
 set, that key is what runs bill against and the subscription login is ignored;
@@ -154,12 +166,15 @@ refused.
 | `UF_WORKSPACE` | Host directory mounted at `/workspace`. Runs are confined to it. Absolute path; compose refuses to start without it. |
 | `UF_AUTH_TOKEN` | Shared secret for the UI. Blank makes the server **refuse to start** unless `UF_ALLOW_NO_AUTH=1` is also set. |
 | `UF_ALLOW_NO_AUTH` | `1` to run with no authentication at all. Only for a loopback-bound install on a machine you alone use; every page then says so. |
+| `UF_STATUS_TOKEN` | Optional. A second, read-only credential, for `/api/status` and nothing else — never point a monitor at any other route, because `UF_AUTH_TOKEN` also starts billed runs. Blank leaves that route behind the ordinary gate, so a monitor gets a 401 rather than the endpoint being public. |
 | `UF_BIND_ADDRESS` | Which host interface the port is published on. Default `127.0.0.1` — this machine only. See *Reaching it from another machine* below. |
 | `ANTHROPIC_ADMIN_KEY` | Optional. Enables the API-account page. Org Admin key only. |
 | `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only, and every repository. |
 | `UF_GITHUB_TOKENS` | Optional. `folder=token` entries separated by `\|`, narrowing the credential to the repository a run is working in. |
 | `UF_GH_EXTENSIONS` | Optional. `gh` extensions to install at boot, `owner/repo` or `owner/repo@tag`, space-separated. Kept in a named volume, so a rebuild does not lose them. Needs `UF_GITHUB_TOKEN`. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid every spawned agent runs as; must own the mounts. The server itself runs as root and drops to this. Default 1000. |
+| `UF_CHAT_GID` | The group the orchestrator chat runs in, which owns the per-turn MCP capability file that a concurrent agent must not read. Default 65533. **Must differ from `UF_GID`** — the server refuses to boot when they match rather than hand that file to the group it is being kept from. |
+| `UF_BACKUP_DIR` | Host directory mounted at `/backups`, where `scripts/backup-db.mjs` writes. Default `./backups`, which this repository ships. Point it elsewhere and create that directory first: Docker makes a missing bind source root-owned, and the children that write it are `UF_UID`. |
 | `UF_MEM_LIMIT` | What the container may take before Docker kills it. Default `10g`, sized for the shipped 4 runs plus 2 other Claude processes. |
 | `UF_NODE_HEAP_MB` | The server's own heap ceiling, in MiB. Default 2048. |
 | `UF_PIDS_LIMIT` | Tasks the container may hold. Default 2048. |
@@ -217,6 +232,12 @@ run fails. So on Linux:
 echo "UF_UID=$(id -u)" >> .env
 echo "UF_GID=$(id -g)" >> .env
 ```
+
+If `id -g` comes back **65533**, set `UF_CHAT_GID` to some other unused gid in
+the same file. That is the default group the orchestrator chat runs in, and it
+is chosen to be one no agent is in — so a `UF_GID` that equals it refuses the
+boot rather than handing the chat's capability file to the group it is being
+kept from. Rare, and the symptom is a container that will not start.
 
 Run compose as yourself, not under `sudo`: `$HOME` comes from your shell, and
 `sudo` would point the credential mount at root's home.
@@ -313,7 +334,9 @@ the boot line and **Settings → Sandbox** read the managed policy, so both say
 docker compose logs usagefoundry | grep 'sandbox:'
 # [usagefoundry] sandbox: on — enabled by /etc/claude-code/managed-settings.json
 
-docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+# the uid from the container, not from your shell — see *Sign in once* above
+uid=$(docker compose exec -T usagefoundry printenv UF_AGENT_UID)
+docker compose exec --user "$uid" usagefoundry \
   bwrap --dev-bind / / --unshare-user --unshare-pid true && echo ok
 # expect ok. "No permissions to create new namespace" means half two never
 # arrived — no override file, or a container that was restarted, not recreated.
@@ -358,17 +381,10 @@ same file carries hooks, permission rules and environment for every session.
 UF_LOCK_CLAUDE_HOME=1
 ```
 
-**And one line in `docker-compose.yml`, without which the variable above does
-nothing at all.** Compose forwards variables to the container by name and this
-one is not in the file yet, so add it to the `environment:` block beside
-`UF_SANDBOX`:
-
-```yaml
-      UF_LOCK_CLAUDE_HOME: "${UF_LOCK_CLAUDE_HOME:-}"
-```
-
-then check that it arrived, because a variable that did not is indistinguishable
-from a switch that is off:
+`1` is the only value that switches it on, and any other non-empty value is off
+with a line in the boot log saying so. Nothing else to edit — compose forwards
+it. Check that it arrived anyway, because a variable that did not is
+indistinguishable from a switch that is off:
 
 ```bash
 docker compose exec usagefoundry sh -c 'echo "[$UF_LOCK_CLAUDE_HOME]"'   # expect [1]

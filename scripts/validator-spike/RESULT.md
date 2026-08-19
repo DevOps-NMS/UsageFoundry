@@ -81,7 +81,7 @@ about what a partly-off-repository deliverable means, not a failure to read.
 
 ## The testimony arm: it changed nothing
 
-`docs/external-validator.md` §1 calls the run's own final message *"the one
+`proposals/ExternalValidator/external-validator.md` §1 calls the run's own final message *"the one
 artefact that would close the biggest gap"* — the thing that separates a
 correct empty diff from a wrong one — and decision 2 recommends giving it to the
 validator. That is testable here, so it was tested.
@@ -125,7 +125,7 @@ Two figures, because only one of them is a measurement.
   bill, and it could not be measured here because no API key is reachable from
   this container.
 
-Against `docs/external-validator.md` §8's guardrail — median validation cost ≤
+Against `proposals/ExternalValidator/external-validator.md` §8's guardrail — median validation cost ≤
 10% of the run it validates — even the upper bound clears it comfortably: these
 runs cost dollars each, not twelve cents.
 

@@ -3,11 +3,22 @@
 **One-liner:** a cheap, adversarial second reading of a finished run — task text
 against branch diff — that says *did the work happen*, *it did not*, or *I cannot
 tell*, and does nothing else.
-**Appetite:** two weeks, one person · **Status:** draft · **Date:** 2026-08-19
+**Appetite:** two weeks, one person · **Status:** draft; the offline spike this
+document asks for in M1 has since been run and scored · **Date:** 2026-08-19
 
 Shaped against the measurement in [`validator-baseline.md`](validator-baseline.md),
 which is on this branch and is the input every number below rests on. Read its §4
 and §5 before this. Nothing here is product code and nothing here proposes any.
+
+> **Nothing shipped, and one milestone has run.** No run is validated today:
+> `AssistKind` is still `"review" | "resolve"` (`src/lib/review.ts:51`), there is
+> no validator on the assist path, and nothing in this document reached the
+> product. What *does* exist is an offline harness —
+> [`scripts/validator-spike/`](../../scripts/validator-spike/), whose reading is
+> [`RESULT.md`](../../scripts/validator-spike/RESULT.md) — which put a model over
+> the labelled set and scored it. Several statements below were written before
+> that existed and are marked where the spike overtook them; where this document
+> and `RESULT.md` disagree, `RESULT.md` is the measurement.
 
 ---
 
@@ -19,8 +30,10 @@ and do the two-hour change in front of it first.**
 Three things the measurement settled, and each of them narrows the bet:
 
 1. **The whole measured defect lives in one stratum, and the app already has the
-   column that names it.** Of 32 sampled runs that replied `DONE`, 29 of 29
-   judgeable ones did the work and **none** failed to. Of the 8 that ended by
+   column that names it.** Of 32 sampled runs that replied `DONE`, **31 of 31**
+   judgeable ones did the work and **none** failed to (it read 29 of 29 before
+   `validator-baseline.md` §3's correction, which moved two rows out of
+   `unjudgeable` and into `finished` on this same stratum). Of the 8 that ended by
    using up their cycle cap, two of four judgeable ones did not. `reported_done`
    already separates those two populations, and the run detail page already reads
    it: `describeRun` (`runs/[id]/page.tsx:239-256`) returns tone `neutral`,
@@ -35,18 +48,34 @@ Three things the measurement settled, and each of them narrows the bet:
    ending findable"* — **and targets exactly the 29.6% of runs that carry 100% of
    the measured defect.** Do it whether or not the validator is ever built.
 
-2. **A validator that only reads the diff is blind on at least 17.5% of tasks and
-   plausibly 52.5%**, and no amount of model quality moves that: the
-   specification is a GitHub issue body, a `WF1` the prompt did not restate, or a
+2. **A validator that only reads the diff is blind on ~~at least 17.5% of tasks
+   and plausibly 52.5%~~ at least 12.5% and plausibly 47.5%**, and no amount of
+   model quality moves that: the specification is a GitHub issue body, or a
    deliverable that never enters the repository. That is a ceiling on coverage,
    not a quality target.
 
-3. **The one artefact that would close the biggest gap is the run's own
-   testimony.** Five sampled runs correctly produced an empty diff and two
-   wrongly produced one; nothing but the run's own final text separates them, and
-   that text is in `run_events`. So this document uses **external** to mean *not
-   the author, adversarially prompted, judged against the task text* — not
-   *evidence-independent*, which it cannot be.
+   **Both figures came down after `validator-baseline.md` §3 was corrected.** The
+   `WF1` case that used to be the second example of this is not one: that string
+   is `runs.task`, the workflow node's title, and the prompt those runs received
+   carried the specification in full — so a validator reading the composed prompt
+   is not blind on them. What is left is one problem rather than two: **a correct
+   empty diff**, five of forty. The 47.5% inherits an unre-derived component (14
+   runs pointing at a GitHub issue body), noted as such in that document.
+
+3. **~~The one artefact that would close the biggest gap is the run's own
+   testimony.~~ Measured since, and it closed nothing.** The reasoning was: five
+   sampled runs correctly produced an empty diff and two wrongly produced one,
+   and nothing but the run's own final text separates them. The spike tested that
+   on all eight empty-diff cases and **zero of eight verdicts changed**
+   (`RESULT.md`, *The testimony arm*). What separates them is the **task text**,
+   which the validator already gets: every correctly-`unjudgeable` run was told
+   in its own prompt not to commit or was asked a question, and both `not-done`
+   runs were told to commit and did not. Testimony is still worth *having* —
+   given it, the model named it and declined to lean on it (*"only testimony
+   claims filing, which isn't evidence"*), which is evidence about the prompt —
+   but it is not the thing that closes the gap. This document still uses
+   **external** to mean *not the author, adversarially prompted, judged against
+   the task text* — not *evidence-independent*, which it cannot be.
 
 So the shape recommended here is: **an assist, not a run; fired after the run has
 already released everything; three-valued; notify-only.** It writes nothing on
@@ -81,7 +110,8 @@ branch that never contained the change.
 
 How often, measured: of 213 unattended run sessions over ten days, 63 (29.6%)
 ended without `DONE`. Two of the four judgeable ones sampled from that stratum
-had not done the work. On the `DONE` stratum, 29 of 29 had.
+had not done the work. On the `DONE` stratum, 31 of 31 had (29 of 29 as
+originally labelled — see `validator-baseline.md` §3).
 
 What it costs today if nothing changes: the operator either audits everything —
 which scales with the fleet, and the fleet is the product — or trusts the green
@@ -164,8 +194,9 @@ because it constrains this project directly:
    Runs 3, 12, 24, 28 and 33 make claims about rendering, layout or a clean-clone
    build that no diff can settle; run 21 states in its own report that it never
    reproduced the symptom it fixed.
-3. **Anything about a task whose specification is elsewhere.** 17.5% of the
-   sample outright; 52.5% counting the 14 runs judgeable only because the prompt
+3. **Anything about a task whose specification is elsewhere.** 12.5% of the
+   sample outright (was 17.5% before `validator-baseline.md` §3's correction);
+   47.5% counting the 14 runs judgeable only because the prompt
    writer happened to restate a GitHub issue. **A validator's reach is set by how
    much of the specification the prompt writer inlined, not by the validator.**
 4. **Which commits are this run's**, on a chain (above).
@@ -394,7 +425,7 @@ the cheaper error flips to the false "finished". A design that gets suspicious
 alarms with nobody having decided to.
 
 **The third verdict is not a hedge, it is a requirement.** `unjudgeable` is
-≥17.5%, so a two-valued validator manufactures opinions on the runs where there
+≥12.5%, so a two-valued validator manufactures opinions on the runs where there
 is nothing to be right about — which are exactly the ones it will get wrong. So
 `cannot-tell` is a real verdict, and the prompt makes it the cheap and
 respectable answer for the three shapes the measurement names. Coverage then
@@ -405,15 +436,17 @@ everything costs money to say nothing; §8 bounds it from both sides.
 
 ## 8. Success criteria (question 6)
 
-Baselines are the labelled set in `validator-baseline.md` §3–§4 (n=40: 31
-`finished`, 2 `not-done`, 7 `unjudgeable`), expanded by milestone 0.
+Baselines are the labelled set in `validator-baseline.md` §3–§4 — **n=40: 33
+`finished`, 2 `not-done`, 5 `unjudgeable`** after that document's §3 correction to
+rows 8 and 36; it read `31 / 2 / 7` when the table below was written, and the two
+rows moved from `unjudgeable` to `finished`. Expanded by milestone 0.
 
 | Metric | Baseline today | Target | How it is measured | Checked when |
 |---|---|---|---|---|
 | **Detection.** Share of human-labelled `not-done` runs the validator calls `did-not` | 0 of 2 (nothing exists) | ≥ 80% of the expanded label set | offline harness over the labelled set | end of M1 |
-| **False alarm.** Share of human-labelled `finished` runs called `did-not` | n/a | ≤ 6% (≤ 2 of 31 on the current set) | same harness | end of M1 |
-| **Honesty about the ceiling.** Share of the 7 known-`unjudgeable` runs called `cannot-tell` | n/a | ≥ 5 of 7 | same harness | end of M1 |
-| **Coverage (guardrail).** Share of validated runs answered `cannot-tell` | ceiling is 17.5%; floor unknown | ≤ 35% on the cycle-cap stratum | count over `run_reviews` where `kind='validate'` | 2 weeks after M2 |
+| **False alarm.** Share of human-labelled `finished` runs called `did-not` | n/a | ≤ 6% (≤ 2 of 33 on the current set) | same harness | end of M1 |
+| **Honesty about the ceiling.** Share of the 5 known-`unjudgeable` runs called `cannot-tell` | n/a | ≥ 4 of 5 | same harness | end of M1 |
+| **Coverage (guardrail).** Share of validated runs answered `cannot-tell` | ceiling is 12.5%; floor unknown | ≤ 35% on the cycle-cap stratum | count over `run_reviews` where `kind='validate'` | 2 weeks after M2 |
 | **Cost (guardrail).** Median validation `cost_usd` ÷ that run's `spent_usd` | unknown — the measurement could not recover `spent_usd` | ≤ 10%, and every validation hard-capped by `--max-budget-usd` | one SQL join | 2 weeks after M2 |
 | **No ending changed (guardrail).** Runs whose `status`, `stop_reason`, `reported_done` or `needs_review_reason` differ because a validator ran | 0 | **exactly 0** | the validator writes no `runs` column — a test pins it, plus a read of the diff | end of M1 |
 | **No dependent delayed (guardrail).** Delta between a run's `finished_at` and its dependents' admission | 0 | **exactly 0** | structural — the call site sits below `promoteQueued()`; a read of the diff, plus one timing test | end of M2 |
@@ -426,6 +459,26 @@ until it lands. And the trivial validator — always answer `did-the-work` — s
 77.5% overall agreement on the current set while detecting nothing, which is why
 agreement is deliberately **not** a criterion here and detection, false alarm and
 `cannot-tell` honesty are three separate rows.
+
+**Three of these rows now have a reading, from the offline spike rather than from
+M1.** [`scripts/validator-spike/RESULT.md`](../../scripts/validator-spike/RESULT.md)
+scored the current labelled set, not the expanded one, so nothing below is a
+criterion met — but the *Baseline today* column is no longer "nothing exists".
+False alarm: 0 of 29 held-out, 1 of 30 all-in, against a ≤ 6% target. Cost:
+median $0.125 per verdict measured on an upper-bound transport, against runs
+costing dollars. **Detection is the one that still rests on n = 2** — both
+`not-done` rows were called `not-finished`, and one of them is held out, so the
+held-out detection figure is one example. That is exactly the caveat above,
+unmoved.
+
+*Honesty about the ceiling* needs one more sentence, because the row above and
+the spike count it against **different label sets**. `RESULT.md` reports **5 of
+7** against the labels as the measurement run wrote them, and deliberately did
+not rescore. Against the corrected labels the same five are the whole set — the
+two it "missed", rows 8 and 36, are the two `validator-baseline.md` §3 has since
+retracted — so it is **5 of 5**. The row's target was rewritten as ≥ 4 of 5 to
+keep the ≈71% the original ≥ 5 of 7 expressed; that is a re-scaling, not a
+re-measurement, and M0's expanded set is what should set it properly.
 
 ---
 
@@ -479,7 +532,9 @@ the third of the fleet that carries every known failure. **It is also the gate:*
 The thinnest path that touches every layer: `kind='validate'` on `run_reviews`, a
 `verdict` column and the two judged shas, a prompt composed from task text +
 branch diff + the run row's own facts + the last cycle's final text marked as
-testimony, `--permission-mode plan`, `--max-budget-usd` off a new setting, a
+testimony — **and see decision 2: the spike measured that last term buying zero
+verdict changes, so M1 should compose it both ways and score the difference
+rather than assume it** — `--permission-mode plan`, `--max-budget-usd` off a new setting, a
 three-valued verdict parsed and written. No UI, no automatic firing — invoked by
 a script against a finished run id. Ugly and hardcoded is fine.
 *Acceptance:* Given a finished isolated run, when the script is run against its
@@ -520,7 +575,7 @@ before the first three answer.
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | The positive class is n=2; every detection number is noise | **certain today** | the project is unfalsifiable | M0, and it is a gate rather than a task |
-| `cannot-tell` becomes the lazy answer and coverage collapses | high | pure spend, no information | the coverage guardrail in §8, scored against the 7 known-unjudgeable runs where the correct answer is known |
+| `cannot-tell` becomes the lazy answer and coverage collapses | high | pure spend, no information | the coverage guardrail in §8, scored against the 5 known-unjudgeable runs where the correct answer is known |
 | False alarms burn the operator's trust before the rate is measured | medium | the card is ignored; spend continues | notify-only; the ≤6% criterion is a gate on M2 |
 | **Prompt injection through the diff** — the diff is written by an agent, and a file could contain text addressed to the validator | medium | a verdict the branch chose | `--permission-mode plan`, the verdict parsed from a structured field rather than from prose, and the honest statement that this is **not closed** — it is the same exposure `review.ts` already carries |
 | An automatic spender outside every ceiling | **certain if not designed** | `installDailyCostLimitUSD` silently stops meaning what it says | `--max-budget-usd` on the child *and* widening `installSpend`; both are in M1/M2, not follow-ups |
@@ -628,9 +683,21 @@ Five, each answerable with "defaults are fine".
    precedent, and it costs nothing if the validator is never built.*
 2. **Does the validator get the run's own final text?** It is testimony, not
    independent evidence, and it widens a decision `review.ts` took deliberately.
-   *Recommended default: **yes**, one turn only, marked as testimony in the
+   ~~*Recommended default: **yes**, one turn only, marked as testimony in the
    prompt — it is the only thing that separates a correct empty diff from a wrong
-   one, which is the largest gap the measurement found.*
+   one, which is the largest gap the measurement found.*~~ **That premise has
+   been measured false.** The spike re-ran all eight empty-diff cases with
+   `--with-testimony` (`scripts/validator-spike/io-testimony/`,
+   `score-report-testimony.md`, commit `5c49a08`) and **zero of eight verdicts
+   changed** — six of six identical on the scored subset, case for case. The
+   discrimination was never in the testimony; the task text carries it.
+   *Recommended default: **measure it in M1 before paying for it.** Not "no":
+   n = 8, one stratum, one sample per case, and testimony on a 100 kB patch is
+   untested. But it is no longer "yes on reasoning" — the one place the document
+   claimed it mattered is the one place it was tried and bought nothing, and
+   shipping it means more prompt tokens on every verdict, a testimony field in
+   the prompt contract, and a `review.ts` decision reversed for no measured
+   change.*
 3. **Which runs get validated in M2?** *Recommended default: **only `completed`
    runs that ended without `DONE`, and only isolated ones.** That is ~30% of the
    fleet and carries 100% of the measured defect; widen to all `completed` runs
@@ -646,15 +713,49 @@ Five, each answerable with "defaults are fine".
 
 ## What could not be settled by reading
 
-- **Whether a model can actually do this job.** Every number in §8 is a target,
-  not a measurement. Nothing in this repository can measure a validator that does
-  not exist, which is what M1 is for.
-- **What a validation costs or how long it takes.** No recorded review latency or
-  cost figure exists anywhere in this repository — `docs/verification.md:1511-1515`
-  states that **no real `claude` has ever been run through the assist path**; the
-  spawn, the flags and the accounting were exercised against a stub. The 10-minute
-  timeout is the only bound that exists, and it is a ceiling rather than an
-  expectation.
+Two of the entries that stood here have since been settled by the spike, and are
+kept with what it returned rather than deleted — the original claim is what a
+reader who remembers this section will be looking for.
+
+- **~~Whether a model can actually do this job.~~ Measured offline, once.** The
+  claim here was that nothing in this repository can measure a validator that does
+  not exist. `scripts/validator-spike/` is that measurement: **34 of 37 (91.9%)
+  agreement** on the held-out set, 35/40 all-in, against **29 of 37 (78.4%)** for
+  a trivial validator that always answers `finished`; **zero false-finished**, 5
+  of 7 known-`unjudgeable` rows answered `unjudgeable` (5 of 5 against the
+  corrected labels — §8), and 40 of 40 verdicts
+  parsed. §8's numbers are still targets — that table is scored against an
+  *expanded* label set M0 has not built — but "a model cannot be measured here"
+  is no longer true.
+- **~~What a validation costs or how long it takes.~~ One measured figure and one
+  modelled one.** `RESULT.md` records **median $0.125 per verdict** ($5.27 for
+  40) and **median 49.5 s** wall clock (11.9 – 108.0 s). The dollar figure is an
+  upper bound: it prices the harness's own subagent transport, which re-sends the
+  prompt once per turn and carries its own system prompt and tool schemas.
+  `RESULT.md` also models **≈$0.04** for what `validate.mjs --transport api`
+  would bill — that one is arithmetic over the median prompt, not a measurement,
+  because no API key was reachable. Either way §8's cost guardrail (median
+  validation ≤ 10% of the run it validates) clears comfortably against runs that
+  cost dollars each. The 10-minute assist timeout is still the only *enforced*
+  bound.
+
+What the spike did **not** settle, and what therefore still stands here:
+
+- **Whether a real `claude` under the pinned CLI answers the same way.** The 40
+  requests went through the harness's subagent path — same prompt bytes and model
+  family, different system prompt and a tool loop around it — not through
+  `validate.mjs --transport api` and not through `spawnAssist`.
+  `docs/verification.md` still records that **no real `claude` has been run
+  through the assist path**; the spawn, the flags and the accounting were
+  exercised against a stub.
+- **Repeatability.** Every case was judged once, so none of the figures above
+  carries a variance.
+- **Anything outside the sampled stratum.** The labelled set is 40 `completed`
+  runs on isolated branches; non-isolated runs and `failed` / `blocked` /
+  `cancelled` ones were not looked at, and testimony was only tried on the eight
+  empty-diff cases.
+- **Whether any of the work is correct.** Every `finished` verdict means the
+  change asked for is present, never that it works.
 - **The population shape.** `runs.origin`, `status` and `spent_usd` were
   unavailable to the measurement run (`/data` is masked in the agent sandbox by
   the same invariant that makes it safe), so how many finished runs are isolated,

@@ -670,8 +670,15 @@ through before trusting this unattended:
   is the failure recorded under *Verified* above and whose cause is settled
   there — so
   `npm run typecheck`, `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG
-  npm run build` were **not run**, and neither was a browser. Treat it as
-  unbuilt until those three pass. Then, at 390×844: every page that holds one of
+  npm run build` were **not run**, and neither was a browser.
+
+  **That gate is now discharged.** The change landed as `d8c711d`, and all three
+  commands have since been run in a worktree with a working shell: `npm run
+  typecheck` exit 0, `npm test` exit 0 (1335 pass, 0 fail, 210 suites) at
+  `c9d0b3c`, and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` exit 0
+  with `.next/standalone` written at `a294ed2` — two documentation-only commits
+  above the same source. **What is still open is the browser**, which is the rest
+  of this entry and none of it was run. At 390×844: every page that holds one of
   them read top to bottom with **no horizontal scroll**, every figure still
   `tabular-nums` and every unknown reading still hatched, the branches selection
   bar starting at the window's left edge rather than 224px in with its Land,
@@ -685,8 +692,21 @@ through before trusting this unattended:
   are load-bearing and emit nothing at all if wrong: `md:contents` on the value
   wrapper, whose loss is a silent *desktop* change in all seventeen, and
   `max-md:last:border-b-0` on the row, whose loss is one doubled hairline.
-  `grep -c 'md:contents' .next/static/css/*.css` after a build is the cheap form
-  of both.
+  The cheap form of both is a grep of the emitted stylesheet after a build —
+  but it has to be spelled the way Tailwind writes a selector, which escapes
+  every `:`. Use `-F` and escape the colons, or the pattern cannot match at all:
+
+  ```sh
+  grep -cF 'md\:contents' .next/static/css/*.css                # expect ≥ 1
+  grep -cF 'max-md\:last\:border-b-0' .next/static/css/*.css    # expect ≥ 1
+  ```
+
+  The unescaped `grep -c 'md:contents'` this entry used to prescribe returns
+  **0 on a build where the class is present** — measured, not reasoned: on a
+  build at `a294ed2` the emitted `da7ba9cfe258a729.css` contains
+  `.md\:contents{display:contents}`, the unescaped pattern matched nothing and
+  the `-F` form above matched. Any check written as `grep '<variant>:<utility>'`
+  against built CSS has that defect by construction.
 
   The right form of it is the harness already in *Verified* above — a production
   build in a headless browser against fabricated API responses, both themes,
@@ -722,12 +742,19 @@ through before trusting this unattended:
   they sit outside `AppShell`'s box and so owe the edge themselves. All of it was reasoned from documented platform behaviour. **None
   of it was watched.**
 
-  **This run had no working shell either** — every command died with `bwrap: No
-  permissions to create new namespace`, `git` included, from the same cause as
-  the entry above and settled under *Verified* — so `npm run typecheck`,
-  `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` were
-  **not run**, no browser was driven, and **nothing was committed**: this change
-  and the two before it sit uncommitted in the worktree. Treat it as unbuilt.
+  **The run that wrote this had no working shell either** — every command died
+  with `bwrap: No permissions to create new namespace`, `git` included, from the
+  same cause as the entry above and settled under *Verified* — so `npm run
+  typecheck`, `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
+  build` were **not run** and no browser was driven.
+
+  **The work is committed and the three commands pass.** The change is
+  `d8c711d`, with `2e68820` above it; `git status --porcelain
+  --untracked-files=no` is empty, so there is no uncommitted worktree to go
+  looking for. `npm run typecheck` and `npm test` (1335 pass, 0 fail) were run at
+  `c9d0b3c` and the build at `a294ed2`, all exit 0. **The browser was still not
+  driven**, which is what the rest of this entry is about and is where the two
+  device-only defects still sit.
 
   Narrowing a desktop window is not a substitute for either device-only check.
   **The zoom**: on real iOS Safari at 390px, tap into any field on `/runs/new`
@@ -745,8 +772,21 @@ through before trusting this unattended:
   `ListRow` never wraps and a `w-72` select squeezes its label to nothing),
   `max-md:min-w-11` (an icon-only segment still 38px wide), and
   `max-md:after:-inset-y-[11px]` / `-inset-x-[3px]` (a switch still 38×32).
-  `grep -o 'font-size:16px\|min-width:8rem' .next/static/css/*.css | sort |
-  uniq -c` after a build is the cheap form of the first two. The 1440px claim
+  The cheap form of the first two is again a grep of the built stylesheet, and
+  again it has to be spelled for what Tailwind emits rather than for what the
+  class says:
+
+  ```sh
+  grep -cF 'max-md\:text-\[16px\]' .next/static/css/*.css   # expect ≥ 1
+  grep -cF 'max-md\:min-w-32' .next/static/css/*.css        # expect ≥ 1
+  ```
+
+  Grepping the *declaration* instead is the trap this entry fell into. It used
+  to prescribe `grep -o 'font-size:16px\|min-width:8rem'`, and the second half
+  can never match: Tailwind v4 emits `min-width:calc(var(--spacing) * 32)`, not
+  a resolved `8rem`. Measured on the same build at `a294ed2` —
+  `font-size:16px` twice, `min-width:8rem` never, and the two class-name
+  patterns above once each. The 1440px claim
   needs the harness above: the only unprefixed edits are `AppShell`'s root
   height (`h-dvh` → an inline `calc(100dvh - var(--keyboard-inset, 0px))`),
   `--pane-h`'s extra term, `Sheet`'s panel cap and safe-area padding, and the
@@ -793,7 +833,7 @@ through before trusting this unattended:
 - **The whole UI density restructure — every surface of it, at every width.**
   Five build runs regrouped `/settings`, `/runs/new`, `/runs/[id]`, the three
   workflow surfaces, the dashboard, `/runs`, `/branches`, `/chat` and
-  `/account` against `docs/ui-density-audit.md`, and built two primitives
+  `/account` against `docs/agent/ui-density-audit.md`, and built two primitives
   (`ui/Disclosure`, `ui/ListView`) that every fold and every list box in the app
   now goes through. What *has* been checked, on the last of the five runs and
   reported with its output: `npm run typecheck` clean, `npm test` 1335 passing
@@ -814,7 +854,7 @@ through before trusting this unattended:
   was not run by any of the five.
 
   > **A later completion pass did open a browser, on the host, at a wide
-  > desktop width — see `docs/ui-density-audit.md` §9.** It closed the six
+  > desktop width — see `docs/agent/ui-density-audit.md` §9.** It closed the six
   > items §8 left open, and it moved four of the readings below out of this
   > list: eleven surfaces were opened and read; every `Disclosure` on
   > `/settings` was seen opening by itself with its count when its contents

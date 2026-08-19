@@ -6,7 +6,7 @@
 // The prompt lives in prompt.md and is the only place the model's instructions
 // are written; this file assembles evidence, sends it, and parses the answer
 // back. The three verdict names are the brief's and map one-to-one onto
-// docs/external-validator.md §5's proposed column values (did-the-work /
+// proposals/ExternalValidator/external-validator.md §5's proposed column values (did-the-work /
 // did-not / cannot-tell).
 //
 // Usage:

@@ -120,7 +120,8 @@ adjustment to a token weight can repair a guessed denominator.
 Three things to know about that source:
 
 - **It is percentages, not numbers.** There is still no ceiling to read, and
-  nothing here ever populates one by itself. **Settings → Calibrate** can now
+  nothing here ever populates one by itself. **Settings → Estimate a ceiling
+  from your own history** can now
   *divide* by it — a window that cost $71 and took 15% of the allowance implies
   a ~$474 ceiling — which is a measurement rather than the observed-peak lower
   bound below it. It errs the same way and for a new reason: the cost is Claude
@@ -140,7 +141,8 @@ provider did not answer for:
 - With no ceiling configured, meters render **hatched** ("no ceiling set"), not
   at 0%. An empty bar would read as "plenty left", which is the opposite of
   "we don't know".
-- **Settings → Calibrate** derives a ceiling from your own peak usage: the
+- **Settings → Estimate a ceiling from your own history** derives a ceiling from
+  your own peak usage — press **Scan history** — reporting the
   costliest fully-elapsed 5-hour block, and the peak trailing-7-day total. Those
   are **lower bounds** on the real limit (you reached them without being cut
   off), so percentages computed against them read *high* rather than low — a

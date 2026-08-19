@@ -3,7 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { BLANK_MEANINGFUL_ENV_VARS, MOUNTED_WORKSPACE_SLOTS } from "./config";
+import {
+  BLANK_MEANINGFUL_ENV_VARS,
+  MOUNTED_WORKSPACE_SLOTS,
+  unmountedWorkspaceRefusal,
+} from "./config";
 
 /**
  * Covers the agreement between `Dockerfile` and `docker-compose.yml` about who
@@ -419,6 +423,47 @@ describe("the mounted workspace slots the code assumes", () => {
       Array.from({ length: forwarded.length }, (_, i) => MOUNTED_WORKSPACE_SLOTS + 1 + i),
     );
   });
+
+  /**
+   * Every `see <file>, "<heading>"` in a string, resolved against the tree.
+   *
+   * A reference is checked by opening the file and finding the heading, not by
+   * matching the filename, so a section that moves or is renamed fails here too
+   * — which is the only difference between this and the state it replaces.
+   */
+  function assertReferencesResolve(source: string, what: string): void {
+    const references = [...source.matchAll(/see ([\w./-]+), "([^"]+)"/g)];
+    assert.ok(references.length > 0, `${what} no longer points anywhere`);
+    for (const [, file, heading] of references) {
+      const page = path.join(root, file);
+      assert.ok(fs.existsSync(page), `${what} names ${file}, which is not a file in this repo`);
+      assert.match(
+        fs.readFileSync(page, "utf8"),
+        new RegExp(`^#{1,6} ${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m"),
+        `${what} sends the operator to ${file}, "${heading}", and that file has ` +
+          `no section by that name`,
+      );
+    }
+  }
+
+  it("sends the refusal to a page that has the section it names", () => {
+    // That sentence is the whole of what the operator gets: the refusal throws
+    // at module scope, so the container exits before there is a dashboard, an
+    // API or a log line to read instead. It named README, which has no
+    // workspace section at all — so a boot that will not start pointed at a
+    // place that does not exist, which is the failure the refusal was written
+    // to end wearing a different hat (#126).
+    const refusal = unmountedWorkspaceRefusal("UF_WORKSPACE_5_NAME");
+    assert.ok(refusal, "a configured fifth slot must still refuse the boot");
+    assertReferencesResolve(refusal, "unmountedWorkspaceRefusal's message");
+  });
+
+  it("keeps compose's own pointer on that same page", () => {
+    // The comment above UF_UNMOUNTED_WORKSPACES answers the same question for
+    // whoever is already reading the file they have to edit, and it drifted in
+    // step with the refusal — one edit away, and neither typechecks.
+    assertReferencesResolve(compose, "docker-compose.yml");
+  });
 });
 
 /**
@@ -663,18 +708,32 @@ describe("gh extensions survive the rebuild that installs them by hand does not"
  * not available where these tests run, so this pins the files against each
  * other; `docs/verification.md` carries the commands that check the behaviour,
  * and two of them now have answers.
+ *
+ * The forwarding assertion below is no longer about `UF_SANDBOX` alone. It
+ * covers every `UF_` name the entrypoint reads, because the one that went
+ * missing was the one no prefix had been written for.
  */
 describe("the sandbox ships off, and its switch reaches the container", () => {
   const entrypoint = fs.readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8");
 
-  it("forwards every UF_SANDBOX variable the entrypoint reads", () => {
+  it("forwards every UF_ variable the entrypoint reads", () => {
+    // Derived from the entrypoint rather than listed here, and widened from the
+    // `UF_SANDBOX` prefix it used to match, because a prefix only covers the
+    // variables somebody already thought of: `UF_LOCK_CLAUDE_HOME` — the other
+    // half of this same sandbox — shipped unforwarded past this assertion and
+    // could not be given a value by any operator until #125. Comment lines are
+    // dropped first, so the `docker compose exec --user "${UF_UID:-1000}"`
+    // advice the entrypoint prints for an operator is not read as a variable
+    // this container is given.
     const read = new Set(
-      [...entrypoint.matchAll(/\$\{(UF_SANDBOX[A-Z_]*)[:}]/g)].map((m) => m[1]),
+      [...entrypoint.replace(/^\s*#.*$/gm, "").matchAll(/\$\{?(UF_[A-Z0-9_]+)/g)].map(
+        (m) => m[1],
+      ),
     );
-    assert.ok(read.size > 0, "docker-entrypoint.sh no longer reads any UF_SANDBOX variable");
+    assert.ok(read.size > 0, "docker-entrypoint.sh no longer reads any UF_ variable");
 
     const forwarded = new Set(
-      [...compose.matchAll(/^ {6}(UF_SANDBOX[A-Z_]*):/gm)].map((m) => m[1]),
+      [...compose.matchAll(/^ {6}(UF_[A-Z0-9_]*):/gm)].map((m) => m[1]),
     );
     const dropped = [...read].filter((name) => !forwarded.has(name));
     assert.deepEqual(

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Next.js 15 (App Router) app that (a) reads Claude Code's local session transcripts to show subscription usage against 5-hour / weekly windows, and (b) runs Claude Code headlessly against a mounted folder, stopping between iterations when a budget guard trips. Ships as a single Docker container. `README.md` explains the domain reasoning in depth — read it before changing anything in `src/lib/`.
+A Next.js 15 (App Router) app that (a) reads Claude Code's local session transcripts to show subscription usage against 5-hour / weekly windows, and (b) runs Claude Code headlessly against a mounted folder, stopping between iterations when a budget guard trips. Ships as a single Docker container. `docs/architecture.md` is the `src/lib/` module map and `docs/agent/` carries the per-area reasoning behind each one — read the relevant one before changing anything in `src/lib/`. `README.md` is the landing page and says nothing about `src/lib/`.
 
 ## Commands
 
@@ -22,7 +22,7 @@ python3 scripts/make-icons.py # re-rasterise public/icon.svg; run only after edi
 
 Two environment traps, both of which make a green tree look broken and neither of which is about this repository. A bare `npm ci` under the image's `NODE_ENV=production` exits 0 having skipped devDependencies, and `typecheck`/`test` then fail with exit 127 — use `NODE_ENV=development npm ci --include=dev`. And a shell inheriting `__NEXT_PRIVATE_STANDALONE_CONFIG` from a UsageFoundry container (which is what an agent this app spawns gets) makes `next build` die with `TypeError: generate is not a function`: `loadConfig` returns that JSON verbatim rather than loading `next.config.ts` and applying defaults, and a serialized config cannot carry `generateBuildId`, which is a function. `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` is the whole fix.
 
-There is **no linter run** (`eslint.ignoreDuringBuilds` is on), and `npm test` covers a deliberately short list of pure functions whose failure modes are silent and expensive. `npm run typecheck` plus a `docker compose up --build` smoke test is the real verification loop, and README's "Verified" section — including its "Not yet verified" list, which must stay honest — records what was checked by hand. Before adding a test, read `docs/agent/testing.md`: it names every existing one and the grounds each earned, and that is the bar, not a general convention to follow.
+There is **no linter run** (`eslint.ignoreDuringBuilds` is on), and `npm test` covers a deliberately short list of pure functions whose failure modes are silent and expensive. `npm run typecheck` plus a `docker compose up --build` smoke test is the real verification loop, and `docs/verification.md` — including its "Not yet verified by hand" list, which must stay honest — records what was checked by hand. Before adding a test, read `docs/agent/testing.md`: it names every existing one and the grounds each earned, and that is the bar, not a general convention to follow.
 
 Note that `npm run dev` on the host reads the host's **real** `~/.claude` transcripts and can spawn **real, billed** `claude` processes. Runs default to `acceptEdits`, so an agent started from the UI writes files.
 
@@ -101,7 +101,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - An instance's status is four parts derived: `started` means something is live, never "not halted". Act on `instanceIsOpen`, never on `status === "started"`.
 
 - **`review.ts`, `git.ts`, `diff.ts`, `patch.ts`** → `docs/agent/git-and-review.md`
-  - Every `git diff` carries `--no-ext-diff --no-textconv`; paths that go back out as pathspecs are pinned `:(top,literal)`.
+  - Every `git diff` that reads contents carries `--no-ext-diff --no-textconv`; the one exempt call site is named in the doc. Paths that go back out as pathspecs are pinned `:(top,literal)`.
   - A shortened diff says so and names the omitted files in the prompt.
   - `GIT_CONFIG_COUNT` must equal the number of pairs, or git discards the whole block silently.
   - The resolver may run a check only on `resolveCheckout`'s reuse branch, and only what `resolveVerifyTools` names. The reviewer gets none.
@@ -131,10 +131,12 @@ This app's invariants encode the product's reasoning, not style preferences, and
 
 - **The UI says "work cycle", the code says "iteration".** User-facing copy names the unit a first-time user must reason about; `Settings`, `BudgetPolicy`, the API payloads and the `runs` table keep `iteration`/`maxIterations`. Don't rename the internals to match the copy, and don't reintroduce "iteration" into the UI.
 - **Comments explain *why* a decision was made** — usually a correctness or safety trade-off — never what the code does. Match that when editing.
-- **Long-lived module state goes on `globalThis`** (`__ufDb`, `__ufBus`, `__ufProcs`, `__ufCancelled`, `__ufTranscriptCache`), or it silently resets on every request in dev.
+- **Long-lived module state goes on `globalThis`** (e.g. `__ufDb`, `__ufBus`, `__ufProcs`, `__ufInterrupts`, `__ufTranscriptCache`), or it silently resets on every request in dev. Those five are examples and not the roster — there are thirty-odd such keys; `grep -rn "globalThis as unknown" src/` finds every one. Note `__ufInterrupts`: reusing a key whose *shape* changed is the trap `orchestrator.ts:373` records, because `??=` only initialises when absent, so a pre-upgrade value survives a dev hot reload and every call on it throws.
 - **Schema changes** are idempotent statements in `migrate()` in `db.ts`. A destructive one is the exception and runs inside a single `db.transaction`.
 - **A pure function whose failure mode is silent gets a unit test.** That is the bar the existing suite was built to; `docs/agent/testing.md` records what each one earned.
 
 ## Docs
 
-`docs/agent/` is the agent-facing reasoning above. `docs/` proper is human-facing: `install.md`, `runs.md`, `workflows.md`, `security.md`, `review-and-land.md`, `orchestrator-chat.md`, `limits-and-accuracy.md`, `backup-and-restore.md`, and `verification.md` — which records what has been measured against the pinned CLI and what has not.
+`docs/agent/` is the agent-facing reasoning above. `docs/` proper is human-facing, and its index is `docs/README.md` — go there rather than to a list here, because a list here is what drifted last time. The two an editor needs are `docs/architecture.md`, the `src/lib/` module map, and `docs/verification.md`, which records what has been measured against the pinned CLI and what has not. Beside the operator's pages — `install.md`, `runs.md`, `workflows.md`, `security.md`, `review-and-land.md`, `orchestrator-chat.md`, `limits-and-accuracy.md`, `backup-and-restore.md` — `docs/` holds one design record, `needs-review.md`, which is implemented and kept for the argument rather than the decision. The rest moved to where their reader is: the UI density audit is `docs/agent/ui-density-audit.md`, because `docs/agent/conventions.md` cites it as the reasoning behind a live invariant, and the external-validator pitch and its baseline measurement are `proposals/ExternalValidator/`, because nothing in them shipped.
+
+`HEALTH-CHECK.md` at the repository root is neither, and is not maintained: it is one dated code audit at `267b901`, 2026-08-11, kept because `scripts/file-health-check-issues.sh` files its sections as issues by title. Its own header carries the per-finding status. Check any finding against the tree before acting on it — one of the seven was fixed in a way that contradicts its suggestion.

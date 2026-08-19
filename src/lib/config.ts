@@ -241,7 +241,7 @@ export function unmountedWorkspaceRefusal(forwarded: string): string | null {
     `${MOUNTED_WORKSPACE_SLOTS} workspace slots and a bind mount cannot be added from .env. ` +
     `Unset ${names.length === 1 ? "it" : "them"}, or mount the directory in a ` +
     `docker-compose.override.yml and set UF_UNMOUNTED_WORKSPACES to an empty string there — ` +
-    "see README, \"More than four workspaces\"."
+    "see docs/install.md, \"More than four workspaces\"."
   );
 }
 

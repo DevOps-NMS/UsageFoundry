@@ -23,8 +23,8 @@ whole list, and the omission is the point.
 
 A block does **not** hold a budget, a permission mode, an isolation choice or a
 model. It **names a template**, and every guard comes from that template; a block
-naming no template runs under the untemplated guard set in Settings → *Chat
-defaults*, exactly as an untemplated chat proposal does. This is the same rule
+naming no template runs under the untemplated guard set in Settings → *Default
+guard set*, exactly as an untemplated chat proposal does. This is the same rule
 the orchestrator chat follows and it is worth stating in full, because it is the
 reason a workflow can be edited freely without anyone re-reading it for safety:
 
@@ -93,7 +93,7 @@ emit tool and named nothing, *ended without emitting anything* means it never
 called it at all, and those are different problems.
 
 **Its own spend is its own.** A deciding turn's cost is bounded by Settings →
-*Chat turn budget*, exactly as a chat turn's is; it lands on the block, never on
+*Orchestrator chat limit*, exactly as a chat turn's is; it lands on the block, never on
 a run's spend and never on the dashboard meters. It **is** counted against the
 workflow's own limit below, because it is money that press of Run spent.
 
@@ -271,7 +271,7 @@ that all start at once, each running a single work cycle, has no boundary
 *before* any of them — every block is already working before any has spent
 anything, so a check made only before a cycle starts had nothing to compare and
 the workflow-wide limit could not fire. The first block to finish is the boundary
-that case needs. **Settings → maximum concurrent runs** still narrows the
+that case needs. **Settings → Runs at the same time** still narrows the
 overshoot: with a cap of one, a five-block graph is checked before and after each
 block rather than five times against zero.
 

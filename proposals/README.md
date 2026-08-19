@@ -16,3 +16,4 @@ sentence that makes it.
 | Proposal | Question | State |
 |---|---|---|
 | [Sandboxing](Sandboxing/README.md) | What would full containment of a run look like — filesystem, network, and between two concurrent runs? | Open; one recommendation, unverified in its central mechanism |
+| [ExternalValidator](ExternalValidator/README.md) | Should a finished run get a second, adversarial reading of task text against branch diff? | Open; the offline spike has run and is scored, and **nothing shipped** — no run is validated today |

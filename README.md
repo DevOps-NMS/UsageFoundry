@@ -41,6 +41,12 @@ that *decide* what to run next, blocks that *repeat* one task until the agent
 reports it done, and blocks that land what the ones before them built. Run one on
 a schedule, under a budget that covers the whole graph.
 
+**Bring the tooling you already have.** Claude Code plugins sitting in your
+mounted folders are found and listed under **Settings → Plugins**. Switching one
+on puts it on every work cycle this app starts from the next cycle onward,
+including runs already in flight — nothing is installed into `~/.claude`, and
+nothing outside your mounts is ever offered.
+
 Everything runs on your machine, in one Docker container. No account, no
 telemetry back to us, no third-party service.
 
@@ -87,6 +93,14 @@ of their reach, but your Claude account, every mounted workspace and
 `UF_GITHUB_TOKEN` are inside the trust boundary of anything you run unattended.
 **[docs/security.md](docs/security.md)** sizes all of it.
 
+**A plugin you switch on is inside that boundary too.** It is a directory found
+in one of your mounted workspaces, and enabling it means the container runs
+whatever that directory ships — hooks, agents, skills, commands, an MCP server —
+as the agents' uid, on every work cycle from the next one onward, runs already
+in flight included. The Plugins tab says which of those each one carries before
+you press it, and the switch is saved the moment you press it rather than on
+*Save*.
+
 Full setup, including Linux `UF_UID`, multiple workspaces and GitHub access, is
 in **[docs/install.md](docs/install.md)**.
 
@@ -109,9 +123,19 @@ banner on the dashboard: a workspace whose path is not a directory (Docker
 creates a missing bind source rather than refusing, so a typo in `UF_WORKSPACE`
 looks exactly like an empty one), a `CLAUDE_HOME` with no `projects/` under it
 (every usage figure reads zero), and any variable set to the empty string where
-blank is not an answer. `UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY` and
-`UF_GITHUB_TOKEN` are the three where blank *is* an answer — it means off — and
-they are never reported.
+blank is not an answer. Eight variables are where blank *is* an answer, and none
+of them is ever reported: `UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY`,
+`UF_GITHUB_TOKEN` and `UF_GITHUB_TOKENS`, where it means *off*;
+`UF_ALLOW_NO_AUTH`, `UF_COOKIE_SECURE` and `UF_TRANSCRIPT_CACHE_MAX_ENTRIES`,
+where it means *take the default*; and `UF_UNMOUNTED_WORKSPACES`, which compose
+computes rather than you, and where blank is the success case — a non-blank
+value there refuses the boot. `BLANK_MEANINGFUL_ENV_VARS` in `src/lib/config.ts`
+is the list.
+
+Two of those are ones the Quick start above tells you to set, so read the silence
+carefully: a blank `UF_ALLOW_NO_AUTH` or `UF_COOKIE_SECURE` is *taken as the
+default*, not reported, and nothing at boot distinguishes it from a value that
+arrived.
 
 The full table is in [docs/install.md](docs/install.md#required-environment).
 
@@ -235,12 +259,17 @@ line**, beside the existing `[usagefoundry] …` prose:
 {"ts":"2026-08-14T09:12:03.114Z","level":"info","event":"run.cycle_finished","run_id":"…","subtype":"success","cost_usd":0.42,"duration_ms":183422}
 ```
 
-`run.status`, `run.cycle_started`, `run.cycle_finished`, `run.guard_tripped`,
-`run.error`, `sweep.failed`, `live_guard_tick.failed`, `boot.reconciled`,
-`http.mutation`. The
+Ten events in all: `run.status`, `run.cycle_started`, `run.cycle_finished`,
+`run.guard_tripped`, `run.error`, `run.sandbox_refusal`, `sweep.failed`,
+`live_guard_tick.failed`, `boot.reconciled`, `http.mutation`. The
 noisy kinds — the agent's own output, every tool call, every log line — are
 deliberately **not** on stdout; they are in `run_events` and on the run page,
-where they are readable. What is on stdout is projected field by field rather
+where they are readable. `run.sandbox_refusal` is the one tool failure that
+crosses that line, and it is there for the reason a tripped guard is: a policy
+that refuses the work fails *inside* tool calls, and at twenty-five unattended
+runs the run page is not where anyone finds that out. Filter it out and a
+sandbox refusing every agent's calls looks like runs that quietly do less work.
+What is on stdout is projected field by field rather
 than dumped, so no prompt text, folder path or credential reaches it.
 
 ### Who started what
@@ -788,16 +817,35 @@ That last one is not boilerplate. It carries an explicit *"Not yet verified"*
 list, which is the honest boundary of what this has been exercised against.
 Read it before running anything unattended.
 
-The newest thing on that boundary is the **repeating block**, which has never
-been run against a real CLI. Its pass decision and the scheduling around it are
-unit tested, and the wiring was driven once by hand against a real database and
+The newest thing on that boundary is **Needs review**, a fourth way a run can
+end. A run that meets a wall it cannot pass — a credential that is not there, a
+permission it does not have, a decision that is not its to make — says so and
+stops, instead of spending the rest of its cycle cap restating the problem or
+finishing green beside runs that did the job. [docs/runs.md](docs/runs.md) has
+the whole of it. What is unverified is the part that decides it: the ending
+turns entirely on the agent replying `NEEDS_REVIEW` on a line of its own, and
+**no `claude` child has ever produced that token for this app.** The matcher,
+the precedence between it and the other endings, and the workflow-loop stop are
+unit tested; what the wording actually produces in a real agent is reasoned
+from how `DONE` behaved over 251 runs, and reasoned is not measured. It can be
+wrong in two directions: an agent that withholds it spends its whole cycle cap
+against the wall exactly as before, and one that reaches for it cheaply turns
+your completions into a queue of questions. The reason the agent gives is the
+evidence either way. Nothing on that path has been seen in a browser either.
+
+The **repeating block** is on the same boundary and has also never been run
+against a real CLI. Its pass decision and the scheduling around it are unit
+tested, and the wiring was driven once by hand against a real database and
 a real git workspace — in a throwaway script, under a concurrency cap that held
 every pass `queued`. No page has rendered a repeating block, no browser has
 saved one, and no `claude` child has ever worked a pass. What to watch on the
-first real one is what ends it: a block stops repeating because the agent
-replied `DONE`, and a run that merely used up its work-cycle limit is written
-`completed` as well — so a block that quietly gave up after one pass and a block
-that finished the job look the same until you read what the agent said.
+first real one is what ends it. A block stops repeating when the agent replied
+`DONE`, when a pass ended as anything other than `completed` (**Needs review**
+among them, which stops the loop rather than waiting for it), when a pass
+started no run at all, or when it runs out of passes. And a run that merely used up its
+work-cycle limit is written `completed` as well — so a block that quietly gave
+up after one pass and a block that finished the job look the same until you read
+what the agent said.
 
 ---
 

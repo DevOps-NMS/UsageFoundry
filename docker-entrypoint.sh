@@ -408,9 +408,13 @@ if [ "${UF_LOCK_CLAUDE_HOME:-}" = "1" ] && [ -n "${UF_AGENT_UID:-}" ]; then
   # skipped rather than refused, because only `projects/` is silent about it and
   # because refusing over a `todos/` the CLI has not needed yet would make this
   # unturnable-on. Sign in and run one real cycle before switching this on; if
-  # something is missing afterwards, create it yourself as the agent's uid
-  # (`docker compose exec --user "${UF_UID:-1000}" usagefoundry mkdir -p
-  # ~/.claude/todos`) with the switch off, then turn it on.
+  # something is missing afterwards, create it yourself as the agent's uid, with
+  # the switch off, then turn it on. Take that uid from the container: a
+  # `${UF_UID}` typed at a host shell is expanded by that shell, and .env never
+  # reaches it, so it is 1000 however the install is configured.
+  #
+  #     uid=$(docker compose exec -T usagefoundry printenv UF_AGENT_UID)
+  #     docker compose exec -u "$uid" usagefoundry mkdir -p ~/.claude/todos
   if [ ! -d "$CLAUDE_HOME_DIR" ]; then
     claude_home_refusal="$CLAUDE_HOME_DIR is not a directory"
   elif [ "$(id -u)" != "0" ]; then
