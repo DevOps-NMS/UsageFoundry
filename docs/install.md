@@ -358,17 +358,10 @@ same file carries hooks, permission rules and environment for every session.
 UF_LOCK_CLAUDE_HOME=1
 ```
 
-**And one line in `docker-compose.yml`, without which the variable above does
-nothing at all.** Compose forwards variables to the container by name and this
-one is not in the file yet, so add it to the `environment:` block beside
-`UF_SANDBOX`:
-
-```yaml
-      UF_LOCK_CLAUDE_HOME: "${UF_LOCK_CLAUDE_HOME:-}"
-```
-
-then check that it arrived, because a variable that did not is indistinguishable
-from a switch that is off:
+`1` is the only value that switches it on; anything else is off and the boot log
+says so. Nothing else to edit — compose forwards it. Check that it arrived
+anyway, because a variable that did not is indistinguishable from a switch that
+is off:
 
 ```bash
 docker compose exec usagefoundry sh -c 'echo "[$UF_LOCK_CLAUDE_HOME]"'   # expect [1]

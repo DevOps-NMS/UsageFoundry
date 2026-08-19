@@ -141,6 +141,21 @@ services:
       # Naming any domain also pins the list to the managed file, so a run
       # cannot widen it from the ~/.claude/settings.json it can write.
       UF_SANDBOX_ALLOWED_DOMAINS: "${UF_SANDBOX_ALLOWED_DOMAINS:-}"
+      # The other half of that sandbox, and a separate switch on purpose. "1"
+      # makes docker-entrypoint.sh give ~/.claude and its settings.json to root
+      # at boot — that file is an honored source for `sandbox.*`, so until this
+      # is on a run can append `{"sandbox":{"filesystem":{"allowWrite":["/"]}}}`
+      # to it and every later session, its own and its siblings', starts
+      # confined to nothing. Blank is off and is the shipped state; the
+      # entrypoint acts on the literal "1" and says so on the boot log for any
+      # other value.
+      #
+      # Forwarded here because it has to be. It is read by the entrypoint and by
+      # nothing in the app, and this file has no env_file, so without this line
+      # UF_LOCK_CLAUDE_HOME=1 in .env is read by compose for interpolation and
+      # never reaches the container: a security control switched on in a file,
+      # never applied, and indistinguishable from one that is off.
+      UF_LOCK_CLAUDE_HOME: "${UF_LOCK_CLAUDE_HOME:-}"
       # One entry per selectable workspace, "Label=/container/path", separated
       # by "|". An entry whose label is empty — i.e. UF_WORKSPACE_N_NAME is not
       # set in .env — is skipped, so extra workspaces are switched on from .env

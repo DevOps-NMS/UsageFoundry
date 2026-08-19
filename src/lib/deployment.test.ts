@@ -663,18 +663,32 @@ describe("gh extensions survive the rebuild that installs them by hand does not"
  * not available where these tests run, so this pins the files against each
  * other; `docs/verification.md` carries the commands that check the behaviour,
  * and two of them now have answers.
+ *
+ * The forwarding assertion below is no longer about `UF_SANDBOX` alone. It
+ * covers every `UF_` name the entrypoint reads, because the one that went
+ * missing was the one no prefix had been written for.
  */
 describe("the sandbox ships off, and its switch reaches the container", () => {
   const entrypoint = fs.readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8");
 
-  it("forwards every UF_SANDBOX variable the entrypoint reads", () => {
+  it("forwards every UF_ variable the entrypoint reads", () => {
+    // Derived from the entrypoint rather than listed here, and widened from the
+    // `UF_SANDBOX` prefix it used to match, because a prefix only covers the
+    // variables somebody already thought of: `UF_LOCK_CLAUDE_HOME` — the other
+    // half of this same sandbox — shipped unforwarded past this assertion and
+    // could not be given a value by any operator until #125. Comment lines are
+    // dropped first, so the `docker compose exec --user "${UF_UID:-1000}"`
+    // advice the entrypoint prints for an operator is not read as a variable
+    // this container is given.
     const read = new Set(
-      [...entrypoint.matchAll(/\$\{(UF_SANDBOX[A-Z_]*)[:}]/g)].map((m) => m[1]),
+      [...entrypoint.replace(/^\s*#.*$/gm, "").matchAll(/\$\{?(UF_[A-Z0-9_]+)/g)].map(
+        (m) => m[1],
+      ),
     );
-    assert.ok(read.size > 0, "docker-entrypoint.sh no longer reads any UF_SANDBOX variable");
+    assert.ok(read.size > 0, "docker-entrypoint.sh no longer reads any UF_ variable");
 
     const forwarded = new Set(
-      [...compose.matchAll(/^ {6}(UF_SANDBOX[A-Z_]*):/gm)].map((m) => m[1]),
+      [...compose.matchAll(/^ {6}(UF_[A-Z0-9_]*):/gm)].map((m) => m[1]),
     );
     const dropped = [...read].filter((name) => !forwarded.has(name));
     assert.deepEqual(
