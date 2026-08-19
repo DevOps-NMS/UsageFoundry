@@ -247,6 +247,100 @@ and schedule, and nothing backs it up on its own — take a snapshot before you
 try either of the commands above, and put one in cron afterwards:
 **[Backup and restore](backup-and-restore.md)**.
 
+## Optional: turn on the sandbox
+
+Off by default, unproven, and **two switches rather than one** — the variable on
+its own gets you an install that reports a sandbox and confines nothing.
+
+The reason it exists: nothing else here bounds what an agent's shell may touch
+below the uid it runs as. With this on, the container writes a root-owned policy
+to `/etc/claude-code/managed-settings.json` that puts each command inside Claude
+Code's own bubblewrap namespace — a deny over your `.credentials.json`, a read
+deny over `/data` and `/backups`, and an egress allowlist if you name one.
+[Security](security.md) has the argument and what it still does not close.
+
+**Half one, in `.env`:**
+
+```bash
+UF_SANDBOX=1
+UF_SANDBOX_ENFORCEMENT=refuse     # the default; "warn" runs unconfined instead
+UF_SANDBOX_ALLOWED_DOMAINS=       # blank leaves egress alone
+```
+
+Egress is the part to add last. A domain list that is missing something a cycle
+needs fails inside a tool call the run loop does not read, so get a run working
+first, then start from `api.anthropic.com|github.com|registry.npmjs.org` and
+expect to add to it.
+
+**Half two, on the host.** Bubblewrap cannot create a namespace under Docker's
+default seccomp profile — it fails "No permissions to create new namespace" as
+root and as `UF_UID` alike — so the container needs a widened one.
+`uf-seccomp.json` in the repository root is Docker's own default profile with
+six syscalls ungated (`clone`, `clone3`, `unshare`, `mount`, `umount2`,
+`pivot_root`); what that widens, what it does not, and how to regenerate it for
+your engine are in `docker-compose.yml` beside the commented `security_opt`
+block. Put it in a `docker-compose.override.yml`, which compose reads
+automatically, rather than uncommenting that block — the profile has to be one
+your daemon accepts, a rejected one fails the boot, and this is one machine's
+answer rather than something to commit:
+
+```yaml
+services:
+  usagefoundry:
+    security_opt:
+      - seccomp=./uf-seccomp.json
+```
+
+Then `docker compose up -d`. `security_opt` is fixed when the container is
+created, so a restart does not pick it up. Deleting the override file and
+running that again is how you go back — quietly, so clear `UF_SANDBOX` too.
+
+**The half you do not set.** The profile is necessary and not sufficient: Docker
+masks parts of `/proc`, and the CLI's default bubblewrap shape mounts a fresh
+procfs, which the kernel refuses under those over-mounts — as root too. The
+entrypoint therefore writes `"enableWeakerNestedSandbox": true` into the managed
+policy on every boot, unconditionally, which switches the CLI to binding the
+existing `/proc`. Nothing to configure. It is named here because it is the
+reason the seccomp profile on its own still leaves you with a sandbox that
+cannot start, and because it is a real weakening: a sandboxed command sees this
+container's `/proc`, so sibling agents' processes are visible in it.
+
+**Then check that it worked, because "on" is a statement about a file.** Both
+the boot line and **Settings → Sandbox** read the managed policy, so both say
+`on` for a sandbox whose bubblewrap cannot start:
+
+```bash
+docker compose logs usagefoundry | grep 'sandbox:'
+# [usagefoundry] sandbox: on — enabled by /etc/claude-code/managed-settings.json
+
+docker compose exec --user "${UF_UID:-1000}" usagefoundry \
+  bwrap --dev-bind / / --unshare-user --unshare-pid true && echo ok
+# expect ok. "No permissions to create new namespace" means half two never
+# arrived — no override file, or a container that was restarted, not recreated.
+```
+
+Then start one short run and read its log. A **`sandbox` row** — "bubblewrap
+could not build the namespace the sandbox needs, so this command never ran" —
+under a failed tool call means every `Bash` call is being wrapped in a program
+that exits before the command does. Look for it deliberately: this install spent
+thirteen hours in exactly that state — eight runs, 170 failed `Bash` calls, at
+least $210 of spend — with nothing anywhere naming the cause, because
+`UF_SANDBOX_ENFORCEMENT=refuse` does not catch it. The CLI's availability check
+asks whether `bwrap` and `socat` exist and are executable; it never runs one, so
+a bubblewrap the kernel refuses is not "unavailable" to it and nothing stops.
+
+**What is not settled.** What has been run under a working sandbox on this
+project is one `claude -p` that wrote a file in `/tmp` and read it back, and one
+that was refused `.credentials.json` — a file its own uid can otherwise read, so
+the deny is enforced rather than merely written down. No **work cycle** has run
+under one: no per-run write set has ever reached a live sandbox, the egress
+allowlist has never been exercised, and whether the set each child gets is wide
+enough for a real cycle — `/tmp`, `$HOME/.npm` and `$GOPATH` are in it for
+exactly this reason — is reasoning rather than a measurement. Expect early
+cycles to fail inside tool calls, watch the first
+one rather than the second, and treat this as an experiment you are running.
+`docs/verification.md` carries the steps that would settle it.
+
 ## Optional: give `~/.claude` to root
 
 Off by default, and worth understanding before you switch it on, because it is

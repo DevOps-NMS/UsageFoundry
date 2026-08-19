@@ -515,6 +515,113 @@ Built and exercised against real transcripts:
   What that leaves unchecked: the **amd64** branch of the arch case and its
   digest, since the build ran on Apple silicon; and a real agent mid-cycle
   building a Go repository, as opposed to a shell in the same image.
+- **A sandbox that could not start, on this install, unnoticed for thirteen
+  hours.** Not a probe: a production failure, and the only end-to-end reading of
+  `UF_SANDBOX=1` anything here has. `UF_SANDBOX=1` and
+  `UF_SANDBOX_ENFORCEMENT=refuse` were set, `docker-entrypoint.sh` wrote
+  `/etc/claude-code/managed-settings.json` correctly, and `docker-compose.yml`'s
+  `security_opt` block was — as it ships — commented out, so bubblewrap could not
+  create a namespace. **The CLI did not refuse to start.** Its availability probe
+  `access(X_OK)`s the `bwrap` and `socat` binaries and never runs one, so
+  `getSandboxUnavailableReason()` was undefined, `failIfUnavailable` never fired,
+  and every `Bash` command was wrapped in a `bwrap` that exited 1 before reaching
+  the command. **170 failed `Bash` calls across 8 runs, 2026-08-18 18:12:12 UTC
+  to 2026-08-19 07:39:57 UTC.** Those runs record $210.12 and 123.2M tokens,
+  which is a floor and not a total: two were still running, and a run writes its
+  spend at the end of a cycle. The most expensive of them (`6052f120`, $139.12)
+  finished by parsing `.git/index` by hand to enumerate the files it could not
+  list. **UsageFoundry reported none of it**: `run_events` held 484 `tool_error`
+  rows and **zero** `sandbox` rows, and the only `ops_events` row in the window
+  was an unrelated boot reconciliation. The three `bwrap:` markers now in
+  `src/lib/sandbox.ts` are that transcript read back out.
+
+  Two things this settles that were open below. The generated policy does
+  **not** short-circuit to an unwrapped command on this build — every `Bash`
+  call came back as `bwrap`'s own stderr, which is a wrapper that was built.
+  And a required-but-unstartable sandbox has a **third** outcome besides the two
+  `scripts/sandbox-probe/probe.sh:521` allows for: not a refusal, not an
+  unconfined run, but a session that starts, reports nothing, and fails every
+  command inside a sandbox that was never built. Nothing observes it from the
+  inside — the CLI's own availability check is satisfied by the binaries
+  existing, and this app had no marker for `bwrap`'s stderr, so the only signal
+  was 170 tool errors that each looked like a command that went wrong.
+- **`uf-seccomp.json` applied to a real daemon, and the one bubblewrap operation
+  it does not buy.** On Docker Engine 29.7.2, kernel 6.12.76-linuxkit:
+  `bwrap --dev-bind / / --unshare-user --unshare-pid true` fails
+  `No permissions to create new namespace` with rc=1 **as root and as uid
+  1000**; with `--security-opt seccomp=./uf-seccomp.json` it exits 0 at both
+  uids. The daemon genuinely applies it — the profile is inlined in
+  `HostConfig.SecurityOpt`, and `Seccomp_filters` inside the container is still
+  1, so this is a narrowed profile and not `seccomp=unconfined`.
+  `/proc/sys/user/max_user_namespaces` is 31734: the kernel was never the
+  blocker, Docker's default profile was. `uf-seccomp.json` is byte-for-byte
+  reproducible from moby v28.5.2's default profile with
+  `scripts/make-seccomp-profile.py`'s patch applied — but the regeneration
+  command printed in `docker-compose.yml` **404s on this engine**, because moby
+  publishes no `v29` tag; the shipped file has to stay the newest tagged default
+  until it does, and 29.7.2 accepts it.
+
+  What the profile does **not** fix is the operation the CLI's default sandbox
+  needs. Under it, `--ro-bind`, `--tmpfs`, `--dev`, `--unshare-pid`,
+  `--unshare-net` and binding the existing `/proc` all succeed; `--proc /proc`
+  is the only failing one — `bwrap: Can't mount proc on /newroot/proc: Operation
+  not permitted`, as root as well — because Docker's masked `/proc`
+  over-mounts trip the kernel's `mount_too_revealing` check. The pinned CLI
+  builds exactly two bubblewrap argv shapes, switched on the managed setting
+  `sandbox.enableWeakerNestedSandbox`: the default pushes
+  `--unshare-user --cap-drop ALL --proc /proc`, the weaker one
+  `--unshare-user --bind /proc /proc`. Both shapes were read out of the binary
+  and then **run verbatim as `bwrap` command lines**: the default fails under
+  the profile, the weaker exits 0 as uid 1000. That is what
+  `docker-entrypoint.sh` now writes the key for — and it is a measurement of
+  `bwrap`, not of the CLI choosing a shape, which nothing has watched.
+- **That this install's agents have never had `Grep` or `Glob`.** The pinned CLI
+  (2.1.226) drops both from the tool list whenever `Bash` is present — the gate
+  read out of the binary is `searchToolsOptIn` false and `CLAUDE_CODE_ENTRYPOINT`
+  not `local-agent` — and its refusal text tells the model to use `grep`/`find`
+  through the shell instead. Measured against this install's own records rather
+  than inferred: **zero of 469 recorded `system:init` events have ever carried
+  `Grep`**, going back to 2026-08-10, five days before a sandbox existed here —
+  so this is not the failure above wearing a second face — and all five `Grep` /
+  `Glob` calls an agent ever attempted failed. In a throwaway container on the
+  pin, passing `--allowedTools Grep Glob` puts both back in the tool list and
+  changes nothing else in it; the opt-in is set by the CLI from the
+  `--allowedTools` values themselves, so naming them is the whole of it. That is
+  one `system:init` event on a throwaway container, not a work cycle — what the
+  flag does to a real run is in the list below.
+- **A sandbox that starts, and confines. The first on this project.** Three
+  `claude` invocations against the recreated container on 2026-08-19, as uid
+  1000, with `security_opt` applied from `docker-compose.override.yml` and the
+  managed policy carrying `enableWeakerNestedSandbox: true`. Billed: $0.51 in
+  total, and the figures are on each line below because a probe that is not
+  worth its cost should be argued about with the cost in front of it.
+
+  First, that the wrapper is built and the command survives it. `claude -p`
+  told to run `echo … > /tmp/uf-probe.txt && cat /tmp/uf-probe.txt` under
+  `--permission-mode acceptEdits` returned `UF-SANDBOX-PROBE-OK` from the tool
+  and `DONE` from the model, in 3.0s for $0.298 — no `bwrap` line anywhere in
+  the stream, where the same call before the profile produced nothing else. The
+  `system:init` event on that same invocation lists `Glob` and `Grep`, from
+  `--allowedTools Grep Glob` and nothing else on the argv, which is
+  `SEARCH_TOOLS` measured against the real binary rather than a throwaway.
+
+  Second, and the one that separates a policy from a decoration: the credential
+  deny **denies**. `/home/node/.claude/.credentials.json` is 509 bytes and
+  readable by uid 1000 from a plain `docker exec`; the same file through a
+  sandboxed `Bash` call in the same container, as the same uid, came back
+  `wc: /home/node/.claude/.credentials.json: Permission denied`, exit 1
+  ($0.099 — an earlier attempt at the same question cost $0.115 and answered
+  nothing, because a compound command is held for an approval a `-p` child has
+  nobody to give). So the policy is enforced on a file the uid otherwise owns,
+  which no reading of a settings file could have told anyone.
+
+  What it does not settle. The refusal arrives as an ordinary `EACCES`, exactly
+  as `src/lib/sandbox.ts` says a policy denial does — so this is also the
+  measurement behind that module refusing to match one, and there is still no
+  way to tell a denied path from a missing one inside a tool call. Nothing here
+  exercised the per-run `--settings` overlay (these had none), the `denyRead`
+  paths, the network allowlist, or a work cycle doing real work; the write set
+  and everything else below stay on the list.
 
 ## Not yet verified by hand
 
@@ -555,7 +662,9 @@ through before trusting this unattended:
   no `md:`-prefixed rule at all, which is the whole of the "1440px is unchanged"
   claim in one assertion. What has not happened is anything else. The run that
   wrote this had **no working shell at all** — every command, `git` included,
-  died in the sandbox with `bwrap: No permissions to create new namespace` — so
+  died in the sandbox with `bwrap: No permissions to create new namespace`, which
+  is the failure recorded under *Verified* above and whose cause is settled
+  there — so
   `npm run typecheck`, `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG
   npm run build` were **not run**, and neither was a browser. Treat it as
   unbuilt until those three pass. Then, at 390×844: every page that holds one of
@@ -605,7 +714,8 @@ through before trusting this unattended:
   of it was watched.**
 
   **This run had no working shell either** — every command died with `bwrap: No
-  permissions to create new namespace`, `git` included — so `npm run typecheck`,
+  permissions to create new namespace`, `git` included, from the same cause as
+  the entry above and settled under *Verified* — so `npm run typecheck`,
   `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` were
   **not run**, no browser was driven, and **nothing was committed**: this change
   and the two before it sit uncommitted in the worktree. Treat it as unbuilt.
@@ -1589,22 +1699,25 @@ through before trusting this unattended:
   at all but the Settings page, where the app already declares the ambient set
   once and where "your `~/.claude` starts every agentless child as *X*" is a true
   sentence with no control to contradict it.
-- **Everything about the sandbox reporting, because no sandbox has ever been
-  started.** `sandboxRefusal` and `sandboxArrangement` are unit-tested in both
-  directions and `npm run typecheck`, `npm test` and `next build` all pass, but
-  the marker strings the detector matches were **read out of the pinned binary
-  with `strings` and never executed** (`proposals/Sandboxing/10-validation.md`,
-  "What this validation did not check"), and the run this was written in could
-  not have executed them: no `docker` binary, no `/var/run/docker.sock`, and
-  `unshare --user` answers `Operation not permitted`, so bubblewrap could not
-  have started even if it had been installed. Three separate things are
-  unverified, and the first is the one that matters:
+- **The sandbox reporting, all of it except the three markers a failure wrote.**
+  `sandboxRefusal` and `sandboxArrangement` are unit-tested in both directions
+  and `npm run typecheck`, `npm test` and `next build` all pass. One provenance
+  changed on 2026-08-19 and only one: the three `bwrap:` markers were read off
+  this install's own `run_events` after the thirteen-hour failure in *Verified*
+  above, so those three are transcribed rather than guessed. The CLI's own six
+  were **read out of the pinned binary with `strings` and have still never been
+  executed** (`proposals/Sandboxing/10-validation.md`, "What this validation did
+  not check"). Three separate things are unverified, and the first is the one
+  that matters:
 
   **Whether the strings the detector matches are the strings the CLI actually
-  emits into a tool result.** Nothing here has seen one. Once Phase 2 of
-  `proposals/Sandboxing/09-implementation-sketch.md` is in place — bubblewrap,
-  `socat`, the seccomp `security_opt` and a managed policy — capture the real
-  text before trusting the table:
+  emits into a tool result.** Nothing here has seen one, and the failure above
+  did not change that: what it produced was `bwrap`'s own stderr, from a `bwrap`
+  the CLI spawned and which exited before doing anything, and not a single
+  sandbox message written by the CLI itself. The rest of Phase 2 of
+  `proposals/Sandboxing/09-implementation-sketch.md` — bubblewrap, `socat`, the
+  seccomp `security_opt` and a managed policy — now exists and has been started;
+  capture the real text before trusting the table:
 
   ```sh
   # A command the policy refuses, read off the wire rather than off a page.
@@ -1623,8 +1736,13 @@ through before trusting this unattended:
 
   **Whether the event reaches the two places it is supposed to.** The emit is on
   the same path as `tool_error` and the rendering is a case in the same switch,
-  so both are ordinary — but neither has been watched. With a policy in place,
-  start a run whose first command the policy refuses and confirm both:
+  so both are ordinary — but neither has been watched, and the one chance this
+  install had at it went by: across the thirteen-hour window above, `run_events`
+  took 484 `tool_error` rows and **zero** `sandbox` rows. That is a matcher with
+  no `bwrap:` needle in it at the time rather than an emit path that failed, and
+  the three needles are what closes it *next* time — but no `sandbox` row has
+  ever been written by anything. With a policy in place, start a run whose first
+  command the policy refuses and confirm both:
 
   ```sh
   docker compose logs usagefoundry | grep run.sandbox_refusal   # one JSON line
@@ -1637,12 +1755,21 @@ through before trusting this unattended:
   than instead of it.
 
   **The image's three sandbox dependencies, the generated policy and the
-  seccomp profile — none of it built, started or applied.** The image now
-  carries `bubblewrap` and `socat` on the apt line and
-  `@anthropic-ai/sandbox-runtime` pinned beside the CLI;
+  seccomp profile — built, started and applied at last, and still not one
+  confined tool call.** The image now carries `bubblewrap` and `socat` on the
+  apt line and `@anthropic-ai/sandbox-runtime` pinned beside the CLI;
   `docker-entrypoint.sh` writes `/etc/claude-code/managed-settings.json` when
   `UF_SANDBOX=1`; `docker-compose.yml` carries a commented `security_opt` line
-  and `uf-seccomp.json` beside it. What was checked here is what could be:
+  and `uf-seccomp.json` beside it. What is measured, all of it on 2026-08-18/19
+  and all of it in *Verified* above: the image builds and boots with
+  `UF_SANDBOX=1`, the policy file is written correctly, both binaries are
+  present and executable (the CLI's own `access(X_OK)` probe passing is what
+  says so), the profile is accepted by a real daemon and lets `bwrap` build a
+  namespace, and the CLI does wrap `Bash` in one. What is **not** measured is
+  any of it working together: every `bwrap` this app has caused to run exited 1
+  without executing anything, so no policy has confined a tool call, no
+  allowlist has been consulted by a kernel, and the reporting above is still
+  unexercised. What was checked before any of that, and is what could be:
   `npm run typecheck`, `npm test` and `next build` pass, `sh -n` and `dash -n`
   accept the entrypoint, the policy generator was lifted out and run under
   `dash` against a temporary directory once per branch it has — off, on,
@@ -1650,20 +1777,27 @@ through before trusting this unattended:
   the removal on the way back down — and `@anthropic-ai/sandbox-runtime@0.0.71`'s
   published tarball really does carry `vendor/seccomp/arm64/apply-seccomp` and
   `.../x64/apply-seccomp`.
-  **Docker is not available in the container this was written in** — no
-  `docker` binary, no `/var/run/docker.sock`, `apt-get` needs a root this had
-  not got, and `unshare --user` answers `Operation not permitted` — so the
-  image was never built, the container never started, and no `bwrap` has ever
-  run. Every command below is for a human and **none of them has been run**; the
-  entry below on the CLI's own sandbox carries `scripts/sandbox-probe/`, which
-  runs the sketch's questions 0-8 outside this app's own wiring:
+  **Docker was not available in the container this section was written in** — no
+  `docker` binary, no `/var/run/docker.sock`, `apt-get` needing a root it had
+  not got, and `unshare --user` answering `Operation not permitted` — which is
+  why it stood unexecuted as long as it did. Two of the commands below now have
+  answers and are marked with them; **the rest have not been run**, and neither
+  has anything in `scripts/sandbox-probe/`, which the entry below on the CLI's
+  own sandbox carries and which runs the sketch's questions 0-8 outside this
+  app's own wiring:
 
   ```sh
   # 0. are the two apt packages installable in this image at all? Dockerfile:92
   #    removes the apt lists, so this could not be answered from inside one.
+  #    ANSWERED 2026-08-19: yes — both are in the shipped image and executable,
+  #    which is what the CLI's own access(X_OK) probe passing establishes.
   apt-get update && apt-cache policy bubblewrap socat
 
   # 1. does bubblewrap work under the relaxed profile? (uncomment security_opt)
+  #    ANSWERED 2026-08-19, both uids: BWRAP-BLOCKED without the profile,
+  #    BWRAP-OK with it, on Engine 29.7.2 / kernel 6.12.76-linuxkit. `--proc
+  #    /proc` still fails under it, which is what enableWeakerNestedSandbox is
+  #    for — see Verified.
   docker compose exec usagefoundry \
     bwrap --unshare-user --ro-bind / / --dev /dev true && echo BWRAP-OK
 
@@ -1700,8 +1834,13 @@ through before trusting this unattended:
   because a sandbox nothing was asked of is not one that failed. The policy
   generated here always names a `credentials.files` deny and two `denyRead`
   paths, both of which feed that second term, so on this reading it can never
-  short-circuit; that reading is `strings` on one build and has been executed
-  never. Confirm from the outside rather than by re-reading the binary:
+  short-circuit. **Narrowed on 2026-08-19 and not closed**: through the failure
+  in *Verified*, every `Bash` call came back as `bwrap`'s own error, which is a
+  wrapper the CLI built rather than a command it handed back — so this policy
+  does not short-circuit on this build, at least for `Bash`. What that says
+  nothing about is the deny working, since no `bwrap` this app has caused ever
+  reached an `exec`. Confirm the rest from the outside rather than by re-reading
+  the binary:
 
   ```sh
   docker compose exec --user "${UF_UID:-1000}" usagefoundry \
@@ -1727,25 +1866,49 @@ through before trusting this unattended:
   schema documents `false`, the normaliser rewrites an enabled policy that
   omits it to `true`. All three are readings of one build.
 
-  **The seccomp profile has never been applied to a daemon.** `uf-seccomp.json`
-  is generated by `scripts/make-seccomp-profile.py` from Docker v28.5.2's own
-  default profile with six syscalls ungated — `clone`, `clone3`, `unshare`,
-  `mount`, `umount2`, `pivot_root` — and the three rules that exist only to
-  constrain `clone`/`clone3` for a container without `CAP_SYS_ADMIN` removed,
-  so the resulting filter does not depend on how libseccomp merges a narrow
-  rule with a wide one. That much is mechanical and was checked by re-reading
-  the generated file. What is unverified is everything after: that Docker
-  accepts the profile, that `bwrap` starts under it, that the six are enough
-  (bubblewrap 0.8 uses the classic mount API; a future one reaching for
-  `open_tree`/`move_mount` would fail loudly and need them added), and that
-  nothing else in the image needs a syscall this profile's *unmodified* rules
-  withhold. Regenerate against your own engine before trusting it:
-  `python3 scripts/make-seccomp-profile.py "v$(docker version --format '{{.Server.Version}}')"`.
+  **A fourth, added on 2026-08-19 and the newest of them.**
+  `enableWeakerNestedSandbox: true` is now written unconditionally, because the
+  argv shape the CLI builds without it cannot mount a procfs in this container.
+  What that rests on is in *Verified*: `bwrap` run by hand with each of the two
+  shapes read out of the binary. **No `claude` has ever read that key** — no
+  session has chosen a shape, no namespace has been built by the CLI, and the
+  name is honest about the price whenever one is: the sandboxed command sees
+  this container's `/proc`, so a sibling agent's processes are visible in it.
+
+  **The seccomp profile, applied to a daemon at last and still short of what it
+  is for.** `uf-seccomp.json` is generated by
+  `scripts/make-seccomp-profile.py` from Docker v28.5.2's own default profile
+  with six syscalls ungated — `clone`, `clone3`, `unshare`, `mount`, `umount2`,
+  `pivot_root` — and the three rules that exist only to constrain
+  `clone`/`clone3` for a container without `CAP_SYS_ADMIN` removed, so the
+  resulting filter does not depend on how libseccomp merges a narrow rule with a
+  wide one. That much is mechanical, was checked by re-reading the generated
+  file, and is now also byte-for-byte reproducible from that source (*Verified*).
+  Three of the four things that were unverified after it are now measured: Docker
+  accepts the profile and applies it as a narrowed filter rather than as
+  `unconfined`, `bwrap` starts under it at both uids, and the six are enough for
+  every operation the CLI's two argv shapes ask for **except** `--proc /proc` —
+  which ungating a seventh syscall would not fix, because `mount` is already
+  ungated here and the refusal comes from the kernel's `mount_too_revealing`
+  check over Docker's masked `/proc` rather than from the filter;
+  `enableWeakerNestedSandbox` is the way around it. What is still unverified:
+  that nothing *else* in the image needs a syscall this profile's *unmodified*
+  rules withhold, since nothing but `bwrap` and a boot have been exercised under
+  it; and the forward case, a bubblewrap reaching for `open_tree`/`move_mount`
+  instead of the classic mount API 0.8 uses, which would fail loudly and need
+  them added. One trap in the regeneration line, and it is measured: `python3
+  scripts/make-seccomp-profile.py "v$(docker version --format '{{.Server.Version}}')"`
+  **404s on any 29.x engine**, because moby publishes no `v29` tag. The shipped
+  file has to stay the newest tagged default until it does.
 
   **What the boot line and the Settings row say once there is something to
-  report.** Only the `none` reading has ever been rendered, which is every stock
-  install and is why it is the one that had to be right. The other three are
-  reasoning: `docker compose logs usagefoundry | grep '\] sandbox:'` should
+  report.** Only the `none` reading has ever been *read*, which is every stock
+  install and is why it is the one that had to be right. An install with
+  `/etc/claude-code/managed-settings.json` present has since run for thirteen
+  hours (*Verified*), so the other readings were reachable — but nobody recorded
+  what its boot line or its Settings row said, which leaves this exactly as
+  unmeasured as it was and is the cheapest of the gaps here to close. The other
+  three are reasoning: `docker compose logs usagefoundry | grep '\] sandbox:'` should
   change wording as soon as `/etc/claude-code/managed-settings.json` exists, an
   `{"sandbox":{"enabled":true}}` with nothing under it should read **enabled but
   empty** on Settings rather than on, and a file that is present and unparsable
@@ -1768,13 +1931,13 @@ through before trusting this unattended:
   metering case and the reviewer's, and naming the checkout *store* instead of
   the checkout fails the sibling case.
 
-  What has **not** happened is any of it against a sandbox. No `--settings`
-  overlay has ever reached a running CLI, no `bwrap` has ever started here, and
-  the run this was written in could not have started one: no `docker` binary, no
-  `/var/run/docker.sock`, and `unshare --user` answers `Operation not
-  permitted`. So the by-hand check that `09-implementation-sketch.md` asks for —
-  two concurrent runs, A asked to write into B's checkout, the tool call fails —
-  is **unrun**, and these are its commands:
+  What has **not** happened is any of it against a sandbox that ran. No
+  `--settings` overlay has ever confined anything: the only `bwrap` processes
+  this app has ever caused are the ones in *Verified* that exited 1 before
+  executing a command, and the ones run by hand outside it. So the by-hand check
+  that `09-implementation-sketch.md` asks for — two concurrent runs, A asked to
+  write into B's checkout, the tool call fails — is **unrun**, and these are its
+  commands:
 
   ```sh
   # With UF_SANDBOX=1, the security_opt line uncommented, and the image built.
@@ -1835,14 +1998,54 @@ through before trusting this unattended:
   the argv *merges* with `/etc/claude-code/managed-settings.json` rather than
   standing in for other sources — read out of the binary's source list
   (`flagSettings` beside `userSettings` and the managed file), never executed.
-  Whether the write set is wide enough for a cycle to *work*: it names the
-  checkout, the repository's `.git` and the config directory and nothing else, so
-  `/tmp`, `~/.npm` and `$GOPATH` are outside it, and the binary binds `/`
-  read-only and rw-binds only the allow set once any write config exists — a
-  first `npm install` or `go build` is where that fails, inside a tool call, and
-  it is the first thing to run after the sibling check above. And whether the
-  overlay's paths survive a rename: they are the row's own recorded paths, so a
+  Whether the write set is wide enough for a cycle to *work*. It named the
+  checkout, the repository's `.git` and the config directory and nothing else,
+  which left `/tmp`, `$HOME/.npm` and `$GOPATH` outside it; all three are in it
+  as of 2026-08-19 — `/tmp` for every child, beside `CLAUDE_CONFIG_DIR`, because
+  the CLI writes its shell snapshots and temporary files there and a child that
+  cannot write it has a `Bash` tool failing for a reason unrelated to the task;
+  the two caches for the two children that build, the work cycle and the
+  conflict resolver. **That is an argument about where a toolchain writes, not a
+  measurement**: no `npm install` and no `go build` has ever run inside a
+  sandbox that started, the binary still binds `/` read-only and rw-binds only
+  the allow set once any write config exists, and a set that is still too narrow
+  shows up the same way it would have before — inside a tool call, in a run the
+  loop reads as ordinary work. It remains the first thing to run after the
+  sibling check above. And whether the overlay's paths survive a rename: they
+  are the row's own recorded paths, so a
   checkout moved underneath a live run would be confined to where it used to be.
+
+- **`SEARCH_TOOLS` on a real spawn from this app.** That naming `Grep` and
+  `Glob` on `--allowedTools` puts both back in the tool list is measured
+  (*Verified*) — on **one `system:init` event in a throwaway container**, with
+  no other flag on the argv, and that is the whole of it.
+  `src/lib/orchestrator.ts` now carries them on one `--allowedTools` at every
+  `claude` spawn: `buildArgs` after `ISOLATED_GIT_TOOLS`, `review.ts`'s
+  `spawnAssist` before the operator's list, and `chat.ts`. `npm run typecheck`
+  passes and the argv is unit-tested in `orchestrator.test.ts`. Four things
+  nobody has watched, each of which is an argv that throwaway container did not
+  run. Whether a **mixed** list — two `Bash(git …:*)` grants and two tool names
+  on one flag — still opts the search tools in and still grants the two
+  commands, which is the isolated work cycle's argv and the one the git grant
+  was measured without. Whether `--permission-mode plan`
+  offers them at all, which is the reviewer's. Whether they appear in a
+  `bypassPermissions` chat turn, where the flag has no prompt to skip and is
+  there purely for the opt-in. And whether `--resume` keeps them at cycle 2, the
+  way `--plugin-dir` does not — it is on every cycle's argv either way, so a
+  drop would be invisible rather than harmful. The cheap check is the
+  `system:init` event of any real run, which is where the 469 above were
+  counted:
+
+  ```sh
+  sqlite3 "$DATA_DIR/usagefoundry.db" \
+    "SELECT payload FROM run_events
+       WHERE kind='log' AND payload LIKE '%system:init%'
+       ORDER BY id DESC LIMIT 1;" | grep -c Grep
+  ```
+
+  One thing this deliberately does not claim: the removal of `spawnAssist`'s
+  emptiness guard is safe because the list can no longer be empty, which is a
+  statement about this codebase and not about the CLI.
 
 - **Root-owning `~/.claude`, which no container has ever done and which changes
   a directory on the operator's own host.** `UF_LOCK_CLAUDE_HOME=1` makes
@@ -2004,18 +2207,21 @@ through before trusting this unattended:
   close a hole nobody has shown is open. `policy-limits.json` was not traced at
   all. Both are worth an hour against a live binary before anyone calls the
   policy surface closed.
-- **The CLI's own sandbox — every claim about it, none of them executed.**
-  `proposals/Sandboxing/02x-option-cli-sandbox.md` establishes that the pinned
-  CLI (2.1.226) implements a bubblewrap sandbox configured by `sandbox.*`
+- **The CLI's own sandbox — read out of the binary, and executed in exactly two
+  places.** `proposals/Sandboxing/02x-option-cli-sandbox.md` establishes that the
+  pinned CLI (2.1.226) implements a bubblewrap sandbox configured by `sandbox.*`
   settings keys, and `08-recommendation.md` recommends adopting it. All of that
-  was read out of the binary's strings with `strings`, and **not one line of it
-  has been run** — several runs have now written about the mechanism without
-  starting one, every one of them in an environment with no Docker, no root and a
-  seccomp profile that refuses `unshare --user` outright, which is the first
-  thing that would have to change. No stock install enables a sandbox either:
-  `UF_SANDBOX=1` is opt-in and off unless the operator sets it. What depends on
-  these answers is the wiring in the entries above, none of which has ever met a
-  running sandbox, and whatever gets built after that.
+  was read out of the binary's strings with `strings`, and until 2026-08-19 not
+  one line of it had been run. What has been run since is narrow, is in
+  *Verified* above, and is two things: `bwrap` itself, with and without the
+  seccomp profile and with each of the two argv shapes the binary contains; and
+  one install that ran thirteen hours with `UF_SANDBOX=1` and a sandbox that
+  never started. **No `claude` has ever completed work inside a sandbox that
+  started.** No policy has confined a tool call here, the network allowlist and
+  the credential deny have never been exercised at all, and what depends on
+  those answers is the wiring in the entries above and whatever gets built after
+  it. No stock install enables a sandbox either: `UF_SANDBOX=1` is opt-in and
+  off unless the operator sets it.
 
   The harness is `scripts/sandbox-probe/` — a throwaway image on the same base
   and the same CLI pin, a seccomp profile that is Docker's default plus user
@@ -2026,29 +2232,42 @@ through before trusting this unattended:
   and 5 are billed. Its own answer logic is exercised against stubs by
   `scripts/sandbox-probe/probe.test.sh` (37 assertions, no Docker and no
   money) — which measures the harness and says nothing about the CLI.
+  **Nothing in that directory has been run against a container**, and one of its
+  questions is now known to be under-specified: `probe.sh:521` gives Q2 two
+  outcomes, `REFUSED` and `RAN-UNSANDBOXED`, and production showed a third — a
+  session that starts, reports nothing, and fails every command inside a `bwrap`
+  that exited first. The probe cannot reach it, because it asks Q2 in an image
+  with **no** bubblewrap, which is the one kind of unavailability the CLI's
+  `access(X_OK)` check does detect. An installed `bwrap` the kernel refuses
+  reads to that check as available.
 
-  **Nothing below has been measured.** Fill it in from the script's last block,
-  and record the CLI, bubblewrap and kernel versions it prints with it:
+  **Three rows below are answered, none of them by this script**, and the rest
+  are not. Fill those in from the script's last block, and record the CLI,
+  bubblewrap and kernel versions it prints with them:
 
   | Question | Answer | Recorded |
   |---|---|---|
-  | Q0 — are `bubblewrap` and `socat` installable in this image? | *(unmeasured)* | |
-  | Q1 — does bubblewrap start under the relaxed profile? | *(unmeasured)* | |
-  | Q2 — does the CLI refuse to start when it cannot sandbox? | *(unmeasured)* | |
-  | Q3 — is the sandbox around the session or only around Bash? | *(unmeasured)* | |
+  | Q0 — are `bubblewrap` and `socat` installable in this image? | **Yes** — both ship in the image and are executable | 2026-08-19, this install; inferred from the CLI's own `access(X_OK)` probe passing |
+  | Q1 — does bubblewrap start under the relaxed profile? | **BWRAP-BLOCKED** without `security_opt`, at both uids; **BWRAP-OK** with `uf-seccomp.json`. `--proc /proc` fails either way | 2026-08-19, Engine 29.7.2 / kernel 6.12.76-linuxkit |
+  | Q2 — does the CLI refuse to start when it cannot sandbox? | **Neither refused nor unsandboxed** — it starts, reports nothing, and every `Bash` call dies inside `bwrap`; `failIfUnavailable` never fires | 2026-08-18/19, production, 170 failed calls across 8 runs |
+  | Q3 — is the sandbox around the session or only around Bash? | *(unmeasured — narrowed on one side: `Bash` is wrapped, `Edit`/`Write` unknown)* | |
   | Q4 — does a credentials deny entry stop a shell reading the token? | *(unmeasured)* | |
   | Q5 — does a user-settings write widen a managed policy? | *(unmeasured)* | |
   | Q6 — what does one sandboxed command cost in tasks? | *(unmeasured)* | |
   | Q7 — does the CLI's sandbox unshare PID? | *(unmeasured)* | |
   | Q8a — which bubblewrap, and does it carry `--tmp-overlay`? | *(unmeasured)* | |
-  | Q8b — does `--unshare-pid` plus `--tmp-overlay` work here? | *(unmeasured)* | |
+  | Q8b — does `--unshare-pid` plus `--tmp-overlay` work here? | *(unmeasured — narrowed: `--unshare-pid` alone exits 0 under the profile; `--tmp-overlay` has never been tried)* | |
   | Q8c — does one bubblewrap start inside another? | *(unmeasured)* | |
   | Q8d — does the CLI's own bubblewrap start inside one we started? | *(unmeasured)* | |
 
   Q3 and Q8d are the two that decide the shape rather than refine it: together
   they say whether the vendor's sandbox stands alone, is replaced by a wrapper
   this app puts around the whole `claude` process, or composes with one. The
-  others each move a phase of the plan; RUNBOOK.md's table says which.
+  others each move a phase of the plan; RUNBOOK.md's table says which. The three
+  answered rows do not make the script redundant: Q8a is the one thing above
+  that nothing has recorded — nobody has read the bubblewrap version this image
+  actually carries — and the script prints it beside every other answer, which is
+  what makes a re-reading of this table possible on the next pin.
 
 - **Whether a real agent uses the `NEEDS_REVIEW` sentinel when it should, and
   withholds it when it should not.** The `needs-review` ending is decided

@@ -144,19 +144,59 @@ app's own master credential and an organisation-wide Admin key, neither of which
 has anything to do with the task the agent was given — are no longer reachable.
 
 There is now a switch that reaches the first of the five, and it is **off, and
-unproven**. `UF_SANDBOX=1` (see `.env.example`) has the container write a
+barely proven**. `UF_SANDBOX=1` (see `.env.example`) has the container write a
 root-owned policy that puts each of an agent's commands inside Claude Code's own
 bubblewrap namespace, with a deny over `~/.claude/.credentials.json` — the first
 mechanism here that makes a `cat` of your token fail inside a run while the
 session still bills — plus a read deny over `/data` and `/backups` and, if you
-name domains, an egress allowlist. It needs the `security_opt` block in
-`docker-compose.yml` uncommented, since bubblewrap cannot start under Docker's
-default seccomp profile. Two things it is not. It does **not** close the third
-bullet above: the policy is install-wide and names no per-run paths, so a run can
-still write a concurrent run's checkout. And nothing about it has ever been
-executed on this project — the mechanism was read out of the pinned CLI binary,
-so turning it on is an experiment you are running rather than a control you are
-enabling. `docs/verification.md` carries every step that would settle it.
+name domains, an egress allowlist.
+
+Switching it on is two things on the host and one that happens for you. It needs
+the `security_opt` block from `docker-compose.yml` — best placed in a
+`docker-compose.override.yml`, which compose merges automatically — because
+bubblewrap cannot create a namespace under Docker's default seccomp profile.
+With that profile applied it can, at both uids, measured against this image. The
+profile is still not sufficient: Docker masks parts of `/proc`, and the CLI's
+default bubblewrap shape mounts a fresh procfs, which the kernel then refuses —
+as root as well. So the entrypoint writes `enableWeakerNestedSandbox` into the
+managed policy unconditionally, switching the CLI to binding the existing
+`/proc`. That is the half you do not configure, and the CLI's name for it is
+honest: a sandboxed command sees this container's `/proc`, so a sibling agent's
+processes are visible in it — a boundary this container never had anyway, since
+every agent here is one uid. `docs/install.md` has the procedure.
+
+**A sandbox reported as "on" is not a sandbox that is working, and the gap is
+not theoretical.** The boot line (`sandbox: on — …`) and **Settings → Sandbox**
+both read the managed policy file: they say what is *configured*. Whether
+bubblewrap can build a namespace is a property of a process, and the CLI does
+not check that either — its availability probe asks only whether `bwrap` and
+`socat` exist and are executable, never runs one, so `failIfUnavailable`, which
+is what `UF_SANDBOX_ENFORCEMENT=refuse` sets, never fires against a bubblewrap
+the kernel refuses. Every `Bash` call is instead wrapped in a program that exits
+1 before the command runs. On this install that lasted thirteen hours: eight
+runs, 170 failed `Bash` calls, at least $210 of spend, and nothing in
+`run_events` naming a cause — from the outside, agents that had stopped being
+productive. What surfaces it is a **`sandbox` row on the run's log**, under the
+`tool failed` row for the same call, reading "bubblewrap could not build the
+namespace the sandbox needs, so this command never ran". Look for it on the
+first run after switching this on. Its presence means nothing was executed; its
+absence is not evidence that anything was confined, because a policy denial
+comes back out of a mount namespace as an ordinary `EACCES` and this app
+deliberately does not claim those.
+
+Two things it is still not. It does **not** close the third bullet above: the
+policy is install-wide and names no per-run paths, so a run can still write a
+concurrent run's checkout. And **no work cycle has yet run under a
+sandbox that started here.** What has been executed against this image is
+bubblewrap itself and two `claude -p` calls: one ran a shell command through a
+live sandbox, and one was refused `.credentials.json` — a file the agent's own
+uid can otherwise read — which is the credential deny enforced rather than
+reported. Nothing more. The egress allowlist has never been exercised, no
+per-run write set has ever reached a live sandbox, and whether the set each
+child is given is wide enough for a real work cycle is reasoning rather than a
+measurement. Turning it on is an experiment you are
+running rather than a control you are enabling. `docs/verification.md` carries
+every step that would settle it.
 
 **And one more surface, which is a policy file rather than a path.**
 `~/.claude/settings.json` is one of the sources Claude Code merges a sandbox
