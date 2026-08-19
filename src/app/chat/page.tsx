@@ -292,25 +292,6 @@ export default function ChatPage() {
         return;
       }
       setChat(data.chat);
-      // Both routes answer with the list, so this lands on every poll. Still
-      // guarded: the body above is untrusted, and a payload without it must
-      // leave the sidebar as it was rather than emptying it.
-      if (data.chats) setChats(data.chats);
-      setPollError(null);
-    } catch (err) {
-      // `void load(id)` from an interval: without this the rejection is an
-      // unhandled one and, again, nothing on screen changes.
-      const cause = err instanceof Error ? err.message : String(err);
-      setPollError(pollFailureMessage(null, cause));
-    }
-  }, []);
-
-  useEffect(() => {
-    void load(null);
-  }, [load]);
-
-  // Once, and deliberately not on the poll: the registry changes when somebody
-  // edits it on another page, which is not something this composer has to track
       // A proposal this thread was holding can be decided somewhere this page
       // cannot see — another tab, another window — and its id then stays in
       // `selected` with no row left to untick. The route refuses it by id, so
@@ -333,6 +314,25 @@ export default function ChatPage() {
         const next = new Set([...prev].filter((id) => stillPending.has(id)));
         return next.size === prev.size ? prev : next;
       });
+      // Both routes answer with the list, so this lands on every poll. Still
+      // guarded: the body above is untrusted, and a payload without it must
+      // leave the sidebar as it was rather than emptying it.
+      if (data.chats) setChats(data.chats);
+      setPollError(null);
+    } catch (err) {
+      // `void load(id)` from an interval: without this the rejection is an
+      // unhandled one and, again, nothing on screen changes.
+      const cause = err instanceof Error ? err.message : String(err);
+      setPollError(pollFailureMessage(null, cause));
+    }
+  }, []);
+
+  useEffect(() => {
+    void load(null);
+  }, [load]);
+
+  // Once, and deliberately not on the poll: the registry changes when somebody
+  // edits it on another page, which is not something this composer has to track
   // between keystrokes. A failure is swallowed for the reason stated where the
   // state is declared — it costs a completion, and the door still decides.
   useEffect(() => {
@@ -1295,16 +1295,21 @@ function Proposal({
               <Icon name="folder" size="sm" />
               <span className="truncate">{folder}</span>
             </span>
+            {/* The one fact in this row that wraps rather than truncating, and
+                the folder beside it is why the difference is worth stating: a
+                press of Approve is approved against this guard set, so it is a
+                fact a decision is taken on — visible with no interaction, and
+                a hover title is not a way of reading it at all on touch. The
+                row already wraps, so the whole set costs a second line and
+                moves nothing. A folder path is context and may still be
+                clipped. */}
             <span
               className={`inline-flex min-w-0 max-w-full items-center gap-1 ${
                 GUARD_TONE[missing ? "missing" : "set"]
               }`}
-              title={proposal.guardsLabel}
             >
               <Icon name="guard" size="sm" />
-              <span className="truncate">
-                {missing ? "template deleted" : proposal.guardsLabel}
-              </span>
+              <span>{missing ? "template deleted" : proposal.guardsLabel}</span>
             </span>
             {/* Outside the guard mark and never inside it. The agent is what
                 the run will be *started as*, which is a larger fact than the
