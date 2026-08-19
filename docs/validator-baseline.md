@@ -7,6 +7,14 @@ the artefacts an external validator would have.
 
 It measures. It proposes nothing and changes no product code.
 
+> **An offline spike has since run against these labels**, and it is the reason
+> parts of this document carry corrections rather than only their original text.
+> [`scripts/validator-spike/RESULT.md`](../scripts/validator-spike/RESULT.md) is
+> its reading; the pitch it feeds is
+> [`external-validator.md`](external-validator.md). Nothing shipped —
+> `AssistKind` is still `"review" | "resolve"` (`src/lib/review.ts:51`) and no
+> run is validated today.
+
 ---
 
 ## 1. What could not be reached, first

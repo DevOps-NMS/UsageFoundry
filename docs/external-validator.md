@@ -3,11 +3,22 @@
 **One-liner:** a cheap, adversarial second reading of a finished run — task text
 against branch diff — that says *did the work happen*, *it did not*, or *I cannot
 tell*, and does nothing else.
-**Appetite:** two weeks, one person · **Status:** draft · **Date:** 2026-08-19
+**Appetite:** two weeks, one person · **Status:** draft; the offline spike this
+document asks for in M1 has since been run and scored · **Date:** 2026-08-19
 
 Shaped against the measurement in [`validator-baseline.md`](validator-baseline.md),
 which is on this branch and is the input every number below rests on. Read its §4
 and §5 before this. Nothing here is product code and nothing here proposes any.
+
+> **Nothing shipped, and one milestone has run.** No run is validated today:
+> `AssistKind` is still `"review" | "resolve"` (`src/lib/review.ts:51`), there is
+> no validator on the assist path, and nothing in this document reached the
+> product. What *does* exist is an offline harness —
+> [`scripts/validator-spike/`](../scripts/validator-spike/), whose reading is
+> [`RESULT.md`](../scripts/validator-spike/RESULT.md) — which put a model over
+> the labelled set and scored it. Several statements below were written before
+> that existed and are marked where the spike overtook them; where this document
+> and `RESULT.md` disagree, `RESULT.md` is the measurement.
 
 ---
 
@@ -427,6 +438,17 @@ until it lands. And the trivial validator — always answer `did-the-work` — s
 agreement is deliberately **not** a criterion here and detection, false alarm and
 `cannot-tell` honesty are three separate rows.
 
+**Three of these rows now have a reading, from the offline spike rather than from
+M1.** [`scripts/validator-spike/RESULT.md`](../scripts/validator-spike/RESULT.md)
+scored the current labelled set, not the expanded one, so nothing below is a
+criterion met — but the *Baseline today* column is no longer "nothing exists".
+False alarm: 0 of 29 held-out, 1 of 30 all-in, against a ≤ 6% target. Honesty
+about the ceiling: 5 of 7, against a ≥ 5 of 7 target. Cost: median $0.125 per
+verdict measured on an upper-bound transport, against runs costing dollars.
+**Detection is the one that still rests on n = 2** — both `not-done` rows were
+called `not-finished`, and one of them is held out, so the held-out detection
+figure is one example. That is exactly the caveat above, unmoved.
+
 ---
 
 ## 9. Goals and non-goals
@@ -646,15 +668,48 @@ Five, each answerable with "defaults are fine".
 
 ## What could not be settled by reading
 
-- **Whether a model can actually do this job.** Every number in §8 is a target,
-  not a measurement. Nothing in this repository can measure a validator that does
-  not exist, which is what M1 is for.
-- **What a validation costs or how long it takes.** No recorded review latency or
-  cost figure exists anywhere in this repository — `docs/verification.md:1511-1515`
-  states that **no real `claude` has ever been run through the assist path**; the
-  spawn, the flags and the accounting were exercised against a stub. The 10-minute
-  timeout is the only bound that exists, and it is a ceiling rather than an
-  expectation.
+Two of the entries that stood here have since been settled by the spike, and are
+kept with what it returned rather than deleted — the original claim is what a
+reader who remembers this section will be looking for.
+
+- **~~Whether a model can actually do this job.~~ Measured offline, once.** The
+  claim here was that nothing in this repository can measure a validator that does
+  not exist. `scripts/validator-spike/` is that measurement: **34 of 37 (91.9%)
+  agreement** on the held-out set, 35/40 all-in, against **29 of 37 (78.4%)** for
+  a trivial validator that always answers `finished`; **zero false-finished**, 5
+  of 7 known-`unjudgeable` rows answered `unjudgeable`, and 40 of 40 verdicts
+  parsed. §8's numbers are still targets — that table is scored against an
+  *expanded* label set M0 has not built — but "a model cannot be measured here"
+  is no longer true.
+- **~~What a validation costs or how long it takes.~~ One measured figure and one
+  modelled one.** `RESULT.md` records **median $0.125 per verdict** ($5.27 for
+  40) and **median 49.5 s** wall clock (11.9 – 108.0 s). The dollar figure is an
+  upper bound: it prices the harness's own subagent transport, which re-sends the
+  prompt once per turn and carries its own system prompt and tool schemas.
+  `RESULT.md` also models **≈$0.04** for what `validate.mjs --transport api`
+  would bill — that one is arithmetic over the median prompt, not a measurement,
+  because no API key was reachable. Either way §8's cost guardrail (median
+  validation ≤ 10% of the run it validates) clears comfortably against runs that
+  cost dollars each. The 10-minute assist timeout is still the only *enforced*
+  bound.
+
+What the spike did **not** settle, and what therefore still stands here:
+
+- **Whether a real `claude` under the pinned CLI answers the same way.** The 40
+  requests went through the harness's subagent path — same prompt bytes and model
+  family, different system prompt and a tool loop around it — not through
+  `validate.mjs --transport api` and not through `spawnAssist`.
+  `docs/verification.md` still records that **no real `claude` has been run
+  through the assist path**; the spawn, the flags and the accounting were
+  exercised against a stub.
+- **Repeatability.** Every case was judged once, so none of the figures above
+  carries a variance.
+- **Anything outside the sampled stratum.** The labelled set is 40 `completed`
+  runs on isolated branches; non-isolated runs and `failed` / `blocked` /
+  `cancelled` ones were not looked at, and testimony was only tried on the eight
+  empty-diff cases.
+- **Whether any of the work is correct.** Every `finished` verdict means the
+  change asked for is present, never that it works.
 - **The population shape.** `runs.origin`, `status` and `spent_usd` were
   unavailable to the measurement run (`/data` is masked in the agent sandbox by
   the same invariant that makes it safe), so how many finished runs are isolated,
