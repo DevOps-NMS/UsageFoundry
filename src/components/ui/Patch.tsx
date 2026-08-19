@@ -153,6 +153,12 @@ export function DiffFileRow({ file }: { file: DiffFileDTO }) {
       //
       // `--control-h` for the pointer, because `Disclosure` states only the
       // finger's target and leaves the desktop box to the row it is in.
+      //
+      // `flex` is the one thing here that costs something: it replaces the
+      // `list-item` display the disclosure triangle is drawn by, so this row
+      // says it opens with the pointer and the hover fill and not with a
+      // marker. Four spans that have to sit on one line and share the width
+      // is what buys it.
       summaryClassName="sticky top-0 z-10 -mx-1 flex min-h-[var(--control-h)] flex-wrap items-center gap-2 rounded-sm bg-surface px-1 text-sm hover:bg-inset"
       summary={
         <>
