@@ -2238,6 +2238,49 @@ export async function checkoutStores(
 }
 
 /**
+ * One branch's runs in chain order, oldest first.
+ *
+ * Ordered by how far down the `continuesRun` links a run sits, rather than by
+ * the order the query handed them over. That order is `created_at DESC`, and a
+ * chain is written in a single synchronous pass — `createRun` runs from entry to
+ * INSERT with no await, and a workflow instantiates its whole graph that way —
+ * so two links routinely share a millisecond and which of them comes back first
+ * is then whatever the sort felt like. `nextQueuedIn` needed `batch_id` for the
+ * same collision; here no tiebreak would do, because the true order *is* the
+ * links. Reading it off them is what stops the wrong link being named the
+ * branch's owner, and that failure does not degrade gracefully: the row this
+ * page keeps then refuses to land, naming an owner whose row it never listed,
+ * and the branch has no route in the UI that reaches it at all.
+ *
+ * Depth rather than a walk from the head, because it is total. A member whose
+ * predecessor is not in the group — purged out from under it, or never on this
+ * branch — is depth 0 beside the real first link instead of derailing the walk,
+ * and a hand-edited row that made a chain a cycle stops at its own `seen` set
+ * and keeps the arrival order this replaced. Equal depths keep that order too,
+ * which is why the base is reversed first: for everything the links cannot
+ * separate, oldest-first is still the best reading available.
+ */
+function chainOrder<T extends BranchCandidate>(held: readonly T[]): T[] {
+  const byId = new Map(held.map((r) => [r.id, r]));
+  const depth = new Map<string, number>();
+  for (const run of held) {
+    const seen = new Set<string>([run.id]);
+    let links = 0;
+    for (let up = run; up.continuesRun; ) {
+      const prev = byId.get(up.continuesRun);
+      if (!prev || seen.has(prev.id)) break;
+      seen.add(prev.id);
+      links++;
+      up = prev;
+    }
+    depth.set(run.id, links);
+  }
+  return [...held]
+    .reverse()
+    .sort((a, b) => depth.get(a.id)! - depth.get(b.id)!);
+}
+
+/**
  * One row per branch, not one per run that has held it.
  *
  * A chain of runs extending each other shares a ref, and this page is a list of
@@ -2248,8 +2291,8 @@ export async function checkoutStores(
  * failure `landRefusal` exists to stop.
  *
  * The row kept is `branchOwner`'s, so the page and the Land button agree about
- * which run answers for the branch. Runs come newest-first, hence the reverse
- * before the decision — `branchOwner` reads a chain oldest-first.
+ * which run answers for the branch — see `chainOrder` for where that order
+ * comes from, which is not the order the runs arrive in.
  *
  * A `waiting` link is missing from this list entirely (its branch is null until
  * it is released), so a row can look landable while a run is queued up behind
@@ -2272,9 +2315,11 @@ function oneRunPerBranch<T extends BranchCandidate>(runs: readonly T[]): T[] {
       kept.push(held[0]);
       continue;
     }
-    const chain = [...held]
-      .reverse()
-      .map((r) => ({ runId: r.id, status: r.status, iterations: r.iterations }));
+    const chain = chainOrder(held).map((r) => ({
+      runId: r.id,
+      status: r.status,
+      iterations: r.iterations,
+    }));
     const owner = branchOwner(chain);
     kept.push(held.find((r) => r.id === owner) ?? held[0]);
   }
@@ -2288,6 +2333,8 @@ export interface BranchCandidate {
   iterations: number;
   repoRoot: string;
   branch: string;
+  /** `runs.continues_run` — the link `chainOrder` reads. Null for a first link. */
+  continuesRun: string | null;
 }
 
 /** Which slice of the inventory a caller is asking for. */
@@ -2384,7 +2431,8 @@ function branchBearingRuns(): Array<BranchCandidate & { createdAt: number }> {
   return db()
     .prepare(
       `SELECT id, status, iterations, repo_root AS repoRoot,
-              worktree_branch AS branch, created_at AS createdAt
+              worktree_branch AS branch, continues_run AS continuesRun,
+              created_at AS createdAt
          FROM runs
         WHERE isolation = 'worktree'
           AND worktree_branch IS NOT NULL

@@ -733,7 +733,8 @@ describe("selectBranchCandidates", () => {
     branch: string,
     status: import("./land").BranchCandidate["status"] = "completed",
     iterations = 1,
-  ) => ({ id, status, iterations, repoRoot, branch });
+    continuesRun: string | null = null,
+  ) => ({ id, status, iterations, repoRoot, branch, continuesRun });
 
   /** N branches in one repository, newest first. */
   const many = (repoRoot: string, n: number, from = 0) =>
@@ -810,8 +811,8 @@ describe("selectBranchCandidates", () => {
     // not consume three rows of somebody's page, and the row kept is the
     // chain's owner so the page and the Land button agree.
     const runs = [
-      run("c3", "/w/a", "uf/chain"),
-      run("c2", "/w/a", "uf/chain"),
+      run("c3", "/w/a", "uf/chain", "completed", 1, "c2"),
+      run("c2", "/w/a", "uf/chain", "completed", 1, "c1"),
       run("c1", "/w/a", "uf/chain"),
       run("solo", "/w/a", "uf/solo"),
     ];
@@ -821,9 +822,55 @@ describe("selectBranchCandidates", () => {
       sel.examined.map((r) => r.branch),
       ["uf/chain", "uf/solo"],
     );
-    // Oldest-first is the chain order, so the last link owns it.
+    // The last link down the chain owns it.
     assert.equal(sel.examined[0].id, "c3");
     assert.deepEqual(sel.repos, [{ repoRoot: "/w/a", branches: 2 }]);
+  });
+
+  it("reads a chain's order off its links, not off the order it arrives in", () => {
+    // The defect, and it made a branch unlandable rather than untidy. Runs
+    // arrive `created_at DESC`, and a chain is created in one synchronous pass,
+    // so two links share a millisecond and come back in whatever order the sort
+    // settled on — here c2 ahead of c3. Reversing that made c2 the owner, the
+    // page kept c2's row, and pressing Land on it refused: `landRun` builds the
+    // chain from `continues_run`, correctly names c3, and c3 had no row on the
+    // page to press. Nothing threw, and the branch had no route in the UI.
+    const tied = [
+      run("c2", "/w/a", "uf/chain", "completed", 1, "c1"),
+      run("c3", "/w/a", "uf/chain", "completed", 2, "c2"),
+      run("c1", "/w/a", "uf/chain"),
+    ];
+    assert.equal(selectBranchCandidates(tied).examined[0].id, "c3");
+
+    // And the same three links in every other arrival order still name c3.
+    for (const order of [
+      ["c1", "c2", "c3"],
+      ["c1", "c3", "c2"],
+      ["c2", "c1", "c3"],
+      ["c3", "c1", "c2"],
+      ["c3", "c2", "c1"],
+    ]) {
+      const runs = order.map((id) => tied.find((r) => r.id === id)!);
+      assert.equal(
+        selectBranchCandidates(runs).examined[0].id,
+        "c3",
+        `arrival order ${order.join(",")}`,
+      );
+    }
+  });
+
+  it("does not let a link with no findable predecessor own the branch", () => {
+    // A run whose predecessor was purged is on the branch and sits at the top
+    // of no chain. Ranking it beside the real first link keeps the run that
+    // actually carries the work — c2 — as the owner; ranking it last would
+    // hand the branch to a run with nothing behind it, which is the same
+    // dead end from the other direction.
+    const runs = [
+      run("orphan", "/w/a", "uf/chain", "completed", 1, "gone"),
+      run("c2", "/w/a", "uf/chain", "completed", 1, "c1"),
+      run("c1", "/w/a", "uf/chain"),
+    ];
+    assert.equal(selectBranchCandidates(runs).examined[0].id, "c2");
   });
 
   it("keeps the per-request git cost bounded whatever is asked for", () => {
