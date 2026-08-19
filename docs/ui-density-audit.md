@@ -643,11 +643,12 @@ are not looking. Leave that group on screen.
 - **One Save.** §1.2 rule 9.
 - **The two sign-in `Sheet`s stay inside the row's `<dd>`** — `939939a` moved
   them there and a `<dl>` may hold only `dt`/`dd`/`div`.
-- **`conventions.md:21` is stale about this page** and run (b) fixes the doc,
-  not the code: the storage report is a `ListGroup`/`ListRow` (`:585-662`), not
-  a `Table`. The page's only `Table` is the calibration result (`:1859-1911`),
-  which has no `stack` and no `Td label`s — correct, because it is a
-  three-column suggestion table inside a fold, not a record.
+- **The calibration result table keeps no `stack` and no `Td label`s.** That is
+  correct rather than an oversight: it is a three-column suggestion table
+  (`Ceiling` / `Set now` / `Observed peak`), not a presentation of a record, and
+  after B3 it lives inside a fold. `conventions.md` used to name the *storage
+  report* as the settings page's un-stacked table; that sentence has already
+  been corrected — see §7 — so run (b) does not need to touch it.
 
 ### Every control, accounted for
 
@@ -1565,8 +1566,7 @@ migration is class-for-class.
 ### (b) `/settings`
 
 **Owns:** `src/app/settings/page.tsx`, `src/app/api/settings/route.ts`,
-`src/lib/settings.ts` (export `sameValue` only), and the one stale line in
-`docs/agent/conventions.md` about the storage report.
+`src/lib/settings.ts` (export `sameValue` only).
 
 **Spec:** §3.B. **Acceptance:** §3.B's list.
 
@@ -1959,11 +1959,15 @@ of a component would otherwise have to rediscover from here.
    land-strategy `select` to the kit `Select`, there is **one** — the chat
    composer. Run (e) makes that edit in the same commit as the conversion.
 
-Run (b) additionally fixes the stale sentence at `conventions.md`'s
-`Table`/`stack` paragraph: the settings page's storage report is a
-`ListGroup`/`ListRow`, not a `Table` without `stack`. The page's only `Table` is
-the calibration result.
+A fourth correction is **already made** by this document, because it depends on
+no code change: `conventions.md`'s `Table`/`stack` paragraph named "the settings
+page's storage report" as one of the three tables without `stack`. Measured —
+`grep -c '<Table[ >]'` is 20, `<Table stack` is 17 — the counts were right and
+one of the three names was not. The storage report is no longer a table at all
+(`settings/page.tsx:585-662` is a `ListGroup` of `ListRow`s); the settings
+page's one un-stacked `Table` is the **calibration suggestion table** at
+`:1859-1911`. The sentence now says so.
 
-Items 1 and 2 are written by this document (below, and in the same commit).
-Item 3 is run (e)'s and the storage-report correction is run (b)'s, because
-both have to land with the code they describe.
+Items 1 and 2 and that correction are written by this document. Item 3 is run
+(e)'s, because it has to land in the same commit as the conversion it
+describes.
