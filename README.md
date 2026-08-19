@@ -245,12 +245,17 @@ line**, beside the existing `[usagefoundry] …` prose:
 {"ts":"2026-08-14T09:12:03.114Z","level":"info","event":"run.cycle_finished","run_id":"…","subtype":"success","cost_usd":0.42,"duration_ms":183422}
 ```
 
-`run.status`, `run.cycle_started`, `run.cycle_finished`, `run.guard_tripped`,
-`run.error`, `sweep.failed`, `live_guard_tick.failed`, `boot.reconciled`,
-`http.mutation`. The
+Ten events in all: `run.status`, `run.cycle_started`, `run.cycle_finished`,
+`run.guard_tripped`, `run.error`, `run.sandbox_refusal`, `sweep.failed`,
+`live_guard_tick.failed`, `boot.reconciled`, `http.mutation`. The
 noisy kinds — the agent's own output, every tool call, every log line — are
 deliberately **not** on stdout; they are in `run_events` and on the run page,
-where they are readable. What is on stdout is projected field by field rather
+where they are readable. `run.sandbox_refusal` is the one tool failure that
+crosses that line, and it is there for the reason a tripped guard is: a policy
+that refuses the work fails *inside* tool calls, and at twenty-five unattended
+runs the run page is not where anyone finds that out. Filter it out and a
+sandbox refusing every agent's calls looks like runs that quietly do less work.
+What is on stdout is projected field by field rather
 than dumped, so no prompt text, folder path or credential reaches it.
 
 ### Who started what
