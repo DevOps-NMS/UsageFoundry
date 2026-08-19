@@ -79,11 +79,16 @@ const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** The list route returns this many; anything older is simply not on the wire. */
 const SERVER_LIMIT = 100;
 
-type Filter = "all" | "completed" | "stopped" | "failed" | "blocked";
+type Filter = "all" | "completed" | "needs-review" | "stopped" | "failed" | "blocked";
 
 const FILTERS: readonly SegmentedOption<Filter>[] = [
   { value: "all", label: "All" },
   { value: "completed", label: "Completed" },
+  // The segment is what makes this ending findable. `ACTIVE` correctly does not
+  // hold it, so the run drops into the history table already — but without a
+  // segment of its own the one state whose entire content is "a person should
+  // look at this" is reachable only under "All".
+  { value: "needs-review", label: "Needs review" },
   { value: "stopped", label: "Stopped" },
   { value: "failed", label: "Failed" },
   { value: "blocked", label: "Blocked" },

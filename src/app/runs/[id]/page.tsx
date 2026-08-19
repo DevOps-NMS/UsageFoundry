@@ -224,6 +224,17 @@ function describeRun(
             detail: "It will not start another work cycle on its own.",
           };
 
+    case "needs-review":
+      // Says what the state means and what to do about it, never what the agent
+      // said — that is rendered verbatim underneath, which is the contract on
+      // `RunState.detail` above.
+      return {
+        tone: "warn",
+        headline: "Needs review",
+        detail:
+          "Nothing failed. It reached something it could not get past on its own, and said so rather than spending more work cycles against it.",
+      };
+
     case "completed":
       if (run.reported_done) {
         return {
@@ -745,6 +756,10 @@ export default function RunDetail({
     run.status === "failed" ||
     run.status === "stopped" ||
     run.status === "completed" ||
+    // Mirrors `REOPENABLE`, and the mirror is silent: leaving it out would take
+    // the Resume button off the one page whose whole job is getting a run that
+    // asked for a person moving again, while `reopenRun` went on accepting it.
+    run.status === "needs-review" ||
     // Both shapes of `blocked`, mirroring `reopenRun`: the guard-refused kind is
     // the one whose whole fix is raising a limit and pressing this button.
     run.status === "blocked";
@@ -864,6 +879,17 @@ export default function RunDetail({
           <p className="mt-1 text-sm text-ink-muted">{state.detail}</p>
           {run.stop_reason && (
             <p className="mt-1 text-xs text-ink-muted">{run.stop_reason}</p>
+          )}
+          {/* The agent's own account of what stopped it, verbatim and clipped
+              only at the write. Gated on the column rather than on the status:
+              it is cleared by every other ending and by a pick-up, so its
+              presence already means this row records that ending.
+              `whitespace-pre-wrap` because the agent writes paragraphs and the
+              three facts it was asked for are usually on separate lines. */}
+          {run.needs_review_reason && (
+            <p className="mt-2 whitespace-pre-wrap border-l-2 border-l-warn pl-2 text-xs text-ink">
+              {run.needs_review_reason}
+            </p>
           )}
           {haltedWith && (
             <p className="mt-1 text-xs text-ink-muted">

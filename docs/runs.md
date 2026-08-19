@@ -111,6 +111,55 @@ the direction a ceiling should err in. The dashboard shows it as its own card,
 and hatched rather than empty when no limit is set. It ships off, because no
 single figure is right for both a laptop and a fleet.
 
+### When the agent cannot finish: Needs review
+
+A run that meets a wall it cannot pass ends as **Needs review**, and the point of
+that state is that you go and look.
+
+Until it existed, such a run had three futures and all of them were wrong. It
+spent the rest of its cycle cap restating the problem, because the prompt tells
+it that stopping without `DONE` buys another work cycle. Or it replied `DONE`
+anyway and finished green, beside runs that did the job. Or it ran out of cycles
+and finished green for that reason instead — indistinguishable on the list from
+the second. The cycle cap defaults to 1, so on a stock install almost every
+finished run takes the third route.
+
+The agent asks for this ending itself, by replying `NEEDS_REVIEW` on a line of
+its own, and it is told what the bar is: a credential that is not there, a
+permission it does not have, a decision that is not its to make, a repository or
+service it cannot reach — after it has actually tried and been stopped, never
+because the task is large or unclear. In the same reply it is asked to say what
+it was doing, what it tried, and exactly what stopped it. That reply is what the
+run's page shows under the state card, and it is the whole reason to have the
+state: a good one names a thing and a fix, and a bad one is recognisable as
+having tried nothing.
+
+It is **not** a failure. Nothing went wrong: a cycle ran, cost money, and
+produced a judgement. `failed` is where the machine broke — a crash, a non-zero
+exit, a provider refusal with its retries spent — and a wall the agent hit is
+none of those, so it wears the amber of something that needs attention rather
+than the red of something that faulted. It is not a `stopped` either, which means
+a person or a rule they configured decided; nobody decided this. And it is not
+`blocked`, which means refused before the first work cycle with nothing spent.
+
+The run is over: it releases its folder and its isolated checkout, anything
+queued behind it starts, and its branch is landable exactly as a finished run's
+is. A run told to start **only if this one succeeded** stays blocked, with a
+sentence naming the run in front of it; one told to start **once it has finished**
+starts. A loop block whose pass ends this way stops rather than handing the next
+pass the same wall.
+
+The one thing to know about chaining: a **merge block** behind an *on-finish*
+edge will land the branch of a run that asked for review, with nobody looking.
+That is not new — it already does so for a run that failed — and the control is
+the same one you already have, which is to use *on-success* instead.
+
+Two things it deliberately does not do. It never sets "the agent reported the
+task complete", because a run that could not finish has not. And it is never
+picked up by the bulk controls: **Pick up N stopped** would put an agent that
+accepts edits back to work, unattended, against a wall nobody has read about.
+Picking one of these up is a decision, so it stays on the run's own page.
+
 ### Running until the limit rather than until the agent says stop
 
 *When Claude says the task is done* can be switched from ending the run to
@@ -126,6 +175,11 @@ Because `DONE` no longer ends the run, something else has to. A run with no cycl
 limit is refused unless it has a time limit — the clock is the only limit that
 keeps advancing whether or not a cycle survived long enough to report what it
 spent.
+
+One correction to *"the run ends only when a limit is reached"*: it can also end
+when the agent reports that it cannot get past something. **Needs review** is
+honoured in this mode too, deliberately — the alternative is one more billed
+cycle against the same wall, every cycle, until a limit finally stops it.
 
 Stopping a run signals the current work cycle and prevents any further one. If
 the stop lands between cycles there is no process to signal, but the run still
@@ -176,6 +230,14 @@ it used up its work cycles is *finished* in the same green sense and said
 nothing of the kind, so blank tells it to continue like any other run cut off
 mid-task — the pushback would open by telling it that it had reported the task
 complete, and then forbid it from starting the work it was reopened to do.
+
+A run that ended as **Needs review** is the other case where blank is not
+"continue". The usual reason you are picking one of these up is that you have
+cleared whatever stopped it, so blank asks the agent to check that first and say
+what it finds, rather than telling it to carry on into the same wall — and if the
+wall is still there, to say what is still missing and report it again instead of
+spending a cycle working around it. Write a message and yours is sent instead, as
+always.
 
 Resuming asks for the limits again, pre-filled from the run, because the usual
 reason a run needs picking up is that its own limits ended it. They are totals,

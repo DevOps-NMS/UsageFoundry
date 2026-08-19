@@ -18,7 +18,8 @@
 ## Using it
 
 - **[Runs](runs.md)** — the run loop, the guarantee stated honestly, budget
-  policy, picking a run back up, and two runs on one project.
+  policy, the **Needs review** ending an agent asks for when it cannot finish,
+  picking a run back up, and two runs on one project.
 - **[Workflows](workflows.md)** — saved graphs of blocks, orchestrator blocks
   that decide what to run, merge blocks that land it, whole-graph budgets, and
   schedules.

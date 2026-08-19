@@ -556,12 +556,22 @@ export interface RunDTO {
   relPath?: string;
   prompt: string;
   model: string | null;
+  /**
+   * Duplicated from `RunStatus` in `orchestrator.ts` rather than imported, for
+   * this file's stated rule: it is the client-safe mirror and must not pull a
+   * server module into the browser bundle. No compiler compares the two — the
+   * three route handlers that build a run payload return anonymous objects into
+   * `NextResponse.json` — so a member added on one side and not the other
+   * typechecks clean and surfaces only where a client indexes a `Record` keyed
+   * on this union.
+   */
   status:
     | "waiting"
     | "queued"
     | "running"
     | "paused"
     | "completed"
+    | "needs-review"
     | "stopped"
     | "failed"
     | "blocked";
@@ -618,6 +628,13 @@ export interface RunDTO {
    * picked up with different prompts.
    */
   reported_done?: number;
+  /**
+   * What the agent said when it reported it could not finish, clipped at the
+   * write. Present only while the row records the `needs-review` ending —
+   * picking the run up clears it, because it describes an ending rather than
+   * the run.
+   */
+  needs_review_reason?: string | null;
   /**
    * 1 when this run ended because the server went down under it, rather than
    * for any reason of its own. Cleared when it is picked up again, so it says

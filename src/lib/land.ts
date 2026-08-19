@@ -13,6 +13,7 @@ import {
 } from "./review";
 import {
   MAX_WORKTREE_SLOTS,
+  TERMINAL_STATUSES,
   activeRuns,
   auxWorktreePath,
   conflictKey,
@@ -595,10 +596,16 @@ export async function landState(runId: string): Promise<LandState | null> {
  */
 function branchChain(run: RunRow): ChainMember[] {
   const byId = db().prepare("SELECT * FROM runs WHERE id = ?");
+  // The settled list is built from `TERMINAL_STATUSES` rather than spelled out,
+  // for `admitDependencies`' reason: a second copy is a second thing to forget.
+  // Nothing here breaks when it is wrong — this is an ordering rather than a
+  // filter, and the docblock above argues that which of two successors is
+  // followed decides nothing — but a stale copy quietly stops meaning what it
+  // says, and the next member added will not be so lucky.
   const next = db().prepare(
     `SELECT * FROM runs WHERE continues_run = ?
       ORDER BY CASE WHEN iterations > 0
-                      OR status NOT IN ('completed','stopped','failed','blocked')
+                      OR status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(",")})
                     THEN 0 ELSE 1 END,
                created_at
       LIMIT 1`,
@@ -616,7 +623,7 @@ function branchChain(run: RunRow): ChainMember[] {
 
   const tail: RunRow[] = [];
   for (let down = run; ; ) {
-    const after = next.get(down.id) as RunRow | undefined;
+    const after = next.get(down.id, ...TERMINAL_STATUSES) as RunRow | undefined;
     if (!after || seen.has(after.id)) break;
     seen.add(after.id);
     tail.push(after);
@@ -825,6 +832,12 @@ export function landRefusal(s: {
   if (!s.branchExists) return "This branch no longer exists.";
   if (!s.target) return "There is no recorded branch for this work to land into.";
 
+  // `needs-review` is deliberately absent, and it looks like an omission. A run
+  // that asked for review cannot commit again unless somebody reopens it —
+  // exactly like `completed`, `stopped` and `failed`, all three of which are
+  // landable today — and an operator who has read the reason may well decide the
+  // partial work is worth having. Taking the button away would leave them with a
+  // branch and no route to it.
   if (s.runStatus === "running" || s.runStatus === "queued" || s.runStatus === "paused") {
     return (
       "This run is still active. It can commit again at any moment, so anything " +

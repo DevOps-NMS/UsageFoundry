@@ -160,7 +160,10 @@ const SHARED_TOOLS = [
     name: "list_runs",
     description:
       "List recent runs with their status, folder and spend, so work already " +
-      "in flight is not proposed a second time.",
+      "in flight is not proposed a second time. A run whose status is " +
+      "needs-review is not in flight: it is finished, holds nothing, and is " +
+      "waiting on a person, so proposing work that depends on it parks that " +
+      "work on the same question.",
     inputSchema: {
       type: "object",
       properties: {

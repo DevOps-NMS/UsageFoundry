@@ -221,7 +221,16 @@ const SANDBOX_REASON: Record<SandboxRefusalKindDTO, string> = {
 /** How loudly a hand-driven transition should read. */
 function statusTone(status: unknown): LogTone {
   if (status === "failed") return "danger";
-  if (status === "paused" || status === "blocked" || status === "stopped") {
+  if (
+    status === "paused" ||
+    status === "blocked" ||
+    status === "stopped" ||
+    // Typed `unknown`, so nothing here is a compile error and a missing member
+    // falls quietly to `neutral` — which for this one would put the line that
+    // says a person is being asked at the same weight as a status change nobody
+    // needs to read.
+    status === "needs-review"
+  ) {
     return "warn";
   }
   return "neutral";

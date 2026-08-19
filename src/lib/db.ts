@@ -1050,6 +1050,17 @@ function migrate(db: Database.Database) {
   // second would lose the one the column exists for.
   addColumn(db, "runs", "reopened_at", "INTEGER");
 
+  // What the agent said when it reported it could not finish — the whole content
+  // of the `needs-review` ending, and the reason an operator was asked to look.
+  //
+  // `runs.status` carries no CHECK constraint, so the new status itself is
+  // additive at the schema level and this column is the only statement the
+  // migration needs: `addColumn` reads the live schema, is not keyed on
+  // `SCHEMA_VERSION` and destroys nothing, so it needs no transaction and no
+  // version bump — that constant records that a *rebuild* completed, and this is
+  // not one.
+  addColumn(db, "runs", "needs_review_reason", "TEXT");
+
   // The same pair for an instance, so a node created *later* — a deferred one,
   // behind an orchestrator block's decision — records the trigger the press of
   // Run had rather than guessing. A scheduled instance's late nodes are still

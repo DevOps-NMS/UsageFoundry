@@ -2579,6 +2579,29 @@ describe("planLoopPass — whether a loop takes another pass", () => {
     }
   });
 
+  it("stops on a pass whose run reported it could not finish", () => {
+    // Two failures in one, and the first is the expensive one. `needs-review` is
+    // terminal, so the rung above must not read it as a pass still working — a
+    // loop block that waits for ever holds everything behind it with nothing on
+    // any page to say why, and that is exactly what a missing `TERMINAL_STATUSES`
+    // entry produces. Given that, the stop is the right answer for the reason
+    // every non-completed status is: a loop is not a retry mechanism, and handing
+    // the next pass the same wall costs a whole run rather than a work cycle.
+    const d = loopOf([pass(1, "completed"), pass(2, "needs-review")]);
+    assert.notEqual(d.kind, "wait");
+    assert.equal(d.kind === "stop" && d.code, "failed");
+    assert.match(d.kind === "stop" ? d.reason : "", /Pass 2 .*ended needs-review/);
+  });
+
+  it("reports the stop rather than the completion when the pass did both", () => {
+    // The `reportedDone` rung is below this one, so a last pass that did the work
+    // *and* asked for review says it stopped. Same precedence as the cycle-outcome
+    // ladder, for the same reason: the ending that asks for a person is the one
+    // that can be taken back.
+    const d = loopOf([pass(1, "needs-review", { done: true })]);
+    assert.equal(d.kind === "stop" && d.code, "failed");
+  });
+
   it("stops at the pass cap", () => {
     const d = loopOf([
       pass(1, "completed"),

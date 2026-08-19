@@ -54,9 +54,11 @@ process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
 const {
   buildArgs,
   conflictKey,
+  cycleEnding,
   cycleSilenceMs,
   dependencyCycle,
   duePausedRuns,
+  edgeSatisfied,
   interruptOutcome,
   overlaps,
   planPausedRun,
@@ -93,6 +95,7 @@ const {
   MAX_RATE_LIMIT_RETRIES,
   MAX_RESUMES_PER_SWEEP,
   MAX_TRANSIENT_RETRIES,
+  NEEDS_REVIEW_NOTICE,
 } = require("./orchestrator") as typeof import("./orchestrator");
 
 const { CLAUDE_CONFIG_DIR } = require("./config") as typeof import("./config");
@@ -394,6 +397,44 @@ describe("dependencies", () => {
     }
   });
 
+  /**
+   * A run that reported it could not finish is terminal, and is not a success.
+   *
+   * Both halves are cheap to get wrong and neither throws. Miss the terminal
+   * half — the `TERMINAL_STATUSES` entry — and an `on-finish` dependent waits
+   * for ever behind a run that finished hours ago, with nothing on any page
+   * saying why. Read it as a success instead and the next run in the chain
+   * starts on top of work that did not happen, which is the failure the whole
+   * `on-success` reading exists to prevent.
+   */
+  it("settles a chain on needs-review without treating it as success", () => {
+    const stuck = { id: "a", status: "needs-review" as const, iterations: 1 };
+    assert.equal(edgeSatisfied(stuck, "on-success"), false);
+    assert.equal(edgeSatisfied(stuck, "on-finish"), true);
+    // The rule that makes a chain terminate rather than sit there applies here
+    // too: a run that never opened a file satisfies neither condition, whatever
+    // it ended as.
+    const empty = { ...stuck, iterations: 0 };
+    assert.equal(edgeSatisfied(empty, "on-success"), false);
+    assert.equal(edgeSatisfied(empty, "on-finish"), false);
+  });
+
+  it("blocks an on-success dependent behind it and starts an on-finish one", () => {
+    const stuck = { id: "a", status: "needs-review" as const, iterations: 1 };
+    const refused = releasableRuns([stuck, waiting("b")], [link("b", "a")]);
+    assert.deepEqual(refused.release, []);
+    assert.equal(refused.block.length, 1);
+    // Named, not merely blocked: the sentence is the only thing on the page that
+    // sends the operator to the run holding the chain up.
+    assert.match(refused.block[0].reason, /run a\b/);
+    assert.match(refused.block[0].reason, /needs-review/);
+
+    assert.deepEqual(
+      releasableRuns([stuck, waiting("b")], [link("b", "a", "on-finish")]),
+      { release: ["b"], block: [] },
+    );
+  });
+
   it("treats a run that used up its cycle cap as a success", () => {
     // `completed` covers both the DONE reply and the cycle cap, and the cap
     // defaults to 1 — so requiring the reply would mean a dependent almost
@@ -684,6 +725,61 @@ describe("isolation for the three modes", () => {
 });
 
 /**
+ * Covers how a work cycle's own last turn ends the run.
+ *
+ * The regexes are not what earns this — a bare matcher would pin the language,
+ * and the DONE one has gone untested since it was written. What earns it is the
+ * **precedence**, which is a decision: a turn carrying both tokens is an agent
+ * contradicting itself, and getting it backwards files a run that said it was
+ * stuck as green `completed` — the exact defect the needs-review ending exists
+ * to remove, throwing nothing and typechecking cleanly.
+ *
+ * The negative cases are the other half and they are the ones that will actually
+ * be exercised: the first task to run through this feature is a task *about* it,
+ * whose text carries the token in prose. Measured on this install, a task whose
+ * text merely carried `DONE` ended its run in a single cycle 53% of the time
+ * against 2 of 120 without it, so the two guards — a different spelling from the
+ * stored status, and alone on its own line — are load-bearing rather than tidy.
+ */
+describe("what a work cycle's final text ends the run as", () => {
+  it("reads each token when it is alone on its line", () => {
+    assert.equal(cycleEnding("All done.\nDONE\n"), "done");
+    assert.equal(cycleEnding("I cannot get past this.\nNEEDS_REVIEW\n"), "needs-review");
+    // Leading whitespace is tolerated, as the DONE matcher has always been: an
+    // agent that indents its last line has still reported the ending.
+    assert.equal(cycleEnding("text\n   NEEDS_REVIEW   "), "needs-review");
+    assert.equal(cycleEnding("nothing reported here"), null);
+    assert.equal(cycleEnding(""), null);
+  });
+
+  it("lets the ending that asks for a person win over the one that does not", () => {
+    // Both in one turn is an agent contradicting itself. `completed` is
+    // ok-toned, green, and the one ending nobody re-reads; needs-review is
+    // warn-toned, reopenable and asks for somebody — so the recoverable reading
+    // is the safe one to err toward, in either order.
+    assert.equal(cycleEnding("DONE\nNEEDS_REVIEW\n"), "needs-review");
+    assert.equal(cycleEnding("NEEDS_REVIEW\nDONE\n"), "needs-review");
+  });
+
+  it("ignores the token mentioned rather than reported", () => {
+    // The case that will bite first, because the first task to exercise this
+    // feature is a task about this feature.
+    assert.equal(cycleEnding("Reply with NEEDS_REVIEW to end the run."), null);
+    assert.equal(cycleEnding("I added the NEEDS_REVIEW sentinel\nand tests."), null);
+    assert.equal(cycleEnding("reply with exactly `NEEDS_REVIEW` on its own line"), null);
+    assert.equal(cycleEnding("> NEEDS_REVIEW"), null);
+    // The stored value is lowercase and hyphenated where the sentinel is
+    // uppercase and underscored, so a task that quotes the *status* — which is
+    // what a task about this app would do — cannot trip the matcher. This is
+    // why the two spellings differ, and it should not be tidied away.
+    assert.equal(cycleEnding("The run ended needs-review."), null);
+    assert.equal(cycleEnding("needs-review\n"), null);
+    // The same guard on the older token, which has never had one.
+    assert.equal(cycleEnding("I am not DONE yet."), null);
+  });
+});
+
+/**
  * Covers which prompt a cycle spawns with. Pure, and it earns a test because
  * every wrong branch is billed: the continuation prompt asks for DONE if the
  * work is finished, so sending it into a session that has just said DONE buys
@@ -712,8 +808,17 @@ describe("prompt for the next work cycle", () => {
     endsOnDone: false,
   };
 
+  /**
+   * Every prompt but the operator's own note carries the needs-review contract,
+   * so the equalities below compose against it rather than dropping to a
+   * substring match. Weaker assertions here would stop saying that the prompt is
+   * *exactly* its part plus the notice, which is the only thing that catches a
+   * second sentence being appended by accident.
+   */
+  const wall = (s: string) => `${s}\n\n${NEEDS_REVIEW_NOTICE}`;
+
   it("opens with the task when there is no session to resume", () => {
-    assert.equal(nextPrompt({ ...base, sessionId: null }), "TASK");
+    assert.equal(nextPrompt({ ...base, sessionId: null }), wall("TASK"));
   });
 
   it("prepends the isolation preamble only on that opening turn", () => {
@@ -727,11 +832,11 @@ describe("prompt for the next work cycle", () => {
     // change a test edit. What matters is that the preamble still opens the
     // prompt and the task still closes it.
     assert.ok(opened.startsWith("PRE\n\n"));
-    assert.ok(opened.endsWith("\n\nTASK"));
+    assert.ok(opened.endsWith(`\n\n${wall("TASK")}`));
     // Mid-conversation the agent is already in its worktree and has been told.
     assert.equal(
       nextPrompt({ ...base, isolationPreamble: "PRE" }),
-      "CONTINUE",
+      wall("CONTINUE"),
     );
   });
 
@@ -749,23 +854,30 @@ describe("prompt for the next work cycle", () => {
     assert.match(isolated, /stash@\{n\}/);
     // A run in the operator's own checkout has no sibling worktree to collide
     // with, and gets neither the preamble nor this.
-    assert.equal(nextPrompt({ ...base, sessionId: null }), "TASK");
+    assert.equal(nextPrompt({ ...base, sessionId: null }), wall("TASK"));
     // Not on a resumed cycle, for the preamble's reason: it is carried by the
     // opening turn of the conversation it is true of.
-    assert.equal(nextPrompt({ ...base, isolationPreamble: "PRE" }), "CONTINUE");
+    assert.equal(
+      nextPrompt({ ...base, isolationPreamble: "PRE" }),
+      wall("CONTINUE"),
+    );
   });
 
   it("continues an existing session rather than restating the task", () => {
-    assert.equal(nextPrompt(base), "CONTINUE");
+    assert.equal(nextPrompt(base), wall("CONTINUE"));
   });
 
   it("pushes back instead of continuing after a DONE", () => {
     // The continuation prompt asks for DONE when the work is complete, so
     // replying to a DONE with it is a billed cycle that only says DONE again.
-    assert.equal(nextPrompt({ ...base, justRetriggered: true }), "PUSHBACK");
+    assert.equal(nextPrompt({ ...base, justRetriggered: true }), wall("PUSHBACK"));
   });
 
   it("sends the operator's note as the whole turn", () => {
+    // The one branch the needs-review contract is *not* appended to: this is the
+    // operator's own words, which docs/runs.md promises are sent verbatim, and a
+    // run whose operator wrote a note already has the person that contract
+    // exists to reach. The next cycle restates it either way.
     assert.equal(nextPrompt({ ...base, followUp: "NOTE" }), "NOTE");
   });
 
@@ -774,7 +886,7 @@ describe("prompt for the next work cycle", () => {
     // note that only makes sense as one would read as the entire job.
     assert.equal(
       nextPrompt({ ...base, sessionId: null, followUp: "NOTE" }),
-      "TASK\n\nNOTE",
+      wall("TASK\n\nNOTE"),
     );
     const isolated = nextPrompt({
       ...base,
@@ -783,7 +895,7 @@ describe("prompt for the next work cycle", () => {
       followUp: "NOTE",
     });
     assert.ok(isolated.startsWith("PRE\n\n"));
-    assert.ok(isolated.endsWith("\n\nTASK\n\nNOTE"));
+    assert.ok(isolated.endsWith(`\n\n${wall("TASK\n\nNOTE")}`));
   });
 
   it("says so when the task is being reopened on top of earlier work", () => {
@@ -793,7 +905,7 @@ describe("prompt for the next work cycle", () => {
     // disk itself.
     const restarted = nextPrompt({ ...base, sessionId: null, priorCycles: 3 });
     assert.match(restarted, /^A previous attempt at this task already ran 3 work cycles/);
-    assert.match(restarted, /\n\nTASK$/);
+    assert.ok(restarted.endsWith(`\n\n${wall("TASK")}`));
 
     // An isolated run's earlier work is committed, and the branch is the only
     // place a fresh session can still read it.
@@ -814,16 +926,19 @@ describe("prompt for the next work cycle", () => {
     assert.ok(
       isolated.indexOf("refs/stash") < isolated.indexOf("A previous attempt"),
     );
-    assert.match(isolated, /\n\nTASK$/);
+    assert.ok(isolated.endsWith(`\n\n${wall("TASK")}`));
   });
 
   it("stays silent about earlier work when there is none, or a session holds it", () => {
     // A first cycle is not a restart …
-    assert.equal(nextPrompt({ ...base, sessionId: null, priorCycles: 0 }), "TASK");
+    assert.equal(
+      nextPrompt({ ...base, sessionId: null, priorCycles: 0 }),
+      wall("TASK"),
+    );
     // … and a run that can resume already has the whole conversation.
     assert.equal(
       nextPrompt({ ...base, priorCycles: 3, worktreeBranch: "uf/thing" }),
-      "CONTINUE",
+      wall("CONTINUE"),
     );
   });
 
@@ -853,7 +968,7 @@ describe("prompt for the next work cycle", () => {
     assert.match(continued, /git diff --stat abc123\.\.\.HEAD/);
     assert.doesNotMatch(continued, /git diff abc123/);
     // The editable half is the guidance, and it comes last.
-    assert.match(continued, /READ-FIRST\n\nTASK$/);
+    assert.ok(continued.endsWith(wall("READ-FIRST\n\nTASK")));
   });
 
   it("keeps both notices, branch history before this run's own restart", () => {
@@ -883,7 +998,7 @@ describe("prompt for the next work cycle", () => {
         ...base,
         continuedFrom: { runId: "bbbbbbbb", branch: "uf/thing", base: "abc123" },
       }),
-      "CONTINUE",
+      wall("CONTINUE"),
     );
   });
 
@@ -915,17 +1030,20 @@ describe("prompt for the next work cycle", () => {
     // other: that run is set to carry on past a DONE and `donePushbackPrompt`
     // says so, so promising the opposite on the opening turn is a contradiction
     // the agent meets again on every later cycle.
-    assert.equal(nextPrompt({ ...base, sessionId: null, endsOnDone: false }), "TASK");
+    assert.equal(
+      nextPrompt({ ...base, sessionId: null, endsOnDone: false }),
+      wall("TASK"),
+    );
   });
 
   it("keeps the completion notice off a resumed cycle", () => {
     // `continuationPrompt` is already the whole turn there and already carries
     // the contract. Sending both would restate it at the top of a conversation
     // that is re-sent in full on every request.
-    assert.equal(nextPrompt({ ...base, endsOnDone: true }), "CONTINUE");
+    assert.equal(nextPrompt({ ...base, endsOnDone: true }), wall("CONTINUE"));
     assert.equal(
       nextPrompt({ ...base, justRetriggered: true, endsOnDone: true }),
-      "PUSHBACK",
+      wall("PUSHBACK"),
     );
   });
 
@@ -944,6 +1062,59 @@ describe("prompt for the next work cycle", () => {
     assert.ok(opened.startsWith("PRE\n\n"));
     assert.ok(opened.indexOf("TASK") < opened.indexOf("exactly DONE"));
     assert.ok(opened.indexOf("NOTE") < opened.indexOf("exactly DONE"));
+  });
+
+  /**
+   * The other half of the same contract, and the half that is easy to lose.
+   *
+   * `completed` was written both for a run that replied DONE and for one that
+   * used up its cycle cap, so an agent that met a wall had no ending to ask for
+   * and `COMPLETION_NOTICE` told it that stopping without DONE bought another
+   * cycle. What these pin is that the sentence naming the other ending reaches
+   * every cycle of every run — the gating is where this would silently be lost.
+   */
+  it("tells the opening cycle it may report that it is stuck", () => {
+    const opened = nextPrompt({ ...base, sessionId: null, endsOnDone: true });
+    assert.match(opened, /exactly NEEDS_REVIEW on its own line/);
+    // The bar, not just the token. Without it the ending is a cheaper way out of
+    // any large task than doing it.
+    assert.match(opened, /only after you have actually tried and been stopped/);
+    // Last, and after the completion notice: an instruction about when to stop
+    // is a statement about the task above, and both endings read as one contract
+    // only if they are adjacent.
+    assert.ok(opened.indexOf("TASK") < opened.indexOf("exactly NEEDS_REVIEW"));
+    assert.ok(
+      opened.indexOf("exactly DONE") < opened.indexOf("exactly NEEDS_REVIEW"),
+    );
+  });
+
+  it("carries it even where DONE would not end the run", () => {
+    // The assertion that pins the ungating, and nothing else reports its loss.
+    // `endsOnDone` is false for `maxIterations === 1` and for
+    // `continueAfterDone`, because in both a DONE is a promise that would be
+    // untrue — but reporting a wall always ends the run with the reason
+    // recorded, so neither reason reaches this token. `maxIterations` defaults
+    // to 1, so folding this under `endsOnDone` would withhold the new ending
+    // from the majority of runs on a stock install: exactly the one-cycle runs
+    // that are written green today.
+    assert.match(
+      nextPrompt({ ...base, sessionId: null, endsOnDone: false }),
+      /exactly NEEDS_REVIEW on its own line/,
+    );
+  });
+
+  it("restates it on the continuation and on the pushback, never on a note", () => {
+    // On every cycle rather than on cycle 1 alone: `continuationPrompt` names
+    // DONE on each resumed turn, so an agent on cycle 5 that has been re-told
+    // about one ending four times and about the other once — on a turn that has
+    // scrolled out of the conversation — has been told there is one ending.
+    assert.match(nextPrompt(base), /exactly NEEDS_REVIEW on its own line/);
+    assert.match(
+      nextPrompt({ ...base, justRetriggered: true }),
+      /exactly NEEDS_REVIEW on its own line/,
+    );
+    // And never on the operator's own words, which are promised verbatim.
+    assert.equal(nextPrompt({ ...base, followUp: "NOTE" }), "NOTE");
   });
 });
 
@@ -1060,6 +1231,59 @@ describe("prompt for a reopened run", () => {
       }),
       "",
     );
+  });
+
+  /**
+   * The pick-up branch for a run that said it could not get past something.
+   *
+   * Doing nothing here would already have looked correct: the pushback tests
+   * `completed`, which this row is not, so the run would fall through to the
+   * plain continuation — "Continue working on the task. If it is fully complete
+   * and verified, reply with exactly DONE" — into a conversation whose last turn
+   * was the agent reporting a wall. That is the same shape as the defect
+   * `RESTART_KILLED_NOTICE` was added to fix, on this same function, and it is
+   * silent: the run works, spends, and reports the same wall again.
+   */
+  it("asks a needs-review run whether the wall is still there", () => {
+    const picked = reopenPrompt({
+      ...base,
+      status: "needs-review",
+      reportedDone: false,
+    });
+    assert.notEqual(picked, "");
+    assert.match(picked, /check whether what stopped you is still there/);
+    // The ordinary reason to reopen one of these with no note is that somebody
+    // cleared it, so the alternative is a whole billed cycle finding out.
+    assert.notEqual(picked, "PUSHBACK");
+  });
+
+  it("keeps the operator's note above it, and drops it with no session", () => {
+    assert.equal(
+      reopenPrompt({ ...base, status: "needs-review", note: "NOTE" }),
+      "NOTE",
+    );
+    // Without a session `nextPrompt` restarts the original task with
+    // `priorWorkNotice`, and a reply-shaped notice would be describing a
+    // conversation that no longer exists — both neighbours are gated the same
+    // way for the same reason.
+    assert.equal(
+      reopenPrompt({ ...base, status: "needs-review", sessionId: null }),
+      "",
+    );
+  });
+
+  it("never sends the DONE pushback to a run that said it was stuck", () => {
+    // `reported_done` survives the ending it described, so a run that replied
+    // DONE in an earlier segment, was reopened, worked and then reported a wall
+    // has a stale 1 on its row unless the loop clears it. This is the branch
+    // that would act on it: the status has to win.
+    assert.notEqual(
+      reopenPrompt({ ...base, status: "needs-review", reportedDone: true }),
+      "PUSHBACK",
+    );
+    // The control, and half the test: an ordinary completed run that really did
+    // reply DONE is still pushed back on.
+    assert.equal(reopenPrompt(base), "PUSHBACK");
   });
 });
 

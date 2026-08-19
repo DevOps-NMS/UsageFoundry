@@ -30,8 +30,13 @@ export function RunDiff({ run }: { run: RunDTO }) {
   // Loaded once for a run that is over, on request for one that is not. A diff
   // costs several git processes, and an active run's is a moment-in-time
   // reading that is stale as soon as it renders.
+  // A positive list, so a status added to the union and not to it silently makes
+  // the card say "still working" about a run that is over and never load.
   const settled =
-    run.status === "completed" || run.status === "stopped" || run.status === "failed";
+    run.status === "completed" ||
+    run.status === "needs-review" ||
+    run.status === "stopped" ||
+    run.status === "failed";
   const [diff, setDiff] = useState<RunDiffDTO | null>(null);
   // A settled run starts in the loading state because the effect below is about
   // to fetch: initialising to false renders one frame of "nothing loaded",

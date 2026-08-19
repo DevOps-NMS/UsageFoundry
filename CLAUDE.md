@@ -53,6 +53,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - `cancelled` is checked twice per cycle, and the interrupt test comes **before** the exit-code test.
   - Both bulk pick-ups filter on `set_aside_at`; `reopenRun` clears it. Setting a live run aside marks it **before** the stop.
   - The DONE contract reaches cycle 1 as **generated** text, gated on `endsOnDone`. A prompt in `Settings` would not reach a saved install.
+  - `needs-review` is the agent's own judgement about the *task*. Its rung sits below every refusal and exit-code test, above `DONE`, and clears `reportedDone` explicitly. Its notice is generated too and is **not** gated on `endsOnDone`.
   - `reopenPrompt`'s restart branch sits **above** the pushback: `reported_done` is stale after a mid-cycle kill.
 
 - **`createRun`/`promoteQueued`, `serverLock.ts`, `db.ts`, `instrumentation.ts`** → `docs/agent/concurrency-and-ownership.md`
@@ -66,6 +67,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
 
 - **`releasableRuns`/`admitDependencies`/`releaseDependents`** → `docs/agent/dependencies.md`
   - A run that ran no work cycle satisfies nothing. Both edge conditions are explicit on the wire, never defaulted.
+  - `needs-review` is terminal and is **not** a success: `on-success` stays blocked, `on-finish` starts. One `TERMINAL_STATUSES` entry carries that, retention's three sweeps and the loop block's exit test.
   - Every terminal transition wakes the dependents; a boot deliberately does not.
 
 - **`land.ts`, `mergeQueue.ts`, `resolveIsolation`/`ensureWorktree`** → `docs/agent/isolation-and-landing.md`
@@ -94,6 +96,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - An orchestrator block's `fanOut` is not nullable, and a workflow whose instance budget sets nothing cannot be scheduled.
   - A loop block unrolls: every pass is a fresh run continuing the last one's branch, and `run_deps` never learns a loop exists.
   - `planLoopPass` stops on `runs.reported_done`, never on `completed` — a used-up cycle cap writes that too. `maxPasses` is not nullable.
+  - A `needs-review` pass **stops** the loop rather than waiting for it, and the member counts as settled, never as written off.
   - `looping` is live everywhere `thinking` is, and settled nowhere.
   - An instance's status is four parts derived: `started` means something is live, never "not halted". Act on `instanceIsOpen`, never on `status === "started"`.
 

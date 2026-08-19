@@ -1946,6 +1946,40 @@ through before trusting this unattended:
   this app puts around the whole `claude` process, or composes with one. The
   others each move a phase of the plan; RUNBOOK.md's table says which.
 
+- **Whether a real agent uses the `NEEDS_REVIEW` sentinel when it should, and
+  withholds it when it should not.** The `needs-review` ending is decided
+  entirely by a token in the agent's own final text, so what the wording of
+  `NEEDS_REVIEW_NOTICE` actually produces is the whole feature — and nothing in
+  this repository can measure it. The matcher, the precedence, the prompt
+  composition, the loop stop and the edge semantics are unit-tested; the model's
+  *behaviour* against them is reasoned from `COMPLETION_NOTICE`'s measured
+  precedent (251 runs) and from `DEFAULT_DONE_PUSHBACK_PROMPT`'s stated failure
+  mode, and reasoned is not measured. Two directions to watch on the first real
+  one, and they fail differently: an agent that reports it under-generously
+  spends its whole cycle cap against a wall exactly as before, which is the
+  status quo and costs money; an agent that reports it cheaply — because a task
+  is large, unclear or tedious — turns completions into a queue of questions for
+  a person, which costs more than money. The reason string is the evidence
+  either way: a good one names a thing and a fix, a bad one has tried nothing.
+  Also unmeasured, and cheaper: the collision, where a run whose *task* discusses
+  this feature carries the literal token and ends in one cycle. That is bounded
+  by design rather than closed — the sentinel is spelled unlike the stored
+  status and must be alone on its line — and it costs one run ending early with
+  its own text recorded, visible and reopenable in one click.
+- **Everything on the `needs-review` path that needs a browser or a running
+  container.** No `claude` child has ever reported the sentinel to this app. Not
+  rendered: the amber badge and its glyph on the runs list, the run page, the
+  workflow instance page and the dashboard telemetry card; the **Needs review**
+  filter segment; the agent's own reason under the state card; the warn-toned log
+  line for the transition. Not exercised against a database: that the ending
+  stamps `finished_at` and frees its folder so a queued run starts, that a second
+  run may be created to continue such a run's branch, that Resume accepts one and
+  clears its reason, that neither bulk pick-up offers it, and that Land, Delete,
+  Purge and a conflict resolution are all still permitted on its branch. Docker
+  was unavailable in the container this was implemented in, so the
+  `docker compose up --build` half of the real verification loop has not been run
+  against any of it.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a

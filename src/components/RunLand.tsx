@@ -283,6 +283,9 @@ export function RunLand({ run }: { run: RunDTO }) {
   }
 
   const canLand = state.blocked === null;
+  // A negative list, unlike `RunDiff`'s, so a new terminal status reads settled
+  // with no edit here — which is right for `needs-review` and is worth stating,
+  // because the two components spell the same idea opposite ways round.
   const settled = !["running", "queued", "paused"].includes(state.runStatus);
   // A squashed branch is never an ancestor of its target, so `merged` alone
   // would leave it undeletable for ever.

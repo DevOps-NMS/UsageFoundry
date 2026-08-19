@@ -164,6 +164,15 @@ describe("landRefusal", () => {
     assert.equal(landRefusal(landable), null);
   });
 
+  it("still offers the branch of a run that asked for review", () => {
+    // It looks like an omission and is not. A `needs-review` run cannot commit
+    // again unless somebody reopens it — exactly like `completed`, `stopped` and
+    // `failed`, all three of which are landable — and an operator who has read
+    // the reason may well decide the partial work is worth having. Refusing here
+    // would leave them with a branch and no route to it.
+    assert.equal(landRefusal({ ...landable, runStatus: "needs-review" }), null);
+  });
+
   it("refuses while the run can still commit", () => {
     for (const runStatus of ["running", "queued", "paused"] as const) {
       assert.match(
@@ -362,7 +371,7 @@ describe("landRefusal for a branch a chain shares", () => {
     // branch and put nothing on it. Letting it own the branch would leave the
     // run that did the work unlandable for ever, with a sentence pointing at a
     // run that is finished and empty.
-    for (const status of ["blocked", "stopped", "failed"] as const) {
+    for (const status of ["blocked", "stopped", "failed", "needs-review"] as const) {
       const chain = [member("aaaaaaaa", "completed"), member("bbbbbbbb", status, 0)];
       assert.equal(
         landRefusal({ ...base, runId: "aaaaaaaa", chain }),
@@ -377,6 +386,19 @@ describe("landRefusal for a branch a chain shares", () => {
     // commits on the branch, so it is where the branch ends and picking it up
     // again is the way on rather than landing from behind it.
     const chain = [member("aaaaaaaa", "completed"), member("bbbbbbbb", "failed", 2)];
+    assert.match(landRefusal({ ...base, runId: "aaaaaaaa", chain }) ?? "", /bbbbbbbb/);
+    assert.equal(landRefusal({ ...base, runId: "bbbbbbbb", chain }), null);
+  });
+
+  it("keeps a link that asked for review as the owner once it has committed", () => {
+    // Same rule again, and the ending that most often has work worth keeping:
+    // it got some of the way and then met a wall. The branch ends there, so it
+    // is what the operator lands or picks up — not something to land from
+    // behind.
+    const chain = [
+      member("aaaaaaaa", "completed"),
+      member("bbbbbbbb", "needs-review", 2),
+    ];
     assert.match(landRefusal({ ...base, runId: "aaaaaaaa", chain }) ?? "", /bbbbbbbb/);
     assert.equal(landRefusal({ ...base, runId: "bbbbbbbb", chain }), null);
   });

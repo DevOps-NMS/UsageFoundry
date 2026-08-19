@@ -101,6 +101,20 @@ export type RunStatus =
   /** Stepped aside for a full 5-hour window; the sweeper will re-queue it. */
   | "paused"
   | "completed"
+  /**
+   * The agent judged it could not finish the task and said so.
+   *
+   * A fourth ending, and the only one in the ladder that is a statement about
+   * the *task* rather than about the machine. `completed` is written both for a
+   * run that replied DONE and for one that used up its cycle cap, and
+   * `maxIterations` defaults to 1 — so before this existed a run that met a wall
+   * it could not pass was filed green beside runs that did the job. Not
+   * `failed`, which is where something went wrong; not `stopped`, which is a
+   * person or a rule they configured deciding; not `blocked`, which is refused
+   * before its first work cycle. This one worked, spent money, and reached a
+   * judgement worth a person's attention.
+   */
+  | "needs-review"
   | "stopped"
   | "failed"
   | "blocked";
@@ -173,6 +187,16 @@ export interface RunRow {
    * prompts when the run is picked up again — see `reopenPrompt`.
    */
   reported_done: number;
+  /**
+   * What the agent said when it reported it could not finish, clipped to
+   * `MAX_NEEDS_REVIEW_REASON`.
+   *
+   * Describes *the ending this row currently records*, which is `stop_reason`'s
+   * invariant — so the loop writes null on every other ending and `reopenRun`
+   * clears it, or a reopened run that ends without re-entering the loop would
+   * carry a reason describing an ending two segments old.
+   */
+  needs_review_reason: string | null;
   /**
    * The operator's next message, waiting for the next spawn. Set by
    * `reopenRun`, cleared by the loop as soon as it is delivered.
@@ -3023,14 +3047,23 @@ function admitDependencies(
       // unextendable for ever over a run that never opened a file. Same test as
       // `edgeSatisfied` and `branchOwner` — a terminal run with no work cycle
       // is not a link.
+      //
+      // Built from `TERMINAL_STATUSES` rather than spelled out again: a second
+      // copy of "which statuses have settled" is a second thing to forget when
+      // one is added, and forgetting it here is the expensive direction — a
+      // settled run reads as still holding the branch, so nothing may ever be
+      // created to carry it on and the refusal names a run that finished hours
+      // ago.
       const rival = db()
         .prepare(
           `SELECT id, status FROM runs
             WHERE continues_run = ?
-              AND (iterations > 0 OR status NOT IN ('completed','stopped','failed','blocked'))
+              AND (iterations > 0 OR status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(",")}))
             LIMIT 1`,
         )
-        .get(runId) as { id: string; status: RunStatus } | undefined;
+        .get(runId, ...TERMINAL_STATUSES) as
+        | { id: string; status: RunStatus }
+        | undefined;
       if (rival) {
         throw new Error(
           `Run ${shortId(rival.id)} is already set to continue run ${shortId(runId)}'s branch (it is ${rival.status}). ` +
@@ -3430,6 +3463,13 @@ export interface DependencyState {
  */
 export const TERMINAL_STATUSES: readonly RunStatus[] = [
   "completed",
+  // Carries five subsystems at once — dependency release, retention's three
+  // sweeps, a loop block's exit test, `edgeVerdict` and `planInstanceStep`.
+  // Adding the union member and forgetting this constant produces a run that is
+  // terminal everywhere a person looks and unsettled everywhere the machine
+  // looks: chains that never start, loops that wait for ever, evidence that
+  // never ages out, and not one line anywhere saying so.
+  "needs-review",
   "stopped",
   "failed",
   "blocked",
@@ -3462,6 +3502,13 @@ function shortId(id: string): string {
  * fault*: no crash, no guard, no operator stop — which is the question a person
  * chaining two runs is actually asking. `reported_done` is on the DTO for
  * anyone who wants the stronger reading; it is not what this decides.
+ *
+ * `needs-review` is therefore terminal and not a success, and both halves are
+ * deliberate: an `on-success` dependent stays blocked with a sentence naming the
+ * run that asked for review, and an `on-finish` dependent starts — which is what
+ * `on-finish` has always meant about a `failed` predecessor. A run that reported
+ * it could not get past something did not do the work the next run was chained
+ * behind.
  */
 export function edgeSatisfied(
   dep: DependencyState,
@@ -4203,6 +4250,27 @@ interface IterationResult {
 const STDERR_TAIL_LIMIT = 4_096;
 
 /**
+ * Cap on `runs.needs_review_reason`, applied at the write and nowhere else.
+ *
+ * At the write for `log()`'s reason with `MAX_LOG_CHARS`: a second bound at a
+ * second place is a second number to keep in step. The size is what the wire can
+ * carry rather than what a person will read — `RunDTO` is polled every three
+ * seconds by the run page and is the row shape the runs list ships for *every*
+ * row, so an unbounded model-authored blob multiplies by the length of the list.
+ * Nothing is lost by clipping: the full text is the cycle's assistant output in
+ * `run_events`, which the Report tab already renders.
+ */
+export const MAX_NEEDS_REVIEW_REASON = 2_000;
+
+/** The agent's account of the wall, bounded so a clip cannot read as the whole. */
+function clipReason(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length <= MAX_NEEDS_REVIEW_REASON
+    ? trimmed
+    : `${trimmed.slice(0, MAX_NEEDS_REVIEW_REASON - 1)}…`;
+}
+
+/**
  * What the cycle about to spawn actually says.
  *
  * Pure, and separated from the loop because every branch is a billing decision
@@ -4273,12 +4341,23 @@ export function nextPrompt(o: {
       // Last, so it is the most recent thing in the opening context and so it
       // reads as a statement about the task above rather than a preamble to it.
       o.endsOnDone ? COMPLETION_NOTICE : null,
+      // After it, because the two are one contract and this is the branch of it:
+      // an agent told how to finish and not how to stop has one ending.
+      NEEDS_REVIEW_NOTICE,
     ]
       .filter((part): part is string => Boolean(part))
       .join("\n\n");
   }
+  // Not appended: this branch is the operator's own words, which `docs/runs.md`
+  // promises are sent verbatim as the next turn. A run whose operator wrote a
+  // note already has the person this ending exists to reach, and the contract is
+  // restated on the very next cycle by the branch below.
   if (o.followUp) return o.followUp;
-  return o.justRetriggered ? o.donePushback : o.continuation;
+  // On both, not on cycle 1 alone. `COMPLETION_NOTICE`'s own docblock names the
+  // failure this avoids: an agent on cycle 5 that has been re-told about DONE
+  // four times and about this once, on a turn that has scrolled out of reach,
+  // has been told there is one ending.
+  return `${o.justRetriggered ? o.donePushback : o.continuation}\n\n${NEEDS_REVIEW_NOTICE}`;
 }
 
 /**
@@ -4390,6 +4469,81 @@ const COMPLETION_NOTICE =
   "complete and verified, reply with exactly DONE on its own line and make no " +
   "further changes. If work remains, or something could not be verified, end " +
   "with what remains and why instead of DONE, and this run will carry on.";
+
+/**
+ * The other ending, and the one an agent has to be told it may ask for.
+ *
+ * `COMPLETION_NOTICE` above says stopping without DONE "buys another work cycle
+ * on the same task", which is true and is exactly the wrong instruction for a
+ * run that has met a wall: it spends the rest of its cycle cap restating the
+ * problem, or replies DONE anyway and is filed green. Neither reaches a person.
+ *
+ * The bar is the load-bearing half of the wording, not the token. An ending the
+ * agent controls is a cheap way out of a large or tedious task, so the sentence
+ * has to make reporting it *more* work than carrying on: it names what counts as
+ * a wall, refuses the shapes that are not one, and asks for the three facts an
+ * operator needs before they can act. `DEFAULT_DONE_PUSHBACK_PROMPT` carries the
+ * same kind of clause for the same reason — an instruction an agent cannot
+ * satisfy produces churn rather than silence.
+ *
+ * Generated rather than stored, for `COMPLETION_NOTICE`'s reason: the settings
+ * page PUTs the whole effective object on Save, so a sentence added to a
+ * `DEFAULT_*` prompt reaches no install whose operator has ever pressed it.
+ *
+ * Deliberately **not** gated on `endsOnDone`. That flag withholds a promise that
+ * would be false — under `maxIterations === 1` the cap ends the run whatever the
+ * agent says — and neither of its cases reaches this token, which always ends the
+ * run with the reason recorded. `maxIterations` defaults to 1, so gating would
+ * withhold the new ending from precisely the runs where it matters most.
+ *
+ * Exported, where `COMPLETION_NOTICE` is not, for one reason: this one rides on
+ * *every* prompt `nextPrompt` returns bar the operator's own note, so every
+ * exact-equality assertion in that function's suite composes against it. The
+ * alternative was degrading each of them to a substring match, which is the
+ * weaker test.
+ */
+export const NEEDS_REVIEW_NOTICE =
+  "If you reach something you cannot get past, reply with exactly NEEDS_REVIEW " +
+  "on its own line and this run ends for a person to look at. Use it only after " +
+  "you have actually tried and been stopped — a credential that is not there, a " +
+  "permission you do not have, a decision that is not yours to make, a " +
+  "repository or service you cannot reach — and in the same reply say what you " +
+  "were doing, what you tried, and exactly what stopped you. Do not use it " +
+  "because the task is large, unclear or tedious: work you have not attempted is " +
+  "not a wall, and a run that ends this way with nothing to act on spends a " +
+  "person's time instead of a work cycle.";
+
+/** Which of the two endings a cycle's own final text reported, if either. */
+export type CycleEnding = "needs-review" | "done";
+
+/**
+ * How a work cycle's last assistant turn ends the run, or null to carry on.
+ *
+ * Extracted because the **precedence** is a decision rather than an expression:
+ * a turn carrying both tokens is an agent contradicting itself, and
+ * `needs-review` wins. `completed` is `ok`-toned, green, and the one ending
+ * nobody re-reads; `needs-review` is warn-toned, reopenable, and asks for a
+ * person — so the recoverable reading is the safe one to err toward, and getting
+ * it backwards files a run that said it was stuck as a run that said it was
+ * finished. That throws nothing and typechecks.
+ *
+ * Both tokens must be alone on their line, and the spellings differ on purpose:
+ * the sentinel is `NEEDS_REVIEW`, the stored status is `needs-review`, so a task
+ * that quotes the *status* — which is what a task about this app would do —
+ * cannot trip the matcher. Measured on this install, a task whose text merely
+ * carried `DONE` ended its run in a single cycle 53% of the time against 2 of
+ * 120 without it, so the collision is real and these two guards are what bound
+ * it. Do not tidy the spellings into agreement.
+ *
+ * Sub-agent text cannot reach here at all: `handleStreamLine` routes any message
+ * carrying `parent_tool_use_id` to its own event kind, so it never becomes a
+ * cycle's `finalText`. That protection is inherited rather than restated.
+ */
+export function cycleEnding(finalText: string): CycleEnding | null {
+  if (/^\s*NEEDS_REVIEW\s*$/m.test(finalText)) return "needs-review";
+  if (/^\s*DONE\s*$/m.test(finalText)) return "done";
+  return null;
+}
 
 /**
  * What an isolated run is not told by "you are working in a dedicated worktree".
@@ -6077,6 +6231,8 @@ export async function startRun(id: string): Promise<void> {
   let followUp: string | null = run.follow_up ?? null;
   let stopReason = "";
   let finalStatus: RunStatus = "completed";
+  /** Set only by the needs-review branch, so any other ending clears the row. */
+  let needsReviewReason: string | null = null;
   let lastExit = 0;
   let workDir = workDirOf(run);
   let incompleteIteration = false;
@@ -6905,12 +7061,45 @@ export async function startRun(id: string): Promise<void> {
         break;
       }
 
+      // What this cycle's last turn said about the task, if anything. The
+      // precedence between the two tokens lives in `cycleEnding` rather than
+      // here, so the branch below and the test that pins it cannot disagree.
+      const ending = cycleEnding(res.finalText);
+
+      // Below every test above it, and that placement is the whole decision.
+      // Everything above is a statement about the *machine* — a person stopping
+      // the run, a ceiling the CLI enforced, the provider refusing, the child
+      // dying — and this is the only rung that is a statement about the task.
+      // Filing a provider wall or a dropped socket as the agent's judgement
+      // would be a lie about who decided, and it would send an operator who came
+      // to read what the agent could not do to a 429. A cycle that names the
+      // sentinel and then exits non-zero is `failed` for the same reason: the
+      // exit code is the CLI's own verdict that the cycle did not complete, and
+      // the text may be a partial stream finalised after a truncation.
+      if (ending === "needs-review") {
+        // Cleared explicitly, and this is the trap. `reportedDone` is hydrated
+        // from the row rather than being a fresh local, so a branch that breaks
+        // out without touching it writes a stale 1 for a run picked up after an
+        // earlier DONE — which then sends `donePushbackPrompt` into a run that
+        // never said it was finished.
+        reportedDone = false;
+        needsReviewReason = clipReason(res.finalText);
+        stopReason =
+          "Agent reported that it could not complete the task. What it said is on this run's page.";
+        // `error_max_budget_usd`'s rule: every other way a run ends puts a
+        // sentence in the stream the operator is watching, and one that only
+        // changed status reads there like a cycle that stopped for no reason.
+        log(id, stopReason);
+        finalStatus = "needs-review";
+        break;
+      }
+
       // Completion signal from the continuation protocol. Recorded even when it
       // is absent, because "the agent said the task was finished" is the only
       // thing that separates a `completed` run from one that simply ran out of
       // work cycles below, and the answer is gone by the time the run is picked
       // up again.
-      reportedDone = /^\s*DONE\s*$/m.test(res.finalText);
+      reportedDone = ending === "done";
       if (reportedDone) {
         if (!policy.continueAfterDone) {
           stopReason =
@@ -6988,6 +7177,10 @@ export async function startRun(id: string): Promise<void> {
       spent_tokens_est: spentEstTokens,
       done_retriggers: doneRetriggers,
       reported_done: reportedDone ? 1 : 0,
+      // Written on every ending, not only the one that sets it: the column
+      // describes the ending this row records, so a run picked up and finished
+      // some other way must not keep the reason its previous segment left.
+      needs_review_reason: needsReviewReason,
       work_dir: workDir,
       session_id: sessionId,
       // No cycle is in flight once this function is unwinding, on any path —
@@ -7630,7 +7823,16 @@ export function resumeRun(id: string): ResumeOutcome {
 export type ReopenOutcome = { ok: true } | { ok: false; reason: string };
 
 /** Statuses a run can be picked up from. Terminal, and holding nothing. */
-const REOPENABLE: readonly RunStatus[] = ["failed", "stopped", "completed"];
+const REOPENABLE: readonly RunStatus[] = [
+  "failed",
+  "stopped",
+  "completed",
+  // Without it the gate below answers "this run is needs-review, so there is
+  // nothing here to pick up", which is the opposite of what the state is for:
+  // an operator who has read the reason and cleared the wall is exactly who this
+  // ending was written to reach.
+  "needs-review",
+];
 
 /**
  * What a reopened run says on its first cycle, or `""` for the continuation.
@@ -7679,6 +7881,27 @@ export function reopenPrompt(o: {
   // the task plus `priorWorkNotice`, which already says work happened here; a
   // note about a severed conversation would be describing one that is gone.
   if (o.restartKilled && o.sessionId) return RESTART_KILLED_NOTICE;
+  // Below `restartKilled` and above the pushback, and only one half of that is
+  // load-bearing. `restartKilled` is `status === "failed" && restart_closed`, so
+  // the two above can never both be true — the order between them is written
+  // this way for the next reader rather than for this code: if `reconcileOnBoot`
+  // ever widens what it writes on a mid-cycle kill, a kill must still outrank a
+  // stale ending. The order below it *is* load-bearing for the reason stated
+  // there, which is that the pushback reads a column and this reads a status.
+  //
+  // Doing nothing here would already satisfy the cheap reading of this branch —
+  // the pushback tests `completed`, which this row is not, so a `needs-review`
+  // run picked up with no note would get the plain continuation. That is the
+  // failure, not the fix: "Continue working on the task. If it is fully complete
+  // and verified, reply with exactly DONE" is the same sentence
+  // `RESTART_KILLED_NOTICE` was added to stop being sent, into a conversation
+  // whose last turn was the agent saying it could not get past something. And
+  // the ordinary reason to reopen such a run with no note is that the wall has
+  // been cleared, which is one cheap step to check and one whole billed cycle
+  // not to.
+  if (o.status === "needs-review" && o.sessionId) {
+    return NEEDS_REVIEW_PICKUP_NOTICE;
+  }
   // Without a session there is nothing to push back against — `nextPrompt`
   // starts the original task over — so the substitution is dropped entirely.
   if (o.status === "completed" && o.reportedDone && o.sessionId) {
@@ -7686,6 +7909,24 @@ export function reopenPrompt(o: {
   }
   return "";
 }
+
+/**
+ * What a run that reported it was stuck is told when somebody picks it back up.
+ *
+ * It deliberately does not quote the recorded reason back. This branch requires
+ * a session, so the agent's own words are already the last thing in that
+ * conversation, and re-sending them is spend for no information —
+ * `DEFAULT_CONTINUATION_PROMPT`'s own stated rule.
+ */
+const NEEDS_REVIEW_PICKUP_NOTICE =
+  "You ended your last work cycle by reporting that you could not get past " +
+  "something, and somebody has now picked this run back up. Usually that means " +
+  "they have cleared it. Before you do anything else, check whether what " +
+  "stopped you is still there — the credential, the permission, the access, the " +
+  "decision you were waiting on — and say what you find. If it has been " +
+  "cleared, carry on with the task from where you stopped. If it has not, do " +
+  "not spend a cycle working around it: say what is still missing and reply " +
+  "with exactly NEEDS_REVIEW on its own line again.";
 
 /**
  * What a resumed run is told when a restart, not the agent, ended its last cycle.
@@ -7886,8 +8127,15 @@ export function reopenRun(
       // than worked around. Leaving it set would mean a run that had been picked
       // up and had run again was still excluded from the next bulk pick-up, on
       // the strength of something somebody decided about a previous ending.
+      //
+      // `needs_review_reason=NULL` beside `stop_reason`, and for its reason: the
+      // column describes the ending the row records, and a reopened run may end
+      // without re-entering the loop at all — stopped while queued, closed out
+      // by a boot — after which a reason left behind would be describing an
+      // ending two segments old.
       `UPDATE runs SET status=?, budget=?, max_iterations=?, follow_up=?, reopened_at=?,
          started_at=NULL, finished_at=NULL, exit_code=NULL, stop_reason=NULL,
+         needs_review_reason=NULL,
          resume_at=NULL, restart_closed=0, set_aside_at=NULL WHERE id=? AND status=?`,
     )
     .run(

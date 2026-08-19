@@ -27,6 +27,11 @@ export const STATUS_TONE: Record<RunDTO["status"], BadgeTone> = {
   // let it disappear into the history table.
   paused: "warn",
   completed: "ok",
+  // The same test `paused` passes: it needs attention. Never `ok` — green is
+  // what made a run that hit a wall indistinguishable from one that did the job
+  // — and never `danger`, which is `failed`'s and says something went wrong. A
+  // cycle ran, cost money and produced a judgement; nothing faulted.
+  "needs-review": "warn",
   stopped: "warn",
   blocked: "warn",
   failed: "danger",
