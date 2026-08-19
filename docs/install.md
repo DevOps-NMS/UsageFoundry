@@ -381,10 +381,10 @@ same file carries hooks, permission rules and environment for every session.
 UF_LOCK_CLAUDE_HOME=1
 ```
 
-`1` is the only value that switches it on; anything else is off and the boot log
-says so. Nothing else to edit — compose forwards it. Check that it arrived
-anyway, because a variable that did not is indistinguishable from a switch that
-is off:
+`1` is the only value that switches it on, and any other non-empty value is off
+with a line in the boot log saying so. Nothing else to edit — compose forwards
+it. Check that it arrived anyway, because a variable that did not is
+indistinguishable from a switch that is off:
 
 ```bash
 docker compose exec usagefoundry sh -c 'echo "[$UF_LOCK_CLAUDE_HOME]"'   # expect [1]
