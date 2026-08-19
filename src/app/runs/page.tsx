@@ -259,6 +259,34 @@ function RunList({
       <Table stack>
         <caption className="sr-only">{caption}</caption>
         <THead>
+          {/* These are `w-[…]` and not `min-w-[…]`, and that is the opposite
+              of every other table in the app — `/branches`, `/agents` and both
+              workflow surfaces all state floors. It is deliberate, it is the
+              one place the difference matters, and it was measured rather than
+              argued.
+
+              Auto table layout hands a `width` back to whichever column asked
+              for `width: 100%` — the Run column, which is what makes it the one
+              that gives — so none of these figures is what the browser draws:
+              Status renders 84px against the 150 written here, Cycles 59
+              against 88, Spent 56 against 92. A `min-width` *would* be honoured,
+              and on a wrapped table that is the right answer. Not here. This
+              list is the app's one table outside `TableWrap` (`box="plain"`
+              above), because an `overflow-x-auto` would pin the sticky header
+              to a box that never scrolls — so a floor under these columns is a
+              floor under the *pane*. Measured: with floors the table stops
+              shrinking at 594px and the pane scrolls sideways from ~615px down,
+              which covers every window from 768px (where the table is still
+              flat) to about 880. With plain widths it keeps collapsing to
+              468px and the pane never scrolls at all.
+
+              conventions.md ranks those two costs and this is the losing side
+              of it: "a table must not be the reason the pane scrolls
+              sideways". What it buys is that a long status wraps — "next up —
+              starts when the folder frees" comes out one word per line at
+              84px. That is a real cost, recorded rather than fixed, and the
+              fix is to shorten the status line or give the pane a wrapper, not
+              to change these back. */}
           <tr>
             <Th scope="col" className={`w-[150px] ${STICKY_HEAD}`}>
               Status
@@ -266,12 +294,7 @@ function RunList({
             <Th scope="col" className={`w-full ${STICKY_HEAD}`}>
               Run
             </Th>
-            <Th
-              scope="col"
-              num
-              className={`w-[88px] ${STICKY_HEAD}`}
-              title="Work cycles that finished, against the run's cap"
-            >
+            <Th scope="col" num className={`w-[88px] ${STICKY_HEAD}`}>
               Cycles
             </Th>
             {kind === "active" ? (
@@ -372,6 +395,17 @@ function RunList({
                       {folderLabel(r)}
                     </div>
                   </Td>
+                  {/* The head carried a `title` saying "work cycles that
+                      finished, against the run's cap", which is banned twice
+                      over: a hover has no touch equivalent, and this table
+                      stacks — below the breakpoint the head is not rendered at
+                      all, so on a phone that sentence did not exist. It is
+                      gone rather than relocated, because nothing was lost. The
+                      figure is `n/m`, which reads as "n of m" without help,
+                      and the half the title was really distinguishing —
+                      finished against still running — is the `In flight`
+                      column standing next to it on the only list where a run
+                      can be in flight. */}
                   <Td
                     num
                     label="Cycles"

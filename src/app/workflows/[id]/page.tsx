@@ -422,16 +422,27 @@ export default function WorkflowPage() {
             <caption className="sr-only">
               The blocks of this workflow, and what each one waits for
             </caption>
+            {/* `min-w` rather than `w` on every fixed column here, and it is a
+                correctness fix rather than a preference. A `width` on a table
+                cell is a *suggestion* the auto layout algorithm trades away
+                against a `w-full` column's own content, so `Starts after`
+                measured 93px against the 260 declared for it and wrapped one
+                dependency into four lines. `min-width` is a constraint the
+                algorithm may not go under, so each column gets at least what
+                it was written for and `w-full` still takes whatever is left.
+                It cannot reach the narrow layout either way: `THead` is
+                `max-md:hidden` on a stacked table, so below the breakpoint
+                these cells are not rendered at all. */}
             <THead>
               <tr>
-                <Th scope="col" className="w-[40px]" />
+                <Th scope="col" className="min-w-[40px]" />
                 <Th scope="col" className="w-full">
                   Block
                 </Th>
-                <Th scope="col" className="w-[180px]">
+                <Th scope="col" className="min-w-[180px]">
                   Guards
                 </Th>
-                <Th scope="col" className="w-[260px]">
+                <Th scope="col" className="min-w-[260px]">
                   Starts after
                 </Th>
               </tr>
@@ -552,7 +563,7 @@ export default function WorkflowPage() {
                 </caption>
                 <THead>
                   <tr>
-                    <Th scope="col" className="w-[180px]">
+                    <Th scope="col" className="min-w-[180px]">
                       Started
                     </Th>
                     <Th scope="col" className="w-full">
@@ -560,7 +571,7 @@ export default function WorkflowPage() {
                     </Th>
                     {/* Runs, not blocks: an orchestrator block's own runs are
                         in here too, and they are not in the saved graph. */}
-                    <Th scope="col" num className="w-[88px]">
+                    <Th scope="col" num className="min-w-[88px]">
                       Runs
                     </Th>
                   </tr>

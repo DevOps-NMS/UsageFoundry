@@ -205,26 +205,39 @@ function RunRows({
 
 function RunTableHead() {
   return (
+    // `min-w` rather than `w` on every fixed column here, and it is a
+    // correctness fix rather than a preference. A `width` on a table cell is a
+    // *suggestion* the auto layout algorithm trades away against a `w-full`
+    // column's own content — measured on `/workflows/[id]`, a column declared
+    // at 260px rendered at 93 and wrapped one dependency into four lines, and
+    // these four columns are declared exactly the same way. `min-width` is a
+    // constraint the algorithm may not go under, so each column gets at least
+    // what it was written for and `w-full` still takes whatever is left. It
+    // cannot reach the narrow layout either way: `THead` is `max-md:hidden` on
+    // a stacked table, so below the breakpoint these cells are not rendered at
+    // all.
     <THead>
       <tr>
-        <Th scope="col" className="w-[116px]">
+        <Th scope="col" className="min-w-[116px]">
           Status
         </Th>
         <Th scope="col" className="w-full">
           Run
         </Th>
-        <Th
-          scope="col"
-          num
-          className="w-[104px]"
-          title="Work cycles that finished, against the run's cap"
-        >
+        {/* The head carried a `title` saying "work cycles that finished,
+            against the run's cap" — the second copy of that exact string, the
+            other being `/runs`. Both are gone rather than relocated. A hover
+            has no touch equivalent, and this table stacks, so the sentence
+            existed on exactly one of the two layouts; and nothing was lost
+            with it, because `n/m` reads as "n of m" and the run's own state is
+            already in the cell beside it. */}
+        <Th scope="col" num className="min-w-[104px]">
           Cycles
         </Th>
-        <Th scope="col" num className="w-[96px]">
+        <Th scope="col" num className="min-w-[96px]">
           Spent
         </Th>
-        <Th scope="col" num className="w-[128px]">
+        <Th scope="col" num className="min-w-[128px]">
           Started
         </Th>
       </tr>
@@ -615,18 +628,22 @@ export default function WorkflowInstancePage() {
                   Blocks that decide what to run, blocks that repeat one, blocks
                   that land branches, and blocks waiting on any of them
                 </caption>
+                {/* `min-w` for `RunTableHead`'s reason, one table over: a
+                    `width` is traded away against the `w-full` column's own
+                    content, where a `min-width` is a floor the auto layout may
+                    not go under. */}
                 <THead>
                   <tr>
-                    <Th scope="col" className="w-[116px]">
+                    <Th scope="col" className="min-w-[116px]">
                       Status
                     </Th>
                     <Th scope="col" className="w-full">
                       Block
                     </Th>
-                    <Th scope="col" num className="w-[104px]">
+                    <Th scope="col" num className="min-w-[104px]">
                       Started
                     </Th>
-                    <Th scope="col" num className="w-[96px]">
+                    <Th scope="col" num className="min-w-[96px]">
                       Spent
                     </Th>
                   </tr>

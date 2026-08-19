@@ -344,15 +344,24 @@ export default function AgentsPage() {
           <TableWrap>
             <Table stack>
               <caption className="sr-only">Saved agents, by name</caption>
+              {/* Floors rather than widths, and the difference is the whole of
+                  it. `Table` is auto-layout, where a `width` is a suggestion
+                  the algorithm is free to overrule and does the moment a
+                  `w-full` column asks for everything left — measured, the
+                  Agent column rendered 98px against the 200 declared here, so
+                  a name wrapped to three lines beside a description that had
+                  taken the room. A `min-width` is not a suggestion: it enters
+                  the column's own minimum, so the wide column gives instead.
+                  The figures are unchanged. */}
               <THead>
                 <tr>
-                  <Th scope="col" className="w-[200px]">
+                  <Th scope="col" className="min-w-[200px]">
                     Agent
                   </Th>
                   <Th scope="col" className="w-full">
                     Description
                   </Th>
-                  <Th scope="col" className="w-[160px]">
+                  <Th scope="col" className="min-w-[160px]">
                     Model
                   </Th>
                 </tr>
@@ -441,13 +450,13 @@ export default function AgentsPage() {
               </caption>
               <THead>
                 <tr>
-                  <Th scope="col" className="w-[200px]">
+                  <Th scope="col" className="min-w-[200px]">
                     Agent
                   </Th>
                   <Th scope="col" className="w-full">
                     Description
                   </Th>
-                  <Th scope="col" className="w-[240px]">
+                  <Th scope="col" className="min-w-[240px]">
                     File
                   </Th>
                 </tr>
