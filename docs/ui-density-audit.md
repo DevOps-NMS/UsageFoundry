@@ -1280,8 +1280,16 @@ are, in that order, unchanged.
 
 ### 3.E.2 `/runs` — the runs list
 
-**Verdict: this is the least fuzzy data page in the app. Change two things and
-nothing else.**
+**What arrived with what.** `ca50657` split the form off and left this page the
+overview; `ac6be76` drew the runs as one list view instead of cards and a
+table; `5d5a262` added the `waiting` status; `bcba644` (#111) added
+`FleetControls`; `e9109e6` (#60) added `RestartClosed`; `d193868` added
+set-aside and the archive filter. Six features — and unlike every other page
+here, **each one landed in its own tier** rather than at the foot of the
+nearest card.
+
+**Verdict: this is the least fuzzy data page in the app, and the provenance is
+why. Change two things and nothing else.**
 
 It already has the structure the rest of this document is trying to produce:
 three tiers by recency (`In flight` with a count badge, `Finished in the last
@@ -1391,6 +1399,15 @@ containing a `<details>`, then a two-column grid: the conversation `Card`
 (`emphasis="primary"`) with a pinned composer, and a 360px side card whose
 emphasis is already conditional on pending proposals.
 
+**What arrived with what.** `9061ac0` created the page whole. Then, one feature
+per paragraph of the proposal card: `433182a` added the `prompt rewritten`
+marker, `4643fa6` the dependency line and workflow proposals, `515bfe7` the
+mention popover, `17d8d6a` the `as {agent}` phrasing. `b728243` and `a5e3f09`
+reworked the thread into a conversation and then into an assistant pane;
+`8e6a437` added `Stop`; `eb40307` added the side tab bar and the standing
+disclosure. **The proposal card grew a fact at a time and its facts never got a
+consistent treatment** — which is the finding below.
+
 **What is fuzzy — counted.**
 
 1. **The most consequential fact on a proposal card is its least visible one.**
@@ -1444,6 +1461,10 @@ be promoted is in §6.
 emphasis is already dynamic (`editing ? "default" : "primary"`); an
 `On disk` card (`quiet`, zero controls).
 
+**What arrived with what.** `d4e4cf5` *Give the agent registry a page, so a
+specialist can be created at all* created the whole page; `afcb1cd` and
+`be79fe8` touched it visually. **One feature, one page** — and it shows.
+
 **What is fuzzy.** Exactly one thing, and it is small: **three `CardTitle`s
 render outside their `Card`** (`:206`, `:312`, `:418`), which is the only place
 in the app that does this, so the three section names read as labels floating
@@ -1463,6 +1484,11 @@ stays, with its full explanatory `Hint`, and stays uncontrollable.
 mutually exclusive states. The loaded state is `Billed cost — last 30 days`
 (`primary`), a `Daily cost` card and `Configured rate limits`. **Zero controls
 when it is working.**
+
+**What arrived with what.** `24a886d` shipped it; `128f024` moved it onto the
+kit; `13d304c` *Say on the API account page why a Pro/Max plan is not on it*
+added the second lede paragraph. Three commits, and the only one that added
+content is the one this section is about.
 
 **What is fuzzy.** One thing: the `Lede`'s second paragraph (`:53-59`) is three
 sentences of `text-xs` explaining why a Pro or Max subscription is invisible
