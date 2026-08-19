@@ -10,6 +10,27 @@
 > the target structure too. Section 6 lists the handful I would remove, and
 > those are recommendations for a person, not instructions for a build run.
 
+## Contents
+
+| § | | Read it if |
+|---|---|---|
+| 0 | How this was produced, and what was verified | you want to know how much to trust a claim |
+| 1 | **The density vocabulary** — seven affordances, the closed "never" list, and the one primitive to build | **always, before you group anything** |
+| 2 | **The promotion and demotion rule** — three tiers, four anti-rules | **always, before you fold anything** |
+| 3 | Per-surface target structures, ordered by build run | your own subsection, and only yours |
+| 3.A | run (a) — the shell and the shared primitives | |
+| 3.B | run (b) — `/settings` | |
+| 3.C | run (c) — `/runs/new` and `/runs/[id]` | |
+| 3.D | run (d) — the workflow surfaces | |
+| 3.E | run (e) — dashboard, runs list, branches, chat, agents, account | |
+| 3.F | Every dialog and every drawer | you are touching a `Sheet` or the drawer |
+| 4 | The five build runs: file ownership and what each must not touch | before your first edit |
+| 5 | **What must not change** | **always, first** |
+| 6 | Recommend removing — needs a human decision | never act on it |
+| 7 | Additions to `docs/agent/conventions.md` | |
+
+---
+
 ## 0. How this was produced, and what was actually verified
 
 ### 0.1 What I could see
