@@ -623,6 +623,24 @@ this safe rather than a way to hide a surprise:
 > fold contains any key in that list renders `defaultOpen` and its `count` is
 > the number of such keys.
 
+Three details of that, because run (b) would otherwise have to guess and the
+wrong guess is silent:
+
+- **`nonDefaultKeys` is a third top-level key on the GET response, beside
+  `settings` and `env`.** Not inside `env` — that object is about the
+  environment the container was given, and this is about the stored blob.
+  `src/app/api/settings/route.ts:32-64`.
+- **`PUT` returns it too.** `:388` currently answers `{ settings: saveSettings(patch) }`
+  and the page sets both `s` and `savedS` from that response
+  (`settings/page.tsx:1254-1255`). Without the field on the PUT, every fold's
+  `count` is stale the moment the operator saves.
+- **`defaultOpen` is read from the *first* GET and never again; `count` follows
+  the latest response.** `Disclosure` is uncontrolled precisely so that a fold
+  cannot close under the reader — and a fold snapping shut in the same frame as
+  a successful Save, because the value it holds just became the default, is that
+  failure in its most confusing form. The badge may change; the open state may
+  not.
+
 This is also the answer to the objection already recorded in the file. The
 comment at `:1645-1647` says the raw-token ceilings are
 `"On screen rather than behind the disclosure this used to be: the two fields
@@ -672,7 +690,8 @@ button stay, in place, with the same labels — except the one chip renamed in B
 4. `sameValue` is exported from `src/lib/settings.ts` and used — not
    reimplemented — by whatever computes `nonDefaultKeys`.
 5. A prompt whose stored value differs from the shipped default renders its
-   `Disclosure` open on load, with a non-zero `count`.
+   `Disclosure` open on load, with a non-zero `count`. Saving that prompt back
+   to its default updates the `count` and **leaves the fold open**.
 6. Every one of the 38 `EDITABLE_PATHS` is still reachable and still writes the
    same key. Save still commits every field in one press.
 7. `blocked` still refuses Save for both existing reasons (`:1290-1302`), and
