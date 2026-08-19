@@ -1176,7 +1176,7 @@ export default function Dashboard() {
                 Runs, workflow blocks and chat turns together. A run still going,
                 or one that finished inside the window, counts its whole spend —
                 which over-counts rather than under-counts, because this is a
-                ceiling. Not comparable with the meters above: those measure every
+                limit. Not comparable with the meters above: those measure every
                 transcript on this machine against Anthropic&rsquo;s windows.
               </>
             )}

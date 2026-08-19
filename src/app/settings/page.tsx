@@ -331,19 +331,23 @@ function at(obj: unknown, path: string): unknown {
 
 /**
  * What a run's own spending limit can overshoot by. Every mode now carries the
- * remainder into the cycle as a ceiling of its own, so what the mode still
- * decides is when a *fresh* reading is taken — which is why these three differ
- * only in their first clause. Rendered from the stored mode rather than
- * hardcoded: nothing on this page can set it, but a guard set written by
- * another build could carry `live`, and a sentence describing the wrong mode is
- * worse than no sentence.
+ * remainder into the cycle as a cap of its own, so what the mode still decides
+ * is when a *fresh* reading is taken — which is why these three differ only in
+ * their first clause. "Cap" and not "ceiling", here and in the three strings:
+ * a ceiling is a number set further up this same page that a *window*
+ * percentage is measured against, and this is a limit on one run. Everything
+ * else on this page that says "ceiling" means the windows, which is exactly why
+ * the word may not also mean this one — the run form settled on "cap" for the
+ * same sentence. Rendered from the stored mode rather than hardcoded: nothing
+ * on this page can set it, but a guard set written by another build could carry
+ * `live`, and a sentence describing the wrong mode is worse than no sentence.
  */
 const SPEND_READ_AT: Record<BudgetPolicyDTO["enforcement"], string> = {
   "between-cycles":
-    "Read before each work cycle, and carried into the cycle as its own ceiling, so a run stops near it.",
-  live: "Read on a ticker while a cycle is going, and carried into the cycle as its own ceiling, so a run stops near it.",
+    "Read before each work cycle, and carried into the cycle as its own cap, so a run stops near it.",
+  live: "Read on a ticker while a cycle is going, and carried into the cycle as its own cap, so a run stops near it.",
   "live-resume":
-    "Read on a ticker while a cycle is going, and carried into the cycle as its own ceiling, so a run stops near it.",
+    "Read on a ticker while a cycle is going, and carried into the cycle as its own cap, so a run stops near it.",
 };
 
 /** Complete class strings per tone, looked up rather than interpolated. */
