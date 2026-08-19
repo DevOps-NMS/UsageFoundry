@@ -109,9 +109,19 @@ banner on the dashboard: a workspace whose path is not a directory (Docker
 creates a missing bind source rather than refusing, so a typo in `UF_WORKSPACE`
 looks exactly like an empty one), a `CLAUDE_HOME` with no `projects/` under it
 (every usage figure reads zero), and any variable set to the empty string where
-blank is not an answer. `UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY` and
-`UF_GITHUB_TOKEN` are the three where blank *is* an answer — it means off — and
-they are never reported.
+blank is not an answer. Eight variables are where blank *is* an answer, and none
+of them is ever reported: `UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY`,
+`UF_GITHUB_TOKEN` and `UF_GITHUB_TOKENS`, where it means *off*;
+`UF_ALLOW_NO_AUTH`, `UF_COOKIE_SECURE` and `UF_TRANSCRIPT_CACHE_MAX_ENTRIES`,
+where it means *take the default*; and `UF_UNMOUNTED_WORKSPACES`, which compose
+computes rather than you, and where blank is the success case — a non-blank
+value there refuses the boot. `BLANK_MEANINGFUL_ENV_VARS` in `src/lib/config.ts`
+is the list.
+
+Two of those are ones the Quick start above tells you to set, so read the silence
+carefully: a blank `UF_ALLOW_NO_AUTH` or `UF_COOKIE_SECURE` is *taken as the
+default*, not reported, and nothing at boot distinguishes it from a value that
+arrived.
 
 The full table is in [docs/install.md](docs/install.md#required-environment).
 
