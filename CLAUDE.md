@@ -137,6 +137,6 @@ This app's invariants encode the product's reasoning, not style preferences, and
 
 ## Docs
 
-`docs/agent/` is the agent-facing reasoning above. `docs/` proper is human-facing: `install.md`, `runs.md`, `workflows.md`, `security.md`, `review-and-land.md`, `orchestrator-chat.md`, `limits-and-accuracy.md`, `backup-and-restore.md`, and `verification.md` — which records what has been measured against the pinned CLI and what has not.
+`docs/agent/` is the agent-facing reasoning above. `docs/` proper is human-facing, and its index is `docs/README.md` — go there rather than to a list here, because a list here is what drifted last time. The two an editor needs are `docs/architecture.md`, the `src/lib/` module map, and `docs/verification.md`, which records what has been measured against the pinned CLI and what has not. Beside the operator's pages — `install.md`, `runs.md`, `workflows.md`, `security.md`, `review-and-land.md`, `orchestrator-chat.md`, `limits-and-accuracy.md`, `backup-and-restore.md` — `docs/` also holds design records and audits: `needs-review.md`, `external-validator.md`, `validator-baseline.md`, `ui-density-audit.md`.
 
 `HEALTH-CHECK.md` at the repository root is neither, and is not maintained: it is one dated code audit at `267b901`, 2026-08-11, kept because `scripts/file-health-check-issues.sh` files its sections as issues by title. Its own header carries the per-finding status. Check any finding against the tree before acting on it — one of the seven was fixed in a way that contradicts its suggestion.
