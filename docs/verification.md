@@ -670,8 +670,15 @@ through before trusting this unattended:
   is the failure recorded under *Verified* above and whose cause is settled
   there — so
   `npm run typecheck`, `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG
-  npm run build` were **not run**, and neither was a browser. Treat it as
-  unbuilt until those three pass. Then, at 390×844: every page that holds one of
+  npm run build` were **not run**, and neither was a browser.
+
+  **That gate is now discharged.** The change landed as `d8c711d`, and all three
+  commands have since been run in a worktree with a working shell: `npm run
+  typecheck` exit 0, `npm test` exit 0 (1335 pass, 0 fail, 210 suites) at
+  `c9d0b3c`, and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` exit 0
+  with `.next/standalone` written at `a294ed2` — two documentation-only commits
+  above the same source. **What is still open is the browser**, which is the rest
+  of this entry and none of it was run: at 390×844: every page that holds one of
   them read top to bottom with **no horizontal scroll**, every figure still
   `tabular-nums` and every unknown reading still hatched, the branches selection
   bar starting at the window's left edge rather than 224px in with its Land,
@@ -735,12 +742,19 @@ through before trusting this unattended:
   they sit outside `AppShell`'s box and so owe the edge themselves. All of it was reasoned from documented platform behaviour. **None
   of it was watched.**
 
-  **This run had no working shell either** — every command died with `bwrap: No
-  permissions to create new namespace`, `git` included, from the same cause as
-  the entry above and settled under *Verified* — so `npm run typecheck`,
-  `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` were
-  **not run**, no browser was driven, and **nothing was committed**: this change
-  and the two before it sit uncommitted in the worktree. Treat it as unbuilt.
+  **The run that wrote this had no working shell either** — every command died
+  with `bwrap: No permissions to create new namespace`, `git` included, from the
+  same cause as the entry above and settled under *Verified* — so `npm run
+  typecheck`, `npm test` and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
+  build` were **not run** and no browser was driven.
+
+  **The work is committed and the three commands pass.** The change is
+  `d8c711d`, with `2e68820` above it; `git status --porcelain
+  --untracked-files=no` is empty, so there is no uncommitted worktree to go
+  looking for. `npm run typecheck` and `npm test` (1335 pass, 0 fail) were run at
+  `c9d0b3c` and the build at `a294ed2`, all exit 0. **The browser was still not
+  driven**, which is what the rest of this entry is about and is where the two
+  device-only defects still sit.
 
   Narrowing a desktop window is not a substitute for either device-only check.
   **The zoom**: on real iOS Safari at 390px, tap into any field on `/runs/new`
