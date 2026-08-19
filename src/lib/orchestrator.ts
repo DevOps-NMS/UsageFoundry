@@ -3,6 +3,7 @@ import type { Readable } from "node:stream";
 import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import os from "node:os";
 import fs from "node:fs";
 import {
   CLAUDE_BIN,
@@ -4941,6 +4942,31 @@ export type SandboxScope =
 const SANDBOX_GLOB_CHARS = /[*?[\]{}!]/;
 
 /**
+ * Where a toolchain writes that is neither the checkout nor this app's.
+ *
+ * A write config of any kind makes the CLI bind `/` read-only and rw-bind only
+ * the allow set (`10-validation.md`), so every path a build touches has to be
+ * named or the build fails inside a tool call the run loop does not read —
+ * `docs/verification.md` names these two by name as the ones the set left out.
+ * npm's cache is `$HOME/.npm` and Go's is under `GOPATH`, which the image points
+ * at a named volume so it survives a container it is meant to outlive.
+ *
+ * Read off the *environment* rather than written as literals, because the uid
+ * that owns them is not the one asking: the server runs as root under compose
+ * and the children run as `UF_AGENT_UID`, while `HOME` is `/home/node` for both
+ * — which is what makes `os.homedir()` the right answer here and would make
+ * `/root/.npm` the silent wrong one.
+ *
+ * Given to the two children that build. The reviewer installs nothing and the
+ * chat is told to look rather than work, so neither is handed a cache it would
+ * only fill.
+ */
+const BUILD_CACHE_DIRS = [
+  path.join(os.homedir(), ".npm"),
+  process.env.GOPATH || path.join(os.homedir(), "go"),
+];
+
+/**
  * The overlay this child gets, on top of a managed policy it cannot weaken.
  *
  * `/etc/claude-code/managed-settings.json` is what enables the sandbox at all —
@@ -5000,6 +5026,11 @@ export function sandboxSettings(scope: SandboxScope): SandboxPolicy {
           // branch. Only a per-run clone would, and that is a different
           // proposal. Named as it is rather than pretended narrower.
           scope.repoRoot === null ? null : path.join(scope.repoRoot, ".git"),
+          // And the toolchain caches, which are not this run's work and are
+          // where a first `npm install` or `go build` writes. Named for the
+          // two children that build; the reviewer never installs anything and
+          // the chat is told not to.
+          ...BUILD_CACHE_DIRS,
         ],
         "a run with no working directory",
       );
@@ -5012,9 +5043,12 @@ export function sandboxSettings(scope: SandboxScope): SandboxPolicy {
       // `acceptEdits` and edits conflict markers in a throwaway checkout
       // (`land.ts`), so that checkout is named and the repository's `.git` is
       // deliberately **not**: it is not asked to run git, and the merge commit
-      // is made by this server afterwards once the result has been checked.
+      // is made by this server afterwards once the result has been checked —
+      // and, for the resolver only, the toolchain caches, since
+      // `settings.resolveVerifyTools` is the operator naming a build command
+      // for it to run against the merge it wrote.
       return writeSet(
-        scope.permissionMode === "plan" ? [] : [scope.cwd],
+        scope.permissionMode === "plan" ? [] : [scope.cwd, ...BUILD_CACHE_DIRS],
         "an assist with no working directory",
       );
 
@@ -5047,11 +5081,19 @@ export function sandboxSettings(scope: SandboxScope): SandboxPolicy {
  * is the constraint pointing both ways at once: metering needs it writable by
  * the agent's uid, policy integrity needs the settings file inside it not to be.
  * The resolution is per-entry ownership, and it is not this function's.
+ *
+ * `/tmp` is here for the same "no call site can leave it out" reason, and it is
+ * not this app's path at all: the CLI writes its shell snapshots and its own
+ * temporary files there, so a child that cannot write `/tmp` has a `Bash` tool
+ * that fails for a reason with nothing to do with what it was asked to do.
+ * `scripts/sandbox-probe/probe.sh` names it in all six of its allowlists on
+ * exactly this ground, and it is given even to the reviewer — whose set is
+ * otherwise empty, and which still runs read-only shell under `plan`.
  */
 function writeSet(paths: readonly (string | null)[], empty: string): SandboxPolicy {
   const allowWrite: string[] = [];
 
-  for (const candidate of [...paths, CLAUDE_CONFIG_DIR]) {
+  for (const candidate of [...paths, CLAUDE_CONFIG_DIR, "/tmp"]) {
     if (candidate === null || candidate === "") continue;
     // A relative entry is not a path the CLI can bind either, and this app's
     // own paths are absolute — one arriving here means a caller passed

@@ -239,6 +239,26 @@ if [ "${UF_SANDBOX:-}" = "1" ]; then
   # replace it, and is certainly not asking it to delete it.
   policy_tmp="$MANAGED_SETTINGS_DIR/.usagefoundry-policy.tmp"
   sandbox_policy_installed=""
+  # `enableWeakerNestedSandbox` below is what makes the sandbox able to start
+  # inside a container at all, and it is not optional here. The CLI builds one
+  # of two bubblewrap command lines: its default mounts a fresh procfs
+  # (`--proc /proc`), and this key switches it to binding the existing one
+  # (`--bind /proc /proc`). Docker masks parts of `/proc` — kcore, keys,
+  # interrupts, timer_list over tmpfs, several more bound read-only — and the
+  # kernel refuses a new procfs mount inside a user namespace while locked
+  # over-mounts hide part of the current view. Measured on this project's own
+  # image, at both uids and with the seccomp profile applied: the default shape
+  # dies with "Can't mount proc on /newroot/proc: Operation not permitted" and
+  # the bound shape exits 0.
+  #
+  # It is named "weaker" by the CLI and the name is honest: the sandboxed
+  # command sees this container's `/proc` rather than one of its own, so a
+  # sibling agent's processes are visible in it. That is the boundary this
+  # container never had anyway — every agent here is one uid (`privsep.ts`),
+  # and `PROCESS_KILLERS` plus the self-hosting notice are what stand in for it.
+  # Written unconditionally rather than as a switch for the reason the two
+  # `denyRead` paths are: a policy an operator can half-configure is one that
+  # reports "on" and confines nothing.
   if mkdir -p "$MANAGED_SETTINGS_DIR" 2>/dev/null &&
      cat > "$policy_tmp" 2>/dev/null <<EOF
 {
@@ -246,6 +266,7 @@ if [ "${UF_SANDBOX:-}" = "1" ]; then
     "enabled": true,
     "failIfUnavailable": $fail_if_unavailable,
     "allowUnsandboxedCommands": false,
+    "enableWeakerNestedSandbox": true,
 $network_block
     "filesystem": {
       "denyRead": ["${DATA_DIR:-/data}", "/backups"]

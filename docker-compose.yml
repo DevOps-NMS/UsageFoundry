@@ -295,11 +295,29 @@ services:
     # What this container may ask the kernel for — commented out, and the whole
     # of what UF_SANDBOX above needs from the host.
     # ------------------------------------------------------------------------
-    # Uncomment the two lines below to let bubblewrap start. Nothing else here
-    # depends on them: with them commented the image still carries bwrap, socat
-    # and the seccomp applier, and every one of them sits unused, which is what
-    # makes a stock install identical to the one before this section existed. A
-    # missing ./uf-seccomp.json cannot break a boot that never reads it.
+    # Uncomment the two lines below to let bubblewrap start — or, better, put
+    # them in a docker-compose.override.yml, which compose merges automatically
+    # and which is one host's answer rather than this project's. They stay
+    # commented here so that a stock `docker compose up` cannot fail on a
+    # profile file a daemon rejects, for a sandbox nobody asked for. Nothing
+    # else here depends on them: with them commented the image still carries
+    # bwrap, socat and the seccomp applier, and every one of them sits unused,
+    # which is what makes a stock install identical to the one before this
+    # section existed. A missing ./uf-seccomp.json cannot break a boot that
+    # never reads it.
+    #
+    # **They are necessary and they are not sufficient, and that is measured.**
+    # With the profile applied, `bwrap --dev-bind / / --unshare-user` exits 0 at
+    # both uids on Docker Engine 29.7.2 / kernel 6.12.76-linuxkit, where without
+    # it the same command fails "No permissions to create new namespace". What
+    # still fails afterwards is a fresh procfs: Docker masks parts of `/proc`,
+    # so `--proc /proc` — the CLI's *default* bubblewrap shape — dies with
+    # "Can't mount proc on /newroot/proc: Operation not permitted", as root as
+    # well. docker-entrypoint.sh therefore writes `enableWeakerNestedSandbox`
+    # into the managed policy, which is what switches the CLI to the shape that
+    # works. Turning this on without that key gets a sandbox that still cannot
+    # start — and, since the CLI's availability check only asks whether bwrap
+    # exists, one that fails inside every Bash call instead of at startup.
     #
     # What it widens. Docker's default seccomp profile allows the whole
     # namespace-and-mount family only to a container holding CAP_SYS_ADMIN, and
@@ -307,7 +325,9 @@ services:
     # consulted at all. Measured in the shipped container rather than reasoned
     # about: plain `unshare -U`, which needs no privilege on a stock kernel,
     # fails the same way; `/proc/sys/user/max_user_namespaces` is 31734 and
-    # `Seccomp: 2` with one filter loaded. ./uf-seccomp.json is Docker's own
+    # `Seccomp: 2` with one filter loaded — and one filter is still loaded with
+    # this profile applied, since it is a narrowed Docker default and not
+    # `seccomp=unconfined`. ./uf-seccomp.json is Docker's own
     # default profile with six syscalls ungated — clone, clone3, unshare, mount,
     # umount2, pivot_root — which is the user namespace and the mount namespace
     # bubblewrap builds inside it, and nothing else. The twenty-one other
@@ -329,6 +349,12 @@ services:
     # the one Docker actually ships:
     #
     #   python3 scripts/make-seccomp-profile.py "v$(docker version --format '{{.Server.Version}}')"
+    #
+    # The shipped file is moby v28.5.2's default with the six names appended.
+    # That command only works for a version moby tags: an engine on 29.x gets a
+    # 404, because moby publishes no v29 tag, and the profile has to stay the
+    # newest tagged default until it does. Applied under Engine 29.7.2 it is
+    # accepted and the container still runs filtered.
     #
     # security_opt:
     #   - seccomp=./uf-seccomp.json

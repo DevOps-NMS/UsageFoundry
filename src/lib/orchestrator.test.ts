@@ -2415,6 +2415,29 @@ describe("sandboxSettings — what one child may write", () => {
     assert.equal(writable(isolated, store), false);
   });
 
+  it("keeps the paths a tool call writes without being told to", () => {
+    // The two ways this set is wrong are opposite and both silent, and this is
+    // the narrow one: a write config of any kind makes the CLI bind `/`
+    // read-only, so a path nobody named fails inside a tool call the run loop
+    // never reads. `/tmp` is where the CLI puts its own shell snapshots — the
+    // first `Bash` call is where that shows up — and the caches are where a
+    // first `npm install` or `go build` writes.
+    assert.equal(writable(isolated, "/tmp"), true);
+    assert.equal(writable(isolated, "/tmp/claude-shell-snapshot-x"), true);
+    assert.equal(writable(isolated, path.join(os.homedir(), ".npm")), true);
+    assert.equal(writable(isolated, path.join(os.homedir(), "go", "pkg", "mod")), true);
+
+    // And the resolver gets them too: it is the other child an operator can
+    // point at a build command, through `settings.resolveVerifyTools`.
+    const resolver = sandboxSettings({
+      kind: "assist",
+      cwd: own,
+      permissionMode: "acceptEdits",
+    });
+    assert.equal(writable(resolver, "/tmp"), true);
+    assert.equal(writable(resolver, path.join(os.homedir(), ".npm")), true);
+  });
+
   it("keeps CLAUDE_CONFIG_DIR writable, which is the metering path", () => {
     // Every window, every meter and every guard but one is derived from the
     // transcripts under it. A set that forgets it reports zeros rather than
@@ -2451,9 +2474,15 @@ describe("sandboxSettings — what one child may write", () => {
   });
 
   it("gives the reviewer a read-only set and the resolver its checkout", () => {
-    // One spawn site, two children. `plan` writes nothing at all, so its set is
-    // the transcript directory and nothing else — the repository it is reading a
-    // diff out of is not in it.
+    // One spawn site, two children. `plan` writes nothing of its own, so its
+    // set is the transcript directory and the CLI's own scratch and nothing
+    // else — the repository it is reading a diff out of is not in it, and
+    // neither is a toolchain cache, since it installs nothing.
+    //
+    // Still an exact set rather than a containment check: "a read-only child,
+    // spelled as one" is the claim, and `/tmp` is in it because a `plan` child
+    // still runs read-only shell and the CLI writes a shell snapshot for every
+    // one of those.
     const reviewer = sandboxSettings({
       kind: "assist",
       cwd: own,
@@ -2461,7 +2490,7 @@ describe("sandboxSettings — what one child may write", () => {
     });
     assert.deepEqual(
       reviewer.kind === "confined" ? reviewer.allowWrite : null,
-      [CLAUDE_CONFIG_DIR],
+      [CLAUDE_CONFIG_DIR, "/tmp"],
     );
 
     // The conflict resolver edits markers in a throwaway checkout and is

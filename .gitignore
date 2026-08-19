@@ -13,6 +13,13 @@ node_modules
 .env.*
 !.env.example
 
+# One host's compose answers — a seccomp profile, an extra mount — which are
+# not this project's defaults and must not become them. Ignored rather than
+# tracked for a second reason: an isolated run's `git add -A` commits whatever
+# is untracked in the checkout it was given, and this repository is one an agent
+# here actually works in.
+docker-compose.override.yml
+
 *.tsbuildinfo
 next-env.d.ts
 .DS_Store
