@@ -25,6 +25,23 @@ import { Hint, type HintTone } from "@/components/ui/Hint";
  */
 const CONTROL_BASE =
   "ui-transition rounded-sm border bg-inset px-2.5 text-sm text-ink " +
+  // 16px below the shell's breakpoint, and that number is a platform floor
+  // rather than a type decision: iOS Safari zooms the page in whenever a
+  // control under 16px takes focus, and it never zooms back out — so one tap
+  // on the first field leaves every screen after it offset sideways for the
+  // rest of the session, with nothing on the page saying why.
+  //
+  // Deliberately an arbitrary value and not a step in the type scale.
+  // --text-sm and --text-base are both 13 for the reason written beside them
+  // in globals.css, twenty other things read them, and neither may move to
+  // accommodate a control's touch floor. It is equally not a font-size on
+  // `html`, which redefines `rem` and takes 12.5% off every spacing and type
+  // utility in the app. Everything not on this kit gets the same floor from
+  // the element selectors in globals.css's legacy layer.
+  //
+  // Every text control in the app concatenates this string — Input, Select,
+  // Textarea and LimitField's two — so this is the one place it is stated.
+  "max-md:text-[16px] " +
   "placeholder:text-ink-faint " +
   // No ring here any more. `focus:outline-none focus:shadow-focus` was a text
   // control's own second focus treatment, and it is the half of the pair that
@@ -34,8 +51,14 @@ const CONTROL_BASE =
   "focus:border-accent " +
   "disabled:cursor-not-allowed disabled:bg-canvas disabled:text-ink-faint";
 
-/** One line of text in a 36px box, so a control is aimed at, not passed over. */
-const CONTROL_LINE = "min-h-[var(--control-h-lg)] py-1.5";
+/**
+ * One line of text in a 36px box, so a control is aimed at, not passed over —
+ * and 44px below the shell's breakpoint, which is what a finger needs. A
+ * `max-md:` override rather than a change to --control-h-lg, which is the
+ * *pointer's* floor and what the whole kit is sized from. See Button's SIZE map
+ * for why the two heights sit in one string.
+ */
+const CONTROL_LINE = "min-h-[var(--control-h-lg)] max-md:min-h-11 py-1.5";
 /** Many lines, where the padding is what keeps the text off the border. */
 const CONTROL_BLOCK = "py-2";
 
@@ -422,6 +445,14 @@ export function Switch({
         // The pointer target, not the box: inset vertically past the pill to
         // --control-h and no wider, so a row of controls keeps its spacing.
         "after:absolute after:-inset-y-[5px] after:inset-x-0 after:content-[''] " +
+        // 44×44 below the shell's breakpoint, and still entirely inside the
+        // overlay: the pill stays 38×22, so a grouped list's right edge does
+        // not move and no row gets taller for it. This is the one control that
+        // has to grow sideways as well — 22px is short enough that height
+        // alone leaves it under the floor in the axis a thumb misses in — and
+        // 3px of bleed per side sits well inside the 8px `gap` a ListRow puts
+        // between two trailing controls, so two targets still cannot touch.
+        "max-md:after:-inset-y-[11px] max-md:after:-inset-x-[3px] " +
         `${state.track} ${className}`
       }
     >
@@ -463,7 +494,10 @@ export function Toggle({
   return (
     <label
       htmlFor={id}
-      className={`flex min-h-[var(--control-h-lg)] items-center gap-2.5 text-sm ${
+      // The whole row is the target, so the row is what takes the 44px floor
+      // below the breakpoint — the switch inside it keeps its own overlay for
+      // the case where the label is not what the finger lands on.
+      className={`flex min-h-[var(--control-h-lg)] max-md:min-h-11 items-center gap-2.5 text-sm ${
         off ? "cursor-not-allowed text-ink-faint" : "cursor-pointer text-ink"
       }`}
     >

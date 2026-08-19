@@ -2328,7 +2328,10 @@ export default function NewRunPage() {
                     <button
                       type="button"
                       onClick={() => focusControl(p.focus)}
-                      className="inline-flex min-h-8 cursor-pointer items-center border-0 bg-transparent p-0 text-left text-sm font-normal text-accent hover:underline"
+                      // 44px below the breakpoint like every other control —
+                      // this one is a button drawn as a link, and the app's hit
+                      // target does not depend on what a control looks like.
+                      className="inline-flex min-h-8 max-md:min-h-11 cursor-pointer items-center border-0 bg-transparent p-0 text-left text-sm font-normal text-accent hover:underline"
                     >
                       {p.message}
                     </button>

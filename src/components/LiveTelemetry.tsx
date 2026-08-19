@@ -8,7 +8,7 @@ import type { TelemetryWindowDTO } from "../lib/apiTypes";
 import { STATUS_TONE, fmtRelative, fmtTokens, fmtUSD } from "../lib/format";
 import { Badge } from "./ui/Badge";
 import { Card, CardTitle, Stat } from "./ui/Card";
-import { Table, Td, Th, Tr } from "./ui/Table";
+import { TBody, THead, Table, Td, Th, Tr } from "./ui/Table";
 
 /**
  * The same Finder-style list view the period card and the dashboard draw: a
@@ -20,8 +20,12 @@ import { Table, Td, Th, Tr } from "./ui/Table";
  * No height cap: this list is already capped at the heaviest few runs by
  * `telemetryWindow`, so it has nothing to scroll past. The sticky header costs
  * nothing until that cap moves.
+ *
+ * The sideways scroll is released below the breakpoint, where the rows are
+ * blocks and there is nothing left to scroll to.
  */
-const LIST_VIEW = "overflow-auto rounded-sm border border-line";
+const LIST_VIEW =
+  "overflow-auto max-md:overflow-visible rounded-sm border border-line";
 
 const STICKY_HEAD =
   "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
@@ -75,12 +79,12 @@ export function LiveTelemetry({
       </div>
 
       <div className={LIST_VIEW}>
-        <Table>
+        <Table stack>
           <caption className="sr-only">
             Each run&rsquo;s own first-party cost inside this window, heaviest
             first
           </caption>
-          <thead>
+          <THead>
             <tr>
               <Th className={STICKY_HEAD}>Run</Th>
               <Th className={STICKY_HEAD}>Status</Th>
@@ -94,14 +98,15 @@ export function LiveTelemetry({
                 Last request
               </Th>
             </tr>
-          </thead>
-          <tbody>
+          </THead>
+          <TBody>
             {telemetry.runs.map((r) => (
               <Tr key={r.runId}>
+                {/* No label: the run's own id is what the record is. */}
                 <Td className="mono whitespace-nowrap">
                   <Link href={`/runs/${r.runId}`}>{r.runId.slice(0, 8)}</Link>
                 </Td>
-                <Td>
+                <Td label="Status">
                   {/* A telemetry row can outlive nothing — runs are never
                       deleted — but the join is a LEFT JOIN, so say "unknown"
                       rather than inventing a status. */}
@@ -111,14 +116,18 @@ export function LiveTelemetry({
                     "—"
                   )}
                 </Td>
-                <Td num>{fmtUSD(r.costUSD)}</Td>
-                <Td num>{r.requests}</Td>
-                <Td num className="whitespace-nowrap">
+                <Td num label="Cost">
+                  {fmtUSD(r.costUSD)}
+                </Td>
+                <Td num label="Requests">
+                  {r.requests}
+                </Td>
+                <Td num label="Last request" className="whitespace-nowrap">
                   {fmtRelative(r.lastAt, now)}
                 </Td>
               </Tr>
             ))}
-          </tbody>
+          </TBody>
         </Table>
       </div>
 

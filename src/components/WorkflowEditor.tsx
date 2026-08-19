@@ -692,7 +692,14 @@ export function WorkflowEditor({
           </div>
         </div>
 
-        <div className="flex flex-col gap-4 lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(var(--pane-h)-6rem)] lg:overflow-y-auto">
+        {/* `max-lg:min-w-0` for the run page's reason, one surface over: below
+            `lg` these two stack into one implicit `auto` track whose floor is
+            this column's min-content, and `BlockStatement` states *where* a
+            block runs as an unbroken `mono` path. A deep folder would
+            otherwise be a floor under the whole grid and scroll the pane
+            sideways. Scoped, because above the breakpoint the track is a fixed
+            26rem and this changes which way such a path overflows. */}
+        <div className="flex flex-col gap-4 max-lg:min-w-0 lg:col-start-2 lg:row-start-1 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(var(--pane-h)-6rem)] lg:overflow-y-auto">
           <Card>
             <CardTitle>
               {selectedBlock

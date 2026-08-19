@@ -1462,7 +1462,7 @@ export default function SettingsPage() {
           <a
             key={sec.id}
             href={`#${sec.id}`}
-            className="ui-transition inline-flex min-h-[var(--control-h)] items-center rounded-sm border border-line bg-bezel px-2.5 text-xs font-medium text-ink-muted no-underline shadow-e1 hover:border-line-strong hover:bg-bezel-hover hover:text-ink hover:no-underline"
+            className="ui-transition inline-flex min-h-[var(--control-h)] max-md:min-h-11 items-center rounded-sm border border-line bg-bezel px-2.5 text-xs font-medium text-ink-muted no-underline shadow-e1 hover:border-line-strong hover:bg-bezel-hover hover:text-ink hover:no-underline"
           >
             {sec.label}
           </a>

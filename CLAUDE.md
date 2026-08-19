@@ -111,6 +111,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
 
 - **`src/components/`, route handlers, `globals.css`** → `docs/agent/conventions.md`
   - Variants are typed props with `Record<Union, string>` lookup maps, never `data-[…]` Tailwind variants.
+  - A table stacks below `md` only with `Table stack` **and** a `label` on every `Td`. One without the other is a column of unnamed figures.
   - `"use client"` files import from `apiTypes.ts` / `format.ts`, never `windows.ts` / `transcripts.ts`.
   - Route handlers touching SQLite or the filesystem need `runtime = "nodejs"` and `dynamic = "force-dynamic"`.
   - `saveSettings` stores only what differs from `DEFAULTS`. Writing the whole object kills every future default on that install.

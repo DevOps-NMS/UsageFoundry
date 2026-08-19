@@ -43,7 +43,12 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="mx-auto mt-[12vh] max-w-[380px]">
+    // The one page with no pane around it, so it owes its own gutter: at 390px
+    // a bare 380px card leaves 5px either side and reads as a full-bleed form
+    // that has come apart at the edges. And 12vh of a phone held upright is
+    // most of the space the keyboard is about to take, so the card starts
+    // higher there — the field is the only thing on this screen.
+    <div className="mx-auto mt-[12vh] max-w-[380px] max-md:mt-8 max-md:px-4">
       <Card emphasis="primary">
         {/* The first thing anyone sees of this app. The mark and the name are
             the whole of it — there is one field below and nothing to choose. */}

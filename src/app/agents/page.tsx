@@ -24,7 +24,15 @@ import { Field, Input, Textarea } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
 import { Sheet } from "@/components/ui/Sheet";
-import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
+import {
+  TBody,
+  THead,
+  Table,
+  TableWrap,
+  Td,
+  Th,
+  Tr,
+} from "@/components/ui/Table";
 
 /**
  * The registry, and the only place in this app that writes to it.
@@ -324,9 +332,9 @@ export default function AgentsPage() {
           </Empty>
         ) : (
           <TableWrap>
-            <Table>
+            <Table stack>
               <caption className="sr-only">Saved agents, by name</caption>
-              <thead>
+              <THead>
                 <tr>
                   <Th scope="col" className="w-[200px]">
                     Agent
@@ -338,8 +346,8 @@ export default function AgentsPage() {
                     Model
                   </Th>
                 </tr>
-              </thead>
-              <tbody>
+              </THead>
+              <TBody>
                 {agents.map((agent) => {
                   const onDisk = ambientClash(agent.name, ambient);
                   return (
@@ -352,11 +360,17 @@ export default function AgentsPage() {
                             it, did not. Agent names are hyphenated by
                             convention, so this is the ordinary case rather
                             than an odd one, and a name is the handle the
-                            operator picks the agent by. */}
+                            operator picks the agent by.
+
+                            `inline-flex` only below the breakpoint, where the
+                            name is what opens the editor with a finger and owes
+                            the app's 44px target; above it the row is aimed at
+                            with a pointer and this stays the inline text it
+                            reads as. */}
                         <button
                           type="button"
                           onClick={() => openEdit(agent)}
-                          className="cursor-pointer whitespace-nowrap text-left font-medium text-ink hover:text-accent"
+                          className="cursor-pointer whitespace-nowrap text-left font-medium text-ink hover:text-accent max-md:inline-flex max-md:min-h-11 max-md:items-center"
                         >
                           {agent.name}
                         </button>
@@ -367,12 +381,22 @@ export default function AgentsPage() {
                           </div>
                         )}
                       </Td>
-                      <Td className="align-top text-ink-muted">
+                      {/* The name sits over the value rather than beside it:
+                          this is a paragraph an agent is chosen on, and in the
+                          right half of a 390px row it is a four-word column. */}
+                      <Td
+                        label="Description"
+                        labelPlacement="above"
+                        className="align-top text-ink-muted"
+                      >
                         <span className="block max-w-[70ch]">
                           {agent.description || "—"}
                         </span>
                       </Td>
-                      <Td className="align-top whitespace-nowrap text-ink-muted">
+                      <Td
+                        label="Model"
+                        className="align-top whitespace-nowrap text-ink-muted"
+                      >
                         {agent.model ? (
                           <span className="mono">{agent.model}</span>
                         ) : (
@@ -382,7 +406,7 @@ export default function AgentsPage() {
                     </Tr>
                   );
                 })}
-              </tbody>
+              </TBody>
             </Table>
           </TableWrap>
         )}
@@ -401,11 +425,11 @@ export default function AgentsPage() {
           </Empty>
         ) : (
           <TableWrap>
-            <Table>
+            <Table stack>
               <caption className="sr-only">
                 Agent definitions in ~/.claude/agents, which this app did not write
               </caption>
-              <thead>
+              <THead>
                 <tr>
                   <Th scope="col" className="w-[200px]">
                     Agent
@@ -417,22 +441,36 @@ export default function AgentsPage() {
                     File
                   </Th>
                 </tr>
-              </thead>
-              <tbody>
+              </THead>
+              <TBody>
                 {ambient.map((a) => (
                   <Tr key={a.path}>
                     <Td className="align-top font-medium text-ink">{a.name}</Td>
-                    <Td className="align-top text-ink-muted">
+                    <Td
+                      label="Description"
+                      labelPlacement="above"
+                      className="align-top text-ink-muted"
+                    >
                       <span className="block max-w-[70ch]">
                         {a.description ?? "— no description in the file —"}
                       </span>
                     </Td>
-                    <Td className="mono align-top text-ink-faint">
+                    {/* Above the value for the description's reason: a path is
+                        the widest thing in the row and the one that has to stay
+                        whole, since it is the only handle this table can give. */}
+                    <Td
+                      label="File"
+                      labelPlacement="above"
+                      // A path has no space in it to wrap at, so below the
+                      // breakpoint it is the one value here that can push the
+                      // pane sideways on its own.
+                      className="mono align-top text-ink-faint max-md:break-all"
+                    >
                       {shortPath(a.path)}
                     </Td>
                   </Tr>
                 ))}
-              </tbody>
+              </TBody>
             </Table>
           </TableWrap>
         )}

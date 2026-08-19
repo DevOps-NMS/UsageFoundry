@@ -544,8 +544,14 @@ export function WorkflowCanvas({
               if (claimedByPointer()) return;
               addAtFreeSpot(kind);
             }}
-            className="ui-transition inline-flex min-h-[var(--control-h)] cursor-grab
-              touch-none select-none items-center rounded-sm border border-line
+            // 44px below the shell's breakpoint, stated in the same string as
+            // the pointer's height for `Button`'s SIZE-map reason. These are
+            // hand-rolled rather than `Button`s — they carry a pointer sequence
+            // of their own — so the floor the kit applies once has to be
+            // repeated here, and it is the only route a finger has to the
+            // palette.
+            className="ui-transition inline-flex min-h-[var(--control-h)] max-md:min-h-11
+              cursor-grab touch-none select-none items-center rounded-sm border border-line
               bg-bezel px-2.5 text-sm font-medium text-ink shadow-e1
               not-disabled:hover:bg-bezel-hover not-disabled:active:shadow-press
               disabled:cursor-not-allowed disabled:opacity-50"
@@ -558,6 +564,23 @@ export function WorkflowCanvas({
           link{links.length === 1 ? "" : "s"}
         </span>
       </div>
+
+      {/* Said plainly rather than worked around. Every gesture below still
+          answers a finger — a tap on the palette adds a block, a drag moves
+          one, and Link then **Link here** joins two — but a 390px window is
+          about 358px of pane against a `NODE_W` of 232 and a `COL_STRIDE` of
+          328, so it holds exactly one block and the gap to the next. Placing
+          blocks against each other through that is what this declines to
+          pretend at, rather than a gesture it half-implements. The one fact a
+          reader needs instead is where the block they just tapped is edited,
+          because at one column the inspector is below the canvas and nothing
+          else on screen says so. `md:hidden` rather than a JS width test: the
+          shell already owns the app's one `matchMedia`, and a second would be
+          a second boundary to keep in step. */}
+      <p className="border-b border-line bg-inset px-3 py-1.5 text-xs text-ink-muted md:hidden">
+        A graph is arranged on a larger screen. Here, tap a block to edit it in
+        the panel below the canvas.
+      </p>
 
       {linking && (
         <div className="border-b border-line bg-inset px-3 py-1.5 text-xs text-ink-muted">
@@ -585,9 +608,21 @@ export function WorkflowCanvas({
           Delete" to the handler written for it. Out of the tab order, and a
           pointer press yields `:focus` rather than `:focus-visible`, so nothing
           draws a ring. */}
+      {/* The cap is *tightened* below the breakpoint rather than released, and
+          that is the one place this surface departs from the rule the three
+          `LIST_VIEW` scrollers follow. Releasing it there is right because a
+          stacked list has no width left to scroll and the cap is all that
+          traps the reader; here the sheet is at least 640px wide against a
+          390px pane, so `overflow-auto` is the whole of what keeps the *pane*
+          from scrolling sideways and cannot be given up. What is left of that
+          rule is the part that still bites: at 62vh the frame filled a phone
+          on its own, and a nested scroller with nothing visible past it reads
+          as the end of the page — which is exactly where the inspector holding
+          the block's guards is. 22rem is three block-heights, so the surface
+          still shows a column, and what is under it is on screen. */}
       <div
         tabIndex={-1}
-        className="relative max-h-[62vh] overflow-auto bg-inset"
+        className="relative max-h-[62vh] max-md:max-h-[22rem] overflow-auto bg-inset"
       >
         <div
           ref={sheetRef}
@@ -604,10 +639,23 @@ export function WorkflowCanvas({
           }}
         >
           {blocks.length === 0 && (
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            // Centred in the *surface*, which is `MIN_W` wide however narrow
+            // the window is — so on a phone the only sentence an empty canvas
+            // has was centred at x=320 of a 640px sheet and sat off the right
+            // edge of a 358px pane, leaving a new workflow looking like a blank
+            // grid. Pulled to the left margin below the breakpoint, which is
+            // where the scroll region starts.
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center max-md:justify-start max-md:pl-5">
               <Empty>
                 <div className="font-medium text-ink">No blocks yet</div>
-                <div className="mt-1">Drag one from Add, or press Enter on it</div>
+                {/* The footer's split, for the footer's reason: this is the
+                    first thing a new workflow says, and on a phone it named a
+                    key. */}
+                <div className="mt-1">
+                  Drag one from Add
+                  <span className="max-md:hidden">, or press Enter on it</span>
+                  <span className="md:hidden">, or tap it</span>
+                </div>
               </Empty>
             </div>
           )}
@@ -676,9 +724,13 @@ export function WorkflowCanvas({
                   CONDITION_CHIP[link.edge]
                 }${link.continueBranch ? ", carries on its branch" : ""}. Delete removes this link.`}
                 style={{ left: mid.x, top: mid.y }}
+                // 44px below the breakpoint, beside the pointer's height for
+                // the palette's reason. It grows about the curve's midpoint
+                // rather than downwards from it — the chip is centred on the
+                // edge by a translate — so the link it labels does not move.
                 className={`ui-transition absolute z-10 inline-flex min-h-[var(--control-h)]
-                  -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center gap-1.5
-                  whitespace-nowrap rounded-full border px-2.5 py-1 text-2xs font-semibold
+                  max-md:min-h-11 -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center
+                  gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-1 text-2xs font-semibold
                   ${LINK_CHIP[tone]}`}
               >
                 {CONDITION_CHIP[link.edge]}
@@ -768,8 +820,21 @@ export function WorkflowCanvas({
                             ? `Start ${label(block)} after ${label(linkSource)}`
                             : `Link from ${label(block)}`
                       }
+                      // `Switch`'s recipe, and the one control here that needs
+                      // it: the card is a fixed NODE_H, so a 44px *box* would
+                      // take the twelve pixels the task preview above it is
+                      // drawn in. So the box stays at --control-h and the
+                      // target comes from a stretched `::after` the layout
+                      // never sees — 6px past the chip top and bottom, 3px
+                      // each side, which lands inside the `gap-2` to the badge
+                      // beside it and the card's own p-2.5, so no two targets
+                      // on a card can touch. `max-md:relative` rather than a
+                      // bare one, so the containing block this creates does
+                      // not exist above the breakpoint either.
                       className={`ui-transition inline-flex min-h-[var(--control-h)] cursor-pointer
                         touch-none items-center rounded-sm border px-2 py-1 text-2xs font-semibold
+                        max-md:relative max-md:after:absolute max-md:after:-inset-y-[6px]
+                        max-md:after:-inset-x-[3px] max-md:after:content-['']
                         ${
                           armed
                             ? "border-accent-line bg-accent-dim text-ink"
@@ -799,13 +864,31 @@ export function WorkflowCanvas({
         </div>
       </div>
 
+      {/* The gestures, and which half of each exists depends on the input:
+          "press Enter" and "Delete" name keys a phone does not have, where the
+          panel below the canvas is the route a finger takes to those same two
+          acts. Both spellings are rendered and one is hidden rather than
+          branched on in JS — `AppShell` owns the app's one `matchMedia` and a
+          second would be a second boundary to keep in step — so the line above
+          the breakpoint is unchanged character for character. */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-line px-2.5 py-1.5 text-xs text-ink-faint">
         <span>
-          {full
-            ? "This workflow is full"
-            : "Drag a block onto the canvas, or press Enter to place it"}
+          {full ? (
+            "This workflow is full"
+          ) : (
+            <>
+              Drag a block onto the canvas
+              <span className="max-md:hidden">, or press Enter to place it</span>
+              <span className="md:hidden">, or tap one in Add</span>
+            </>
+          )}
         </span>
-        <span>Delete removes what is selected — there is no undo</span>
+        <span className="max-md:hidden">
+          Delete removes what is selected — there is no undo
+        </span>
+        <span className="md:hidden">
+          Remove is in the panel below — there is no undo
+        </span>
       </div>
     </div>
   );

@@ -18,7 +18,7 @@ import {
 import { Meter } from "./Meter";
 import { Badge } from "./ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "./ui/Card";
-import { Table, Td, Th, Tr } from "./ui/Table";
+import { TBody, THead, Table, Td, Th, Tr } from "./ui/Table";
 
 /**
  * Spend per calendar day, week or month, with each period's share of the
@@ -95,8 +95,14 @@ const HEADING: Record<PeriodGranularityDTO, string> = {
  * Stated here, in `LiveTelemetry` and in the dashboard page separately: the
  * three files that draw a list view are the three the run may touch, and a
  * shared module for them would be a fourth.
+ *
+ * Both halves are released below the breakpoint: the head is hidden and the
+ * rows are blocks there, so the cap has no sticky head left to give a box to
+ * and would instead be a nested scroller on touch.
  */
-const LIST_VIEW = "mt-4 max-h-80 overflow-auto rounded-sm border border-line";
+const LIST_VIEW =
+  "mt-4 max-h-80 overflow-auto max-md:max-h-none max-md:overflow-visible " +
+  "rounded-sm border border-line";
 
 /**
  * `bg-surface` because the rows scroll under it, and the inset shadow because a
@@ -229,11 +235,11 @@ export function UsagePeriods({
       />
 
       <div className={LIST_VIEW}>
-        <Table>
+        <Table stack>
           <caption className="sr-only">
             Spend per calendar {noun}, newest first
           </caption>
-          <thead>
+          <THead>
             <tr>
               <Th className={STICKY_HEAD}>{HEADING[series.granularity]}</Th>
               <Th num className={STICKY_HEAD}>
@@ -249,8 +255,8 @@ export function UsagePeriods({
                 Used
               </Th>
             </tr>
-          </thead>
-          <tbody>
+          </THead>
+          <TBody>
             {series.buckets.map((b) => {
               // Only meaningful when it exceeds the known reading; equal
               // values are the normal, fully-priced case. Same rule the
@@ -270,10 +276,16 @@ export function UsagePeriods({
                       </>
                     )}
                   </Td>
-                  <Td num>{fmtUSD(b.costUSD)}</Td>
-                  <Td num>{fmtTokens(b.tokens)}</Td>
-                  <Td num>{b.entryCount.toLocaleString()}</Td>
-                  <Td num className="whitespace-nowrap">
+                  <Td num label="Cost">
+                    {fmtUSD(b.costUSD)}
+                  </Td>
+                  <Td num label="Tokens">
+                    {fmtTokens(b.tokens)}
+                  </Td>
+                  <Td num label="Turns">
+                    {b.entryCount.toLocaleString()}
+                  </Td>
+                  <Td num label="Used" className="whitespace-nowrap">
                     {fmtPct(b.fraction)}
                     {hasUpper && (
                       <span className="text-ink-muted">
@@ -285,7 +297,7 @@ export function UsagePeriods({
                 </Tr>
               );
             })}
-          </tbody>
+          </TBody>
         </Table>
       </div>
 

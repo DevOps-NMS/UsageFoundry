@@ -9,7 +9,7 @@ import {
   SegmentedControl,
   type SegmentedOption,
 } from "@/components/ui/SegmentedControl";
-import { Table, Td, Th, Tr } from "@/components/ui/Table";
+import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
 
 /**
  * What each repository cost, over a span.
@@ -43,7 +43,14 @@ const SPANS: Array<SegmentedOption<string>> = [
   { value: "30", label: "30 days" },
 ];
 
-const LIST_VIEW = "max-h-80 overflow-auto rounded-sm border border-line";
+/**
+ * Both the cap and the scroll are released below the breakpoint: the head is
+ * hidden and the rows are blocks there, so what is left is a nested scroller
+ * inside a scrolling pane with nothing pinned to the top of it.
+ */
+const LIST_VIEW =
+  "max-h-80 overflow-auto max-md:max-h-none max-md:overflow-visible " +
+  "rounded-sm border border-line";
 const STICKY_HEAD = "sticky top-0 z-10 bg-surface";
 
 export function RepoSpendCard() {
@@ -105,12 +112,12 @@ export function RepoSpendCard() {
       ) : (
         <>
           <div className={LIST_VIEW}>
-            <Table>
+            <Table stack>
               <caption className="sr-only">
                 What each repository&apos;s runs reported spending over the last{" "}
                 {data.days} day{data.days === 1 ? "" : "s"}, highest first
               </caption>
-              <thead>
+              <THead>
                 <tr>
                   <Th className={STICKY_HEAD}>Repository</Th>
                   <Th num className={STICKY_HEAD}>
@@ -126,36 +133,45 @@ export function RepoSpendCard() {
                     Share
                   </Th>
                 </tr>
-              </thead>
-              <tbody>
+              </THead>
+              <TBody>
                 {/* Every run lands in a bucket, including the explicit
                     "(not a repository)" row, so the column adds to 100% rather
                     than quietly omitting a remainder. */}
                 {data.rows.map((r) => (
                   <Tr key={r.key}>
-                    <Td>
+                    {/* No label: the repository is what the record is.
+                        `break-all` below the breakpoint because the label is a
+                        path where the row is a repository, and a path has no
+                        space in it to wrap at. */}
+                    <Td className="max-md:break-all">
                       <span className={r.isRepository ? "mono" : undefined}>
                         {r.label}
                       </span>
                     </Td>
-                    <Td num>{r.runCount}</Td>
-                    <Td num>{fmtUSD(r.spentUSD)}</Td>
+                    <Td num label="Runs">
+                      {r.runCount}
+                    </Td>
+                    <Td num label="Reported">
+                      {fmtUSD(r.spentUSD)}
+                    </Td>
                     {/* Beside the measured figure and never inside it: a
                         reconciled estimate presented as a measurement is the
                         one thing the split exists to prevent. Em dash rather
                         than $0.00, so "no killed cycles" does not read as a
-                        figure somebody could add up. */}
-                    <Td num className="text-ink-muted">
+                        figure somebody could add up. The stacked row keeps them
+                        two named lines for the same reason. */}
+                    <Td num label="Estimated" className="text-ink-muted">
                       {r.spentEstUSD > 0 ? `+${fmtUSD(r.spentEstUSD)}` : "—"}
                     </Td>
-                    <Td num>
+                    <Td num label="Share">
                       {total > 0
                         ? `${Math.round((r.spentUSD / total) * 100)}%`
                         : "—"}
                     </Td>
                   </Tr>
                 ))}
-              </tbody>
+              </TBody>
             </Table>
           </div>
           <p className="mt-3 max-w-[72ch] text-xs text-ink-muted">

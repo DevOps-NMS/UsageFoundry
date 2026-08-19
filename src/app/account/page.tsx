@@ -7,7 +7,15 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
 import { Notice } from "@/components/ui/Notice";
-import { Table, TableWrap, Td, Th, Tr } from "@/components/ui/Table";
+import {
+  TBody,
+  THead,
+  Table,
+  TableWrap,
+  Td,
+  Th,
+  Tr,
+} from "@/components/ui/Table";
 
 const LIMIT_LABELS: Record<string, string> = {
   requests_per_minute: "Requests / min",
@@ -199,6 +207,12 @@ export default function AccountPage() {
           {recent.length === 0 ? (
             <Empty>No cost data in range.</Empty>
           ) : (
+            // Deliberately not a `stack` table, and the one on this page that
+            // is not: it has no `<thead>` at all, so there is no column name to
+            // lose below the breakpoint — and a date beside a dollar figure is
+            // already two short columns that fit a 390px pane. Stacking it
+            // would turn every row into two lines to name what a date and a
+            // dollar sign say on their own.
             <div className="max-h-[200px] overflow-y-auto">
               <Table>
                 <tbody>
@@ -221,24 +235,33 @@ export default function AccountPage() {
           <Empty>No rate limit groups returned.</Empty>
         ) : (
           <TableWrap>
-            <Table>
-              <thead>
+            <Table stack>
+              <THead>
                 <tr>
                   <Th>Group</Th>
                   <Th>Models</Th>
                   <Th>Limits</Th>
                 </tr>
-              </thead>
-              <tbody>
+              </THead>
+              <TBody>
                 {data.rateLimits.map((g, i) => (
                   <Tr key={i}>
+                    {/* No label: the group is what the record is. */}
                     <Td>
                       <Badge>{g.group_type}</Badge>
                     </Td>
-                    <Td className="mono max-w-[320px]">
+                    {/* Both names sit above their values: one is a comma list of
+                        model ids and the other is a block of label/figure rows,
+                        and neither survives being squeezed into the right half
+                        of a 390px row. */}
+                    <Td
+                      label="Models"
+                      labelPlacement="above"
+                      className="mono max-w-[320px] max-md:max-w-none"
+                    >
                       {g.models?.join(", ") ?? "—"}
                     </Td>
-                    <Td>
+                    <Td label="Limits" labelPlacement="above">
                       {g.limits.map((l) => (
                         <div key={l.type} className="flex gap-2">
                           <span className="text-ink-muted">
@@ -252,7 +275,7 @@ export default function AccountPage() {
                     </Td>
                   </Tr>
                 ))}
-              </tbody>
+              </TBody>
             </Table>
           </TableWrap>
         )}
