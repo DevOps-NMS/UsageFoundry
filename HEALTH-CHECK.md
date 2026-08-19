@@ -1,8 +1,37 @@
 # Code health check — 2026-08-11
 
-Full-repo health check of UsageFoundry at `267b901`.
+> **This is a point-in-time audit, not the current state of the repository.**
+> Everything below is what one full-repo health check found at commit `267b901`
+> on 2026-08-11. It has not been re-run since and it is not maintained: read it
+> as a dated report, and check any finding against the tree before acting on it.
+> The per-finding status as of 2026-08-19 is the table below, and each section
+> repeats its own at the top.
+>
+> **It does not document the container's liveness check.** That is `HEALTHCHECK`
+> in `Dockerfile:379` and `GET /api/health` (`src/app/api/health/route.ts`),
+> which were built after this file and share nothing with it but a name.
+>
+> The file is kept rather than deleted because
+> `scripts/file-health-check-issues.sh` files its sections as GitHub issues,
+> matching by title, so it is the record of what that script filed — and the
+> script's own regression test re-derives its expectations from these headings.
+
+| # | Finding | State on 2026-08-19 |
+|---|---|---|
+| 1 | A `blocked` run cannot be reopened | **fixed**, #41 — but *not* by this file's suggested fix |
+| 2 | `matchesCopyGlobs` reads `?` as a quantifier | **fixed**, #43 |
+| 3 | `invalidateTranscriptCache` is wrong and unreachable | **gone** — the function was deleted |
+| 4 | Five unreachable exports | **four still live**; the fifth went with finding 3 |
+| 5 | Two `review.ts` doc comments on the wrong constants | **fixed** |
+| 6 | Three high-severity advisories under `next` | **still true** |
+| 7 | `RunLand` overwrites the strategy choice on reload | **fixed**, #48 |
 
 ## Mechanical checks
+
+**These figures are from 2026-08-11 and are stale.** The suite has grown by an
+order of magnitude since: `npm test` on 2026-08-19 reports 1335 tests, 210
+suites, 0 failures. `npm audit` still reports 3 high, and `npm run typecheck`
+still passes.
 
 | Check | Result |
 |---|---|
@@ -24,6 +53,14 @@ invariants in `CLAUDE.md`.
 ---
 
 ### 1. A `blocked` run cannot be reopened, which is the one status reopening exists for
+
+> **Fixed (#41, closed) — but do not apply the suggested fix below.** `blocked`
+> was deliberately *not* added to `REOPENABLE`. `orchestrator.ts:8102-8112`
+> reopens it through `waitingAgain` / `guardRefused` instead, because a run
+> blocked behind a dependency holds no workspace and must go back to `waiting`,
+> where a run its own guard refused already holds a checkout and rejoins the
+> queue. Following the suggestion below would collapse that distinction and plan
+> a second checkout slot on top of the first.
 
 **Labels:** bug
 **Files:** `src/lib/orchestrator.ts:2669`, `src/app/runs/[id]/page.tsx:483`
@@ -69,6 +106,10 @@ already handles `sessionId === null` by sending the original task.
 ---
 
 ### 2. `matchesCopyGlobs` treats `?` as a regex quantifier, so a glob containing it matches the wrong files
+
+> **Fixed (#43, closed).** The quoted `new RegExp(…)` no longer exists anywhere;
+> matching is now `parseCopyGlob` (`orchestrator.ts:2255`) plus `segmentMatcher`
+> (`:2233`), which walks the pattern segment by segment.
 
 **Labels:** bug
 **File:** `src/lib/orchestrator.ts:1003-1014`
@@ -117,6 +158,9 @@ a setting.
 ---
 
 ### 3. `invalidateTranscriptCache` does not provide the guarantee its comment claims, and is unreachable
+
+> **Gone.** The function was deleted rather than corrected:
+> `grep -rn invalidateTranscriptCache src/` returns nothing.
 
 **Labels:** bug, dead-code
 **File:** `src/lib/transcripts.ts:371-377`
@@ -170,6 +214,11 @@ export function invalidateTranscriptCache(): void {
 
 ### 4. Five unreachable exports
 
+> **Still live, for four of the five.** `billableWeightedTokens`, `isKnownModel`,
+> `knownModelIds` and `invalidateAccountProfile` each still have exactly one
+> occurrence in `src/`, which is their own definition. The fifth row,
+> `invalidateTranscriptCache`, went with finding 3.
+
 **Labels:** dead-code
 **Files:** `src/lib/pricing.ts`, `src/lib/transcripts.ts`, `src/lib/account.ts`
 
@@ -200,6 +249,11 @@ model picker that was never wired up — worth deciding which.
 ---
 
 ### 5. Two doc comments in `review.ts` are attached to the wrong constants
+
+> **Fixed.** The 128 KB argv line no longer sits on `REVIEW_TIMEOUT_MS`, which at
+> `review.ts:69` now carries its own rationale — why a resolution gets no clock
+> and a review does, and why `assistTimeoutMs` rather than the constant is where
+> that split is made.
 
 **Labels:** documentation
 **File:** `src/lib/review.ts:48-51`
@@ -234,6 +288,10 @@ const REVIEW_TIMEOUT_MS = 10 * 60_000;
 
 ### 6. Three high-severity advisories in transitive dependencies of `next`
 
+> **Still true on 2026-08-19.** `npm audit` reports the same three, still postcss
+> and sharp under `next`, still fixed only by a breaking major — now
+> `next@16.3.1` rather than the `16.3.0` named below.
+
 **Labels:** security, dependencies
 
 `npm audit` reports:
@@ -264,6 +322,9 @@ explicit accept-risk note with the reachability argument above.
 ---
 
 ### 7. `RunLand` overwrites the operator's strategy choice on every reload
+
+> **Fixed (#48, closed)**, by the suggested fix: `RunLand.tsx:194` is now
+> `useState<MergeStrategyDTO | null>(null)`.
 
 **Labels:** bug, ui
 **File:** `src/components/RunLand.tsx:37-49, 66-88`
