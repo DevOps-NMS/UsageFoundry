@@ -41,6 +41,12 @@ that *decide* what to run next, blocks that *repeat* one task until the agent
 reports it done, and blocks that land what the ones before them built. Run one on
 a schedule, under a budget that covers the whole graph.
 
+**Bring the tooling you already have.** Claude Code plugins sitting in your
+mounted folders are found and listed under **Settings → Plugins**. Switching one
+on puts it on every work cycle this app starts from the next cycle onward,
+including runs already in flight — nothing is installed into `~/.claude`, and
+nothing outside your mounts is ever offered.
+
 Everything runs on your machine, in one Docker container. No account, no
 telemetry back to us, no third-party service.
 
@@ -86,6 +92,14 @@ so that the app's own secrets — `UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY` — are
 of their reach, but your Claude account, every mounted workspace and
 `UF_GITHUB_TOKEN` are inside the trust boundary of anything you run unattended.
 **[docs/security.md](docs/security.md)** sizes all of it.
+
+**A plugin you switch on is inside that boundary too.** It is a directory found
+in one of your mounted workspaces, and enabling it means the container runs
+whatever that directory ships — hooks, agents, skills, commands, an MCP server —
+as the agents' uid, on every work cycle from the next one onward, runs already
+in flight included. The Plugins tab says which of those each one carries before
+you press it, and the switch is saved the moment you press it rather than on
+*Save*.
 
 Full setup, including Linux `UF_UID`, multiple workspaces and GitHub access, is
 in **[docs/install.md](docs/install.md)**.
