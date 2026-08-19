@@ -167,7 +167,26 @@ const JUMP_STATE: Record<"shown" | "hidden", string> = {
   hidden: "pointer-events-none translate-y-1 opacity-0",
 };
 
-/** The card rises when it has something waiting for a decision. */
+/**
+ * The card rises when it has something waiting for a decision.
+ *
+ * **This is the only card on the page allowed to move, and the conversation
+ * beside it is deliberately not the other half of a pair.** Both were
+ * `primary` at once, which by `Card`'s own rule means the page had no lead at
+ * all — so one of them had to stop rising. The obvious repair was to make the
+ * conversation the inverse of this map, and it is wrong: `emphasis` carries
+ * padding as well as elevation (`p-5` against `p-4`), so a conversation keyed
+ * on `pending` would re-pad the scrolled transcript and shift the composer
+ * under the reader's hands the moment a proposal arrived — on a surface that
+ * polls. This card holds neither a scroll position nor a text field, which is
+ * exactly why it is the one that may change size.
+ *
+ * The conversation is therefore a flat `default` in every state, and the page
+ * has one lead while something is waiting and none otherwise. That is a state
+ * §1.1 names as legitimate, and on this page it is honest: with nothing
+ * waiting, the thread is already the larger half by three columns and does not
+ * need a shadow to say so.
+ */
 const PROPOSALS_EMPHASIS: Record<"waiting" | "clear", CardEmphasis> = {
   waiting: "primary",
   clear: "default",
@@ -706,7 +725,7 @@ export default function ChatPage() {
             60vh was a cap that could sit either side of the edge depending on
             the window and never on the box it was capping. */}
         <Card
-          emphasis="primary"
+          emphasis="default"
           className="flex max-h-[34rem] min-h-[22rem] flex-col lg:max-h-none lg:min-h-0"
         >
           <div className="relative min-h-0 flex-1">
