@@ -107,9 +107,9 @@ Seven, and no eighth without a change to this document.
 |---|---|---|---|
 | 1 | **Pane** (a row in `panes.ts`) | The reader arrives here *from the sidebar* to do a distinct job with its own primary action. | **Eight. The list is closed** — see §1.2. |
 | 2 | **Sub-route** (a page below a pane) | A group is both *large* (a screen's worth) and *rare* (used once a week or less), and has its own primary action. | — |
-| 3 | **Card** (`Card`, `emphasis`) | The contents are read together and answer **one** question a reader could ask out loud. | ≤ 7 cards **as peers at one level**; ≤ 9 controls in one card without an inner `ListGroup`; **exactly one `primary` per page**. |
+| 3 | **Card** (`Card`, `emphasis`) | The contents are read together and answer **one** question a reader could ask out loud. | ≤ 7 cards **as peers at one level**; ≤ 9 controls in one card without an inner `ListGroup`; **at most one `primary` per page** — a page may legitimately have none. |
 | 4 | **Group** (`ListGroup` with `label`) | Rows inside a card share a subject that the card's own title does not name. | 3–9 rows, more than 9 is two. Fewer than 3 only where the **label** states something neither row does. |
-| 5 | **Disclosure** (new `Disclosure` primitive, §1.3) | The content is *evidence* (a log, a diff, an older list, a preflight report) or a setting whose default is right for nearly everyone. | Never nested. Never around a fact a decision is approved against. |
+| 5 | **Disclosure** (new `Disclosure` primitive, §1.3) | The content is *evidence* (a log, a diff, an older list, a preflight report); or a setting whose default is right for nearly everyone; or an **explanation that is read once** and that no decision on that surface is approved against. | Never nested. Never around a fact a decision is approved against. |
 | 6 | **Tab strip** (a `SegmentedControl` that switches **which pane is shown**) | Two to five mutually exclusive views of one subject, where the reader wants one at a time and the page can tell whether there is anything behind each. | ≤ 5 segments. **One strip per page.** |
 | 7 | **Sheet** (`Sheet`, native `<dialog>`) | A decision that must be answered before anything else proceeds; or an action that is destructive, irreversible, or handles a credential. | One default action + Cancel. Never nested. |
 
@@ -133,7 +133,7 @@ Notes that are part of the rule, not commentary:
   `Raw-token ceilings` holds two rows whose labels are the same two words as the
   `Cost ceilings` group above it; the group label is the only thing telling them
   apart, so it is doing work. A group of two whose label merely restates its
-  rows is not — which is why §3.B merges the two single-row guard groups.
+  rows is not — which is why §3.B merges the two single-row spending groups.
 - **A tab strip is a view switcher, never a navigation device.** Moving between
   different *subjects* is the sidebar's job. `/runs/[id]` has the app's one
   five-segment tab strip and `/chat`'s side card has a two-or-three-segment one;
@@ -152,8 +152,12 @@ Each of these is a thing a build run would plausibly reach for. None is allowed.
 1. **A ninth pane.** `panes.ts` is eight rows bound to ⌘1–⌘8 and four readers
    (`panes.ts:3-14`). A ninth destination has no digit. New destinations are
    sub-routes under an existing pane.
-2. **An accordion where more than one panel can be open.** That is cards with
-   extra clicks and a lost scroll position.
+2. **An accordion** — a *coordinated* set where opening one panel closes
+another. It is cards with extra clicks and a lost scroll position, and the
+coordination is a second state machine nothing else here has. **Independent
+sibling `Disclosure`s are not an accordion**: four folds in one section, each
+opening and closing on its own, are four folds. §3.B requires exactly that in
+`Prompts`.
 3. **Nested disclosure.** A fact two clicks deep is a fact nobody has read.
 4. **A tab strip inside a tab.**
 5. **A page-level drawer.** The app has exactly one drawer — the sidebar below
@@ -204,18 +208,23 @@ this worse rather than better.
 **Contract.**
 
 ```tsx
-export type DisclosureTone = "default" | "quiet";
-export type DisclosureSize = "default" | "compact";
-
 export function Disclosure({
-  summary,      // ReactNode — the always-visible line. Never a full sentence.
+  summary,      // ReactNode — the always-visible line. A phrase, never a
+                // sentence with a full stop.
   count,        // number | undefined — rendered as a muted "(n)" after summary.
-  tone,         // DisclosureTone = "default"
-  size,         // DisclosureSize = "default"
-  defaultOpen,  // boolean = false — uncontrolled, native.
+  defaultOpen,  // boolean = false — uncontrolled, native. Read at mount only.
+  open,         // boolean | undefined — controlled; see the carve-out below.
+  onToggle,     // ((open: boolean) => void) | undefined — with `open` or not
+                // at all.
   children,
   className,
 }: { ... })
+
+**It has no variants.** No `tone`, no `size`, no `Record<Union, string>` map:
+every call site in §3 wants the same thing, and a variant nobody passes is a
+decision nobody made. The 44px recipe is therefore unconditional rather than an
+entry in a `SIZE` map. If a later surface genuinely needs a second size, it adds
+the union then — with a call site in the same commit.
 ```
 
 - **Native `<details>`/`<summary>`.** Not a hand-rolled show/hide. The browser
@@ -257,10 +266,13 @@ export function Disclosure({
 - **Must not animate its own height.** `ui-transition` deliberately omits
   `height` and `transform`; an animated fold is content moving under a pointer.
 - **Must not close on outside click, on route change, or on a poll.**
-- **Must not take an `onOpen` that fetches.** Every fold in §3 wraps content
-  that is already loaded. `/runs/[id]`'s "only the active tab is mounted" is a
-  tab-strip decision that is documented and stays a tab-strip decision; do not
-  generalise it to folds.
+- **Must not fetch when it opens, except through the controlled pair.** Every
+fold in §3 wraps content that is already loaded, with the single exception
+named above — the branches history, which fetches through `onToggle` and must
+keep doing so. There is no `onOpen` prop: a caller that needs to fetch uses
+`open`/`onToggle` and owns the request itself. `/runs/[id]`'s "only the active
+tab is mounted" is a tab-strip decision that is documented and stays a
+tab-strip decision; do not generalise it to folds.
 - **Must not be used above `md` for something that is visible below it, or vice
   versa.** A fold is the same fold at every width. Anything width-conditional is
   the landed mobile work's business, not this document's.
@@ -327,9 +339,11 @@ A control or figure is Tier 1 if **any** of these is true:
 
 This is the generalisation of the settings page's existing "edited rail"
 (`settings/page.tsx:555-564`) and it is the whole answer to the standard fold
-failure — a setting hidden at a value the reader does not expect. Where a build
-run cannot compute "differs from default" cheaply, it does not get to fold; it
-groups instead.
+failure — a setting hidden at a value the reader does not expect. **This applies to a fold that holds settings.** A fold holding *content* —
+evidence, an explanation, a superseded card — has no default to differ from,
+and the rule that governs it is rule 5's "correct when" instead. Where a fold
+does hold settings and a build run cannot compute "differs from default"
+cheaply, it does not get to fold; it groups instead.
 
 **Tier 3 — behind a link to a sub-route, or inside a `Sheet`.**
 
@@ -346,8 +360,14 @@ groups instead.
    the control does to money, to a branch, or to a running agent.
 3. **Two names for one concept is a defect, not a layout problem.** Fix the
    name before deciding where the control goes. §3 lists every pair I found.
-4. **A group with one member is not a group.** If applying this rule leaves a
-   `ListGroup` with a single row, the row belongs in the group above it.
+4. **A `ListGroup` of one row, whose label restates that row, is not a
+group.** Fold it into the group above. Two things are deliberately outside
+this rule: a **region** is not a group — it names *why* its contents sit
+together and may hold one card or one block (`Live from runs` on the dashboard
+holds one, `Against its limits` on the run page holds one) — and the **agent
+row** keeps its own single-row group wherever it appears, because
+`agents-and-templates.md` forbids it from joining the guards group and there
+is nowhere else for it to go.
 
 ---
 
@@ -466,39 +486,56 @@ how the fifth one drifts.
 **Build `src/components/ui/ListView.tsx`:**
 
 ```tsx
-export type ListViewCap = "capped" | "uncapped";
+export type ListViewBox = "capped" | "scrolling" | "plain";
 
 export function ListView({
-  cap,        // ListViewCap = "capped"
+  box,        // ListViewBox = "capped"
   children,
   className,  // spacing only; the caller's own margin, never a cap
 }: { ... })
 
-export const STICKY_HEAD: string;  // the one string, exported
+/** The four-way string: sticky head with the hairline under it. */
+export const STICKY_HEAD: string;
+/** The same without the hairline. RepoSpendCard is its only caller. */
+export const STICKY_HEAD_FLAT: string;
 ```
 
-- `capped` = `max-h-80 overflow-auto max-md:max-h-none max-md:overflow-visible`
-  plus the box. This is `conventions.md`'s released-below-the-breakpoint rule
-  and it is now stated once instead of three times.
-- `uncapped` = the box and nothing else. Its doc comment carries the runs
-  list's reason verbatim: a sticky header inside a scroll container pins to a
-  box that never moves.
-- `className` is for the caller's margin (`UsagePeriods`' `mt-4`), never for a
-  cap. A caller that passes a `max-h-*` here is a bug; say so in the comment.
+**Three values, because the five call sites are three different boxes** and the
+migration must be class-for-class. Each is the exact string that call site
+carries today:
+
+| `box` | Exact classes | Callers |
+|---|---|---|
+| `capped` | `max-h-80 overflow-auto max-md:max-h-none max-md:overflow-visible rounded-sm border border-line` | `page.tsx` ×2, `RepoSpendCard`, `UsagePeriods` |
+| `scrolling` | `overflow-auto max-md:overflow-visible rounded-sm border border-line` | `LiveTelemetry` |
+| `plain` | `rounded-lg border border-line bg-surface` | `runs/page.tsx` |
+
+`capped` states `conventions.md`'s released-below-the-breakpoint rule once
+instead of three times. `scrolling` is `capped` **without the height cap** —
+whether that is a decision or an omission is unresolved and is in §6, so this
+variant exists to preserve it rather than to bless it. `plain` carries the runs
+list's reason in its doc comment: a sticky header inside a scroll container pins
+to a box that never moves, which is why that list is deliberately not one.
+
+`className` is for the caller's margin (`UsagePeriods`' `mt-4`), never for a
+cap. A caller that passes a `max-h-*` here is a bug; say so in the comment.
 
 **Migration, exactly, with no behaviour change:**
 
-| Call site | Passes |
-|---|---|
-| `src/app/page.tsx:1016`, `:1085` | `cap="capped"` |
-| `src/components/RepoSpendCard.tsx:114` | `cap="capped"` |
-| `src/components/UsagePeriods.tsx:237` | `cap="capped" className="mt-4"` |
-| `src/components/LiveTelemetry.tsx:81` | `cap="uncapped"` |
-| `src/app/runs/page.tsx:269` | `cap="uncapped"` |
+| Call site | Passes | Sticky head |
+|---|---|---|
+| `src/app/page.tsx:1016`, `:1085` | `box="capped"` | `STICKY_HEAD` |
+| `src/components/RepoSpendCard.tsx:114` | `box="capped"` | `STICKY_HEAD_FLAT` |
+| `src/components/UsagePeriods.tsx:237` | `box="capped" className="mt-4"` | `STICKY_HEAD` |
+| `src/components/LiveTelemetry.tsx:81` | `box="scrolling"` | `STICKY_HEAD` |
+| `src/app/runs/page.tsx:269` | `box="plain"` | `STICKY_HEAD` |
 
-`LiveTelemetry` gets `uncapped` because that is what it does today. Whether the
-missing `max-h-80` there was a decision or an omission is **unverified** and it
-is in §6 — a build run must not answer it by changing the class.
+`LiveTelemetry` gets `scrolling` and `RepoSpendCard` gets `STICKY_HEAD_FLAT`
+because those are what they do today. Both differences are **unverified** as
+decisions and both are in §6 — a build run must not answer either question by
+changing a class. **After this migration every one of the five list views and
+all five sticky heads renders byte-identical CSS to today**, which is the
+whole test for run (a) on this change.
 
 ### 3.A.4 `Field.tsx` — move the one thing in it that is not a form control
 
@@ -534,7 +571,11 @@ All three are in §6 as questions for a person.
 4. `Subsection` is exported from `ui/Card.tsx` and no longer from `ui/Field.tsx`.
 5. `npm run typecheck` passes. `npm test` passes — including
    `src/components/ui/Table.test.tsx` and `src/components/Meter.test.tsx`.
-6. Nothing under `src/app/` is modified except imports.
+6. The five `ListView` call sites are a **markup swap**: `<div
+className={LIST_VIEW}>` becomes `<ListView box="…">`, the local `const` is
+deleted, and the emitted CSS is unchanged. That is the *only* change run (a)
+makes under `src/app/` or to a component run (e) owns — no structure, no
+ordering, no copy.
 7. The emitted CSS is checked for the `max-md:` variant on the new component —
    Tailwind emits nothing for a spelling it does not know, silently
    (`conventions.md`).
@@ -620,8 +661,13 @@ Seven sections, same names, **same order**. A reader relearns nothing. Four
 changes, in increasing size.
 
 **B1 — Make the chip nav a map (required).**
-Add an active state driven by the location hash: the chip whose `id` matches
-`location.hash` carries `aria-current="true"` and the selected chip styling.
+Add an active state driven by the location hash: the chip whose `id` matches `location.hash` carries `aria-current="true"` and
+the selected styling. **That styling does not exist yet and this document
+specifies it:** a typed `Record<"current" | "plain", string>` in the page,
+`current: "bg-tint text-tint-fg border-tint"` and `plain: ""` — the same
+selected-chip treatment `QuickOpen`'s result rows already use
+(`QuickOpen.tsx:34-38`), so it is the app's existing answer rather than a new
+one. Everything else about the chip is unchanged.
 Update on click and on `hashchange`. Keep plain anchors — the comment at
 `:1452-1456` says why, and it is right.
 **Explicitly out of scope: an `IntersectionObserver` scroll-spy.** The pane is
@@ -632,9 +678,10 @@ that is a second mechanism with a second failure mode for a marginal gain.
 - Chip label `Default guards` → `Default guard set`.
 - `Raw-token ceilings`' rows: `5-hour ceiling` → `5-hour token ceiling`,
   `Weekly ceiling` → `Weekly token ceiling`. The `ListGroup` label stays.
-- Merge the two single-row groups into one `ListGroup label="Spending ceilings
-  for this install"` holding both `Orchestrator chat limit` and
-  `Install limit, rolling 24 hours`, keeping both hints verbatim.
+- Merge the two single-row groups into one `ListGroup label="Spending limits"`
+holding both `Orchestrator chat limit` and `Install limit, rolling 24 hours`,
+keeping both hints verbatim. **`limits`, not `ceilings`** — both rows are
+dollar caps on a unit of work, which is what C1's table calls a limit.
 
 **B3 — Fold what is set once, using `Disclosure` (required).**
 
@@ -661,9 +708,16 @@ Three details of that, because run (b) would otherwise have to guess and the
 wrong guess is silent:
 
 - **`nonDefaultKeys` is a third top-level key on the GET response, beside
-  `settings` and `env`.** Not inside `env` — that object is about the
-  environment the container was given, and this is about the stored blob.
-  `src/app/api/settings/route.ts:32-64`.
+`settings` and `env`.** Not inside `env` — that object is about the
+environment the container was given, and this is about the stored blob.
+`src/app/api/settings/route.ts:32-64`. - **It is spelled in `EDITABLE_PATHS`'
+dotted form**, not in `SETTINGS_KEYS`' top-level form. `saveSettings` compares
+whole top-level keys (`settings.ts:684-690`), but the page's folds and its
+edited rail both key on the 38 dotted paths at `settings/page.tsx:147+` (e.g.
+`chatDefaultGuards.budget.maxIterations`). So the route walks
+`EDITABLE_PATHS`, resolves each against the effective settings and against
+`DEFAULTS`, and compares the two with `sameValue`. Top-level spelling would
+make a fold holding one guard row open for a change to any of the seven.
 - **`PUT` returns it too.** `:388` currently answers `{ settings: saveSettings(patch) }`
   and the page sets both `s` and `savedS` from that response
   (`settings/page.tsx:1252-1253`). Without the field on the PUT, every fold's
@@ -728,9 +782,15 @@ button stay, in place, with the same labels — except the one chip renamed in B
    to its default updates the `count` and **leaves the fold open**.
 6. Every one of the 38 `EDITABLE_PATHS` is still reachable and still writes the
    same key. Save still commits every field in one press.
-7. `blocked` still refuses Save for both existing reasons (`:1290-1302`), and
-   the refusal is still readable when the control it names is inside a fold —
-   **a fold containing a control named by a `blocked` reason opens.**
+7. `blocked` still refuses Save for both existing reasons (`:1290-1302`). One
+of them names `5-hour window reset`, which B3 puts inside a fold, so the
+sticky bar's `Cannot save:` line must **name the section that control is in**
+— the operator has to be able to find it. This is deliberately a copy change
+and not a fold change: `Disclosure` is uncontrolled, `blocked` is recomputed
+from live form state after mount, and a fold that opened itself in response
+would be the "nothing switches on its own" failure. In practice a stored
+override that trips this is non-default, so the fold is already open on load;
+the copy covers the case where the operator typed it and closed the fold.
 8. `npm run typecheck` and `npm test` pass; `src/lib/settings.test.ts`
    still asserts on the stored blob.
 
@@ -809,7 +869,7 @@ titles are a genuinely good sequence and they stay.
 |---|---|---|
 | **ceiling** | A number set in Settings that a window percentage is measured against. | A cap on one run. |
 | **guard** | A threshold on a window (5-hour or weekly) that steps a run aside or ends it. | A number of dollars or minutes. |
-| **limit** | A cap on this run: work cycles, spend, time. | Anything about the subscription. |
+| **limit** | A cap on one unit of work — this run, this chat turn, this workflow, this install: work cycles, spend, time. | Anything about the subscription. |
 
 The page is already 90% consistent with this. Fix exactly one phrase, and note
 that it occurs **twice** — once in each branch of the same ternary, at
@@ -851,15 +911,18 @@ stay on their rows.
 
 | Today | Moves to |
 |---|---|
-| `:2161` telemetry hint | the `Spending limit for this run` row's hint |
+| `:2161` telemetry hint | the `Spending limit for this run` row's `description` |
 | `:2168` no 5-hour percentage | the `Step aside at 5-hour usage` row's description |
 | `:2174` keeps editing after DONE | the `Keep going after DONE` row's description |
 | `:2258` rolling weekly window | the `When a limit is reached` row's group footnote |
 | `:2268` a waiting run keeps its checkout | the same footnote |
 
-Their conditions, tones and text are unchanged — only their position.
+Their conditions, tones and text are unchanged — only their position. Note the
+prop: a `ListRow` takes `description`, not `hint` (`List.tsx:63-70`); `hint`
+is `Field`'s. The two rows that are `Field`s take `hint`; the rest take
+`description`.
 
-**Three stay exactly where they are**, immediately above the footer, because
+**Four stay exactly where they are**, immediately above the footer, because
 they are about the *submission* and not about a control: `:2276` (the
 `bypassPermissions` danger notice — Tier 1 clause (c), and it must be the last
 thing read before `Start run`), `:2291` (`formError`), `:2299` (`started`) and
@@ -1037,7 +1100,7 @@ per-file conflict summary unchanged.
 2. `/runs/new`: the stop summary is drawn as a `Notice tone="info" quiet` at
    the top of `When it stops`, with a comment forbidding a fold.
 3. `/runs/new`: `grep -c 'as a ceiling' src/app/runs/new/page.tsx` returns 0
-   (it is 2 today); `docs/agent/conventions.md` carries the three-word table.
+(it is 2 today).
 4. `/runs/new`: exactly four blocks remain between the last card and the
    footer — the `bypassPermissions` notice, `formError`, `started`, and the
    validation list.
@@ -1310,16 +1373,22 @@ every future card has to re-derive it. Made a region boundary, a new card lands
 in the right place by construction, and a total drawn across a region boundary
 is visibly wrong rather than merely undocumented.
 
-| Region | Heading | Cards | One-line statement under the heading |
+| Region | Heading | Cards | What its statement says (verbatim strings below) |
 |---|---|---|---|
 | — | *(none — card 1 leads the page)* | 1 | — |
 | 1 | **`Your subscription`** | 4 `Rate and totals`, 5 `Usage by period`, 7 `Where it went — …`, 8 `Recent 5-hour blocks` | this app's price table over every Claude Code transcript on this machine |
 | 2 | **`What this app spent`** | 3 `This install, last N hours`, 6 `What each repository cost` | money runs this app started reported spending |
 | 3 | **`Live from runs`** | 2 `Live from runs — first-party` | Claude Code's own per-request cost, for agents this app spawned |
 
-Region headings are `<h2>` at `CardTitle` weight. **No figure, meter, badge,
-total or comparison may be drawn at a region level, and no region may contain a
-card from another region's source.** Every card keeps its own footnote verbatim
+Region headings are `<h2>` at `CardTitle` weight — the same treatment C6 gives
+the run page's, and a `<div>` rather than a `<section>` (§5.11). The fourth
+column above is the **verbatim sentence** that goes under each heading,
+sentence case with a full stop, in `text-xs text-ink-muted`: *"This app's
+price table over every Claude Code transcript on this machine."*, *"Money runs
+this app started reported spending."*, *"Claude Code's own per-request cost,
+for agents this app spawned."* **No figure, meter, badge, total or comparison
+may be drawn at a region level, and no region may contain a card from another
+region's source.** Every card keeps its own footnote verbatim
 — they are now belt and braces rather than the only defence.
 
 Card 1 stays above all three regions and stays the page's only `primary`: it is
@@ -1447,10 +1516,13 @@ disclosure. Six features, one page, no regrouping.
   the row's own `text-sm` **when the toggle is on**. It is the only statement
   on the page that a press of Land will spend money.
 - **E10 — Confirm a paid landing (required, and it is the one control this
-  document adds).** When `Have Claude resolve conflicts` is on, `Land N
-  branches` opens a `Sheet` — one default action, Cancel, `danger` variant so
-  it opens with Cancel focused — naming the number of branches and saying that
-  a conflicting one will be reconciled by a billed model run on its own branch.
+  document adds).** When `Have Claude resolve conflicts` is on, `Land N branches` opens a `Sheet`
+— `danger` variant, so it opens with Cancel focused. Its strings, since §3.F
+gives every other sheet exact ones: `title` = `` `Land ${n} branch${n === 1 ?
+"" : "es"}?` ``, `confirmLabel` = `Land them`, and a body reading `A branch
+that conflicts is reconciled by Claude on that branch, in a throwaway checkout
+— billed, unattended, and against the same 5-hour window your runs use. Your
+own checkout is not involved.` The count is the one already on the button.
   When the toggle is off, the button behaves exactly as today with no sheet.
   *Rejected alternative: defaulting `autoResolve` to off. That changes what the
   app does rather than how it reads, and it is a decision for a person — §6.*
@@ -1506,19 +1578,30 @@ consistent treatment** — which is the finding below.
 
 **Target structure.**
 
-- **E11 — Give `prompt rewritten` a tone and a glyph (required).** It is Tier 1
-  by §2.2 clause (c): a decision on this surface is approved against it. Render
-  it `text-warn` with an `<Icon>`. **The text does not change** and it stays in
-  the same row.
+- **E11 — Give `prompt rewritten` a warn tone (required).** It is Tier 1 by
+§2.2 clause (c): a decision on this surface is approved against it, and today
+it is a bare `<span>` beside two facts that carry glyphs. Render it
+`text-warn`, and add `font-medium` so it holds weight against the muted row.
+**No icon**, and that is a decision rather than an omission: `IconName` is a
+closed union of twenty (`Icon.tsx:19-48`) with no warning or edit glyph in it,
+`guard` is ruled out by E12's own reasoning, and `Icon.tsx` belongs to run
+(a). **The text does not change** and it stays in the same row. Whether it
+should eventually have a glyph of its own is in §6.
 - **E12 — Give `as {agentName}` its own `<Icon name="agents" />` (required),
   and keep it outside the guard mark.** The comment at `:1271-1275` and
   `agents-and-templates.md` both say why: a phrase under the shield would claim
   the agent bounds something, and it bounds nothing. Its own glyph, not the
   guard's.
-- **E13 — Stop comparing rendered copy (required).** Replace the two
-  string-literal comparisons at `:1386` and `:1396` with a boolean on the DTO
-  (`guardsMissing`, `agentMissing`) computed where the label is produced. This
-  is a correctness fix that a copy edit in this pass would otherwise trip.
+- **E13 — *withdrawn.*** An earlier draft required replacing the two
+rendered-copy comparisons at `:1386` and `:1396` with booleans on the DTO. It
+is a real defect — rewording either label silently drops the danger colour on
+a workflow block — but the labels are produced by `summarizeProposedGraph` in
+`src/lib/workflows.ts` and typed in `src/lib/apiTypes.ts`, neither of which
+run (e) owns, `src/lib/workflows.test.ts` asserts on those very strings, and
+§5.3 pins that function's output. It is not a density change and it does not
+belong in this pass. **It is in §6 instead, and run (e) must not touch those
+two comparisons** — which also means run (e) must not reword `template
+deleted` or `agent deleted`.
 - **E14 — Migrate the `<details>` at `:644-664` to `Disclosure`.** Contents
   unchanged.
 
@@ -1547,13 +1630,18 @@ emphasis is already dynamic (`editing ? "default" : "primary"`); an
 specialist can be created at all* created the whole page; `afcb1cd` and
 `be79fe8` touched it visually. **One feature, one page** — and it shows.
 
-**What is fuzzy.** Exactly one thing, and it is small: **three `CardTitle`s
-render outside their `Card`** (`:206`, `:312`, `:418`), which is the only place
-in the app that does this, so the three section names read as labels floating
-above boxes rather than as the boxes' own titles.
+**What is fuzzy.** *Nothing that this pass should change.* An earlier draft
+said the page's three `CardTitle`s render outside their `Card` (`:206`,
+`:312`, `:418`) and that this was unique to `/agents`. **It is not:**
+`workflows/[id]/page.tsx:371`, `:531`, `workflows/page.tsx:82` and the
+instance page do the same, while the dashboard, branches and the run form put
+the title inside. The app has **two undocumented conventions** for where a
+card's title sits, and `/agents` follows one of them. Making this page match
+the dashboard would make it mismatch the workflow pages, which run (d) is not
+told to change either.
 
-- **E15 — Move the three `CardTitle`s inside their `Card`s (required).** No
-  other change.
+- **E15 — *withdrawn.* `/agents` gets no change.** Which of the two conventions
+  the app should keep is a question for a person, and is §6 item 12.
 
 **What does not change.** The four editor fields and nothing else — no tool
 list, no permission mode, no budget, no folder, no isolation choice. That
@@ -1602,10 +1690,15 @@ sentence is load-bearing.
    `Field` with a visible label, and `conventions.md`'s "exactly two"
    hand-written text controls becomes one, named.
 6. `/branches` opens a `Sheet` on `Land N` only when auto-resolve is on.
-7. `/chat` renders `prompt rewritten` with a tone and a glyph; no rendered copy
-   string is used in a `===` comparison anywhere in `chat/page.tsx`.
+7. `/chat` renders `prompt rewritten` with `text-warn font-medium`; the two
+rendered-copy comparisons at `:1386` and `:1396` are **untouched**, as are the
+strings they compare.
 8. `/agents` has no `CardTitle` outside a `Card`.
-9. No raw `<details>` element remains anywhere in `src/`.
+9. No raw `<details>` element remains in run (e)'s own files —
+`runs/page.tsx`, `branches/page.tsx`, `chat/page.tsx`. Run (e) is the last of
+(b)–(e), so if runs (a), (c) and (d) have landed, `grep -rn '<details' src/`
+also returns nothing repo-wide; assert that too, and if it does not hold,
+report which file still has one rather than reaching into it.
 10. `npm run typecheck` and `npm test` pass.
 
 **Run (e) must not touch:** `src/app/settings/`, `src/app/runs/new/`,
@@ -1663,14 +1756,22 @@ Each has two work cycles and cannot ask a question. Run them in this order —
 **Owns:** `src/components/ui/Disclosure.tsx` (new),
 `src/components/ui/ListView.tsx` (new), `src/components/ui/Patch.tsx`,
 `src/components/ui/Card.tsx`, `src/components/ui/Field.tsx`,
-`src/components/shell/*` (read-only verification), plus **import-only** edits at
-the five `LIST_VIEW` call sites and wherever `Subsection` is imported.
+`src/components/ui/Icon.tsx` (the stale `// Disclosure.` comment only),
+`src/components/shell/*` (read-only verification), the five
+`LIST_VIEW`/`STICKY_HEAD` call sites as scoped in §3.A.3, every file importing
+`Subsection`, and **the `<summary>` paragraph in `docs/agent/conventions.md`**
+(§7 item 4).
 
 **Spec:** §3.A. **Acceptance:** §3.A.5.
 
-**Must not touch, because a later run owns it:** every page's structure. If a
-`LIST_VIEW` migration seems to need a markup change, it is wrong — the
-migration is class-for-class.
+**Ordering note, because this run reaches into five files run (e) owns.**
+`src/app/page.tsx`, `src/app/runs/page.tsx`, `LiveTelemetry.tsx`,
+`RepoSpendCard.tsx` and `UsagePeriods.tsx` all carry a
+`LIST_VIEW`/`STICKY_HEAD` const. Run (a) goes first and touches **only** those
+consts and the one element each wraps. Run (e) then finds `<ListView>` already
+in place and changes what §3.E tells it to. Nothing else in those five files
+is run (a)'s. If a migration seems to need any other change, it is wrong —
+stop and report.
 
 ### (b) `/settings`
 
@@ -1687,8 +1788,8 @@ keys of `Settings`, because this page sends the whole blob on Save. §5.10.
 
 **Owns:** `src/app/runs/new/page.tsx`, `src/app/runs/[id]/page.tsx`,
 `RunLand.tsx`, `RunDiff.tsx`, `RunReview.tsx`, `RunOutput.tsx`,
-`RunAgentCost.tsx`, and the three-word table added to
-`docs/agent/conventions.md`.
+`RunAgentCost.tsx`. **No documentation** — the `ceiling`/`guard`/`limit` table
+is already in `conventions.md`; run (c) applies it, it does not write it.
 
 **Spec:** §3.C. **Acceptance:** §3.C's list.
 
@@ -1711,9 +1812,9 @@ need a change in `lib/`, stop and report.
 **Owns:** `src/app/page.tsx`, `src/components/LiveTelemetry.tsx`,
 `UsagePeriods.tsx`, `RepoSpendCard.tsx`, `FleetControls.tsx`,
 `src/app/runs/page.tsx`, `src/app/branches/page.tsx`, `src/app/chat/page.tsx`,
-`src/app/api/chat/dto.ts` (the two booleans in E13),
-`src/app/agents/page.tsx`, `src/app/account/page.tsx`, and the
-`conventions.md` line E8 changes.
+`src/components/RestartClosed.tsx` (no change, but nobody else may touch it),
+`src/app/agents/page.tsx`, `src/app/account/page.tsx`, and **only** the
+"exactly two" sentence in `docs/agent/conventions.md` (§7 item 3).
 
 **Spec:** §3.E. **Acceptance:** §3.E's list.
 
@@ -1724,9 +1825,12 @@ need a change in `lib/`, stop and report.
 ### What every run does, without being told again
 
 1. Read §5 before opening a file.
-2. `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` is not required, but
-   `npm run typecheck` and `npm test` are, and they are the definition of done
-   — there is no linter run in this repository.
+2. `npm run typecheck` and `npm test` are required and there is no linter run
+in this repository. `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` is
+required **only if you introduce a Tailwind variant spelling the codebase does
+not already use**, because point 3 cannot be checked without it. Every variant
+this document asks for (`max-md:`, `md:`) is already in the emitted CSS, so in
+practice only run (a)'s new components could need it.
 3. Verify any new Tailwind variant spelling **in the emitted CSS**. Tailwind
    emits nothing for a spelling it does not know, silently.
 4. Check every change you make against §5.9: it must survive at 390px and it
@@ -1905,7 +2009,7 @@ Rules a build run must not break:
 | String / rule | File | Why |
 |---|---|---|
 | **"work cycle" in the UI, `iteration` in the code** | copy in `runs/new`, `runs/[id]`, `runs`, `settings`, `page.tsx`, the instance page; internals in `budget.ts`, `orchestrator.ts`, `apiTypes.ts`, `db.ts` | Both directions are forbidden. Do not "align labels with the API field names". **Verified today: zero user-visible occurrences of "iteration" in `src/app` or `src/components`. Keep it at zero.** |
-| **the "tighter, not exact" caveat** | `runs/new/page.tsx:1357` (the copy), `:1349` (the comment stating the rule) | `budgets-and-guards.md` requires it in **every** piece of live-enforcement copy. Measured: the phrase itself is only in that comment; the user-visible form is `:1357`'s "tighter than waiting for the cycle to end, but still not an exact cut-off", and **Settings' own live-enforcement row (`:2443`) carries no such caveat at all** — an existing gap this document neither closes nor widens. Do not condense the three enforcement-mode descriptions into one shared hint, and do not move the caveat into a fold. | | **`fmtCycleInFlight` decides the in-flight wording, wording included** | `src/lib/format.ts:59-69`; used at `runs/page.tsx:408` | One column, on the in-flight list, nowhere else. Never merged with the completed count, never formatted inline. | | **`failed` for a deadline, `stopped` for a decision** | `src/lib/orchestrator.ts`, `format.ts` (`STATUS_TONE`) | A hung agent filed as "stopped" is the sentence that stops anyone looking for the cause. Do not bucket the two into one visual "ended" group. | | **`NEEDS_REVIEW` the sentinel vs `needs-review` the status** | `src/lib/orchestrator.ts` | Spelled differently on purpose, so a task quoting the status cannot fire the matcher. Never render the status as `NEEDS_REVIEW`. | | **`stop_reason` is user-visible prose** | `src/lib/apiTypes.ts`, both runs surfaces | Never parsed or regexed to derive a badge, icon or grouping. | | **Merge-block words** | the instance page, `WorkflowEditor.tsx` | The page says "merging" and "landed"; the column says `thinking`/`emitted`. Do not surface the raw status on a merge block. | | **`started` is not a word for a press of Run that is over** | `src/lib/workflows.ts` (`instanceIsOpen`) | Act on `instanceIsOpen`, never on `status === "started"`. Four of six readings are derived. | | **The three generated prompt strings** | `src/lib/orchestrator.ts` | `COMPLETION_NOTICE`, `SHARED_CHECKOUT_NOTICE`, `RESTART_KILLED_NOTICE`, and the `needs-review` notice, are generated rather than stored **because** one press of Save materialises every default into the stored blob. Never move one into `Settings`. | | **`ceiling` / `guard` / `limit`** | §3.C.1, and §7 adds it to `conventions.md` | New with this document, and the only rewording it authorises is one string at `runs/new/page.tsx:1938-1939`. |
+| **the "tighter, not exact" caveat** | `runs/new/page.tsx:1357` (the copy), `:1349` (the comment stating the rule) | `budgets-and-guards.md` requires it in **every** piece of live-enforcement copy. Measured: the phrase itself is only in that comment; the user-visible form is `:1357`'s "tighter than waiting for the cycle to end, but still not an exact cut-off", and **Settings' own live-enforcement row (`:2443`) carries no such caveat at all** — an existing gap this document neither closes nor widens. Do not condense the three enforcement-mode descriptions into one shared hint, and do not move the caveat into a fold. | | **`fmtCycleInFlight` decides the in-flight wording, wording included** | `src/lib/format.ts:59-69`; used at `runs/page.tsx:408` | One column, on the in-flight list, nowhere else. Never merged with the completed count, never formatted inline. | | **`failed` for a deadline, `stopped` for a decision** | `src/lib/orchestrator.ts`, `format.ts` (`STATUS_TONE`) | A hung agent filed as "stopped" is the sentence that stops anyone looking for the cause. Do not bucket the two into one visual "ended" group. | | **`NEEDS_REVIEW` the sentinel vs `needs-review` the status** | `src/lib/orchestrator.ts` | Spelled differently on purpose, so a task quoting the status cannot fire the matcher. Never render the status as `NEEDS_REVIEW`. | | **`stop_reason` is user-visible prose** | `src/lib/apiTypes.ts`, both runs surfaces | Never parsed or regexed to derive a badge, icon or grouping. | | **Merge-block words** | the instance page, `WorkflowEditor.tsx` | The page says "merging" and "landed"; the column says `thinking`/`emitted`. Do not surface the raw status on a merge block. | | **`started` is not a word for a press of Run that is over** | `src/lib/workflows.ts` (`instanceIsOpen`) | Act on `instanceIsOpen`, never on `status === "started"`. Four of six readings are derived. | | **The three generated prompt strings** | `src/lib/orchestrator.ts` | `COMPLETION_NOTICE`, `SHARED_CHECKOUT_NOTICE`, `RESTART_KILLED_NOTICE`, and the `needs-review` notice, are generated rather than stored **because** one press of Save materialises every default into the stored blob. Never move one into `Settings`. | | **`ceiling` / `guard` / `limit`** | §3.C.1, and §7 adds it to `conventions.md` | New with this document. It authorises exactly one *correction* — the two halves of the ternary at `runs/new/page.tsx:1938-1939` — and it governs the wording of anything §3 newly writes, which is why B2's merged group is labelled `Spending limits`. B2's other renames are authorised by B2 and are about ambiguity, not about these three words. |
 
 ### 5.7 `needs-review`, and the two `REOPENABLE` sets
 
@@ -1957,9 +2061,15 @@ Rules a build run must not break:
 `2c43b27` and the four runs behind it. **None of this may be undone, and every
 change in §3 must survive at 390px as well as at 1440px.**
 
-- **Every mobile rule is additive behind a breakpoint prefix.** A `max-md:` rule
-  or a `md:`-prefixed override, never an edit to an unprefixed class — **the app
-  at 1440px must be pixel-identical before and after.**
+- **Every mobile rule is additive behind a breakpoint prefix.** A `max-md:`
+rule or a `md:`-prefixed override, never an edit to an unprefixed class.
+**Read this precisely:** it says a *narrow-viewport fix* may not be bought by
+editing desktop, and the pixel-identity clause in `conventions.md` is about
+that landed work. It does **not** freeze the desktop against this document —
+E2 changes card emphasis, C6 and E1 add region headings, E9 raises one line's
+size, and every one of those is a deliberate desktop change this specification
+authorises. What is forbidden is reaching for an unprefixed class to solve a
+390px problem.
 - The breakpoint is `md` (768px), written once in JS as `SIDEBAR_DOCKED`.
 - The touch target is 44px below it (`max-md:min-h-11`), except a `<summary>`,
   which buys it with `max-md:py-3.5` — which is why `Disclosure` exists.
@@ -2050,7 +2160,7 @@ I would ask.
    reach GitHub" a sentence that has to be read before the first message, or
    one that is read once?*
 4. **`LiveTelemetry`'s missing `max-h-80`** (`LiveTelemetry.tsx:27-28`) — the
-   only `LIST_VIEW` without a cap. §3.A.3 preserves it as `cap="uncapped"`.
+   only `LIST_VIEW` without a cap. §3.A.3 preserves it as `box="scrolling"`.
    *Question: decision or omission?* **Unverified.**
 5. **A loop block draws no badge on its canvas card**
    (`WorkflowCanvas.tsx:794-804`), so `maxPasses` is not on the card while an
@@ -2076,13 +2186,38 @@ I would ask.
     surfaces read `GET /api/agents`: "read by five surfaces" in one paragraph,
     "one sentence four pickers share" in the next. Five is right (run form,
     Settings, canvas, chat mention popover, `/agents`).
+12. **Two conventions for where a card's title sits.** `workflows/[id]`,
+    `workflows/page.tsx`, the instance page and `/agents` put `CardTitle`
+    *outside* the `Card` it names; the dashboard, branches, the run form and
+    every component in `src/components/` put it inside. Both read fine; having
+    both means a fifth page has to guess. *Question: which one, and is the
+    outside form actually a different thing — a section label above a box —
+    that wants its own name?* Withdrawn from run (e) as E15.
+13. **Two rendered strings are compared as literals.** `chat/page.tsx:1386`
+    tests `b.guardsLabel === "template deleted"` and `:1396` tests
+    `b.agentLabel === "agent deleted"`, against copy produced by
+    `summarizeProposedGraph` (`src/lib/workflows.ts`). Rewording either drops
+    the danger colour on a workflow block silently. The fix is a boolean on
+    `ProposedBlockDTO`, which touches `src/lib/workflows.ts`,
+    `src/lib/apiTypes.ts` and `src/lib/workflows.test.ts` — not a density
+    change, and no run in this plan owns those. Withdrawn from run (e) as E13.
+14. **`prompt rewritten` has no glyph** because `IconName` is a closed union of
+    twenty with no warning or edit glyph in it (E11 gives it a tone instead).
+    *Question: is it worth a twenty-first?* `conventions.md` says a new
+    destination needs a glyph before it needs a row in `panes.ts`; this is the
+    same question one layer down.
+15. **`RepoSpendCard`'s sticky head has no hairline shadow**
+    (`RepoSpendCard.tsx:54`) where the app's other four do. §3.A.3 preserves it
+    as `STICKY_HEAD_FLAT`. *Question: decision or omission?* **Unverified**,
+    exactly like item 4.
 
 ---
 
 ## 7. Additions to `docs/agent/conventions.md`
 
-Three, and no more. Each is a decision this document makes that a future editor
-of a component would otherwise have to rediscover from here.
+Four, and no more. Each is a decision this document makes — or falsifies —
+that a future editor of a component would otherwise have to rediscover from
+here.
 
 1. **The grouping vocabulary**, in one paragraph: the seven affordances, the
    caps, and the closed "never" list — pointing at this document for the
@@ -2093,6 +2228,17 @@ of a component would otherwise have to rediscover from here.
    therefore repeating the 16px floor. After run (e) converts the branches
    land-strategy `select` to the kit `Select`, there is **one** — the chat
    composer. Run (e) makes that edit in the same commit as the conversion.
+4. **The `<summary>` paragraph, which these five runs falsify.**
+   `conventions.md` currently names the three call sites that carry the
+   `max-md:py-3.5` recipe and says *"the four in the run detail pane —
+   `RunOutput`, `RunReview`, `RunLand` and `ui/Patch` — do not yet, and are the
+   one gap this leaves."* Once `Disclosure` exists and every `<summary>` in the
+   app goes through it, both halves are wrong and the gap is closed. **Run (a)
+   rewrites that passage** — in the same commit as the component, describing
+   the end state: the recipe lives in `Disclosure`, and the reason a
+   `<summary>` cannot take `max-md:min-h-11` is what the component's own
+   comment now carries. Run (a) writes it once; runs (c) and (e) migrate their
+   call sites into a sentence that is already true of them.
 
 A fourth correction is **already made** by this document, because it depends on
 no code change: `conventions.md`'s `Table`/`stack` paragraph named "the settings
@@ -2103,6 +2249,7 @@ one of the three names was not. The storage report is no longer a table at all
 page's one un-stacked `Table` is the **calibration suggestion table** at
 `:1859-1911`. The sentence now says so.
 
-Items 1 and 2 and that correction are written by this document. Item 3 is run
-(e)'s, because it has to land in the same commit as the conversion it
-describes.
+Items 1 and 2 and the storage-report correction are written by this document.
+Item 3 is run (e)'s and item 4 is run (a)'s, because each has to land in the
+same commit as the code it describes. **No other run may edit
+`conventions.md`.**
