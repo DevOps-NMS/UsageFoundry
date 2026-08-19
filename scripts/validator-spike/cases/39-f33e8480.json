@@ -1,0 +1,48 @@
+{
+  "n": 39,
+  "runId": "f8da8c51",
+  "sessionId": "f33e8480",
+  "folder": "VisualMerge",
+  "stop": "done",
+  "label": "finished",
+  "labelReason": "`docs/01-implementation-plan.md` exists at 1175 lines and takes a position on each numbered question the task listed",
+  "labelEvidence": "commit `fed425c`",
+  "repo": "/workspace/VisualMerge",
+  "transcript": "/home/node/.claude/projects/-workspace--uf-worktrees-visualmerge-c18570bd208d-1/f33e8480-8789-4ea9-9c6b-634da7bd4780.jsonl",
+  "reachable": true,
+  "branch": "uf/visualmerge-c18570bd208d-1-f8da8c51",
+  "chained": true,
+  "chainEvidence": [
+    "2 sampled sessions share branch uf/visualmerge-c18570bd208d-1-f8da8c51",
+    "the task text carries the app's continuation notice"
+  ],
+  "task": "You are working in a dedicated git worktree on your own branch, not in the user's checkout. Commit your work as you go, with clear messages; anything left uncommitted will not be visible to the user.\n\nThis branch (uf/visualmerge-c18570bd208d-1-f8da8c51) already carries the work of run f8da8c51, which you are continuing. That was a separate agent and a separate conversation: none of what it decided is in your context, and the only record of it is the branch itself. Before doing anything, read it:\n\n    git log --oneline ce1b5ae43e3c88c15fc50d4e3bf5fa3f596f986b..HEAD\n    git diff ce1b5ae43e3c88c15fc50d4e3bf5fa3f596f986b...HEAD\n\nRead what is already on this branch before you change anything, and treat it as deliberate: extend it, fix what is wrong with it, and finish what it left unfinished. Do not restart the task from scratch and do not revert that work because it is not what you would have written. If it contradicts the task below, say so in your reply rather than quietly undoing it.\n\nYou will get a task given from another source, or appended here. If thats not the case report DONE every cycle\n\n## This run specifically\n\n## This run specifically\n\nRepository: `/workspace/VisualMerge` (GitHub `Xapicc/VisualMerge`). You are on the branch of the run that wrote `docs/00-shape.md`; its commit is already here. Read that document first and treat it as binding — its goals, non-goals, appetite and success criteria are the specification for this plan. If you believe something in it is wrong, say so in a clearly marked section rather than quietly planning something else.\n\nYou are running unattended. Nobody will answer a question. Write no application code and add no dependencies: the deliverable is a plan a later run can execute, not a scaffold.\n\n### What VisualMerge is\n\nA tool that visualises what merging one git branch into another will do — what arrives, what is overwritten or lost, what conflicts — such that someone who does not really understand git can read it correctly. It has to be droppable into an existing website with very little integration work.\n\n### What to produce\n\nWrite `docs/01-implementation-plan.md`. Take a real position on each of these; a plan that lists options without choosing is not usable by an unattended agent.\n\n**1. Where the merge data comes from.** A browser cannot run `git`. Decide how a merge is computed and turned into data — `git merge-tree`/`merge-base` in a small local CLI or server, isomorphic-git or a WASM git in the browser, a host-supplied backend, the GitHub compare API, or a pre-baked JSON artefact. Name the choice, the runners-up, and why. Say what it costs the integrator, because the shape document's integration criterion is what this has to satisfy.\n\n**2. The data contract.** The stable JSON that the renderer consumes, given as a typed schema with a worked example. This is the most important artefact in the plan: it is the seam between \"compute the merge\" and \"draw the merge\", and getting it right is what lets the two halves be built and tested independently. Cover at least — commits unique to each side, files added/modified/deleted/renamed per side, files touched by both, conflict regions, and whatever carries \"this change is at risk of being lost\". Say explicitly how a *loss* is detected and represented, since that is the claim the product is making and the easiest thing to get subtly wrong.\n\n**3. The visual model.** How the merge is drawn so a novice reads it correctly. Name the views (a graph? two columns converging? a file-level ledger? a per-file before/after?), what each one answers, and which one is the default. Justify against the comprehension questions in `docs/00-shape.md`. Say what is deliberately not drawn — density is the enemy of comprehension here. Cover the vocabulary too: the labels a novice sees should not be `HEAD`, `ancestor`, `ours`/`theirs` unless you argue for it.\n\n**4. The package and integration surface.** What an integrator actually installs and writes. Decide the framework question (framework-agnostic web component, React component, plain function that renders into a DOM node) and the distribution (npm ESM, a single UMD/script-tag bundle, both). Write the host-page snippet you are promising, and state the bundle size budget you are holding yourself to.\n\n**5. Architecture and repository layout.** Directory tree with a sentence per package or directory. Language and toolchain choices (TypeScript vs JavaScript, bundler, test runner) with reasons, biased toward what the browser and npm ecosystem make boring.\n\n**6. Testing strategy.** What is unit-tested (merge analysis against fixture repositories built by a script), what is snapshot/visual-tested, and how the comprehension claim from the shape doc is checked. Say how git fixtures are created and kept deterministic.\n\n**7. Milestones as work packages.** Slice the build into ordered packages an unattended agent can take one at a time. For each: what it delivers, what it depends on, acceptance criteria that are checkable by running something, and roughly how big it is. The first package must end with a real merge rendered from real repository data — a scaffold with placeholder data is not a milestone. Note which packages can be built in parallel.\n\n**8. Risks and open questions**, each with the decision that would settle it.\n\n### Finishing\n\nCommit `docs/01-implementation-plan.md` on this branch. Do not push, do not open a pull request, do not merge or rebase onto main. Do not edit anything outside this checkout.\n\nEnd with a short report: the three or four decisions that most constrain the build, anything in the shape document you had to push back on, and any question you could not settle alone.",
+  "finalText": "DONE",
+  "attribution": "commit-message",
+  "commits": [
+    {
+      "sha": "fed425cd55280ae4963069b11a43c669f14844f1",
+      "subject": "Plan VisualMerge as a CLI-computed report with a frozen JSON seam"
+    }
+  ],
+  "unresolvedSubjects": {
+    "ambiguous": [],
+    "missing": []
+  },
+  "diff": {
+    "mode": "range",
+    "text": "",
+    "stat": "docs/01-implementation-plan.md | 1175 ++++++++++++++++++++++++++++++++++++++++\n 1 file changed, 1175 insertions(+)",
+    "truncated": true,
+    "omitted": [
+      {
+        "file": "docs/01-implementation-plan.md",
+        "bytes": 87308
+      }
+    ],
+    "bytes": 0,
+    "totalBytes": 87308,
+    "fileCount": 1
+  },
+  "emptyDiffReason": null
+}

@@ -1,0 +1,33 @@
+{
+  "n": 31,
+  "runId": "a0edf3c2",
+  "sessionId": "24e538ca",
+  "folder": "VibeHub",
+  "stop": "cap?",
+  "label": "unjudgeable",
+  "labelReason": "Task was \"can you tell me whats going on in this repo?\"; no diff is expected and none exists",
+  "labelEvidence": "empty diff",
+  "repo": "/workspace/VibeHub",
+  "transcript": "/home/node/.claude/projects/-workspace--uf-worktrees-vibehub-c34dfbd8d9d5-1/24e538ca-dc55-4a7d-a647-e60dbacb732a.jsonl",
+  "reachable": true,
+  "branch": "uf/vibehub-c34dfbd8d9d5-1-a0edf3c2",
+  "chained": false,
+  "chainEvidence": [],
+  "task": "You are working in a dedicated git worktree on your own branch, not in the user's checkout. Commit your work as you go, with clear messages; anything left uncommitted will not be visible to the user.\n\ncan you tell me whats going on in this repo?",
+  "finalText": "## What VibeHub is\n\nA research and design project, not a product. Two people asking what the substrate for agent software work would look like if it weren't inherited from humans. Thesis in one line: git is a content-addressed store wearing a text-file interface, wrapped in a coordination model (branch, PR, review, merge) that assumes a slow single-threaded human at the keyboard, and every property that made it good for that reader is a tax when the reader is a fleet of agents from different vendors under different owners.\n\nIt splits into Track A (the substrate: what replaces the file, the line, the branch) and Track B (the channel: how two agents under different owners discover each other, claim work, and attest what they did). The stated highest risk is the seam between them, so six shared nouns are fixed up front: `Actor`, `Node`, `Claim`, `ChangeSet`, `Attestation`, `Session`.\n\nThe method rules are the real character of the repo: every claim carries a verification tag (`[V-full]` read the primary source, `[S]` secondary, `[A]` our assertion), walls get kill criteria written before the attempt, dead approaches stay written down, controls must be form-matched, and no benchmark of their own until a third party's published number is reproduced first.\n\n## The gate, and the thing it's currently tripping over\n\n`docs/07-open-questions.md` Group 0 blocks implementation on three questions. D2 (can a substrate enforce coordination, or only account for it?) was settled on 2026-08-16: only account for it, which re-aimed Track B from enforcement to accountability. **D1 (is the cross-vendor case actually growing? today it's 0.5% of concurrent agent PR pairs) and D3 (what is the metric) are both still open and, since Track A went dormant, both unowned.** D1 is flagged as the cheapest thing that could end the project.\n\nThe live tension: the gate forbids code, but the repo's own agenda needs two experiments that require code. That's D17, still open, with a proposed discriminator (code that could survive into the product is implementation; code that produces a measurement and is then deleted is an instrument). `poc/` was built *under* that discriminator before it was agreed, which is exactly the settling-by-drift the repo exists to prevent, so it's flagged in D17 rather than buried. If D17 is rejected, `poc/` gets deleted and its findings survive as prose.\n\n## What this branch has done\n\nYou're on Track B's line of work: `poc/` is a testbed with two processes under different owners sharing nothing but a Unix socket, plus the wire schema, verifier, reader rules L1 to L13, sixteen scripted adversary scenarios, a decidability probe, and an MCP surface. Three headline results:\n\n**Sixteen adversaries, seven registered `NO_ANSWER`.** The design holds against naive claim-squatting and silent holds; it has no answer to A3, the lying attestation. A1 and A2 both escape through fabricated or unverifiable evidence, so they collapse into A3, and A3 is bounded only by the cost of discarding an identity, which is one keygen with a placeholder anchor. The sharpest loss: a lie typed as *evidence* on a check nobody else's toolchain can run gets `ACCEPT`, unrefuted, permanently.\n\n**Metadata decides three defect classes out of five, and the interesting failure is D-a** (an altered interface the metadata omits). It's indistinguishable from D-d (honest metadata over a semantically wrong change) to a receiver that can't see the diff. So \"decidable without the diff\" is partly true, and the part that isn't just relocates the bill from the receiver's context to the verifier's toolchain.\n\n**Twenty-four real headless Claude Code sessions on the channel, twelve runs.** The work outcome was identical with and without the channel in every trial. Nobody deferred, split work, or handed anything off. What the channel produced was an accurate collision report to each owner's human, and nothing else. Two structural reasons: discovery is a single poll at session start when the channel is still empty, and the MCP server is a child of the session, so the party that finishes first can never learn what the second one did. That second one is wall W3, not an implementation gap.\n\n## State of the tree\n\nClean, 28 commits ahead of `origin/main` and 30 behind. `main` has moved on with Track A work you don't have here: `vhfs/` (a Python addressing layer with an A/B result, 8/8, p=0.0078) and the `research/codec/` measurements. Nothing conflicts yet, but the two tracks numbered docs independently while apart, so `08`, `09` and `10` each exist twice; a future edit should renumber one side rather than adding a third.",
+  "attribution": "no-commits",
+  "commits": [],
+  "unresolvedSubjects": {
+    "ambiguous": [],
+    "missing": []
+  },
+  "diff": {
+    "mode": "empty",
+    "text": "",
+    "stat": "",
+    "truncated": false,
+    "omitted": [],
+    "bytes": 0
+  },
+  "emptyDiffReason": "the run ran no `git commit -m` at all"
+}
