@@ -86,10 +86,10 @@ Seven, and no eighth without a change to this document.
 |---|---|---|---|
 | 1 | **Pane** (a row in `panes.ts`) | The reader arrives here *from the sidebar* to do a distinct job with its own primary action. | **Eight. The list is closed** — see §1.2. |
 | 2 | **Sub-route** (a page below a pane) | A group is both *large* (a screen's worth) and *rare* (used once a week or less), and has its own primary action. | — |
-| 3 | **Card** (`Card`, `emphasis`) | The contents are read together and answer **one** question a reader could ask out loud. | ≤ 7 cards per page; ≤ 9 controls in one card without an inner `ListGroup`; **exactly one `primary` per page**. |
-| 4 | **Group** (`ListGroup` with `label`) | Three or more rows inside a card share a subject that the card's own title does not name. | 3–9 rows. Fewer than 3 is not a group, more than 9 is two. |
+| 3 | **Card** (`Card`, `emphasis`) | The contents are read together and answer **one** question a reader could ask out loud. | ≤ 7 cards **as peers at one level**; ≤ 9 controls in one card without an inner `ListGroup`; **exactly one `primary` per page**. |
+| 4 | **Group** (`ListGroup` with `label`) | Rows inside a card share a subject that the card's own title does not name. | 3–9 rows, more than 9 is two. Fewer than 3 only where the **label** states something neither row does. |
 | 5 | **Disclosure** (new `Disclosure` primitive, §1.3) | The content is *evidence* (a log, a diff, an older list, a preflight report) or a setting whose default is right for nearly everyone. | Never nested. Never around a fact a decision is approved against. |
-| 6 | **Tab strip** (`SegmentedControl` switching panes) | Two to five **mutually exclusive views of one subject**, where the reader wants one at a time and the page can tell whether there is anything behind each. | ≤ 5 segments. One strip per page. |
+| 6 | **Tab strip** (a `SegmentedControl` that switches **which pane is shown**) | Two to five mutually exclusive views of one subject, where the reader wants one at a time and the page can tell whether there is anything behind each. | ≤ 5 segments. **One strip per page.** |
 | 7 | **Sheet** (`Sheet`, native `<dialog>`) | A decision that must be answered before anything else proceeds; or an action that is destructive, irreversible, or handles a credential. | One default action + Cancel. Never nested. |
 
 Notes that are part of the rule, not commentary:
@@ -104,9 +104,25 @@ Notes that are part of the rule, not commentary:
 - **`ListGroup`'s `footnote` is where a group's explanation goes** — under the
   box, not as a paragraph above it (`List.tsx:25`, `List.tsx:40-44`). A
   paragraph above a group is a lede for a heading that is already there.
+- **The card cap is on *peers*, not on the page.** Seven cards side by side with
+  nothing between them is the fuzziness this document is about; seven cards
+  under three named regions is a structure. `/` keeps all eight of its cards and
+  gets regions (§3.E.1) rather than losing one.
+- **A group of two is legitimate where its label is the information.** Settings'
+  `Raw-token ceilings` holds two rows whose labels are the same two words as the
+  `Cost ceilings` group above it; the group label is the only thing telling them
+  apart, so it is doing work. A group of two whose label merely restates its
+  rows is not — which is why §3.B merges the two single-row guard groups.
 - **A tab strip is a view switcher, never a navigation device.** Moving between
   different *subjects* is the sidebar's job. `/runs/[id]` has the app's one
-  legitimate tab strip and it stays.
+  five-segment tab strip and `/chat`'s side card has a two-or-three-segment one;
+  both stay.
+- **A `SegmentedControl` used to pick a *value* is not a tab strip** and none of
+  rule 6's caps reach it. The runs list's six-option status filter, the
+  dashboard's three pickers (`Period length`, `Breakdown dimension`, `Span`),
+  Settings' four and the run form's three are all form controls, governed by
+  `conventions.md`'s own rule for the component and by its `max-md:flex-wrap`.
+  **Do not "fix" the six-option filter to satisfy rule 6.**
 
 ### 1.2 What may never be used
 
