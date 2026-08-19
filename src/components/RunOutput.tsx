@@ -3,6 +3,7 @@
 import type { CycleOutput } from "@/lib/cycles";
 import { fmtClock } from "@/lib/format";
 import { Card, CardTitle } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Markdown } from "@/components/Markdown";
 
 /**
@@ -54,16 +55,22 @@ export function RunOutput({ cycles }: { cycles: CycleOutput[] }) {
       <CycleBody cycle={latest} />
 
       {earlier.length > 0 && (
-        <details className="mt-4 border-t border-line pt-3">
-          <summary className="cursor-pointer text-xs font-semibold text-ink-muted">
-            {earlier.length} earlier work cycle{earlier.length === 1 ? "" : "s"}
-          </summary>
+        // Through the kit's `Disclosure` rather than a hand-rolled `<details>`,
+        // which is where the 44px touch target this call site did not carry now
+        // lives. The count stays in the summary's own words rather than moving
+        // to the `count` prop: "3 earlier work cycles" already says how much is
+        // behind the fold, and "earlier work cycles (3)" says it twice.
+        <Disclosure
+          className="mt-4 border-t border-line pt-3"
+          summary={`${earlier.length} earlier work cycle${earlier.length === 1 ? "" : "s"}`}
+          summaryClassName="text-xs font-semibold text-ink-muted"
+        >
           <div className="mt-3 flex flex-col gap-3">
             {earlier.map((c) => (
               <CycleBody key={`${c.n}-${c.ts}`} cycle={c} />
             ))}
           </div>
-        </details>
+        </Disclosure>
       )}
     </Card>
   );

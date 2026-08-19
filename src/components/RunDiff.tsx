@@ -169,9 +169,14 @@ export function RunDiff({ run }: { run: RunDTO }) {
 
           {diff.uncommitted.length > 0 && (
             <div className="mt-4 border-t border-line pt-3.5">
+              {/* Two wordings for two different places, and the branch is the
+                  whole of the difference: an isolated run's checkout is not the
+                  operator's folder. There was a third wording on the Land card
+                  for the same list; one name each is what the reader needs to
+                  match them up. */}
               <div className="mb-2 text-xs font-semibold text-ink">
                 {diff.kind === "range"
-                  ? "Left uncommitted in the checkout"
+                  ? "Uncommitted in the checkout"
                   : "Uncommitted in this folder"}
               </div>
               <div className="mono max-h-40 overflow-auto rounded-sm border border-line bg-inset p-2.5">

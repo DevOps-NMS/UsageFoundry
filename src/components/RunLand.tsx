@@ -13,6 +13,7 @@ import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Input, Select } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
@@ -51,19 +52,31 @@ function ConflictFile({ file }: { file: ConflictFileDTO }) {
   const total = shown + file.regionsOmitted;
 
   return (
-    <details className="border-b border-line py-1.5 last:border-b-0">
-      <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
-        <span className="mono min-w-0 flex-1 break-all text-ink">{file.path}</span>
-        {file.type && (
-          <span className="text-2xs uppercase tracking-wide text-warn">{file.type}</span>
-        )}
-        {total > 0 && (
-          <span className="whitespace-nowrap tabular-nums text-xs text-ink-muted">
-            {total} clash{total === 1 ? "" : "es"}
+    // The kit's fold, which is where the 44px touch target this row did not
+    // carry now lives. The summary keeps all three of its parts — the path, the
+    // kind of conflict and the clash count — because a file row that says only
+    // its path is a list of names to open one at a time.
+    <Disclosure
+      className="border-b border-line py-1.5 last:border-b-0"
+      summaryClassName="flex flex-wrap items-center gap-2 text-sm"
+      summary={
+        <>
+          <span className="mono min-w-0 flex-1 break-all text-ink">
+            {file.path}
           </span>
-        )}
-      </summary>
-
+          {file.type && (
+            <span className="text-2xs uppercase tracking-wide text-warn">
+              {file.type}
+            </span>
+          )}
+          {total > 0 && (
+            <span className="whitespace-nowrap tabular-nums text-xs text-ink-muted">
+              {total} clash{total === 1 ? "" : "es"}
+            </span>
+          )}
+        </>
+      }
+    >
       <div className="mt-2">
         {file.message && (
           <div className="mb-2 text-xs leading-snug text-ink-muted">{file.message}</div>
@@ -91,7 +104,7 @@ function ConflictFile({ file }: { file: ConflictFileDTO }) {
           <Hint>git left no conflict markers in this file</Hint>
         )}
       </div>
-    </details>
+    </Disclosure>
   );
 }
 
@@ -120,8 +133,10 @@ function PendingWork({
 
   return (
     <div className="mt-3 border-t border-line pt-3">
+      {/* The same list the Changes tab heads, under the same words: this is an
+          isolated run, so it is always the checkout branch of that pair. */}
       <div className="mb-1.5 text-xs font-semibold text-ink">
-        Uncommitted in its checkout
+        Uncommitted in the checkout
       </div>
 
       {!pending.readable ? (

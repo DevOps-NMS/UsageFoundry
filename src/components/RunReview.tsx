@@ -7,6 +7,7 @@ import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
 import { Spinner } from "@/components/ui/Log";
@@ -148,16 +149,19 @@ export function RunReview({ run }: { run: RunDTO }) {
       {latest && <ReviewBody review={latest} />}
 
       {earlier.length > 0 && (
-        <details className="mt-4 border-t border-line pt-3">
-          <summary className="cursor-pointer text-xs font-semibold text-ink-muted">
-            {earlier.length} earlier review{earlier.length === 1 ? "" : "s"}
-          </summary>
+        // The kit's fold, for the touch target this call site did not carry.
+        // The count stays in the summary's own words — see `RunOutput`.
+        <Disclosure
+          className="mt-4 border-t border-line pt-3"
+          summary={`${earlier.length} earlier review${earlier.length === 1 ? "" : "s"}`}
+          summaryClassName="text-xs font-semibold text-ink-muted"
+        >
           <div className="mt-3 flex flex-col gap-3">
             {earlier.map((r) => (
               <ReviewBody key={r.id} review={r} />
             ))}
           </div>
-        </details>
+        </Disclosure>
       )}
     </Card>
   );
