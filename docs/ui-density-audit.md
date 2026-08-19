@@ -385,9 +385,9 @@ migrates **only the one call site inside the kit**:
 The other six call sites are migrated by whichever run owns their page
 (§3.B–§3.E). Run (a) does **not** touch them.
 
-`Icon.tsx:32-33` already carries `chevron-right` and `chevron-down` under the
-comment `// Disclosure.`, with no consumer anywhere in `src/`. The glyphs were
-drawn for this component and it was never built. Use them, or use the native
+`Icon.tsx:33-34` already carries `chevron-right` and `chevron-down`, under a
+comment at `:32` reading exactly `// Disclosure.`, with no consumer anywhere in
+`src/`. The glyphs were drawn for this component and it was never built. Use them, or use the native
 `<summary>` marker and delete the comment — but do not leave both.
 
 ### 3.A.3 `ListView` — extract it, and make the difference typed
@@ -730,10 +730,17 @@ titles are a genuinely good sequence and they stay.
 | **guard** | A threshold on a window (5-hour or weekly) that steps a run aside or ends it. | A number of dollars or minutes. |
 | **limit** | A cap on this run: work cycles, spend, time. | Anything about the subscription. |
 
-The page is already 90% consistent with this. Fix exactly one string:
-`runs/new/page.tsx:1938-1939`, `each cycle carries what is left of it as a
-ceiling` → `each cycle carries what is left of it as its own cap`. The same
-three-word table is added to `docs/agent/conventions.md` (§7).
+The page is already 90% consistent with this. Fix exactly one phrase, and note
+that it occurs **twice** — once in each branch of the same ternary, at
+`runs/new/page.tsx:1938` (the `live` branch) and `:1939` (the other):
+
+- `Read mid-cycle too, and each cycle carries what is left of it as a ceiling,
+  so the run stops near this figure`
+- `Each cycle carries what is left of it as a ceiling, so the run stops near
+  this figure`
+
+In both, `as a ceiling` → `as its own cap`. Nothing else on the page changes
+wording. The same three-word table is added to `docs/agent/conventions.md` (§7).
 
 **C2 — Promote the stop summary (required).**
 `summaryLead` + `windowLines` + the no-terminus sentence (`:1853-1871`) is
@@ -856,6 +863,13 @@ the column, nothing is folded, and every block keeps its own heading.
 | 3 | **`What it has spent`** | the `Spent` / `Work cycles` stat grid; `Agent work`; `Telemetry — first-party` |
 | 4 | **`How it was set up`** | `Agent`; `Checkout`; `Task` |
 
+> **Region 4 is what keeps the agent *beside* the guards rather than among
+> them.** `agents-and-templates.md` forbids an agent row inside a guard group,
+> because a row there would claim it bounds something and an agent bounds
+> strictly nothing. `Agent` sits in its own region, two regions away from
+> `Against its limits`. A build run that "tidies" it into region 2 has broken
+> that rule and nothing will say so. See §5.8.
+
 Region headings are `<h2>` styled as `CardTitle` (`text-sm font-semibold`);
 block headings stay `<h3>` at `text-xs font-semibold`. That is the existing
 two-step in `conventions.md`, not a new token, and it is what stops a rare
@@ -930,8 +944,8 @@ per-file conflict summary unchanged.
    render on the same rows; `Start run` and ⌘↩ both still submit.
 2. `/runs/new`: the stop summary is drawn as a `Notice tone="info" quiet` at
    the top of `When it stops`, with a comment forbidding a fold.
-3. `/runs/new`: the string `as a ceiling` no longer appears at `:1938-1939`;
-   `docs/agent/conventions.md` carries the three-word table.
+3. `/runs/new`: `grep -c 'as a ceiling' src/app/runs/new/page.tsx` returns 0
+   (it is 2 today); `docs/agent/conventions.md` carries the three-word table.
 4. `/runs/new`: exactly four blocks remain between the last card and the
    footer — the `bypassPermissions` notice, `formError`, `started`, and the
    validation list.
@@ -1077,6 +1091,14 @@ questions rather than thirteen rows:
 > ambient set stays on that group. See §5.7.
 
 Every existing group `footnote` stays on whichever group now holds its rows.
+
+**D4b — `/workflows` (the list) and the two editor wrappers: no change.**
+`src/app/workflows/page.tsx` is three columns, one `Saved` card, one
+`New workflow` button and a designed empty state — the smallest well-formed
+page in the app. `src/app/workflows/new/page.tsx` and
+`src/app/workflows/[id]/edit/page.tsx` are thin wrappers that mount
+`WorkflowEditor` with an `<h1>` and a back link. All three are verified and
+left alone.
 
 **D5 — `/workflows/[id]`: one primary action (required).**
 Four buttons in one row today. Assign: `Run` `primary`, `Edit` `secondary`
@@ -1253,6 +1275,12 @@ cell and the deliberate absence of `overflow-x-auto` are landed decisions.
 - **E5 — Migrate `<details>` at `:745-755` to `Disclosure`** with
   `summary="Older runs"` and `count={older.length}`. The rendered text stays
   `Older runs (n)`.
+- **E5b — `RestartClosed` (`src/components/RestartClosed.tsx`, 133) does not
+  change.** It is a `Notice tone="warn"` with one `Pick up {n}` button and a
+  confirming `Sheet`, rendered above `FleetControls` at `runs/page.tsx:652`.
+  Its count comes from the same filtered query the press reads, which is what
+  stops the badge and the payload disagreeing — see §5.5. Run (e) owns the
+  file and touches nothing in it.
 - **E6 — `FleetControls` keeps `emphasis="quiet"`** and its `Stop everything`
   `danger` button. A quiet card holding the page's most destructive control is
   correct here: it acts on no run in particular, so §2.3 anti-rule 1 does not
@@ -1460,6 +1488,45 @@ sentence is load-bearing.
 
 ---
 
+## 3.F Every dialog and every drawer
+
+The app's whole top-layer surface is **eleven `Sheet`s and one drawer**. Listed
+because the brief asks for every dialog, and because a modal is where a
+restructure most easily loses a rule.
+
+| # | Surface | File:line | Title / purpose | Owned by | Verdict |
+|---|---|---|---|---|---|
+| 1 | Claude sign-in | `settings/page.tsx:940` | `Sign in to Claude` | (b) | No change. Stays inside the row's `<dd>` — `939939a` put it there because a `<dl>` may hold only `dt`/`dd`/`div`. |
+| 2 | Claude sign-out | `settings/page.tsx:978` | `Sign out of Claude?` | (b) | No change. `confirmVariant="danger"`, so it opens with Cancel focused. |
+| 3 | Purge branch | `RunLand.tsx:609` | `Purge {branch}?` | (c) | No change. It names the branch and counts the commits and uncommitted paths. Never replaced by a generic confirm. §5.3. |
+| 4 | Delete workflow | `workflows/[id]/page.tsx:349` | `Delete "{name}"?` | (d) | No change. |
+| 5 | Remove schedule | `WorkflowSchedule.tsx:464` | `Remove this schedule?` | (d) | No change. |
+| 6 | Stop all blocks | `instances/[instanceId]/page.tsx:447` | `Stop {n} unfinished block(s)?` | (d) | No change. Its body states that an interrupted cycle's spend is estimated rather than measured — that is the display-versus-guard split in words. §5.2. |
+| 7 | Delete agent | `agents/page.tsx:489` | `Delete "{name}"?` | (e) | No change. Its second paragraph names every surface that refuses rather than quietly starting without a specialist. |
+| 8 | Stop everything | `FleetControls.tsx:158` | `Stop every run in flight` | (e) | No change. |
+| 9 | Pick up N stopped | `FleetControls.tsx:180` | `Pick up {n} run(s)` | (e) | No change. It carries two form fields inside the sheet; it takes the explicit id list the page displayed. §5.5. |
+| 10 | Pick up restarted | `RestartClosed.tsx:116` | `Pick up {n} run(s)?` | (e) | No change. |
+| 11 | Quick open | `QuickOpen.tsx:188` | `Quick open` | (a), read-only | No change. **Navigates and does nothing else.** §5.5. |
+| 12 | The sidebar drawer | `Sidebar.tsx:242` | the nav drawer below `md` | (a), read-only | No change. It is the app's **only** drawer and §1.2 rule 5 keeps it that way. |
+
+Three rules apply to all twelve and none of the five runs may bend one:
+
+- **One default action and Cancel.** `Sheet` has no informational mode and must
+  not grow one. A `danger` sheet opens with Cancel focused, because one Return
+  on a destructive confirmation is not a confirmation.
+- **Always rendered, never conditionally mounted; nothing sets `display`;
+  `cancel` is prevented so Esc routes through `onDismiss`.** All three are
+  correctness decisions about using the element rather than imitating it.
+- **A `Sheet` is in the top layer, so it owes the window's edges itself** —
+  all four `env(safe-area-inset-*)`, and its panel cap subtracts
+  `--keyboard-inset`. §5.9.
+
+**§3.E.10 adds the thirteenth** — a confirmation on `Land N branches` when
+auto-resolve is on. It is the only dialog this document creates, and it obeys
+all three rules above.
+
+---
+
 ## 4. The five build runs
 
 Each has two work cycles and cannot ask a question. Run them in this order —
@@ -1537,9 +1604,15 @@ need a change in `lib/`, stop and report.
    — there is no linter run in this repository.
 3. Verify any new Tailwind variant spelling **in the emitted CSS**. Tailwind
    emits nothing for a spelling it does not know, silently.
-4. Commit in logical steps with messages in this repository's style: what
+4. Check every change you make against §5.9: it must survive at 390px and it
+   must leave 1440px pixel-identical. Concretely — every new class is either
+   unprefixed and additive, or carries `max-md:`/`md:`; every new interactive
+   element clears 44px below the breakpoint (a `<summary>` via `Disclosure`,
+   everything else via `max-md:min-h-11`); and no new `Td` is added to a
+   `stack` table without a `label` unless it is the headline cell.
+5. Commit in logical steps with messages in this repository's style: what
    changes and *why*, imperative, under ~60 characters.
-5. If this document is silent or contradicts itself on something you need,
+6. If this document is silent or contradicts itself on something you need,
    **stop and report**. Do not invent an answer and do not widen your file
    ownership to work around it.
 
