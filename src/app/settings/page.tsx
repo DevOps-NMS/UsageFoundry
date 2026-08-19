@@ -31,6 +31,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Field, Input, Select, Switch, Textarea } from "@/components/ui/Field";
 import { Hint, type HintTone } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
@@ -233,6 +234,41 @@ const EDITABLE_PATHS = [
   "checkoutRetentionDays",
   "transcriptRetentionDays",
 ] as const;
+
+/**
+ * What each fold holds, in the dotted spelling `GET /api/settings` answers
+ * `nonDefaultKeys` with.
+ *
+ * A fold whose contents differ from their defaults opens by default and says
+ * how many do, and that rule is the whole of what makes folding a control set
+ * once per install safe rather than a way to hide a surprise. These lists are
+ * what it is computed from, so a path missing from one is a setting that can
+ * sit behind a closed summary at a value nobody on this install chose — which
+ * is silent, because the fold looks exactly the same either way.
+ *
+ * The seventh fold — the calibration tool — holds no stored setting at all and
+ * so takes neither, which is why it has no list here.
+ */
+const WINDOW_TURNOVER_KEYS = ["weeklyAnchor", "sessionResetOverrideAt"];
+const ISOLATED_RUN_KEYS = [
+  "isolationCopyGlobs",
+  "isolationCopyGlobsByRepo",
+  "landStrategy",
+  "resolveVerifyTools",
+];
+
+/**
+ * A fold's summary stands exactly where the group label or field label it
+ * replaced stood, so it is drawn as that label: the triangle beside it is what
+ * says it opens, and the hit target and the interaction states are
+ * `Disclosure`'s own. Both of those labels are this one string in the kit
+ * (`List`'s and `Field`'s), so a fold cannot read as a different rank of thing
+ * from the groups it sits among.
+ */
+const FOLD_SUMMARY = "text-xs font-medium text-ink-muted";
+
+/** The gap between a summary and the box under it, stated once. */
+const FOLD_BODY = "mt-2";
 
 /**
  * Drops the trailing field margin so a card's bottom padding matches its top.
@@ -598,6 +634,75 @@ function FormField({
       <EditedRail on={edited} />
       {children}
     </Field>
+  );
+}
+
+/**
+ * One prompt behind its own fold.
+ *
+ * Four independent folds and deliberately not an accordion: opening one must
+ * not close another, which would be a second state machine nothing else in this
+ * app has, and a lost scroll position each time.
+ *
+ * The summary carries the label, so the field inside renders none — a
+ * `<summary>` is the disclosure's own control and cannot also be the `<label>`
+ * for the box under it, so the textarea takes the same words as its accessible
+ * name. The unsaved-edit suffix goes on the summary rather than on the field,
+ * which is what lets a screen reader tell from a **closed** fold that something
+ * inside it is unsaved; the rail in the gutter says the same thing to everyone
+ * else, once the fold is open.
+ *
+ * Factored for the reason `SettingRow` is: four call sites repeat it verbatim,
+ * and the label is stated once here rather than twice at each of them.
+ */
+function PromptFold({
+  label,
+  id,
+  edited,
+  count,
+  defaultOpen,
+  value,
+  onChange,
+  className = "",
+  hint,
+}: {
+  label: string;
+  id: string;
+  /** Differs from what the server last confirmed. */
+  edited: boolean;
+  /** How many of this fold's settings differ from what the build ships. */
+  count: number | undefined;
+  defaultOpen: boolean;
+  value: string;
+  onChange: (next: string) => void;
+  /** The textarea's own height. The four differ, and always have. */
+  className?: string;
+  hint: ReactNode;
+}) {
+  return (
+    <Disclosure
+      className="mb-3.5 last:mb-0"
+      summaryClassName={FOLD_SUMMARY}
+      summary={
+        <>
+          {label}
+          {edited && <span className="sr-only"> — edited, not saved</span>}
+        </>
+      }
+      count={count}
+      defaultOpen={defaultOpen}
+    >
+      <FormField edited={edited} className={`${FOLD_BODY} ${FLUSH}`}>
+        <Textarea
+          id={id}
+          aria-label={label}
+          className={className}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+        <Hint>{hint}</Hint>
+      </FormField>
+    </Disclosure>
   );
 }
 
@@ -1104,6 +1209,20 @@ export default function SettingsPage() {
   /** What the server last confirmed. Every dirty check is against this. */
   const [savedS, setSavedS] = useState<SettingsDTO | null>(null);
   const [env, setEnv] = useState<Record<string, unknown>>({});
+  /**
+   * Which settings this install has moved off the value the build ships, and
+   * which of them had when the page loaded. Two states rather than one, and
+   * that is the whole point of the second.
+   *
+   * `Disclosure` is uncontrolled so that a fold cannot close under the reader,
+   * and a fold snapping shut in the same frame as a successful Save — because
+   * the value it holds has just become the default again — is that failure in
+   * its most confusing form. So the open state is decided once, from the first
+   * answer, and the badge follows the latest one. The badge may change; the
+   * fold may not.
+   */
+  const [movedKeys, setMovedKeys] = useState<string[]>([]);
+  const [movedAtLoad, setMovedAtLoad] = useState<string[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1155,6 +1274,15 @@ export default function SettingsPage() {
       setS(json.settings);
       setSavedS(json.settings);
       setEnv(json.env ?? {});
+      const moved: string[] = Array.isArray(json.nonDefaultKeys)
+        ? json.nonDefaultKeys
+        : [];
+      setMovedKeys(moved);
+      // Only the first answer decides which folds open, and `load` is called
+      // again by Try again — a retry after a failed load is still this page's
+      // first sight of the settings, and nothing has been rendered from the
+      // one before it.
+      setMovedAtLoad((prev) => prev ?? moved);
     } catch (err) {
       setLoadError(
         `The server could not be reached — ${err instanceof Error ? err.message : String(err)}.`,
@@ -1301,6 +1429,10 @@ export default function SettingsPage() {
       }
       setS(json.settings);
       setSavedS(json.settings);
+      // The badge, never the open state: a Save that returns a setting to its
+      // shipped value drops the count and leaves the fold where the reader
+      // put it.
+      if (Array.isArray(json.nonDefaultKeys)) setMovedKeys(json.nonDefaultKeys);
       setCopyGlobsText(null);
       setSaved(true);
       setSaveError(null);
@@ -1345,10 +1477,17 @@ export default function SettingsPage() {
     effective !== null &&
     effective.sessionResetOverrideAt !== null &&
     effective.sessionResetOverrideAt > Date.now() + FIVE_HOURS_MS;
+  // Each refusal names where its control is, because one of them is now behind
+  // a fold and a sentence about a control the reader cannot see is a sentence
+  // they cannot act on. Copy rather than a fold that opens itself: `Disclosure`
+  // is uncontrolled on purpose, and a fold springing open in answer to what was
+  // typed in it is the "nothing switches on its own" failure. In practice a
+  // stored override that trips this is not the shipped default, so the fold is
+  // already open on load; this covers the operator who typed it and closed it.
   const blocked = noTerminus
     ? "The default guard set has neither a work-cycle limit nor a time limit."
     : resetTooFarAhead
-      ? "The 5-hour reset override is more than five hours from now."
+      ? "The 5-hour reset override is more than five hours from now — Subscription limits, under “When a window turns over”."
       : null;
 
   /**
@@ -1400,6 +1539,26 @@ export default function SettingsPage() {
 
   const numOrEmpty = (v: number | null) => (v === null ? "" : String(v));
   const isEdited = (p: string) => changed.has(p);
+  /**
+   * How many of a fold's settings this install has moved off the shipped
+   * default, and whether it had any when the page loaded.
+   *
+   * Deliberately a different question from `isEdited`, which is "differs from
+   * what the server last confirmed" and draws the rail in the gutter. One says
+   * you have typed something you have not saved; this one says the stored value
+   * is not the one that shipped. A fold needs the second — a control at a
+   * number nobody chose is what makes hiding it a risk — and the rail inside it
+   * still says the first.
+   *
+   * `undefined` rather than 0, per `Disclosure`: `(0)` says there is nothing
+   * behind the fold, and there is — a prompt, or three window fields.
+   */
+  const movedCount = (paths: readonly string[]) => {
+    const n = paths.filter((p) => movedKeys.includes(p)).length;
+    return n === 0 ? undefined : n;
+  };
+  const openAtLoad = (paths: readonly string[]) =>
+    paths.some((p) => movedAtLoad?.includes(p) ?? false);
   const guards = effective.chatDefaultGuards;
   const patchGuards = (p: Partial<RunGuardsDTO>) =>
     patch({ chatDefaultGuards: { ...guards, ...p } });
@@ -1761,263 +1920,290 @@ export default function SettingsPage() {
           </SettingRow>
         </ListGroup>
 
-        <ListGroup className="mt-4" label="When a window turns over">
-          <SettingRow
-            htmlFor="anchor"
-            edited={isEdited("weeklyAnchor")}
-            label="Weekly reset"
-            description="Rolling means the weekly total decays over days rather than resetting, so no run can wait it out"
-          >
-            <div className="w-52">
-              <Select
-                id="anchor"
-                value={
-                  effective.weeklyAnchor
-                    ? String(effective.weeklyAnchor.weekday)
-                    : ""
-                }
-                onChange={(e) =>
-                  patch({
-                    weeklyAnchor: e.target.value
-                      ? {
-                          weekday: Number(e.target.value),
-                          hourUTC: effective.weeklyAnchor?.hourUTC ?? 0,
-                        }
-                      : null,
-                  })
-                }
-              >
-                <option value="">Rolling 7 days</option>
-                {WEEKDAYS.map((d, i) => (
-                  <option key={d} value={i}>
-                    Resets {d}
-                  </option>
-                ))}
-              </Select>
-            </div>
-            {effective.weeklyAnchor && (
-              <div className="w-28">
-                <Input
-                  type="number"
-                  min={0}
-                  max={23}
-                  className="tabular-nums"
-                  unit="UTC"
-                  aria-label="Reset hour, UTC"
-                  value={effective.weeklyAnchor.hourUTC}
+        {/* Folded: three hand-corrections for a boundary that could not be
+            observed, typed once if ever. The group's own label is gone rather
+            than repeated under a summary that is the same three words — the
+            summary is where that label now is. */}
+        <Disclosure
+          className="mt-4"
+          summaryClassName={FOLD_SUMMARY}
+          summary="When a window turns over"
+          count={movedCount(WINDOW_TURNOVER_KEYS)}
+          defaultOpen={openAtLoad(WINDOW_TURNOVER_KEYS)}
+        >
+          <ListGroup className={FOLD_BODY}>
+            <SettingRow
+              htmlFor="anchor"
+              edited={isEdited("weeklyAnchor")}
+              label="Weekly reset"
+              description="Rolling means the weekly total decays over days rather than resetting, so no run can wait it out"
+            >
+              <div className="w-52">
+                <Select
+                  id="anchor"
+                  value={
+                    effective.weeklyAnchor
+                      ? String(effective.weeklyAnchor.weekday)
+                      : ""
+                  }
                   onChange={(e) =>
                     patch({
-                      weeklyAnchor: {
-                        weekday: effective.weeklyAnchor!.weekday,
-                        hourUTC: Number(e.target.value),
-                      },
+                      weeklyAnchor: e.target.value
+                        ? {
+                            weekday: Number(e.target.value),
+                            hourUTC: effective.weeklyAnchor?.hourUTC ?? 0,
+                          }
+                        : null,
                     })
                   }
-                />
+                >
+                  <option value="">Rolling 7 days</option>
+                  {WEEKDAYS.map((d, i) => (
+                    <option key={d} value={i}>
+                      Resets {d}
+                    </option>
+                  ))}
+                </Select>
               </div>
-            )}
-          </SettingRow>
+              {effective.weeklyAnchor && (
+                <div className="w-28">
+                  <Input
+                    type="number"
+                    min={0}
+                    max={23}
+                    className="tabular-nums"
+                    unit="UTC"
+                    aria-label="Reset hour, UTC"
+                    value={effective.weeklyAnchor.hourUTC}
+                    onChange={(e) =>
+                      patch({
+                        weeklyAnchor: {
+                          weekday: effective.weeklyAnchor!.weekday,
+                          hourUTC: Number(e.target.value),
+                        },
+                      })
+                    }
+                  />
+                </div>
+              )}
+            </SettingRow>
 
-          <SettingRow
-            htmlFor="sessreset"
-            edited={isEdited("sessionResetOverrideAt")}
-            label="5-hour window reset"
-            description={
-              <Toned
-                tone={
-                  resetTooFarAhead
-                    ? "danger"
-                    : effective.sessionResetOverrideAt !== null &&
-                        Date.now() < effective.sessionResetOverrideAt
-                      ? "warn"
-                      : "neutral"
-                }
-              >
-                {resetTooFarAhead ? (
-                  "No window can reset more than five hours from now — check the date"
-                ) : effective.planUsageFromApi ? (
-                  "Not needed while the reading above is on: Anthropic names the reset instant itself, and that wins over anything typed here"
-                ) : effective.sessionResetOverrideAt === null ? (
-                  "Blank is the normal state. Only needed after a tier change, which restarts the window with no trace in any transcript"
-                ) : Date.now() < effective.sessionResetOverrideAt ? (
-                  <>
-                    In force until{" "}
-                    {new Date(
-                      effective.sessionResetOverrideAt,
-                    ).toLocaleString()}{" "}
-                    — work before it stays in history but leaves the current
-                    window and the budget guard
-                  </>
-                ) : (
-                  <>
-                    Expired: that window ended{" "}
-                    {new Date(effective.sessionResetOverrideAt).toLocaleString()}
-                    . Clear the field to drop the split
-                  </>
-                )}
-              </Toned>
-            }
-          >
-            <div className="w-56">
-              <Input
-                id="sessreset"
-                type="datetime-local"
-                className="tabular-nums"
-                aria-invalid={resetTooFarAhead || undefined}
-                value={toLocalInput(effective.sessionResetOverrideAt)}
-                onChange={(e) => {
-                  const at = e.target.value
-                    ? new Date(e.target.value).getTime()
-                    : null;
-                  patch({
-                    sessionResetOverrideAt:
-                      at !== null && Number.isFinite(at) ? at : null,
-                  });
-                }}
-              />
-            </div>
-          </SettingRow>
-        </ListGroup>
-
-        <ListGroup
-          className="mt-4"
-          label="Where a ceiling can come from"
-          footnote="Nothing publishes your limit, so the least-bad evidence is your own history: a 5-hour block that reached a figure without being cut off proves the ceiling is at least that"
-        >
-          <SettingRow
-            label="Estimate from your own history"
-            description={
-              calBusy
-                ? "Reading every transcript on this disk…"
-                : "Reports the highest 5-hour block and 7-day window it can find. Nothing is stored until you save"
-            }
-          >
-            <Button
-              variant="secondary"
-              onClick={() => void calibrate()}
-              busy={calBusy}
-            >
-              Scan history
-            </Button>
-          </SettingRow>
-        </ListGroup>
-
-        {calError && (
-          <Notice tone="danger" className="mt-3.5">
-            {calError}
-          </Notice>
-        )}
-
-        {cal && !cal.ok && (
-          <Notice tone="warn" className="mt-3.5">
-            {cal.reason}
-          </Notice>
-        )}
-
-        {cal?.ok && cal.suggestion && (
-          <div className="mt-3.5">
-            <TableWrap>
-              <Table>
-                <thead>
-                  <tr>
-                    <Th>Ceiling</Th>
-                    <Th num>Set now</Th>
-                    <Th num>Observed peak</Th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <Tr>
-                    <Td>
-                      5-hour
-                      <div className="text-xs text-ink-faint">
-                        {cal.suggestion.sessionTokenLimit === null
-                          ? "no completed block"
-                          : `${fmtTokens(cal.suggestion.sessionTokenLimit)} raw tokens`}
-                      </div>
-                    </Td>
-                    <Td num className="mono">
-                      {effective.sessionCostLimit === null
-                        ? "—"
-                        : fmtUSD(effective.sessionCostLimit)}
-                    </Td>
-                    <Td num className="mono">
-                      {cal.suggestion.sessionCostLimit === null
-                        ? "—"
-                        : fmtUSD(cal.suggestion.sessionCostLimit)}
-                    </Td>
-                  </Tr>
-                  <Tr>
-                    <Td>
-                      Weekly
-                      <div className="text-xs text-ink-faint">
-                        {cal.suggestion.weeklyTokenLimit === null
-                          ? "no full week yet"
-                          : `${fmtTokens(cal.suggestion.weeklyTokenLimit)} raw tokens`}
-                      </div>
-                    </Td>
-                    <Td num className="mono">
-                      {effective.weeklyCostLimit === null
-                        ? "—"
-                        : fmtUSD(effective.weeklyCostLimit)}
-                    </Td>
-                    <Td num className="mono">
-                      {cal.suggestion.weeklyCostLimit === null
-                        ? "—"
-                        : fmtUSD(cal.suggestion.weeklyCostLimit)}
-                    </Td>
-                  </Tr>
-                </tbody>
-              </Table>
-            </TableWrap>
-
-            <dl className="mt-3.5 grid max-w-[70ch] gap-x-8 gap-y-1.5 text-xs sm:max-w-[104ch] sm:grid-cols-2">
-              <EnvRow label="History">
-                <span className="tabular-nums">
-                  {evCount("historyDays", "days")}
-                </span>
-              </EnvRow>
-              <EnvRow label="Confidence">
-                <Badge
+            <SettingRow
+              htmlFor="sessreset"
+              edited={isEdited("sessionResetOverrideAt")}
+              label="5-hour window reset"
+              description={
+                <Toned
                   tone={
-                    cal.confidence === "reasonable"
-                      ? "ok"
-                      : cal.confidence === "moderate"
+                    resetTooFarAhead
+                      ? "danger"
+                      : effective.sessionResetOverrideAt !== null &&
+                          Date.now() < effective.sessionResetOverrideAt
                         ? "warn"
-                        : "danger"
+                        : "neutral"
                   }
                 >
-                  {cal.confidence ?? "unknown"}
-                </Badge>
-              </EnvRow>
-              <EnvRow label="5-hour blocks">
-                <span className="tabular-nums">
-                  {evCount("closedBlocks", "completed")}
-                </span>
-                {ev("blockCostP50") !== null && ev("blockCostP95") !== null && (
-                  <span className="tabular-nums">
-                    {" "}
-                    · median {fmtUSD(ev("blockCostP50") as number)}, 95th{" "}
-                    {fmtUSD(ev("blockCostP95") as number)}
-                  </span>
-                )}
-              </EnvRow>
-              <EnvRow label="7-day windows">
-                <span className="tabular-nums">
-                  {evCount("weeklyWindowsSampled", "sampled")}
-                </span>
-              </EnvRow>
-            </dl>
+                  {resetTooFarAhead ? (
+                    "No window can reset more than five hours from now — check the date"
+                  ) : effective.planUsageFromApi ? (
+                    "Not needed while the reading above is on: Anthropic names the reset instant itself, and that wins over anything typed here"
+                  ) : effective.sessionResetOverrideAt === null ? (
+                    "Blank is the normal state. Only needed after a tier change, which restarts the window with no trace in any transcript"
+                  ) : Date.now() < effective.sessionResetOverrideAt ? (
+                    <>
+                      In force until{" "}
+                      {new Date(
+                        effective.sessionResetOverrideAt,
+                      ).toLocaleString()}{" "}
+                      — work before it stays in history but leaves the current
+                      window and the budget guard
+                    </>
+                  ) : (
+                    <>
+                      Expired: that window ended{" "}
+                      {new Date(effective.sessionResetOverrideAt).toLocaleString()}
+                      . Clear the field to drop the split
+                    </>
+                  )}
+                </Toned>
+              }
+            >
+              <div className="w-56">
+                <Input
+                  id="sessreset"
+                  type="datetime-local"
+                  className="tabular-nums"
+                  aria-invalid={resetTooFarAhead || undefined}
+                  value={toLocalInput(effective.sessionResetOverrideAt)}
+                  onChange={(e) => {
+                    const at = e.target.value
+                      ? new Date(e.target.value).getTime()
+                      : null;
+                    patch({
+                      sessionResetOverrideAt:
+                        at !== null && Number.isFinite(at) ? at : null,
+                    });
+                  }}
+                />
+              </div>
+            </SettingRow>
+          </ListGroup>
+        </Disclosure>
 
-            <Notice tone="warn" className="mt-3.5">
-              {cal.caveat}
+        {/* Folded as evidence rather than as settings: this holds a tool and
+            what it found, and not one stored key — so it takes neither the
+            open-by-default rule nor a count, which would be permanently 0 and
+            say there is nothing behind it.
+
+            The group keeps its own label, unlike the two folds that are
+            settings: `Where a ceiling can come from` says something the
+            summary does not, and deleting redundancy is not deleting a
+            second fact. */}
+        <Disclosure
+          className="mt-4"
+          summaryClassName={FOLD_SUMMARY}
+          summary="Estimate a ceiling from your own history"
+        >
+          <ListGroup
+            className={FOLD_BODY}
+            label="Where a ceiling can come from"
+            footnote="Nothing publishes your limit, so the least-bad evidence is your own history: a 5-hour block that reached a figure without being cut off proves the ceiling is at least that"
+          >
+            <SettingRow
+              label="Estimate from your own history"
+              description={
+                calBusy
+                  ? "Reading every transcript on this disk…"
+                  : "Reports the highest 5-hour block and 7-day window it can find. Nothing is stored until you save"
+              }
+            >
+              <Button
+                variant="secondary"
+                onClick={() => void calibrate()}
+                busy={calBusy}
+              >
+                Scan history
+              </Button>
+            </SettingRow>
+          </ListGroup>
+
+          {calError && (
+            <Notice tone="danger" className="mt-3.5">
+              {calError}
             </Notice>
+          )}
 
-            <Button variant="secondary" onClick={applySuggestion}>
-              Copy peaks into the fields above
-            </Button>
-            <Hint>Both metrics at once. Nothing is stored until you save</Hint>
-          </div>
-        )}
+          {cal && !cal.ok && (
+            <Notice tone="warn" className="mt-3.5">
+              {cal.reason}
+            </Notice>
+          )}
+
+          {cal?.ok && cal.suggestion && (
+            <div className="mt-3.5">
+              <TableWrap>
+                <Table>
+                  <thead>
+                    <tr>
+                      <Th>Ceiling</Th>
+                      <Th num>Set now</Th>
+                      <Th num>Observed peak</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <Tr>
+                      <Td>
+                        5-hour
+                        <div className="text-xs text-ink-faint">
+                          {cal.suggestion.sessionTokenLimit === null
+                            ? "no completed block"
+                            : `${fmtTokens(cal.suggestion.sessionTokenLimit)} raw tokens`}
+                        </div>
+                      </Td>
+                      <Td num className="mono">
+                        {effective.sessionCostLimit === null
+                          ? "—"
+                          : fmtUSD(effective.sessionCostLimit)}
+                      </Td>
+                      <Td num className="mono">
+                        {cal.suggestion.sessionCostLimit === null
+                          ? "—"
+                          : fmtUSD(cal.suggestion.sessionCostLimit)}
+                      </Td>
+                    </Tr>
+                    <Tr>
+                      <Td>
+                        Weekly
+                        <div className="text-xs text-ink-faint">
+                          {cal.suggestion.weeklyTokenLimit === null
+                            ? "no full week yet"
+                            : `${fmtTokens(cal.suggestion.weeklyTokenLimit)} raw tokens`}
+                        </div>
+                      </Td>
+                      <Td num className="mono">
+                        {effective.weeklyCostLimit === null
+                          ? "—"
+                          : fmtUSD(effective.weeklyCostLimit)}
+                      </Td>
+                      <Td num className="mono">
+                        {cal.suggestion.weeklyCostLimit === null
+                          ? "—"
+                          : fmtUSD(cal.suggestion.weeklyCostLimit)}
+                      </Td>
+                    </Tr>
+                  </tbody>
+                </Table>
+              </TableWrap>
+
+              <dl className="mt-3.5 grid max-w-[70ch] gap-x-8 gap-y-1.5 text-xs sm:max-w-[104ch] sm:grid-cols-2">
+                <EnvRow label="History">
+                  <span className="tabular-nums">
+                    {evCount("historyDays", "days")}
+                  </span>
+                </EnvRow>
+                <EnvRow label="Confidence">
+                  <Badge
+                    tone={
+                      cal.confidence === "reasonable"
+                        ? "ok"
+                        : cal.confidence === "moderate"
+                          ? "warn"
+                          : "danger"
+                    }
+                  >
+                    {cal.confidence ?? "unknown"}
+                  </Badge>
+                </EnvRow>
+                <EnvRow label="5-hour blocks">
+                  <span className="tabular-nums">
+                    {evCount("closedBlocks", "completed")}
+                  </span>
+                  {ev("blockCostP50") !== null && ev("blockCostP95") !== null && (
+                    <span className="tabular-nums">
+                      {" "}
+                      · median {fmtUSD(ev("blockCostP50") as number)}, 95th{" "}
+                      {fmtUSD(ev("blockCostP95") as number)}
+                    </span>
+                  )}
+                </EnvRow>
+                <EnvRow label="7-day windows">
+                  <span className="tabular-nums">
+                    {evCount("weeklyWindowsSampled", "sampled")}
+                  </span>
+                </EnvRow>
+              </dl>
+
+              <Notice tone="warn" className="mt-3.5">
+                {cal.caveat}
+              </Notice>
+
+              <Button variant="secondary" onClick={applySuggestion}>
+                Copy peaks into the fields above
+              </Button>
+              <Hint>Both metrics at once. Nothing is stored until you save</Hint>
+            </div>
+          )}
+        </Disclosure>
       </Section>
 
       <Section
@@ -2173,118 +2359,129 @@ export default function SettingsPage() {
           </SettingRow>
         </ListGroup>
 
-        <ListGroup className="mt-4" label="Isolated runs">
-          <SettingRow
-            htmlFor="copyglobs"
-            edited={isEdited("isolationCopyGlobs")}
-            label="Files copied into a new checkout"
-            description={
-              <>
-                A fresh checkout holds committed work only, so a gitignored
-                config file has to be copied in — prefix a pattern with{" "}
-                <span className="mono">!</span> to exclude it, and write a path
-                (<span className="mono">apps/web/.env</span>) to reach one below
-                the repository root. Dependencies are not copied; the agent
-                installs them
-              </>
-            }
-          >
-            {/* Held as raw text while editing. Splitting on every keystroke
-                drops the separator the moment it is typed, which makes a
-                second pattern impossible to enter. */}
-            <div className="w-72">
-              <Input
-                id="copyglobs"
-                value={copyGlobsText ?? effective.isolationCopyGlobs.join(", ")}
-                onChange={(e) => setCopyGlobsText(e.target.value)}
-                onBlur={() => {
-                  if (copyGlobsText === null) return;
-                  patch({ isolationCopyGlobs: parseGlobs(copyGlobsText) });
-                  setCopyGlobsText(null);
-                }}
-              />
-            </div>
-          </SettingRow>
+        {/* Folded: four settings decided once per repository. The group's label
+            is gone rather than repeated under a summary that is the same two
+            words. */}
+        <Disclosure
+          className="mt-4"
+          summaryClassName={FOLD_SUMMARY}
+          summary="Isolated runs"
+          count={movedCount(ISOLATED_RUN_KEYS)}
+          defaultOpen={openAtLoad(ISOLATED_RUN_KEYS)}
+        >
+          <ListGroup className={FOLD_BODY}>
+            <SettingRow
+              htmlFor="copyglobs"
+              edited={isEdited("isolationCopyGlobs")}
+              label="Files copied into a new checkout"
+              description={
+                <>
+                  A fresh checkout holds committed work only, so a gitignored
+                  config file has to be copied in — prefix a pattern with{" "}
+                  <span className="mono">!</span> to exclude it, and write a path
+                  (<span className="mono">apps/web/.env</span>) to reach one below
+                  the repository root. Dependencies are not copied; the agent
+                  installs them
+                </>
+              }
+            >
+              {/* Held as raw text while editing. Splitting on every keystroke
+                  drops the separator the moment it is typed, which makes a
+                  second pattern impossible to enter. */}
+              <div className="w-72">
+                <Input
+                  id="copyglobs"
+                  value={copyGlobsText ?? effective.isolationCopyGlobs.join(", ")}
+                  onChange={(e) => setCopyGlobsText(e.target.value)}
+                  onBlur={() => {
+                    if (copyGlobsText === null) return;
+                    patch({ isolationCopyGlobs: parseGlobs(copyGlobsText) });
+                    setCopyGlobsText(null);
+                  }}
+                />
+              </div>
+            </SettingRow>
 
-          <SettingRow
-            htmlFor="copyglobsbyrepo"
-            edited={isEdited("isolationCopyGlobsByRepo")}
-            label="Per-repository overrides"
-            description={
-              <>
-                One <span className="mono">folder: patterns</span> line per
-                repository, replacing the list above for that folder and
-                everything under it. The folder is written as the picker shows
-                it (<span className="mono">acme/web</span>) or absolute. A line
-                with no patterns copies nothing
-              </>
-            }
-          >
-            <div className="w-72">
-              <Textarea
-                id="copyglobsbyrepo"
-                rows={3}
-                placeholder={"acme/web: apps/web/.env.local\nacme/api: local.settings.json"}
-                value={
-                  copyGlobsByRepoText ??
-                  formatGlobsByRepo(effective.isolationCopyGlobsByRepo)
-                }
-                onChange={(e) => setCopyGlobsByRepoText(e.target.value)}
-                onBlur={() => {
-                  if (copyGlobsByRepoText === null) return;
-                  patch({
-                    isolationCopyGlobsByRepo: parseGlobsByRepo(copyGlobsByRepoText),
-                  });
-                  setCopyGlobsByRepoText(null);
-                }}
-              />
-            </div>
-          </SettingRow>
+            <SettingRow
+              htmlFor="copyglobsbyrepo"
+              edited={isEdited("isolationCopyGlobsByRepo")}
+              label="Per-repository overrides"
+              description={
+                <>
+                  One <span className="mono">folder: patterns</span> line per
+                  repository, replacing the list above for that folder and
+                  everything under it. The folder is written as the picker shows
+                  it (<span className="mono">acme/web</span>) or absolute. A line
+                  with no patterns copies nothing
+                </>
+              }
+            >
+              <div className="w-72">
+                <Textarea
+                  id="copyglobsbyrepo"
+                  rows={3}
+                  placeholder={"acme/web: apps/web/.env.local\nacme/api: local.settings.json"}
+                  value={
+                    copyGlobsByRepoText ??
+                    formatGlobsByRepo(effective.isolationCopyGlobsByRepo)
+                  }
+                  onChange={(e) => setCopyGlobsByRepoText(e.target.value)}
+                  onBlur={() => {
+                    if (copyGlobsByRepoText === null) return;
+                    patch({
+                      isolationCopyGlobsByRepo: parseGlobsByRepo(copyGlobsByRepoText),
+                    });
+                    setCopyGlobsByRepoText(null);
+                  }}
+                />
+              </div>
+            </SettingRow>
 
-          <SettingRow
-            edited={isEdited("landStrategy")}
-            label="Landing a branch"
-            description={LAND_CONSEQUENCE[effective.landStrategy]}
-          >
-            <SegmentedControl
-              options={LAND_OPTIONS}
-              value={effective.landStrategy}
-              onChange={(v) => patch({ landStrategy: v })}
+            <SettingRow
+              edited={isEdited("landStrategy")}
               label="Landing a branch"
-            />
-          </SettingRow>
-
-          <SettingRow
-            htmlFor="verifytools"
-            edited={isEdited("resolveVerifyTools")}
-            label="Checks a conflict resolution may run"
-            description={
-              <>
-                When Claude resolves a merge conflict it can edit the files and
-                run nothing, so the merge is judged by reading it. Name the
-                commands it may run and it will check its own work — write them
-                as tool patterns (
-                <span className="mono">Bash(npm run typecheck:*)</span>). Left
-                blank it runs none, which is the safe answer for a repository
-                whose checks need a dependency tree the resolver does not have
-              </>
-            }
-          >
-            {/* Raw text while editing, for the reason the globs field is. */}
-            <div className="w-72">
-              <Input
-                id="verifytools"
-                value={verifyToolsText ?? effective.resolveVerifyTools.join(", ")}
-                onChange={(e) => setVerifyToolsText(e.target.value)}
-                onBlur={() => {
-                  if (verifyToolsText === null) return;
-                  patch({ resolveVerifyTools: parseGlobs(verifyToolsText) });
-                  setVerifyToolsText(null);
-                }}
+              description={LAND_CONSEQUENCE[effective.landStrategy]}
+            >
+              <SegmentedControl
+                options={LAND_OPTIONS}
+                value={effective.landStrategy}
+                onChange={(v) => patch({ landStrategy: v })}
+                label="Landing a branch"
               />
-            </div>
-          </SettingRow>
-        </ListGroup>
+            </SettingRow>
+
+            <SettingRow
+              htmlFor="verifytools"
+              edited={isEdited("resolveVerifyTools")}
+              label="Checks a conflict resolution may run"
+              description={
+                <>
+                  When Claude resolves a merge conflict it can edit the files and
+                  run nothing, so the merge is judged by reading it. Name the
+                  commands it may run and it will check its own work — write them
+                  as tool patterns (
+                  <span className="mono">Bash(npm run typecheck:*)</span>). Left
+                  blank it runs none, which is the safe answer for a repository
+                  whose checks need a dependency tree the resolver does not have
+                </>
+              }
+            >
+              {/* Raw text while editing, for the reason the globs field is. */}
+              <div className="w-72">
+                <Input
+                  id="verifytools"
+                  value={verifyToolsText ?? effective.resolveVerifyTools.join(", ")}
+                  onChange={(e) => setVerifyToolsText(e.target.value)}
+                  onBlur={() => {
+                    if (verifyToolsText === null) return;
+                    patch({ resolveVerifyTools: parseGlobs(verifyToolsText) });
+                    setVerifyToolsText(null);
+                  }}
+                />
+              </div>
+            </SettingRow>
+          </ListGroup>
+        </Disclosure>
       </Section>
 
       <Section
@@ -2759,80 +2956,79 @@ export default function SettingsPage() {
         title="Prompts"
         lede="What this app says to Claude, over and above the task you type. Emptying one keeps the stored text rather than clearing it."
       >
-        <FormField
+        <PromptFold
           label="Continuation prompt"
-          htmlFor="cont"
+          id="cont"
           edited={isEdited("continuationPrompt")}
-        >
-          <Textarea
-            id="cont"
-            className="min-h-[130px]"
-            value={effective.continuationPrompt}
-            onChange={(e) => patch({ continuationPrompt: e.target.value })}
-          />
-          <Hint>
-            Sent at the start of every work cycle after the first. The run ends
-            when the reply contains <span className="mono">DONE</span> on its
-            own line, so keep that instruction
-          </Hint>
-        </FormField>
+          count={movedCount(["continuationPrompt"])}
+          defaultOpen={openAtLoad(["continuationPrompt"])}
+          className="min-h-[130px]"
+          value={effective.continuationPrompt}
+          onChange={(v) => patch({ continuationPrompt: v })}
+          hint={
+            <>
+              Sent at the start of every work cycle after the first. The run ends
+              when the reply contains <span className="mono">DONE</span> on its
+              own line, so keep that instruction
+            </>
+          }
+        />
 
-        <FormField
+        <PromptFold
           label="Carry-on prompt"
-          htmlFor="pushback"
+          id="pushback"
           edited={isEdited("donePushbackPrompt")}
-        >
-          <Textarea
-            id="pushback"
-            className="min-h-[130px]"
-            value={effective.donePushbackPrompt}
-            onChange={(e) => patch({ donePushbackPrompt: e.target.value })}
-          />
-          <Hint>
-            Sent when the agent reports <span className="mono">DONE</span> on a
-            run set to carry on. It must not be the continuation prompt, which
-            asks for <span className="mono">DONE</span> — that buys an immediate
-            second one and a billed spin
-          </Hint>
-        </FormField>
+          count={movedCount(["donePushbackPrompt"])}
+          defaultOpen={openAtLoad(["donePushbackPrompt"])}
+          className="min-h-[130px]"
+          value={effective.donePushbackPrompt}
+          onChange={(v) => patch({ donePushbackPrompt: v })}
+          hint={
+            <>
+              Sent when the agent reports <span className="mono">DONE</span> on a
+              run set to carry on. It must not be the continuation prompt, which
+              asks for <span className="mono">DONE</span> — that buys an immediate
+              second one and a billed spin
+            </>
+          }
+        />
 
-        <FormField
+        <PromptFold
           label="Isolated-run preamble"
-          htmlFor="isopre"
+          id="isopre"
           edited={isEdited("isolationPreamble")}
-        >
-          <Textarea
-            id="isopre"
-            className="min-h-[110px]"
-            value={effective.isolationPreamble}
-            onChange={(e) => patch({ isolationPreamble: e.target.value })}
-          />
-          <Hint>
-            Prepended to the first prompt of an isolated run. Keep the
-            instruction to commit: a worktree holds committed work only, so
-            anything left uncommitted never reaches your branch
-          </Hint>
-        </FormField>
+          count={movedCount(["isolationPreamble"])}
+          defaultOpen={openAtLoad(["isolationPreamble"])}
+          className="min-h-[110px]"
+          value={effective.isolationPreamble}
+          onChange={(v) => patch({ isolationPreamble: v })}
+          hint={
+            <>
+              Prepended to the first prompt of an isolated run. Keep the
+              instruction to commit: a worktree holds committed work only, so
+              anything left uncommitted never reaches your branch
+            </>
+          }
+        />
 
-        <FormField
+        <PromptFold
           label="Continued-branch preamble"
-          htmlFor="contwork"
+          id="contwork"
           edited={isEdited("continuedWorkPrompt")}
-          className={FLUSH}
-        >
-          <Textarea
-            id="contwork"
-            className="min-h-[110px]"
-            value={effective.continuedWorkPrompt}
-            onChange={(e) => patch({ continuedWorkPrompt: e.target.value })}
-          />
-          <Hint>
-            Sent when a run picks up the branch the run before it was working
-            on. The branch, that run and the commands to read it are added
-            around this — what you write here is what to <em>do</em> with what
-            is already there
-          </Hint>
-        </FormField>
+          count={movedCount(["continuedWorkPrompt"])}
+          defaultOpen={openAtLoad(["continuedWorkPrompt"])}
+          className="min-h-[110px]"
+          value={effective.continuedWorkPrompt}
+          onChange={(v) => patch({ continuedWorkPrompt: v })}
+          hint={
+            <>
+              Sent when a run picks up the branch the run before it was working
+              on. The branch, that run and the commands to read it are added
+              around this — what you write here is what to <em>do</em> with what
+              is already there
+            </>
+          }
+        />
       </Section>
 
       {/* The pane's footer, not a form's button row: the default action at the
