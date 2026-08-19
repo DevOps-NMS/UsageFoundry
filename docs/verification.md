@@ -685,8 +685,21 @@ through before trusting this unattended:
   are load-bearing and emit nothing at all if wrong: `md:contents` on the value
   wrapper, whose loss is a silent *desktop* change in all seventeen, and
   `max-md:last:border-b-0` on the row, whose loss is one doubled hairline.
-  `grep -c 'md:contents' .next/static/css/*.css` after a build is the cheap form
-  of both.
+  The cheap form of both is a grep of the emitted stylesheet after a build —
+  but it has to be spelled the way Tailwind writes a selector, which escapes
+  every `:`. Use `-F` and escape the colons, or the pattern cannot match at all:
+
+  ```sh
+  grep -cF 'md\:contents' .next/static/css/*.css                # expect ≥ 1
+  grep -cF 'max-md\:last\:border-b-0' .next/static/css/*.css    # expect ≥ 1
+  ```
+
+  The unescaped `grep -c 'md:contents'` this entry used to prescribe returns
+  **0 on a build where the class is present** — measured, not reasoned: on a
+  build at `a294ed2` the emitted `da7ba9cfe258a729.css` contains
+  `.md\:contents{display:contents}`, the unescaped pattern matched nothing and
+  the `-F` form above matched. Any check written as `grep '<variant>:<utility>'`
+  against built CSS has that defect by construction.
 
   The right form of it is the harness already in *Verified* above — a production
   build in a headless browser against fabricated API responses, both themes,
@@ -745,8 +758,21 @@ through before trusting this unattended:
   `ListRow` never wraps and a `w-72` select squeezes its label to nothing),
   `max-md:min-w-11` (an icon-only segment still 38px wide), and
   `max-md:after:-inset-y-[11px]` / `-inset-x-[3px]` (a switch still 38×32).
-  `grep -o 'font-size:16px\|min-width:8rem' .next/static/css/*.css | sort |
-  uniq -c` after a build is the cheap form of the first two. The 1440px claim
+  The cheap form of the first two is again a grep of the built stylesheet, and
+  again it has to be spelled for what Tailwind emits rather than for what the
+  class says:
+
+  ```sh
+  grep -cF 'max-md\:text-\[16px\]' .next/static/css/*.css   # expect ≥ 1
+  grep -cF 'max-md\:min-w-32' .next/static/css/*.css        # expect ≥ 1
+  ```
+
+  Grepping the *declaration* instead is the trap this entry fell into. It used
+  to prescribe `grep -o 'font-size:16px\|min-width:8rem'`, and the second half
+  can never match: Tailwind v4 emits `min-width:calc(var(--spacing) * 32)`, not
+  a resolved `8rem`. Measured on the same build at `a294ed2` —
+  `font-size:16px` twice, `min-width:8rem` never, and the two class-name
+  patterns above once each. The 1440px claim
   needs the harness above: the only unprefixed edits are `AppShell`'s root
   height (`h-dvh` → an inline `calc(100dvh - var(--keyboard-inset, 0px))`),
   `--pane-h`'s extra term, `Sheet`'s panel cap and safe-area padding, and the
