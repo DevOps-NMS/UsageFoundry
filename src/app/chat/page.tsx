@@ -292,6 +292,28 @@ export default function ChatPage() {
 
   // Once, and deliberately not on the poll: the registry changes when somebody
   // edits it on another page, which is not something this composer has to track
+      // A proposal this thread was holding can be decided somewhere this page
+      // cannot see — another tab, another window — and its id then stays in
+      // `selected` with no row left to untick. The route refuses it by id, so
+      // nothing wrong reaches the data; what it costs is the two claims this
+      // page makes about the selection. `allSelected` compares a size against
+      // `pending.length` and so reads true while a visible row is unticked,
+      // and "the explicit list of the ids the page displayed" becomes a
+      // sentence about the render before this one. So the poll's answer is
+      // what the set is reconciled against, here rather than in `pending`:
+      // approval stays one synchronous pass over an explicit list of ids that
+      // state holds, and deriving it from the render would be a different
+      // gate. `prev` is returned unchanged where nothing was dropped, because
+      // this runs on every poll and a fresh Set each time would re-render the
+      // rows for nothing.
+      const stillPending = new Set(
+        data.chat.proposals.filter((p) => p.status === "pending").map((p) => p.id),
+      );
+      setSelected((prev) => {
+        if (prev.size === 0) return prev;
+        const next = new Set([...prev].filter((id) => stillPending.has(id)));
+        return next.size === prev.size ? prev : next;
+      });
   // between keystrokes. A failure is swallowed for the reason stated where the
   // state is declared — it costs a completion, and the door still decides.
   useEffect(() => {
