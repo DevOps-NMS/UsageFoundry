@@ -26,10 +26,18 @@ import {
 import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
-import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
+import {
+  Card,
+  type CardEmphasis,
+  CardTitle,
+  Empty,
+  SkeletonText,
+} from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Notice } from "@/components/ui/Notice";
+import { Sheet } from "@/components/ui/Sheet";
 import { Spinner } from "@/components/ui/Log";
-import { Select, Toggle } from "@/components/ui/Field";
+import { Field, Select, Toggle } from "@/components/ui/Field";
 import {
   TBody,
   THead,
@@ -437,6 +445,20 @@ function QueueBatchSection({
 }
 
 /**
+ * The card rises while the worker is on it, and settles back afterwards.
+ *
+ * No card on this page declared an emphasis, so the one thing here that is
+ * changing on its own — branches being merged into somebody's target, right
+ * now — read as a peer of a static pressure gauge beside it. The chat's
+ * proposal card already makes exactly this conditional, so this is that
+ * decision applied a second time rather than a new one.
+ */
+const QUEUE_EMPHASIS: Record<"working" | "idle", CardEmphasis> = {
+  working: "primary",
+  idle: "default",
+};
+
+/**
  * The queue, one group per press of Land — and the earlier presses behind a
  * disclosure.
  *
@@ -480,7 +502,7 @@ function QueuePanel({
   const notListed = history ? queue.historyCount - history.length : 0;
 
   return (
-    <Card className="mb-4">
+    <Card emphasis={QUEUE_EMPHASIS[active ? "working" : "idle"]} className="mb-4">
       <CardTitle>
         Merge queue
         {active && (
@@ -511,23 +533,25 @@ function QueuePanel({
         />
       ))}
 
+      {/* The one controlled fold in the app, and the reason the pair exists:
+          opening it fetches. This card polls every three seconds while the
+          worker runs, so the *closed* case has to stay the cheap one — an
+          always-rendered-and-hidden history would make an idle install pay for
+          it on every tick. `count` is deliberately not used: the summary is a
+          sentence about presses of Land rather than a phrase with a number
+          after it. */}
       {queue.historyCount > 0 && (
-        <details
+        <Disclosure
           className="mt-3 border-t border-line pt-3"
+          summaryClassName="text-sm text-ink-muted"
           open={historyOpen}
-          onToggle={(e) => onToggleHistory(e.currentTarget.open)}
-        >
-          {/* Padding rather than `max-md:min-h-11`, which is what every other
-              control below the breakpoint takes: a min-height on a `list-item`
-              leaves the word and its triangle at the top of a box the finger is
-              aiming at the middle of. Same figure as the runs list's disclosure
-              — see the note there. */}
-          <summary className="ui-transition cursor-pointer max-md:py-3.5 text-sm text-ink-muted marker:text-ink-faint hover:text-ink">
-            {queue.historyCount === 1
+          onToggle={onToggleHistory}
+          summary={
+            queue.historyCount === 1
               ? "1 earlier press of Land"
-              : `${queue.historyCount} earlier presses of Land`}
-          </summary>
-
+              : `${queue.historyCount} earlier presses of Land`
+          }
+        >
           {/* Newest first here and drain order above: what is at the top of the
               panel is what lands next, and nothing in this list is going to
               land. */}
@@ -546,7 +570,7 @@ function QueuePanel({
               </p>
             )}
           </div>
-        </details>
+        </Disclosure>
       )}
     </Card>
   );
@@ -574,7 +598,9 @@ function CheckoutStores({ stores }: { stores: CheckoutStoreDTO[] }) {
   const exhausted = notable.filter((s) => s.free === 0);
 
   return (
-    <Card className="mb-4">
+    // Quiet: a pressure gauge, read once when a run is refused a checkout. The
+    // queue above it is the card this page is opened for.
+    <Card emphasis="quiet" className="mb-4">
       <CardTitle>Checkout slots</CardTitle>
       {exhausted.length > 0 && (
         <Notice tone="danger">
@@ -707,6 +733,8 @@ export default function Branches() {
   const [selected, setSelected] = useState<string[]>([]);
   const [strategy, setStrategy] = useState<"merge" | "squash">("merge");
   const [autoResolve, setAutoResolve] = useState(true);
+  // Only ever true on the paid path — see the press handler on Land.
+  const [confirmLand, setConfirmLand] = useState(false);
   const [queue, setQueue] = useState<MergeQueueDTO | null>(null);
   const [queueBusy, setQueueBusy] = useState(false);
 
@@ -989,7 +1017,9 @@ export default function Branches() {
           are listed, where this notice could only say that some were missing. */}
       {data && <CheckoutStores stores={data.checkouts ?? []} />}
 
-      <Card>
+      {/* Stated rather than left to the component's own fallback, so the three
+          cards on this page read as one decision about which of them leads. */}
+      <Card emphasis="default">
         <CardTitle>
           {data ? `${data.total} branch${data.total === 1 ? "" : "es"}` : "Branches"}
           <Button
@@ -1182,9 +1212,18 @@ export default function Branches() {
                   onChange={setAutoResolve}
                   label="Have Claude resolve conflicts"
                 />
+                {/* The size is part of the statement, which is why both halves
+                    of the ternary carry it rather than one sitting in a shared
+                    string beside them. This is the only line on the page that
+                    says a press of Land will spend money, and at 12px in a
+                    muted row it was the same weight as "they land one after
+                    another". Switched off it is describing what will *not*
+                    happen, and goes back to a footnote. */}
                 <div
-                  className={`mt-1 text-xs leading-snug ${
-                    autoResolve ? "text-warn" : "text-ink-muted"
+                  className={`mt-1 leading-snug ${
+                    autoResolve
+                      ? "text-sm text-warn"
+                      : "text-xs text-ink-muted"
                   }`}
                 >
                   {autoResolve
@@ -1198,25 +1237,57 @@ export default function Branches() {
                   longest option is "Merge, keeping their commits" is the widest
                   thing in the bar. */}
               <ButtonRow className="ml-auto max-md:w-full">
-                <select
-                  // `max-md:text-[16px]` for the reason CONTROL_BASE in
-                  // ui/Field states it: under 16px iOS Safari zooms the page in
-                  // on focus and never zooms back out. The floor in the legacy
-                  // layer does not reach this one — it is in `legacy` and loses
-                  // to the `text-sm` beside it — so the last hand-written
-                  // `select` in the app has to say it itself.
-                  className="w-auto rounded-sm border border-line bg-inset px-2.5 py-2 text-sm max-md:text-[16px] text-ink max-md:min-h-11 max-md:w-full"
-                  value={strategy}
-                  onChange={(e) =>
-                    setStrategy(e.target.value as "merge" | "squash")
-                  }
-                  aria-label="How to land them"
-                >
-                  <option value="merge">Merge, keeping their commits</option>
-                  <option value="squash">Squash each into one commit</option>
-                </select>
+                {/* On the kit, so `CONTROL_BASE` supplies the 16px floor that
+                    stops iOS Safari zooming the page in on focus and never
+                    zooming back out — this was the last hand-written control in
+                    the app repeating that figure itself. `Field` also gives it
+                    the visible label the `aria-label` was standing in for: the
+                    repository picker two hundred lines up has one, and a bar
+                    holding the page's most expensive button is not where a
+                    control is identified by its current value alone.
+                    `Field`'s own `mb-3.5` is cancelled on a wrapper and not
+                    with an `mb-0` on the Field, for the reason `ui/Field`
+                    states about width: two utilities for one property on one
+                    element resolve by *stylesheet* order, and Tailwind emits
+                    `mb-*` ascending, so `mb-0` loses to every larger one. This
+                    is a bar, and the row is centred on the buttons. */}
+                {/* `self-end` because `ButtonRow` centres its line and this
+                    item is a label plus a control where the others are a
+                    control: centred, the picker would sit half a label below
+                    the buttons it is pressed with. `align-self` is a different
+                    property from the row's `align-items`, so this is an
+                    override rather than a second declaration of one. */}
+                <div className="-mb-3.5 w-auto self-end max-md:w-full">
+                  <Field label="How to land them" htmlFor="land-strategy">
+                    {/* No width here: `Select` already states `w-full` and a
+                        second width utility on one element resolves by
+                        stylesheet order. The wrapper above is where this
+                        caller's width is stated, exactly once. */}
+                    <Select
+                      id="land-strategy"
+                      value={strategy}
+                      onChange={(e) =>
+                        setStrategy(e.target.value as "merge" | "squash")
+                      }
+                    >
+                      <option value="merge">Merge, keeping their commits</option>
+                      <option value="squash">
+                        Squash each into one commit
+                      </option>
+                    </Select>
+                  </Field>
+                </div>
                 <Button
-                  onClick={queueSelected}
+                  onClick={() => {
+                    // The confirmation is on the paid path only. Auto-resolve
+                    // on means one press starts unattended model work against
+                    // the same 5-hour window the runs use, and it defaults to
+                    // on — where a single dead branch takes two presses to
+                    // delete. Off, this button behaves exactly as it always
+                    // has, because there is then nothing to confirm.
+                    if (autoResolve) setConfirmLand(true);
+                    else void queueSelected();
+                  }}
                   disabled={queueBusy}
                   className="min-w-[140px] max-md:flex-1"
                 >
@@ -1236,6 +1307,32 @@ export default function Branches() {
           </div>
         </>
       )}
+
+      {/* Outside the bar's own conditional, because a `<dialog>` is always
+          rendered and never conditionally mounted — mounting one in the same
+          commit that calls `showModal()` is a race. `danger`, so it opens with
+          Cancel focused: one Return is not a confirmation for a press that
+          starts billed model work.
+
+          The count is the one already on the button, so the sheet and the
+          control that opened it cannot come to disagree about how many
+          branches this is. */}
+      <Sheet
+        open={confirmLand}
+        onDismiss={() => setConfirmLand(false)}
+        title={`Land ${selected.length} branch${selected.length === 1 ? "" : "es"}?`}
+        confirmLabel="Land them"
+        confirmVariant="danger"
+        busy={queueBusy}
+        onConfirm={() => {
+          setConfirmLand(false);
+          void queueSelected();
+        }}
+      >
+        A branch that conflicts is reconciled by Claude on that branch, in a
+        throwaway checkout — billed, unattended, and against the same 5-hour
+        window your runs use. Your own checkout is not involved.
+      </Sheet>
     </>
   );
 }
