@@ -58,13 +58,21 @@ export interface SandboxRefusal {
 /**
  * The literals, and the whole of what this recognises.
  *
- * **Every one was read out of the pinned CLI binary with `strings` and none has
- * ever been executed** (`proposals/Sandboxing/10-validation.md`, "What this
- * validation did not check"). So they are matched as literal, case-sensitive
- * substrings and nothing is inferred from them: no regular expression, no
- * lowercasing, no matching on the word "sandbox" — which appears in this
- * repository's own source, and a run working on this repository is a case that
- * has already happened here.
+ * **The table has two provenances now, and the comment on each entry says
+ * which.** The CLI's own messages were read out of the pinned binary with
+ * `strings` and have never been executed (`proposals/Sandboxing/10-validation.md`,
+ * "What this validation did not check"). The `bwrap:` entries below were read
+ * off this install's own `run_events` after a sandbox that could not start went
+ * unnoticed for thirteen hours — which is the measurement the paragraph above
+ * asks for, arriving the expensive way.
+ *
+ * The matching rule does not change with the provenance. Every needle is a
+ * literal, case-sensitive substring and nothing is inferred from it: no regular
+ * expression, no lowercasing, no matching on the word "sandbox" — which appears
+ * in this repository's own source, and a run working on this repository is a
+ * case that has already happened here. `bwrap: ` alone is refused for the same
+ * reason and more sharply, since this file, its test and
+ * `scripts/sandbox-probe/` all carry the literal.
  *
  * Ordered specific-first, and the order is the answer when several match: the
  * apply-seccomp message carries the `[Sandbox Linux]` tag as well, and
@@ -93,6 +101,26 @@ const MARKERS: ReadonlyArray<{ needle: string; kind: SandboxRefusalKind }> = [
   // `10-validation.md`, finding 2: both are errors rather than warnings.
   { needle: "bubblewrap (bwrap) not installed", kind: "dependency-missing" },
   { needle: "socat not installed", kind: "dependency-missing" },
+  // The two above are the CLI's own availability check, and it only asks
+  // whether the binaries exist and are executable — it never runs one. So an
+  // installed `bwrap` the kernel refuses passes that check, `failIfUnavailable`
+  // never fires, and every command is wrapped in a program that exits 1 before
+  // the command runs. **Measured, not read**: 214 of this install's 484
+  // `tool_error` rows carry the first of these verbatim, and not one `sandbox`
+  // row was written beside them.
+  {
+    needle: "bwrap: No permissions to create new namespace",
+    kind: "bwrap-failed",
+  },
+  // The next one along rather than a recorded one, and named here because it is
+  // what a container gets *after* the seccomp profile lets the namespace be
+  // created: Docker masks parts of `/proc`, and a fresh procfs mount inside a
+  // new user namespace is refused while those over-mounts hide the current view.
+  { needle: "bwrap: Can't mount proc on", kind: "bwrap-failed" },
+  // Every other way bubblewrap says it could not build its namespace. Broad
+  // within its own sentence and safe to be: it is bwrap's own prefix, and the
+  // program is only ever on an argv this app's children did not write.
+  { needle: "bwrap: Creating new namespace failed", kind: "bwrap-failed" },
   // The CLI's own tag on a wrap-time message. Broad on purpose and safe to be:
   // no ordinary tool failure carries it.
   { needle: "[Sandbox Linux]", kind: "sandbox-message" },

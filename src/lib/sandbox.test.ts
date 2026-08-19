@@ -20,10 +20,12 @@ import {
  * unwrapped, and an unreadable policy file is not evidence of absence, so both
  * have to be distinguishable from a working sandbox and from a stock install.
  *
- * The literals below are the ones read out of the pinned CLI binary in
- * `proposals/Sandboxing/`. None has been executed against a running sandbox —
- * see `docs/verification.md` — so what this pins is that the matcher is exactly
- * as wide as the evidence, no wider.
+ * Most of the literals below were read out of the pinned CLI binary in
+ * `proposals/Sandboxing/` and have never been executed. The `bwrap:` ones are
+ * the exception and the reason the rest are worth having: they are copied out
+ * of this install's own `run_events`, where a sandbox that could not start
+ * produced 214 failed tool calls and no `sandbox` row at all. What this pins
+ * either way is that the matcher is exactly as wide as the evidence, no wider.
  */
 
 describe("sandboxRefusal", () => {
@@ -73,6 +75,45 @@ describe("sandboxRefusal", () => {
       "dependency-missing",
     );
     assert.equal(sandboxRefusal("socat not installed")?.kind, "dependency-missing");
+  });
+
+  it("names a bubblewrap that could not start, which is what actually happened", () => {
+    // The whole recorded line, copied out of `run_events` rather than trimmed
+    // to the needle: this is the text the matcher has to survive, and the
+    // `Exit code 1` prefix in front of it is the CLI's, not bwrap's.
+    const text =
+      "Exit code 1 bwrap: No permissions to create new namespace, likely " +
+      "because the kernel does not allow non-privileged user namespaces. See " +
+      "<https://deb.li/bubblewrap> or " +
+      "<file:///usr/share/doc/bubblewrap/README.Debian.gz>.";
+    const refusal = sandboxRefusal(text);
+
+    assert.equal(refusal?.kind, "bwrap-failed");
+    assert.equal(refusal?.matched, "bwrap: No permissions to create new namespace");
+    assert.equal(refusal?.reason, text);
+
+    // The failure after the seccomp profile is applied: the namespace is
+    // created and the procfs mount inside it is refused.
+    assert.equal(
+      sandboxRefusal("bwrap: Can't mount proc on /newroot/proc: Operation not permitted")
+        ?.kind,
+      "bwrap-failed",
+    );
+    assert.equal(
+      sandboxRefusal("bwrap: Creating new namespace failed: nesting depth or /proc/sys/user/max_*_namespaces exceeded (ENOSPC)")
+        ?.kind,
+      "bwrap-failed",
+    );
+  });
+
+  it("does not fire on the word bwrap, which this repository also carries", () => {
+    // The same argument the bare word "sandbox" is refused by, and it applies
+    // harder here: the needles now live in this file, in `sandbox.ts` and in
+    // `scripts/sandbox-probe/`, so a run grepping its own source must not
+    // report a policy failure.
+    assert.equal(sandboxRefusal("src/lib/sandbox.ts:88:  needle: \"bwrap: \""), null);
+    assert.equal(sandboxRefusal("bwrap: --version"), null);
+    assert.equal(sandboxRefusal("/usr/bin/bwrap: not found"), null);
   });
 
   it("keeps a tagged message this app has never read", () => {

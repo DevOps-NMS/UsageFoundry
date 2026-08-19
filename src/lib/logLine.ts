@@ -215,6 +215,11 @@ const SANDBOX_REASON: Record<SandboxRefusalKindDTO, string> = {
     "the seccomp applier is missing, so unix socket access is not restricted",
   "sandbox-unavailable": "a sandbox was required here and could not start",
   "dependency-missing": "the sandbox's own dependencies are not installed",
+  // The one clause here that is about a *tool call that did not happen*: bwrap
+  // exits before it execs the command, so the words after this on the row are
+  // what the agent was trying to do rather than what it did.
+  "bwrap-failed":
+    "bubblewrap could not build the namespace the sandbox needs, so this command never ran",
   "sandbox-message": "the CLI's Linux sandbox reported this",
 };
 

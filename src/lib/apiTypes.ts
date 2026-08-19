@@ -196,6 +196,7 @@ export type SandboxRefusalKindDTO =
   | "seccomp-unavailable"
   | "sandbox-unavailable"
   | "dependency-missing"
+  | "bwrap-failed"
   | "sandbox-message";
 
 export interface SandboxDTO {
