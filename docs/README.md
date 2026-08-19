@@ -36,8 +36,26 @@
   from whom.
 - **[Verification log](verification.md)** — what has been exercised by hand
   against a real CLI, and an explicit list of what has **not**.
+- **[A fourth ending: `needs-review`](needs-review.md)** — **a design record, not
+  a reference.** The feature is implemented and the durable description of it is
+  [Runs](runs.md) plus `docs/agent/`; this is the argument behind each decision,
+  and it warns in its own first paragraph that every line reference in it has
+  drifted. Read it when you want to know *why*, not *what*.
 
 For the reasoning behind the load-bearing design decisions — why a window is
 derived rather than rounded, why a guard charges unpriced models a fallback
 rate, why the folder claim has no `await` in it — see [`CLAUDE.md`](../CLAUDE.md)
 in the repository root.
+
+**Not here, deliberately.** Two kinds of document used to sit in this directory
+without being listed in it, which read as an operator page nobody had indexed:
+
+- The **UI density audit** is a brief written for build runs, all five of which
+  have landed. It is `docs/agent/ui-density-audit.md`, beside the invariant it
+  settles — `docs/agent/conventions.md` cites it as the reasoning behind the
+  closed grouping vocabulary.
+- The **external validator** pitch and the baseline measurement it rests on are
+  [`proposals/ExternalValidator/`](../proposals/ExternalValidator/README.md).
+  Nothing in them shipped: no run is validated today. `proposals/` is where an
+  argument lives until it becomes a decision, and that framing is the point of
+  the move.

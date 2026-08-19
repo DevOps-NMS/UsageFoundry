@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Reconstruct the validator's inputs for every run in `docs/validator-baseline.md`.
+// Reconstruct the validator's inputs for every run in `proposals/ExternalValidator/validator-baseline.md`.
 //
 // The spike needs, per run, exactly what a validator would be handed at run end:
 // the task text and the branch diff. Neither is reachable here. The operator's
@@ -30,7 +30,14 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..");
-const BASELINE = path.join(REPO_ROOT, "docs", "validator-baseline.md");
+// Moved out of `docs/` when the pitch and its baseline were reclassified as a
+// proposal rather than an operator page: nothing in either shipped.
+const BASELINE = path.join(
+  REPO_ROOT,
+  "proposals",
+  "ExternalValidator",
+  "validator-baseline.md",
+);
 const TRANSCRIPT_ROOT = path.join(os.homedir(), ".claude", "projects");
 
 /** The baseline's folder column, mapped to the checkout each run worked in. */

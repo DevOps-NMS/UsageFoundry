@@ -833,7 +833,7 @@ through before trusting this unattended:
 - **The whole UI density restructure — every surface of it, at every width.**
   Five build runs regrouped `/settings`, `/runs/new`, `/runs/[id]`, the three
   workflow surfaces, the dashboard, `/runs`, `/branches`, `/chat` and
-  `/account` against `docs/ui-density-audit.md`, and built two primitives
+  `/account` against `docs/agent/ui-density-audit.md`, and built two primitives
   (`ui/Disclosure`, `ui/ListView`) that every fold and every list box in the app
   now goes through. What *has* been checked, on the last of the five runs and
   reported with its output: `npm run typecheck` clean, `npm test` 1335 passing
@@ -854,7 +854,7 @@ through before trusting this unattended:
   was not run by any of the five.
 
   > **A later completion pass did open a browser, on the host, at a wide
-  > desktop width — see `docs/ui-density-audit.md` §9.** It closed the six
+  > desktop width — see `docs/agent/ui-density-audit.md` §9.** It closed the six
   > items §8 left open, and it moved four of the readings below out of this
   > list: eleven surfaces were opened and read; every `Disclosure` on
   > `/settings` was seen opening by itself with its count when its contents

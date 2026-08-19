@@ -14,8 +14,8 @@ and §5 before this. Nothing here is product code and nothing here proposes any.
 > `AssistKind` is still `"review" | "resolve"` (`src/lib/review.ts:51`), there is
 > no validator on the assist path, and nothing in this document reached the
 > product. What *does* exist is an offline harness —
-> [`scripts/validator-spike/`](../scripts/validator-spike/), whose reading is
-> [`RESULT.md`](../scripts/validator-spike/RESULT.md) — which put a model over
+> [`scripts/validator-spike/`](../../scripts/validator-spike/), whose reading is
+> [`RESULT.md`](../../scripts/validator-spike/RESULT.md) — which put a model over
 > the labelled set and scored it. Several statements below were written before
 > that existed and are marked where the spike overtook them; where this document
 > and `RESULT.md` disagree, `RESULT.md` is the measurement.
@@ -461,7 +461,7 @@ agreement is deliberately **not** a criterion here and detection, false alarm an
 `cannot-tell` honesty are three separate rows.
 
 **Three of these rows now have a reading, from the offline spike rather than from
-M1.** [`scripts/validator-spike/RESULT.md`](../scripts/validator-spike/RESULT.md)
+M1.** [`scripts/validator-spike/RESULT.md`](../../scripts/validator-spike/RESULT.md)
 scored the current labelled set, not the expanded one, so nothing below is a
 criterion met — but the *Baseline today* column is no longer "nothing exists".
 False alarm: 0 of 29 held-out, 1 of 30 all-in, against a ≤ 6% target. Cost:

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Score the spike against the labelled set in docs/validator-baseline.md §3.
+// Score the spike against the labelled set in proposals/ExternalValidator/validator-baseline.md §3.
 //
 // Two phases, because the transport may be asynchronous:
 //   --emit     compose every case's prompt and write it out
@@ -170,7 +170,7 @@ async function main() {
   const lines = [];
   const say = (s = "") => lines.push(s);
 
-  say(`# Validator spike — score against docs/validator-baseline.md §3`);
+  say(`# Validator spike — score against proposals/ExternalValidator/validator-baseline.md §3`);
   say();
   say(`model: ${options.model} · transport: ${options.transport} · testimony: ${options.withTestimony ? "given" : "withheld"}`);
   say();
