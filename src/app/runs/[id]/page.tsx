@@ -27,6 +27,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, Stat } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Field, Input, Textarea } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
@@ -289,11 +290,41 @@ function Section({
   action?: ReactNode;
 }) {
   return (
-    <div className="mt-4 border-t border-line pt-4">
+    // The `first:` half is what makes a block sit directly under the heading of
+    // the region it opens rather than under a hairline drawn a line below one.
+    // It is a `:first-child` rule rather than a prop because three of the four
+    // regions have a *conditional* first block — `Agent` and `Checkout` are
+    // both gated — so which one opens the region is not knowable where the
+    // region is written.
+    <div className="mt-4 border-t border-line pt-4 first:mt-0 first:border-t-0 first:pt-0">
       <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold text-ink">
         {title}
         {action && <span className="ml-auto">{action}</span>}
       </h3>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * A named group of blocks in the inspector, and the reason they sit together.
+ *
+ * Eleven blocks at one weight is a column where a state you see constantly and
+ * one most operators never see are peers. The heading is a step above a
+ * block's own — `text-sm` against `text-xs`, the two-step `conventions.md`
+ * already has — and nothing here folds: every block that was in the column is
+ * still in it, still with its own heading.
+ *
+ * A `div`, never a `<section>`. `section + section { margin-top: 24px }` is
+ * still in the legacy layer and would fire between every pair of these, which
+ * reads as a spacing decision somebody made rather than as a stylesheet rule
+ * nobody meant to trigger. `Section` above and `Card` both document the same
+ * trap.
+ */
+function Region({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="mt-5 border-t border-line pt-4">
+      <h2 className="mb-2 text-sm font-semibold text-ink">{title}</h2>
       {children}
     </div>
   );
@@ -775,6 +806,20 @@ export default function RunDetail({
   // A `completed` run that used up its cycle cap never reported anything, and
   // is continued rather than pushed back on — same branch as `reopenPrompt`.
   const saidDone = run.status === "completed" && Boolean(run.reported_done);
+  /**
+   * One name for one act, said once.
+   *
+   * The button that opens the panel and the button that commits it are the same
+   * decision, and they read as two while one said `Resume run` and the other
+   * said whichever of these three applied. Both kinds of `blocked` never
+   * started a work cycle, so "Resume" would name something that never happened.
+   */
+  const resumeLabel =
+    run.status === "blocked"
+      ? "Try again"
+      : saidDone
+        ? "Ask for more"
+        : "Resume";
   // Orthogonal to every other flag here: a run can be set aside in any status,
   // and it changes nothing this page offers — only what the two bulk pick-ups
   // on the runs page will act on.
@@ -922,37 +967,39 @@ export default function RunDetail({
             </p>
           )}
 
+          {/* Up to four of these render together, and the variants are what say
+              which one the page is for. Exactly one `primary` in every reachable
+              state: `Try now` asks a parked run to rejoin the queue early and is
+              the same act as the pick-up one row down, so it is the secondary
+              spelling of it and never a second filled button beside it. */}
           <ButtonRow className="mt-3">
-            {run.status === "paused" && <Button onClick={tryNow}>Try now</Button>}
-            {resumable && !reopenOpen && (
-              <Button onClick={openReopen}>
-                {/* Both kinds of `blocked` never started a work cycle, so
-                    "Resume" would name something that never happened. */}
-                {run.status === "blocked"
-                  ? "Try again"
-                  : saidDone
-                    ? "Ask for more"
-                    : "Resume"}
+            {run.status === "paused" && (
+              <Button variant="secondary" onClick={tryNow}>
+                Try now
               </Button>
+            )}
+            {resumable && !reopenOpen && (
+              <Button onClick={openReopen}>{resumeLabel}</Button>
             )}
             {active && (
               <Button variant="danger" onClick={stop}>
                 {run.status === "paused" ? "Give up" : "Stop run"}
               </Button>
             )}
-            {/* The undo comes first when there is one, because a run already
-                set aside has nothing else to offer here. Otherwise: `danger` on
-                a live run, where the press also ends a billed agent, and plain
-                on a finished one, where it changes a list and nothing else. */}
+            {/* Last, and `ghost`, because this is the one control here that does
+                not change what the run *is* — it changes which runs the two bulk
+                pick-ups will act on, and nothing else. A live run's press also
+                ends a billed agent, and the label says so in words rather than
+                in a colour that would put a second red button beside Stop. The
+                undo takes the same slot and is `secondary`: a run already set
+                aside has nothing else to offer from this row, so it is the one
+                thing there is to press. */}
             {setAsideAt ? (
               <Button variant="secondary" onClick={() => void setAside(false)}>
                 Put back
               </Button>
             ) : (
-              <Button
-                variant={active ? "danger" : "secondary"}
-                onClick={() => void setAside(true)}
-              >
+              <Button variant="ghost" onClick={() => void setAside(true)}>
                 {active ? "Stop and set aside" : "Set aside"}
               </Button>
             )}
@@ -1074,8 +1121,11 @@ export default function RunDetail({
               {reopenError && <Hint tone="danger">{reopenError}</Hint>}
 
               <ButtonRow className="mt-3">
+                {/* The same word the button that opened this panel used. It
+                    read `Resume run` under a `Try again`, which is two names
+                    for one act on one screen. */}
                 <Button onClick={submitReopen} busy={reopenBusy}>
-                  Resume run
+                  {resumeLabel}
                 </Button>
                 <Button
                   variant="secondary"
@@ -1088,219 +1138,237 @@ export default function RunDetail({
             </Section>
           )}
 
-          {/* The two figures that belong to the run itself: both come from what
-              Claude Code reported for a finished work cycle. Telemetry is a
-              different measurement and stays in a block of its own. */}
-          <div className="mt-4 grid grid-cols-2 gap-4 border-t border-line pt-4">
-            <div>
-              <div className="text-xs font-semibold text-ink">Spent</div>
-              <Stat>{fmtUSD(run.spent_usd)}</Stat>
-              <div className={SUB}>
-                {fmtTokens(run.spent_tokens)} tokens, as Claude Code reported
-                them
-              </div>
-              {/* $0.00 on a run eight minutes into its first cycle is documented
-                  behaviour rather than a broken counter — Claude Code reports
-                  what a cycle cost in its terminal `result` event and nowhere
-                  earlier. */}
-              {cycleInFlight && (
-                <div className={SUB}>
-                  excludes the cycle in flight, which is reported when it ends
+          <Region title="Against its limits">
+            <Section title="Guards">
+              {bars.length > 0 && (
+                <div className="mb-3">
+                  {bars.map((b) => (
+                    <Meter
+                      key={b.label}
+                      size="compact"
+                      label={b.label}
+                      fraction={b.fraction}
+                      upperFraction={b.upperFraction}
+                      value={b.value}
+                    />
+                  ))}
                 </div>
               )}
-              {/* Held apart from the measured figure above, not added to it. */}
-              {(run.spent_usd_est ?? 0) > 0 && (
-                <Hint tone="warn">
-                  {fmtUSD(run.spent_usd_est ?? 0)} more is estimated from your
-                  transcripts for cycles that were cut short
-                </Hint>
-              )}
-            </div>
-
-            <div>
-              <div className="text-xs font-semibold text-ink">Work cycles</div>
-              <Stat>
-                {run.iterations}
-                {/* 0 is the stored sentinel for "no cap" — see db.ts. */}
-                <span className="text-lg font-medium text-ink-muted">
-                  {run.max_iterations > 0
-                    ? `/${run.max_iterations}`
-                    : " · no cap"}
-                </span>
-              </Stat>
-              <div className={SUB}>
-                {run.status === "paused"
-                  ? "parked between cycles"
-                  : (cycleInFlight ?? (active ? "starting" : "finished"))}
-              </div>
-              {!active && <div className={SUB}>exit {run.exit_code ?? "—"}</div>}
-              {(run.done_retriggers ?? 0) > 0 && (
-                <div className={SUB}>
-                  {run.done_retriggers} sent back after it reported done
-                </div>
-              )}
-            </div>
-          </div>
-
-          <Section title="Guards">
-            {bars.length > 0 && (
-              <div className="mb-3">
-                {bars.map((b) => (
-                  <Meter
-                    key={b.label}
-                    size="compact"
-                    label={b.label}
-                    fraction={b.fraction}
-                    upperFraction={b.upperFraction}
-                    value={b.value}
-                  />
-                ))}
-              </div>
-            )}
-            <ListGroup footnote="A window guard steps this run aside when that window passes its percentage.">
-              <ListRow label="5-hour window">
-                <GuardValue>
-                  {run.budget.maxSessionFraction === null
-                    ? "no guard"
-                    : fmtPct(run.budget.maxSessionFraction)}
-                </GuardValue>
-              </ListRow>
-              <ListRow label="Weekly window">
-                <GuardValue>
-                  {run.budget.maxWeeklyFraction === null
-                    ? "no guard"
-                    : fmtPct(run.budget.maxWeeklyFraction)}
-                </GuardValue>
-              </ListRow>
-              <ListRow label="When a limit is acted on">
-                <GuardValue>{ENFORCEMENT[run.budget.enforcement]}</GuardValue>
-              </ListRow>
-              <ListRow label="After DONE">
-                <GuardValue>
-                  {run.budget.continueAfterDone ? "sent back in" : "stops"}
-                </GuardValue>
-              </ListRow>
-              <ListRow label="Permission mode">
-                <GuardValue>{run.budget.permissionMode ?? "—"}</GuardValue>
-              </ListRow>
-            </ListGroup>
-          </Section>
-
-          {/* Beside the guards and deliberately not among them — re-decided
-              under `--agent` rather than carried over, because the obvious
-              reading of "the run *is* the agent" is that it has been promoted
-              into the guard group. It has not. That flag sets the session's
-              system prompt, and its model where the run named none; the
-              permission mode, the isolation grant and the deny list are all
-              argued at the spawn and are untouched by it, which
-              `orchestrator.test.ts` asserts again with one selected. A row
-              inside the group above would claim it bounds something, and it
-              bounds strictly nothing — a bigger fact than it was, and still
-              not that kind of fact. What it says is what was sent: the run's
-              own frozen copy, so it still names the agent after that agent has
-              been renamed or deleted. */}
-          {run.agent && (
-            <Section title="Agent">
-              <ListGroup footnote="This run was started as it, so the saved prompt is the run's own. It changes who the run is, not what it was allowed to do.">
-                <ListRow label="Started as" description={run.agent.description}>
-                  <GuardValue>{run.agent.name}</GuardValue>
-                </ListRow>
-                <ListRow label="Its model">
+              <ListGroup footnote="A window guard steps this run aside when that window passes its percentage.">
+                <ListRow label="5-hour window">
                   <GuardValue>
-                    {run.agent.model ?? "the run's own"}
+                    {run.budget.maxSessionFraction === null
+                      ? "no guard"
+                      : fmtPct(run.budget.maxSessionFraction)}
                   </GuardValue>
+                </ListRow>
+                <ListRow label="Weekly window">
+                  <GuardValue>
+                    {run.budget.maxWeeklyFraction === null
+                      ? "no guard"
+                      : fmtPct(run.budget.maxWeeklyFraction)}
+                  </GuardValue>
+                </ListRow>
+                <ListRow label="When a limit is acted on">
+                  <GuardValue>{ENFORCEMENT[run.budget.enforcement]}</GuardValue>
+                </ListRow>
+                <ListRow label="After DONE">
+                  <GuardValue>
+                    {run.budget.continueAfterDone ? "sent back in" : "stops"}
+                  </GuardValue>
+                </ListRow>
+                <ListRow label="Permission mode">
+                  <GuardValue>{run.budget.permissionMode ?? "—"}</GuardValue>
                 </ListRow>
               </ListGroup>
             </Section>
-          )}
+          </Region>
 
-          {/* Who did the work, and what their share of it cost. The two figures
-              above say what the run spent and neither can say this: only the
-              transcript records which agent produced a turn, which is why this
-              is the same source the dashboard meters come from rather than a
-              fourth one. Its own poll and its own route — see the component.
-
-              `startedAs` changes nothing about the arithmetic and only what the
-              card is allowed to say. Under `--agent` this split has two readings
-              an operator would otherwise take for a bug: every row under the
-              agent's name and nothing in `(main thread)`, or the reverse, on a
-              page whose section above says the run is the reviewer. Which one
-              the CLI writes is unmeasured and no branch here depends on it, so
-              the card names the run's agent and lets the rows say what they
-              say. */}
-          <Section title="Agent work">
-            <RunAgentCost
-              runId={run.id}
-              active={active}
-              now={nowTick}
-              startedAs={run.agent?.name ?? null}
-            />
-          </Section>
-
-          {/* A separate measurement, deliberately not folded into the figures
-              above. It counts every API request the agent made, including any
-              belonging to a work cycle that ended before the CLI reported its
-              cost — so a higher number here is the expected outcome of an
-              interrupted run, not a discrepancy to reconcile away. */}
-          {telemetry && (
-            <Section title="Telemetry — first-party">
-              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                <Stat>{fmtUSD(telemetry.costUSD)}</Stat>
-                <div className="text-xs tabular-nums text-ink-muted">
-                  {telemetry.requests} API{" "}
-                  {telemetry.requests === 1 ? "request" : "requests"} ·{" "}
-                  {fmtTokens(telemetry.tokens)} tokens
+          {/* Three readings of overlapping money, and the region is what says
+              they are three. **No figure, meter, badge or total may be drawn at
+              this level.** Any sum of two of them double-counts: `spent_usd` is
+              what a work cycle's own `result` event reported, `Agent work` is
+              this app's price table over the transcripts, and telemetry is
+              Claude Code's own per-request cost. Each keeps its own footnote
+              saying so, because adjacency is not permission — and a subtotal
+              here would break a correctness invariant that will not throw and
+              will not fail a typecheck. */}
+          <Region title="What it has spent">
+            {/* The two figures that belong to the run itself: both come from what
+                Claude Code reported for a finished work cycle. Telemetry is a
+                different measurement and stays in a block of its own. */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <div className="text-xs font-semibold text-ink">Spent</div>
+                <Stat>{fmtUSD(run.spent_usd)}</Stat>
+                <div className={SUB}>
+                  {fmtTokens(run.spent_tokens)} tokens, as Claude Code reported
+                  them
                 </div>
-              </div>
-              <p className="mt-2 text-xs leading-snug text-ink-muted">
-                Claude Code&rsquo;s own per-request cost for this run. Kept apart
-                from the figure above rather than added to it: that one counts
-                only work cycles the CLI got to report, so the two disagree by
-                design
-                {telemetry.costUSD > run.spent_usd
-                  ? " — and this one is the larger, which is what an interrupted cycle looks like."
-                  : "."}
-              </p>
-            </Section>
-          )}
-
-          {isolated && (
-            <Section title="Checkout">
-              <p className="text-xs leading-snug text-ink-muted">
-                This run works on branch{" "}
-                <span className="mono text-ink">{run.worktree_branch}</span>, not
-                in your copy of the folder — so other runs can use the same
-                project at the same time. Nothing lands in your checkout until
-                you merge it.
-                {run.continues_run && (
-                  <>
-                    {" "}
-                    It carries on the branch run{" "}
-                    <Link
-                      href={`/runs/${run.continues_run}`}
-                      className="mono underline underline-offset-2"
-                    >
-                      {run.continues_run.slice(0, 8)}
-                    </Link>{" "}
-                    was working on, so those commits are already here and the
-                    Changes tab covers both. Only the last run on a branch can
-                    land it.
-                  </>
+                {/* $0.00 on a run eight minutes into its first cycle is
+                    documented behaviour rather than a broken counter — Claude
+                    Code reports what a cycle cost in its terminal `result`
+                    event and nowhere earlier. */}
+                {cycleInFlight && (
+                  <div className={SUB}>
+                    excludes the cycle in flight, which is reported when it ends
+                  </div>
                 )}
-              </p>
-            </Section>
-          )}
+                {/* Held apart from the measured figure above, not added to it. */}
+                {(run.spent_usd_est ?? 0) > 0 && (
+                  <Hint tone="warn">
+                    {fmtUSD(run.spent_usd_est ?? 0)} more is estimated from your
+                    transcripts for cycles that were cut short
+                  </Hint>
+                )}
+              </div>
 
-          <Section title="Task">
-            <div
-              tabIndex={0}
-              role="group"
-              aria-label="Task given to the agent"
-              className="mono max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-sm border border-line bg-inset p-2.5 text-ink-muted"
-            >
-              {run.prompt}
+              <div>
+                <div className="text-xs font-semibold text-ink">Work cycles</div>
+                <Stat>
+                  {run.iterations}
+                  {/* 0 is the stored sentinel for "no cap" — see db.ts. */}
+                  <span className="text-lg font-medium text-ink-muted">
+                    {run.max_iterations > 0
+                      ? `/${run.max_iterations}`
+                      : " · no cap"}
+                  </span>
+                </Stat>
+                <div className={SUB}>
+                  {run.status === "paused"
+                    ? "parked between cycles"
+                    : (cycleInFlight ?? (active ? "starting" : "finished"))}
+                </div>
+                {!active && (
+                  <div className={SUB}>exit {run.exit_code ?? "—"}</div>
+                )}
+                {(run.done_retriggers ?? 0) > 0 && (
+                  <div className={SUB}>
+                    {run.done_retriggers} sent back after it reported done
+                  </div>
+                )}
+              </div>
             </div>
-          </Section>
+
+            {/* Who did the work, and what their share of it cost. The two
+                figures above say what the run spent and neither can say this:
+                only the transcript records which agent produced a turn, which
+                is why this is the same source the dashboard meters come from
+                rather than a fourth one. Its own poll and its own route — see
+                the component.
+
+                `startedAs` changes nothing about the arithmetic and only what
+                the card is allowed to say. Under `--agent` this split has two
+                readings an operator would otherwise take for a bug: every row
+                under the agent's name and nothing in `(main thread)`, or the
+                reverse, on a page whose region below says the run is the
+                reviewer. Which one the CLI writes is unmeasured and no branch
+                here depends on it, so the card names the run's agent and lets
+                the rows say what they say. */}
+            <Section title="Agent work">
+              <RunAgentCost
+                runId={run.id}
+                active={active}
+                now={nowTick}
+                startedAs={run.agent?.name ?? null}
+              />
+            </Section>
+
+            {/* A separate measurement, deliberately not folded into the figures
+                above. It counts every API request the agent made, including any
+                belonging to a work cycle that ended before the CLI reported its
+                cost — so a higher number here is the expected outcome of an
+                interrupted run, not a discrepancy to reconcile away. */}
+            {telemetry && (
+              <Section title="Telemetry — first-party">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <Stat>{fmtUSD(telemetry.costUSD)}</Stat>
+                  <div className="text-xs tabular-nums text-ink-muted">
+                    {telemetry.requests} API{" "}
+                    {telemetry.requests === 1 ? "request" : "requests"} ·{" "}
+                    {fmtTokens(telemetry.tokens)} tokens
+                  </div>
+                </div>
+                <p className="mt-2 text-xs leading-snug text-ink-muted">
+                  Claude Code&rsquo;s own per-request cost for this run. Kept apart
+                  from the figure above rather than added to it: that one counts
+                  only work cycles the CLI got to report, so the two disagree by
+                  design
+                  {telemetry.costUSD > run.spent_usd
+                    ? " — and this one is the larger, which is what an interrupted cycle looks like."
+                    : "."}
+                </p>
+              </Section>
+            )}
+          </Region>
+
+          {/* What was decided before it started, and the region is what keeps
+              `Agent` *beside* the guards rather than among them — two regions
+              away from `Against its limits`. A row inside that guard group
+              would claim the agent bounds something, and it bounds strictly
+              nothing: `--agent` sets the session's system prompt, and its model
+              where the run named none, while the permission mode, the isolation
+              grant and the deny list are all argued at the spawn and untouched
+              by it, which `orchestrator.test.ts` asserts again with one
+              selected. Tidying it into the guards is a change nothing would
+              report. */}
+          <Region title="How it was set up">
+            {/* What it says is what was sent: the run's own frozen copy, so it
+                still names the agent after that agent has been renamed or
+                deleted. */}
+            {run.agent && (
+              <Section title="Agent">
+                <ListGroup footnote="This run was started as it, so the saved prompt is the run's own. It changes who the run is, not what it was allowed to do.">
+                  <ListRow label="Started as" description={run.agent.description}>
+                    <GuardValue>{run.agent.name}</GuardValue>
+                  </ListRow>
+                  <ListRow label="Its model">
+                    <GuardValue>
+                      {run.agent.model ?? "the run's own"}
+                    </GuardValue>
+                  </ListRow>
+                </ListGroup>
+              </Section>
+            )}
+
+            {isolated && (
+              <Section title="Checkout">
+                <p className="text-xs leading-snug text-ink-muted">
+                  This run works on branch{" "}
+                  <span className="mono text-ink">{run.worktree_branch}</span>, not
+                  in your copy of the folder — so other runs can use the same
+                  project at the same time. Nothing lands in your checkout until
+                  you merge it.
+                  {run.continues_run && (
+                    <>
+                      {" "}
+                      It carries on the branch run{" "}
+                      <Link
+                        href={`/runs/${run.continues_run}`}
+                        className="mono underline underline-offset-2"
+                      >
+                        {run.continues_run.slice(0, 8)}
+                      </Link>{" "}
+                      was working on, so those commits are already here and the
+                      Changes tab covers both. Only the last run on a branch can
+                      land it.
+                    </>
+                  )}
+                </p>
+              </Section>
+            )}
+
+            <Section title="Task">
+              <div
+                tabIndex={0}
+                role="group"
+                aria-label="Task given to the agent"
+                className="mono max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-sm border border-line bg-inset p-2.5 text-ink-muted"
+              >
+                {run.prompt}
+              </div>
+            </Section>
+          </Region>
         </Card>
 
         <div className="min-w-0 lg:col-start-1 lg:row-start-1 lg:flex lg:flex-col">
@@ -1382,63 +1450,79 @@ export default function RunDetail({
             <>
               <RunLand run={run} />
 
-              {handoff && (
-                <Card emphasis="quiet" className="mt-4">
-                  <CardTitle>In your own terminal</CardTitle>
+              {/* The generation of this feature that `RunLand` above replaced,
+                  kept whole and moved one click away. Two things it says are
+                  not said anywhere else — the commit list as the agent wrote it,
+                  and the `git merge` line — so it is an escape hatch rather than
+                  a duplicate, and Tier 2 evidence is what a fold is for.
 
-                  {Array.isArray(handoff.payload.commits) &&
-                  handoff.payload.commits.length > 0 ? (
-                    <div className="mono max-h-40 overflow-auto rounded-sm border border-line bg-inset p-2.5">
-                      {(handoff.payload.commits as string[]).map((c) => (
-                        <div key={c} className="whitespace-pre-wrap text-ink-muted">
+                  What it withholds is unchanged and must stay withheld: the
+                  merge command is absent entirely while the operator's checkout
+                  is dirty, never shown with a warning, because a copyable
+                  command gets copied. */}
+              {handoff && (
+                <Disclosure
+                  className="mt-4"
+                  summary="Do it in your own terminal"
+                  summaryClassName="text-xs font-semibold text-ink-muted"
+                >
+                  <Card emphasis="quiet" className="mt-3">
+                    <CardTitle>In your own terminal</CardTitle>
+
+                    {Array.isArray(handoff.payload.commits) &&
+                    handoff.payload.commits.length > 0 ? (
+                      <div className="mono max-h-40 overflow-auto rounded-sm border border-line bg-inset p-2.5">
+                        {(handoff.payload.commits as string[]).map((c) => (
+                          <div key={c} className="whitespace-pre-wrap text-ink-muted">
+                            {c}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <Empty>The agent made no commits on this branch.</Empty>
+                    )}
+
+                    {Array.isArray(handoff.payload.uncommitted) &&
+                      handoff.payload.uncommitted.length > 0 && (
+                        <Notice tone="warn" quiet className="mt-3">
+                          <strong>Uncommitted changes left in the checkout.</strong>{" "}
+                          They are not on the branch, so a merge will not bring
+                          them over.
+                        </Notice>
+                      )}
+
+                    <div className="mt-4 border-t border-line pt-3.5">
+                      <div className="mb-2 text-xs font-semibold text-ink">
+                        Review it
+                      </div>
+                      {(Array.isArray(handoff.payload.review)
+                        ? (handoff.payload.review as string[])
+                        : []
+                      ).map((c) => (
+                        <div key={c} className="mono break-all text-ink-muted">
                           {c}
                         </div>
                       ))}
                     </div>
-                  ) : (
-                    <Empty>The agent made no commits on this branch.</Empty>
-                  )}
 
-                  {Array.isArray(handoff.payload.uncommitted) &&
-                    handoff.payload.uncommitted.length > 0 && (
-                      <Notice tone="warn" quiet className="mt-3">
-                        <strong>Uncommitted changes left in the checkout.</strong>{" "}
-                        They are not on the branch, so a merge will not bring
-                        them over.
-                      </Notice>
-                    )}
-
-                  <div className="mt-4 border-t border-line pt-3.5">
-                    <div className="mb-2 text-xs font-semibold text-ink">
-                      Review it
-                    </div>
-                    {(Array.isArray(handoff.payload.review)
-                      ? (handoff.payload.review as string[])
-                      : []
-                    ).map((c) => (
-                      <div key={c} className="mono break-all text-ink-muted">
-                        {c}
+                    <div className="mt-4 border-t border-line pt-3.5">
+                      <div className="mb-2 text-xs font-semibold text-ink">
+                        Bring it in
                       </div>
-                    ))}
-                  </div>
-
-                  <div className="mt-4 border-t border-line pt-3.5">
-                    <div className="mb-2 text-xs font-semibold text-ink">
-                      Bring it in
+                      {handoff.payload.merge ? (
+                        <div className="mono break-all text-ink-muted">
+                          {String(handoff.payload.merge)}
+                        </div>
+                      ) : (
+                        // Withheld rather than shown with a caveat: a copyable
+                        // command gets copied.
+                        <Hint tone="warn">
+                          {String(handoff.payload.mergeBlocked)}
+                        </Hint>
+                      )}
                     </div>
-                    {handoff.payload.merge ? (
-                      <div className="mono break-all text-ink-muted">
-                        {String(handoff.payload.merge)}
-                      </div>
-                    ) : (
-                      // Withheld rather than shown with a caveat: a copyable
-                      // command gets copied.
-                      <Hint tone="warn">
-                        {String(handoff.payload.mergeBlocked)}
-                      </Hint>
-                    )}
-                  </div>
-                </Card>
+                  </Card>
+                </Disclosure>
               )}
             </>
           )}
