@@ -1206,13 +1206,18 @@ function BlockPanel({
             </div>
           </ListRow>
 
+          {/* The off state says what the *switch* withholds, not what the
+              block will do — `BlockStatement` above already prints "A
+              conflicting branch is reported and left alone." for this block,
+              and the row repeating it verbatim spent a description saying
+              nothing the panel had not said one paragraph earlier. */}
           <ListRow
             label="Let Claude resolve a conflict"
             htmlFor={`${block.id}-autoresolve`}
             description={
               block.mergeAutoResolve
                 ? "Saving this is the authorisation, and it is billed"
-                : "A conflicting branch is reported and left alone"
+                : "Off, so this block authorises no spending"
             }
           >
             <Switch
