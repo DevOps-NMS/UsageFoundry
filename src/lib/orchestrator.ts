@@ -4612,6 +4612,35 @@ const SHARED_CHECKOUT_NOTICE =
 const ISOLATED_GIT_TOOLS = ["Bash(git add:*)", "Bash(git commit:*)"];
 
 /**
+ * The two search tools, named so that the CLI offers them at all.
+ *
+ * Not a permission. `Grep` and `Glob` read; nothing about naming them widens
+ * what a child may do, and the mode over them is untouched. What the name buys
+ * is the tools' *existence*: the pinned CLI drops both from the tool list
+ * whenever `Bash` is present — telling the model to use `grep` and `find`
+ * through the shell instead — unless something on the argv opts in by naming
+ * one of them.
+ *
+ * Measured on this install rather than reasoned about, and in both directions.
+ * Zero of 469 recorded `system:init` events have ever carried `Grep`, going
+ * back five days before a sandbox existed here; every one of the five `Grep`
+ * and `Glob` calls an agent ever attempted came back "No such tool available".
+ * And in a throwaway container on the pin, adding these two to `--allowedTools`
+ * puts both back in the list and changes nothing else in it.
+ *
+ * The fallback the CLI points at is exactly what a broken sandbox took away:
+ * for thirteen hours every `Bash` call on this install died inside bubblewrap,
+ * which left agents with `Read` and a directory they could not list. One of
+ * them recovered a file list by parsing `.git/index` by hand. Two independent
+ * defects, and this is the half that does not need a container restart to fix.
+ *
+ * On every spawn, unlike `ISOLATED_GIT_TOOLS`: a read is not a decision about
+ * the tree the child is standing in, so there is nothing here for isolation or
+ * a permission mode to gate.
+ */
+export const SEARCH_TOOLS = ["Grep", "Glob"];
+
+/**
  * Name-matched process killers, withheld from every agent.
  *
  * This server is a Next.js process and Next renames it: inside the container
@@ -4822,7 +4851,17 @@ export function buildArgs(opts: {
   // Additive: `--allowedTools` names what skips the prompt, and everything else
   // still follows the mode. It is not the allowlist `chat.ts` runs under, where
   // `manual` mode is what makes the same flag exhaustive.
-  if (opts.isolated) args.push("--allowedTools", ...ISOLATED_GIT_TOOLS);
+  //
+  // One flag rather than two, and the git grant stays in front of the search
+  // one: a second `--allowedTools` is a variadic option the CLI would read as a
+  // replacement rather than an addition, and the order is what the assertions
+  // beside this read. `SEARCH_TOOLS` is last because it is the entry that is
+  // always there.
+  args.push(
+    "--allowedTools",
+    ...(opts.isolated ? ISOLATED_GIT_TOOLS : []),
+    ...SEARCH_TOOLS,
+  );
   // Unconditional, and deliberately not paired with the isolation flag above:
   // a run in the operator's own checkout is inside the same process as one in a
   // worktree, and the kill does not care which.

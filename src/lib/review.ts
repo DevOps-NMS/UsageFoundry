@@ -14,6 +14,7 @@ import {
   emitRunEvent,
   getRun,
   sandboxArgsFor,
+  SEARCH_TOOLS,
   signalTree,
   workDirOf,
   type RunRow,
@@ -278,10 +279,15 @@ export interface AssistRequest {
    *
    * Absent means none, deliberately rather than by omission: this decides what
    * an unattended child may run in somebody's repository, and a call site that
-   * could acquire it by forgetting is the wrong shape for that. The reviewer
-   * passes nothing and must keep passing nothing — it is `--permission-mode
-   * plan` precisely so that nothing it does can write, and a grant here would be
-   * the one hole in that.
+   * could acquire it by forgetting is the wrong shape for that. **The reviewer
+   * passes nothing here and must keep passing nothing** — it is
+   * `--permission-mode plan` precisely so that nothing it does can write, and a
+   * command granted through this field would be the one hole in that.
+   *
+   * What the spawn adds below this is `SEARCH_TOOLS`, and the difference is the
+   * point rather than an exception to it: this field names *commands* a child
+   * may run without being asked, where that names two read-only tools the CLI
+   * would otherwise not offer at all. The bound stays capability, not count.
    */
   allowedTools?: string[];
   /**
@@ -622,9 +628,17 @@ function spawnAssist(id: string, req: AssistRequest): Promise<void> {
 
     // Additive, exactly as `ISOLATED_GIT_TOOLS` is on a work cycle: this names
     // what skips the prompt and everything else still follows the mode above.
-    // Emitted only when there is something to name — a bare `--allowedTools`
-    // with no values would take the next flag as its argument.
-    if (allowedTools?.length) args.push("--allowedTools", ...allowedTools);
+    //
+    // `SEARCH_TOOLS` is here rather than at the call sites, and it is why this
+    // no longer needs the emptiness guard the flag used to carry — a bare
+    // `--allowedTools` would take the next flag as its value, and this list is
+    // never empty now. It is also the one grant the reviewer gets: naming
+    // `Grep` and `Glob` is what makes the CLI offer them at all, they read and
+    // cannot write, and `--permission-mode plan` is still the whole of what
+    // stops a review changing anything. The operator's own list stays behind
+    // them, so `resolveVerifyTools` remains the only thing that can name a
+    // *command*, and `resolvePrompt` still sees only that list.
+    args.push("--allowedTools", ...SEARCH_TOOLS, ...(allowedTools ?? []));
 
     // What this child may write, if anything confines it at all. The same
     // encoder the work cycle and the chat use, handed the one thing that

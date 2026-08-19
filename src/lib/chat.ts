@@ -32,6 +32,7 @@ import {
   dependencyCycle,
   githubEnv,
   sandboxArgsFor,
+  SEARCH_TOOLS,
   signalTree,
   topologicalOrder,
   type CreateRunInput,
@@ -1667,6 +1668,15 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
       (m) => m.path,
     );
     for (const dir of addDirs) args.push("--add-dir", dir);
+
+    // The one allowlist this child carries, and it grants nothing: naming
+    // `Grep` and `Glob` is what makes the pinned CLI offer them at all, and
+    // under `bypassPermissions` there is no prompt for them to skip. Without
+    // it an orchestrator asked to look at a repository has `Read` and no way
+    // to find out what to read — which is the failure the mode above was
+    // chosen to prevent, arriving through the tool list instead of the
+    // permission system.
+    args.push("--allowedTools", ...SEARCH_TOOLS);
 
     // And the same list again as this child's write set, if anything confines
     // it at all. The same encoder the work cycle and the reviewer use, and

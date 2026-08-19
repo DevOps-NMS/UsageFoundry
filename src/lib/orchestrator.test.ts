@@ -86,6 +86,7 @@ const {
   reopenRun,
   sandboxArgs,
   sandboxSettings,
+  SEARCH_TOOLS,
   selectPromotable,
   sweepPaused,
   telemetryEnv,
@@ -1989,6 +1990,24 @@ describe("buildArgs", () => {
     spentGuardUSD: 0,
   };
 
+  /**
+   * Everything the one `--allowedTools` flag names, and nothing after it.
+   *
+   * Written as "up to the next flag" rather than as a fixed slice because the
+   * list is now two lists — the isolation grant and the search tools — and a
+   * test that counted would pass while granting a command nobody meant to.
+   */
+  /** Spelled out rather than imported: the grant is the thing under test. */
+  const ISOLATED_GIT_TOOLS_EXPECTED = ["Bash(git add:*)", "Bash(git commit:*)"];
+
+  const allowedToolValues = (args: string[]): string[] => {
+    const at = args.indexOf("--allowedTools");
+    if (at === -1) return [];
+    const rest = args.slice(at + 1);
+    const end = rest.findIndex((a) => a.startsWith("--"));
+    return end === -1 ? rest : rest.slice(0, end);
+  };
+
   it("grants an isolated run the two git commands it is told to use", () => {
     const args = buildArgs({ ...base, isolated: true });
     const at = args.indexOf("--allowedTools");
@@ -1997,12 +2016,28 @@ describe("buildArgs", () => {
       "Bash(git add:*)",
       "Bash(git commit:*)",
     ]);
+    // One flag, both lists, and only one flag: a second `--allowedTools` is a
+    // variadic option the CLI reads as a replacement, so the isolation grant
+    // and the search tools have to travel together or one of them is lost.
+    assert.deepEqual(allowedToolValues(args), [
+      ...ISOLATED_GIT_TOOLS_EXPECTED,
+      ...SEARCH_TOOLS,
+    ]);
+    assert.equal(args.filter((a) => a === "--allowedTools").length, 1);
   });
 
-  it("grants nothing to a run working in the operator's own checkout", () => {
+  it("grants no command to a run working in the operator's own checkout", () => {
     // It is never told to commit, and auto-approving commits into the tree
-    // somebody is working in is a decision nobody asked for.
-    assert.equal(buildArgs({ ...base, isolated: false }).includes("--allowedTools"), false);
+    // somebody is working in is a decision nobody asked for. The flag itself is
+    // now always there — `SEARCH_TOOLS` is what makes the CLI offer `Grep` and
+    // `Glob` at all — so what this pins is that it names nothing that can run.
+    const granted = allowedToolValues(buildArgs({ ...base, isolated: false }));
+    assert.deepEqual(granted, [...SEARCH_TOOLS]);
+    assert.equal(
+      granted.some((tool) => tool.startsWith("Bash(")),
+      false,
+      "a run in the operator's own checkout must be granted no command",
+    );
   });
 
   it("carries plugin directories on a resumed cycle, not only the first", () => {
