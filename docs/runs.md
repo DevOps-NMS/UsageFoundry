@@ -25,14 +25,14 @@ it stays `iteration`.
 **No mode here is a hard cap.** Each run picks one of three, under *When a limit
 is reached*:
 
-**Let the cycle finish, then stop** — the default, and the original behaviour.
+**Between cycles** — the default, and the original behaviour.
 Guards are checked **between** iterations, not during one, so what this gives you
 is *"no new work starts past the threshold"* — **not** *"spend never exceeds the
 threshold"*. Overshoot is bounded by one iteration **per run that was active at
 the time**. Size the cap accordingly. It is also the only mode whose accounting
 is exact: every cycle runs to completion and reports what it cost.
 
-**Stop the cycle in flight** — guards are re-read about once a minute while
+**Stop mid-cycle** — guards are re-read about once a minute while
 Claude is working, and it is killed as soon as one trips. The bound becomes *one
 model turn plus one check interval plus the kill*, which on a long cycle is a
 large improvement. It is still not instant, and the reason is structural: usage
@@ -42,7 +42,7 @@ read yet. The work in the interrupted cycle is lost. Its cost is recovered from
 your transcripts afterwards and shown separately from the figure Claude Code
 reported — close, but reconstructed rather than measured.
 
-**Stop the cycle, carry on next window** — as above, except that filling your
+**Stop, then resume** — as above, except that filling your
 5-hour window parks the run instead of ending it. It resumes where it left off,
 same conversation and same checkout, when the next 5-hour window opens, so one
 task can stretch across several of them until the weekly percentage (or the time
@@ -308,9 +308,11 @@ Three things it does **not** do, each on purpose:
 - **It does not apply a live-enforcement mode quietly.** There is deliberately no
   global "default enforcement", because one edit that turns *every* run into a
   cycle-killing run is a mistake with no undo. A template is a second way to
-  inherit that choice, so a template carrying *Stop the cycle in flight* (or
-  *…carry on next window*) says so in a banner above the form, with a button that
-  puts it back to the mode that loses no work. Same for `bypassPermissions`,
+  inherit that choice, so a template carrying *Stop mid-cycle* (or *Stop, then
+  resume*) says so in a banner above the form — worded as "stops cycles in
+  flight", with "carries on next window" added for the second — and the banner
+  carries a button, *Let the cycle finish instead*, that puts it back to the mode
+  that loses no work. Same for `bypassPermissions`,
   which gets the danger banner it gets everywhere else.
 - **It does not let you save something that cannot run.** A template with no
   cycle limit and no time limit is refused when you save it, with the same
@@ -377,8 +379,8 @@ The **Branches** page lists slot pressure per repository as soon as the first
 checkout is retired, with each one's uncommitted path count, so this is visible
 long before it stops a run. Commit or purge from that page to free them.
 
-You can turn this off per run with **Isolation → work in the folder itself**, in
-which case it behaves like the case below.
+You can turn this off per run with **Where Claude writes → This folder** (the
+other option is *Own branch*), in which case it behaves like the case below.
 
 **Anything else — they take turns.** A plain folder has no repository to branch
 from, so a second run on it is **queued**, not refused, and starts on its own when
