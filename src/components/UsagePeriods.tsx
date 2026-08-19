@@ -149,7 +149,7 @@ export function UsagePeriods({
   const current = series.buckets[0];
   if (!current) {
     return (
-      <Card className="mb-4">
+      <Card emphasis="quiet" className="mb-4">
         {title}
         <Empty>No usage recorded yet.</Empty>
       </Card>
@@ -160,7 +160,11 @@ export function UsagePeriods({
   const noun = NOUN[series.granularity];
 
   return (
-    <Card className="mb-4">
+    // Quiet, and both states say so together: this is history, under a band
+    // whose lead is `Rate and totals`. A card that leads its band and one that
+    // does not is the whole of what emphasis says here, and a card that changed
+    // weight when its history emptied would be saying something else.
+    <Card emphasis="quiet" className="mb-4">
       {title}
 
       {/* The direct answer, above the history: what this period has cost and

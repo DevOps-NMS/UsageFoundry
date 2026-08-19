@@ -37,7 +37,10 @@ export function LiveTelemetry({
   const unlisted = telemetry.runCount - telemetry.runs.length;
 
   return (
-    <Card emphasis="quiet" className="mb-4">
+    // It leads its own band on the dashboard and is the only card in it, so
+    // `quiet` said "scaffolding" about the one figure on the page that moves
+    // while a work cycle is running.
+    <Card className="mb-4">
       <CardTitle>
         Live from runs — first-party
         {telemetry.workingRunCount > 0 && (

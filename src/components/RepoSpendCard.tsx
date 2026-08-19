@@ -83,7 +83,11 @@ export function RepoSpendCard() {
   const estimated = data?.totals.spentEstUSD ?? 0;
 
   return (
-    <Card className="mb-4">
+    // Quiet: `This install, last N hours` leads the band these two share, and
+    // it is the one with a ceiling behind it that stops every agent when it
+    // trips. This is a report that reaches no guard, which is the same fact the
+    // absent meter states.
+    <Card emphasis="quiet" className="mb-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
         <CardTitle className="mb-0">What each repository cost</CardTitle>
         <SegmentedControl

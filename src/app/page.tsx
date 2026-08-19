@@ -148,6 +148,50 @@ function ListValue({ children }: { children: ReactNode }) {
   );
 }
 
+/**
+ * A named band of cards, and the one reading every card in it is drawn from.
+ *
+ * This page carries three readings of overlapping money — our price table over
+ * every transcript on the machine, what runs this app started reported
+ * spending, and Claude Code's own per-request telemetry — and any sum of two of
+ * them double-counts. That prohibition used to be defended by a paragraph at
+ * the foot of each card, so every card that landed had to re-derive it and six
+ * of the eight landed with a separate feature. As a boundary it is structural:
+ * a new card lands in the band whose source it reads, and a total drawn across
+ * one is visibly wrong rather than merely undocumented. Each card keeps its own
+ * footnote, which is now belt as well as braces.
+ *
+ * **No figure, meter, badge, total or comparison may be drawn at this level.**
+ * A number beside a band's name is a number about two cards at once, which is
+ * the arithmetic the bands exist to make impossible.
+ *
+ * A `div` with an `h2` in it, never a `<section>`: `section + section
+ * { margin-top: 24px }` is still in the legacy layer and would fire between
+ * every pair of these, which reads as a spacing decision somebody made rather
+ * than as a stylesheet rule nobody meant to trigger. `Card` documents the same
+ * trap from the other side.
+ */
+function SourceRegion({
+  heading,
+  statement,
+  children,
+}: {
+  heading: string;
+  /** Where the figures below come from, in one sentence. Never a figure. */
+  statement: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="mt-6">
+      <h2 className="text-sm font-semibold text-ink">{heading}</h2>
+      <p className="mt-0.5 mb-3 max-w-[68ch] text-xs text-ink-muted">
+        {statement}
+      </p>
+      {children}
+    </div>
+  );
+}
+
 /** Middot between metadata items, hidden from assistive tech as pure ornament. */
 function Sep() {
   return (
@@ -683,6 +727,55 @@ export default function Dashboard() {
                 whichever is highest.
               </div>
             )}
+
+            {/* The last line of the card it is about, and it renders always.
+                It spent a year as the fifth of five stacked notices, four of
+                which appear only when something is wrong — so the one standing
+                fact on the page was read as a fourth exception and skipped
+                with them. It is a caveat about these two meters and about
+                nothing else on the page, and this is where they are. */}
+            <div>
+              <strong className="font-medium text-ink">
+                Costs and volumes here cover Claude Code only.
+              </strong>{" "}
+              Your 5-hour and weekly limits are shared with{" "}
+              <strong className="font-medium text-ink">Cowork</strong>, Claude
+              Desktop, web and mobile, none of which write anything locally — so
+              treat every dollar and token figure on this page as a{" "}
+              <em>floor</em> on your real consumption.
+              {/* Whether that blind spot also reaches the percentages is the
+                  whole difference this reading makes, and it decides which of
+                  the two pieces of advice below is the right one — reserving
+                  headroom against a figure that already counts every surface
+                  would subtract the same allowance twice. */}
+              {planPercentages ? (
+                <>
+                  {" "}
+                  The <em>percentages</em> do not have that gap: they are
+                  Anthropic&rsquo;s own, for the whole account. Reserved
+                  headroom no longer applies to them and is not being
+                  subtracted.
+                </>
+              ) : meta.reservedHeadroomFraction > 0 ? (
+                <>
+                  {" "}
+                  The percentages have the same gap. You have reserved{" "}
+                  <strong className="font-medium text-ink">
+                    {fmtPct(meta.reservedHeadroomFraction)}
+                  </strong>{" "}
+                  of each window for it, so the ceilings above are reduced
+                  accordingly.
+                </>
+              ) : (
+                <>
+                  {" "}
+                  So do the percentages.{" "}
+                  <Link href="/settings">Reserve headroom</Link> if you use
+                  those too — otherwise a guard can permit a run while your real
+                  window is already close to full.
+                </>
+              )}
+            </div>
           </div>
         </div>
       </Card>
@@ -778,346 +871,327 @@ export default function Dashboard() {
         </Notice>
       )}
 
-      {/* Always shown — the blind spot is structural, not a transient state.
-          Rendered quiet so the conditional warnings above can outrank it;
-          three equally loud warn blocks trained the eye to skip all three. */}
-      <Notice quiet>
-        <strong>Costs and volumes here cover Claude Code only.</strong> Your
-        5-hour and weekly limits are shared with <strong>Cowork</strong>, Claude
-        Desktop, web and mobile, none of which write anything locally — so treat
-        every dollar and token figure on this page as a <em>floor</em> on your
-        real consumption.
-        {/* Whether that blind spot also reaches the percentages is the whole
-            difference this reading makes, and it decides which of the two
-            pieces of advice below is the right one — reserving headroom
-            against a figure that already counts every surface would subtract
-            the same allowance twice. */}
-        {planPercentages ? (
-          <>
-            {" "}
-            The <em>percentages</em> do not have that gap: they are Anthropic&rsquo;s
-            own, for the whole account. Reserved headroom no longer applies to
-            them and is not being subtracted.
-          </>
-        ) : meta.reservedHeadroomFraction > 0 ? (
-          <>
-            {" "}
-            The percentages have the same gap. You have reserved{" "}
-            <strong>{fmtPct(meta.reservedHeadroomFraction)}</strong> of each
-            window for it, so the ceilings above are reduced accordingly.
-          </>
-        ) : (
-          <>
-            {" "}
-            So do the percentages. <Link href="/settings">Reserve headroom</Link>{" "}
-            if you use those too — otherwise a guard can permit a run while your
-            real window is already close to full.
-          </>
-        )}
-      </Notice>
+      {/* The four cards this page's own price table produced. The two meters
+          above are the same reading; these are what it breaks down into. */}
+      <SourceRegion
+        heading="Your subscription"
+        statement="This app’s price table over every Claude Code transcript on this machine."
+      >
+        {/* Four equally-weighted bordered boxes said these four readings were as
+            important as the meters above them, which none of them is. As a
+            grouped list they read as what they are: derived figures about the
+            window the card above measures. */}
+        <Card className="mb-4">
+          <CardTitle>Rate and totals</CardTitle>
+          <ListGroup>
+            {/* The unit rides in the description rather than beside the figure,
+                so the values stay one column of comparable numbers — a dollar
+                figure, a duration, a percentage, a dollar figure. */}
+            <ListRow label="Burn rate" description="Per hour, trailing 60 minutes">
+              <ListValue>{fmtUSD(s.burnCostPerHour)}</ListValue>
+            </ListRow>
 
-      {/* Sits under the session meter because it is a footnote to it: the same
-          five hours, read a different way. Absent entirely when agent
-          self-reporting is off or nothing has reported — the same rule the run
-          page's telemetry card follows. */}
-      {telemetry && <LiveTelemetry telemetry={telemetry} now={s.now} />}
+            <ListRow
+              label="Projected exhaustion"
+              description={
+                s.projectedExhaustionAt ? (
+                  <span
+                    className="tabular-nums"
+                    title={new Date(s.projectedExhaustionAt).toLocaleString()}
+                  >
+                    At this burn rate, around{" "}
+                    {fmtDateTime(s.projectedExhaustionAt)}
+                  </span>
+                ) : noConfiguredCeilings ? (
+                  "Needs a configured ceiling"
+                ) : (
+                  "Not projected to run out"
+                )
+              }
+            >
+              <ListValue>
+                {s.projectedExhaustionAt
+                  ? fmtDuration(Math.max(0, s.projectedExhaustionAt - s.now))
+                  : "—"}
+              </ListValue>
+            </ListRow>
 
-      {/* The one ceiling on this page that is about the *install* rather than
-          about a window Anthropic enforces, so it sits below the meters and
-          outside them: its span is a rolling 24 hours, its figures are money
-          this app recorded spending rather than our price table over every
-          transcript on the machine, and the two must never be added. Always
-          shown — with no ceiling configured the meter is the hatched
-          indeterminate one, which is this app's standing answer to a reading
-          with no denominator, and the hint is where the operator finds out the
-          limit exists at all. */}
-      <Card emphasis="quiet" className="mb-4">
-        <CardTitle>This install, last {install.windowHours} hours</CardTitle>
-        <Meter
-          label="Spent by everything this app runs"
-          fraction={
-            install.limitUSD === null ? null : install.spentUSD / install.limitUSD
+            {/* The second clause used to read "which is why the dollar figures
+                track work and the token counts do not", and this install's own
+                telemetry says otherwise: across a week of run cycles, cache reads
+                were 60% of the *bill* as well as 96% of the tokens, with the
+                1-hour cache write another 26% and generated output 14%. Cheap per
+                token is not the same as small, and a reader told the dollars track
+                work will look for the expensive run rather than the long one. */}
+            <ListRow
+              label="Cache reads"
+              description="Share of all tokens, billed at 0.1× — cheap each, and still the largest share of the bill once conversations run long"
+            >
+              <ListValue>{fmtPct(cacheShare)}</ListValue>
+            </ListRow>
+
+            <ListRow
+              label="Lifetime recorded"
+              description="Equivalent API cost, all local transcripts"
+            >
+              <ListValue>{fmtUSD(s.totalCostUSD)}</ListValue>
+            </ListRow>
+          </ListGroup>
+        </Card>
+
+        {/* History, so it sits below everything that describes right now. The
+            meters answer whether a run can start; this answers what the last
+            fortnight cost. */}
+        <UsagePeriods
+          series={periods[granularity]}
+          // The picker is rendered here rather than inside the card because that
+          // component is unit-tested against the plain CommonJS emits, where the
+          // path alias `SegmentedControl` reaches `Icon` through does not
+          // resolve. The page already owns which granularity is selected.
+          control={
+            <SegmentedControl
+              options={PERIOD_OPTIONS}
+              value={granularity}
+              onChange={setGranularity}
+              label="Period length"
+            />
           }
-          upperFraction={
-            install.limitUSD === null
-              ? null
-              : install.spentGuardUSD / install.limitUSD
-          }
-          unknownHint="no install limit set"
-          detail={
-            install.limitUSD === null
-              ? `${fmtUSD(install.spentGuardUSD)} spent`
-              : `${fmtUSD(install.spentGuardUSD)} of ${fmtUSD(install.limitUSD)}`
-          }
+          reservedHeadroomFraction={meta.reservedHeadroomFraction}
         />
-        <Hint>
-          {install.limitUSD === null ? (
-            <>
-              Every guard in this app bounds one run, one workflow or one chat
-              turn. Nothing bounds the total until you{" "}
-              <Link href="/settings">set an install limit</Link>.
-            </>
+
+        <Card emphasis="quiet" className="mb-4">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <CardTitle className="mb-0">
+              Where it went — {s.weekly.label.toLowerCase()}
+            </CardTitle>
+            {/* Was a hand-rolled pill strip claiming `role="tablist"`. The kit's
+                segmented control is the native idiom for one choice from a short
+                fixed set, and it owns the roving tabindex and the arrow keys that
+                used to be written out here. */}
+            <SegmentedControl
+              options={DIMENSION_OPTIONS}
+              value={dimension}
+              onChange={setDimension}
+              label="Breakdown dimension"
+            />
+          </div>
+
+          {/* No tabpanel role and no tabindex: a radiogroup is not a tablist, and
+              a focusable region with nothing focusable inside it is a dead tab
+              stop. The list names itself with a caption instead. */}
+          {current.rows.length === 0 ? (
+            <Empty>No usage in this window.</Empty>
           ) : (
-            <>
-              Runs, workflow blocks and chat turns together. A run still going,
-              or one that finished inside the window, counts its whole spend —
-              which over-counts rather than under-counts, because this is a
-              ceiling. Not comparable with the meters above: those measure every
-              transcript on this machine against Anthropic&rsquo;s windows.
-            </>
+            <ListView box="capped">
+              <Table stack>
+                <caption className="sr-only">
+                  Cost by {DIMENSION_LABEL[dimension].toLowerCase()} over{" "}
+                  {s.weekly.label.toLowerCase()}, highest first
+                </caption>
+                <THead>
+                  <tr>
+                    <Th className={STICKY_HEAD}>{DIMENSION_LABEL[dimension]}</Th>
+                    <Th num className={STICKY_HEAD}>
+                      Cost
+                    </Th>
+                    <Th num className={STICKY_HEAD}>
+                      Share
+                    </Th>
+                  </tr>
+                </THead>
+                <TBody>
+                  {/* Every turn lands in some bucket — including explicit
+                      "(main thread)" / "(no skill)" rows — so the column adds to
+                      100% instead of quietly omitting a remainder. */}
+                  {current.rows.slice(0, MAX_BREAKDOWN_ROWS).map((r) => (
+                    <Tr key={r.label}>
+                      {/* No label: the bucket's own name is what the record is,
+                          and the picker above already says which of the five
+                          dimensions is being named. `break-all` below the
+                          breakpoint because a project bucket is a path, which has
+                          no space to wrap at and would take the pane sideways. */}
+                      <Td className="max-md:break-all">
+                        <span className="mono">{r.label}</span>
+                        {r.mark && (
+                          <>
+                            {" "}
+                            <Badge tone={r.mark.tone}>{r.mark.text}</Badge>
+                          </>
+                        )}
+                      </Td>
+                      <Td num label="Cost">
+                        {fmtUSD(r.cost)}
+                      </Td>
+                      <Td num label="Share">
+                        {s.weekly.costUSD > 0
+                          ? fmtPct(r.cost / s.weekly.costUSD)
+                          : "—"}
+                      </Td>
+                    </Tr>
+                  ))}
+                </TBody>
+              </Table>
+            </ListView>
           )}
-        </Hint>
-      </Card>
 
-      {/* Four equally-weighted bordered boxes said these four readings were as
-          important as the meters above them, which none of them is. As a
-          grouped list they read as what they are: derived figures about the
-          window the card above measures. */}
-      <Card emphasis="quiet" className="mb-4">
-        <CardTitle>Rate and totals</CardTitle>
-        <ListGroup>
-          {/* The unit rides in the description rather than beside the figure,
-              so the values stay one column of comparable numbers — a dollar
-              figure, a duration, a percentage, a dollar figure. */}
-          <ListRow label="Burn rate" description="Per hour, trailing 60 minutes">
-            <ListValue>{fmtUSD(s.burnCostPerHour)}</ListValue>
-          </ListRow>
+          {/* Rows are cost-descending, so the tail really is the cheap end — but
+              a list that stops at twelve with nothing said reads as the whole
+              set. Same rule a shortened diff follows. */}
+          {breakdownOmitted > 0 && (
+            <div className="mt-2 text-xs tabular-nums text-ink-muted">
+              {breakdownOmitted} cheaper{" "}
+              {breakdownOmitted === 1 ? "row is" : "rows are"} in the totals above
+              but not listed.
+            </div>
+          )}
+          {current.hint && (
+            <div className="mt-2 text-xs text-ink-muted">{current.hint}</div>
+          )}
+        </Card>
 
-          <ListRow
-            label="Projected exhaustion"
-            description={
-              s.projectedExhaustionAt ? (
-                <span
-                  className="tabular-nums"
-                  title={new Date(s.projectedExhaustionAt).toLocaleString()}
-                >
-                  At this burn rate, around{" "}
-                  {fmtDateTime(s.projectedExhaustionAt)}
-                </span>
-              ) : noConfiguredCeilings ? (
-                "Needs a configured ceiling"
-              ) : (
-                "Not projected to run out"
-              )
-            }
-          >
-            <ListValue>
-              {s.projectedExhaustionAt
-                ? fmtDuration(Math.max(0, s.projectedExhaustionAt - s.now))
-                : "—"}
-            </ListValue>
-          </ListRow>
-
-          {/* The second clause used to read "which is why the dollar figures
-              track work and the token counts do not", and this install's own
-              telemetry says otherwise: across a week of run cycles, cache reads
-              were 60% of the *bill* as well as 96% of the tokens, with the
-              1-hour cache write another 26% and generated output 14%. Cheap per
-              token is not the same as small, and a reader told the dollars track
-              work will look for the expensive run rather than the long one. */}
-          <ListRow
-            label="Cache reads"
-            description="Share of all tokens, billed at 0.1× — cheap each, and still the largest share of the bill once conversations run long"
-          >
-            <ListValue>{fmtPct(cacheShare)}</ListValue>
-          </ListRow>
-
-          <ListRow
-            label="Lifetime recorded"
-            description="Equivalent API cost, all local transcripts"
-          >
-            <ListValue>{fmtUSD(s.totalCostUSD)}</ListValue>
-          </ListRow>
-        </ListGroup>
-      </Card>
-
-      {/* History, so it sits below everything that describes right now. The
-          meters answer whether a run can start; this answers what the last
-          fortnight cost. */}
-      <UsagePeriods
-        series={periods[granularity]}
-        // The picker is rendered here rather than inside the card because that
-        // component is unit-tested against the plain CommonJS emits, where the
-        // path alias `SegmentedControl` reaches `Icon` through does not
-        // resolve. The page already owns which granularity is selected.
-        control={
-          <SegmentedControl
-            options={PERIOD_OPTIONS}
-            value={granularity}
-            onChange={setGranularity}
-            label="Period length"
-          />
-        }
-        reservedHeadroomFraction={meta.reservedHeadroomFraction}
-      />
-
-      {/* After the transcript breakdowns and before the footnotes, because it
-          answers a different question with a different source: those slice the
-          window above by what produced it, this one says what each repository's
-          own runs reported spending. The two are never added — see the card. */}
-      <RepoSpendCard />
-
-      <Card className="mb-4">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <CardTitle className="mb-0">
-            Where it went — {s.weekly.label.toLowerCase()}
-          </CardTitle>
-          {/* Was a hand-rolled pill strip claiming `role="tablist"`. The kit's
-              segmented control is the native idiom for one choice from a short
-              fixed set, and it owns the roving tabindex and the arrow keys that
-              used to be written out here. */}
-          <SegmentedControl
-            options={DIMENSION_OPTIONS}
-            value={dimension}
-            onChange={setDimension}
-            label="Breakdown dimension"
-          />
-        </div>
-
-        {/* No tabpanel role and no tabindex: a radiogroup is not a tablist, and
-            a focusable region with nothing focusable inside it is a dead tab
-            stop. The list names itself with a caption instead. */}
-        {current.rows.length === 0 ? (
-          <Empty>No usage in this window.</Empty>
-        ) : (
+        <Card emphasis="quiet" className="mb-4">
+          <CardTitle>Recent 5-hour blocks</CardTitle>
           <ListView box="capped">
             <Table stack>
               <caption className="sr-only">
-                Cost by {DIMENSION_LABEL[dimension].toLowerCase()} over{" "}
-                {s.weekly.label.toLowerCase()}, highest first
+                Each recorded 5-hour window, newest first
               </caption>
               <THead>
                 <tr>
-                  <Th className={STICKY_HEAD}>{DIMENSION_LABEL[dimension]}</Th>
+                  <Th className={STICKY_HEAD}>Started</Th>
+                  <Th num className={STICKY_HEAD}>
+                    Tokens
+                  </Th>
                   <Th num className={STICKY_HEAD}>
                     Cost
                   </Th>
                   <Th num className={STICKY_HEAD}>
-                    Share
+                    Turns
                   </Th>
+                  <Th className={STICKY_HEAD}>Models</Th>
                 </tr>
               </THead>
               <TBody>
-                {/* Every turn lands in some bucket — including explicit
-                    "(main thread)" / "(no skill)" rows — so the column adds to
-                    100% instead of quietly omitting a remainder. */}
-                {current.rows.slice(0, MAX_BREAKDOWN_ROWS).map((r) => (
-                  <Tr key={r.label}>
-                    {/* No label: the bucket's own name is what the record is,
-                        and the picker above already says which of the five
-                        dimensions is being named. `break-all` below the
-                        breakpoint because a project bucket is a path, which has
-                        no space to wrap at and would take the pane sideways. */}
-                    <Td className="max-md:break-all">
-                      <span className="mono">{r.label}</span>
-                      {r.mark && (
+                {s.blocks.slice(0, MAX_BLOCK_ROWS).map((b) => (
+                  <Tr key={b.startsAt}>
+                    {/* No label: when the window started is what identifies the
+                        block, and the "live" badge beside it is part of that. */}
+                    <Td className="whitespace-nowrap tabular-nums">
+                      <span title={new Date(b.startsAt).toLocaleString()}>
+                        {fmtDateTime(b.startsAt)}
+                      </span>
+                      {b.isActive && (
                         <>
                           {" "}
-                          <Badge tone={r.mark.tone}>{r.mark.text}</Badge>
+                          <Badge tone="ok">live</Badge>
                         </>
                       )}
                     </Td>
-                    <Td num label="Cost">
-                      {fmtUSD(r.cost)}
+                    <Td num label="Tokens">
+                      {fmtTokens(
+                        b.agg.tokens.input +
+                          b.agg.tokens.output +
+                          b.agg.tokens.cacheRead +
+                          b.agg.tokens.cacheWrite5m +
+                          b.agg.tokens.cacheWrite1h,
+                      )}
                     </Td>
-                    <Td num label="Share">
-                      {s.weekly.costUSD > 0
-                        ? fmtPct(r.cost / s.weekly.costUSD)
-                        : "—"}
+                    <Td num label="Cost">
+                      {fmtUSD(b.agg.costUSD)}
+                    </Td>
+                    <Td num label="Turns">
+                      {b.agg.entryCount}
+                    </Td>
+                    {/* Above the value: a window with three model families in it
+                        is a longer string than anything else in the row. */}
+                    <Td label="Models" labelPlacement="above" className="mono">
+                      {b.models.map((m) => m.replace("claude-", "")).join(", ")}
                     </Td>
                   </Tr>
                 ))}
               </TBody>
             </Table>
           </ListView>
-        )}
+          {blocksOmitted > 0 && (
+            <div className="mt-2 text-xs tabular-nums text-ink-muted">
+              {blocksOmitted} older{" "}
+              {blocksOmitted === 1 ? "block is" : "blocks are"} recorded but not
+              listed.
+            </div>
+          )}
+        </Card>
+      </SourceRegion>
 
-        {/* Rows are cost-descending, so the tail really is the cheap end — but
-            a list that stops at twelve with nothing said reads as the whole
-            set. Same rule a shortened diff follows. */}
-        {breakdownOmitted > 0 && (
-          <div className="mt-2 text-xs tabular-nums text-ink-muted">
-            {breakdownOmitted} cheaper{" "}
-            {breakdownOmitted === 1 ? "row is" : "rows are"} in the totals above
-            but not listed.
-          </div>
-        )}
-        {current.hint && (
-          <div className="mt-2 text-xs text-ink-muted">{current.hint}</div>
-        )}
-      </Card>
+      <SourceRegion
+        heading="What this app spent"
+        statement="Money runs this app started reported spending."
+      >
+        {/* The one ceiling on this page that is about the *install* rather than
+            about a window Anthropic enforces, so it sits outside the meters: its
+            span is a rolling 24 hours, its figures are money this app recorded
+            spending rather than our price table over every transcript on the
+            machine, and the two must never be added. Always shown — with no
+            ceiling configured the meter is the hatched indeterminate one, which
+            is this app's standing answer to a reading with no denominator, and
+            the hint is where the operator finds out the limit exists at all. */}
+        <Card className="mb-4">
+          <CardTitle>This install, last {install.windowHours} hours</CardTitle>
+          <Meter
+            label="Spent by everything this app runs"
+            fraction={
+              install.limitUSD === null ? null : install.spentUSD / install.limitUSD
+            }
+            upperFraction={
+              install.limitUSD === null
+                ? null
+                : install.spentGuardUSD / install.limitUSD
+            }
+            unknownHint="no install limit set"
+            detail={
+              install.limitUSD === null
+                ? `${fmtUSD(install.spentGuardUSD)} spent`
+                : `${fmtUSD(install.spentGuardUSD)} of ${fmtUSD(install.limitUSD)}`
+            }
+          />
+          <Hint>
+            {install.limitUSD === null ? (
+              <>
+                Every guard in this app bounds one run, one workflow or one chat
+                turn. Nothing bounds the total until you{" "}
+                <Link href="/settings">set an install limit</Link>.
+              </>
+            ) : (
+              <>
+                Runs, workflow blocks and chat turns together. A run still going,
+                or one that finished inside the window, counts its whole spend —
+                which over-counts rather than under-counts, because this is a
+                ceiling. Not comparable with the meters above: those measure every
+                transcript on this machine against Anthropic&rsquo;s windows.
+              </>
+            )}
+          </Hint>
+        </Card>
 
-      <Card emphasis="quiet">
-        <CardTitle>Recent 5-hour blocks</CardTitle>
-        <ListView box="capped">
-          <Table stack>
-            <caption className="sr-only">
-              Each recorded 5-hour window, newest first
-            </caption>
-            <THead>
-              <tr>
-                <Th className={STICKY_HEAD}>Started</Th>
-                <Th num className={STICKY_HEAD}>
-                  Tokens
-                </Th>
-                <Th num className={STICKY_HEAD}>
-                  Cost
-                </Th>
-                <Th num className={STICKY_HEAD}>
-                  Turns
-                </Th>
-                <Th className={STICKY_HEAD}>Models</Th>
-              </tr>
-            </THead>
-            <TBody>
-              {s.blocks.slice(0, MAX_BLOCK_ROWS).map((b) => (
-                <Tr key={b.startsAt}>
-                  {/* No label: when the window started is what identifies the
-                      block, and the "live" badge beside it is part of that. */}
-                  <Td className="whitespace-nowrap tabular-nums">
-                    <span title={new Date(b.startsAt).toLocaleString()}>
-                      {fmtDateTime(b.startsAt)}
-                    </span>
-                    {b.isActive && (
-                      <>
-                        {" "}
-                        <Badge tone="ok">live</Badge>
-                      </>
-                    )}
-                  </Td>
-                  <Td num label="Tokens">
-                    {fmtTokens(
-                      b.agg.tokens.input +
-                        b.agg.tokens.output +
-                        b.agg.tokens.cacheRead +
-                        b.agg.tokens.cacheWrite5m +
-                        b.agg.tokens.cacheWrite1h,
-                    )}
-                  </Td>
-                  <Td num label="Cost">
-                    {fmtUSD(b.agg.costUSD)}
-                  </Td>
-                  <Td num label="Turns">
-                    {b.agg.entryCount}
-                  </Td>
-                  {/* Above the value: a window with three model families in it
-                      is a longer string than anything else in the row. */}
-                  <Td label="Models" labelPlacement="above" className="mono">
-                    {b.models.map((m) => m.replace("claude-", "")).join(", ")}
-                  </Td>
-                </Tr>
-              ))}
-            </TBody>
-          </Table>
-        </ListView>
-        {blocksOmitted > 0 && (
-          <div className="mt-2 text-xs tabular-nums text-ink-muted">
-            {blocksOmitted} older{" "}
-            {blocksOmitted === 1 ? "block is" : "blocks are"} recorded but not
-            listed.
-          </div>
-        )}
-      </Card>
+        {/* A different question with a different source: the cards above
+            slice the transcript window by what produced it, this one says what
+            each repository's own runs reported spending. The two are never
+            added — see the card. */}
+        <RepoSpendCard />
+      </SourceRegion>
+
+      {/* A third reading, and the only one that moves *during* a work cycle:
+          a run reports its own spend when its cycle ends, so a run in flight
+          reads $0 on the band above until then. Absent entirely when agent
+          self-reporting is off or nothing has reported — the gate is the
+          setting, never the guard figure. */}
+      {telemetry && (
+        <SourceRegion
+          heading="Live from runs"
+          statement="Claude Code’s own per-request cost, for agents this app spawned."
+        >
+          <LiveTelemetry telemetry={telemetry} now={s.now} />
+        </SourceRegion>
+      )}
     </>
   );
 }
