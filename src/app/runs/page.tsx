@@ -20,6 +20,7 @@ import { StatusMark } from "@/components/StatusMark";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { ListView, STICKY_HEAD } from "@/components/ui/ListView";
 import { Notice } from "@/components/ui/Notice";
 import {
@@ -729,18 +730,17 @@ export default function RunsPage() {
         )}
       </div>
 
+      {/* The kit's fold, so the 44px target and the reason a `<summary>` cannot
+          buy it with `max-md:min-h-11` are stated once in `ui/Disclosure`
+          rather than here. What stays the caller's is the desktop box —
+          `mb-3 py-2` is this page's own rhythm — and the count, which renders
+          as `Older runs (n)` exactly as before. */}
       {older.length > 0 && (
-        <details>
-          {/* No `display` utility here on purpose: anything but `list-item`
-              drops the native disclosure triangle, and the triangle is the
-              only thing saying this opens — which is also why the 44px target
-              below the breakpoint is bought with padding rather than with the
-              `max-md:min-h-11` every other control here takes: a min-height on
-              a list-item leaves the word and its triangle at the top of a box
-              the finger is aiming at the middle of. */}
-          <summary className="ui-transition mb-3 cursor-pointer py-2 max-md:py-3.5 text-sm font-semibold text-ink-muted marker:text-ink-faint hover:text-ink">
-            Older runs ({older.length})
-          </summary>
+        <Disclosure
+          summary="Older runs"
+          count={older.length}
+          summaryClassName="mb-3 py-2 text-sm font-semibold text-ink-muted"
+        >
           <div className="mb-3">
             <SegmentedControl
               label="Show older runs by how they ended"
@@ -774,7 +774,7 @@ export default function RunsPage() {
               not page beyond that yet.
             </p>
           )}
-        </details>
+        </Disclosure>
       )}
     </>
   );
