@@ -973,6 +973,7 @@ per-file conflict summary unchanged.
    validation list.
 5. `/runs/[id]`: three region headings exist, at `text-sm font-semibold`, and
    every one of the eleven blocks is under exactly one of them or in region 1.
+   **No region is a `<section>` element** — see §5.11.
 6. `/runs/[id]`: **no figure is rendered at the level of `What it has spent`**,
    and the three footnotes are byte-identical to today.
 7. `/runs/[id]`: `In your own terminal` renders inside a `Disclosure`, with
@@ -1513,7 +1514,8 @@ sentence is load-bearing.
 ### Acceptance criteria for run (e)
 
 1. `/` renders three region headings; every card is under exactly one region
-   except card 1; **no figure of any kind is rendered at region level**.
+   except card 1; **no figure of any kind is rendered at region level**; **no
+   region is a `<section>` element** — see §5.11.
 2. `/` renders exactly one `primary` card, and card 3 `This install, last N
    hours` is `default`.
 3. `/` renders `Costs and volumes here cover Claude Code only.` inside card 1
@@ -1921,6 +1923,38 @@ change in §3 must survive at 390px as well as at 1440px.**
   payload shape is a security constraint with a test asserting the absence of a
   prompt, a folder path, a setting or a token. Never add a field there.
   `src/middleware.ts`, `src/lib/status.ts`, `src/lib/health.ts`.
+
+### 5.11 The one CSS trap the new region headings will walk into
+
+Three of this document's changes introduce a *region*: E1 (the dashboard's
+three), C6 (the run inspector's three) and, loosely, D4 (the editor's block
+groups). Every one of them will tempt a build run to reach for `<section>`.
+
+**Do not use `<section>` for a region.** `src/app/globals.css:621` still carries
+
+```css
+section + section { margin-top: 24px; }
+```
+
+in the `@layer legacy` block. It is the exact rule `Card.tsx:29-32` records
+being bitten by — *"The legacy stylesheet still carries `section + section
+{ margin-top: 24px }`, which fired between sibling cards inside a grid and
+pushed every card but the first down 24px. A card is a surface anyway, not a
+document section."*
+
+So a region is a `<div>` with an `<h2>` inside it, exactly as `Card` is a `div`.
+The failure if you ignore this is the signature of everything else in §5:
+nothing throws, nothing fails to typecheck, and every region after the first
+sits 24px lower than the one above — which reads as a spacing decision somebody
+made rather than as a stylesheet rule nobody meant to trigger.
+
+The settings page's local `Section` (`settings/page.tsx:422-475`) *does* render
+a `<section id>`, because its sections want a hash target and do want the
+separation. It is the exception, it already exists, and run (b) leaves it alone.
+
+The legacy block "shrinks as pages move onto the kit. When it is empty, delete
+it" — this rule is one of the reasons it is not empty yet. Do not delete it in
+any of these five runs; nothing here is scoped to prove it unused.
 
 ---
 
