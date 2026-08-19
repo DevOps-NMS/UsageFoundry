@@ -138,7 +138,16 @@ export function UsagePeriods({
 }) {
   const title = (
     <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-      <CardTitle className="mb-0">Usage by period</CardTitle>
+      {/* `-mb-3` on a wrapper, where this said `className="mb-0"` on the title
+          and that never did anything: Tailwind emits a numeric utility's
+          values ascending, so `CardTitle`'s own `mb-3` wins whatever the call
+          site writes. The row already owns the 12px below it, so the title's
+          margin was a second one inside the line — lifting the title off the
+          control it shares that line with, and doubling the space between the
+          two once the row wraps. */}
+      <div className="-mb-3">
+        <CardTitle>Usage by period</CardTitle>
+      </div>
       {control}
     </div>
   );

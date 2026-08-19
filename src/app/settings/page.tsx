@@ -1114,7 +1114,7 @@ function ClaudeAccount() {
             container it may not be able to reach the page at all. */}
         <p className="mono mt-2 break-all text-xs text-ink-faint">{linkUrl}</p>
         <Field
-          className="mt-4 mb-0"
+          className="mt-4"
           label="Code"
           htmlFor="claude-auth-code"
           error={flowError}
