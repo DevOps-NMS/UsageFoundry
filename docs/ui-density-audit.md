@@ -427,9 +427,14 @@ migrates **only the one call site inside the kit**:
 The other six call sites are migrated by whichever run owns their page
 (§3.B–§3.E). Run (a) does **not** touch them.
 
-`Icon.tsx:33-34` already carries `chevron-right` and `chevron-down`, under a
-comment at `:32` reading exactly `// Disclosure.`, with no consumer anywhere in
-`src/`. The glyphs were drawn for this component and it was never built. Use them, or use the native
+`Icon.tsx:33-34` carries `chevron-right` and `chevron-down` under a comment at
+`:32` reading exactly `// Disclosure.`. **`chevron-right` has no consumer
+anywhere in `src/`; `chevron-down` has exactly one** — the chat's
+jump-to-latest button at `chat/page.tsx:746`. So the disclosure glyph was
+drawn for a component that was never built, and the comment above it has been
+wrong ever since. `Disclosure` may use those glyphs or leave the native
+`<summary>` marker alone; either way **run (a) owns `Icon.tsx`** and corrects
+that comment so it names what the glyphs are actually for. Use them, or use the native
 `<summary>` marker and delete the comment — but do not leave both.
 
 ### 3.A.3 `ListView` — extract it, and make the difference typed
@@ -444,8 +449,13 @@ Five files define a `LIST_VIEW` const. **Four distinct strings, none exported:**
 | `src/components/LiveTelemetry.tsx:27-28` | `overflow-auto max-md:overflow-visible rounded-sm border border-line` — **no `max-h-80`** |
 | `src/app/runs/page.tsx:112` | `rounded-lg border border-line bg-surface` — **no cap, no scroll at all** |
 
-A matching `STICKY_HEAD` is defined five times beside them, three of which are
-the same string character for character.
+A matching `STICKY_HEAD` is defined five times beside them. **Four are the
+same string character for character** — `page.tsx:160-161`,
+`UsagePeriods.tsx:112-113`, `LiveTelemetry.tsx:30-31` and
+`runs/page.tsx:114-115`, all `"sticky top-0 z-10 bg-surface
+shadow-[inset_0_-1px_0_var(--border)]"`. The fifth, `RepoSpendCard.tsx:54`, is
+`"sticky top-0 z-10 bg-surface"` — the same string **without the hairline
+shadow**.
 
 The last two differences are *deliberate and documented* — the runs list is
 not a scroll container because its sticky header must pin to the content pane
@@ -550,7 +560,7 @@ them a sticky footer with `Discard` and one `Save` (`:2798-2847`).
 
 | Section | Lines | Emphasis | Settings controls |
 |---|---|---|---|
-| `Subscription limits` | 1472–1961 | **`primary`** | 10 (+2 conditional) |
+| `Subscription limits` | 1472–1961 | **`primary`** | 10, one conditional |
 | `Runs` | 1963–2228 | `default` | 10 |
 | `Default guard set` | 2230–2427 | `default` | 7 |
 | `Unattended runs` | 2429–2536 | `default` | 5 |
@@ -558,10 +568,13 @@ them a sticky footer with `Discard` and one `Save` (`:2798-2847`).
 | `Storage` | 2608–2692 | `default` | 3 (+ a read-only `ListGroup`) |
 | `Prompts` | 2694–2773 | `default` | 4 `Textarea`s |
 
-**38 always-visible settings controls** (23 `Input`, 5 `Textarea`, 5 `Switch`,
-2 `Select`, 4 `SegmentedControl`) against `EDITABLE_PATHS`' 38 paths, plus 7
-chips, 2 footer buttons and up to 3 account buttons. **≈50 interactive elements
-on one flat scroll.**
+**39 always-visible settings controls** (23 `Input`, 5 `Textarea`, 5 `Switch`,
+2 `Select`, 4 `SegmentedControl`) against `EDITABLE_PATHS`' **38** paths — the
+two differ because `weeklyAnchor` is written by two controls, the `Select` at
+`:1712` and the conditional UTC-hour `Input` at `:1740`. Plus 7 chips, 2
+footer buttons and up to 3 account buttons. **≈50 interactive elements on one
+flat scroll.** (Counts exclude the per-plugin `Switch` at `:2596`, which is
+data-dependent, and the `Input` at `:968`, which is inside a `Sheet`.)
 
 ### What arrived with what
 
@@ -653,7 +666,7 @@ wrong guess is silent:
   `src/app/api/settings/route.ts:32-64`.
 - **`PUT` returns it too.** `:388` currently answers `{ settings: saveSettings(patch) }`
   and the page sets both `s` and `savedS` from that response
-  (`settings/page.tsx:1254-1255`). Without the field on the PUT, every fold's
+  (`settings/page.tsx:1252-1253`). Without the field on the PUT, every fold's
   `count` is stale the moment the operator saves.
 - **`defaultOpen` is read from the *first* GET and never again; `count` follows
   the latest response.** `Disclosure` is uncontrolled precisely so that a fold
@@ -735,10 +748,12 @@ button stay, in place, with the same labels — except the one chip renamed in B
 
 **What it holds.** Four cards — `What to work on` (`primary`), `What the agent
 may do`, `When it stops`, `Save for next time` (`quiet`) — inside one `<form>`
-committed by a `Start run` button and ⌘↩. Twenty-one form controls; twelve
-`ResetToBaseline` markers; four buttons inside two carried-template notices;
-eight `<Link>`s; up to nine focus buttons in the validation list. **Up to 56
-simultaneously reachable interactive elements.**
+committed by a `Start run` button and ⌘↩. **Nineteen form controls** (6
+`Input`, 1 `Textarea`, 5 `Switch`, 4 `Select`, 3 `SegmentedControl`); twelve
+`ResetToBaseline` markers; two buttons in the templates card; four buttons
+inside two carried-template notices; two footer buttons; eight `<Link>`s; up
+to nine focus buttons in the validation list. **Up to 54 simultaneously
+reachable interactive elements.**
 
 **What arrived with what.** `ca50657` split the form out of the runs page with
 the three limit rows. `28e4f4b` *Make the new-run form say what each guard will
@@ -755,18 +770,22 @@ titles are a genuinely good sequence and they stay.
 
 **What is fuzzy — counted.**
 
-1. **`When it stops` holds 10 of the 21 controls**, three `ListGroup`s, a
-   computed summary paragraph, seven reset markers, two conditional
-   danger/warn notices and three trailing hints — about **20 interactive
-   elements in one card**, against 5 / 2 / 4 in the other three.
+1. **`When it stops` holds 10 of the 19 form controls**, three `ListGroup`s, a
+   computed summary paragraph, seven reset markers, one conditional warn
+   notice (`:1820`) and three trailing hints — about **20 interactive elements
+   in one card**, against 5 / 2 / 2 form controls in the other three. The
+   `bypassPermissions` danger notice is at `:2276`, below the last card, not
+   in this one.
 2. **Three decisions cost six controls.** `Work cycles` + `Cap the work
    cycles`, `Spending limit for this run` + `Cap what this run may spend`,
    `Time limit` + `Cap how long this run may take` — a `Switch` whose label is
    different from the row it governs, and an `Input` that vanishes when it is
    off.
-3. **Eight conditional blocks between the last card and the footer**
-   (`:2161`, `:2168`, `:2174`, `:2258`, `:2268`, `:2276`, `:2291`, `:2299`),
-   five of which are about one specific control higher up the page.
+3. **Eight conditional blocks after the last row of controls** — three
+   trailing hints still inside `When it stops` (`:2161`, `:2168`, `:2174`; the
+   card closes at `:2180`) and five below the last card (`:2258`, `:2268`,
+   `:2276`, `:2291`, `:2299`). Five of the eight are about one specific
+   control higher up the page.
 4. **Ten concept-synonym pairs.** The worst three:
    - *cycle / iteration / pass*: `Work cycles` (`:1884`) beside
      `1 means one pass and then stop` (`:1888`) beside `id="iters"` (`:1910`).
@@ -775,8 +794,8 @@ titles are a genuinely good sequence and they stay.
      (`:1932`) — **and one genuine misuse**, `each cycle carries what is left
      of it as a ceiling` (`:1938-1939`), which applies the subscription-side
      word to a per-run cap.
-   - *checkout / worktree / branch / this folder*: `Own branch` (`:259`),
-     `Its own checkout` (`:264`), `ROW_LABEL.isolate = "isolation"` (`:140`),
+   - *checkout / worktree / branch / this folder*: `Own branch` (`:258`),
+     `Its own checkout` (`:264`), `ROW_LABEL.isolate = "isolation"` (`:139`),
      under a row labelled `Where Claude writes` (`:1750`).
 5. **One control with two names.** Visible label `What it may do without
    asking` (`:1781`); accessible label `What the agent may do without asking`
@@ -870,23 +889,25 @@ first is the dashboard's (`app/page.tsx:856`), the second the runs list's
 **What it holds.** A split view: a 21rem `lg:sticky` inspector on the right
 (source-ordered first, so it leads at one column) and a pane on the left behind
 a five-segment `SegmentedControl` — `Log`, `Report`, `Changes`, `Review`,
-`Land`. The inspector is **eleven blocks**, six unconditional and five
-conditional.
+`Land`. The inspector is **eleven blocks, seven unconditional and four conditional** —
+the conditional four are the reopen form (`{reopenOpen &&`, `:972`), `Agent`
+(`{run.agent &&`, `:1202`), `Telemetry — first-party` (`{telemetry &&`,
+`:1245`) and `Checkout` (`{isolated &&`, `:1267`).
 
 **What arrived with what — this is the diagnosis.**
 
 - `7164d04` *Put the run on a split view with an inspector* created the column
   and the tab strip and moved `Guards`, `Checkout` and `Task` into it.
-- `2cc61c1` added `Telemetry — first-party` and the `In your own terminal` card.
+- `2cc61c1` added `Telemetry — first-party`, and retitled the handoff card.
 - `f3b425c` added `Agent work` / `RunAgentCost`. `ddbe231` and `17d8d6a` added
   the `Agent` section and its two rows.
 - The ButtonRow at `:925-959` collects five buttons from five commits:
   `f1f73f8` (`Try now`), `0d88856` (`Resume run`), `a84506b` (`Ask for more`),
   `d193868` (`Set aside` / `Put back`), `1bdd7ff` (the not-owner branch).
-- **`6c1a270` *Run several agents on one project at once* added the
-  `In your own terminal` card. `36a0dbf` *Let a run's work be reviewed and
-  landed* added the Land tab that does the same job in the UI. Both still
-  render, together, at `:1381-1444`.** That is the single clearest artefact of
+- **`6c1a270` *Run several agents on one project at once* added this card, as
+`Where the work landed`; `2cc61c1` retitled it `In your own terminal`.
+`36a0dbf` *Let a run's work be reviewed and landed* added the Land tab that
+does the same job in the UI. Both still render, together, at `:1381-1444`.** That is the single clearest artefact of
   the problem this document exists to fix: two generations of one feature
   stacked, neither ever removed.
 
@@ -896,19 +917,27 @@ conditional.
    `Section` heading is `text-xs font-semibold text-ink` (`:293`), and so are
    the two labels of the headingless stat grid. `Telemetry — first-party`
    (only when an OTLP row exists) is set identically to `Guards` (always).
-2. **Twelve outcomes on one `<h2>`.** `describeRun` (`:114-265`) maps
-   `"Working"` and `"Refused to start"` to the same treatment.
+2. **Twelve outcomes on one `<h2>`.** `describeRun` (`:114-265`) sets all
+   twelve headlines at the same typography. They are not undifferentiated —
+   each carries a `tone` that `STATE_ACCENT` (`:86-92`) turns into a left
+   border, so `Working` is `info`/`border-l-accent` and `Refused to start` is
+   `warn`/`border-l-warn` — but a 3px edge is the whole of the difference
+   between a state you see constantly and one most operators never see.
 3. **Three cost readings adjacent and unlabelled as such.** The `Spent` stat
-   (`runs.spent_usd`), `Agent work` (transcript-derived, `RunAgentCost`) and
-   `Telemetry — first-party` (OTLP) each carry a footnote saying they must not
-   be added — and nothing in the *structure* says it.
-4. **A superseded card inside the tab that superseded it** (`:1386-1444`).
+      (`runs.spent_usd`), `Agent work` (transcript-derived, `RunAgentCost`) and
+   `Telemetry — first-party` (OTLP). **Two of the three say in user-visible
+   copy that they must not be added** — `RunAgentCost.tsx:211` ("never added
+   to either") and `:1256-1257` ("Kept apart from the figure above rather than
+   added to it") — while the `Spent` block says it only in a source comment
+   (`:1091-1093`). Nothing in the *structure* says it at all.
+4. **A superseded card inside the tab that superseded it** — the `Card` is
+   `:1386-1441`; the Land branch that renders both is `:1381-1444`.
 5. **Five names for one action.** The same button reads `Resume` / `Try again`
    / `Ask for more` (`:931-935`) and its submit reads `Resume run` (`:1078`);
    the page elsewhere says `picked up again` and `Try now`.
 6. **Three headings for one list.** `Left uncommitted in the checkout`
    (`RunDiff.tsx:174`), `Uncommitted in this folder` (`:175`),
-   `Uncommitted in its checkout` (`RunLand.tsx:123`).
+   `Uncommitted in its checkout` (`RunLand.tsx:124`).
 7. **Tab noun versus card title.** Tab `Changes`, card `What changed`, button
    `Show changes`, and the adjacent Review tab says `diff` twice.
 
@@ -948,8 +977,8 @@ block reading as a peer of a constant one. The inspector `Card` has no
 > will not fail typecheck. See §5.1.
 
 **C7 — Fold the superseded terminal card (required).**
-`In your own terminal` (`:1386-1444`), with its `Review it` and `Bring it in`
-sub-headings, its uncommitted-changes `Notice` and its `Empty`, moves **whole
+`In your own terminal` (the `Card` at `:1386-1441`), with its `Review it` and
+`Bring it in` sub-headings, its uncommitted-changes `Notice` and its `Empty`, moves **whole
 and unchanged** into a `Disclosure summary="Do it in your own terminal"` at the
 foot of the Land tab, below `RunLand`. It is Tier 2 evidence: an escape hatch
 consulted when the in-app path will not do. **Nothing in it is deleted** — its
@@ -974,14 +1003,15 @@ Order is fixed: the action on the run's state first, `Set aside` last.
 / `Ask for more` was pressed. §2.3 anti-rule 3.
 
 **C10 — One name for the uncommitted list (required).**
-`RunDiff.tsx:174`, `RunDiff.tsx:175` and `RunLand.tsx:123` all become
+`RunDiff.tsx:174`, `RunDiff.tsx:175` and `RunLand.tsx:124` all become
 **`Uncommitted in the checkout`** for an isolated run and **`Uncommitted in
 this folder`** for a direct one. The two-branch distinction at `RunDiff:174/175`
 is real and stays; what goes is the third wording.
 
-**C11 — Migrate the four remaining `<details>` to `Disclosure`** —
-`RunOutput.tsx:58`, `RunReview.tsx:152`, `RunLand.tsx:55` — which is what
-closes the touch-target gap `conventions.md` names. (`ui/Patch.tsx` is run
+**C11 — Migrate the three remaining `<details>` in run (c)'s files to
+`Disclosure`** — `RunOutput.tsx:57`, `RunReview.tsx:151`, `RunLand.tsx:54`;
+`runs/[id]/page.tsx` itself contains none — which is what closes the
+touch-target gap `conventions.md` names. (`ui/Patch.tsx` is run
 (a)'s.) Summaries and `count`s:
 `{n} earlier work cycle{s}`, `{n} earlier review{s}`, and `RunLand`'s
 per-file conflict summary unchanged.
@@ -1050,8 +1080,9 @@ sticky 26rem inspector on the right holding the selected block or link plus
 four cards — `Limits for the whole workflow`, `Blocks not yet runs`, `Blocks`,
 `Runs a block started`.
 
-Twenty-four controls are declared in the editor; at most thirteen render at
-once (a merge block shows five, a loop block twelve).
+**Nineteen kit controls are declared in the editor** (7 `Input`, 7 `Select`, 2
+`Textarea`, 2 `Switch`, 1 `LimitField`); fewer render at once, because most of
+`BlockPanel` is gated on the selected block's kind.
 
 ### What arrived with what
 
@@ -1070,15 +1101,20 @@ instance page). `/workflows/[id]` is the hinge between them.
 
 ### What is fuzzy — counted
 
-1. **Eight stacked `Hint` paragraphs on the instance page.** Two at
-   `:539-550`, then four kind-conditional ones at `:640-662` explaining what a
-   deciding block, a repeating block and a merge block are — appended by the
-   commit that added each kind, all to the foot of the same card.
-2. **One 63-word sentence, duplicated verbatim** in `WorkflowEditor.tsx:821-825`
+1. **Seven stacked `Hint` paragraphs on the instance page** (`:539`, `:545`,
+   `:640`, `:645`, `:650`, `:658`, `:712`). Two sit under the meter they are
+   about; four more are stacked at the foot of the `Blocks not yet runs` card
+   explaining what a deciding block, a repeating block and a merge block are —
+   and **two of those four are unconditional** (`:640`, `:645`) while two are
+   kind-conditional (`kind === "loop"` at `:650`, `kind === "merge"` at
+   `:658`). Each was appended by the commit that added its kind.
+2. **One 55-word sentence, duplicated verbatim** in
+`WorkflowEditor.tsx:821-825`
    and the instance page `:542` (the "checked before a block starts a work
    cycle" paragraph).
 3. **Four phrasings of two edge conditions, in three constant maps in three
-   files**: `CONDITIONS` (editor `:165-167`), `CONDITION_CHIP` (canvas
+   files**: `CONDITIONS` (editor `:164-166`, whose first entry is the `""` one),
+`CONDITION_CHIP` (canvas
    `:139-143`), `CONDITION_LABEL` (`[id]/page.tsx:41-42`), plus `LinkPanel`'s
    own inline sentence (`:1501-1503`).
 4. **`KIND_LABEL` is two unrelated exported/local maps** — block-kind display
@@ -1105,7 +1141,8 @@ compiles, which is the same reason the shared tone unions live there:
 - `EDGE_CHIP_LABEL` — same keys — `"needs a condition"`, `"if it completes"`,
   `"either way"`.
 
-All four existing maps are deleted and their call sites read these two.
+**All three existing maps are deleted** — `CONDITIONS`, `CONDITION_CHIP` and
+`CONDITION_LABEL` — and their call sites read these two.
 **`LinkPanel`'s prose sentence keeps its own wording** (`", only if it
 completes."` reads inside a sentence; the chip does not) — this is a
 consolidation of *maps*, not of every string.
@@ -1193,8 +1230,7 @@ graph lives on the canvas one route over.
 ### Acceptance criteria for run (d)
 
 1. `WORKFLOW_LIMIT_TIMING_NOTE`, `EDGE_OPTION_LABEL` and `EDGE_CHIP_LABEL` are
-   exported from `src/lib/format.ts`; the four local maps and the duplicated
-   63-word string literal are gone; `grep -c` for that sentence in `src/`
+   exported from `src/lib/format.ts`;    the three local maps and the duplicated 55-word string literal are gone; `grep -c` for that sentence in `src/`
    returns 1.
 2. `EDGE_OPTION_LABEL[""]` still renders as a selectable option and a link with
    `edge: ""` still reaches the wire and is still refused by name.
@@ -1804,7 +1840,9 @@ Rules a build run must not break:
   at, per open run page, forever.
 - **`emit()` persists then publishes.** The log's reconnect is lossless because
   of that order. A log-pane change that assumes live-first delivery drops events
-  on a late page load. `src/lib/bus.ts`, `src/app/api/runs/[id]/stream/route.ts`.
+    on a late page load. `emit()` is `src/lib/orchestrator.ts:482` and the bus
+  is the `globalThis.__ufBus` singleton at `:332` — **there is no
+  `src/lib/bus.ts`**. Also `src/app/api/runs/[id]/stream/route.ts`.
 - **The guard check order** — terminus, cycles, duration, run spend, weekly,
   then session — is in `src/lib/budget.ts` and is not a UI concern. It becomes
   one the moment somebody reorders the form's limit fields and then "aligns the
@@ -1867,15 +1905,7 @@ Rules a build run must not break:
 | String / rule | File | Why |
 |---|---|---|
 | **"work cycle" in the UI, `iteration` in the code** | copy in `runs/new`, `runs/[id]`, `runs`, `settings`, `page.tsx`, the instance page; internals in `budget.ts`, `orchestrator.ts`, `apiTypes.ts`, `db.ts` | Both directions are forbidden. Do not "align labels with the API field names". **Verified today: zero user-visible occurrences of "iteration" in `src/app` or `src/components`. Keep it at zero.** |
-| **"tighter, not exact"** | `runs/new/page.tsx:1349`, `settings/page.tsx` | Must appear in **every** piece of live-enforcement copy. Do not condense the three enforcement-mode descriptions into one shared hint, and do not move the caveat into a fold. |
-| **`fmtCycleInFlight` decides the in-flight wording, wording included** | `src/lib/format.ts:59-69`; used at `runs/page.tsx:408` | One column, on the in-flight list, nowhere else. Never merged with the completed count, never formatted inline. |
-| **`failed` for a deadline, `stopped` for a decision** | `src/lib/orchestrator.ts`, `format.ts` (`STATUS_TONE`) | A hung agent filed as "stopped" is the sentence that stops anyone looking for the cause. Do not bucket the two into one visual "ended" group. |
-| **`NEEDS_REVIEW` the sentinel vs `needs-review` the status** | `src/lib/orchestrator.ts` | Spelled differently on purpose, so a task quoting the status cannot fire the matcher. Never render the status as `NEEDS_REVIEW`. |
-| **`stop_reason` is user-visible prose** | `src/lib/apiTypes.ts`, both runs surfaces | Never parsed or regexed to derive a badge, icon or grouping. |
-| **Merge-block words** | the instance page, `WorkflowEditor.tsx` | The page says "merging" and "landed"; the column says `thinking`/`emitted`. Do not surface the raw status on a merge block. |
-| **`started` is not a word for a press of Run that is over** | `src/lib/workflows.ts` (`instanceIsOpen`) | Act on `instanceIsOpen`, never on `status === "started"`. Four of six readings are derived. |
-| **The three generated prompt strings** | `src/lib/orchestrator.ts` | `COMPLETION_NOTICE`, `SHARED_CHECKOUT_NOTICE`, `RESTART_KILLED_NOTICE`, and the `needs-review` notice, are generated rather than stored **because** one press of Save materialises every default into the stored blob. Never move one into `Settings`. |
-| **`ceiling` / `guard` / `limit`** | §3.C.1, and §7 adds it to `conventions.md` | New with this document, and the only rewording it authorises is one string at `runs/new/page.tsx:1938-1939`. |
+| **the "tighter, not exact" caveat** | `runs/new/page.tsx:1357` (the copy), `:1349` (the comment stating the rule) | `budgets-and-guards.md` requires it in **every** piece of live-enforcement copy. Measured: the phrase itself is only in that comment; the user-visible form is `:1357`'s "tighter than waiting for the cycle to end, but still not an exact cut-off", and **Settings' own live-enforcement row (`:2443`) carries no such caveat at all** — an existing gap this document neither closes nor widens. Do not condense the three enforcement-mode descriptions into one shared hint, and do not move the caveat into a fold. | | **`fmtCycleInFlight` decides the in-flight wording, wording included** | `src/lib/format.ts:59-69`; used at `runs/page.tsx:408` | One column, on the in-flight list, nowhere else. Never merged with the completed count, never formatted inline. | | **`failed` for a deadline, `stopped` for a decision** | `src/lib/orchestrator.ts`, `format.ts` (`STATUS_TONE`) | A hung agent filed as "stopped" is the sentence that stops anyone looking for the cause. Do not bucket the two into one visual "ended" group. | | **`NEEDS_REVIEW` the sentinel vs `needs-review` the status** | `src/lib/orchestrator.ts` | Spelled differently on purpose, so a task quoting the status cannot fire the matcher. Never render the status as `NEEDS_REVIEW`. | | **`stop_reason` is user-visible prose** | `src/lib/apiTypes.ts`, both runs surfaces | Never parsed or regexed to derive a badge, icon or grouping. | | **Merge-block words** | the instance page, `WorkflowEditor.tsx` | The page says "merging" and "landed"; the column says `thinking`/`emitted`. Do not surface the raw status on a merge block. | | **`started` is not a word for a press of Run that is over** | `src/lib/workflows.ts` (`instanceIsOpen`) | Act on `instanceIsOpen`, never on `status === "started"`. Four of six readings are derived. | | **The three generated prompt strings** | `src/lib/orchestrator.ts` | `COMPLETION_NOTICE`, `SHARED_CHECKOUT_NOTICE`, `RESTART_KILLED_NOTICE`, and the `needs-review` notice, are generated rather than stored **because** one press of Save materialises every default into the stored blob. Never move one into `Settings`. | | **`ceiling` / `guard` / `limit`** | §3.C.1, and §7 adds it to `conventions.md` | New with this document, and the only rewording it authorises is one string at `runs/new/page.tsx:1938-1939`. |
 
 ### 5.7 `needs-review`, and the two `REOPENABLE` sets
 
@@ -2004,7 +2034,7 @@ any of these five runs; nothing here is scoped to prove it unused.
 §3's target structures.** They are the things I would put to a person, with what
 I would ask.
 
-1. **The `In your own terminal` card** (`src/app/runs/[id]/page.tsx:1386-1444`).
+1. **The `In your own terminal` card** (`src/app/runs/[id]/page.tsx:1386-1441`).
    Change **C7** folds it. It arrived with `6c1a270`; the Land tab that does the same
    job arrived with `36a0dbf` and supersedes most of it. *Question: does anyone
    still use the copyable commands now that Land, Review and Changes are in the
