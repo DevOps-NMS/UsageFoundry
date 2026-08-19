@@ -1863,7 +1863,7 @@ export default function NewRunPage() {
               description={
                 <>
                   {iterationsCapped
-                    ? "Each cycle picks up the same conversation where the last one left off; 1 means one pass and then stop"
+                    ? "Each cycle picks up the same conversation where the last one left off; 1 means one cycle and then stop"
                     : "Needs the time limit below — the clock is the only limit that keeps advancing whether or not Claude reports what it spent"}
                   {problemFor("iters") && (
                     <Toned tone="danger">

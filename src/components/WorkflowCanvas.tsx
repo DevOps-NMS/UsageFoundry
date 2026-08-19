@@ -603,17 +603,17 @@ export function WorkflowCanvas({
           pointer press yields `:focus` rather than `:focus-visible`, so nothing
           draws a ring. */}
       {/* The cap is *tightened* below the breakpoint rather than released, and
-          that is the one place this surface departs from the rule the three
-          `LIST_VIEW` scrollers follow. Releasing it there is right because a
-          stacked list has no width left to scroll and the cap is all that
-          traps the reader; here the sheet is at least 640px wide against a
-          390px pane, so `overflow-auto` is the whole of what keeps the *pane*
-          from scrolling sideways and cannot be given up. What is left of that
-          rule is the part that still bites: at 62vh the frame filled a phone
-          on its own, and a nested scroller with nothing visible past it reads
-          as the end of the page — which is exactly where the inspector holding
-          the block's guards is. 22rem is three block-heights, so the surface
-          still shows a column, and what is under it is on screen. */}
+          that is the one place this surface departs from the rule `ListView`'s
+          `capped` box follows. Releasing it there is right because a stacked
+          list has no width left to scroll and the cap is all that traps the
+          reader; here the sheet is at least 640px wide against a 390px pane,
+          so `overflow-auto` is the whole of what keeps the *pane* from
+          scrolling sideways and cannot be given up. What is left of that rule
+          is the part that still bites: at 62vh the frame filled a phone on its
+          own, and a nested scroller with nothing visible past it reads as the
+          end of the page — which is exactly where the inspector holding the
+          block's guards is. 22rem is three block-heights, so the surface still
+          shows a column, and what is under it is on screen. */}
       <div
         tabIndex={-1}
         className="relative max-h-[62vh] max-md:max-h-[22rem] overflow-auto bg-inset"

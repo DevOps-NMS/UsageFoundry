@@ -331,19 +331,23 @@ function at(obj: unknown, path: string): unknown {
 
 /**
  * What a run's own spending limit can overshoot by. Every mode now carries the
- * remainder into the cycle as a ceiling of its own, so what the mode still
- * decides is when a *fresh* reading is taken — which is why these three differ
- * only in their first clause. Rendered from the stored mode rather than
- * hardcoded: nothing on this page can set it, but a guard set written by
- * another build could carry `live`, and a sentence describing the wrong mode is
- * worse than no sentence.
+ * remainder into the cycle as a cap of its own, so what the mode still decides
+ * is when a *fresh* reading is taken — which is why these three differ only in
+ * their first clause. "Cap" and not "ceiling", here and in the three strings:
+ * a ceiling is a number set further up this same page that a *window*
+ * percentage is measured against, and this is a limit on one run. Everything
+ * else on this page that says "ceiling" means the windows, which is exactly why
+ * the word may not also mean this one — the run form settled on "cap" for the
+ * same sentence. Rendered from the stored mode rather than hardcoded: nothing
+ * on this page can set it, but a guard set written by another build could carry
+ * `live`, and a sentence describing the wrong mode is worse than no sentence.
  */
 const SPEND_READ_AT: Record<BudgetPolicyDTO["enforcement"], string> = {
   "between-cycles":
-    "Read before each work cycle, and carried into the cycle as its own ceiling, so a run stops near it.",
-  live: "Read on a ticker while a cycle is going, and carried into the cycle as its own ceiling, so a run stops near it.",
+    "Read before each work cycle, and carried into the cycle as its own cap, so a run stops near it.",
+  live: "Read on a ticker while a cycle is going, and carried into the cycle as its own cap, so a run stops near it.",
   "live-resume":
-    "Read on a ticker while a cycle is going, and carried into the cycle as its own ceiling, so a run stops near it.",
+    "Read on a ticker while a cycle is going, and carried into the cycle as its own cap, so a run stops near it.",
 };
 
 /** Complete class strings per tone, looked up rather than interpolated. */
@@ -1114,7 +1118,7 @@ function ClaudeAccount() {
             container it may not be able to reach the page at all. */}
         <p className="mono mt-2 break-all text-xs text-ink-faint">{linkUrl}</p>
         <Field
-          className="mt-4 mb-0"
+          className="mt-4"
           label="Code"
           htmlFor="claude-auth-code"
           error={flowError}
@@ -1668,7 +1672,17 @@ export default function SettingsPage() {
         className="mb-6 flex flex-wrap gap-1.5 border-b border-line pb-4"
       >
         {SECTIONS.map((sec) => {
-          const current = sec.id === sectionHash;
+          // An empty hash is the top of the pane, and the top of the pane is
+          // the first section — so that is the chip standing. Without this the
+          // opening state of the page, which includes the server render and
+          // every arrival that did not come through a chip, is the one state in
+          // which *no* chip is current: a map that says you are nowhere.
+          // Resolved here rather than seeded into `useSectionHash` so the hook
+          // keeps reporting the location rather than a guess about it, and so
+          // the server and the first paint read the same empty string and pick
+          // the same chip — a hydration mismatch here would be a louder bug
+          // than the missing fill it fixes.
+          const current = sec.id === (sectionHash || SECTIONS[0].id);
           return (
             <a
               key={sec.id}

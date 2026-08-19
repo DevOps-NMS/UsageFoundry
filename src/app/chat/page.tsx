@@ -167,7 +167,26 @@ const JUMP_STATE: Record<"shown" | "hidden", string> = {
   hidden: "pointer-events-none translate-y-1 opacity-0",
 };
 
-/** The card rises when it has something waiting for a decision. */
+/**
+ * The card rises when it has something waiting for a decision.
+ *
+ * **This is the only card on the page allowed to move, and the conversation
+ * beside it is deliberately not the other half of a pair.** Both were
+ * `primary` at once, which by `Card`'s own rule means the page had no lead at
+ * all — so one of them had to stop rising. The obvious repair was to make the
+ * conversation the inverse of this map, and it is wrong: `emphasis` carries
+ * padding as well as elevation (`p-5` against `p-4`), so a conversation keyed
+ * on `pending` would re-pad the scrolled transcript and shift the composer
+ * under the reader's hands the moment a proposal arrived — on a surface that
+ * polls. This card holds neither a scroll position nor a text field, which is
+ * exactly why it is the one that may change size.
+ *
+ * The conversation is therefore a flat `default` in every state, and the page
+ * has one lead while something is waiting and none otherwise. That is a state
+ * §1.1 names as legitimate, and on this page it is honest: with nothing
+ * waiting, the thread is already the larger half by three columns and does not
+ * need a shadow to say so.
+ */
 const PROPOSALS_EMPHASIS: Record<"waiting" | "clear", CardEmphasis> = {
   waiting: "primary",
   clear: "default",
@@ -273,6 +292,28 @@ export default function ChatPage() {
         return;
       }
       setChat(data.chat);
+      // A proposal this thread was holding can be decided somewhere this page
+      // cannot see — another tab, another window — and its id then stays in
+      // `selected` with no row left to untick. The route refuses it by id, so
+      // nothing wrong reaches the data; what it costs is the two claims this
+      // page makes about the selection. `allSelected` compares a size against
+      // `pending.length` and so reads true while a visible row is unticked,
+      // and "the explicit list of the ids the page displayed" becomes a
+      // sentence about the render before this one. So the poll's answer is
+      // what the set is reconciled against, here rather than in `pending`:
+      // approval stays one synchronous pass over an explicit list of ids that
+      // state holds, and deriving it from the render would be a different
+      // gate. `prev` is returned unchanged where nothing was dropped, because
+      // this runs on every poll and a fresh Set each time would re-render the
+      // rows for nothing.
+      const stillPending = new Set(
+        data.chat.proposals.filter((p) => p.status === "pending").map((p) => p.id),
+      );
+      setSelected((prev) => {
+        if (prev.size === 0) return prev;
+        const next = new Set([...prev].filter((id) => stillPending.has(id)));
+        return next.size === prev.size ? prev : next;
+      });
       // Both routes answer with the list, so this lands on every poll. Still
       // guarded: the body above is untrusted, and a payload without it must
       // leave the sidebar as it was rather than emptying it.
@@ -684,7 +725,7 @@ export default function ChatPage() {
             60vh was a cap that could sit either side of the edge depending on
             the window and never on the box it was capping. */}
         <Card
-          emphasis="primary"
+          emphasis="default"
           className="flex max-h-[34rem] min-h-[22rem] flex-col lg:max-h-none lg:min-h-0"
         >
           <div className="relative min-h-0 flex-1">
@@ -1254,16 +1295,21 @@ function Proposal({
               <Icon name="folder" size="sm" />
               <span className="truncate">{folder}</span>
             </span>
+            {/* The one fact in this row that wraps rather than truncating, and
+                the folder beside it is why the difference is worth stating: a
+                press of Approve is approved against this guard set, so it is a
+                fact a decision is taken on — visible with no interaction, and
+                a hover title is not a way of reading it at all on touch. The
+                row already wraps, so the whole set costs a second line and
+                moves nothing. A folder path is context and may still be
+                clipped. */}
             <span
               className={`inline-flex min-w-0 max-w-full items-center gap-1 ${
                 GUARD_TONE[missing ? "missing" : "set"]
               }`}
-              title={proposal.guardsLabel}
             >
               <Icon name="guard" size="sm" />
-              <span className="truncate">
-                {missing ? "template deleted" : proposal.guardsLabel}
-              </span>
+              <span>{missing ? "template deleted" : proposal.guardsLabel}</span>
             </span>
             {/* Outside the guard mark and never inside it. The agent is what
                 the run will be *started as*, which is a larger fact than the

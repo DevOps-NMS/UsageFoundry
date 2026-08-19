@@ -232,11 +232,21 @@ export default function AgentsPage() {
                 per-cwd and which definition Claude Code uses is unverified — so
                 the operator is told, and left to decide. */}
             {clash && (
-              <Hint tone="warn" className="-mt-2 mb-3.5">
-                Your own {shortPath(clash.path)} already defines an agent called “
-                {clash.name}”. Both reach the same run and which one Claude Code
-                uses is not something this app can determine
-              </Hint>
+              // The pull-up is on a wrapper because `Hint` states its own
+              // `mt-1.5`, and Tailwind emits a numeric utility's values
+              // ascending — so a caller's `-mt-2` on the component itself
+              // loses to the larger value the component wrote and the class
+              // reads as a pull-up while rendering a 6px push-down. A caller
+              // that has to cancel a component's own spacing does it on a
+              // wrapper; `mb-3.5` stays where it is, since `Hint` states no
+              // bottom margin for it to lose to.
+              <div className="-mt-2">
+                <Hint tone="warn" className="mb-3.5">
+                  Your own {shortPath(clash.path)} already defines an agent called “
+                  {clash.name}”. Both reach the same run and which one Claude Code
+                  uses is not something this app can determine
+                </Hint>
+              </div>
             )}
 
             <Field
@@ -334,15 +344,24 @@ export default function AgentsPage() {
           <TableWrap>
             <Table stack>
               <caption className="sr-only">Saved agents, by name</caption>
+              {/* Floors rather than widths, and the difference is the whole of
+                  it. `Table` is auto-layout, where a `width` is a suggestion
+                  the algorithm is free to overrule and does the moment a
+                  `w-full` column asks for everything left — measured, the
+                  Agent column rendered 98px against the 200 declared here, so
+                  a name wrapped to three lines beside a description that had
+                  taken the room. A `min-width` is not a suggestion: it enters
+                  the column's own minimum, so the wide column gives instead.
+                  The figures are unchanged. */}
               <THead>
                 <tr>
-                  <Th scope="col" className="w-[200px]">
+                  <Th scope="col" className="min-w-[200px]">
                     Agent
                   </Th>
                   <Th scope="col" className="w-full">
                     Description
                   </Th>
-                  <Th scope="col" className="w-[160px]">
+                  <Th scope="col" className="min-w-[160px]">
                     Model
                   </Th>
                 </tr>
@@ -431,13 +450,13 @@ export default function AgentsPage() {
               </caption>
               <THead>
                 <tr>
-                  <Th scope="col" className="w-[200px]">
+                  <Th scope="col" className="min-w-[200px]">
                     Agent
                   </Th>
                   <Th scope="col" className="w-full">
                     Description
                   </Th>
-                  <Th scope="col" className="w-[240px]">
+                  <Th scope="col" className="min-w-[240px]">
                     File
                   </Th>
                 </tr>

@@ -4,6 +4,30 @@ import { useId, type ReactNode } from "react";
 import { FieldControlContext } from "@/components/ui/Field";
 
 /**
+ * A group's heading, at the one rank a heading over a grouped box is drawn at.
+ *
+ * It exists as an export because a group's contents are not always rows: the
+ * workflow editor's `What it does` holds two nine-line text regions, which have
+ * no right edge to align a grouped row against, so they are `Field`s rather
+ * than a `ListGroup` — and a run block, which has no caps, has nothing else
+ * under that heading at all. Written out at that call site the heading would be
+ * a second definition of this rank, and nothing would keep the two in step.
+ *
+ * **The two must never diverge.** A reader asks the same question of a heading
+ * over rows and a heading over content that is not rows, and half a step of
+ * size or weight between them reads as a hierarchy that is not there. That is
+ * also why this takes no `tone` and no `size`: it is one rank, not a family of
+ * them, and a variant map here would be the divergence arriving as a feature.
+ */
+export function GroupLabel({ children }: { children: ReactNode }) {
+  return (
+    <div className="mb-1.5 px-1 text-xs font-medium text-ink-muted">
+      {children}
+    </div>
+  );
+}
+
+/**
  * The grouped inset list macOS System Settings is built from: a rounded box, a
  * hairline between each row, and the explanation as a footnote under the box
  * rather than a paragraph over it.
@@ -29,11 +53,7 @@ export function ListGroup({
 }) {
   return (
     <div className={className}>
-      {label && (
-        <div className="mb-1.5 px-1 text-xs font-medium text-ink-muted">
-          {label}
-        </div>
-      )}
+      {label && <GroupLabel>{label}</GroupLabel>}
       <div className="divide-y divide-line rounded-lg border border-line bg-grouped">
         {children}
       </div>

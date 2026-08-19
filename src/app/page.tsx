@@ -561,7 +561,7 @@ export default function Dashboard() {
       <Card emphasis="primary" className="mb-4">
         <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
           <div>
-            <CardTitle className="mb-1">
+            <CardTitle>
               5-hour session window
               {s.session.agg.entryCount > 0 && (
                 <Badge tone="accent">active</Badge>
@@ -650,7 +650,7 @@ export default function Dashboard() {
         <div className="mt-5 border-t border-line pt-4">
           <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
             <div>
-              <CardTitle className="mb-1">{s.weekly.label}</CardTitle>
+              <CardTitle>{s.weekly.label}</CardTitle>
               <Stat>{fmtUSD(s.weekly.costUSD)}</Stat>
               <StatSub>
                 <span className="tabular-nums">
@@ -961,9 +961,20 @@ export default function Dashboard() {
 
         <Card emphasis="quiet" className="mb-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-            <CardTitle className="mb-0">
-              Where it went — {s.weekly.label.toLowerCase()}
-            </CardTitle>
+            {/* The row above already states the gap under this heading, so the
+                title's own `mb-3` is not a gap here at all — it is 12px inside
+                the flex line, and `items-center` centres each item's *margin*
+                box, so the words sat 6px above the control beside them. The
+                cancellation is on a wrapper rather than an `mb-0` on the title
+                for the reason `ui/Field` states about width: two utilities for
+                one property on one element resolve by stylesheet order, and
+                Tailwind emits `mb-*` ascending, so the component's larger value
+                wins whatever a call site writes. */}
+            <div className="-mb-3">
+              <CardTitle>
+                Where it went — {s.weekly.label.toLowerCase()}
+              </CardTitle>
+            </div>
             {/* Was a hand-rolled pill strip claiming `role="tablist"`. The kit's
                 segmented control is the native idiom for one choice from a short
                 fixed set, and it owns the roving tabindex and the arrow keys that
@@ -1165,7 +1176,7 @@ export default function Dashboard() {
                 Runs, workflow blocks and chat turns together. A run still going,
                 or one that finished inside the window, counts its whole spend —
                 which over-counts rather than under-counts, because this is a
-                ceiling. Not comparable with the meters above: those measure every
+                limit. Not comparable with the meters above: those measure every
                 transcript on this machine against Anthropic&rsquo;s windows.
               </>
             )}

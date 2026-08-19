@@ -53,7 +53,7 @@ import {
   Textarea,
 } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
-import { ListGroup, ListRow } from "@/components/ui/List";
+import { GroupLabel, ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 
 /**
@@ -1206,13 +1206,18 @@ function BlockPanel({
             </div>
           </ListRow>
 
+          {/* The off state says what the *switch* withholds, not what the
+              block will do — `BlockStatement` above already prints "A
+              conflicting branch is reported and left alone." for this block,
+              and the row repeating it verbatim spent a description saying
+              nothing the panel had not said one paragraph earlier. */}
           <ListRow
             label="Let Claude resolve a conflict"
             htmlFor={`${block.id}-autoresolve`}
             description={
               block.mergeAutoResolve
                 ? "Saving this is the authorisation, and it is billed"
-                : "A conflicting branch is reported and left alone"
+                : "Off, so this block authorises no spending"
             }
           >
             <Switch
@@ -1233,6 +1238,16 @@ function BlockPanel({
               the same exception the run form and Settings make: a nine-line
               text region has nothing to align a right edge against, which is
               also why neither is a row of a `ListGroup`. */}
+          {/* The other three kinds take this heading from the `ListGroup` of
+              caps above. A run block has none, so without it the panel went
+              from the name and the kind straight to two unlabelled text
+              regions, and the first heading a reader met was `Where it runs` —
+              which made the task read as part of that question rather than as
+              the whole of this one. It is the bare label rather than an empty
+              `ListGroup`, which would draw a rounded box with a hairline round
+              nothing above the two fields. */}
+          {!orchestrator && !loop && <GroupLabel>What it does</GroupLabel>}
+
           <Field
             label={
               orchestrator ? "What to decide" : loop ? "Task to repeat" : "Task"
