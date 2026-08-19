@@ -803,16 +803,35 @@ That last one is not boilerplate. It carries an explicit *"Not yet verified"*
 list, which is the honest boundary of what this has been exercised against.
 Read it before running anything unattended.
 
-The newest thing on that boundary is the **repeating block**, which has never
-been run against a real CLI. Its pass decision and the scheduling around it are
-unit tested, and the wiring was driven once by hand against a real database and
+The newest thing on that boundary is **Needs review**, a fourth way a run can
+end. A run that meets a wall it cannot pass — a credential that is not there, a
+permission it does not have, a decision that is not its to make — says so and
+stops, instead of spending the rest of its cycle cap restating the problem or
+finishing green beside runs that did the job. [docs/runs.md](docs/runs.md) has
+the whole of it. What is unverified is the part that decides it: the ending
+turns entirely on the agent replying `NEEDS_REVIEW` on a line of its own, and
+**no `claude` child has ever produced that token for this app.** The matcher,
+the precedence between it and the other endings, and the workflow-loop stop are
+unit tested; what the wording actually produces in a real agent is reasoned
+from how `DONE` behaved over 251 runs, and reasoned is not measured. It can be
+wrong in two directions: an agent that withholds it spends its whole cycle cap
+against the wall exactly as before, and one that reaches for it cheaply turns
+your completions into a queue of questions. The reason the agent gives is the
+evidence either way. Nothing on that path has been seen in a browser either.
+
+The **repeating block** is on the same boundary and has also never been run
+against a real CLI. Its pass decision and the scheduling around it are unit
+tested, and the wiring was driven once by hand against a real database and
 a real git workspace — in a throwaway script, under a concurrency cap that held
 every pass `queued`. No page has rendered a repeating block, no browser has
 saved one, and no `claude` child has ever worked a pass. What to watch on the
-first real one is what ends it: a block stops repeating because the agent
-replied `DONE`, and a run that merely used up its work-cycle limit is written
-`completed` as well — so a block that quietly gave up after one pass and a block
-that finished the job look the same until you read what the agent said.
+first real one is what ends it. A block stops repeating when the agent replied
+`DONE`, when a pass ended as anything other than `completed` (**Needs review**
+among them, which stops the loop rather than waiting for it), when a pass
+started no run at all, or when it runs out of passes. And a run that merely used up its
+work-cycle limit is written `completed` as well — so a block that quietly gave
+up after one pass and a block that finished the job look the same until you read
+what the agent said.
 
 ---
 
