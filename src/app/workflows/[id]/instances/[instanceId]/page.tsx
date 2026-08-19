@@ -20,6 +20,7 @@ import { Meter } from "@/components/Meter";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, SkeletonText } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { Hint } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
@@ -68,7 +69,15 @@ const BLOCK_LABEL: Record<BlockStatus, string> = {
   blocked: "blocked",
 };
 
-const KIND_LABEL: Partial<
+/**
+ * The kinds that read their own status differently, and nothing else.
+ *
+ * Named for what it holds rather than `KIND_LABEL`, which is what
+ * `WorkflowCanvas` exports for an unrelated thing — the display name of a block
+ * *kind*. Two maps of one name in one feature area is how a later reader
+ * imports the wrong one and gets a plausible word back.
+ */
+const STATUS_BY_KIND: Partial<
   Record<BlockKind, Partial<Record<BlockStatus, string>>>
 > = {
   merge: { thinking: "merging", emitted: "landed" },
@@ -76,7 +85,7 @@ const KIND_LABEL: Partial<
 };
 
 const blockLabel = (b: { kind: BlockKind; status: BlockStatus }) =>
-  KIND_LABEL[b.kind]?.[b.status] ?? BLOCK_LABEL[b.status];
+  STATUS_BY_KIND[b.kind]?.[b.status] ?? BLOCK_LABEL[b.status];
 
 const BLOCK_TONE: Record<BlockStatus, BadgeTone> = {
   waiting: "neutral",
@@ -404,6 +413,51 @@ export default function WorkflowInstancePage() {
     budget.maxSessionFraction === null &&
     budget.maxWeeklyFraction === null;
 
+  /**
+   * What each kind of block is, for a reader meeting one for the first time.
+   *
+   * Four paragraphs stacked at the foot of one card, each appended by the
+   * commit that added its kind, two of them describing a kind this graph may
+   * not even hold. They are foldable **here and nowhere else**: on this page
+   * the press of Run has already happened, so none of this is a fact a decision
+   * is being approved against — which is exactly what `BlockStatement` in the
+   * editor is, and why nothing folds it.
+   *
+   * Held as an array so the count on the fold is the number actually behind it:
+   * a fold that overstates what it holds is one a reader stops opening, and a
+   * count computed separately from the conditions is one that goes wrong the
+   * next time a kind is added.
+   */
+  const blockKindNotes = [
+    <Hint key="approval">
+      What a deciding block starts is created without an approval — the folder,
+      the guards and the most runs it may start were fixed when the workflow was
+      saved
+    </Hint>,
+    <Hint key="spend">
+      A deciding block&rsquo;s own spend is counted against this workflow&rsquo;s
+      limit and never against a run
+    </Hint>,
+    ...(instance.blocks.some((b) => b.kind === "loop")
+      ? [
+          <Hint key="loop">
+            A repeating block starts one run per pass, each carrying on the
+            previous pass&rsquo;s branch — it stops when the agent reports the
+            work complete, a pass does not complete, or one of its caps is
+            reached
+          </Hint>,
+        ]
+      : []),
+    ...(instance.blocks.some((b) => b.kind === "merge")
+      ? [
+          <Hint key="merge">
+            A merge block&rsquo;s branches are in the merge queue on Branches,
+            one row each, with git&rsquo;s own answer for every one
+          </Hint>,
+        ]
+      : []),
+  ];
+
   return (
     <>
       <div className="mb-6">
@@ -638,29 +692,16 @@ export default function WorkflowInstancePage() {
                 </TBody>
               </Table>
             </TableWrap>
-            <Hint>
-              What a deciding block starts is created without an approval — the
-              folder, the guards and the most runs it may start were fixed when
-              the workflow was saved
-            </Hint>
-            <Hint>
-              A deciding block&rsquo;s own spend is counted against this
-              workflow&rsquo;s limit and never against a run
-            </Hint>
-            {instance.blocks.some((b) => b.kind === "loop") && (
-              <Hint>
-                A repeating block starts one run per pass, each carrying on the
-                previous pass&rsquo;s branch — it stops when the agent reports
-                the work complete, a pass does not complete, or one of its caps
-                is reached
-              </Hint>
-            )}
-            {instance.blocks.some((b) => b.kind === "merge") && (
-              <Hint>
-                A merge block&rsquo;s branches are in the merge queue on
-                Branches, one row each, with git&rsquo;s own answer for every one
-              </Hint>
-            )}
+            {/* The words are unchanged and every one of them is still on this
+                page — see `blockKindNotes` for why a fold is allowed here. */}
+            <Disclosure
+              className="mt-3"
+              summaryClassName="text-xs font-medium text-ink-muted"
+              summary="What these block kinds do"
+              count={blockKindNotes.length}
+            >
+              {blockKindNotes}
+            </Disclosure>
           </Card>
         </>
       )}
