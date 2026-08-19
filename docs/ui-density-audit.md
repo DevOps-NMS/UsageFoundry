@@ -34,6 +34,7 @@
 | 6 | Recommend removing — needs a human decision | never act on it |
 | 7 | Additions to `docs/agent/conventions.md` | |
 | 8 | **What actually landed, by run** — written after all five ran | **before you believe anything in §3 shipped** |
+| 9 | **The completion pass** — the first time any of this was opened in a browser | **before you believe §8 either** |
 
 ---
 
@@ -223,9 +224,22 @@ export function Disclosure({
   onToggle,     // ((open: boolean) => void) | undefined — with `open` or not
                 // at all.
   children,
-  className,
+  className,          // the caller's own box and rhythm, on the <details>.
+  summaryClassName,   // the summary's own box. See below — a class
+                      // passthrough, not the variant hatch.
 }: { ... })
 ```
+
+> **`summaryClassName` was written into this contract after the fact.** It is
+> not drift: the component landed with it, argued in its own file, and this
+> block was the half that was wrong. It exists for a `<summary>` that has to be
+> `sticky` — the header of an open patch scrolls away first and the fact it
+> takes with it is which file you are in, and `sticky` on the `<details>` would
+> pin a box taller than the pane — and it has since been spent on the summary
+> *rhythm* a call site owns as well. Twelve call sites in nine files use it. It
+> is a class passthrough, which is why it does not open the hatch the next
+> paragraph closes: a second **size** or **tone** is still a union in
+> `Disclosure.tsx` with a call site in the same commit.
 
 **It has no variants.** No `tone`, no `size`, no `Record<Union, string>` map:
 every call site in §3 wants the same thing, and a variant nobody passes is a
@@ -1598,7 +1612,7 @@ consistent treatment** — which is the finding below.
 it is a bare `<span>` beside two facts that carry glyphs. Render it
 `text-warn`, and add `font-medium` so it holds weight against the muted row.
 **No icon**, and that is a decision rather than an omission: `IconName` is a
-closed union of twenty (`Icon.tsx:19-48`) with no warning or edit glyph in it,
+closed union of nineteen (`Icon.tsx`) with no warning or edit glyph in it,
 `guard` is ruled out by E12's own reasoning, and `Icon.tsx` belongs to run
 (a). **The text does not change** and it stays in the same row. Whether it
 should eventually have a glyph of its own is in §6.
@@ -2228,8 +2242,9 @@ I would ask.
     `src/lib/apiTypes.ts` and `src/lib/workflows.test.ts` — not a density
     change, and no run in this plan owns those. Withdrawn from run (e) as E13.
 14. **`prompt rewritten` has no glyph** because `IconName` is a closed union of
-    twenty with no warning or edit glyph in it (E11 gives it a tone instead).
-    *Question: is it worth a twenty-first?* `conventions.md` says a new
+    **nineteen** with no warning or edit glyph in it (E11 gives it a tone
+    instead). It said *twenty* until §9 deleted `chevron-right`, which had no
+    caller. *Question: is it worth a twentieth?* `conventions.md` says a new
     destination needs a glyph before it needs a row in `panes.ts`; this is the
     same question one layer down.
 15. **`RepoSpendCard`'s sticky head has no hairline shadow**
@@ -2314,11 +2329,13 @@ future editor would otherwise read them as drift:
   does not list.** It exists for a `<summary>` that has to be `sticky` — the
   header of an open patch — and it is argued in the component. It is not a
   `tone` or a `size`, so it does not open the variant hatch §1.3 closes, but
-  the contract in §1.3 is now incomplete rather than wrong. Five call sites
-  use it.
+  the contract in §1.3 is now incomplete rather than wrong. ~~Five call sites
+  use it.~~ **Twelve, in nine files** — the count was wrong as well as the
+  contract. §9 closes both: §1.3 now carries the prop.
 - **`Icon.tsx`'s stale comment was rewritten rather than deleted**, and both
   glyphs were kept. `chevron-right` still has **no caller anywhere in `src/`**;
-  `chevron-down` has one, the chat's jump-to-latest button.
+  `chevron-down` has one, the chat's jump-to-latest button. **§9 deletes
+  `chevron-right`**, which is the half of §3.A.2 that was left open.
 - **§3.A.4's "update every import" was vacuous.** `Subsection` had no importer
   before the move and has none now.
 - **Acceptance 7 was not closed by run (a).** `Disclosure.test.tsx` asserts the
@@ -2382,7 +2399,22 @@ without fixing it, which is what the audit asked for.
 Acceptance 1–9 hold. Acceptance 10 was not run by run (c); **run (e) ran both**.
 One stale comment survives: `RunDiff.tsx:22` still says "Every row is a
 collapsed `<details>`" where the rows are now `ui/Patch`'s `DiffFileRow`. It is
-a comment, the element is gone, and `ui/Patch` is run (a)'s file.
+a comment, the element is gone, and `ui/Patch` is run (a)'s file. **§9 fixes
+it.**
+
+Two deviations run (e) did not find, added here because §8.2 records run (b)'s
+in the same shape and the asymmetry read as though run (c) had none:
+
+- **Run (c) also edited `src/components/ui/Field.tsx`** (`2cf4541`), adding
+  `modeId` and `invalid` to `LimitField`. §4 gives run (c) seven files and that
+  is not one of them. It is the benign direction — the change is what C3 needed
+  and it is where the decision belongs — but it is a kit edit made by a page
+  run, and it added `src/components/ui/LimitField.test.tsx` with it.
+- **Run (c) added a module beside the run form**, `src/app/runs/new/budgetPayload.ts`
+  and its test (`b587999`), extracting what the form sends before rearranging
+  what it shows. §4 names `src/app/runs/new/page.tsx`, not a new file next to
+  it. Pinning the payload before moving the controls is the right order to do
+  the work in; the gap is in the record, not in the judgement.
 
 ### 8.4 Run (d) — the workflow surfaces
 
@@ -2461,7 +2493,12 @@ Run (e) ran all four commands on the finished tree and reports each:
 - `npm run typecheck` — clean.
 - `npm test` — 1335 tests, 210 suites, 0 failures. `Meter.test.tsx`,
   `ui/Table.test.tsx`, `ui/ListView.test.tsx`, `ui/Disclosure.test.tsx` and
-  `ui/LimitField.test.tsx` all in it.
+  `ui/LimitField.test.tsx` all in it. **This does not reproduce off the
+  container.** On a macOS host `npm test` exits 1 with **three** failures, all
+  three in `src/lib/mergeQueueDrain.test.ts`, all three on the same sentence —
+  *"This run's repository is no longer inside a workspace mount."* They are a
+  host path-resolution difference, not a density regression; §9 records what
+  was and was not established about them.
 - `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` — compiles, and emits
   the standalone bundle and one stylesheet.
 
@@ -2509,10 +2546,25 @@ have been a change nobody asked for.
 either.** `docs/agent/testing.md`'s bar is a pure function whose failure is
 silent and expensive, or a rendering that pins something a reader would act on
 that is wrong in a way that typechecks — and it names `STATUS_TONE` and
-`describeRun` as things deliberately *not* tested on exactly that ground. Runs
+`describeRun` as things deliberately *not* tested on exactly that ground. ~~Runs
 (a) and (b) added five files between them (`Disclosure`, `ListView`,
 `LimitField`, `format`, the settings route), each pinning a primitive's own
-decision. Run (e)'s two candidates both failed the bar for the same mechanical
+decision.~~
+
+**That sentence is wrong three ways, and `git log --diff-filter=A` settles
+each.** Runs (a) and (b) *created* two of the five — `ui/Disclosure.test.tsx`
+(`3b6cb39`) and `ui/ListView.test.tsx` (`3f8ff13`). `ui/LimitField.test.tsx`
+is run **(c)**'s (`2cf4541`). `src/lib/format.test.ts` (`34741d4`) and
+`src/app/api/settings/route.test.ts` (`b71bc6c`) both **predate this
+specification** — runs (d) and (b) widened them, which is not the same claim.
+And the paragraph's opening sentence is falsified by a sixth file it does not
+mention: **run (c) added `src/app/runs/new/budgetPayload.test.ts`** (`b587999`),
+which is a pure function whose failure is silent and expensive — the bar
+`docs/agent/testing.md` sets — so the five runs did add one to the pure suite.
+The honest statement is that no run added a test for a *rearrangement*, which
+is the claim that was worth making.
+
+Run (e)'s two candidates both failed the bar for the same mechanical
 reason: the chat's approval correspondence and the branches sheet's gate live
 inside `"use client"` page components that import through the `@/` alias, and
 `tsconfig.test.json` emits plain CommonJS with nothing rewriting that alias at
@@ -2522,3 +2574,191 @@ specification did not ask for. The correspondence is therefore preserved by
 **absence of change** — the approve path, the selection state and the row that
 renders it are untouched — and that is a weaker claim than a test, which is why
 it is written here and in `docs/verification.md` rather than left implied.
+
+---
+
+## 9. The completion pass
+
+> **Written after the six items §8 left open were closed, and after the app was
+> driven in a browser for the first time.** §8 says in as many words that
+> *"nothing was checked in a browser, at any width, by any of the five runs"* —
+> everything in §3 and §8 stands on reading source and on looking up class
+> spellings in an emitted stylesheet. This section is what changed when a
+> browser was finally pointed at it, and it is the reason §8 is now the
+> second-most reliable part of this document rather than the most.
+
+### 9.1 How this one was produced
+
+A dev server on the host, with `UF_AUTH_TOKEN` cleared so no credential was
+typed into a form, `WORKSPACE_ROOTS` pointed at a real directory of
+repositories, and a seeded database: three agents, one saved workflow holding
+all five block kinds, one run template, and seven `runs` rows written straight
+to SQLite covering `completed`, landed, `needs-review`, `failed`, `stopped`,
+`queued` and `waiting`, with `run_events` and a `run_reviews` row behind two of
+them. **No run was started and nothing was landed** — every reading below is of
+a surface, not of an agent.
+
+Two things were measured rather than argued, and both found defects reading
+could not:
+
+- **A rule-order probe.** Every `.utility` rule in the page's own stylesheet,
+  indexed by class in emission order, cross-referenced against every element's
+  class list, reporting each element where the utility the author wrote *last*
+  is not the one the cascade picks. That is §8.7 defect 1 as an instrument
+  rather than as an anecdote, and it found three more instances of it.
+- **A pane-width sweep.** `<main>` set to a fixed pixel width and the page
+  re-measured, which changes the layout without moving the media query — so the
+  band between `md` and about 880px, where a table is still flat but the pane is
+  narrow, can be read at a desktop window. That band is where the one genuinely
+  bad idea in this pass was caught.
+
+**Still not verified.** The narrow-viewport work (§5.9) — the browser here
+refused to resize below the host window and reported `innerWidth: 2560` at a
+1519px window, so no reading at 390px was taken and `docs/verification.md`'s
+*Not yet verified* list keeps every one of its entries about that. Everything
+below was seen at a wide desktop width.
+
+### 9.2 What §8 left open, and what closed it
+
+| Item | Closed by |
+|---|---|
+| **D4 — the one change that landed partially** | `What it does` now heads **every** block kind. §8.4's open question — "whether those two fields want a heading of their own" — is answered *yes*, and run (d)'s argued layout is kept: `Task` and `Standing instructions` are still `<Field>`s and not `ListRow`s, because a nine-line text region still has no right edge to align a grouped row against. What was wrong was not their shape, it was that a `run` block has no caps, so the group holding the heading never rendered for that kind and the panel reached two unlabelled fields. **Confirmed in a browser before and after.** |
+| **§8.7 defect 1 — `className="mb-0"` on a kit component** | Seven call sites, not the three §8.7 counted. Three `CardTitle` `mb-0`, **two more `CardTitle` `mb-1`** on the dashboard that §8.7 missed, a `<Field className="mt-4 mb-0">` in the sign-in sheet, and a `<Hint className="-mt-2">` on `/agents` where the losing utility turned a pull-up into a 6px push-down. Each is now either deleted (where the component's own value was right and the source was lying) or moved to a wrapper (where the tighter gap was genuinely wanted). |
+| **§8.7 defect 2 — the chat's stale `selected` ids** | The poll's answer now prunes `selected` against the proposals it just delivered. The approval path is byte-identical: still one synchronous pass over an explicit list of ids. |
+| **§8.7 defect 3 — `RunDiff.tsx`'s stale comment** | Rewritten. |
+| **§8.7 defect 4 — `Icon`'s callerless `chevron-right`** | Deleted, which is the half of §3.A.2 run (a) left open ("use them, or delete the comment — but do not leave both"). `IconName` is now nineteen; §6 item 14 is corrected to match. |
+| **§8.2's acceptance-2 caveat — zero chips carried `aria-current`** | An empty hash now stands on the first section, which is what is on screen when the page opens. Server render and first paint pick the same chip, so nothing hydrates differently. **Confirmed in a browser: exactly one chip, on load, with no hash.** |
+| **§1.3's incomplete contract** | `summaryClassName` is in it, with the count corrected from five call sites to twelve in nine files. |
+| **Two stale `LIST_VIEW` references** | `WorkflowCanvas.tsx` and `conventions.md` both name `ListView`'s `capped` box now. `grep -rn LIST_VIEW` returns nothing. |
+
+**§2.2's fold rule was verified rather than assumed.** Three settings were
+moved off their shipped defaults and the page reloaded: `When a window turns
+over (1)` and `Isolated runs (2)` both opened by themselves and both said how
+many differ. That is B3's whole safety argument, seen working.
+
+### 9.3 What the browser found that no run had
+
+1. **Every table in the app was drawing its fixed columns at a third of their
+   declared width.** `Table` leaves `table-layout` at `auto`, where a sibling
+   cell asking for `width: 100%` — the column that gives — outranks every other
+   column's `width` and squeezes each toward min-content. Measured: `/runs`
+   Status 84px against 150, `/agents` Agent 98px and 83px against 200,
+   `/branches` Actions 77px against 176 and the tick box 20px against 56,
+   `/workflows/[id]` `Starts after` **93px against 260**. The visible cost was
+   text at one word per line. Fixed by stating a `min-width`, which auto layout
+   *does* honour, on every `Th` in `/branches`, `/agents` and both workflow
+   surfaces.
+2. **`/runs` is the exception, and finding out why is the most useful thing in
+   this pass.** It is the app's one table deliberately outside `TableWrap`,
+   because an `overflow-x-auto` would pin its sticky head to a box that never
+   scrolls — so a floor under its columns is a floor under the *pane*. Measured
+   both ways: with floors the table stops shrinking at 594px and the pane
+   scrolls sideways from ~615px down, which covers every window from 768px to
+   about 880; with plain widths it collapses to 468px and the pane never
+   scrolls. `conventions.md` ranks those two costs — "a table must not be the
+   reason the pane scrolls sideways" — so `/runs` keeps its widths, wraps its
+   long status, and now carries the measurement in a comment so the next editor
+   does not "fix" it to match its four neighbours.
+3. **A class the caller wrote that the kit's own `w-full` beat**, on the
+   `/branches` repository picker: `w-[34ch]` rendered at 155px where 34ch is
+   284. The same rule as §8.7 defect 1, one property over. Moved to a wrapper,
+   which is what the same file already does 150 lines further down.
+4. **`QueueBatchSection` rendered sibling `<section>` elements**, so
+   `globals.css`'s legacy `section + section { margin-top: 24px }` fired between
+   every pair of merge-queue batches — 24px nobody wrote, on top of the hairline
+   the component states for itself. This is the exact trap `Card.tsx`'s own
+   comment records being bitten by. Now a `<div>`.
+5. **`/chat` rendered two `emphasis="primary"` cards at once**, which by
+   §1.1's own rule means it had none. The proposals card keeps its rise; the
+   conversation is a flat `default` in every state. The obvious repair — making
+   the conversation the inverse of the proposals map — was tried and rejected:
+   `emphasis` carries padding as well as elevation, so a conversation keyed on
+   `pending` would re-pad the scrolled transcript and shift the composer under
+   the reader's hands on a surface that polls.
+6. **Six tooltips carrying facts that existed nowhere else** (§1.2 item 6). Two
+   of them were the *same string* explaining the Cycles column on `/runs` and on
+   the instance page, on tables that stack — so below the breakpoint, where the
+   head is not rendered at all, the sentence did not exist. Both are deleted
+   rather than relocated: `n/m` reads as "n of m", and the distinction the
+   tooltip drew is the `In flight` column standing beside it. The rest —
+   `Ahead`'s definition, the purge's irreversibility, the `uncommitted` badge's
+   meaning — are now visible text.
+
+### 9.4 Decisions taken beyond what §5 authorised, named rather than buried
+
+Three corrections exceed §5.6's "**exactly one** correction" clause for the
+`ceiling`/`guard`/`limit` table, and are recorded here because that clause is a
+real limit and this pass chose to pass it:
+
+- `settings/page.tsx`'s `SPEND_READ_AT` strings called a run's own spending
+  limit **"its own ceiling"** — the phrase C1 corrected on `/runs/new` and
+  nowhere else. Now "its own cap", matching the landed run-form wording.
+- `page.tsx`'s install-limit card said **"because this is a ceiling"**. The
+  table reserves *limit* for a cap on one unit of work "this run, this chat
+  turn, this workflow, **this install**", and Settings already labels the same
+  key `Install limit` under a group called `Spending limits`. Now "a limit".
+- `/runs/new` said **"1 means one pass and then stop"** in a row whose label,
+  unit and off-label all say *cycle*, and where *pass* is the workflow feature's
+  word for something else. Now "one cycle".
+
+Each is correct under the audit's own table and each is one string. §5.6's
+clause exists to stop a *build run* doing a find-and-replace across the app; a
+pass whose whole job is closing §2.3 anti-rule 3 is a different thing, and
+saying so is better than doing it quietly.
+
+One more, of the same kind: the merge block's `Let Claude resolve a conflict`
+row printed **the same sentence `BlockStatement` prints one panel up**. The row
+now says what its own switch withholds. `BlockStatement`'s output is
+byte-identical — checksummed before and after.
+
+### 9.5 A test that was failing, and why nobody had noticed
+
+`npm test` exits **1** on a macOS host and always did: three failures in
+`src/lib/mergeQueueDrain.test.ts`, all on *"This run's repository is no longer
+inside a workspace mount."* §8.6 reports 0 failures, which is true in the
+container and was never true here.
+
+It is a fixture bug and not a landing bug. `os.tmpdir()` on macOS is
+`/var/folders/…`, a symlink to `/private/var/folders/…`; the test registers a
+mount at the unresolved path, and `resolveInMount` checks containment on the
+resolved path **and again after `realpathSync`** — which `security.md` says is
+load-bearing, twice. So the mount refuses its own checkout. Eight sibling test
+files already wrap `mkdtempSync` in `realpathSync`; this one did not. It does
+now, and the suite is **1335 tests, 210 suites, 0 failures** on this host.
+
+### 9.6 What was run
+
+- `npm run typecheck` — clean.
+- `npm test` — 1335 tests, 210 suites, **0 failures**.
+- `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` — compiles and emits
+  the standalone bundle. (A first attempt failed with `Cannot find module
+  './5611.js'` because a dev server was writing `.next` at the same time;
+  `rm -rf .next` is the whole fix and it is worth knowing.)
+- Every arbitrary-value class this pass wrote was then looked up **in the
+  stylesheet the running page loads**, from the page itself, rather than in a
+  built file: every `min-w-[…]` and the moved `w-[34ch]` are present and
+  matched.
+- Nine surfaces were opened and read: `/`, `/runs`, `/runs/new`, two run detail
+  pages, `/branches`, `/chat`, `/agents`, `/settings`, `/workflows`,
+  `/workflows/[id]` and the canvas editor with all four block kinds selected in
+  turn.
+
+### 9.7 Still open, and deliberately so
+
+- **Everything in §6.** Fifteen questions for a person, and this pass answered
+  none of them. Two are now cheaper to answer than they were: item 4
+  (`LiveTelemetry`'s missing `max-h-80`) and item 15 (`RepoSpendCard`'s flat
+  sticky head) are both marked *Unverified* and both are one browser look away
+  now that there is a browser.
+- **§5.9's narrow-viewport work**, for the reason in §9.1: the browser would
+  not resize. `docs/verification.md` keeps all three of its arithmetic-only
+  claims.
+- **The redundancy set.** A sweep against §1.0 step 1 confirmed several pairs
+  where one of two sentences should go — the dashboard's `Live from runs`
+  region heading against the card title inside it, the `In your own terminal`
+  fold summary against the card title it opens onto, Settings' calibration fold
+  summary against its only row's label, `Nothing is stored until you save`
+  printed twice in one fold, and the two `Window guards` rows that read
+  identically on a fresh install. Each needs a judgement about *which* sentence
+  survives, which is an editorial pass and not a mechanical one. Listed here so
+  it is a work item rather than a discovery to make again.

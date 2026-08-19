@@ -811,7 +811,24 @@ through before trusting this unattended:
 
   **No browser was opened and Docker is not available in this container**, so
   `docker compose up --build` — half this repository's real verification loop —
-  was not run by any of the five. Nothing below has been *seen*:
+  was not run by any of the five.
+
+  > **A later completion pass did open a browser, on the host, at a wide
+  > desktop width — see `docs/ui-density-audit.md` §9.** It closed the six
+  > items §8 left open, and it moved four of the readings below out of this
+  > list: eleven surfaces were opened and read; every `Disclosure` on
+  > `/settings` was seen opening by itself with its count when its contents
+  > differ from their defaults; the dashboard's three bands were read as
+  > rendered; and every arbitrary-value class the pass wrote was looked up in
+  > the stylesheet the running page loads. It also found that **`CardTitle`'s
+  > no-op was seven call sites and not three**, that every table in the app was
+  > drawing its fixed columns at a third of their declared width, and that
+  > `npm test` had been failing on macOS all along for a reason unrelated to
+  > any of this. All of it is at a wide width: **nothing below about 390px was
+  > seen**, because the browser refused to resize, so every narrow-viewport
+  > entry on this list stands exactly as written.
+
+  Nothing below has been *seen*:
 
   - Every restructured page top to bottom at **390×844** with no horizontal
     scroll, and at **1440px** with nothing moved that the audit did not name.
@@ -844,6 +861,9 @@ through before trusting this unattended:
     looking: `selected` is not pruned against `pending` when the poll answers,
     so a proposal decided in another tab leaves a stale id in the set that the
     next press sends. The route refuses it by id; nothing on the page says so.
+    **The completion pass fixed that prune** (§9.2) without touching the approve
+    path, so the correspondence is still preserved by absence of change and this
+    entry still needs a real thread to settle it.
 - **`/api/status` against a real fleet, and the structured lines on real
   stdout.** The route is driven by `npm test` against a seeded database — the
   counts, the documented keys, the read-only credential, the absence of prompts,
