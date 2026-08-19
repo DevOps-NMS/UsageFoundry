@@ -44,6 +44,7 @@ import {
   type SegmentedOption,
 } from "@/components/ui/SegmentedControl";
 import { isCommitChord } from "@/components/shell/shortcuts";
+import { type BudgetFields, budgetFromForm } from "./budgetPayload";
 
 /** Everything a template or an earlier run supplies to this form. */
 interface FormSeed {
@@ -70,8 +71,12 @@ interface FormSeed {
  * previously needed the template opened in another tab. `applySeed` writes the
  * resulting values here as the *baseline*; anything that differs from it now is
  * the operator's, and is offered a way back.
+ *
+ * The budget half is `BudgetFields`, in a module of its own with no component
+ * import in it, because what those ten values mean on the wire is the one thing
+ * here that is worth a unit test — see `budgetPayload.ts`.
  */
-interface FormValues {
+interface FormValues extends BudgetFields {
   mountId: string;
   folder: string;
   prompt: string;
@@ -79,16 +84,6 @@ interface FormValues {
   permissionMode: string;
   /** `""` is "no agent" — the picker's own empty option, not a missing answer. */
   agentId: string;
-  iterationsCapped: boolean;
-  maxIterations: string;
-  costLimited: boolean;
-  maxRunCostUSD: string;
-  timeLimited: boolean;
-  maxDurationMinutes: string;
-  maxSessionFraction: string;
-  maxWeeklyFraction: string;
-  enforcement: EnforcementModeDTO;
-  continueAfterDone: boolean;
 }
 
 /**
@@ -1040,33 +1035,6 @@ export default function NewRunPage() {
   }
 
   /**
-   * The budget as the wire wants it. Shared by starting a run and saving a
-   * template so the two cannot describe the same form differently — a template
-   * that normalises even slightly unlike the run it was saved from would start
-   * something other than what was tested.
-   */
-  function currentBudget() {
-    return {
-      // null is the wire form of "no limit" for all four of these —
-      // normalizePolicy maps it to an unset cap rather than to a default.
-      maxIterations: iterationsCapped ? maxIterations : null,
-      maxRunCostUSD: costLimited ? maxRunCostUSD : null,
-      maxDurationMinutes: timeLimited ? maxDurationMinutes : null,
-      // Sent as a 0–1 fraction rather than the 0–100 the field shows.
-      // normalizePolicy's frac() reads a bare 1 as 100%, so a user typing
-      // "1" into a field labelled (%) would otherwise get no guard at all.
-      maxWeeklyFraction: maxWeeklyFraction
-        ? Number(maxWeeklyFraction) / 100
-        : null,
-      maxSessionFraction: maxSessionFraction
-        ? Number(maxSessionFraction) / 100
-        : null,
-      enforcement,
-      continueAfterDone,
-    };
-  }
-
-  /**
    * Fill the form from a template or an earlier run.
    *
    * A limit that is off keeps whatever number is already in its box, so
@@ -1195,7 +1163,7 @@ export default function NewRunPage() {
             // "" is the picker's own "no agent", and the column's null is the
             // same absence — collapsed here rather than stored as an empty id.
             agentId: agentId || null,
-            budget: currentBudget(),
+            budget: budgetFromForm(current),
           }),
         },
       );
@@ -1297,7 +1265,7 @@ export default function NewRunPage() {
           // starting a run that quietly is not the agent it was asked to be —
           // which under `--agent` is a run that would fail at the spawn.
           agentId: agentId || null,
-          budget: currentBudget(),
+          budget: budgetFromForm(current),
         }),
       });
       const json = await res.json();
@@ -1935,8 +1903,12 @@ export default function NewRunPage() {
                   {!costLimited
                     ? "This run is not capped in dollars — only the cycle count, the clock and the two window guards below stop it"
                     : live
-                      ? "Read mid-cycle too, and each cycle carries what is left of it as a ceiling, so the run stops near this figure"
-                      : "Each cycle carries what is left of it as a ceiling, so the run stops near this figure"}
+                      ? // "cap", not "ceiling": a ceiling is a number set in
+                        // Settings that a *window* percentage is measured
+                        // against, and this is a limit on one run. The three
+                        // words are kept apart in `conventions.md`.
+                        "Read mid-cycle too, and each cycle carries what is left of it as its own cap, so the run stops near this figure"
+                      : "Each cycle carries what is left of it as its own cap, so the run stops near this figure"}
                   {problemFor("cost") && (
                     <Toned tone="danger">
                       <span className="mt-0.5 block">
