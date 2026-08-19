@@ -19,10 +19,11 @@ import { DiffFileRow } from "@/components/ui/Patch";
 /**
  * Above this many files the list gets its own scroll box.
  *
- * Every row is a collapsed `<details>`, so a 300-file change is 300 rows of
- * chrome between the operator and the land decision below it. The cap bounds
- * the card rather than the list: nothing is dropped, and the count above it
- * already says how many there are.
+ * Every row is a closed `DiffFileRow` — `ui/Patch`'s `Disclosure` over one
+ * file's patch — so a 300-file change is 300 rows of chrome between the
+ * operator and the land decision below it. The cap bounds the card rather than
+ * the list: nothing is dropped, and the count above it already says how many
+ * there are.
  */
 const SCROLL_FILE_LIST_ABOVE = 24;
 
