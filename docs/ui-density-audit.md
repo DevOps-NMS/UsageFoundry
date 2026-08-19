@@ -560,11 +560,11 @@ All three are in §6 as questions for a person.
 ### 3.A.5 Acceptance criteria for run (a)
 
 1. `src/components/ui/Disclosure.tsx` exists, matches §1.3's contract, uses a
-   native `<details>`/`<summary>`, carries `max-md:py-3.5` in its `SIZE` map,
-   and adds no ARIA.
+   native `<details>`/`<summary>`, carries `max-md:py-3.5` unconditionally (it
+   has no variant maps), and adds no ARIA.
 2. `ui/Patch.tsx`'s `DiffFileRow` uses it. The sticky `z-10` summary behaviour
    is preserved.
-   3. `src/components/ui/ListView.tsx` exists with the typed `box` (`capped` /
+3. `src/components/ui/ListView.tsx` exists with the typed `box` (`capped` /
    `scrolling` / `plain`) and exports both `STICKY_HEAD` and
    `STICKY_HEAD_FLAT`; all five call sites use them as §3.A.3's table says;
    all five `LIST_VIEW` and all five `STICKY_HEAD` local consts are deleted;
@@ -572,11 +572,11 @@ All three are in §6 as questions for a person.
 4. `Subsection` is exported from `ui/Card.tsx` and no longer from `ui/Field.tsx`.
 5. `npm run typecheck` passes. `npm test` passes — including
    `src/components/ui/Table.test.tsx` and `src/components/Meter.test.tsx`.
-6. The five `ListView` call sites are a **markup swap**: `<div
-className={LIST_VIEW}>` becomes `<ListView box="…">`, the local `const` is
-deleted, and the emitted CSS is unchanged. That is the *only* change run (a)
-makes under `src/app/` or to a component run (e) owns — no structure, no
-ordering, no copy.
+6. The five `ListView` call sites are a **markup swap**:
+   `<div className={LIST_VIEW}>` becomes `<ListView box="…">`, the local
+   `const` is deleted, and the emitted CSS is unchanged. That is the *only*
+   change run (a) makes under `src/app/` or to a component run (e) owns — no
+   structure, no ordering, no copy.
 7. The emitted CSS is checked for the `max-md:` variant on the new component —
    Tailwind emits nothing for a spelling it does not know, silently
    (`conventions.md`).
