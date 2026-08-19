@@ -84,7 +84,9 @@ const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 const SECTIONS = [
   { id: "limits", label: "Subscription limits" },
   { id: "runs", label: "Runs" },
-  { id: "guards", label: "Default guards" },
+  // The heading's own words. A chip that lands on a heading it does not name
+  // reads as a section that is missing and one that arrived unannounced.
+  { id: "guards", label: "Default guard set" },
   { id: "unattended", label: "Unattended runs" },
   { id: "plugins", label: "Plugins" },
   { id: "storage", label: "Storage" },
@@ -1653,7 +1655,10 @@ export default function SettingsPage() {
           <SettingRow
             htmlFor="sess"
             edited={isEdited("sessionTokenLimit")}
-            label="5-hour ceiling"
+            // The group label was the only thing telling these two apart from
+            // the cost ceilings above, and a group label is not on screen from
+            // inside the field it names.
+            label="5-hour token ceiling"
           >
             <div className="w-40">
               <Input
@@ -1678,7 +1683,7 @@ export default function SettingsPage() {
           <SettingRow
             htmlFor="wk"
             edited={isEdited("weeklyTokenLimit")}
-            label="Weekly ceiling"
+            label="Weekly token ceiling"
           >
             <div className="w-40">
               <Input
@@ -2369,7 +2374,12 @@ export default function SettingsPage() {
           </SettingRow>
         </ListGroup>
 
-        <ListGroup className="mt-4" label="What one chat message may spend">
+        {/* One group of two rather than two groups of one, each labelled with a
+            longer spelling of the row inside it. `limits` and not `ceilings`:
+            both rows are a dollar cap on a unit of work — a chat turn and this
+            install — which is what a limit is here, where a ceiling is an
+            estimate of a subscription window and a guard is a threshold on one. */}
+        <ListGroup className="mt-4" label="Spending limits">
           <SettingRow
             htmlFor="chatbudget"
             edited={isEdited("chatTurnBudgetUSD")}
@@ -2395,9 +2405,7 @@ export default function SettingsPage() {
               />
             </div>
           </SettingRow>
-        </ListGroup>
 
-        <ListGroup className="mt-4" label="What this whole install may spend">
           <SettingRow
             htmlFor="installbudget"
             edited={isEdited("installDailyCostLimitUSD")}
