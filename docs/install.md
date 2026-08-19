@@ -15,8 +15,8 @@ docker compose up --build
 open http://localhost:3000
 ```
 
-Then in the UI: **Settings → Calibrate** to set ceilings, **Runs → New run** to
-start work.
+Then in the UI: **Settings → Estimate a ceiling from your own history** (press
+**Scan history**) to set ceilings, **Runs → New run** to start work.
 
 ## Sign in once, inside the container
 
