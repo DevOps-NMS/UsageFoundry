@@ -29,12 +29,11 @@ export type IconName =
   // The shell's own two controls: collapse the source list, and quick open.
   | "sidebar"
   | "search"
-  // `chevron-down` is the chat's jump-to-latest button, and `chevron-right`
-  // has no caller at all. Both were drawn for a disclosure component, and the
-  // one that was eventually built uses the native `<summary>` marker instead:
-  // the triangle comes from `list-item` display, so a glyph beside it would be
-  // two of them and a glyph replacing it costs the display that draws it.
-  | "chevron-right"
+  // `chevron-down` has exactly one caller — the chat's jump-to-latest button.
+  // It was drawn for a disclosure component, and the one that was eventually
+  // built uses the native `<summary>` marker instead: the triangle comes from
+  // `list-item` display, so a glyph beside it would be two of them and a glyph
+  // replacing it costs the display that draws it.
   | "chevron-down"
   // The two facts a chat proposal is decided on: where it runs, and under
   // whose rules. They were drawn inline on that page, at a different box size
@@ -121,7 +120,6 @@ const GLYPH: Record<IconName, ReactElement> = {
       <path d="m10.5 10.5 2.75 2.75" />
     </>
   ),
-  "chevron-right": <path d="M6.25 3.75 10.5 8l-4.25 4.25" />,
   "chevron-down": <path d="M3.75 6.25 8 10.5l4.25-4.25" />,
   folder: (
     <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.3a1.5 1.5 0 0 1 1.06.44l.7.7h5A1.5 1.5 0 0 1 14 5.64v5.86A1.5 1.5 0 0 1 12.5 13h-9A1.5 1.5 0 0 1 2 11.5z" />
