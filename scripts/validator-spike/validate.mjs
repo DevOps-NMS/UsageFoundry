@@ -278,7 +278,7 @@ export async function validate(caseFile, options) {
 async function main() {
   const argv = process.argv.slice(2);
   /** Flags that consume the next argv entry, so its value is never read as the case path. */
-  const VALUED = new Set(["--transport", "--model", "--io-dir"]);
+  const VALUED = new Set(["--transport", "--model", "--io-dir", "--only", "--out"]);
   let casePath = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i].startsWith("--")) {

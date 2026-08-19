@@ -106,8 +106,16 @@ async function main() {
   };
   const emitOnly = argv.includes("--emit");
   const measuredUsage = readMeasuredUsage(options.ioDir);
+  /** `--only 1,2,6` scores one stratum without disturbing the corpus. */
+  const only = arg(argv, "--only", null)
+    ? new Set(arg(argv, "--only", "").split(",").map((s) => Number(s.trim())))
+    : null;
 
-  const files = fs.readdirSync(CASES).filter((f) => f.endsWith(".json")).sort();
+  const files = fs
+    .readdirSync(CASES)
+    .filter((f) => f.endsWith(".json"))
+    .filter((f) => !only || only.has(Number(f.slice(0, 2))))
+    .sort();
   const results = [];
   for (const file of files) {
     const c = JSON.parse(fs.readFileSync(path.join(CASES, file), "utf8"));

@@ -2,3 +2,4 @@
 # `score.mjs --emit`, so committing 1.5 MB of them would only duplicate the
 # corpus. The replies next to them are NOT derivable and are committed.
 io/*.request.md
+io-testimony/*.request.md

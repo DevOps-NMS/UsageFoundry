@@ -79,6 +79,37 @@ filed GitHub issues + index cannot be confirmed from a git diff"* — which is
 true. The label weighed the visible half. That is a real difference of opinion
 about what a partly-off-repository deliverable means, not a failure to read.
 
+## The testimony arm: it changed nothing
+
+`docs/external-validator.md` §1 calls the run's own final message *"the one
+artefact that would close the biggest gap"* — the thing that separates a
+correct empty diff from a wrong one — and decision 2 recommends giving it to the
+validator. That is testable here, so it was tested.
+
+All eight empty-diff cases (1, 2, 6, 10, 15, 24, 31, 34) were re-run with
+`--with-testimony`, which appends the run's own last turn marked as its account
+of itself. `score-report-testimony.md` is the result:
+
+**Zero of eight verdicts changed.** Six of six on the scored subset, both with
+and without — identical verdicts, case for case.
+
+What did change is the reasoning, and it changed in the right direction: given
+the testimony, the model names it and declines to lean on it. Case 10:
+*"only testimony claims filing, which isn't evidence."* Case 31: *"the final
+message is unverifiable testimony."*
+
+The reason it bought nothing is that the discrimination was never in the
+testimony. **The task text already carries it.** Every one of the five correctly
+`unjudgeable` runs was told in its own prompt not to commit, or asked a question;
+both `not-done` runs were told to commit and did not. A reader with the task text
+and an empty diff does not need the run's own word for it — and on the two rows
+where the task text genuinely cannot settle it, neither can the testimony,
+because the testimony is the run's word about exactly the thing in dispute.
+
+This is a negative result against a recommendation the design document makes on
+reasoning rather than measurement, on n=8. It is not a reason to strike decision
+2 — it is a reason to make M1 measure it before paying for it.
+
 ## Cost
 
 Two figures, because only one of them is a measurement.
@@ -104,10 +135,9 @@ runs cost dollars each, not twelve cents.
   transport that answered these 40 requests was the harness's subagent path, not
   `validate.mjs --transport api` and not `spawnAssist`. Same prompt bytes, same
   model family, different system prompt and a tool loop around it.
-- **The `--with-testimony` arm.** The flag exists and the final turn is in every
-  case file, so the experiment `external-validator.md` decision 2 turns on — does
-  the run's own account separate a correct empty diff from a wrong one — is one
-  command away. It was not run.
+- **Testimony on anything but an empty diff.** The `--with-testimony` arm was run
+  over the 8 empty-diff cases only, because that is where the design document
+  claims it matters. Whether it changes a verdict on a 100 kB patch is untested.
 - **Anything about a non-isolated or a `failed`/`blocked`/`cancelled` run.** The
   labelled set is 40 `completed` runs on isolated branches.
 - **Whether any of the work is correct.** Every `finished` here means the change
