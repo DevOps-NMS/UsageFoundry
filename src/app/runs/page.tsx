@@ -20,6 +20,7 @@ import { StatusMark } from "@/components/StatusMark";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
+import { ListView, STICKY_HEAD } from "@/components/ui/ListView";
 import { Notice } from "@/components/ui/Notice";
 import {
   SegmentedControl,
@@ -93,26 +94,6 @@ const FILTERS: readonly SegmentedOption<Filter>[] = [
   { value: "failed", label: "Failed" },
   { value: "blocked", label: "Blocked" },
 ];
-
-/**
- * The list view's own box and its pinned header.
- *
- * Deliberately *not* the `overflow-x-auto` wrapper the tables elsewhere use:
- * a scroll container of its own would make the header stick to a box that
- * never scrolls, which is a no-op dressed as a feature. Without it the
- * scrollport is the content pane, so the header pins under the toolbar as the
- * page scrolls, which is what a Finder list does and the whole point of it.
- *
- * That cost the page a horizontal scrollbar on a window narrower than this
- * app's own sidebar plus about 640px, which is every phone. `Table`'s `stack`
- * is what answers it rather than a wrapper: below `md` there are no columns to
- * be too wide for, the pinned header goes with them, and the scrollport is
- * still the pane.
- */
-const LIST_VIEW = "rounded-lg border border-line bg-surface";
-
-const STICKY_HEAD =
-  "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
 
 /**
  * Where the run worked, as one line.
@@ -265,8 +246,15 @@ function RunList({
   onStop?: (id: string) => void;
   onResume?: (id: string) => void;
 }) {
+  // Not a scroll container, which is what `plain` is: the scrollport is the
+  // content pane instead, so the header pins under the toolbar as the page
+  // scrolls. That cost the page a horizontal scrollbar on a window narrower
+  // than this app's own sidebar plus about 640px, which is every phone, and
+  // `Table`'s `stack` is what answers it rather than a wrapper — below `md`
+  // there are no columns to be too wide for, the pinned header goes with them,
+  // and the scrollport is still the pane.
   return (
-    <div className={LIST_VIEW}>
+    <ListView box="plain">
       <Table stack>
         <caption className="sr-only">{caption}</caption>
         <THead>
@@ -461,7 +449,7 @@ function RunList({
           )}
         </TBody>
       </Table>
-    </div>
+    </ListView>
   );
 }
 

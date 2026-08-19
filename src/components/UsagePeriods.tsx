@@ -18,6 +18,7 @@ import {
 import { Meter } from "./Meter";
 import { Badge } from "./ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "./ui/Card";
+import { ListView, STICKY_HEAD } from "./ui/ListView";
 import { TBody, THead, Table, Td, Th, Tr } from "./ui/Table";
 
 /**
@@ -81,36 +82,6 @@ const HEADING: Record<PeriodGranularityDTO, string> = {
   week: "Week",
   month: "Month",
 };
-
-/**
- * A Finder-style list view: a bordered, rounded box that owns its own scroll
- * region, rather than a full-width web table bleeding to the card's edges.
- *
- * The height cap is what gives the sticky header something to stick inside.
- * `overflow-auto` rather than `overflow-y-auto`, because these tables also
- * overflow sideways on a narrow window — which is what `TableWrap` used to do,
- * and it cannot be used here: a scroll container with no height constraint
- * never scrolls vertically, so a header sticking to its top never moves.
- *
- * Stated here, in `LiveTelemetry` and in the dashboard page separately: the
- * three files that draw a list view are the three the run may touch, and a
- * shared module for them would be a fourth.
- *
- * Both halves are released below the breakpoint: the head is hidden and the
- * rows are blocks there, so the cap has no sticky head left to give a box to
- * and would instead be a nested scroller on touch.
- */
-const LIST_VIEW =
-  "mt-4 max-h-80 overflow-auto max-md:max-h-none max-md:overflow-visible " +
-  "rounded-sm border border-line";
-
-/**
- * `bg-surface` because the rows scroll under it, and the inset shadow because a
- * `border-b` on a sticky cell is not reliably painted under `border-collapse` —
- * the two are the same hairline in the same place wherever both do render.
- */
-const STICKY_HEAD =
-  "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
 
 /**
  * Name the ceiling the percentages are measured against, and say when it is a
@@ -234,7 +205,7 @@ export function UsagePeriods({
         )}
       />
 
-      <div className={LIST_VIEW}>
+      <ListView box="capped" className="mt-4">
         <Table stack>
           <caption className="sr-only">
             Spend per calendar {noun}, newest first
@@ -299,7 +270,7 @@ export function UsagePeriods({
             })}
           </TBody>
         </Table>
-      </div>
+      </ListView>
 
       {/* The meter's own detail already handles the no-ceiling case and the
           page already carries one "set a ceiling" notice, so this says the two

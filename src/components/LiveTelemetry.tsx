@@ -8,27 +8,8 @@ import type { TelemetryWindowDTO } from "../lib/apiTypes";
 import { STATUS_TONE, fmtRelative, fmtTokens, fmtUSD } from "../lib/format";
 import { Badge } from "./ui/Badge";
 import { Card, CardTitle, Stat } from "./ui/Card";
+import { ListView, STICKY_HEAD } from "./ui/ListView";
 import { TBody, THead, Table, Td, Th, Tr } from "./ui/Table";
-
-/**
- * The same Finder-style list view the period card and the dashboard draw: a
- * bordered box owning its own scroll region, with the header stuck to the top
- * of it. Restated here rather than shared, for the reason given beside the copy
- * in `UsagePeriods` — a module holding two class strings would be a fourth file
- * for three call sites.
- *
- * No height cap: this list is already capped at the heaviest few runs by
- * `telemetryWindow`, so it has nothing to scroll past. The sticky header costs
- * nothing until that cap moves.
- *
- * The sideways scroll is released below the breakpoint, where the rows are
- * blocks and there is nothing left to scroll to.
- */
-const LIST_VIEW =
-  "overflow-auto max-md:overflow-visible rounded-sm border border-line";
-
-const STICKY_HEAD =
-  "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
 
 /**
  * What runs have spent inside the dashboard's 5-hour window, as Claude Code
@@ -78,7 +59,10 @@ export function LiveTelemetry({
         </div>
       </div>
 
-      <div className={LIST_VIEW}>
+      {/* `scrolling` rather than `capped`: this list is already capped at the
+          heaviest few runs by `telemetryWindow`, so it has nothing to scroll
+          past and a height cap would bound a bound. */}
+      <ListView box="scrolling">
         <Table stack>
           <caption className="sr-only">
             Each run&rsquo;s own first-party cost inside this window, heaviest
@@ -129,7 +113,7 @@ export function LiveTelemetry({
             ))}
           </TBody>
         </Table>
-      </div>
+      </ListView>
 
       {/* The total above is over every run in the window; this table is not.
           Same rule as a shortened diff: what was left out is counted, not

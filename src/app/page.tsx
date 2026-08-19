@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
+import { ListView, STICKY_HEAD } from "@/components/ui/ListView";
 import { Notice } from "@/components/ui/Notice";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
@@ -125,40 +126,6 @@ interface Breakdown {
   rows: BreakdownRow[];
   hint?: string;
 }
-
-/**
- * A Finder-style list view: a bordered, rounded box that owns its own scroll
- * region, with the column heads stuck to the top of it — rather than a
- * full-width web table running to the card's edges and scrolling the page.
- *
- * The height cap is what gives the sticky head something to stick inside, which
- * is also why `TableWrap` cannot be used here: a scroll container with no
- * height constraint never scrolls vertically, so a head stuck to its top never
- * moves. `overflow-auto` because these tables still overflow sideways on a
- * narrow window, which is the job `TableWrap` was doing.
- *
- * Repeated in `UsagePeriods` and `LiveTelemetry` rather than shared: those two
- * are unit-tested against the plain CommonJS `tsconfig.test.json` emits, where
- * a path alias does not resolve, so a shared module would have to be reachable
- * relatively from both — a fourth file holding two class strings.
- *
- * Both halves are released below the breakpoint, and it is the same reason
- * twice: the head is hidden there and the rows are blocks, so a 320px scroll
- * region inside a scrolling pane is a nested scroller with nothing pinned to
- * the top of it — a trap on touch, where the only way past a list is through
- * it, and no longer a box for a sticky head to stick inside.
- */
-const LIST_VIEW =
-  "max-h-80 overflow-auto max-md:max-h-none max-md:overflow-visible " +
-  "rounded-sm border border-line";
-
-/**
- * `bg-surface` because the rows scroll under it, and the inset shadow because a
- * `border-b` on a sticky cell is not reliably painted under `border-collapse` —
- * the two are the same hairline in the same place wherever both do render.
- */
-const STICKY_HEAD =
-  "sticky top-0 z-10 bg-surface shadow-[inset_0_-1px_0_var(--border)]";
 
 /** Poll cadence: the second one applies while a run is still working. */
 const POLL_IDLE_MS = 120_000;
@@ -1013,7 +980,7 @@ export default function Dashboard() {
         {current.rows.length === 0 ? (
           <Empty>No usage in this window.</Empty>
         ) : (
-          <div className={LIST_VIEW}>
+          <ListView box="capped">
             <Table stack>
               <caption className="sr-only">
                 Cost by {DIMENSION_LABEL[dimension].toLowerCase()} over{" "}
@@ -1062,7 +1029,7 @@ export default function Dashboard() {
                 ))}
               </TBody>
             </Table>
-          </div>
+          </ListView>
         )}
 
         {/* Rows are cost-descending, so the tail really is the cheap end — but
@@ -1082,7 +1049,7 @@ export default function Dashboard() {
 
       <Card emphasis="quiet">
         <CardTitle>Recent 5-hour blocks</CardTitle>
-        <div className={LIST_VIEW}>
+        <ListView box="capped">
           <Table stack>
             <caption className="sr-only">
               Each recorded 5-hour window, newest first
@@ -1142,7 +1109,7 @@ export default function Dashboard() {
               ))}
             </TBody>
           </Table>
-        </div>
+        </ListView>
         {blocksOmitted > 0 && (
           <div className="mt-2 text-xs tabular-nums text-ink-muted">
             {blocksOmitted} older{" "}

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { RepoSpendDTO } from "@/lib/apiTypes";
 import { fmtUSD, pollFailureMessage } from "@/lib/format";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
+import { ListView, STICKY_HEAD_FLAT } from "@/components/ui/ListView";
 import { Notice } from "@/components/ui/Notice";
 import {
   SegmentedControl,
@@ -42,16 +43,6 @@ const SPANS: Array<SegmentedOption<string>> = [
   { value: "7", label: "7 days" },
   { value: "30", label: "30 days" },
 ];
-
-/**
- * Both the cap and the scroll are released below the breakpoint: the head is
- * hidden and the rows are blocks there, so what is left is a nested scroller
- * inside a scrolling pane with nothing pinned to the top of it.
- */
-const LIST_VIEW =
-  "max-h-80 overflow-auto max-md:max-h-none max-md:overflow-visible " +
-  "rounded-sm border border-line";
-const STICKY_HEAD = "sticky top-0 z-10 bg-surface";
 
 export function RepoSpendCard() {
   const [days, setDays] = useState("7");
@@ -111,7 +102,7 @@ export function RepoSpendCard() {
         <Empty>No runs were started in this span.</Empty>
       ) : (
         <>
-          <div className={LIST_VIEW}>
+          <ListView box="capped">
             <Table stack>
               <caption className="sr-only">
                 What each repository&apos;s runs reported spending over the last{" "}
@@ -119,17 +110,17 @@ export function RepoSpendCard() {
               </caption>
               <THead>
                 <tr>
-                  <Th className={STICKY_HEAD}>Repository</Th>
-                  <Th num className={STICKY_HEAD}>
+                  <Th className={STICKY_HEAD_FLAT}>Repository</Th>
+                  <Th num className={STICKY_HEAD_FLAT}>
                     Runs
                   </Th>
-                  <Th num className={STICKY_HEAD}>
+                  <Th num className={STICKY_HEAD_FLAT}>
                     Reported
                   </Th>
-                  <Th num className={STICKY_HEAD}>
+                  <Th num className={STICKY_HEAD_FLAT}>
                     Estimated
                   </Th>
-                  <Th num className={STICKY_HEAD}>
+                  <Th num className={STICKY_HEAD_FLAT}>
                     Share
                   </Th>
                 </tr>
@@ -173,7 +164,7 @@ export function RepoSpendCard() {
                 ))}
               </TBody>
             </Table>
-          </div>
+          </ListView>
           <p className="mt-3 max-w-[72ch] text-xs text-ink-muted">
             <strong>A floor, not a total.</strong> {fmtUSD(total)} across{" "}
             {data.totals.runCount} run
