@@ -1044,25 +1044,34 @@ export default function Branches() {
         <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3">
           <label className="flex items-center gap-2 text-sm text-ink-muted">
             Repository
-            <Select
-              value={repo}
-              onChange={(e) => {
-                setRepo(e.target.value);
-                setOffset(0);
-                // The selection is the merge order and it survives everything
-                // else, but a branch the operator can no longer see is one they
-                // cannot take back out — so changing what is on screen clears it.
-                setSelected([]);
-              }}
-              className="w-[34ch] max-w-full max-md:min-h-11"
-            >
-              <option value="">All repositories</option>
-              {(data?.repos ?? []).map((r) => (
-                <option key={r.repoRoot} value={r.repoRoot}>
-                  {r.repoLabel} ({r.branches})
-                </option>
-              ))}
-            </Select>
+            {/* The width is on this wrapper, exactly as the land-strategy
+                picker below states its own: `Select` already carries `w-full`,
+                and two width utilities on one element resolve by *stylesheet*
+                order rather than by what the caller wrote — so the `w-[34ch]`
+                that used to sit on the control was a no-op and this picker
+                rendered at 155px where 34ch is 284. Measured in a browser, not
+                deduced. The `max-md:min-h-11` beside it was `CONTROL_LINE`'s
+                own figure repeated, which is the same rule one property over. */}
+            <div className="w-[34ch] max-w-full">
+              <Select
+                value={repo}
+                onChange={(e) => {
+                  setRepo(e.target.value);
+                  setOffset(0);
+                  // The selection is the merge order and it survives everything
+                  // else, but a branch the operator can no longer see is one they
+                  // cannot take back out — so changing what is on screen clears it.
+                  setSelected([]);
+                }}
+              >
+                <option value="">All repositories</option>
+                {(data?.repos ?? []).map((r) => (
+                  <option key={r.repoRoot} value={r.repoRoot}>
+                    {r.repoLabel} ({r.branches})
+                  </option>
+                ))}
+              </Select>
+            </div>
           </label>
 
           {data && data.total > 0 && (
