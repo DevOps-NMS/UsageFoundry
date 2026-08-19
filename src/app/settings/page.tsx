@@ -1672,7 +1672,17 @@ export default function SettingsPage() {
         className="mb-6 flex flex-wrap gap-1.5 border-b border-line pb-4"
       >
         {SECTIONS.map((sec) => {
-          const current = sec.id === sectionHash;
+          // An empty hash is the top of the pane, and the top of the pane is
+          // the first section — so that is the chip standing. Without this the
+          // opening state of the page, which includes the server render and
+          // every arrival that did not come through a chip, is the one state in
+          // which *no* chip is current: a map that says you are nowhere.
+          // Resolved here rather than seeded into `useSectionHash` so the hook
+          // keeps reporting the location rather than a guess about it, and so
+          // the server and the first paint read the same empty string and pick
+          // the same chip — a hydration mismatch here would be a louder bug
+          // than the missing fill it fixes.
+          const current = sec.id === (sectionHash || SECTIONS[0].id);
           return (
             <a
               key={sec.id}
