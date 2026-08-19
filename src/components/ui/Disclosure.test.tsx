@@ -16,6 +16,13 @@ import { Disclosure } from "./Disclosure";
  * who finds out is using a screen reader and not writing this file.
  */
 
+// The pair guard is a development one by contract and this container's shell
+// ships `NODE_ENV=production`, so the mode under test is stated rather than
+// inherited — otherwise the assertion below passes or fails on the
+// environment. `Object.assign` because Next declares the variable readonly,
+// and `node --test` gives each test file its own process to say it in.
+Object.assign(process.env, { NODE_ENV: "development" });
+
 const closed = renderToStaticMarkup(
   <Disclosure summary="Older runs">
     <p>behind it</p>
@@ -55,33 +62,24 @@ test("a count says how much is behind the fold", () => {
 });
 
 test("half of the controlled pair is refused rather than left to go stale", () => {
-  // The guard is a development one by contract, and this container's shell
-  // ships `NODE_ENV=production` — so say which mode is being tested rather
-  // than letting the assertion pass or fail on the environment.
-  const was = process.env.NODE_ENV;
-  process.env.NODE_ENV = "development";
-  try {
-    assert.throws(
-      () =>
-        renderToStaticMarkup(
-          <Disclosure summary="Earlier presses of Land" open>
-            <p>behind it</p>
-          </Disclosure>,
-        ),
-      /one pair/,
-      "a lone `open` goes stale the first time the browser toggles it",
-    );
-    assert.throws(
-      () =>
-        renderToStaticMarkup(
-          <Disclosure summary="Earlier presses of Land" onToggle={() => {}}>
-            <p>behind it</p>
-          </Disclosure>,
-        ),
-      /one pair/,
-      "a lone `onToggle` is the fetch-on-open the contract refuses",
-    );
-  } finally {
-    process.env.NODE_ENV = was;
-  }
+  assert.throws(
+    () =>
+      renderToStaticMarkup(
+        <Disclosure summary="Earlier presses of Land" open>
+          <p>behind it</p>
+        </Disclosure>,
+      ),
+    /one pair/,
+    "a lone `open` goes stale the first time the browser toggles it",
+  );
+  assert.throws(
+    () =>
+      renderToStaticMarkup(
+        <Disclosure summary="Earlier presses of Land" onToggle={() => {}}>
+          <p>behind it</p>
+        </Disclosure>,
+      ),
+    /one pair/,
+    "a lone `onToggle` is the fetch-on-open the contract refuses",
+  );
 });
