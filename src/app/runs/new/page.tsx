@@ -32,6 +32,7 @@ import { Button, ButtonRow } from "@/components/ui/Button";
 import {
   Field,
   Input,
+  LimitField,
   Select,
   Switch,
   Textarea,
@@ -1814,29 +1815,38 @@ export default function NewRunPage() {
             </Notice>
           )}
 
-          {/* The one line that leads the card: what is on the controls below,
-              read back as the sentence it amounts to. Nothing here is behind a
-              disclosure — a guard an unattended agent is about to run under is
-              what most people came to this page to set. */}
-          <p
-            className={`text-sm tabular-nums ${
-              hasTerminus ? "text-ink" : "text-danger"
-            }`}
-          >
-            {summaryLead}
-          </p>
-          {windowLines.map((line) => (
-            <p key={line} className="mt-1 text-sm tabular-nums text-ink">
-              {line}
+          {/* What is on the controls below, read back as the sentence it
+              amounts to — and it is what a press of Start run is approved
+              against, which is the whole of why it leads the card.
+
+              **It may never be folded**, at any width, and no part of it may
+              move behind a disclosure: a guard whose default is "off" hidden
+              one click away is an uncapped run somebody approved without
+              seeing. `quiet` because it is permanently on screen and a
+              standing banner drawn at alarm strength is one the eye learns to
+              skip — the tone that has to be loud is inside it, on the sentence
+              that says nothing would end this run. */}
+          <Notice tone="info" quiet>
+            <p
+              className={`text-sm tabular-nums ${
+                hasTerminus ? "text-ink" : "text-danger"
+              }`}
+            >
+              {summaryLead}
             </p>
-          ))}
-          {!hasTerminus && (
-            <p className="mt-1 max-w-[68ch] text-xs leading-snug text-danger">
-              Nothing here only moves one way: this run&rsquo;s own spend stops
-              accruing the moment a cycle is killed, and both window percentages
-              can fall. Set a time limit, or cap the work cycles.
-            </p>
-          )}
+            {windowLines.map((line) => (
+              <p key={line} className="mt-1 text-sm tabular-nums text-ink">
+                {line}
+              </p>
+            ))}
+            {!hasTerminus && (
+              <p className="mt-1 max-w-[68ch] text-xs leading-snug text-danger">
+                Nothing here only moves one way: this run&rsquo;s own spend
+                stops accruing the moment a cycle is killed, and both window
+                percentages can fall. Set a time limit, or cap the work cycles.
+              </p>
+            )}
+          </Notice>
 
           <ListGroup
             className="mt-4"
@@ -1867,30 +1877,26 @@ export default function NewRunPage() {
             >
               {mark("cycles")}
               {/* React's onBlur is focusout, which bubbles, so one wrapper
-                  catches the switch and the value alike. */}
-              <div
-                className="flex items-center gap-2"
-                onBlur={touch("iters")}
-              >
-                {iterationsCapped && (
-                  <div className="w-32">
-                    <Input
-                      id="iters"
-                      type="number"
-                      min={1}
-                      className="tabular-nums"
-                      unit="cycles"
-                      value={maxIterations}
-                      onChange={(e) => setMaxIterations(e.target.value)}
-                      aria-invalid={problemFor("iters") ? true : undefined}
-                    />
-                  </div>
-                )}
-                <Switch
-                  id="cycles-on"
-                  checked={iterationsCapped}
-                  onChange={setIterationsCapped}
-                  label="Cap the work cycles"
+                  catches the picker and the value alike. The width is on that
+                  wrapper and never on the controls, for `Field`'s own reason,
+                  and it is the same figure on all three rows so the group has
+                  one right edge rather than three. */}
+              <div className="w-72" onBlur={touch("iters")}>
+                <LimitField
+                  id="iters"
+                  // The picker is the half that is there in both states, so it
+                  // is what the no-terminus error sends the cursor to. The id
+                  // is the switch's own, kept because nothing else names it.
+                  modeId="cycles-on"
+                  modeLabel="Whether the work cycles are capped"
+                  onLabel="Stop after…"
+                  offLabel="No cycle limit"
+                  unit="cycles"
+                  enabled={iterationsCapped}
+                  onEnabledChange={setIterationsCapped}
+                  value={maxIterations}
+                  onValueChange={setMaxIterations}
+                  invalid={Boolean(problemFor("iters"))}
                 />
               </div>
             </ListRow>
@@ -1909,6 +1915,22 @@ export default function NewRunPage() {
                         // words are kept apart in `conventions.md`.
                         "Read mid-cycle too, and each cycle carries what is left of it as its own cap, so the run stops near this figure"
                       : "Each cycle carries what is left of it as its own cap, so the run stops near this figure"}
+                  {/* Beside the control it is about, rather than at the foot of
+                      the card: it is advice about *this* row being off, and a
+                      reader who has to carry a sentence four blocks up the page
+                      to the control it names has already stopped reading it. */}
+                  {live &&
+                    !costLimited &&
+                    settings?.telemetryForRuns === false && (
+                      <Toned tone="warn">
+                        <span className="mt-0.5 block">
+                          Consider turning on{" "}
+                          <Link href="/settings">agent self-reporting</Link> —
+                          it is the only independent record of what a cut-short
+                          cycle cost
+                        </span>
+                      </Toned>
+                    )}
                   {problemFor("cost") && (
                     <Toned tone="danger">
                       <span className="mt-0.5 block">
@@ -1920,27 +1942,24 @@ export default function NewRunPage() {
               }
             >
               {mark("cost")}
-              <div className="flex items-center gap-2" onBlur={touch("cost")}>
-                {costLimited && (
-                  <div className="w-32">
-                    <Input
-                      id="cost"
-                      type="number"
-                      min={0}
-                      step="0.5"
-                      className="tabular-nums"
-                      unit="USD"
-                      value={maxRunCostUSD}
-                      onChange={(e) => setMaxRunCostUSD(e.target.value)}
-                      aria-invalid={problemFor("cost") ? true : undefined}
-                    />
-                  </div>
-                )}
-                <Switch
-                  id="cost-on"
-                  checked={costLimited}
-                  onChange={setCostLimited}
-                  label="Cap what this run may spend"
+              <div className="w-72" onBlur={touch("cost")}>
+                <LimitField
+                  id="cost"
+                  modeLabel="Whether this run's spend is capped"
+                  // "near", not "after": this one is not a terminus. A cycle
+                  // killed before it reports stops the spend accruing, which
+                  // is the same fact the summary at the top of the card leads
+                  // with.
+                  onLabel="Stop near…"
+                  offLabel="No spending limit"
+                  unit="USD"
+                  min={0}
+                  step="0.5"
+                  enabled={costLimited}
+                  onEnabledChange={setCostLimited}
+                  value={maxRunCostUSD}
+                  onValueChange={setMaxRunCostUSD}
+                  invalid={Boolean(problemFor("cost"))}
                 />
               </div>
             </ListRow>
@@ -1974,26 +1993,18 @@ export default function NewRunPage() {
               }
             >
               {mark("time")}
-              <div className="flex items-center gap-2" onBlur={touch("dur")}>
-                {timeLimited && (
-                  <div className="w-36">
-                    <Input
-                      id="dur"
-                      type="number"
-                      min={1}
-                      className="tabular-nums"
-                      unit="minutes"
-                      value={maxDurationMinutes}
-                      onChange={(e) => setMaxDurationMinutes(e.target.value)}
-                      aria-invalid={problemFor("dur") ? true : undefined}
-                    />
-                  </div>
-                )}
-                <Switch
-                  id="time-on"
-                  checked={timeLimited}
-                  onChange={setTimeLimited}
-                  label="Cap how long this run may take"
+              <div className="w-72" onBlur={touch("dur")}>
+                <LimitField
+                  id="dur"
+                  modeLabel="Whether this run's time is capped"
+                  onLabel="Stop after…"
+                  offLabel="No time limit"
+                  unit="minutes"
+                  enabled={timeLimited}
+                  onEnabledChange={setTimeLimited}
+                  value={maxDurationMinutes}
+                  onValueChange={setMaxDurationMinutes}
+                  invalid={Boolean(problemFor("dur"))}
                 />
               </div>
             </ListRow>
@@ -2028,6 +2039,15 @@ export default function NewRunPage() {
                         ? ` · now at ${fmtPct(usage.snapshot.session.fraction)}`
                         : " · no ceiling set, so there is no percentage to show"
                       : ""}
+                    {/* What "Stop, then resume" does with this field left
+                        blank, said on the field rather than under the card. */}
+                    {resuming && !maxSessionFraction && (
+                      <span className="mt-0.5 block">
+                        With no 5-hour percentage the run carries on until
+                        Claude itself refuses a cycle, then waits for the
+                        allowance to refill
+                      </span>
+                    )}
                   </>
                 )
               }
@@ -2097,7 +2117,37 @@ export default function NewRunPage() {
           <ListGroup
             className="mt-4"
             label="How the run ends"
-            footnote={enforcementLine}
+            // The group's standing explanation, and the two conditions that are
+            // about this group rather than about one of its rows. Both used to
+            // sit below the last card, four blocks away from the control that
+            // raises them; neither changes what it says or when it says it.
+            footnote={
+              <>
+                {enforcementLine}
+                {resuming && weeklyRolling && (
+                  <Toned tone="warn">
+                    <span className="mt-1.5 block">
+                      Your weekly window is set to{" "}
+                      <strong className="font-semibold">rolling 7 days</strong>,
+                      so it has no reset instant. That does not stop this mode —
+                      the run waits on the 5-hour window, which always rolls
+                      over — but a weekly percentage will only fall as old usage
+                      ages out, over days. Set your reset day in{" "}
+                      <Link href="/settings">Settings</Link> if you know it.
+                    </span>
+                  </Toned>
+                )}
+                {resuming && !isolated && (
+                  <Toned tone="warn">
+                    <span className="mt-1.5 block">
+                      A waiting run keeps hold of its checkout. Nothing else can
+                      run in <span className="mono">{folderLabel}</span> while
+                      it waits, which can be up to five hours at a stretch.
+                    </span>
+                  </Toned>
+                )}
+              </>
+            }
           >
             <ListRow label="When a limit is reached">
               {mark("enforcement")}
@@ -2116,9 +2166,22 @@ export default function NewRunPage() {
               htmlFor="after-done"
               label="Keep going after DONE"
               description={
-                continueAfterDone
-                  ? "Claude is asked to verify and tighten rather than invent work, and the run can then only end at a limit"
-                  : "The run ends as soon as Claude replies DONE"
+                <>
+                  {continueAfterDone
+                    ? "Claude is asked to verify and tighten rather than invent work, and the run can then only end at a limit"
+                    : "The run ends as soon as Claude replies DONE"}
+                  {/* The consequence of *this* switch on *this* folder. It was
+                      under the card, where it read as a fact about the run
+                      rather than about the row that causes it. */}
+                  {continueAfterDone && !isolated && (
+                    <Toned tone="warn">
+                      <span className="mt-0.5 block">
+                        This run edits your folder directly and will keep
+                        editing it after it believes the task is finished
+                      </span>
+                    </Toned>
+                  )}
+                </>
               }
             >
               {mark("afterDone")}
@@ -2129,26 +2192,6 @@ export default function NewRunPage() {
               />
             </ListRow>
           </ListGroup>
-
-          {live && !costLimited && settings?.telemetryForRuns === false && (
-            <Hint tone="warn" className="mt-2">
-              Consider turning on{" "}
-              <Link href="/settings">agent self-reporting</Link> — it is the
-              only independent record of what a cut-short cycle cost
-            </Hint>
-          )}
-          {resuming && !maxSessionFraction && (
-            <Hint className="mt-2">
-              With no 5-hour percentage the run carries on until Claude itself
-              refuses a cycle, then waits for the allowance to refill
-            </Hint>
-          )}
-          {continueAfterDone && !isolated && (
-            <Hint tone="warn" className="mt-2">
-              This run edits your folder directly and will keep editing it after
-              it believes the task is finished
-            </Hint>
-          )}
         </Card>
 
         <Card className="mb-4" emphasis="quiet">
@@ -2227,24 +2270,11 @@ export default function NewRunPage() {
           )}
         </Card>
 
-        {resuming && weeklyRolling && (
-          <Notice tone="warn">
-            Your weekly window is set to <strong>rolling 7 days</strong>, so it
-            has no reset instant. That does not stop this mode — the run waits
-            on the 5-hour window, which always rolls over — but a weekly
-            percentage will only fall as old usage ages out, over days. Set your
-            reset day in <Link href="/settings">Settings</Link> if you know it.
-          </Notice>
-        )}
-
-        {resuming && !isolated && (
-          <Notice tone="warn">
-            A waiting run keeps hold of its checkout. Nothing else can run in{" "}
-            <span className="mono">{folderLabel}</span> while it waits, which
-            can be up to five hours at a stretch.
-          </Notice>
-        )}
-
+        {/* Four blocks stand between the last card and the footer, and it is
+            four rather than nine because these are the only ones about the
+            *submission* rather than about a control higher up the page. The
+            danger notice is the last thing read before Start run, which is
+            what it is for. */}
         {permissionMode === "bypassPermissions" &&
           (resuming || continueAfterDone) && (
             <Notice tone="danger">
