@@ -3,7 +3,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { BLANK_MEANINGFUL_ENV_VARS, MOUNTED_WORKSPACE_SLOTS } from "./config";
+import {
+  BLANK_MEANINGFUL_ENV_VARS,
+  MOUNTED_WORKSPACE_SLOTS,
+  unmountedWorkspaceRefusal,
+} from "./config";
 
 /**
  * Covers the agreement between `Dockerfile` and `docker-compose.yml` about who
@@ -418,6 +422,47 @@ describe("the mounted workspace slots the code assumes", () => {
       [...forwarded].sort((a, b) => a - b),
       Array.from({ length: forwarded.length }, (_, i) => MOUNTED_WORKSPACE_SLOTS + 1 + i),
     );
+  });
+
+  /**
+   * Every `see <file>, "<heading>"` in a string, resolved against the tree.
+   *
+   * A reference is checked by opening the file and finding the heading, not by
+   * matching the filename, so a section that moves or is renamed fails here too
+   * — which is the only difference between this and the state it replaces.
+   */
+  function assertReferencesResolve(source: string, what: string): void {
+    const references = [...source.matchAll(/see ([\w./-]+), "([^"]+)"/g)];
+    assert.ok(references.length > 0, `${what} no longer points anywhere`);
+    for (const [, file, heading] of references) {
+      const page = path.join(root, file);
+      assert.ok(fs.existsSync(page), `${what} names ${file}, which is not a file in this repo`);
+      assert.match(
+        fs.readFileSync(page, "utf8"),
+        new RegExp(`^#{1,6} ${heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$`, "m"),
+        `${what} sends the operator to ${file}, "${heading}", and that file has ` +
+          `no section by that name`,
+      );
+    }
+  }
+
+  it("sends the refusal to a page that has the section it names", () => {
+    // That sentence is the whole of what the operator gets: the refusal throws
+    // at module scope, so the container exits before there is a dashboard, an
+    // API or a log line to read instead. It named README, which has no
+    // workspace section at all — so a boot that will not start pointed at a
+    // place that does not exist, which is the failure the refusal was written
+    // to end wearing a different hat (#126).
+    const refusal = unmountedWorkspaceRefusal("UF_WORKSPACE_5_NAME");
+    assert.ok(refusal, "a configured fifth slot must still refuse the boot");
+    assertReferencesResolve(refusal, "unmountedWorkspaceRefusal's message");
+  });
+
+  it("keeps compose's own pointer on that same page", () => {
+    // The comment above UF_UNMOUNTED_WORKSPACES answers the same question for
+    // whoever is already reading the file they have to edit, and it drifted in
+    // step with the refusal — one edit away, and neither typechecks.
+    assertReferencesResolve(compose, "docker-compose.yml");
   });
 });
 

@@ -173,8 +173,8 @@ services:
       #
       # Slots 5-8 are what an operator following .env.example would reach for.
       # A deployment that really does mount more does it in a
-      # docker-compose.override.yml — see README, "More than four workspaces" —
-      # and sets this to "" there to say the mount was actually made.
+      # docker-compose.override.yml, and sets this to "" there to say the mount
+      # was actually made — see docs/install.md, "More than four workspaces".
       UF_UNMOUNTED_WORKSPACES: "${UF_WORKSPACE_5_NAME:+UF_WORKSPACE_5_NAME }${UF_WORKSPACE_6_NAME:+UF_WORKSPACE_6_NAME }${UF_WORKSPACE_7_NAME:+UF_WORKSPACE_7_NAME }${UF_WORKSPACE_8_NAME:+UF_WORKSPACE_8_NAME }"
       WORKSPACE_ROOT: /workspace
       # Optional: how many parsed transcript turns this process keeps in memory.
