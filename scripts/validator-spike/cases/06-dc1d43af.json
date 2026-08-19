@@ -1,0 +1,33 @@
+{
+  "n": 6,
+  "runId": "ddff2cf3",
+  "sessionId": "dc1d43af",
+  "folder": "RSSDashboard",
+  "stop": "done",
+  "label": "unjudgeable",
+  "labelReason": "Read-only context audit; the run was forbidden to write anything and its whole output was stdout prose",
+  "labelEvidence": "empty diff (correct); branch deleted",
+  "repo": "/workspace/RSSDashboard",
+  "transcript": "/home/node/.claude/projects/-workspace--uf-worktrees-rssdashboard-1/dc1d43af-1a9d-4b03-a9f4-e94628960309.jsonl",
+  "reachable": true,
+  "branch": "uf/rssdashboard-1-ddff2cf3",
+  "chained": false,
+  "chainEvidence": [],
+  "task": "You are working in a dedicated git worktree on your own branch, not in the user's checkout. Commit your work as you go, with clear messages; anything left uncommitted will not be visible to the user.\n\nThis is a read-only inspection run. Do not edit, create or delete any file. Do not stage, commit, branch or push. Do not touch GitHub. Your entire output is a report printed to stdout — nothing you write to disk will be kept.\n\n# Why this run exists\n\nThe operator wants to know what context an unattended UsageFoundry agent actually receives, compared with an interactive chat session on the same machine. An interactive session in /workspace reports that it is given two user-level rules files and a file-based memory directory. Nobody has confirmed that a non-interactive run started by the orchestrator gets the same things. Answer that from direct observation, not from reasoning about how it ought to work.\n\n# What to report\n\nPrint a report under the heading `CONTEXT AUDIT`, with these sections. For every claim, name the exact command or file path you used, and say plainly when something could not be determined rather than inferring it.\n\n## 1. Where you are\n- Your current working directory (`pwd`), and whether it is a git worktree (`git rev-parse --git-common-dir`, `git worktree list`).\n- The branch you are on, and the commit it points at.\n\n## 2. Memory\n- The value of `CLAUDE_CONFIG_DIR` in your environment, and `HOME`.\n- List `$CLAUDE_CONFIG_DIR/projects/` and, for every subdirectory, whether it contains a `memory/` directory and whether that directory has any files in it. Use `find \"$CLAUDE_CONFIG_DIR/projects\" -maxdepth 3 \\( -name MEMORY.md -o -type d -name memory \\)` and then list each hit.\n- State whether a project directory exists that corresponds to YOUR working directory, and whether it was created for this run or already existed.\n- Most important: quote verbatim any instruction in your own system prompt or context that tells you about a memory directory, including the exact path it names. If there is no such instruction, say so explicitly — that is a real finding, not a gap.\n\n## 3. Rules and instruction files\n- Does `$CLAUDE_CONFIG_DIR/rules/` exist, and what is in it? For each file, print its first heading line.\n- State whether the contents of those files appear in your own context, and quote one distinctive sentence from each as evidence if so. If they are on disk but not in your context, say that — it is the single most useful thing this run can establish.\n- Do the same for any `CLAUDE.md` at `$CLAUDE_CONFIG_DIR/CLAUDE.md`, at the repository root, and at the root of each mount.\n\n## 4. Skills\n- List `$CLAUDE_CONFIG_DIR/skills/`. State whether skills are offered to you in this run — i.e. whether you can see a list of available skills — and name them if so.\n- Read `$CLAUDE_CONFIG_DIR/skills/knowledge-vault/SKILL.md` and report the vault path it hardcodes and whether that path exists on this filesystem. Do not fix it.\n\n## 5. Mounts and reachable paths\n- Can you read `/workspace` and `/workspace2`? Try `ls /workspace2` and reading `/workspace2/INDEX.md`; report the result including any permission error verbatim.\n- Read `$CLAUDE_CONFIG_DIR/settings.json` and report the `permissions.additionalDirectories` entries and whether each path exists.\n\n## 6. Permissions and tooling\n- Your permission mode, if it is stated anywhere in your context.\n- Whether `gh auth status` succeeds (run it with `GH_PAGER=cat`), and whether WebFetch or WebSearch are available to you. Do not use them for anything beyond establishing availability.\n\n# What done looks like\n\nA report that lets a reader answer, without running anything themselves: does an unattended run get the same rules, memory and skills as an interactive session on this machine, and if not, exactly which of those are missing. Negative findings are the point of this run — a section that says \"not present in my context\" is a successful result, not a failure. Do not pad the report with anything outside the sections above, and do not propose or make fixes.",
+  "finalText": "DONE",
+  "attribution": "no-commits",
+  "commits": [],
+  "unresolvedSubjects": {
+    "ambiguous": [],
+    "missing": []
+  },
+  "diff": {
+    "mode": "empty",
+    "text": "",
+    "stat": "",
+    "truncated": false,
+    "omitted": [],
+    "bytes": 0
+  },
+  "emptyDiffReason": "the run ran no `git commit -m` at all"
+}

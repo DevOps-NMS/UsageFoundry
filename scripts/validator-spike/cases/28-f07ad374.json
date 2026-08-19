@@ -1,0 +1,44 @@
+{
+  "n": 28,
+  "runId": "02c3e132",
+  "sessionId": "f07ad374",
+  "folder": "UsageFoundry",
+  "stop": "cap?",
+  "label": "finished",
+  "labelReason": "Both reported symptoms addressed: the pane's absolute boxes are contained (one scrollbar) and the checkout card gains the missing margin",
+  "labelEvidence": "`AppShell.tsx` (+14), `branches/page.tsx` (+1/−1)",
+  "repo": "/workspace/UsageFoundry",
+  "transcript": "/home/node/.claude/projects/-workspace--uf-worktrees-usagefoundry-721638d11c0b-1/f07ad374-6990-4381-b0b7-9f6162107d22.jsonl",
+  "reachable": true,
+  "branch": "uf/usagefoundry-721638d11c0b-1-02c3e132",
+  "chained": false,
+  "chainEvidence": [],
+  "task": "You are working in a dedicated git worktree on your own branch, not in the user's checkout. Commit your work as you go, with clear messages; anything left uncommitted will not be visible to the user.\n\nThe Checkout information collides with the branches and doesnt have a space inbetween it, we gotta fix that. And the Dashoboard overscrolls into a grey screen, it shows two scrollbars on the right.",
+  "finalText": "Both fixed and committed.\n\n**Dashboard double scrollbar** (`src/components/shell/AppShell.tsx`, `<main>`): the real cause was `sr-only` table captions. Tailwind's `sr-only` is `position: absolute` with no offsets, and with no positioned ancestor its containing block was the *initial* one — so those boxes were never clipped by `<main>`'s `overflow-y-auto` or the shell's `overflow-hidden`, and they extended the **document's** scrollable overflow down to wherever they were laid out. Measured before the fix at 1440×900: `documentElement.scrollHeight` 1276 vs `clientHeight` 900, i.e. the window scrolled 376px, dragging the sidebar and toolbar up off the screen into the grey page background — that was the second scrollbar. The deepest offender was `<caption class=\"sr-only\">Each recorded 5-hour window, newest first</caption>` at y=1276. Adding `relative` to `<main>` makes it the containing block; document scrollHeight is now exactly 900 and `window.scrollTo(0, 5000)` leaves `scrollY` at 0. This was never dashboard-specific — any page with an `sr-only` element far enough down had it.\n\n**Checkout slots colliding** (`src/app/branches/page.tsx:564`): `CheckoutStores` returned a bare `<Card>` while every other stacked card on that page carries `mb-4` (the queue panel directly above it does), so its border sat flush on the branches card. Now `<Card className=\"mb-4\">`.\n\nVerified: `npm run typecheck` clean, `npm test` 1175/1175 pass, and the scroll fix confirmed in headless Chromium against a dev server. **Not verified visually:** the branches spacing — Chromium in this sandbox dies on `/branches` (renderer killed on load; the server serves it 200), so that one rests on the code and the page's own `mb-4` idiom. I also reverted the `tsconfig.json` rewrite `next dev` made on startup.",
+  "attribution": "commit-message",
+  "commits": [
+    {
+      "sha": "39374baf8e11c3be9da52e8563a705cf18ee22c4",
+      "subject": "Contain the pane's absolute boxes so the document stops scrolling"
+    },
+    {
+      "sha": "b11b2b67fd26f98a6a3140b28ab88401a6a82a91",
+      "subject": "Space the checkout slots card off the branches table"
+    }
+  ],
+  "unresolvedSubjects": {
+    "ambiguous": [],
+    "missing": []
+  },
+  "diff": {
+    "mode": "range",
+    "text": "diff --git a/src/app/branches/page.tsx b/src/app/branches/page.tsx\nindex 16359b8..6749463 100644\n--- a/src/app/branches/page.tsx\n+++ b/src/app/branches/page.tsx\n@@ -561,7 +561,7 @@ function CheckoutStores({ stores }: { stores: CheckoutStoreDTO[] }) {\n   const exhausted = notable.filter((s) => s.free === 0);\n \n   return (\n-    <Card>\n+    <Card className=\"mb-4\">\n       <CardTitle>Checkout slots</CardTitle>\n       {exhausted.length > 0 && (\n         <Notice tone=\"danger\">\ndiff --git a/src/components/shell/AppShell.tsx b/src/components/shell/AppShell.tsx\nindex 6e2f270..8983945 100644\n--- a/src/components/shell/AppShell.tsx\n+++ b/src/components/shell/AppShell.tsx\n@@ -126,8 +126,20 @@ export function AppShell({\n         />\n         {/* The pane's own scroll region. A `sticky bottom-0` bar inside a page\n             now sticks to the bottom of this rather than of the document, which\n-            is where it was always meant to be. */}\n-        <main id=\"main\" className=\"min-h-0 flex-1 overflow-y-auto\">\n+            is where it was always meant to be.\n+\n+            `relative` is what keeps that true for anything *absolutely*\n+            positioned inside a page, and it is load-bearing rather than\n+            decorative: an absolute box whose containing block is the initial\n+            one is not clipped by this scroller at all, so it extends the\n+            *document's* scrollable overflow to wherever it was laid out. Every\n+            `sr-only` element does exactly that — Tailwind's is `position:\n+            absolute` with no offsets — so a `<caption className=\"sr-only\">` on\n+            a table 1200px down a page gave the document a second scrollbar\n+            beside this one, and dragging it slid the whole window, sidebar\n+            included, off the top of the viewport into the page background.\n+            Making this the containing block puts them back inside the pane. */}\n+        <main id=\"main\" className=\"relative min-h-0 flex-1 overflow-y-auto\">\n           {/* px-4 / sm:px-5 is the gutter two pages already reach through with\n               a matching negative margin — keep the pair in step.\n \n",
+    "stat": "src/app/branches/page.tsx         |  2 +-\n src/components/shell/AppShell.tsx | 16 ++++++++++++++--\n 2 files changed, 15 insertions(+), 3 deletions(-)",
+    "truncated": false,
+    "omitted": [],
+    "bytes": 2144,
+    "totalBytes": 2144,
+    "fileCount": 2
+  },
+  "emptyDiffReason": null
+}

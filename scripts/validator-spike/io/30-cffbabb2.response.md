@@ -1,0 +1,9 @@
+The diff touches exactly the one file the task named, `docs/verification.md`, and every deliverable it demanded is present in it: the results table is filled with `Q1: BWRAP-BLOCKED`, `Q2: RAN-UNSANDBOXED`, `Q3: INCONCLUSIVE`, `Q4: DENY-INEFFECTIVE`, each with quoted verbatim command output (`No permissions to create new namespace`, `unshare failed: Operation not permitted`, `CapEff`/`Seccomp` values, `test -r`/`wc -c` results); CLI, bubblewrap, socat and `uname -a` versions are recorded; the `/backups` vs `/data` clean-test distinction is made explicitly; the Phase-4 `sandboxRefusal()` question is answered honestly as untested (nothing was refused) rather than claimed working, with a structural reason given for why a run can't check its own log; and `probe.test.sh` is reported as run with a concrete 34-passed/3-failed result and an environmental explanation for the failures. The single commit (`83fa7ab8`) matches the branch evidence, and no forbidden file (`docker-compose.yml`, `.env`, `/etc/claude-code/`, `~/.claude/`) appears in the diffstat. The "move items out of Not yet verified" instruction was honored by annotation-in-place rather than physical relocation, which is a style choice, not a missing deliverable.
+
+```json
+{
+  "verdict": "finished",
+  "reason": "docs/verification.md gets every Q1-Q4 token, versions, /backups test, Phase-4 honesty, and probe.test.sh result the task demanded, in one committed diff",
+  "evidence": ["docs/verification.md table rows for Q1-Q4 with quoted command output", "versions line: CLI 2.1.226, bubblewrap 0.8.0, uname -a", "/backups vs /data clean-test distinction", "sandboxRefusal() reported untested, not claimed working", "'34 passed, 3 failed' probe.test.sh result with cause", "commit 83fa7ab8, diffstat shows only docs/verification.md changed"]
+}
+```

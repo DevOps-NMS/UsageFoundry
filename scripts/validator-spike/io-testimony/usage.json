@@ -1,0 +1,11 @@
+{
+  "_note": "Same measurement basis as io/usage.json — the sender's own totals over a multi-turn tool loop, so an upper bound on a single API call.",
+  "01-7d04dae5": { "tokens": 27178, "ms": 19105 },
+  "02-f85a9e16": { "tokens": 29333, "ms": 18340 },
+  "06-dc1d43af": { "tokens": 26792, "ms": 24877 },
+  "10-10ae0848": { "tokens": 29728, "ms": 18677 },
+  "15-0e6c0477": { "tokens": 31276, "ms": 17691 },
+  "24-9bcf9107": { "tokens": 26272, "ms": 15802 },
+  "31-24e538ca": { "tokens": 26387, "ms": 18227 },
+  "34-96583812": { "tokens": 28788, "ms": 16433 }
+}
