@@ -1,8 +1,9 @@
 # Who picks the model, and what that costs
 
-Everything below was read out of the tree at `2362283` or measured from this
-install's own transcripts on 2026-08-20. Commands and their output are quoted
-rather than described; a figure with no command beside it is not in this file.
+Everything below was read out of the tree at `2362283` — this branch's head when
+the reading was taken — or measured from this install's own transcripts on
+2026-08-20. Commands and their output are quoted rather than described; a figure
+with no command beside it is not in this file.
 
 ## One setting decides, and nothing else does
 
@@ -19,9 +20,12 @@ own default".
 `runs.model` is `TEXT` and nullable (`src/lib/db.ts:146`). `input.model` is on
 the wire — `CreateRunInput.model` at `src/lib/orchestrator.ts:128`, read from
 the body at `src/app/api/runs/route.ts:233` — but **nothing this app ships ever
-sets it**. The new-run form has no model control; `grep -n model
-src/app/runs/new/page.tsx` returns only a comment and a line of copy about the
-*agent's* model (`:1527`–`1537`). Neither do the two server-side creation paths:
+sets it**. The new-run form has no model control. `grep -n model
+src/app/runs/new/page.tsx` returns four hits and not one of them is an input:
+two are comments, one is a line of copy about the *agent's* model
+(`:1527`–`1537`), and the last is the template picker's own description —
+"Keeps the task, the limits and how it behaves. Not the model — that stays a
+single global setting" (`:2209`). Neither do the two server-side creation paths:
 `grep -n "model" src/lib/workflows.ts src/lib/chat.ts` finds no `model:` key at
 any of the five `createRun` call sites (`src/lib/workflows.ts:3243`, `:4295`,
 `:4720`, `:5441`, `src/lib/chat.ts:933`). So every run this install has ever
@@ -40,7 +44,7 @@ page — the run detail page renders the *agent's* model
 
 ## What carries the choice onto a process
 
-Three of the four kinds of agent child (`docs/agent/architecture.md:102`) get
+Three of the four kinds of agent child (`docs/agent/architecture.md:131`) get
 the run's model; the fourth gets the setting directly.
 
 **The work cycle.** `buildArgs` pushes it first:
