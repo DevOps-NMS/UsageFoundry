@@ -19,6 +19,21 @@ objection `src/lib/templates.ts:35`–`42` makes and the one Options C and I hav
 to answer. Shipped rules are not a place at all; they are behaviour, argued in a
 comment beside the code, the way every other decision in this app is.
 
+## Shape
+
+One pure module — `routeModel(facts): string | null` — beside `budget.ts` and
+`templates.ts` rather than inside `orchestrator.ts`, for the reason
+`src/lib/budget.ts:38`–`40` gives about staying pure and synchronous: *when* a
+verdict is evaluated and *what is done with it* live in the orchestrator, and
+teaching the rule module about processes and timers is the thing to avoid.
+
+One call site, at the top of `createRun`, before the INSERT
+(`src/lib/orchestrator.ts:3205`): `input.model ?? routeModel(…) ??
+settings.defaultModel`. One unit test file. One log line per run and one
+recorded field saying which rule fired. If the rules are operator-authored, add
+a settings key, a form and a validator; if they ship in the source, add none of
+that and no schema change at all.
+
 ## Which facts are available where the decision is taken
 
 This is where an option of this shape is most likely to be wrong, so state it as

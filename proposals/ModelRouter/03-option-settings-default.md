@@ -5,15 +5,29 @@ kinds of `claude` child. `settings.defaultModel` stays; beside it go a default
 for the reviewer and resolver and a default for the chat and orchestrator turn,
 each read at the site that already reads a model independently.
 
-The case for it is that the code has already reached this conclusion once and
-implemented half of it by accident. There are three read sites, not one: a work
-cycle takes `run.model` (`src/lib/orchestrator.ts:4843`), a review and a
-conflict resolution take the same column at a different spawn
-(`src/lib/review.ts:624`), and the chat turn and a workflow block's deciding
-turn **skip the run entirely** and read the setting
-(`src/lib/chat.ts:1699`). That last line is the argument: somebody already
-decided that one of these four children is not the run's decision, and wrote it
-down as a different read rather than as a different setting.
+## The strongest case, first
+
+**The code has already reached this conclusion once and implemented half of it
+by accident.** There are three read sites, not one: a work cycle takes
+`run.model` (`src/lib/orchestrator.ts:4843`), a review and a conflict resolution
+take the same column at a different spawn (`src/lib/review.ts:624`), and the
+chat turn and a workflow block's deciding turn **skip the run entirely** and
+read the setting (`src/lib/chat.ts:1699`). That last line is the argument:
+somebody already decided that one of these four children is not the run's
+decision, and wrote it down as a different read rather than as a different
+setting.
+
+**And it is the only option that changes what a non-run child costs.** A review,
+a conflict resolution and a chat turn are not runs, have no `BudgetPolicy` and
+are not put through `evaluateBudget` (`src/lib/review.ts:457`–`463`); their
+model comes from a decision made for something else entirely. This is the one
+shape in the survey that lets an operator say "reviews are cheap" without saying
+anything about the work.
+
+**And it costs nothing to reverse.** Two nullable settings keys, null in
+`DEFAULTS`, behaving exactly as today until somebody types in one of them.
+Nothing is stored on a run, nothing is stored on a template, and no record
+changes meaning.
 
 ## Shape
 

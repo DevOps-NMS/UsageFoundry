@@ -27,6 +27,19 @@ to choose among options *an operator configured* and it stops emitting free text
 altogether — it becomes Option E's rule table with a model as the matcher, which
 is the strongest form this option has and the one it should be read in.
 
+## Shape
+
+A new module that spawns `claude -p` with the task text and a short instruction,
+`--output-format json`, `--permission-mode plan` so it cannot write, an
+`--allowedTools` list, its own `--max-budget-usd`, and no telemetry env — which
+is `spawnAssist`'s shape almost exactly (`src/lib/review.ts:612`–`641`), and
+copying it is the right instinct: there is one encoder per spawn shape here
+because every way of getting the shape wrong is silent.
+
+Then a row somewhere so the child is countable and closable on boot, a call site
+per creation path, a settings switch, and a run-page read-back. The module is
+small; the list of things around it is not, and the next section is that list.
+
 ## Which half of the split
 
 Cost, not capability — and the argument has to be made rather than assumed,

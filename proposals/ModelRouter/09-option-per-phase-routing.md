@@ -26,6 +26,19 @@ along inside a run.** Cycle 1 of a run reads and plans; cycle 6 is applying a
 diff it already understands. Those are different asks, they are the same run,
 and no record in this app can tell them apart.
 
+## Shape
+
+The expression at `src/lib/orchestrator.ts:6703` stops being `run.model` and
+becomes a function of `iterations`, which the loop already holds and already
+writes (`:6680`–`:6684`). Beside it, a per-cycle `UPDATE runs SET model` so the
+row keeps describing what the run ran on, and a per-cycle line on the run's
+timeline so a person can see the switch.
+
+Wherever the schedule is written — a settings key, a template field, a shipped
+default — is a separate decision this option does not settle, and it is the same
+question Options B, C and E answer differently. What is specific here is only
+the *shape* of the value: not one model, but a model per phase.
+
 ## What `--resume` does to it, and the fact that decides the option
 
 `00-problem.md` settled half of the question and it is the half that does not

@@ -14,13 +14,32 @@ grep is in `00-problem.md`. Doing nothing means *one string per install*, chosen
 once, applying to every run, every review and every resolution until somebody
 edits the box.
 
+## The strongest case, first
+
+**It is the only option with no new failure mode.** Every other option in this
+survey buys its behaviour by adding a writer, a reader, a record or a process,
+and each of those is a way for the app to be wrong in a manner nobody can see
+from a run page — which is the standing complaint `CLAUDE.md` records about
+every defect this repository has found.
+
+**And the measurement does not support the case a router would be sold on.**
+83% of this install's week is carried context rather than generated answers, the
+spread between runs is fourteen times *at a constant model*, and every
+cheaper-model figure in `00-problem.md` is a fixed-token-count counterfactual
+that a real run would not hold. A survey that treats "change something" as the
+default has assumed the thing the problem file declined to assume.
+
+**And it is already the answer this app argued for, four times.** A template
+holds no model, a workflow node holds none, a chat proposal holds none and an
+orchestrator block's run spec holds none — each with the reasoning beside it
+(`src/lib/templates.ts:35`–`42`, `src/lib/db.ts:367`–`370`, `:616`–`619`,
+`src/lib/workflows.ts:1345`–`1351`). Doing nothing is the position those four
+files take, held consistently.
+
 ## Shape
 
-Nothing. No module changes, no schema change, no new setting, no copy edit. That
-is the entire content of the option and it is worth reading as a positive claim
-rather than as an absence: every other option in this survey buys its behaviour
-by adding a writer, a reader, a record or a process, and each of those is a way
-for the app to be wrong in a manner nobody can see from a run page.
+Nothing. No module changes, no schema change, no new setting, no copy edit.
+That is the entire content of the option.
 
 ## Which half of the split
 

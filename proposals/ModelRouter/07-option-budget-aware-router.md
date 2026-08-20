@@ -19,6 +19,20 @@ about.** Every other option here routes on a proxy — a role, a template, a
 regex over prose — for a quantity none of them can see. This one reads the
 quantity.
 
+## Shape
+
+A pure function from a `UsageSnapshot` and a configured ladder to a model
+string or `null`, in its own module beside `budget.ts` — same posture, and for
+the same stated reason: that module "stays pure and synchronous", with *when* a
+verdict is evaluated and *what is done with it* left to the orchestrator
+(`src/lib/budget.ts:38`–`40`).
+
+One call site inside `startRun`'s cycle loop, between the snapshot at
+`src/lib/orchestrator.ts:6419` and `buildArgs` at `:6701`. One per-cycle write
+of `runs.model`, which is new — nothing writes that column after the INSERT
+today (`grep -rn "SET model" src/` returns nothing). One settings key holding
+the ladder, off by default. One log line per switch on the run's own log.
+
 ## Where it sits relative to the guard check order
 
 Exactly here, and the position is the whole safety argument:
@@ -112,6 +126,27 @@ while the window is quiet and take over as it fills, so the agent's pin applies
 early in a window and is overridden late. That is defensible and it is a strange
 sentence to have to write on a page, which is itself a reason to state the
 choice out loud.
+
+## What the operator sees and controls
+
+A switch and a ladder — thresholds against models — which must be off in
+`DEFAULTS` and must go through `saveSettings`' only-what-differs loop
+(`src/lib/settings.ts:693`–`:706`, `docs/agent/conventions.md:14`).
+
+What they cannot have is the ability to predict a given run's model, because it
+depends on what the rest of the fleet spent while that run was working. So the
+switch has to be paired with a per-cycle record: the model, the reading it was
+chosen against, and the fact that a threshold moved it. The precedent is the
+plugin log line, logged per cycle on the run's own page because "an agent that
+stops receiving a plugin behaves exactly like one that never had it, so nothing
+else in this app would ever mention it"
+(`src/lib/orchestrator.ts:6691`–`6699`).
+
+One more thing is owed here that is not owed elsewhere. The dashboard may not
+grow a card claiming this router saved anything: no figure, meter, badge, total
+or comparison is drawn at region level, and any such figure would have to name
+the source it read and sit inside that source's band
+(`docs/agent/conventions.md:46`).
 
 ## Guards, and the three cost sources
 
