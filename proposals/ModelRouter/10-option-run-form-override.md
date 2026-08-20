@@ -16,11 +16,12 @@ than only as a tax on the others.
 ## The strongest case, first
 
 **It is the only option that changes no decision path at all.**
-`CreateRunInput.model` exists (`src/lib/orchestrator.ts:2559`),
-`POST /api/runs` reads it (`src/app/api/runs/route.ts:233`), `createRun` prefers
-it over the setting (`:3205`), `buildArgs` emits it (`:4843`), and the reviewer
-reads the column it lands in (`src/lib/review.ts:624`). Every line of the
-mechanism is written, tested and in production. What is missing is an `<Input>`.
+`CreateRunInput.model` exists (`src/lib/orchestrator.ts:2559`), `POST
+/api/runs` reads it (`src/app/api/runs/route.ts:233`), `createRun` prefers it
+over the setting (`src/lib/orchestrator.ts:3205`), `buildArgs` emits it
+(`:4843`), and the reviewer reads the column it lands in
+(`src/lib/review.ts:624`). Every line of the mechanism is written, tested and
+in production. What is missing is an `<Input>`.
 
 **And it is the only option that restores the measured precedence rather than
 overriding it.** `01-constraints.md`'s first branch — fill only the gap — is
@@ -70,12 +71,13 @@ existing transaction, no `await` added
 (`docs/agent/concurrency-and-ownership.md:10`).
 
 Frozen thereafter, like everything else on the row: `startRun` reads it once
-before the loop (`:6278`), and `reopenRun` carries it forward by not touching it
-(`:8080`). So this option answers `01-constraints.md`'s third obligation and not
-its fourth — "a run already started must be overridable, or the override is not
-one" is a change to `startRun`, and it is deliberately **not** attempted here.
-Adding one would open a second route to the model on a *running* run, which is
-the objection `reopenRun` already refuses on its own account.
+before the loop (`src/lib/orchestrator.ts:6278`), and `reopenRun` carries it
+forward by not touching it (`:8080`). So this option answers
+`01-constraints.md`'s third obligation and not its fourth — "a run already
+started must be overridable, or the override is not one" is a change to
+`startRun`, and it is deliberately **not** attempted here. Adding one would
+open a second route to the model on a *running* run, which is the objection
+`reopenRun` already refuses on its own account.
 
 ## The measured precedence
 

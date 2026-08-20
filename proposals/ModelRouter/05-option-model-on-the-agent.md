@@ -88,8 +88,9 @@ permission mode.
 At `createRun`, synchronously, from the `AgentDefinition` the caller already
 resolved before the call (`src/lib/orchestrator.ts:2571`) — no `await` added
 (`docs/agent/concurrency-and-ownership.md:10`). Then at every spawn, because
-`buildArgs` rebuilds the argv per cycle (`:6701`–`:6703`) and re-emits both the
-member definition and the selection.
+`buildArgs` rebuilds the argv per cycle
+(`src/lib/orchestrator.ts:6701`–`:6703`) and re-emits both the member
+definition and the selection.
 
 ## The measured precedence
 
@@ -183,5 +184,7 @@ sub-turn on the **offered** path — `agentsArgs` without `--agent`
 (`src/lib/review.ts:627`)? Every measurement quoted in this repository is off the
 `system`/`init` event, which reports the session's model, so the offered path's
 behaviour is **assumed unchanged and is not verified here**. Note that no caller
-supplies agents to `spawnAssist` today (`docs/agent/architecture.md:131`), so
-the experiment has to be run by hand rather than observed.
+supplies agents to `spawnAssist` today — `src/lib/agents.ts:354`–`355` says so
+in as many words, and `spawnAssist` passes `req.agents ?? []`
+(`src/lib/review.ts:627`) — so the experiment has to be run by hand rather than
+observed.

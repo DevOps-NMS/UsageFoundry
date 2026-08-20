@@ -9,12 +9,13 @@ it.
 
 **The mechanism is already there and costs one expression.** `buildArgs` is
 called from inside the cycle loop and rebuilds the whole argv every time — the
-loop opens at `src/lib/orchestrator.ts:6412`, `buildArgs({ … model: run.model …
-})` is at `:6701`–`:6703` — so `--model` is re-sent on every cycle including
+loop opens at `src/lib/orchestrator.ts:6412`, `buildArgs({ … model: run.model
+… })` is at `:6701`–`:6703` — so `--model` is re-sent on every cycle including
 resumed ones, and that is asserted rather than assumed
-(`src/lib/orchestrator.test.ts:2353`, "still passes the mode, the model and the
-session to resume"). Nothing has to be added to the spawn path. The only change
-is where the expression at `:6703` gets its value.
+(`src/lib/orchestrator.test.ts:2353`, "still passes the mode, the model and
+the session to resume"). Nothing has to be added to the spawn path. The only
+change is where the expression at `src/lib/orchestrator.ts:6703` gets its
+value.
 
 **And the loop already has the phase in hand.** `iterations` is incremented and
 written per cycle (`src/lib/orchestrator.ts:6680`–`6684`), so "this is pass 1"
@@ -174,8 +175,9 @@ turns are ordinary turns, the totals are ordinary totals, and the only evidence
 is a cache-write line in a rollup nobody compares against a counterfactual.
 
 **Silent, and structural:** the frozen read. A version of this that writes
-`runs.model` and forgets that `startRun` froze the row at `:6278` changes
-nothing at all and looks exactly like a schedule that decided not to switch.
+`runs.model` and forgets that `startRun` froze the row at
+`src/lib/orchestrator.ts:6278` changes nothing at all and looks exactly like a
+schedule that decided not to switch.
 
 **Silent, third:** the cycle cap inverting the scheme, above.
 
@@ -185,8 +187,9 @@ already done work and the failure is legible as "something changed".
 
 ## What it costs to build
 
-Small in code — the expression at `:6703`, a per-cycle write, a place to put the
-schedule, and a per-cycle record on the run's timeline. Two to three days.
+Small in code — the expression at `src/lib/orchestrator.ts:6703`, a per-cycle
+write, a place to put the schedule, and a per-cycle record on the run's
+timeline. Two to three days.
 
 **The largest verification burden in this survey**, and disproportionate to the
 diff: the thing it must not do is not observable from the code, is not observable

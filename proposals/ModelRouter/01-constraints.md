@@ -204,8 +204,8 @@ is called, on the route, and be passed in as `input.model`.
 
 **Between cycles.** This is where an option is most likely to be wrong about the
 current behaviour. `buildArgs` is called inside the cycle loop and re-sends
-`--model` every time (`:6412`, `:6701`–`:6703`) — but the row it reads is frozen
-before the loop opens:
+`--model` every time (`src/lib/orchestrator.ts:6412`, `:6701`–`:6703`) — but
+the row it reads is frozen before the loop opens:
 
     const run = getRun(id);            src/lib/orchestrator.ts:6278
     …
@@ -213,13 +213,13 @@ before the loop opens:
 
 So writing `runs.model` mid-run changes nothing until the run is picked up
 again. Two things in that same loop *are* re-resolved per cycle and are the
-precedent to follow if an option wants this: `enabledPluginDirs()` at `:6690`,
-and the sandbox policy, both with the same stated reason — "a run outlives the
-plugin list it started under, and each stored path is re-proved contained at the
-moment it is used rather than trusted from when it was switched on"
-(`:6686`–`:6689`). `settings` is the counter-precedent, read once at `:6379` so
-that what comes off it is "fixed for the segment rather than per cycle"
-(`:6722`–`:6723`).
+precedent to follow if an option wants this: `enabledPluginDirs()` at
+`src/lib/orchestrator.ts:6690`, and the sandbox policy, both with the same
+stated reason — "a run outlives the plugin list it started under, and each
+stored path is re-proved contained at the moment it is used rather than
+trusted from when it was switched on" (`:6686`–`:6689`). `settings` is the
+counter-precedent, read once at `:6379` so that what comes off it is "fixed
+for the segment rather than per cycle" (`:6722`–`:6723`).
 
 An option that wants per-cycle routing must say which of those two it is, and
 must state that it is *changing* a frozen read rather than adding to a live one.

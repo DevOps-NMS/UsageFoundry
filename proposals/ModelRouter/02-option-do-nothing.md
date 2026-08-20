@@ -59,10 +59,10 @@ concurrency invariant protects (`docs/agent/concurrency-and-ownership.md:10`)
 and legal there precisely because it reads nothing.
 
 Nothing re-reads it. `startRun` freezes the row before the loop opens
-(`:6278`, loop at `:6412`), `reopenRun` carries the value forward by not
-touching it (`:8080`), and `grep -rn "SET model" src/` returns nothing. A run's
-model is therefore fixed at its creation instant for the whole of its life,
-including cycles a restart picks up days later.
+(`src/lib/orchestrator.ts:6278`, loop at `:6412`), `reopenRun` carries the
+value forward by not touching it (`:8080`), and `grep -rn "SET model" src/`
+returns nothing. A run's model is therefore fixed at its creation instant for
+the whole of its life, including cycles a restart picks up days later.
 
 ## The measured precedence
 

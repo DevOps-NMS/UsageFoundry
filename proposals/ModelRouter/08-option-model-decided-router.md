@@ -31,10 +31,21 @@ is the strongest form this option has and the one it should be read in.
 
 A new module that spawns `claude -p` with the task text and a short instruction,
 `--output-format json`, `--permission-mode plan` so it cannot write, an
-`--allowedTools` list, its own `--max-budget-usd`, and no telemetry env — which
-is `spawnAssist`'s shape almost exactly (`src/lib/review.ts:612`–`641`), and
-copying it is the right instinct: there is one encoder per spawn shape here
-because every way of getting the shape wrong is silent.
+`--allowedTools` list, and no telemetry env — which is `spawnAssist`'s shape
+almost exactly (`src/lib/review.ts:612`–`641`, `reviewEnv()` at `:760`–`:775`
+stripping every `OTEL_` key), and copying it is the right instinct: there is one
+encoder per spawn shape here because every way of getting the shape wrong is
+silent.
+
+One thing must **not** be copied, and it is easy to assume is there. There are
+exactly two `--max-budget-usd` call sites in this app — `buildArgs` for a work
+cycle (`src/lib/orchestrator.ts:4882`) and the chat's own turn
+(`src/lib/chat.ts:1704`) — and `spawnAssist` is neither. A review runs with no
+cost bound inside the CLI at all, which is coherent for a child that reads a
+diff under `--permission-mode plan` and is not coherent for a classifier reading
+operator prose. So the classifier owes a `--max-budget-usd` of its own, on
+`chat.ts`'s precedent rather than on `review.ts`'s, and that is a fourth call
+site for a flag this app has deliberately kept to two.
 
 Then a row somewhere so the child is countable and closable on boot, a call site
 per creation path, a settings switch, and a run-page read-back. The module is

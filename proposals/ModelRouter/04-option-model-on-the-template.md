@@ -35,16 +35,17 @@ that decides what they cost per token.
 
 ## Shape
 
-`addColumn(db, "run_templates", "model", "TEXT")` in `migrate()` — an idempotent
-statement beside the thirty already there (helper at `src/lib/db.ts:1330`, call
-sites from `:697`). `RunTemplate` gains the field
-(`src/lib/templates.ts:51` onward), narrowed on save and again on read, which is
-that file's own stated three-narrowings rule (`:22`–`:31`). The templates page
-gains an input. `createRun` is unchanged: the template's model becomes
-`input.model` at the call site that already resolves the template, and lands on
-`runs.model` at `:3205` as a frozen copy — so editing the template afterwards
-cannot reach a run already created, exactly as the agent copy behaves
-(`:6703` and the comment beneath it).
+`addColumn(db, "run_templates", "model", "TEXT")` in `migrate()` — an
+idempotent statement beside the fifty-five already there (`grep -c
+"addColumn(db," src/lib/db.ts` → 55; helper declared at `src/lib/db.ts:1320`,
+its `ALTER TABLE` at `:1330`, call sites from `:697`). `RunTemplate` gains the
+field (`src/lib/templates.ts:51` onward), narrowed on save and again on read, which
+is that file's own stated three-narrowings rule (`:22`–`:31`). The templates
+page gains an input. `createRun` is unchanged: the template's model becomes
+`input.model` at the call site that already resolves the template, and lands
+on `runs.model` at `src/lib/orchestrator.ts:3205` as a frozen copy — so
+editing the template afterwards cannot reach a run already created, exactly as
+the agent copy behaves (`:6703` and the comment beneath it).
 
 ## What it costs to overturn the written decision
 

@@ -127,9 +127,9 @@ permanently, on every install, including the ones where the settings box is
 blank today (`01-constraints.md`; the measurement is
 `src/lib/agents.ts:99`–`110`). This option can avoid that, and it is the only
 one that can do so cleanly: a rule that returns `null` for "no opinion" leaves
-`runs.model` null, `buildArgs` emits no `--model` (`:4843`), and the agent's pin
-wins. Fill-only-the-gap is a one-line property of the return type, and it should
-be the default.
+`runs.model` null, `buildArgs` emits no `--model`
+(`src/lib/orchestrator.ts:4843`), and the agent's pin wins. Fill-only-the-gap
+is a one-line property of the return type, and it should be the default.
 
 ## What the operator sees and controls
 

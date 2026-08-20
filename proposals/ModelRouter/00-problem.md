@@ -19,17 +19,18 @@ own default".
 
 `runs.model` is `TEXT` and nullable (`src/lib/db.ts:146`). `input.model` is on
 the wire — `CreateRunInput.model` at `src/lib/orchestrator.ts:2559`, read from
-the body at `src/app/api/runs/route.ts:233` — but **nothing this app ships ever
-sets it**. The new-run form has no model control. `grep -n model
+the body at `src/app/api/runs/route.ts:233` — but **nothing this app ships
+ever sets it**. The new-run form has no model control. `grep -n model
 src/app/runs/new/page.tsx` returns four hits and not one of them is an input:
 two are comments, one is a line of copy about the *agent's* model
-(`:1527`–`1537`), and the last is the template picker's own description —
-"Keeps the task, the limits and how it behaves. Not the model — that stays a
-single global setting" (`:2209`). Neither do the two server-side creation paths:
-`grep -n "model" src/lib/workflows.ts src/lib/chat.ts` finds no `model:` key at
-any of the five `createRun` call sites (`src/lib/workflows.ts:3243`, `:4295`,
-`:4720`, `:5441`, `src/lib/chat.ts:933`). So every run this install has ever
-started took `settings.defaultModel`, whatever it was at that moment.
+(`src/app/runs/new/page.tsx:1527`–`1537`), and the last is the template
+picker's own description — "Keeps the task, the limits and how it behaves. Not
+the model — that stays a single global setting" (`:2209`). Neither do the two
+server-side creation paths: `grep -n "model" src/lib/workflows.ts
+src/lib/chat.ts` finds no `model:` key at any of the five `createRun` call
+sites (`src/lib/workflows.ts:3243`, `:4295`, `:4720`, `:5441`,
+`src/lib/chat.ts:933`). So every run this install has ever started took
+`settings.defaultModel`, whatever it was at that moment.
 
 It is then never changed. `grep -rn "SET model" src/` returns nothing: no route,
 no sweeper and no guard writes `runs.model` after the INSERT. `reopenRun`
@@ -373,6 +374,48 @@ model is also the one thing this app *could* express before `--agent` and no
 longer can: `SavedAgent.model` was exactly that field
 (`src/lib/agents.ts:88`–`96`).
 
+**But most of that $488.24 is not this app's to route, and the split is by
+directory rather than by bucket.** `scanUsage()` reads `~/.claude/projects`,
+which is one bind mount shared with the host (`CLAUDE.md`), so the scan sees the
+operator's own laptop sessions beside every run this container started. A run
+this app starts has a `cwd` under `/workspace`, because that is where the mounts
+are; a session whose `project` begins `/Users/` ran outside the container, which
+cannot see that path at all (`ls /Users` → `No such file or directory`).
+Splitting the same 7,263 turns that way:
+
+    $ node -e '
+      const {scanUsage}=require("/tmp/ufb-721638d11c0b/lib/transcripts");
+      scanUsage().then(s=>{
+        const w=Date.now()-7*24*3600*1000, e=s.entries.filter(x=>x.ts>=w&&x.agent), p={};
+        for(const x of e){ const k=x.agent+"  @  "+x.project;
+          (p[k]=p[k]||{c:0,n:0}); p[k].c+=x.costUSD; p[k].n++; }
+        for(const [k,v] of Object.entries(p).sort((a,b)=>b[1].c-a[1].c))
+          console.log("$"+v.c.toFixed(2).padStart(8), String(v.n).padStart(5), k);
+      });'
+
+    $  250.65  3431 workflow-subagent  @  /Users/…/Documents/GIT/UsageFoundry
+    $   63.54   673 Explore            @  /workspace/.uf-worktrees/usagefoundry-721638d11c0b-1
+    $   39.48   604 workflow-subagent  @  /Users/…/Documents/GIT/GHtranslator
+    $   39.38   271 Explore            @  /workspace/.uf-worktrees/usagefoundry-721638d11c0b-2
+    $   34.94   789 general-purpose    @  /workspace/.uf-worktrees/visualmerge-c18570bd208d-1
+    …ten projects in all; the remaining seven are `/workspace/.uf-worktrees/…`
+
+The whole `workflow-subagent` bucket — $290.16 of the $488.24, **59%** — is two
+host directories. Those are the operator's own Claude Code sessions using the
+CLI's Workflow tool; no argv this app builds reached them, and none ever could.
+What is left inside the container is $198.08 over 3,227 turns, **4.8% of the
+window**, and at Sonnet's rates the same tokens are $96.51 — so the reachable
+difference is **$101.57, or 2.5% of the window**, not the 6.8% the undivided
+figure implies.
+
+Two further things fall out of that table, and both bear on any option aimed
+here. Every reachable dollar of it is in the `Explore` and `general-purpose`
+buckets, which are exactly the two names `normalizeAgentInput` refuses
+(`src/lib/agents.ts:179`–`185`). And the bucket the CLI is demonstrably routing
+— `general-purpose`, 1,231 turns on Sonnet against 948 on Opus — is reachable
+and refusable at once: the routing that works is happening in the place this app
+may not name.
+
 **And the case that started this proposal.** On 2026-08-19 this repository ran a
 documentation wave: four read-only audits at 19:00 ("**Do not fix anything.**
 […] file one GitHub issue per confirmed drift"), then four runs from 19:38 that
@@ -423,9 +466,12 @@ edit anything.
 The prize is small and worth naming exactly. On that wave: $74.80 actual against
 $29.92 at Sonnet's rates today, a difference of $44.88, or **1.1% of the weekly
 window**; from 2026-09-01 the same comparison is $44.88 and the difference is
-$29.92, or 0.7%. On sub-agent turns, the larger target: $488.24 against $212.59,
-a difference of $275.65, or **6.8% of the window** — and $28.60 of that has
-already been taken by whatever is routing `general-purpose` today.
+$29.92, or 0.7%. On sub-agent turns, the larger target: the whole bucket is
+$488.24 against $212.59, a difference of $275.65 or 6.8% of the window — but
+59% of it is host sessions this app never started, so the part it could reach
+is $198.08 against $96.51, a difference of **$101.57, or 2.5% of the window**,
+and $28.60 of *that* has already been taken by whatever is routing
+`general-purpose` today.
 
 Two things follow, and they point in opposite directions. The measurement
 **does not** support a router justified by aggregate savings: 83% of the bill is

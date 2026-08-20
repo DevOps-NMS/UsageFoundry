@@ -14,11 +14,16 @@ somebody else is already picking is not a survey of the question.
 
 ## The strongest case, first
 
-**It is where the money is, by a factor of six over the next-largest measured
-prize.** 7,263 sub-agent turns in the window at $488.24 — 12% of the bill — of
-which $459.62 is still on Opus. At Sonnet's rates the same tokens are $212.59, a
-difference of $275.65 or **6.8% of the weekly window**, against 1.1% for the
-documentation wave that started this proposal (all from `00-problem.md`).
+**It is still where the money is, but by a factor of two rather than the factor
+of six the undivided figure suggests.** 7,263 sub-agent turns in the window at
+$488.24 — 12% of the bill — of which $459.62 is still on Opus. But 59% of that
+is `workflow-subagent` turns in two *host* directories, from the operator's own
+Claude Code sessions rather than from anything this container spawned, and no
+argv this app builds ever reached them. The reachable part is $198.08 over 3,227
+turns; at Sonnet's rates the same tokens are $96.51, a difference of **$101.57,
+or 2.5% of the weekly window**, against 1.1% for the documentation wave that
+started this proposal (all from `00-problem.md`, which carries the split by
+project directory and the command that produced it).
 
 **And it is where the fixed-token-count counterfactual is least unsafe.** Every
 cheaper-model figure in `00-problem.md` assumes a cheaper model emits the same
@@ -64,9 +69,9 @@ The one surface left is the *offered* path: `agentsArgs`, the plural flag alone,
 which "hands the session's main agent a role it may delegate a subtask to"
 (`src/lib/agents.ts:391`–`401`). Its one caller is `spawnAssist`
 (`src/lib/review.ts:627`) — a reviewer, not a work cycle — and
-`docs/agent/architecture.md:131` records that no caller supplies an agent to it
-anyway. So the offered path exists, carries nothing today, and is on the wrong
-child.
+`src/lib/agents.ts:354`–`355` records that "no caller of `startAssist` supplies
+one, so a review has never been given an agent". So the offered path exists,
+carries nothing today, and is on the wrong child.
 
 **Whether a member's `model` still governs a delegated sub-turn on the offered
 path is not measured in this repository.** Every quoted measurement is off the
@@ -191,9 +196,11 @@ Three things, none of them established:
 1. That a member's `model` still governs a delegated sub-turn on the offered
    path. **Assumed**, not measured here.
 2. That this app's delegated turns go through members it wrote, rather than
-   through built-ins it may not name (`src/lib/agents.ts:179`–`185`). The
-   measured spend is in `general-purpose` and `Explore` buckets, which are
-   built-ins.
+   through built-ins it may not name (`src/lib/agents.ts:179`–`185`). This one
+   is **measured, and it fails**: every reachable delegated dollar in the window
+   — all $198.08 of it — is in the `general-purpose` and `Explore` buckets, and
+   both are on that refusal list (`00-problem.md`'s split by project directory).
+   Not "the measured spend is mostly built-ins": all of it is.
 3. That displacing whatever routes those turns today is an improvement rather
    than an argument — and that a policy fixed per cycle beats one taken per
    turn by something with more context than this app has.
