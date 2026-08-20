@@ -2,9 +2,10 @@
 
 Keep the one global text box. `createRun` copies `settings.defaultModel` onto
 `runs.model` at INSERT (`src/lib/orchestrator.ts:3205`), `buildArgs` re-sends it
-on every cycle (`:4843`, called at `:6701`–`:6703`), `review.ts:624` reads the
-same column for a review and a conflict resolution, and `chat.ts:1699` reads the
-setting directly. Nothing else decides anything.
+on every cycle (`:4843`, called at `:6701`–`:6703`), `src/lib/review.ts:624`
+reads the same column for a review and a conflict resolution, and
+`src/lib/chat.ts:1699` reads the setting directly. Nothing else decides
+anything.
 
 One correction to the framing before the case, because it changes what this
 option is. This is **not** "the operator pins a model per run". `CreateRunInput`

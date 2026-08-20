@@ -44,7 +44,7 @@ Exactly here, and the position is the whole safety argument:
 
 The order inside `evaluateBudget` is untouched: `no_terminus`, `iterations`,
 `duration`, `run_cost`, `run_tokens`, weekly, then session
-(`src/lib/budget.ts:492`–`:560`, stated at
+(`src/lib/budget.ts:492` onward, stated at
 `docs/agent/budgets-and-guards.md:32`). The router adds no rung and reorders
 nothing. It cannot: `evaluateBudget` compares spend already accrued against
 thresholds, so a model chosen for the *next* cycle cannot change any comparison
@@ -55,9 +55,10 @@ is load-bearing partly by being legible.
 
 ## What it means that `costGuardUSD` and `costUSD` are different numbers
 
-They are the same number whenever every model in the window is priced and the
-window's reading is derived (`docs/agent/metering.md:18`). They differ in two
-cases, and both matter here more than anywhere else in this survey.
+They are the same number whenever every model in the window is priced *and* the
+window's reading is derived (`docs/agent/metering.md:18`). Two things make them
+diverge — an unpriced model, and the provider's own percentage carried forward —
+and both bear on this option harder than on any other here.
 
 **A router must read `guardFraction`, not `fraction`.** The reason is already
 written down for the review path: an unpriced model contributes $0 to the
@@ -75,7 +76,7 @@ reaction, while the dashboard the operator is watching shows less. Nothing
 throws. That is a self-amplifying loop built out of two fields whose whole
 purpose is to never be collapsed, and it is this option's most specific hazard.
 
-The third case is the provider's own percentage. When it answered, `fraction` is
+The second source is the provider's own percentage. When it answered, `fraction` is
 its percentage alone while `guardFraction` is the worst of that carried forward
 and every model-scoped weekly wall (`docs/agent/metering.md:18`,
 `src/lib/windows.ts:735`–`:752`). The carried-forward term converts recent spend
