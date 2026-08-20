@@ -147,10 +147,10 @@ settings.defaultModel` at the INSERT (`src/lib/orchestrator.ts:3205`).
   control, and it is the only arrangement in the survey where all four are
   reachable.
 - **The model is not a guard.** It sits beside the budget and permission-mode
-  controls on the same form, and the form is on both of
-  `src/lib/settings.ts:480`–`488`'s lists — but it must be sent as a sibling of
+  controls on the same form, and `src/lib/settings.ts:480`–`488` names the form
+  as a source of the guard half — but the model must be sent as a sibling of
   `prompt` and `folder`, not folded into whatever the form builds for
-  `RunGuards`.
+  `RunGuards`. Sharing a form is not sharing a half.
 - The `isKnownModel` warning from Phase 0b belongs under this input too, for
   `src/lib/templates.ts:22`–`31`'s stated reason: narrowing at save is what puts
   the mistake where it was made rather than at the first attempt to use it.
@@ -177,10 +177,10 @@ precisely the defect 0c repairs and which took a flag change to create.
 
 ## Phase 3 — the boundary, written down rather than built
 
-Three of the five origins start a run with nobody at the keyboard —
-`chat`, `workflow`, `orchestrator-block` and `schedule` are four of the five
-values and three of them are unattended, which is "the whole reason this is a
-column" (`src/lib/orchestrator.ts:263`–`284`). **This answers for `form` and for
+There are five origins — `form`, `chat`, `workflow`, `orchestrator-block`,
+`schedule` — and "three of them start an agent with nobody at the keyboard,
+which is the whole reason this is a column"
+(`src/lib/orchestrator.ts:263`–`284`). **This answers for `form` and for
 nothing else.** A chat proposal holds no model by design
 (`src/lib/db.ts:616`–`619`), a workflow node holds none (`:367`–`370`), an
 orchestrator block's run spec holds none (`src/lib/workflows.ts:1345`–`1351`),
