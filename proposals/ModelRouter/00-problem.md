@@ -55,7 +55,7 @@ and is called from *inside* the cycle loop — `for (;;)` opens at
 `src/lib/orchestrator.ts:6412`, `buildArgs({ … model: run.model … })` is at
 `:6701`–`:6703` — so the flag is rebuilt and re-sent on **every** cycle,
 including a resumed one. That is asserted rather than assumed
-(`src/lib/orchestrator.test.ts:2358`, "still passes the mode, the model and the
+(`src/lib/orchestrator.test.ts:2353`, "still passes the mode, the model and the
 session to resume"). It matters for a reason `--plugin-dir` recorded first: that
 flag is *not* restored by `--resume`, so a version that only sent it on the
 opening cycle would silently drop it thereafter
@@ -139,18 +139,22 @@ own pin is unreachable on this install for as long as that box has text in it.
 
 The live database is **not readable from here**, and that is deliberate rather
 than an accident of this shell: `DATA_DIR` is `/data` (`docker-compose.yml:188`),
-a named volume (`:272`) that `docker-compose.yml:35` describes as "root-owned
-0700, so an agent cannot" read it. From inside a work cycle:
+a named volume (`:272`), and `docker-compose.yml:35`–`36` says why an agent
+cannot open it — "/data is root-owned 0700, so an agent cannot rewrite a budget,
+a status or a permission mode straight in the database". From inside a work
+cycle:
 
-    $ ls -ld /data          →  drwxr-xr-x 2 node node 40   (an empty overlay, not the volume)
+    $ ls -ld /data          →  drwxr-xr-x 2 node node 40
+    $ ls -la /data          →  (empty)
     $ find / -maxdepth 4 -name usagefoundry.db
       /workspace/UsageFoundry/.data/usagefoundry.db     (and the same file via /workspace3, /workspace4)
     $ sqlite3 -readonly /workspace/UsageFoundry/.data/usagefoundry.db "SELECT count(*) FROM runs;"
       0
 
 That last file is a `npm run dev` artifact — `DATA_DIR` defaults to
-`process.cwd()/.data` (`src/lib/config.ts:281`) — and every table in it is empty
-but three. So **no figure below comes from `runs.spent_usd`, `run_reviews` or
+`process.cwd()/.data` (`src/lib/config.ts:281`) — and only four of its 21 tables
+hold a row (`chat_sessions`, `ops_events`, `request_log`, `settings`), none of
+them `runs`. So **no figure below comes from `runs.spent_usd`, `run_reviews` or
 `otlp_requests`.** They come from the transcripts, which is the source
 `buildSnapshot()` itself reads (`src/lib/transcripts.ts:406` →
 `src/lib/windows.ts:669`), through this app's own `scanUsage()` and `pricing.ts`
@@ -159,11 +163,13 @@ rather than through arithmetic written for this document.
 Everything below was produced by compiling `src/lib/` and calling those
 functions:
 
-    $ npx tsc -p tsconfig.test.json --outDir /tmp/ufb-721638d11c0b
+    $ node_modules/.bin/tsc -p tsconfig.test.json --outDir /tmp/ufb-721638d11c0b
 
 The window is the rolling seven days, which is what `weekStart(now, null)`
 returns when no anchor is set (`src/lib/windows.ts:276`–`277`), and
-`settings.weeklyAnchor` defaults to `null` (`src/lib/settings.ts:606`).
+`settings.weeklyAnchor` defaults to `null` (`src/lib/settings.ts:606`). That
+this install has not overridden it is **assumed** — the settings row is in the
+database above.
 
 **One model does 99.3% of the spending, because one setting picked it.**
 
@@ -186,7 +192,7 @@ returns when no anchor is set (`src/lib/windows.ts:276`–`277`), and
 
 Four model strings in a week, and the price table placed every one that spent a
 token — `unpricedModels` is empty, and `<synthetic>` is absent from it by design
-because it carries an all-zero usage block (`src/lib/transcripts.ts:267`–`274`).
+because it carries an all-zero usage block (`src/lib/transcripts.ts:268`–`274`).
 
 ## Something is already routing, and it is not this app
 
@@ -217,17 +223,23 @@ the same window by sub-agent bucket *and* model:
     $     0.00     48 (main thread) | <synthetic>
 
 **Every main-thread dollar in the window is `claude-opus-5`** — the $0.45 that
-is not comes from two probe directories under `/tmp`, not from a work cycle. So
-yes: every work cycle ran on the one setting.
+is not spans 16 turns across six directories, five of them scratch paths under
+`/tmp` or `/private/var/folders` and the sixth a one-turn probe inside a
+worktree ("Without using any tool: am I in a linked worktree…"). None of them is
+a work cycle. So yes: every work cycle in the window ran on the one setting.
 
 But `general-purpose` ran 948 turns on Opus and 1,231 on Sonnet in the same
 week, and `Explore` ran 13 turns on Sonnet. Nothing in this app asked for that.
 `general-purpose` and `Explore` are the CLI's own built-in agents — they appear
 in the "Available agents" list this repository measured off the pin and quoted
 at `docs/agent/agents-and-templates.md:10` (`claude, Explore, general-purpose,
-Plan, statusline-setup, typescript`) — and this app defines neither, sends
-neither on any argv, and stores no model for either. `runs.model` reaches the
-session; what a delegated turn runs on is decided somewhere below it.
+Plan, statusline-setup, typescript`) — and this app defines neither and stores
+no model for either. It could not, even by accident: `normalizeAgentInput`
+refuses a saved agent whose name is in `BUILT_IN_AGENTS`
+(`src/lib/agents.ts:179`–`185`, `:284`–`:292`), and both are on that list, so
+neither name can reach an `--agents` payload this app builds. `runs.model`
+reaches the session; what a delegated turn runs on is decided somewhere below
+it.
 
 Only three sessions in the window contain a delegated Sonnet turn, and two of
 them have an Opus main thread:
@@ -344,7 +356,7 @@ that, and nothing in this file claims it.
 
 **Sub-agent turns are where the counterfactual is least unsafe, and they are
 also where somebody is already acting on it.** 7,263 of the week's turns carry
-an `attributionAgent` (`src/lib/transcripts.ts:263`, surfaced as `byAgent` in
+an `attributionAgent` (`src/lib/transcripts.ts:263`–`264`, surfaced as `byAgent` in
 `src/lib/windows.ts:877`), costing $488.24 — 12% of the window. Their bucket
 split, from the same scan:
 

@@ -232,7 +232,7 @@ makes `run_reviews.model` disagree with the cycles it is reviewing.
 
 **What `--resume` does to each.** Nothing, and that is the useful answer.
 `buildArgs` rebuilds the whole argv per cycle, so the resumed cycle carries
-whatever `opts.model` says; the test at `src/lib/orchestrator.test.ts:2358`
+whatever `opts.model` says; the test at `src/lib/orchestrator.test.ts:2353`
 pins it. Whether the CLI would have *restored* a model across `--resume` on its
 own is **not verified here**, and no option should need it to be: `--plugin-dir`
 is the flag that measurably does not survive
