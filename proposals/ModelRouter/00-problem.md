@@ -18,7 +18,7 @@ own default".
     input.model ?? settings.defaultModel        src/lib/orchestrator.ts:3205
 
 `runs.model` is `TEXT` and nullable (`src/lib/db.ts:146`). `input.model` is on
-the wire — `CreateRunInput.model` at `src/lib/orchestrator.ts:128`, read from
+the wire — `CreateRunInput.model` at `src/lib/orchestrator.ts:2559`, read from
 the body at `src/app/api/runs/route.ts:233` — but **nothing this app ships ever
 sets it**. The new-run form has no model control. `grep -n model
 src/app/runs/new/page.tsx` returns four hits and not one of them is an input:

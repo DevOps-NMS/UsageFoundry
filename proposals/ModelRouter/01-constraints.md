@@ -20,7 +20,7 @@ and the comment above it states the rule the whole approval gate rests on
 
 `RunGuards` is three fields: `permissionMode`, `isolate`, `budget`. The model is
 not one of them, and it is not the prompt or the folder either. It arrives on
-`CreateRunInput` as a fourth thing (`src/lib/orchestrator.ts:128`) resolved from
+`CreateRunInput` as a fourth thing (`src/lib/orchestrator.ts:2559`) resolved from
 `settings.defaultModel` (`:3205`).
 
 **An option must say which half it is putting the model into, and the answer is
