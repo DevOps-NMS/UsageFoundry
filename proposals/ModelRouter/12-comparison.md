@@ -77,9 +77,9 @@ negative is worse than today. Build cost alone runs 3 = free.
 | **Weighted total** | **+6** | **−8** | **−13** | **+10** | **−12** | **−41** | **−38** | **−25** | **+25** | **−9** |
 
 E is scored as **shipped rules**, the shape `06` argues for; operator-authored
-rules take a further −1 on drift and −2 on build cost, for −17. G is scored as
+rules take a further −1 on drift and −2 on build cost, for −19. G is scored as
 the **free-form classifier**; the constrained form `08` says is the defensible
-one moves unpriced to −1 and predict-and-audit to −2, for −29, and is still last
+one moves unpriced to −1 and predict-and-audit to −2, for −32, and is still last
 but one. Both alternatives are named here rather than given columns because
 neither changes the ordering.
 
