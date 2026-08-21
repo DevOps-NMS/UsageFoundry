@@ -104,10 +104,12 @@ delegating.
 **Against that, it grows the fixed prefix, and the fixed prefix is paid on
 every turn of every run for ever.** `02-levers-on-the-pin.md` measured the tool
 block at **111,472 bytes for 28 tool definitions** — 3,981 bytes each, about
-995 tokens at 4 bytes per token. Read at 0.1× on all 16,605 container
+995 tokens at 4 bytes per token — and the closing pass re-measured the same 28
+tools at 109,800 bytes, 3,921 each, so the per-tool figure is good to about 2%
+and not better. Read at 0.1× on all 16,605 container
 main-thread turns in the rolling week, **one added tool definition costs about
-$8.26 a week**, before it is called once. A skill announcement in `msg0.1` is
-charged the same way.
+$8.14 to $8.26 a week**, before it is called once. A skill announcement in
+`msg0.1` is charged the same way.
 
 So the option is a trade: about $8 a week of standing cost per tool against
 about $0.14 per substitution, which breaks even at roughly **sixty

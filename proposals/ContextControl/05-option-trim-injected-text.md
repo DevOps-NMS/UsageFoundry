@@ -60,7 +60,7 @@ distinguishes, and neither is the conversation itself:
   | string | bytes | when |
   |---|---|---|
   | `SELF_HOSTING_NOTICE` | 1,096 | every cycle, on the system prompt |
-  | `NEEDS_REVIEW_NOTICE` (`:4506`) | 639 | every cycle bar an operator follow-up |
+  | `NEEDS_REVIEW_NOTICE` (`src/lib/orchestrator.ts:4506`) | 639 | every cycle bar an operator follow-up |
   | `COMPLETION_NOTICE` (`:4466`) | 443 | cycle 1, gated on `endsOnDone` |
   | `SHARED_CHECKOUT_NOTICE` (`:4577`) | 679 | cycle 1, isolated run |
   | `DEFAULT_DONE_PUSHBACK_PROMPT` (`src/lib/settings.ts:534`) | 536 | after a DONE |
@@ -159,7 +159,8 @@ actionable.
 docblock records two runs killed by a literal it used to carry — `b81e7c70`
 escalating to a bare `pgrep -f 3100` at 2026-08-15 23:39:42 and `9b98ddec`, a
 Go run in another repository, dying in the same second with "exited with code
-143" — and the same again on 2026-08-16 (`:4719`–`:4731`). The current text is
+143" — and the same again on 2026-08-16
+(`src/lib/orchestrator.ts:4719`–`:4731`). The current text is
 longer *because* of that: "the mechanism is stated rather than the conclusion —
 an agent told only 'do not use a bare number' reaches for a different literal"
 (`:4733`–`:4737`). Trimming it is trading $4.28 a week against the incident

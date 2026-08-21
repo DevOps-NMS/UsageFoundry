@@ -237,15 +237,18 @@ anything this app puts on an argv.
 range:
 
     $ claude --autocompact 50000 --help
-    error: option '--autocompact <auto|tokens>' argument '50000' is invalid. It must be 'auto', or between 100k and 1M
+    error: option '--autocompact <auto|tokens>' argument '50000' is invalid. It must be 'auto', or between 100k and 1M (e.g. 500k, 200000, or 200 as shorthand)
 
     $ claude --autocompact 100000 --help     # accepted
     $ claude --autocompact 1000000 --help    # accepted
     $ claude --autocompact 2000000 --help
-    error: … It must be 'auto', or between 100k and 1M
+    error: option '--autocompact <auto|tokens>' argument '2000000' is invalid. It must be 'auto', or between 100k and 1M (e.g. 500k, 200000, or 200 as shorthand)
 
 What it sets is visible in the debug log, and it is **clamped by the model's own
-window and reduced by a fixed reserve**. On `claude-haiku-4-5-20251001`:
+window and reduced by a fixed reserve**. On `claude-haiku-4-5-20251001` —
+`--debug-file <path>` rather than a bare `--debug`, because under
+`--output-format stream-json` a bare `--debug` writes nothing to either stream
+and the line is only reachable through the file:
 
     --autocompact 100000    →  autocompact: tokens=[REDACTED] level=ok       effectiveWindow=80000
     --autocompact 1000000   →  autocompact: tokens=[REDACTED] level=ok       effectiveWindow=180000
@@ -330,17 +333,20 @@ meter comes from those files.
 |---|---|---|
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | exists | request `max_tokens` 32000 → **4096**; drags `thinking.budget_tokens` 31999 → 4095 with it |
 | `MAX_THINKING_TOKENS` | exists | `thinking.budget_tokens` 31999 → **2000**, `max_tokens` unchanged at 32000 |
-| `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` | exists | a `Read` of an 84,000-byte file: tool result **93,401 → 32,226 chars**, plus a paging instruction appended |
+| `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` | exists | a `Read` of an 84,000-byte file: tool result **93,401 → 32,226 chars**, plus a paging instruction appended. **The cap is enforced against a `/v1/messages/count_tokens` answer**, not against a local count: re-run by the closing pass with a recorder returning a fixed 1,000 for every `count_tokens` call, the cap never fired at any value; with a realistic answer the same file went 88,988 → 28,394 chars |
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | could not establish | present in the binary; no observable change to the request body on a short conversation, and the long conversation that would show it needs a live model |
 | `BASH_MAX_OUTPUT_LENGTH` | could not establish | present in the binary; `Bash` cannot run inside this agent's sandbox — every call returns `Sandbox is required but failed to initialize: EPERM … srt-mux-20-1.sock` |
 | `MAX_MCP_OUTPUT_TOKENS` | could not establish | present in the binary; no MCP server is on a work cycle's argv (`00-problem.md`), and none was stood up |
 
 The file-read cap is the one an option could use today, and what it does is
-worth quoting because it is not truncation:
+worth quoting because it is not truncation. Verbatim, from the closing pass's
+re-run at `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS=8000` over an 84,010-byte
+file — the whole thing arrives wrapped in a `<system-reminder>`:
 
-    [… truncated. Use offset=516 and limit=516 for the next page, or Grep to find a
-     specific section. Do NOT answer from this page alone if the answer may be further
-     in the file.]
+    [Truncated: PARTIAL view — /tmp/…/big.txt: showing lines 1-387 of 1217 total
+     (21329 tokens, cap 8000). Call Read with offset=388 limit=387 for the next page,
+     or Grep to find a specific section. Do NOT answer from this page alone if the
+     answer may be further in the file.]
 
 It *pages*. The saving is real on the turn it happens and is repaid in full, plus
 a fresh tool-call round trip, the moment the model asks for page two — which is
@@ -349,10 +355,13 @@ betting that the model does not need the rest, and `00-problem.md` already
 refuses the equivalent claim about file reads generally: its own proxy "cannot
 distinguish *wasted* from *read and understood*".
 
-One further cap the CLI applies without being asked: a `Read` of a 402,000-byte
-file was refused outright — a 199-character tool result ending "…mit parameters
-to read specific portions of the file, or search for specific content instead of
-reading the whole file." — and the env var above did not change that.
+One further cap the CLI applies without being asked, and it names its own
+number: a `Read` of a 402,020-byte file was refused outright with a
+197-character tool result — "File content (392.6KB) exceeds maximum allowed size
+(256KB). Use offset and limit parameters to read specific portions of the file,
+or search for specific content instead of reading the whole file." — and the env
+var above did not change that. **256 KB is the ceiling on anything a single
+`Read` can put in a conversation, whatever this app does.**
 
 ## Delegated turns
 
@@ -451,6 +460,14 @@ from a probe in a directory that is not a git repository, which is why its
     msg0.1   4,968B  cc=null                     <system-reminder> available skills
     msg0.2     306B  cc=null                     <system-reminder> claudeMd + currentDate
     msg0.3      50B  cc={"type":"ephemeral"}     the prompt this app sent
+
+**The tool block's size is not stable and no option should treat it as a
+constant.** The closing pass re-ran the same probe and got **109,800 bytes for
+the same 28 tools** — 1.5% smaller, on the same pin, in a different scratch
+directory. Exactly three `cache_control` marks reproduced both times, on `sys[1]`,
+`sys[2]` and the newest user block; on a *resumed* request the third mark moves
+to the newest message, so the first user message carries no breakpoint at all
+and everything in it sits inside the prefix `sys[2]` breaks.
 
 `sys[2]` is the **first** thing after the tool definitions and it carries a
 breakpoint, so a change in it invalidates everything after it — which is the

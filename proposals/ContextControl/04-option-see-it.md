@@ -111,7 +111,7 @@ a model at all, which also disposes of `01-constraints.md`'s summariser hazard
 — there is no text for the sentinel matcher to later read.
 
 **`--resume`: untouched.** `sessionId` is read from the row and written by
-`adoptSession` (`:6319`, `:6357`) exactly as now.
+`adoptSession` (`src/lib/orchestrator.ts:6319`, `:6357`) exactly as now.
 
 **Retention: it inherits a horizon rather than creating one, and that is the
 one real interaction.** The reading is derived from transcript files that

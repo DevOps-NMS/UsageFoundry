@@ -65,7 +65,8 @@ tool results.
   `--resume`, purely so the run's log says a compaction happened. The event
   carries `session_id`, `transcript_path`, `trigger` and `custom_instructions`
   (`02-levers-on-the-pin.md`), and `--include-hook-events` puts the dispatch on
-  the same `stream-json` channel `handleStreamLine` (`:5830`) already reads.
+  the same `stream-json` channel `handleStreamLine`
+  (`src/lib/orchestrator.ts:5830`) already reads.
 
 **What the flag can and cannot do is decided by the model's window, and it is
 one-directional.** Measured on `claude-haiku-4-5-20251001`:

@@ -225,8 +225,8 @@ neither reached Anthropic and neither could have been billed —
     exit=1
 
     $ timeout 60 claude -p "hi" --exclude-dynamic-system-prompt-sections
-    Terminated                    # parsed, then spent the timeout on 127.0.0.1:1
-    exit=143
+    Execution error               # parsed, then spent the timeout on 127.0.0.1:1
+    exit=124                      # `timeout`'s own code for a child it killed
 
 So on a future build that removes `--exclude-dynamic-system-prompt-sections`,
 every work cycle on the install fails to spawn — immediately, before any API

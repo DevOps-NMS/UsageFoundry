@@ -143,7 +143,8 @@ times. So the mechanism is worth most on exactly the long cycles where
 ## What it does to the DONE contract, `needs-review`, `--resume` and retention
 
 **DONE and `needs-review`: untouched, and structurally out of reach.** The hook
-acts on tool results. `COMPLETION_NOTICE` (`:4466`) and `NEEDS_REVIEW_NOTICE`
+acts on tool results. `COMPLETION_NOTICE` (`src/lib/orchestrator.ts:4466`) and
+`NEEDS_REVIEW_NOTICE`
 (`:4506`) are prompt text and never pass through a tool; `cycleEnding`
 (`:4543`) matches over `res.finalText`, which is the model's own reply. A hook
 cannot reach any of the three. `01-constraints.md`'s summariser hazard — a
@@ -214,7 +215,8 @@ hook's failure is observable by this app without a second channel"
 (`02-levers-on-the-pin.md`). That is the surface `01-constraints.md` says an
 option changing the conversation has to invent, and here it exists already. The
 precedent for adding a flag that changes the stream's shape rather than what
-the run may do is `--forward-subagent-text` (`:4845`, `:4819`–`:4821`).
+the run may do is `--forward-subagent-text`
+(`src/lib/orchestrator.ts:4845`, `:4819`–`:4821`).
 
 **Overrides:** a threshold in Settings, where `null` / `""` / `0` all mean off
 (`docs/agent/budgets-and-guards.md`), stored only if it differs from `DEFAULTS`

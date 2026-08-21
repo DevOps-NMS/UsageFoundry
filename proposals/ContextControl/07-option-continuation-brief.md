@@ -154,7 +154,8 @@ adequate is the question `03-` could not answer, because "no model answered any
 of the five questions".
 
 **DONE and `needs-review`: cheaper and better, and this is a genuine gain.**
-`COMPLETION_NOTICE` is gated on `endsOnDone` and sent on cycle 1 (`:4466`,
+`COMPLETION_NOTICE` is gated on `endsOnDone` and sent on cycle 1
+(`src/lib/orchestrator.ts:4466`,
 `:4344`–`:4348`); `NEEDS_REVIEW_NOTICE` is sent on every cycle bar an operator
 follow-up (`:4506`, `:4361`). Under this option every cycle *is* a cycle 1, so
 both notices arrive on every cycle rather than being carried in a conversation

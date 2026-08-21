@@ -880,8 +880,12 @@ a fresh conversation's opening turn reads (the median in the next section). So
 and everything after it is written again.** Naming what sits
 immediately after that boundary — and therefore what changed — is not possible
 from the transcript, which records no system block, no environment block and no
-`<system-reminder>` (`grep -c system-reminder` over a container transcript
-returns 0).
+`<system-reminder>` (`grep -c system-reminder
+~/.claude/projects/-workspace--uf-worktrees-usagefoundry-721638d11c0b-1/6a2ccabb-6930-4cbd-908e-3d4522456136.jsonl`
+returns 0). **The file has to be named.** 33 of this container's 604 transcripts
+do contain the string, every one of them because an agent grepped for it and the
+tool call and its result went into the file — this proposal's own measurement
+runs among them. What the CLI writes is what the named file shows.
 
 **It is possible from the wire, and `02-levers-on-the-pin.md` names it: the
 `gitStatus` section of the CLI's own system prompt, regenerated on every cycle
@@ -1051,7 +1055,8 @@ entries bear on context:
   app already uses to hand the CLI structured configuration on the argv without
   a file, and it is therefore the shape any new setting would take.
 - **`--plugin-dir`** (`pluginDirArgs` at `src/lib/plugins.ts:123`, pushed at
-  `:4873` from `enabledPluginDirs()` re-resolved per cycle at `:6690`). Its
+  `src/lib/orchestrator.ts:4873` from `enabledPluginDirs()` re-resolved per
+  cycle at `:6690`). Its
   docblock records the property that matters to every option here:
   "`--plugin-dir` is **not** restored by `--resume`, so a version of this that
   only sent it on the opening cycle would leave every later cycle of the same run
@@ -1060,13 +1065,14 @@ entries bear on context:
   skills and hooks the CLI loads, so it is also a context lever and not only a
   capability one.
 - **`--agents` / `--agent`** (`sessionAgentArgs` at `src/lib/agents.ts:433`,
-  pushed at `:4851`). The payload carries the saved agent's `description` and
+  pushed at `src/lib/orchestrator.ts:4851`). The payload carries the saved
+  agent's `description` and
   `prompt` (`agentsFlagValue`, `src/lib/agents.ts:376`–`389`), and with `--agent`
   beside it that prompt is the **session's** own, not a role it may delegate to
   (`src/lib/agents.ts:88`–`96`). It is the one place an operator's own text
   reaches the system prompt rather than the conversation.
-- **`--resume <sessionId>`** (`:4874`). The subject of the handover measurement
-  above.
+- **`--resume <sessionId>`** (`src/lib/orchestrator.ts:4874`). The subject of
+  the handover measurement above.
 
 Two more are on the argv and their effect on context is **not established
 here**: `--allowedTools` (`:4861`, `SEARCH_TOOLS` at `:4642`, plus
@@ -1170,7 +1176,8 @@ One variable decides, and it is hydrated from the row rather than zeroed:
 
     let sessionId: string | null = run.session_id;      src/lib/orchestrator.ts:6319
 
-`nextPrompt` branches on `o.sessionId === null` (`:4330`) and `buildArgs` emits
+`nextPrompt` branches on `o.sessionId === null` (`src/lib/orchestrator.ts:4330`)
+and `buildArgs` emits
 `--resume` on `opts.resumeSessionId` (`:4874`); both are fed that one local. It
 is written the moment the stream names it rather than when the cycle returns —
 `adoptSession` (`:6357`) sets the local *and* the column, because writing it only
@@ -1188,7 +1195,8 @@ The fourth case is a deliberate non-case, and it is the one that says how this
 app values the conversation. When a resume fails twice, the run **stops** rather
 than starting over: `looksLikeResumeFailure` retries once and then reports
 "Could not resume this run's Claude Code session […] Its work is still on disk;
-pick it up by hand with: claude --resume <id>" (`:7127`–`:7151`). The comment
+pick it up by hand with: claude --resume <id>"
+(`src/lib/orchestrator.ts:7127`–`:7151`). The comment
 above it says why — "the honest move is to stop and name the command rather than
 quietly start a fresh session and lose the conversation the resume existed to
 keep" (`:7115`–`:7117`). Any option that proposes to discard a conversation is
@@ -1310,8 +1318,8 @@ cycle's argv at all.
   exception, from a mechanism this app has no name for.
 - **The transcript is written by the CLI**, and it is a partial record. Thinking
   text is stripped (13,454 blocks, zero bytes retained). The system and
-  environment blocks are absent — `grep -c system-reminder` over a container
-  transcript returns `0`. Large tool outputs are spilled to
+  environment blocks are absent — `grep -c system-reminder` over the named
+  container transcript above returns `0`. Large tool outputs are spilled to
   `<session>/tool-results/*.txt` and replaced in the transcript by a
   `<persisted-output>` wrapper carrying a 2 KB preview:
 

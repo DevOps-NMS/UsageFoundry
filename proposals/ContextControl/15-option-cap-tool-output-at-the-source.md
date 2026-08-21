@@ -55,7 +55,7 @@ The variables, with `02-`'s verdicts:
 
 | variable | verdict | observed |
 |---|---|---|
-| `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` | **exists** | a `Read` of an 84,000-byte file: 93,401 → 32,226 chars, plus a paging instruction |
+| `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` | **exists** | a `Read` of an 84,000-byte file: 93,401 → 32,226 chars, plus a paging instruction. Re-run by the closing pass: 88,988 → 28,394 on an 84,010-byte file, **and the cap is enforced against a `/v1/messages/count_tokens` answer** rather than a local count — with a stub count it never fires |
 | `MAX_THINKING_TOKENS` | **exists** | `thinking.budget_tokens` 31,999 → 2,000, `max_tokens` unchanged |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | **exists** | `max_tokens` 32,000 → 4,096, **and drags `thinking.budget_tokens` 31,999 → 4,095 with it** |
 | `BASH_MAX_OUTPUT_LENGTH` | could not establish | in the binary; `Bash` cannot run inside the probing agent's sandbox |
@@ -95,9 +95,10 @@ the conversation is touched, so there is no cut point and `T*` does not apply.
 **What the file-read cap is worth, and the reason it is not what it looks
 like.** `02-` is precise, and quotes the CLI's own appended text:
 
-    [… truncated. Use offset=516 and limit=516 for the next page, or Grep to find a
-     specific section. Do NOT answer from this page alone if the answer may be further
-     in the file.]
+    [Truncated: PARTIAL view — /tmp/…/big.txt: showing lines 1-387 of 1217 total
+     (21329 tokens, cap 8000). Call Read with offset=388 limit=387 for the next page,
+     or Grep to find a specific section. Do NOT answer from this page alone if the
+     answer may be further in the file.]
 
 "It *pages*. The saving is real on the turn it happens and is repaid in full,
 plus a fresh tool-call round trip, the moment the model asks for page two —
@@ -245,6 +246,17 @@ curve.
 two, three and four has paid the original bytes plus three extra tool round
 trips. Nothing distinguishes it in `run_events`, on the run page or in the
 dashboard from a run whose first page was enough.
+
+**Silent, second and a half, found by the closing pass: the cap is decided by a
+round trip to the provider.** It is enforced against a
+`/v1/messages/count_tokens` answer, not against a count the CLI takes locally —
+re-run with a recorder returning a fixed 1,000 tokens for every `count_tokens`
+call, the cap did not fire at 1,000, 2,000 or 8,000; with a realistic answer the
+same file went 88,988 → 28,394 chars. Two things follow. The cap costs an extra
+request per large read, which `02-` observed as a separate finding and attributed
+only to the compaction decision. And on a network where that endpoint is slow or
+refused, the cap silently stops applying — the failure mode of this option is
+therefore not only a typo but an unreachable endpoint, and neither says anything.
 
 **Silent, third: `CLAUDE_CODE_MAX_OUTPUT_TOKENS` caps thinking.** Measured on
 the pin, and it is the kind of coupling nobody would look for. An operator

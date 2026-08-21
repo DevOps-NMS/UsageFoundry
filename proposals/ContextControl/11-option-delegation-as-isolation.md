@@ -235,7 +235,8 @@ bounds the *size* of a delegated turn's context — no flag, no env var and no
 `--agents` field reached it in any probe", **could not establish**. So a
 delegation that goes wrong is a conversation this app has no lever over,
 spending against the run's budget, visible only as sidechain cost after the
-fact. Whether `--max-budget-usd` (`:4880`–`:4882`) bounds a cycle's delegated
+fact. Whether `--max-budget-usd` (`src/lib/orchestrator.ts:4880`–`:4882`) bounds
+a cycle's delegated
 turns as well as its main-thread ones is **not established here** and is the
 single question that would most change this option's risk.
 

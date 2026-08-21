@@ -147,7 +147,8 @@ own inherits that rule: it must not be written out whole.
 `COMPLETION_NOTICE` existed, cycle 1 was judged against a protocol it had never
 been given, and the docblock records the count: of the runs whose budget allowed
 a second cycle, 92 of them cost $162 to say one word into a re-sent conversation
-(`:4436`–`:4446`). An option that drops, summarises or rewrites turns must not
+(`src/lib/orchestrator.ts:4436`–`:4446`). An option that drops, summarises or
+rewrites turns must not
 drop these, and must not contradict them: `NEEDS_REVIEW_NOTICE` says "work you
 have not attempted is not a wall", and a summariser that replaces a cycle's
 evidence with a paragraph is manufacturing exactly the ambiguity that sentence
@@ -258,7 +259,10 @@ whole point:
 - **Loud, by moving the failure earlier.** An `--agents` member the CLI will not
   register used to cost a run its specialist at exit 0 with nothing on stderr;
   named on `--agent` it now fails the spawn outright, exit 1 before any API call
-  (`docs/agent/agents-and-templates.md:12`, `docs/agent/architecture.md:131`).
+  (`docs/agent/agents-and-templates.md:12`, which carries the whole measurement;
+  the closing pass found the second citation this line used to carry,
+  `docs/agent/architecture.md:131`, to be the four-kinds-of-child paragraph,
+  which says nothing about it).
 - **Loud, because the app checks rather than assumes.** `enabledPluginDirs()`
   re-proves every stored path contained at the moment it is used
   (`src/lib/plugins.ts:359`, called at `src/lib/orchestrator.ts:6690`).
