@@ -102,6 +102,17 @@ bounded. Disagreeing with the weights is the cleanest way to disagree with
 | Build cost | 2 | Real, one-off. 3 is free. |
 | Rests on something unestablished | 2 | Weighted **up** for this survey specifically: `02-levers-on-the-pin.md` returns *could not establish* five times in its own verdict table and `03-` could not measure answer quality at all. An option whose case turns on one of those is not a cheaper option, it is an unmeasured one. |
 
+**How sensitive the ranking is to the one weight most worth arguing about.**
+Option A scores 0 on measured prize by construction, so its total does not move
+with that weight at all; Option H scores +1 and D·G·J +2. Solving for where they
+overtake: at a weight of **7** rather than 3, H reaches +21 and D·G·J +22
+against A's unchanged +20, and the recommendation inverts. So a reader who
+believes the prize is worth more than twice what this table says should read
+`17-recommendation.md` as wrong and `10-option-context-guard.md` as the answer.
+The next most sensitive weight is loudness, which would have to be **6** rather
+than 3 before Option K displaced A — K carries the only +3 on that axis and A
+only a +1.
+
 Two things are deliberately **not** scored. **Which layer an option acts on** —
 the argv, the injected text, the folder, the session lifecycle, this app's
 accounting, the environment of the spawn — is a position each option takes

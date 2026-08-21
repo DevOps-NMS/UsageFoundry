@@ -139,9 +139,9 @@ recommendation easier or harder:
 - **The `--autocompact` range error was quoted truncated**, dropping a tail that
   says the flag takes `200` as shorthand for 200k. *Neither.*
 - **The file-read cap's paging instruction was paraphrased rather than quoted.**
-  **Harder, slightly** — the real text names the token count and the cap, which
-  makes the CLI's invitation to page more explicit than the paraphrase did, and
-  paging is what bounds Option L.
+  **Easier, slightly** — the real text names the file's total token count and
+  the cap, so the CLI's invitation to page is more explicit than the paraphrase
+  made it look, and paging is what bounds Option L.
 - **The tool block re-measures at 109,800 bytes, not 111,472**, same pin, same
   28 tools. *Neither* — it makes Option I's per-tool standing cost good to 2%
   and not better, in both directions.
