@@ -475,6 +475,38 @@ export interface Settings {
    * proposal is the least considered kind, so it gets the least rope.
    */
   chatDefaultGuards: RunGuards;
+  /**
+   * Which configured mount holds the knowledge base, by `WorkspaceMount.id`.
+   *
+   * A **name**, not a source. Mounts come from `WORKSPACE_ROOTS` and are fixed
+   * at boot, and this setting cannot add one — so a vault is always somewhere
+   * an agent could already have been pointed at, and choosing one here widens
+   * nothing about what this container may read. Null is off, which is shipped.
+   *
+   * Refused at **save** when it names no configured mount, which is
+   * `defaultAgentId`'s rule and its reason: refuse where the person is. What it
+   * cannot do is stay refused, because the mounts are the one thing that can
+   * change under a stored value — a compose edit that drops a slot leaves this
+   * naming nothing, and a settings page that would not load until somebody
+   * fixed a value they cannot see is worse than one that says the mount is
+   * gone. So the reader degrades to a stated reason rather than throwing, and
+   * the figures beside it go blank rather than to zero.
+   */
+  knowledgeBaseMountId: string | null;
+  /**
+   * A directory inside that mount, relative to its root. `""` is the root.
+   *
+   * A vault is usually not a whole mount — the mount is a documents folder and
+   * the vault is one directory in it — and walking the parent would index every
+   * unrelated markdown file beside it into the same graph, where an operator
+   * would read the extra orphans as a fault in their vault.
+   *
+   * Stored as the normalized form (`normalizeSubpath`), so what the save door
+   * refuses and what the walk resolves are the same string. Containment is
+   * still proved at use time against the mount, twice, because a stored path is
+   * not evidence about the filesystem it is read back into.
+   */
+  knowledgeBaseSubpath: string;
 }
 
 /**
@@ -633,6 +665,8 @@ export const DEFAULTS: Settings = {
   transcriptRetentionDays: 30,
   installDailyCostLimitUSD: null,
   chatDefaultGuards: DEFAULT_CHAT_GUARDS,
+  knowledgeBaseMountId: null,
+  knowledgeBaseSubpath: "",
 };
 
 /**

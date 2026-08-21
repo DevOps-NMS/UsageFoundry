@@ -12,6 +12,7 @@ import {
   type Settings,
 } from "../../../lib/settings";
 import { normalizePolicy } from "../../../lib/budget";
+import { normalizeSubpath } from "../../../lib/knowledge";
 import { agentKnowledgeOf, agentRefusal, getAgent } from "../../../lib/agents";
 import {
   authEnabled,
@@ -233,6 +234,39 @@ async function putHandler(req: Request) {
       if (refusal) return NextResponse.json({ error: refusal }, { status: 400 });
       patch.defaultAgentId = id;
     }
+  }
+
+  if ("knowledgeBaseMountId" in body) {
+    const raw = body.knowledgeBaseMountId;
+    const id = typeof raw === "string" ? raw.trim() : "";
+    if (!id) {
+      patch.knowledgeBaseMountId = null;
+    } else if (!WORKSPACE_MOUNTS.some((m) => m.id === id)) {
+      // `defaultAgentId`'s rule: refuse where the person is. A mount id stored
+      // now and found missing later is a knowledge base whose only symptom is
+      // an empty page in a section that has no reason to be empty.
+      return NextResponse.json(
+        { error: `No workspace mount is configured with id "${id}".` },
+        { status: 400 },
+      );
+    } else {
+      patch.knowledgeBaseMountId = id;
+    }
+  }
+
+  if ("knowledgeBaseSubpath" in body) {
+    const raw = typeof body.knowledgeBaseSubpath === "string" ? body.knowledgeBaseSubpath : "";
+    const subpath = normalizeSubpath(raw);
+    // Refused rather than normalized away: `../vault` is a person describing a
+    // place outside the mount, and silently storing `vault` would answer with a
+    // different directory than the one they typed.
+    if (subpath.split("/").includes("..")) {
+      return NextResponse.json(
+        { error: `The knowledge base subpath must stay inside the mount: "${raw}" does not.` },
+        { status: 400 },
+      );
+    }
+    patch.knowledgeBaseSubpath = subpath;
   }
 
   if ("continuationPrompt" in body) {

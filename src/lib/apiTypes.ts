@@ -1759,6 +1759,14 @@ export interface SettingsDTO {
   installDailyCostLimitUSD: number | null;
   /** What a chat proposal runs under when it names no template. */
   chatDefaultGuards: RunGuardsDTO;
+  /**
+   * The mount holding the knowledge base, by id. Null is off. Names one of the
+   * mounts already configured — it cannot add one — see
+   * `settings.knowledgeBaseMountId`.
+   */
+  knowledgeBaseMountId: string | null;
+  /** A directory inside that mount. `""` is the mount root. */
+  knowledgeBaseSubpath: string;
 }
 
 /**
@@ -1978,4 +1986,128 @@ export interface ChatListEntryDTO {
   status: "idle" | "thinking" | "failed";
   costUSD: number;
   pendingCount: number;
+}
+
+/* ------------------------------------------------------------------ */
+/*                           Knowledge base                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What one node in the link graph is.
+ *
+ * `phantom` is the one that carries a decision. A link naming a note that does
+ * not exist is how a vault records an intention, and Obsidian draws it — so it
+ * is a node here rather than a dropped edge, flagged separately so a count of
+ * "notes" never quietly includes the ones nobody has written.
+ */
+export type KnowledgeNodeKindDTO = "note" | "phantom" | "tag" | "attachment";
+
+/** How an edge was written. `tag` is an edge from a note to a `tag` node. */
+export type KnowledgeLinkKindDTO = "wikilink" | "embed" | "markdown" | "tag";
+
+export interface KnowledgeNodeDTO {
+  /** Namespaced by kind, so a tag named like a path can never collide. */
+  id: string;
+  kind: KnowledgeNodeKindDTO;
+  title: string;
+  /** Vault-relative path. `null` on a tag and on a phantom, which have none. */
+  path: string | null;
+  tags: string[];
+  aliases: string[];
+  inDegree: number;
+  outDegree: number;
+}
+
+export interface KnowledgeEdgeDTO {
+  from: string;
+  to: string;
+  kind: KnowledgeLinkKindDTO;
+  /** The target as it was written, which is what a broken link is reported by. */
+  target: string;
+  label: string | null;
+  heading: string | null;
+  block: string | null;
+  line: number;
+  /** `false` means `to` is a phantom. The edge is still on the wire. */
+  resolved: boolean;
+}
+
+export interface KnowledgeHeadingDTO {
+  level: number;
+  text: string;
+  line: number;
+}
+
+export interface KnowledgeBrokenLinkDTO {
+  /** Vault-relative path of the note the link was written in. */
+  from: string;
+  fromTitle: string;
+  target: string;
+  kind: KnowledgeLinkKindDTO;
+  line: number;
+}
+
+export interface KnowledgeNoteDTO {
+  path: string;
+  title: string;
+  /** Whatever the note's frontmatter held, arbitrary keys included. */
+  frontmatter: Record<string, unknown>;
+  tags: string[];
+  aliases: string[];
+  headings: KnowledgeHeadingDTO[];
+  /** The note's text with its frontmatter block removed. */
+  body: string;
+  outgoing: KnowledgeEdgeDTO[];
+  incoming: KnowledgeEdgeDTO[];
+}
+
+export interface KnowledgeSearchHitDTO {
+  path: string;
+  title: string;
+  tags: string[];
+  score: number;
+  /** Where the query matched, which is the whole of this search's ranking. */
+  matched: "title" | "alias" | "tag" | "path";
+}
+
+/**
+ * Whether a knowledge base is configured, whether it can be read, and what is
+ * in it.
+ *
+ * `configured` and `available` are separate because the settings page has to
+ * tell them apart: nothing chosen yet is a prompt to choose, and a mount that
+ * has gone is a fault to fix. Every count is `null` rather than `0` when the
+ * vault could not be read, so an unreachable mount and an empty one never
+ * render alike.
+ */
+export interface KnowledgeStatusDTO {
+  configured: boolean;
+  available: boolean;
+  /** A full sentence naming what is wrong, or `null` when nothing is. */
+  error: string | null;
+  mountId: string | null;
+  mountLabel: string | null;
+  /** Vault-relative to the mount. `""` is the mount root. */
+  subpath: string;
+  noteCount: number | null;
+  orphanCount: number | null;
+  brokenLinkCount: number | null;
+  tagCount: number | null;
+  attachmentCount: number | null;
+  /** Epoch ms of the scan these figures came from. */
+  scannedAt: number | null;
+  /**
+   * The walk hit its cap, so every figure above is a floor rather than a
+   * total. Reported rather than swallowed: a partial graph reads as complete.
+   */
+  truncated: boolean;
+}
+
+export interface KnowledgeGraphDTO {
+  nodes: KnowledgeNodeDTO[];
+  edges: KnowledgeEdgeDTO[];
+  /** The vault walk hit its cap — not everything was indexed. */
+  truncated: boolean;
+  /** This answer hit its node cap — not everything indexed was sent. */
+  capped: boolean;
 }

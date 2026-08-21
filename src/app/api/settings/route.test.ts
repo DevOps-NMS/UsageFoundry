@@ -35,12 +35,20 @@ import type { Settings } from "../../../lib/settings";
  */
 
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "uf-settings-route-"));
+const MOUNT_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "uf-settings-mount-"));
 
 // Config is fixed at boot, so the throwaway database has to be named before the
 // first import of anything that reads it — hence the dynamic imports below.
 process.env.DATA_DIR = DATA_DIR;
+// And the mounts too: `knowledgeBaseMountId` is refused unless it names one, so
+// the probe below would otherwise pass or fail on whatever this machine happens
+// to have bind-mounted.
+process.env.WORKSPACE_ROOTS = `Probe Vault=${MOUNT_DIR}`;
 
-after(() => fs.rmSync(DATA_DIR, { recursive: true, force: true }));
+after(() => {
+  fs.rmSync(DATA_DIR, { recursive: true, force: true });
+  fs.rmSync(MOUNT_DIR, { recursive: true, force: true });
+});
 
 /**
  * What to send for one key, and what should be stored for it.
@@ -92,6 +100,12 @@ const PROBES: Record<keyof Settings, Probe> = {
   checkoutRetentionDays: { send: 3 },
   transcriptRetentionDays: { send: 45 },
   installDailyCostLimitUSD: { send: 250 },
+  // `Probe Vault` above slugs to this id. The route refuses one that names no
+  // configured mount, which is the same shape as `defaultAgentId`'s refusal.
+  knowledgeBaseMountId: { send: "probe-vault" },
+  // Sent in the form a person types and stored normalized, so the round trip
+  // proves the two ends agree on the spelling rather than only on the value.
+  knowledgeBaseSubpath: { send: "/Vault/Notes/", stored: "Vault/Notes" },
   chatDefaultGuards: {
     send: {
       permissionMode: "plan",
@@ -243,6 +257,38 @@ test("a blank prompt keeps whatever is stored", async () => {
     assert.equal(answered[key], kept, `a blank ${key} was answered as empty`);
     assert.equal((await read())[key], kept, `a blank ${key} was stored`);
   }
+});
+
+/**
+ * A knowledge base naming a mount that is not configured is refused here.
+ *
+ * `defaultAgentId`'s rule — refuse where the person is — and the same silence
+ * if it were not: the mounts are fixed at boot, so a stored id that names none
+ * can never start working, and the only symptom is a Knowledge base section
+ * that stays empty on a page that gives no reason why. The refusal has to be a
+ * 400 rather than a quiet drop for the reason the whole file exists: a dropped
+ * value is answered as the old one and written back over the form.
+ */
+test("PUT /api/settings refuses a knowledge base mount that is not configured", async () => {
+  const { PUT } = await import("./route");
+  const before = (await read()).knowledgeBaseMountId;
+
+  const res = await PUT(
+    new Request("http://localhost/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ knowledgeBaseMountId: "no-such-mount" }),
+    }),
+  );
+  assert.equal(res.status, 400, "an unconfigured mount id was accepted");
+  const body = (await res.json()) as { error?: string };
+  assert.match(String(body.error), /no-such-mount/, "the refusal does not name the id");
+
+  assert.equal(
+    (await read()).knowledgeBaseMountId,
+    before,
+    "a refused mount id was stored anyway",
+  );
 });
 
 /**

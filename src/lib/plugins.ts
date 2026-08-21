@@ -38,8 +38,14 @@ import { getJSON, setJSON } from "./db";
 
 const KEY = "plugins.enabled";
 
-/** Directories below a mount root that are never worth walking into. */
-const SKIP = new Set([
+/**
+ * Directories below a mount root that are never worth walking into.
+ *
+ * Exported because `knowledge.ts` walks a mount for the same reason and would
+ * otherwise carry a second copy that drifts — a build directory this list grows
+ * and that one does not is a vault index that files a `dist/` tree as notes.
+ */
+export const SKIP_DIRS = new Set([
   "node_modules",
   ".git",
   ".uf-worktrees",
@@ -260,7 +266,7 @@ export function discoverPlugins(): { plugins: DiscoveredPlugin[]; problems: stri
       }
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        if (SKIP.has(entry.name)) continue;
+        if (SKIP_DIRS.has(entry.name)) continue;
         // `.claude-plugin` is looked *for*, never walked into, and the rest of
         // the dot-directories are noise.
         if (entry.name.startsWith(".")) continue;
