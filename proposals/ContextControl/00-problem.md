@@ -347,9 +347,11 @@ largest container transcripts and classifying every main-thread content block:
 Four readings, in order of how much they matter.
 
 **Tool results are 64.2% of the conversation and their distribution is savage.**
-The median tool result is 278 bytes; the largest 1% carry 31.8% of all tool-result
-bytes and the largest 10% carry 72.2%. Whatever a context mechanism does, it is
-aimed at a few hundred blocks per conversation and not at the seven thousand.
+The median tool result is 278 bytes; the largest 1% carry 31.8% of all
+tool-result bytes and the largest 10% carry 72.2%. So the bytes are in 722 of
+these 7,221 blocks — about eighteen per conversation — and a mechanism that
+treats tool results uniformly is doing 7,221 blocks' worth of work to reach
+eighteen.
 
 **The single largest contributor is `Read`.** Matching each result back to the
 `tool_use` that produced it:
@@ -400,8 +402,8 @@ aimed at a few hundred blocks per conversation and not at the seven thousand.
     appeared verbatim earlier in the same conversation: 64188 = 0.3% of tool_result bytes
 
 1,260 `Read` results holding 16.3 MB — 72.1% of tool-result bytes, and therefore
-**46% of everything in a main-thread conversation is file contents this app's
-agents read**. `Bash` is a distant second at 21.2% over two and a half times as
+**46% of everything in a main-thread conversation is file contents an agent chose
+to read**. `Bash` is a distant second at 21.2% over two and a half times as
 many calls. And it is not duplication: verbatim re-reads are 0.3%. Files are
 opened once and carried for ever.
 
@@ -1008,10 +1010,10 @@ the work the run actually produced — explain 51%.
 
 The residue is the part worth naming. At a fixed conversation length, 100 to 150
 turns, the spread is still **3.4×**, and cost per turn across long sessions
-varies **9.3×**, from $0.035 to $0.323. So roughly three-quarters of the
-fourteen is how long the conversation ran, and the rest is how heavy each turn of
-it was — which is what the run put in it, and the one part of the spread a
-context mechanism could touch without changing how much work gets done.
+varies **9.3×**, from $0.035 to $0.323. So conversation length accounts for
+about three-quarters of the variance in log cost, and what is left is how heavy
+each turn of it was — which is what the run put in it, and the one part of the
+spread a context mechanism could touch without changing how much work gets done.
 
 ## The levers this app actually holds
 
@@ -1023,7 +1025,7 @@ here is carried over from a description.
 
 `buildArgs` (`src/lib/orchestrator.ts:4756`) builds it, and it is called from
 *inside* the cycle loop (`for (;;)` at `:6412`, the call at `:6701`), so the
-whole argv is rebuilt and re-sent on every cycle including a resumed one. Five
+whole argv is rebuilt and re-sent on every cycle including a resumed one. Six
 entries bear on context:
 
 - **`-p <prompt>`** (`:4842`) carries whatever `nextPrompt` composed. Counted
@@ -1146,10 +1148,9 @@ conversation is higher.
 **Every word this app writes into a ten-cycle run is about 4,982 tokens.** For
 scale, the median long session carries 17,079,927 cache-read tokens over its
 life (the second command in the first section), and one work-cycle handover
-writes a median 231,644. The app's entire
-authored contribution across ten cycles is **2% of one handover**, and about
-0.03% of what a median long run reads back. Any option that proposes to shorten
-these strings is optimising the
+writes a median 231,644. The app's entire authored contribution across ten
+cycles is **2% of one handover**, and about 0.03% of what a median long run
+reads back. Any option that proposes to shorten these strings is optimising the
 wrong three orders of magnitude, and that is worth establishing before the
 survey rather than discovering inside it.
 
@@ -1164,21 +1165,36 @@ One variable decides, and it is hydrated from the row rather than zeroed:
 is written the moment the stream names it rather than when the cycle returns —
 `adoptSession` (`:6357`) sets the local *and* the column, because writing it only
 in the post-cycle UPDATE "left the column null however far the cycle had actually
-got" (`:6350`–`:6355`, and `docs/agent/run-lifecycle.md:36`).
+got" (`:6350`–`:6353`, and `docs/agent/run-lifecycle.md:36`).
 
-So a cycle opens a fresh conversation in exactly four cases: the run has never
-had one; a resume failed twice and the run stopped (`:7127`–`:7151`, which
-reports the failure rather than silently starting over); retention cleared
-`runs.session_id` because the file went (`src/lib/retention.ts:663`–`:667`,
-`docs/agent/retention.md:12`); or the row is a different run — a workflow chain's
-second block, or a `continues_run` pick-up, both of which get
-`continuedWorkNotice` instead of a resume.
+So a cycle opens a fresh conversation in exactly three cases: the run has never
+had one; retention cleared `runs.session_id` because the transcript file went
+(`src/lib/retention.ts:663`–`:667`, `docs/agent/retention.md:12`); or the row is
+a different run — a workflow chain's second block, or a `continues_run` pick-up,
+both of which get `continuedWorkNotice` and `priorWorkNotice` instead of a
+resume.
+
+The fourth case is a deliberate non-case, and it is the one that says how this
+app values the conversation. When a resume fails twice, the run **stops** rather
+than starting over: `looksLikeResumeFailure` retries once and then reports
+"Could not resume this run's Claude Code session […] Its work is still on disk;
+pick it up by hand with: claude --resume <id>" (`:7127`–`:7151`). The comment
+above it says why — "the honest move is to stop and name the command rather than
+quietly start a fresh session and lose the conversation the resume existed to
+keep" (`:7115`–`:7117`). Any option that proposes to discard a conversation is
+proposing the thing this branch refuses to do by accident.
 
 ### The folder — context this app does not author but does choose
 
 `CLAUDE.md` in this repository is 15,172 bytes (`wc -c CLAUDE.md`). It is not in
-the transcript — `grep -c claudeMd` over a container transcript returns 0, and
-so does a search for its own distinctive text — so it arrives in the fixed
+the transcript:
+
+    $ grep -c claudeMd ~/.claude/projects/-workspace--uf-worktrees-usagefoundry-721638d11c0b-1/6a2ccabb-6930-4cbd-908e-3d4522456136.jsonl
+    0
+    $ grep -rl 'work cycle", the code says' ~/.claude/projects | grep -c '\.jsonl$'
+    0
+
+So it arrives in the fixed
 prefix the CLI builds and is invisible to every measurement above except as part
 of that 31,575-token median intercept.
 
@@ -1323,8 +1339,8 @@ alone, a median $2.32 each, on conversations whose previous turn was a median
 ten seconds earlier and whose one-hour TTL had 59 minutes left. 27% of handovers
 in the same window paid $0.165 instead. Nothing on the run page, the dashboard or
 in `run_events` distinguishes the two, because all three read cost and none reads
-composition — a run that paid $4.38 to say "Continue working on the task" and one
-that paid $0.17 are the same row.
+composition — the cycle that paid $2.34 to open with "Continue working on the
+task" and the one that paid $0.17 for the same sentence are the same row.
 
 The measurement supports a narrow claim and refuses a broad one, and the survey
 has to know which it is answering.
@@ -1343,15 +1359,19 @@ It **supports** the narrow claim that the boundaries this app *does* own are
 priced wrongly and measured not at all. This app decides when a cycle ends and a
 new one begins; it decides when a session is resumed and when a fresh one opens;
 it decides what goes on the argv that precedes the conversation. Those three
-decisions are worth, on the measured evidence, $183.69 a week at the handover,
-$95.74 at session openings, and an unmeasured share of a 31,575-token fixed
-prefix paid on all 16,605 container turns. The cheapest of them is the one
-nobody has looked at: 27% of handovers already hit the cache and 73% do not, for
-a reason that is not the clock, not the CLI version and not the process
+decisions are worth, on the measured evidence, $183.69 a week in cache writes at
+the handover, $95.74 at session openings, and an unmeasured share of a
+31,575-token fixed prefix paid on all 16,605 container turns. The one nobody has
+looked at is the biggest: 27% of handovers already hit the cache and 73% do not,
+for a reason that is not the clock, not the CLI version and not the process
 boundary — and until somebody names it, no option in this survey can be priced.
 
-If the pin probe finds that the miss is the CLI's own business and nothing on
-this app's argv moves it, then the honest recommendation is to build nothing but
-a reading — a fourth view of the same transcripts that shows an operator which
-of their handovers cost $2.32 and which cost $0.17. That is a good outcome for
-this proposal, not a failed one.
+Which leaves the survey with a question it must settle before it is read, and one
+it must not pre-empt. The question it must settle is whether it is answering the
+broad claim or the narrow one, because they have different answers. The one it
+must not pre-empt is the pin probe's: if the prefix that changes across a
+handover turns out to be the CLI's own and nothing on this app's argv reaches it,
+then every option aimed at the handover is priced at zero and what the
+measurement still supports is smaller than any of them. A survey that ends
+against building anything is a good outcome for this proposal rather than a
+failed one, and it is on the table from here.
