@@ -46,7 +46,7 @@ be shorter, which is a decision rather than a build.
 The text this app injects. Two of the three layers `01-constraints.md`
 distinguishes, and neither is the conversation itself:
 
-- **The argv.** `--append-system-prompt SELF_HOSTING_NOTICE` (`:4870`),
+- **The argv.** `--append-system-prompt SELF_HOSTING_NOTICE` (`src/lib/orchestrator.ts:4870`),
   unconditional, on every cycle — 1,096 bytes, and prefix content rather than
   conversation content for the reason its docblock gives: "the task is only sent
   on the first cycle of a session and this is true of every cycle"

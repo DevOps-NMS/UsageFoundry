@@ -130,7 +130,7 @@ a paging instruction with extra steps.
 
 ## What it does to the DONE contract, `needs-review`, `--resume` and retention
 
-**DONE and `needs-review`: untouched.** Both are prompt text (`:4466`, `:4506`)
+**DONE and `needs-review`: untouched.** Both are prompt text (`src/lib/orchestrator.ts:4466`, `:4506`)
 and `cycleEnding` (`:4543`) matches over the cycle's own final text. An index
 returns tool results, which are never final text.
 

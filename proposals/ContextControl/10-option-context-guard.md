@@ -27,11 +27,11 @@ against turn count's 0.410 and output tokens' 0.512.**
 **And this app already has every piece of the machinery.** The guard site is the
 top of the cycle loop (`src/lib/orchestrator.ts:6412`), where `currentSnapshot()`
 (`:6198`) is already awaited and `evaluateBudget` (`src/lib/budget.ts:400`)
-already runs. The reading is the join `reconcileKilledCycle` (`:6254`) and
+already runs. The reading is the join `reconcileKilledCycle` (`src/lib/orchestrator.ts:6254`) and
 `GET /api/runs/[id]/agent-cost` already perform. The meter shape is
 `BudgetMeter`, which already carries a `tokens` unit
 (`src/lib/budget.ts:131`–`:136`). The action is one assignment to the `sessionId`
-local at `:6319`. Nothing here is new capability; it is a threshold over a figure
+local at `src/lib/orchestrator.ts:6319`. Nothing here is new capability; it is a threshold over a figure
 this app can already compute and an action it already takes in three other
 circumstances.
 
@@ -60,7 +60,7 @@ at `src/lib/budget.ts:495`, `:506`, `:518`, `:525`, `:532`, `:551`, `:582`, and
 
 - **The shape that survives** is *not* a `BudgetVerdict`. It is a decision taken
   after `evaluateBudget` has already returned `allowed: true`, in the same window
-  where `enabledPluginDirs()` (`:6690`) and the sandbox policy (`:6747`) are
+  where `enabledPluginDirs()` (`src/lib/orchestrator.ts:6690`) and the sandbox policy (`:6747`) are
   re-resolved. `evaluateBudget` stays pure, its order is untouched, and
   `BudgetStopCode` (`src/lib/budget.ts:138`–`:150`) gains no member — which
   matters because a new member would have to be placed in or out of
@@ -81,7 +81,7 @@ Interrupting a working cycle when its context crosses a line would use
 `liveGuardIntervalSeconds` tick (`:7507`), throw away an in-flight cycle whose
 spend then needs `reconcileKilledCycle`, and add a code to
 `LIVE_ENFORCEABLE_CODES` — whose exclusions are each argued individually
-(`:186`–`:192`). It also collides with the interrupt ordering
+(`src/lib/budget.ts:186`–`:192`). It also collides with the interrupt ordering
 `docs/agent/run-lifecycle.md` fixes: `cancelled` is checked twice per cycle and
 the interrupt test comes **before** the exit-code test. The between-cycles form
 avoids all of it, and this file argues for that one.
@@ -144,7 +144,7 @@ thing being measured.** The trigger reads carried context, which is the same
 figure a meter would show, so a `BudgetMeter` with `unit: "tokens"` reports the
 run's distance from its own ceiling on the run page beside the existing guards —
 and it comes from the transcripts, the same source `weeklyFraction` and
-`sessionFraction` in the `budget` event already come from (`:6468`–`:6469`). No
+`sessionFraction` in the `budget` event already come from (`src/lib/orchestrator.ts:6468`–`:6469`). No
 never-mix boundary is crossed.
 
 ## What it does to the DONE contract, `needs-review`, `--resume` and retention
@@ -191,10 +191,10 @@ thing a run carries on past. `enforceableForRun` (`src/lib/budget.ts:242`) and
 its list stay exactly as they are. `RunGuards` (`src/lib/settings.ts:489`) is
 `permissionMode`, `isolate`, `budget`; a context ceiling is a fourth thing, and
 putting it inside `budget` is what would drag it into `BudgetPolicy`,
-`normalizePolicy` (`:592`) and `evaluateBudget` all at once.
+`normalizePolicy` (`src/lib/budget.ts:592`) and `evaluateBudget` all at once.
 
 **One guard meaning it does change, in the direction `01-constraints.md` names.**
-`maxIterations` counts cycles, not money (`:97`). A fresh agent re-deriving what
+`maxIterations` counts cycles, not money (`src/lib/budget.ts:97`). A fresh agent re-deriving what
 it lost uses turns, and enough turns is a cycle — so a run whose cap was sized
 against a resumed arrangement gets less work done under this one. The constraint
 states it as a rule: "an option that makes an agent re-derive what it dropped
@@ -215,7 +215,7 @@ being null on the wire (`src/lib/apiTypes.ts:733`–`:737`).
 **Sees:** a meter, beside the run's other guards, saying how much this run is
 carrying against the ceiling; and a line on the run's own log at the moment the
 ceiling fires. The log line is not optional — `enabledPluginDirs()`'s missing-dirs
-line (`:6691`–`:6698`) is the precedent, written "on the run's own log rather
+line (`src/lib/orchestrator.ts:6691`–`:6698`) is the precedent, written "on the run's own log rather
 than left to be inferred", and a fresh conversation an operator did not ask for is
 at least as invisible as a plugin that stopped loading. `resuming: sessionId`
 going null on the next `iteration` event (`:6651`–`:6652`) is the machine-readable
@@ -234,7 +234,7 @@ is that a context ceiling decides how a run is *shaped* rather than what it may
 do, which is the same distinction that keeps `model` off `RunGuards` today.
 
 **Mid-run:** it must be re-resolved per cycle, `enabledPluginDirs()`'s case
-(`:6686`–`:6689`), not `settings` frozen for the segment (`:6379`,
+(`src/lib/orchestrator.ts:6686`–`:6689`), not `settings` frozen for the segment (`:6379`,
 `:6722`–`:6723`). A ceiling an operator raises while watching a run burn is
 useless if it reaches nothing until the next pick-up.
 
@@ -286,7 +286,7 @@ somebody prefers the rung. `RunGuards`' three fields. The
 unknown-renders-as-hatched rule. `runs.session_id`'s meaning, which changes for
 any run that fired the ceiling — the same three readers Option D disturbs
 (`reconcileKilledCycle`, the agent-cost route, `resumableSessions`). And the
-`adoptSession` rule at `:6350`–`:6353`, which exists because the column was once
+`adoptSession` rule at `src/lib/orchestrator.ts:6350`–`:6353`, which exists because the column was once
 written too late.
 
 **It earns a test on `CLAUDE.md`'s stated bar, and the grounds are already

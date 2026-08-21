@@ -217,7 +217,7 @@ run may do is `--forward-subagent-text` (`:4845`, `:4819`–`:4821`).
 (`src/lib/settings.ts:693`). A threshold is the right shape for the off switch
 because the mechanism is already a threshold.
 
-**Mid-run:** it should be the per-cycle case, `enabledPluginDirs()` (`:6690`) and
+**Mid-run:** it should be the per-cycle case, `enabledPluginDirs()` (`src/lib/orchestrator.ts:6690`) and
 the sandbox policy (`:6747`), not the `settings`-frozen-for-the-segment case
 (`:6379`, `:6722`–`:6723`) — the argv is rebuilt every cycle anyway, so
 re-resolving costs nothing and the alternative is a run that cannot be changed.

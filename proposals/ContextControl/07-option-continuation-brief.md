@@ -37,9 +37,9 @@ case, even `03-`'s worst arrangement wins.
 
 **And the brief is not speculative: every part of it is already in this app.**
 `run_events` holds the whole log, oldest first, with a `dropped` count when it is
-bounded (`src/lib/orchestrator.ts:621`–`:633`). `runDiff` builds the branch diff
+bounded (`src/lib/orchestrator.ts:621`–`:625`). `runDiff` builds the branch diff
 (`src/lib/diff.ts:326`) and `diffAsText` bounds it at a file boundary while naming
-what it withheld (`:588`–`:625`), which is the shape `review.ts` already sends a
+what it withheld (`:588`–`:627`), which is the shape `review.ts` already sends a
 model (`src/lib/review.ts:228`, at `REVIEW_DIFF_BYTES = 60_000`, `:54`). The
 previous cycle's final text is `res.finalText`, already read for `cycleEnding`
 (`src/lib/orchestrator.ts:7157`) and already published as a `result` event
@@ -68,7 +68,7 @@ The brief has four parts and each has a source that already exists:
 4. **What the last cycle said**, `res.finalText` from the previous cycle,
    persisted so a restarted server can still build the brief.
 
-`continuedWorkNotice` (`:4401`) and `priorWorkNotice` (`:4417`) are the
+`continuedWorkNotice` (`src/lib/orchestrator.ts:4401`) and `priorWorkNotice` (`:4417`) are the
 one-sentence version of exactly this, already shipped for the case where a fresh
 conversation is unavoidable. This option makes that case the only case.
 
@@ -85,7 +85,7 @@ assembled by code, from records this app wrote itself. The prompt side of
 reaches it.
 
 The precise moment is between `evaluateBudget` returning and `buildArgs` being
-called — the same window `enabledPluginDirs()` (`:6690`) and the sandbox policy
+called — the same window `enabledPluginDirs()` (`src/lib/orchestrator.ts:6690`) and the sandbox policy
 (`:6747`) are already re-resolved in.
 
 ## What it does to the prefix cache
@@ -134,7 +134,7 @@ has already taken in the opposite direction.**
 
 **`--resume`: abolished, and there is a branch in the code whose whole purpose is
 to refuse what this option proposes.** When a resume fails twice,
-`looksLikeResumeFailure` (`:7127`) stops the run and names the manual command
+`looksLikeResumeFailure` (`src/lib/orchestrator.ts:7127`) stops the run and names the manual command
 rather than starting over, because "the honest move is to stop and name the
 command rather than quietly start a fresh session and lose the conversation the
 resume existed to keep" (`:7113`–`:7117`). `00-problem.md` states the
@@ -169,7 +169,7 @@ from the branch, which is git's. Nothing new is stored, which is
 `01-constraints.md`'s test, and this option passes it cleanly.
 
 The breakage is elsewhere and is not obvious. `adoptSession` writes
-`runs.session_id` the moment the stream names a session (`:6357`). Under this
+`runs.session_id` the moment the stream names a session (`src/lib/orchestrator.ts:6357`). Under this
 option that column is overwritten every cycle, so it names **the last cycle's
 conversation and no other** — and three things read it as though it named the
 run. `reconcileKilledCycle` bounds a killed cycle's spend estimate by it
@@ -233,7 +233,7 @@ install-wide only, is coherent here because the choice is about how this
 operator's runs are shaped rather than about what one run may do.
 
 **Mid-run:** it must be the per-cycle case rather than the `settings` case.
-`settings` is read once at `:6379` and fixed for the segment
+`settings` is read once at `src/lib/orchestrator.ts:6379` and fixed for the segment
 (`:6722`–`:6723`); `enabledPluginDirs()` (`:6690`) and the sandbox policy
 (`:6747`) are re-resolved per cycle "because a run outlives the plugin list it
 started under" (`:6686`–`:6689`). A brief-or-resume choice that could not be
@@ -282,7 +282,7 @@ and `runEvents` rather than reimplementing any of them.
 `runs.session_id`'s three readers, above. `docs/agent/run-lifecycle.md`'s
 `adoptSession` rule, which exists because writing the column only in the
 post-cycle UPDATE "left the column null however far the cycle had actually got"
-(`:6350`–`:6353`) — a per-cycle session makes that column mean something new.
+(`src/lib/orchestrator.ts:6350`–`:6353`) — a per-cycle session makes that column mean something new.
 The `--resume`-failure branch's decision (`:7113`–`:7117`). The DONE and
 `needs-review` contracts, which this option improves but re-routes.
 And `docs/agent/git-and-review.md`'s rule that every `git diff` reading contents

@@ -153,7 +153,7 @@ risk: whether the flag survives `--resume` in the sense that matters — that th
 *second* cycle's request also has the sections moved. `02-`'s mutation probe ran
 two cycles and reported `system identical c1->c2: True` with `'gitStatus' in
 system: False`, which answers it for that probe. The general property is the one
-`buildArgs` already guarantees by rebuilding the argv per cycle (`:6701`).
+`buildArgs` already guarantees by rebuilding the argv per cycle (`src/lib/orchestrator.ts:6701`).
 
 ## Guards and the three cost sources
 
@@ -197,7 +197,7 @@ Install-wide, which `01-constraints.md` says is defensible and should be argued:
 the argument here is that a flag which changes nothing the model receives is not
 something an operator would want to disagree with per run.
 
-**Mid-run:** per cycle, for free. The argv is rebuilt at `:6701` inside the loop,
+**Mid-run:** per cycle, for free. The argv is rebuilt at `src/lib/orchestrator.ts:6701` inside the loop,
 so this follows `enabledPluginDirs()` (`:6690`) and the sandbox policy (`:6747`)
 rather than `settings` frozen for the segment (`:6379`, `:6722`–`:6723`) — with
 the caveat that if the flag is read off that same frozen `settings`, it inherits

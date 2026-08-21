@@ -207,7 +207,7 @@ the default" and says why the split belongs in the app rather than in compose.
 configuration, fixed at spawn from `process.env`, and `RunGuards` is
 `permissionMode`, `isolate`, `budget`. A per-run cap would mean a per-run
 environment, which `childEnv`'s `extra` argument technically allows — it is how
-`telemetryEnv` and `githubEnv` already work (`:5470`) — and which would put a
+`telemetryEnv` and `githubEnv` already work (`src/lib/orchestrator.ts:5470`) — and which would put a
 context choice on the run form. `01-constraints.md` says that widening has to be
 argued; this file does not argue for it.
 
@@ -260,7 +260,7 @@ variant: set them in compose and inherit.
 **Invariants at risk — three.** `docs/agent/environment.md`'s asymmetry, and the
 `${VAR:-}` rendering that turns a blank optional key into a permanent warning.
 `childEnv`'s strip list, which exists because "the child is a full Claude Code
-session with tool access" (`:5175`–`:5176`) and which must not grow a hole.
+session with tool access" (`src/lib/orchestrator.ts:5175`–`:5176`) and which must not grow a hole.
 And the `CLAUDE_CODE_MAX_OUTPUT_TOKENS`/thinking coupling, which is not an
 invariant in this repository at all — it is a property of the pin, and it belongs
 in `docs/verification.md` rather than in a docblock.

@@ -151,7 +151,7 @@ cycle 1.** `nextPrompt`'s resumed branch sends `continuationPrompt` joined to
 (`src/lib/settings.ts:516`). `COMPLETION_NOTICE`'s docblock says why that
 overlap exists — "The first restates `DEFAULT_CONTINUATION_PROMPT` almost
 verbatim on purpose — cycle 1 and cycle 2 disagreeing about the bar is the bug"
-(`:4456`–`:4459`) — and the accidental consequence is that a compaction which
+(`src/lib/orchestrator.ts:4456`–`:4459`) — and the accidental consequence is that a compaction which
 eats the notices is repaired at the next handover.
 
 **Cycle 1 is not repaired, and cycle 1 is where the measured failure lives.** A
@@ -225,7 +225,7 @@ renders every optional variable as `${VAR:-}`, so a blank-by-default key read
 through `env()` becomes a permanent warning on every stock install — meaning this
 one has to be read in a way that does not warn when unset.
 
-**Mid-run:** per cycle, following `enabledPluginDirs()` (`:6690`) and the sandbox
+**Mid-run:** per cycle, following `enabledPluginDirs()` (`src/lib/orchestrator.ts:6690`) and the sandbox
 policy (`:6747`) rather than `settings` frozen for the segment (`:6379`,
 `:6722`–`:6723`). The argv is rebuilt every cycle anyway. The environment
 variable is *not* re-resolvable in the same way — `childEnv` reads

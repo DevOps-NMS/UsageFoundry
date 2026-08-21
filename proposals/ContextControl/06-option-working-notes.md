@@ -54,11 +54,11 @@ already makes decides how:
   page's Prompts section (`src/app/settings/page.tsx:2968`–`2971`, keys at
   `:224`–`:227`) — what belongs in the notes, at what grain, for this operator's
   work. "The sentence that has to stay true is generated, and only guidance is
-  editable" is the split `COMPLETION_NOTICE` already names (`:4453`–`:4454`).
+  editable" is the split `COMPLETION_NOTICE` already names (`src/lib/orchestrator.ts:4453`–`:4454`).
 
 The file itself lives in the run's working directory — `workDir`, which for an
-isolated run is the worktree under `.uf-worktrees` (`:6404`, re-proved contained
-before every spawn at `:6737`–`:6744`). This app writes nothing: the agent does,
+isolated run is the worktree under `.uf-worktrees` (`:6327`, re-proved contained
+before every spawn at `:6729`–`:6739`). This app writes nothing: the agent does,
 with the `Write` tool it already has.
 
 ## What leaves the context, and when the decision is taken
@@ -198,7 +198,7 @@ option must take rather than inherit, because a contract that says "your notes
 survive the next cycle" is false if the notes are not being written.
 
 **A run already started is not reachable**, and this option is on the wrong side
-of that. `settings` is read once at `:6379` and fixed for the segment
+of that. `settings` is read once at `src/lib/orchestrator.ts:6379` and fixed for the segment
 (`:6722`–`:6723`), which is what makes every prompt on a run come from one read.
 The counter-precedent is per-cycle re-resolution: `enabledPluginDirs()` at
 `:6690` and the sandbox policy at `:6747`, both "because a run outlives the

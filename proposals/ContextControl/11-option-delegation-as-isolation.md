@@ -45,7 +45,7 @@ it is what the two thread classes actually cost on this machine.
 **And every piece already ships.** The `Agent` tool is in the CLI's tool set, the
 sub-agent's cost already reaches `buildSnapshot()` through `listTranscriptFiles`'
 recursive walk (`src/lib/transcripts.ts:163`–`:184`), what a delegated turn says
-already reaches the run's own log through `--forward-subagent-text` (`:4845`,
+already reaches the run's own log through `--forward-subagent-text` (`src/lib/orchestrator.ts:4845`,
 default on at `src/lib/settings.ts:615`), and the per-agent split is already a
 card on the run page (`src/components/RunAgentCost.tsx`). This option is the one
 place in the survey where the instrument, the readout and the mechanism all exist
@@ -134,7 +134,7 @@ $0.060-a-turn one — the ratio is excellent and the base is 5%.
 ## What it does to the DONE contract, `needs-review`, `--resume` and retention
 
 **DONE and `needs-review`: untouched, and structurally so.** Both notices are
-prompt text on the main thread (`:4466`, `:4506`), and `cycleEnding` (`:4543`)
+prompt text on the main thread (`src/lib/orchestrator.ts:4466`, `:4506`), and `cycleEnding` (`:4543`)
 matches over the *cycle's* final text, which is the parent's. A sub-agent's reply
 arrives as a tool result and never as `res.finalText`.
 
@@ -166,7 +166,7 @@ new horizon. `01-constraints.md`'s fourth-store test is passed without effort.
 `run_cost` (`:525`), `run_tokens` (`:532`), `weekly_fraction` (`:551`),
 `session_fraction` (`:582`). `RunGuards` (`src/lib/settings.ts:489`) gains
 nothing. A sub-agent carries a role and never a capability, which is what
-`agents.ts`' refusal of a `tools` field enforces (`:187`–`:228`) — and the
+`agents.ts`' refusal of a `tools` field enforces (`src/lib/agents.ts:187`–`:228`) — and the
 refusal got *stronger* under `--agent`, not weaker (`:200`–`:207`).
 
 **One guard interaction, and it is the sharpest in this file.**
@@ -206,7 +206,7 @@ editable, for `COMPLETION_NOTICE`'s reason (`src/lib/orchestrator.ts:4448`–`:4
 **Per run:** no surface, and none is needed. The operator's own task text already
 reaches the agent verbatim and is the natural place to say "audit this by
 delegating"; `docs/runs.md` promises a follow-up is sent verbatim as the next
-turn (`:4353`–`:4355`).
+turn (`src/lib/orchestrator.ts:4353`–`:4355`).
 
 **Mid-run:** the `settings` case, read once at `:6379` and fixed for the segment
 (`:6722`–`:6723`), unless the instruction is moved to a per-cycle read. Prompt
