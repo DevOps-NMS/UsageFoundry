@@ -24,23 +24,23 @@ it as a by-product.
 
 **And the reading already exists, one field over.** `RunAgentCost`
 (`src/components/RunAgentCost.tsx`) is a card on the run page that joins
-`runs.session_id` to `scanUsage()`'s entries, bounded by session id *and* by time
-because "a resumed session copies earlier turns forward into the same file
+`runs.session_id` to `scanUsage()`'s entries, bounded by session id *and* by
+time because "a resumed session copies earlier turns forward into the same file
 carrying their original timestamps"
-(`src/app/api/runs/[id]/agent-cost/route.ts:46`–`48`), polls on its own 30-second
-cadence because the answer costs a full transcript scan (`:14`–`:19`), and
-carries copy at its foot saying the three readings of a run's cost must never be
-added. Everything in the paragraph above is the same route with
-`entry.tokens.cacheRead` and `entry.tokens.cacheWrite1h` read instead of
-`entry.costUSD`. The precedent for the join is older still: `reconcileKilledCycle`
-(`src/lib/orchestrator.ts:6254`) has done exactly this since a killed cycle first
-needed a spend estimate.
+(`src/app/api/runs/[id]/agent-cost/route.ts:46`–`48`), polls on its own
+30-second cadence because the answer costs a full transcript scan
+(`:14`–`:19`), and carries copy at its foot saying the three readings of a
+run's cost must never be added. Everything in the paragraph above is the same
+route with `entry.tokens.cacheRead` and `entry.tokens.cacheWrite1h` read
+instead of `entry.costUSD`. The precedent for the join is older still:
+`reconcileKilledCycle` (`src/lib/orchestrator.ts:6254`) has done exactly this
+since a killed cycle first needed a spend estimate.
 
 **And the classifier is already written and already run.** `00-problem.md`'s
 re-write test is one comparison — `cacheWrite1h > cacheRead` on the turn
 immediately after a continuation prompt — and it separated the 79 from the 29
-without a tokenizer, a hook or a flag. This option is that comparison, moved from
-a shell script into `windows.ts` beside `agentSpend`, and shown.
+without a tokenizer, a hook or a flag. This option is that comparison, moved
+from a shell script into `windows.ts` beside `agentSpend`, and shown.
 
 ## Shape
 
@@ -55,8 +55,9 @@ Three pieces, in the order they would be built:
    (`tokens.cacheRead`), tokens written (`tokens.cacheWrite1h`), and whether the
    cycle's opening turn wrote more than it read.
 2. Cycle boundaries from `run_events`. The `iteration` event already carries
-   `{ n: iterations, prompt, resuming: sessionId }` (`src/lib/orchestrator.ts:6651`–`6652`)
-   and is emitted immediately before the spawn, so consecutive `iteration`
+   `{ n: iterations, prompt, resuming: sessionId }`
+   (`src/lib/orchestrator.ts:6651`–`6652`) and is emitted immediately before
+   the spawn, so consecutive `iteration`
    timestamps bound each cycle's turns exactly as `cycleStartedAt` (`:6661`)
    bounds `reconcileKilledCycle`'s.
 3. A route and a card, `GET /api/runs/[id]/agent-cost`'s shape in both cases —
@@ -73,9 +74,9 @@ hand — how many handovers re-wrote, and what that cost.
 Nothing leaves the context, and no decision is taken. That is the option.
 
 The only timing question it has is when the *reading* is taken, and the answer
-is "after the fact, on a poll, outside the cycle loop". Nothing here runs inside
-the `for (;;)` at `src/lib/orchestrator.ts:6412`, nothing is read before a spawn,
-and no code path a run depends on gains a caller.
+is "after the fact, on a poll, outside the cycle loop". Nothing here runs
+inside the `for (;;)` at `src/lib/orchestrator.ts:6412`, nothing is read before
+a spawn, and no code path a run depends on gains a caller.
 
 ## What it does to the prefix cache
 
@@ -84,12 +85,12 @@ qualification. `01-constraints.md`'s formula prices an edit to the conversation;
 this option makes no edit, so `D = 0`, there is no cut point, and `T*` is
 undefined rather than large.
 
-What it is worth is measured on the other side of the ledger. The prize it makes
-visible is $183.69 a week at the handover and $95.74 at session openings
-(`00-problem.md`), against a build that adds one pure function, one route and one
-card. It cannot claim any of that money — it removes nothing — and the honest
-statement of its value is that **every other option in this survey is a bet on a
-number nobody can currently read back**, and this is the readout.
+What it is worth is measured on the other side of the ledger. The prize it
+makes visible is $183.69 a week at the handover and $95.74 at session openings
+(`00-problem.md`), against a build that adds one pure function, one route and
+one card. It cannot claim any of that money — it removes nothing — and the
+honest statement of its value is that **every other option in this survey is a
+bet on a number nobody can currently read back**, and this is the readout.
 
 One real cost, and it is CPU rather than tokens. `scanUsage()` walks
 `~/.claude/projects`, which held 513 main-thread and 495 sub-agent transcript
@@ -102,28 +103,28 @@ the argument for putting the composition figures on the *existing*
 
 ## What it does to the DONE contract, `needs-review`, `--resume` and retention
 
-**DONE and `needs-review`: untouched.** `nextPrompt` (`src/lib/orchestrator.ts:4299`)
-is not called, `COMPLETION_NOTICE` (`:4466`) and `NEEDS_REVIEW_NOTICE` (`:4506`)
-are unchanged, and `cycleEnding` (`:4543`) still matches over a cycle's own final
-text. Nothing this option writes reaches a model at all, which also disposes of
-`01-constraints.md`'s summariser hazard — there is no text for the sentinel
-matcher to later read.
+**DONE and `needs-review`: untouched.** `nextPrompt`
+(`src/lib/orchestrator.ts:4299`) is not called, `COMPLETION_NOTICE` (`:4466`)
+and `NEEDS_REVIEW_NOTICE` (`:4506`) are unchanged, and `cycleEnding` (`:4543`)
+still matches over a cycle's own final text. Nothing this option writes reaches
+a model at all, which also disposes of `01-constraints.md`'s summariser hazard
+— there is no text for the sentinel matcher to later read.
 
 **`--resume`: untouched.** `sessionId` is read from the row and written by
 `adoptSession` (`:6319`, `:6357`) exactly as now.
 
-**Retention: it inherits a horizon rather than creating one, and that is the one
-real interaction.** The reading is derived from transcript files that
+**Retention: it inherits a horizon rather than creating one, and that is the
+one real interaction.** The reading is derived from transcript files that
 `expiredTranscripts` (`src/lib/retention.ts:528`) will delete at
 `transcriptRetentionDays`, default 30 (`src/lib/settings.ts:633`). So a run's
 context readout **disappears** when its transcript is swept, on a row that
-persists for ever (`docs/agent/retention.md:8`). That is exactly what happens to
-`RunAgentCost` today and the card's null state already carries it: no session id,
-or nothing readable, is "no reading", rendered as the hatched indeterminate meter
-rather than as zero (`src/lib/apiTypes.ts:733`–`737`). This option must reuse
-that state and must not cache the answer on the row — a stored copy would be a
-fourth store with its own horizon (`01-constraints.md`), invented to preserve a
-figure the source is entitled to forget.
+persists for ever (`docs/agent/retention.md:8`). That is exactly what happens
+to `RunAgentCost` today and the card's null state already carries it: no
+session id, or nothing readable, is "no reading", rendered as the hatched
+indeterminate meter rather than as zero (`src/lib/apiTypes.ts:733`–`737`). This
+option must reuse that state and must not cache the answer on the row — a
+stored copy would be a fourth store with its own horizon (`01-constraints.md`),
+invented to preserve a figure the source is entitled to forget.
 
 ## Guards and the three cost sources
 
@@ -154,11 +155,11 @@ all structural:
 
 ## What the operator sees, and how they override it by hand
 
-**Sees:** on the run page, per cycle, the tokens that cycle carried in and wrote,
-and a mark on the cycles whose opening turn wrote more than it read. That mark is
-the whole product. Today an operator reading a run's log sees eleven `iteration`
-events that look identical; after this, two of them say they cost fourteen times
-what the others did.
+**Sees:** on the run page, per cycle, the tokens that cycle carried in and
+wrote, and a mark on the cycles whose opening turn wrote more than it read.
+That mark is the whole product. Today an operator reading a run's log sees
+eleven `iteration` events that look identical; after this, two of them say they
+cost fourteen times what the others did.
 
 **Overrides:** there is nothing to override, and that is worth stating rather
 than skipping. `01-constraints.md`'s five obligations resolve to almost nothing
@@ -170,8 +171,9 @@ than fixed at the start of a segment.
 
 The one decision it does owe is whether the card polls while a run is working.
 `RunAgentCost` takes an `active` flag and re-reads when the run stops
-(`src/components/RunAgentCost.tsx:53`–`:54`); this reading has the same property,
-because a turn only reaches a transcript when Claude Code flushes it (`:41`–`:48`).
+(`src/components/RunAgentCost.tsx:53`–`:54`); this reading has the same
+property, because a turn only reaches a transcript when Claude Code flushes it
+(`:41`–`:48`).
 
 ## How it fails, and whether loudly
 
@@ -227,9 +229,9 @@ That the survey's remaining options are worth **scoring** rather than adopting.
 Everything after this file proposes to change what a run carries, and
 `00-problem.md`'s own conclusion is that the broad claim — that this app can
 shorten conversations profitably — is refused by the measurement, while the
-narrow one, that the boundaries this app owns are priced wrongly and measured not
-at all, is supported. This option is the whole of the narrow claim's second half
-and none of its first.
+narrow one, that the boundaries this app owns are priced wrongly and measured
+not at all, is supported. This option is the whole of the narrow claim's second
+half and none of its first.
 
 That an operator will act on the mark. A run page that says cycle 4 wrote
 231,644 tokens and cycle 5 wrote 197 changes what a person does — when they
@@ -238,9 +240,10 @@ mechanism a later option builds. If nobody would act on it, it is a chart, and
 `CLAUDE.md`'s standing complaint about defects nobody can see from a run page
 does not apply to a number nobody reads.
 
-And, in the other direction, the fact that most weakens it: **it saves nothing.**
-$183.69 a week goes on being spent while this option is deployed. Every figure in
-its case is about knowing, and a survey that ends here has decided the measuring
-is worth more than the mechanism — which `00-problem.md` says is an available
-outcome ("a survey that ends against building anything is a good outcome for
-this proposal rather than a failed one") but does not say is the right one.
+And, in the other direction, the fact that most weakens it: **it saves
+nothing.** $183.69 a week goes on being spent while this option is deployed.
+Every figure in its case is about knowing, and a survey that ends here has
+decided the measuring is worth more than the mechanism — which `00-problem.md`
+says is an available outcome ("a survey that ends against building anything is
+a good outcome for this proposal rather than a failed one") but does not say is
+the right one.

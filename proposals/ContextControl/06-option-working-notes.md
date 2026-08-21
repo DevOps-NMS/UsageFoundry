@@ -6,24 +6,24 @@ remembers. Nothing on the argv, nothing about the session, no CLI feature. Text.
 
 ## The strongest case
 
-**It is the only mechanism in this survey that acts on what *enters* a
-conversation, and it needs nothing from the CLI to do it.** Every other option
-either removes content after the fact and pays `01-constraints.md`'s invalidation
-(`T* = 19·(S/D) − 20`), or depends on a hook, a flag or an env var that a future
-build may drop. This one is a sentence. `02-levers-on-the-pin.md` has no verdict
-to give about it, and there is no version of Claude Code on which it stops
-parsing.
+**It acts on what *enters* a conversation rather than on what is already in it,
+and it is the only option in that class that needs nothing from the CLI to do
+it.** Every other option either removes content after the fact and pays
+`01-constraints.md`'s invalidation (`T* = 19·(S/D) − 20`), or depends on a
+hook, a flag or an env var that a future build may drop. This one is a
+sentence. `02-levers-on-the-pin.md` has no verdict to give about it, and there
+is no version of Claude Code on which it stops parsing.
 
 **And it is the load-bearing half of three other options.**
-`03-experiment-resumed-vs-fresh.md` measured that a fresh conversation is cheaper
-than a resumed one **only while each cycle re-reads under about 3.9 KB — 2.5% of
-what its own first cycle read**. That is a very small allowance, and a
-maintained notes file is the only thing in this survey that could plausibly fit
-inside it. Every "start fresh" shape — an app-assembled brief, a context guard
-that opens a new session, a workflow chain of short blocks — is buying a fresh
-agent that must not re-read, and this is what it would read instead.
-`03-`'s own arrangement 2 already assumed it: its brief was "the previous cycle's
-final text appended to a handoff file kept on disk".
+`03-experiment-resumed-vs-fresh.md` measured that a fresh conversation is
+cheaper than a resumed one **only while each cycle re-reads under about 3.9 KB
+— 2.5% of what its own first cycle read**. That is a very small allowance, and
+a maintained notes file is among the few things in this survey that could
+plausibly fit inside it. Every "start fresh" shape — an app-assembled brief, a
+context guard that opens a new session, a workflow chain of short blocks — is
+buying a fresh agent that must not re-read, and this is what it would read
+instead. `03-`'s own arrangement 2 already assumed it: its brief was "the
+previous cycle's final text appended to a handoff file kept on disk".
 
 **And this repository already believes the failure it addresses.**
 `continuedWorkNotice` exists because a fresh agent on a branch full of work it
@@ -54,7 +54,8 @@ already makes decides how:
   page's Prompts section (`src/app/settings/page.tsx:2968`–`2971`, keys at
   `:224`–`:227`) — what belongs in the notes, at what grain, for this operator's
   work. "The sentence that has to stay true is generated, and only guidance is
-  editable" is the split `COMPLETION_NOTICE` already names (`src/lib/orchestrator.ts:4453`–`:4454`).
+  editable" is the split `COMPLETION_NOTICE` already names
+  (`src/lib/orchestrator.ts:4453`–`:4454`).
 
 The file itself lives in the run's working directory — `workDir`, which for an
 isolated run is the worktree under `.uf-worktrees` (`:6327`, re-proved contained
@@ -66,19 +67,19 @@ with the `Write` tool it already has.
 **Nothing leaves, and the decision is the model's, mid-cycle, every time it
 chooses.**
 
-That is the honest statement and it is unlike every other option here. Under this
-option alone the conversation is **strictly larger**: it gains the `Write` calls
-that maintain the file, their results, and any read of the file back. Nothing is
-dropped, truncated, summarised or discarded. What the option is betting on is a
-change in behaviour — that an agent which has written down what it learnt reads
-fewer whole files afterwards, and that a *later* mechanism can therefore throw the
-conversation away.
+That is the honest statement and it is unlike every other option here. Under
+this option alone the conversation is **strictly larger**: it gains the `Write`
+calls that maintain the file, their results, and any read of the file back.
+Nothing is dropped, truncated, summarised or discarded. What the option is
+betting on is a change in behaviour — that an agent which has written down what
+it learnt reads fewer whole files afterwards, and that a *later* mechanism can
+therefore throw the conversation away.
 
 The timing that matters is therefore not when text is removed but when the file
-becomes load-bearing, and that is at the boundary of the next cycle. On a resumed
-cycle the conversation still holds everything and the file is redundant. On a
-fresh conversation — a run picked up after a pause, a workflow chain's second
-block, a retention sweep that cleared `runs.session_id`
+becomes load-bearing, and that is at the boundary of the next cycle. On a
+resumed cycle the conversation still holds everything and the file is
+redundant. On a fresh conversation — a run picked up after a pause, a workflow
+chain's second block, a retention sweep that cleared `runs.session_id`
 (`src/lib/retention.ts:663`–`667`) — it is the only thing carried across.
 
 ## What it does to the prefix cache
@@ -120,26 +121,26 @@ you go" (`src/lib/settings.ts:559`–`562`), `Recent commits` changes on every
 cycle that commits it.
 
 Priced from `00-problem.md`'s own pair: a handover that hits costs a median
-$0.165 and one that re-writes costs $2.335, a difference of $2.17. Converting the
-six quiet handovers in the rolling week into re-writing ones is **about $13 a
-week of harm** — small against $183.69, and in the wrong direction. On this
-install most isolated runs already commit and already re-write, so the exposure is
-bounded to those six; on an install of read-only audits it would not be.
+$0.165 and one that re-writes costs $2.335, a difference of $2.17. Converting
+the six quiet handovers in the rolling week into re-writing ones is **about $13
+a week of harm** — small against $183.69, and in the wrong direction. On this
+install most isolated runs already commit and already re-write, so the exposure
+is bounded to those six; on an install of read-only audits it would not be.
 
 ## What it does to the DONE contract, `needs-review`, `--resume` and retention
 
 **DONE and `needs-review`: intact, with one hazard this option owes an answer
 to.** Neither notice is dropped or contradicted — nothing is removed from the
-conversation at all, so `01-constraints.md`'s "must not drop these" is satisfied
-trivially. The hazard is the sentinel matcher. `cycleEnding`
-(`src/lib/orchestrator.ts:4543`–`4545`) tests `DONE` and `NEEDS_REVIEW` against a
-cycle's final text, alone on a line. An instruction that asks the agent to
-maintain a notes file about a task, on a run whose task is about this feature, is
-an instruction to write those tokens into a file — and if the same instruction
-also asks the agent to *report* its notes, that file becomes final text. The
-answer is in the generated half: the contract must say the reply is not the
-notes. That is the same door `:4531`–`:4537` already accepts and bounds for task
-text, one further in.
+conversation at all, so `01-constraints.md`'s "must not drop these" is
+satisfied trivially. The hazard is the sentinel matcher. `cycleEnding`
+(`src/lib/orchestrator.ts:4543`–`4545`) tests `DONE` and `NEEDS_REVIEW` against
+a cycle's final text, alone on a line. An instruction that asks the agent to
+maintain a notes file about a task, on a run whose task is about this feature,
+is an instruction to write those tokens into a file — and if the same
+instruction also asks the agent to *report* its notes, that file becomes final
+text. The answer is in the generated half: the contract must say the reply is
+not the notes. That is the same door `:4531`–`:4537` already accepts and bounds
+for task text, one further in.
 
 **`--resume`: untouched, and that is a defect rather than a neutral fact.** The
 session lifecycle is decided by one local (`sessionId`, `:6319`) and this option
@@ -150,32 +151,33 @@ file is only ever *used* on the three occasions a fresh conversation opens
 and read on few.
 
 **Retention: it writes into a store that already has a sweep, and there are two
-distinct outcomes.** An uncommitted notes file lives in the run's checkout under
-`.uf-worktrees`, one of the three stores (`docs/agent/retention.md:8`); the
-checkout sweep "removes a *directory* and never a ref", so an uncommitted file
-goes with the worktree and a committed one survives on the branch. That second
-case is the real cost: a committed notes file is in `runDiff`
+distinct outcomes.** An uncommitted notes file lives in the run's checkout
+under `.uf-worktrees`, one of the three stores (`docs/agent/retention.md:8`);
+the checkout sweep "removes a *directory* and never a ref", so an uncommitted
+file goes with the worktree and a committed one survives on the branch. That
+second case is the real cost: a committed notes file is in `runDiff`
 (`src/lib/diff.ts:326`), in the review the operator reads, and in what
 `land.ts` merges. **The agent's memory becomes part of the deliverable**, and
-nothing in the landing path would strip it. No fourth store is invented, which is
-`01-constraints.md`'s test — but the file is on the branch, and one branch, one
-Land button is what `docs/agent/isolation-and-landing.md` governs.
+nothing in the landing path would strip it. No fourth store is invented, which
+is `01-constraints.md`'s test — but the file is on the branch, and one branch,
+one Land button is what `docs/agent/isolation-and-landing.md` governs.
 
 ## Guards and the three cost sources
 
 **Must not touch, and does not:** `evaluateBudget` (`src/lib/budget.ts:400`)
-gains no caller and its order is unchanged — `no_terminus` (`:495`), `iterations`
-(`:506`), `duration` (`:518`), `run_cost` (`:525`), `run_tokens` (`:532`),
-`weekly_fraction` (`:551`), `session_fraction` (`:582`). `RunGuards`
+gains no caller and its order is unchanged — `no_terminus` (`:495`),
+`iterations` (`:506`), `duration` (`:518`), `run_cost` (`:525`), `run_tokens`
+(`:532`), `weekly_fraction` (`:551`), `session_fraction` (`:582`). `RunGuards`
 (`src/lib/settings.ts:489`) is unchanged; this is prompt text, which
 `docs/agent/chat.md:10` names as the one half of a run a model may write.
 
 **It does spend the terminus, and `01-constraints.md` names that shape by
-name.** `maxIterations` counts cycles rather than money (`src/lib/budget.ts:97`),
-so an agent doing housekeeping is doing it inside a cycle budget sized for the
-task. A cycle spent tidying notes is a cycle not spent on the work, and the
-guard cannot tell the difference. That is not a violation and it is not a
-widening — it is the cost, stated in the terms the constraint uses.
+name.** `maxIterations` counts cycles rather than money
+(`src/lib/budget.ts:97`), so an agent doing housekeeping is doing it inside a
+cycle budget sized for the task. A cycle spent tidying notes is a cycle not
+spent on the work, and the guard cannot tell the difference. That is not a
+violation and it is not a widening — it is the cost, stated in the terms the
+constraint uses.
 
 **Adds to which source: none.** No figure is produced. Nothing reads the
 transcripts, `runs.spent_usd` or OTLP; `telemetrySpendSince` keeps its one door
@@ -187,7 +189,8 @@ transcripts, `runs.spent_usd` or OTLP; `telemetrySpendSince` keeps its one door
 the diff on the run page. That is more visibility than any other option in this
 survey offers, because the mechanism's entire product is a file a person can
 open. And the instruction that produced it is on the run's own log: the
-`iteration` event carries the whole prompt (`src/lib/orchestrator.ts:6651`–`6652`).
+`iteration` event carries the whole prompt
+(`src/lib/orchestrator.ts:6651`–`6652`).
 
 **Overrides:** emptying the guidance box switches the guidance off, which is the
 app's standing convention — `null` / `""` / `0` all mean off
@@ -197,20 +200,21 @@ whether the whole mechanism needs its own off switch is the design decision this
 option must take rather than inherit, because a contract that says "your notes
 survive the next cycle" is false if the notes are not being written.
 
-**A run already started is not reachable**, and this option is on the wrong side
-of that. `settings` is read once at `src/lib/orchestrator.ts:6379` and fixed for the segment
-(`:6722`–`:6723`), which is what makes every prompt on a run come from one read.
-The counter-precedent is per-cycle re-resolution: `enabledPluginDirs()` at
-`:6690` and the sandbox policy at `:6747`, both "because a run outlives the
-plugin list it started under" (`:6686`–`:6689`). This option is the `settings`
-case: an operator who turns the notes contract on mid-run reaches nothing until
-the run is picked up again.
+**A run already started is not reachable**, and this option is on the wrong
+side of that. `settings` is read once at `src/lib/orchestrator.ts:6379` and
+fixed for the segment (`:6722`–`:6723`), which is what makes every prompt on a
+run come from one read. The counter-precedent is per-cycle re-resolution:
+`enabledPluginDirs()` at `:6690` and the sandbox policy at `:6747`, both
+"because a run outlives the plugin list it started under" (`:6686`–`:6689`).
+This option is the `settings` case: an operator who turns the notes contract on
+mid-run reaches nothing until the run is picked up again.
 
 **Per run: no surface.** `RunGuards` is `permissionMode`, `isolate`, `budget`
 (`src/lib/settings.ts:489`) and a prompt choice is not one of the three. This
 option is install-wide, and `01-constraints.md` says that is defensible and
 should be argued rather than defaulted to — the argument here is that a notes
-contract is about how this operator's agents work, not about what one run may do.
+contract is about how this operator's agents work, not about what one run may
+do.
 
 ## How it fails, and whether loudly
 
@@ -226,16 +230,16 @@ re-derives from nothing. `03-`'s arrangement 2b is what that costs: **2.59× the
 resumed arrangement** when the fresh agent re-reads everything, against a lead
 that is spent at 3.9 KB.
 
-That failure has a shape this repository already refuses elsewhere. `--plugin-dir`
-not surviving `--resume` was answered not by detection but by making the correct
-shape the default (`src/lib/orchestrator.ts:4828`–`4831`, `:6701`) plus a line on
-the run's own log when a directory drops out (`:6691`–`:6698`). There is no
-equivalent default here — the agent either writes the file or it does not — so
-the only available answer is detection: a check between cycles that the file
-exists and moved, and a line on the run's log when it did not. That check is part
-of the option rather than a follow-up, for `01-constraints.md`'s reason: "a
-mechanism whose effect is invisible in the log is one whose misbehaviour reads as
-the agent being stupid."
+That failure has a shape this repository already refuses elsewhere.
+`--plugin-dir` not surviving `--resume` was answered not by detection but by
+making the correct shape the default (`src/lib/orchestrator.ts:4828`–`4831`,
+`:6701`) plus a line on the run's own log when a directory drops out
+(`:6691`–`:6698`). There is no equivalent default here — the agent either
+writes the file or it does not — so the only available answer is detection: a
+check between cycles that the file exists and moved, and a line on the run's
+log when it did not. That check is part of the option rather than a follow-up,
+for `01-constraints.md`'s reason: "a mechanism whose effect is invisible in the
+log is one whose misbehaviour reads as the agent being stupid."
 
 **Silent, second:** the notes are *wrong* rather than absent. A file that
 confidently records a conclusion the run later abandoned is worse than an empty
@@ -248,8 +252,8 @@ nothing could ever say so.
 `nextPrompt`), `src/lib/settings.ts` (one `DEFAULT_*` and one key),
 `src/app/settings/page.tsx` (one `PromptFold` in the Prompts section),
 `src/app/api/settings/route.ts` (one key on the wire). If the staleness check
-above is built: one `existsSync`/`statSync` between cycles in the run loop and one
-`log()` call.
+above is built: one `existsSync`/`statSync` between cycles in the run loop and
+one `log()` call.
 
 **Invariants at risk:** four. The `DEFAULTS` materialisation rule
 (`docs/agent/conventions.md:14`) decides which half is generated and which
@@ -270,23 +274,23 @@ false positive is the option's whole safety net not existing.
 
 ## What would have to be true
 
-**That something else in the survey discards a conversation.** Alone, this option
-adds text and removes nothing, so its only route to a saving is behavioural and
-its own upper bound — $84 a week, on a proxy that refuses to be an oracle — is
-not something it can claim. Paired with a mechanism that opens a fresh session,
-it is the difference between `03-`'s arrangement 2a and 2b, which is the
-difference between 2.9% cheaper and 2.59× dearer.
+**That something else in the survey discards a conversation.** Alone, this
+option adds text and removes nothing, so its only route to a saving is
+behavioural and its own upper bound — $84 a week, on a proxy that refuses to be
+an oracle — is not something it can claim. Paired with a mechanism that opens a
+fresh session, it is the difference between `03-`'s arrangement 2a and 2b,
+which is the difference between 2.9% cheaper and 2.59× dearer.
 
 **That a model asked to keep notes keeps them.** Nothing here measures that.
 `03-` did not measure it either — "no model answered any of the five questions;
 the recorder returned fixed strings" — so the compliance rate, the grain the
-agent chooses and whether the notes are any good are all unmeasured, on an option
-whose entire value is those three things.
+agent chooses and whether the notes are any good are all unmeasured, on an
+option whose entire value is those three things.
 
 **And the fact that most weakens it, stated plainly:** the money is not in
 re-reading, because re-reading barely happens. 0.3% of tool-result bytes are
-verbatim repeats. The conversation is expensive because files are opened once and
-carried for ever, and a notes file does not stop the first read — it can only
-make a *discarded* conversation survivable. That makes this an enabling option
-rather than a saving one, and a survey that scores it on its own numbers will
-find almost nothing there.
+verbatim repeats. The conversation is expensive because files are opened once
+and carried for ever, and a notes file does not stop the first read — it can
+only make a *discarded* conversation survivable. That makes this an enabling
+option rather than a saving one, and a survey that scores it on its own numbers
+will find almost nothing there.

@@ -1,8 +1,8 @@
 # Option E — externalise tool output at the hook
 
 A `PostToolUse` hook writes a large tool result to disk and replaces it, before
-the model sees it, with a pointer: the path, the size, and enough of a preview to
-decide whether to fetch it.
+the model sees it, with a pointer: the path, the size, and enough of a preview
+to decide whether to fetch it.
 
 The survey brief asked whether this is buildable at all, and reserved the
 possibility that the pin allows only observation. **It does not: it allows
@@ -11,22 +11,24 @@ running it, so this option gets its full case rather than the fallback one.
 
 ## The strongest case
 
-**It is the only option that removes bytes from the conversation without paying
-for a broken prefix, and it removes the bytes that actually matter.** The hook
-runs *before* the result enters the conversation, so `01-constraints.md`'s cut
-point is at the tip: `S = D`, `T* = 19·(S/D) − 20 = −1`, and the saving is net
-from the first request. Every option that edits a conversation after the fact is
-paying `1.9·S − 2·D` for the privilege; this one pays nothing, and then keeps
-saving `0.1·D` on every turn for the rest of the cycle.
+**It removes bytes from the conversation without paying for a broken prefix,
+and unlike the others in that class it removes the bytes that actually
+matter.** The hook runs *before* the result enters the conversation, so
+`01-constraints.md`'s cut point is at the tip: `S = D`, `T* = 19·(S/D) − 20 =
+−1`, and the saving is net from the first request. Every option that edits a
+conversation after the fact is paying `1.9·S − 2·D` for the privilege; this one
+pays nothing, and then keeps saving `0.1·D` on every turn for the rest of the
+cycle.
 
 **And the distribution is exactly the shape a threshold mechanism wants.**
 `00-problem.md`: tool results are 64.2% of a main-thread conversation; their
 median is **278 bytes** and the largest 10% carry **72.2%** of all tool-result
-bytes. So the money is in about 722 blocks of 7,221 — eighteen per conversation —
-and a threshold reaches all of it while leaving 6,500 small results untouched.
-`Read` alone is 72.1% of tool-result bytes over 1,260 calls at a mean of 12,928
-bytes each: **46% of everything in a main-thread conversation is file contents an
-agent chose to read**, and it is not duplication — verbatim re-reads are 0.3%.
+bytes. So the money is in about 722 blocks of 7,221 — eighteen per conversation
+— and a threshold reaches all of it while leaving 6,500 small results
+untouched. `Read` alone is 72.1% of tool-result bytes over 1,260 calls at a
+mean of 12,928 bytes each: **46% of everything in a main-thread conversation is
+file contents an agent chose to read**, and it is not duplication — verbatim
+re-reads are 0.3%.
 
 **And the CLI already does a version of it, unasked, which is the strongest
 existence proof available.** Large tool outputs are spilled to
@@ -39,12 +41,12 @@ results well above it survive into context.
 
 **And the pin answers every question a hook-based option has to ask.**
 `02-levers-on-the-pin.md`: `PostToolUse` fires under `-p --output-format
-stream-json --verbose`; `hookSpecificOutput.updatedToolOutput` "Replaces the tool
-output before it is sent to the model" and was observed doing so, with a `Read` of
-`canary-line-from-disk` arriving at the model as
-`"1\tHOOK-REPLACED-THE-FILE-CONTENTS"`; the replacement is validated against the
-tool's own output schema and a mismatch is refused rather than coerced; and hooks
-delivered through `--settings` — a file *or* JSON on the argv — **survive
+stream-json --verbose`; `hookSpecificOutput.updatedToolOutput` "Replaces the
+tool output before it is sent to the model" and was observed doing so, with a
+`Read` of `canary-line-from-disk` arriving at the model as
+`"1\tHOOK-REPLACED-THE-FILE-CONTENTS"`; the replacement is validated against
+the tool's own output schema and a mismatch is refused rather than coerced; and
+hooks delivered through `--settings` — a file *or* JSON on the argv — **survive
 `--resume`**, verified across three cycles of one session.
 
 ## Shape
@@ -69,17 +71,18 @@ externalising hook silently stopped on cycle 3 would go back to full-size tool
 results with no symptom but the bill.
 
 **One unresolved build detail, and it is on the argv rather than in the
-model.** `sandboxArgs` already emits `["--settings", JSON.stringify({sandbox: …})]`
-(`:5158`–`:5164`), pushed at `:6760`, and it chose JSON on the argv rather than a
-file because "a file would be a per-child lifecycle to write, chown and remove
-for something that carries no secret" (`:5154`–`:5156`) — which is equally true
-of a hooks payload. Whether the CLI **merges** two `--settings` flags or lets the
-second replace the first is **not established**; `02-` exercised one at a time.
-Until it is, the two payloads have to be composed into one object, and that is a
-change to `sandboxArgs`' contract rather than an addition beside it. The
-precedent for getting this wrong is one flag over: `--allowedTools` is emitted
-once with everything in it because "a second `--allowedTools` is a variadic option
-the CLI would read as a replacement rather than an addition" (`:4856`–`:4858`).
+model.** `sandboxArgs` already emits `["--settings", JSON.stringify({sandbox:
+…})]` (`:5158`–`:5164`), pushed at `:6760`, and it chose JSON on the argv
+rather than a file because "a file would be a per-child lifecycle to write,
+chown and remove for something that carries no secret" (`:5154`–`:5156`) —
+which is equally true of a hooks payload. Whether the CLI **merges** two
+`--settings` flags or lets the second replace the first is **not established**;
+`02-` exercised one at a time. Until it is, the two payloads have to be
+composed into one object, and that is a change to `sandboxArgs`' contract
+rather than an addition beside it. The precedent for getting this wrong is one
+flag over: `--allowedTools` is emitted once with everything in it because "a
+second `--allowedTools` is a variadic option the CLI would read as a
+replacement rather than an addition" (`:4856`–`:4858`).
 
 ## What leaves the context, and when the decision is taken
 
@@ -97,8 +100,8 @@ The trade is that the model can undo it. The pointer is only worth anything if
 the agent can fetch what it points at, and the moment it does, the content
 arrives after all. `02-` names this precisely for the CLI's own file-read cap:
 "The saving is real on the turn it happens and is repaid in full, plus a fresh
-tool-call round trip, the moment the model asks for page two — which is precisely
-what that instruction tells it to do."
+tool-call round trip, the moment the model asks for page two — which is
+precisely what that instruction tells it to do."
 
 ## What it does to the prefix cache
 
@@ -125,17 +128,17 @@ one heading where this option has no qualification to make.
    1.4% of turns — is a further **about $93 a week**.
 
 **Four things make that a ceiling rather than an estimate, and they all cut the
-same way.** A pointer is not zero bytes. The model asks for the content back, and
-the largest results are the ones most likely to be wanted. The composition came
-from the forty largest transcripts rather than from the week. And the fixed
-prefix — a median 31,575 tokens that never appears in the transcript at all —
-is untouched, which is why step 4 exists.
+same way.** A pointer is not zero bytes. The model asks for the content back,
+and the largest results are the ones most likely to be wanted. The composition
+came from the forty largest transcripts rather than from the week. And the
+fixed prefix — a median 31,575 tokens that never appears in the transcript at
+all — is untouched, which is why step 4 exists.
 
 **One property is worth naming because only this option has it: the saving is
-front-loaded within a cycle.** A result dropped at turn 10 of a 140-turn cycle is
-saved 130 times over; the same result dropped at turn 130 is saved ten times. So
-the mechanism is worth most on exactly the long cycles where `00-problem.md`
-measures the last ten turns costing 1.9× the first ten.
+front-loaded within a cycle.** A result dropped at turn 10 of a 140-turn cycle
+is saved 130 times over; the same result dropped at turn 130 is saved ten
+times. So the mechanism is worth most on exactly the long cycles where
+`00-problem.md` measures the last ten turns costing 1.9× the first ten.
 
 ## What it does to the DONE contract, `needs-review`, `--resume` and retention
 
@@ -144,10 +147,10 @@ acts on tool results. `COMPLETION_NOTICE` (`:4466`) and `NEEDS_REVIEW_NOTICE`
 (`:4506`) are prompt text and never pass through a tool; `cycleEnding`
 (`:4543`) matches over `res.finalText`, which is the model's own reply. A hook
 cannot reach any of the three. `01-constraints.md`'s summariser hazard — a
-mechanism writing text this app will later read for those tokens — does not apply
-either, provided the pointer's preview is a byte range of the original rather
-than a generated description. **That is a design constraint rather than an
-observation: a preview generated by a model would put the hazard back.**
+mechanism writing text this app will later read for those tokens — does not
+apply either, provided the pointer's preview is a byte range of the original
+rather than a generated description. **That is a design constraint rather than
+an observation: a preview generated by a model would put the hazard back.**
 
 **`--resume`: intact, and the hook survives it** — measured on the pin through
 the `--settings` channel, and the reason the option must not use `--plugin-dir`.
@@ -157,10 +160,10 @@ content, so the saving compounds across cycles rather than being re-paid.
 **Retention: this option invents a fourth store, and that is its largest
 structural cost.** `01-constraints.md` is explicit: "a dropped-content archive
 … is a fourth, and it needs its own horizon, its own liveness question asked of
-the database rather than of a file's age, and its own line in the storage report
-— or it is the store that fills the disk holding `.credentials.json`"
-(`src/lib/retention.ts:518`–`:521`). The scale is not hypothetical: the CLI's own
-equivalent is 81.7 MB on this container.
+the database rather than of a file's age, and its own line in the storage
+report — or it is the store that fills the disk holding `.credentials.json`"
+(`src/lib/retention.ts:518`–`:521`). The scale is not hypothetical: the CLI's
+own equivalent is 81.7 MB on this container.
 
 Three of the four requirements have a clear answer and one does not. The horizon
 should be the *checkout's*, not the transcripts' — `checkoutRetentionDays`
@@ -193,34 +196,36 @@ incidental.
 
 **Adds to which source: none directly, and one indirectly.** It produces no
 figure. But it changes what the transcripts contain, which is the source
-`buildSnapshot()` reads (`src/lib/transcripts.ts:406` → `src/lib/windows.ts:669`)
-— so every window meter, every guard fraction and `00-problem.md`'s own
-composition measurement are measuring a different thing after this ships than
-before. That is not a violation of the never-mix rule; it is a discontinuity in
-one source that any before-and-after comparison has to date.
+`buildSnapshot()` reads (`src/lib/transcripts.ts:406` →
+`src/lib/windows.ts:669`) — so every window meter, every guard fraction and
+`00-problem.md`'s own composition measurement are measuring a different thing
+after this ships than before. That is not a violation of the never-mix rule; it
+is a discontinuity in one source that any before-and-after comparison has to
+date.
 
 ## What the operator sees, and how they override it by hand
 
 **Sees, and this is unusually good: the hook's own dispatch, on the stream this
 app already parses.** `--include-hook-events` puts every hook dispatch on the
 same `stream-json` channel `handleStreamLine` (`src/lib/orchestrator.ts:5830`)
-already reads, as `{"type":"system","subtype":"hook_started"|"hook_response", …}`
-carrying `hook_name`, `outcome`, `exit_code`, `stdout` and `stderr` — "so a
+already reads, as `{"type":"system","subtype":"hook_started"|"hook_response",
+…}` carrying `hook_name`, `outcome`, `exit_code`, `stdout` and `stderr` — "so a
 hook's failure is observable by this app without a second channel"
 (`02-levers-on-the-pin.md`). That is the surface `01-constraints.md` says an
 option changing the conversation has to invent, and here it exists already. The
-precedent for adding a flag that changes the stream's shape rather than what the
-run may do is `--forward-subagent-text` (`:4845`, `:4819`–`:4821`).
+precedent for adding a flag that changes the stream's shape rather than what
+the run may do is `--forward-subagent-text` (`:4845`, `:4819`–`:4821`).
 
 **Overrides:** a threshold in Settings, where `null` / `""` / `0` all mean off
 (`docs/agent/budgets-and-guards.md`), stored only if it differs from `DEFAULTS`
 (`src/lib/settings.ts:693`). A threshold is the right shape for the off switch
 because the mechanism is already a threshold.
 
-**Mid-run:** it should be the per-cycle case, `enabledPluginDirs()` (`src/lib/orchestrator.ts:6690`) and
-the sandbox policy (`:6747`), not the `settings`-frozen-for-the-segment case
-(`:6379`, `:6722`–`:6723`) — the argv is rebuilt every cycle anyway, so
-re-resolving costs nothing and the alternative is a run that cannot be changed.
+**Mid-run:** it should be the per-cycle case, `enabledPluginDirs()`
+(`src/lib/orchestrator.ts:6690`) and the sandbox policy (`:6747`), not the
+`settings`-frozen-for-the-segment case (`:6379`, `:6722`–`:6723`) — the argv is
+rebuilt every cycle anyway, so re-resolving costs nothing and the alternative
+is a run that cannot be changed.
 
 **By hand, the whole way out:** the operator can fetch any externalised file
 themselves, because it is a file. That is a better answer than any
@@ -233,10 +238,10 @@ times out or exits non-zero reports on the `hook_response` event with its
 `exit_code`, `stdout` and `stderr`, on the channel `handleStreamLine` already
 reads. Nothing else in this survey has an equivalent.
 
-**Silent, and it is the one `02-levers-on-the-pin.md` names in the file itself.**
-The replacement is validated against the tool's own output schema, and a mismatch
-is **refused** — the model receives the real, unreplaced output and the run
-carries on:
+**Silent, and it is the one `02-levers-on-the-pin.md` names in the file
+itself.** The replacement is validated against the tool's own output schema,
+and a mismatch is **refused** — the model receives the real, unreplaced output
+and the run carries on:
 
     [ERROR] "PostToolUse hook returned updatedToolOutput that does not match Write's
              output shape: [ { "expected": "object", "code": "invalid_type", … } ]"
@@ -266,10 +271,10 @@ Neither shows up anywhere.
 
 **Files touched:** a hook script added to the image (`Dockerfile`),
 `src/lib/orchestrator.ts` (`buildArgs`, plus composing one `--settings` object
-with `sandboxArgs`' — see above), `src/lib/settings.ts` and the settings page for
-the threshold, `src/lib/retention.ts` (a fourth sweep, its horizon, its liveness
-query and its line in the storage report). It is the largest build in the survey
-after Option I.
+with `sandboxArgs`' — see above), `src/lib/settings.ts` and the settings page
+for the threshold, `src/lib/retention.ts` (a fourth sweep, its horizon, its
+liveness query and its line in the storage report). It is the largest build in
+the survey after Option I.
 
 **Invariants at risk — six, and three of them are in `docs/agent/security.md`'s
 territory.** The `--settings` single-flag question above. `resolveInMount()`
@@ -285,23 +290,23 @@ decides the delivery channel. And the `PostToolUse`/`PreToolUse` boundary above.
 result size and a settings value, replace or not — is a pure function whose
 failure modes are silent in both directions, which is the bar
 `docs/agent/testing.md` records and the same grounds `plugins.ts`' two earned
-("they decide what code every agent loads"). The hook script itself is not a pure
-function and is not testable on that bar; what would cover it is the
+("they decide what code every agent loads"). The hook script itself is not a
+pure function and is not testable on that bar; what would cover it is the
 verification list in `docs/verification.md`, and it belongs on the "Not yet
 verified by hand" section until a real cycle has run under it.
 
 ## What would have to be true
 
-**That the composition of the forty largest transcripts is the composition of the
-week.** Everything in the chain above rests on it. `00-problem.md` measured 35.2
-MB across 40 files; the container's week is 235 sessions. Nothing establishes that
-the ratio holds at the other end of the distribution, and a short session that
-reads two files has a different shape from a 258-turn one.
+**That the composition of the forty largest transcripts is the composition of
+the week.** Everything in the chain above rests on it. `00-problem.md` measured
+35.2 MB across 40 files; the container's week is 235 sessions. Nothing
+establishes that the ratio holds at the other end of the distribution, and a
+short session that reads two files has a different shape from a 258-turn one.
 
 **That the model tolerates a pointer where it expected a file.** The CLI's own
-81.7 MB of spilling is evidence that it does at *some* threshold, and no evidence
-at all about a lower one. The failure is not an error: it is a fetch, and then
-another fetch, and a run that spends its cycle budget paging.
+81.7 MB of spilling is evidence that it does at *some* threshold, and no
+evidence at all about a lower one. The failure is not an error: it is a fetch,
+and then another fetch, and a run that spends its cycle budget paging.
 
 **That a fourth store is worth having.** `01-constraints.md` sets the bar and it
 is not rhetorical — three stores today, on three media, with three horizons and
@@ -312,7 +317,7 @@ runs produced.
 **And the fact that would most weaken it, from the file that established the
 mechanism:** on a build where a tool's output schema moves, `updatedToolOutput`
 is refused, the debug log says so, and nothing else does. `01-constraints.md`'s
-bar for the pin is not "does the lever work" but "on a build where the lever does
-nothing, does the run get quietly more expensive, or does something say so?" —
-and for this option the honest answer is that it gets quietly more expensive
-unless Option A's readout is there to notice.
+bar for the pin is not "does the lever work" but "on a build where the lever
+does nothing, does the run get quietly more expensive, or does something say
+so?" — and for this option the honest answer is that it gets quietly more
+expensive unless Option A's readout is there to notice.
