@@ -1381,6 +1381,12 @@ export default function SettingsPage() {
   // absent rather than as zero.
   const [knowledge, setKnowledge] = useState<KnowledgeStatusDTO | null>(null);
   const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
+  // The vault skill is a switch of the plugins' kind rather than a settings
+  // field: its own row on its own route, saved as it is pressed. Its error is
+  // separate from `knowledgeError` because they are two different failures —
+  // one is a vault that could not be read, the other a switch that was refused.
+  const [skillBusy, setSkillBusy] = useState(false);
+  const [skillError, setSkillError] = useState<string | null>(null);
   const standalone = useStandalone();
   const [sectionHash, setSectionHash] = useSectionHash();
 
@@ -1472,6 +1478,25 @@ export default function SettingsPage() {
   useEffect(() => {
     void loadKnowledge();
   }, [loadKnowledge]);
+
+  const toggleSkill = useCallback(async (enabled: boolean) => {
+    setSkillBusy(true);
+    const res = await jsonRequest<{ skillEnabled: boolean }>("/api/knowledge/skill", {
+      method: "POST",
+      body: { enabled },
+    });
+    setSkillBusy(false);
+    if (!res.ok) {
+      setSkillError(
+        actionFailureMessage(res, `${enabled ? "Enabling" : "Disabling"} the skill failed.`),
+      );
+      return;
+    }
+    setSkillError(null);
+    // Patched in place rather than by reloading the status, which would walk
+    // the whole vault again to answer a question about one boolean.
+    setKnowledge((prev) => (prev ? { ...prev, skillEnabled: res.data.skillEnabled } : prev));
+  }, []);
 
   useEffect(() => {
     fetch("/api/storage", { cache: "no-store" })
@@ -3079,6 +3104,49 @@ export default function SettingsPage() {
                 onChange={(e) => patch({ knowledgeBaseSubpath: e.target.value })}
               />
             </div>
+          </SettingRow>
+        </ListGroup>
+
+        {skillError && (
+          <Notice tone="danger" className="mt-4">
+            {skillError}
+          </Notice>
+        )}
+
+        <ListGroup
+          className="mt-4"
+          label="What runs may do with it"
+          footnote="The skill is handed to each work cycle as it starts, so switching it reaches runs already in flight. Saved as you press it, not on Save"
+        >
+          <SettingRow
+            htmlFor="kbskill"
+            label="Vault lookup skill"
+            description={
+              <>
+                <span className="block">
+                  Every run this app starts can search these notes instead of answering
+                  from its own knowledge, and quotes each claim&rsquo;s confidence grade
+                  and note. Nothing gains write access to the vault.
+                </span>
+                <span className="block text-2xs text-ink-muted">
+                  {!knowledge?.configured
+                    ? "Pick a folder above first — there is nothing for the skill to look in"
+                    : knowledge.skillSearchScript
+                      ? `Ranked search: ${knowledge.skillSearchScript}`
+                      : "No ranked search in this vault, so the skill greps — and says so in its answers"}
+                </span>
+              </>
+            }
+          >
+            <Switch
+              id="kbskill"
+              checked={knowledge?.skillEnabled ?? false}
+              // Refused at the door as well as here: a switch reading as on
+              // with no vault behind it would hand every cycle nothing at all,
+              // silently.
+              disabled={skillBusy || knowledge === null || !knowledge.configured}
+              onChange={(v) => void toggleSkill(v)}
+            />
           </SettingRow>
         </ListGroup>
       </Section>

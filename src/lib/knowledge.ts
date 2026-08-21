@@ -1289,8 +1289,16 @@ export function knowledgeNoteView(index: KnowledgeIndex, rel: string): Knowledge
  * with nothing in it must not read alike — and it matters more here, because a
  * knowledge base showing "0 notes, 0 broken links" is the reading an operator
  * would take as *good news*.
+ *
+ * The two skill fields of `KnowledgeStatusDTO` are the route's to add rather
+ * than this function's: they come from a settings row and a stat of the vault,
+ * and this module deliberately reads nothing but `Settings` and the filesystem
+ * — a `db` import here would put a database behind every test in
+ * `knowledge.test.ts`.
  */
-export function knowledgeStatus(s: Settings): KnowledgeStatusDTO {
+export function knowledgeStatus(
+  s: Settings,
+): Omit<KnowledgeStatusDTO, "skillEnabled" | "skillSearchScript"> {
   const blank = {
     noteCount: null,
     orphanCount: null,

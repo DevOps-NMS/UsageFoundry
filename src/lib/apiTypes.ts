@@ -2101,6 +2101,19 @@ export interface KnowledgeStatusDTO {
    * total. Reported rather than swallowed: a partial graph reads as complete.
    */
   truncated: boolean;
+  /** Are runs handed the vault-lookup skill? Its own settings row, not a field
+   * of `Settings`, for the reason `plugins.enabled` is: the settings page saves
+   * the whole object, so a stale tab pressing Save would silently clear it. */
+  skillEnabled: boolean;
+  /**
+   * The vault's own ranked search, vault-relative, or `null` if it has none.
+   *
+   * On the wire because the skill's behaviour turns on it and nothing else
+   * would tell the operator which one they got: with a script the skill ranks,
+   * without one it greps and says so. Reported even when the skill is off, so
+   * the answer is visible before the switch is pressed rather than after.
+   */
+  skillSearchScript: string | null;
 }
 
 export interface KnowledgeGraphDTO {
