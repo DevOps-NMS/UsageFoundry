@@ -100,7 +100,7 @@ bounded. Disagreeing with the weights is the cleanest way to disagree with
 | A fourth store | 2 | Three stores, three horizons, three sweeps (`docs/agent/retention.md:8`); the one that fills the disk holds `.credentials.json` (`src/lib/retention.ts:518`–`:521`). |
 | Off, per run, mid-run | 2 | `01-constraints.md`'s five obligations, compressed. Weighted below the gates because every option can satisfy them with work. |
 | Build cost | 2 | Real, one-off. 3 is free. |
-| Rests on something unestablished | 2 | Weighted **up** for this survey specifically: `02-levers-on-the-pin.md` returns *could not establish* seven times and `03-` could not measure answer quality at all. An option whose case turns on one of those is not a cheaper option, it is an unmeasured one. |
+| Rests on something unestablished | 2 | Weighted **up** for this survey specifically: `02-levers-on-the-pin.md` returns *could not establish* five times in its own verdict table and `03-` could not measure answer quality at all. An option whose case turns on one of those is not a cheaper option, it is an unmeasured one. |
 
 Two things are deliberately **not** scored. **Which layer an option acts on** —
 the argv, the injected text, the folder, the session lifecycle, this app's
