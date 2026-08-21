@@ -77,10 +77,11 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - Isolation being *unavailable* degrades to `mode: "none"`; isolation being *used up* throws.
   - Nothing on the landing path has a clock on it. Do not add one.
 
-- **`plugins.ts`, the `--plugin-dir` argv, `/api/plugins`** → `docs/agent/architecture.md`
+- **`plugins.ts`, `vaultSkill.ts`, the `--plugin-dir` argv, `/api/plugins`** → `docs/agent/architecture.md`
   - Never `claude plugin install`: `~/.claude` is one bind mount shared with the host and its registry records absolute paths.
-  - `--plugin-dir` does not survive `--resume`, so it goes on **every** cycle's argv.
+  - `--plugin-dir` does not survive `--resume`, so it goes on **every** cycle's argv. Neither does `--add-dir`.
   - A stored path is proved contained in a mount again at use time. It becomes a directory whose hooks the container runs.
+  - The vault skill is generated per spawn and never written to `DATA_DIR`, which the agent uid cannot read. `--add-dir` grants **write**, so only the skill's own text forbids writing into the vault.
 
 - **`agents.ts`, `agentRegistry.ts`, `templates.ts`** → `docs/agent/agents-and-templates.md`
   - An agent carries a role, never a capability: no `tools`, no permission mode, no folder. A `tools` field is refused by name at save.

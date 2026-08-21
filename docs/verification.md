@@ -661,6 +661,50 @@ Built and exercised against real transcripts:
   browser: the Knowledge base settings section has been typechecked and built,
   never looked at, and no `docker compose up --build` was possible in the
   environment this landed from. Both are on the list below.
+- **That `--plugin-dir` actually delivers a skill, and that the generated
+  SKILL.md is one the CLI accepts.** On 2026-08-21 against the pinned CLI
+  (`claude --version` → `2.1.226`), billed **$0.00**: the API call was pointed
+  at a local sink on `127.0.0.1` that answers 400, which is enough because every
+  plugin and skill load happens before the first request and the request body is
+  then readable in full. Two things were being asked, and this is the route the
+  whole feature rests on, so it was measured before anything was built on it.
+
+  First, that the route works at all. `claude -p --plugin-dir <dir> …` against a
+  directory holding `.claude-plugin/plugin.json` and
+  `skills/knowledge-vault/SKILL.md` logged `Loaded inline plugin from path:
+  usagefoundry`, `Checking plugin usagefoundry: skillsPath=exists`, `Loaded 1
+  skills from plugin usagefoundry default directory`, and `Sending 13 skills via
+  attachment (initial)`. Second, and the part a debug line does not settle: the
+  captured request body carries the skill in the model's own skills block as
+  `usagefoundry:knowledge-vault: Search the knowledge vault at …` — the exact
+  text `renderVaultSkill` produced, from the compiled module rather than a
+  hand-written stand-in. The body of the SKILL.md is **not** in that request:
+  only `name: description` is sent up front and the body loads when the Skill
+  tool fires, which is why the description is three sentences and not the
+  operator's paragraph of topics.
+
+  Two details fell out that are load-bearing elsewhere. Skills are namespaced by
+  their plugin, so this one cannot shadow — or be shadowed by — a same-named
+  skill in the operator's own `~/.claude/skills`; the container this was run in
+  has exactly that, and both were offered. And `--add-dir <dir>` immediately
+  followed by another flag parses correctly, the variadic not swallowing it,
+  which is what makes its position in `buildArgs` safe. The published sandbox
+  policy on a session given `--add-dir` lists the directory under
+  `write.allowOnly`: **it is not a read-only grant**, which is why the skill's
+  own text is where "never write to the vault" has to live, and why the settings
+  copy says the same.
+
+  The same debug log reproduced, live, the breakage `plugins.ts` documents and
+  this feature is shaped around: the container tried to read
+  `/Users/…/.claude/plugins/marketplaces/…` out of the shared `~/.claude` mount
+  and logged `marketplace-load-failed`, exit 0, nothing else said. That is the
+  silent failure that rules out installing into `~/.claude/skills`, observed
+  rather than quoted.
+
+  What it does not settle is on the list below: nothing here ran under
+  privilege separation, so the ownership and mode of the generated directory are
+  reasoned from `chat.ts`'s precedent rather than measured, and no model has yet
+  been asked a question and answered it out of a real vault.
 
 ## Not yet verified by hand
 
@@ -2492,6 +2536,32 @@ through before trusting this unattended:
   Truncated badge have never been on screen. Docker was unavailable in the
   container this landed from, so the `docker compose up --build` half of the
   loop was not run against any of it.
+- **A run actually answering out of the vault, and the generated directory's
+  ownership under privilege separation.** The delivery is measured — the entry
+  above shows the skill reaching the model's skill list from `--plugin-dir`, and
+  three `buildArgs` cases pin that it is on the argv on a first cycle and a
+  resumed one — but no work cycle has been spawned with it and no model has been
+  asked a question it should have answered from a vault. The three behaviours
+  that matter are all *inside* the model and none of them can be typechecked:
+  that it invokes the skill rather than answering from its own knowledge, that
+  it **stops and reports** when the path cannot be read instead of quietly
+  answering anyway, and that it carries the confidence grade through into what
+  it says. The first two are the whole point of the feature and the second is
+  the one that fails invisibly.
+
+  The other half is `writeVaultSkill`'s claim about ownership. The generated
+  directory is written root-owned and 0755 so that every agent uid can read it
+  and none can write it — a sibling able to rewrite a SKILL.md could put words
+  into another run's mouth — and that is reasoned from `chat.ts`'s `/run/uf-mcp`
+  precedent, not measured: nothing here ran with `UF_AGENT_UID` set, so the
+  fallback to `os.tmpdir()` is the only branch that has ever executed. Before
+  trusting this unattended, on a separated install: `stat` the directory under
+  `/run/uf-skills`, read the SKILL.md as the agent uid, and try to write it.
+  Docker was unavailable in the container this landed from, so the `docker
+  compose up --build` half of the loop was not run against any of it, and the
+  vault-skill switch in Settings has been typechecked and built but never
+  rendered — including the state that matters most, which is the switch refused
+  and disabled with no knowledge base configured.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

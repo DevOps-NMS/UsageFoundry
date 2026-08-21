@@ -56,6 +56,21 @@ plugins.ts      Claude Code plugins found in the mounts, switched on per install
                 becomes is a directory whose hooks the container executes. An
                 enabled plugin that stops resolving reaches the run's own log
                 rather than being dropped
+vaultSkill.ts   the vault-lookup skill, delivered the same way and for the same
+                reason: a plugin directory generated per spawn and passed as
+                --plugin-dir, never installed into ~/.claude/skills, where it
+                would break the operator's host sessions exactly as above. Its
+                switch is its own settings row and is refused with no knowledge
+                base configured. It is *generated* rather than shipped as a file
+                because it must name the vault's absolute path as the child sees
+                it, and whether that vault has a ranked search is discoverable
+                only by looking — and it goes to /run/uf-skills rather than
+                DATA_DIR, which is 0700 root and on the CLI's managed denyRead
+                list, so a skill there is unreadable by the agent uid on exactly
+                the hardened install this is for. The vault also needs --add-dir
+                or the skill names a path the run may not read; measurement says
+                that flag grants **write**, so the skill's own text is the only
+                thing forbidding writes into the vault
 agents.ts       saved agents — form input, never a run: the role a run itself
                 takes, carried onto a spawn by sessionAgentArgs as an --agents
                 definition *and* an --agent selection, built on the one encoder

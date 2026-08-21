@@ -24,6 +24,8 @@ src/lib/
   workspace.ts     the folder walk, shared by the picker and the chat's tools
   knowledge.ts     an Obsidian vault in one of the mounts, read as a link
                    graph — parse, resolve, cache; read-only, and no write path
+  vaultSkill.ts    the vault-lookup skill a run is handed: generated per spawn
+                   as a plugin directory, never installed into ~/.claude
   db.ts            SQLite (runs, events, reviews, chats, proposals, workflows,
                    schedules, settings)
 src/app/api/       usage · account · runs · branches · calibrate · settings ·
