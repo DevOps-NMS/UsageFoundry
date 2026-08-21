@@ -139,17 +139,78 @@ export function blocksOf(text: string): Block[] {
 }
 
 /**
- * Code, bold, italic, a markdown link and a bare URL. Deliberately not
- * underscore emphasis: `snake_case_name` would render its middle word italic
- * and drop the underscores, which is a quiet corruption of the identifiers this
- * text is mostly about. Both emphasis forms require a non-space after the
- * marker so that arithmetic and a lone separator stay literal. Code comes first
- * in the alternation so a URL inside backticks stays a literal string.
+ * Code, a wikilink, bold, italic, a markdown link and a bare URL. Deliberately
+ * not underscore emphasis: `snake_case_name` would render its middle word
+ * italic and drop the underscores, which is a quiet corruption of the
+ * identifiers this text is mostly about. Both emphasis forms require a
+ * non-space after the marker so that arithmetic and a lone separator stay
+ * literal. Code comes first in the alternation so a URL — or a `[[wikilink]]` —
+ * inside backticks stays a literal string.
+ *
+ * The wikilink alternative sits ahead of the markdown-link one because `[[a]]`
+ * is a prefix of nothing the latter matches and the latter would consume its
+ * opening bracket while failing.
  */
 const INLINE =
-  /`[^`\n]+`|\*\*[^\s*][^*\n]*\*\*|\*[^\s*][^*\n]*\*|\[[^\]\n]+\]\([^\s()]*\)|https?:\/\/[^\s<>"']+/g;
+  /`[^`\n]+`|!?\[\[[^\][\n]+\]\]|\*\*[^\s*][^*\n]*\*\*|\*[^\s*][^*\n]*\*|\[[^\]\n]+\]\([^\s()]*\)|https?:\/\/[^\s<>"']+/g;
 
 const MD_LINK = /^\[([^\]\n]+)\]\(([^\s()]*)\)$/;
+const WIKILINK = /^!?\[\[([^\][\n]+)\]\]$/;
+
+/** A `[[Target#Heading|label]]`, taken apart. */
+export type Wikilink = {
+  /** `![[…]]` rather than `[[…]]`. */
+  embed: boolean;
+  /** What the link resolves against. `""` for `[[#Heading]]`, a same-note link. */
+  target: string;
+  /** `Heading` or `^block-id`, without the `#`. `null` where none was written. */
+  heading: string | null;
+  /** What is drawn: the explicit `|label`, or the target exactly as written. */
+  label: string;
+};
+
+/**
+ * What a caller's vault says about one wikilink.
+ *
+ * Three cases rather than a nullable href, because three is what a reader has
+ * to tell apart and collapsing any two of them lies. `other` is a target that
+ * exists and is not a page — an embedded image, a tag — and rendering it as
+ * broken would report a healthy vault as a broken one; `missing` is a link that
+ * goes nowhere, and rendering it as ordinary text is the failure this whole
+ * extension exists to fix.
+ */
+export type WikilinkResolution =
+  | { kind: "note"; href: string }
+  | { kind: "other" }
+  | { kind: "missing" };
+
+type Resolve = ((link: Wikilink) => WikilinkResolution) | undefined;
+
+/**
+ * Exported for the test. A wikilink's parts are positional and silent when
+ * misread: an alias taken as a heading points the link at a note that exists,
+ * and a `|label` swallowed into the target breaks one that resolves.
+ */
+export function parseWikilink(token: string): Wikilink | null {
+  const inner = WIKILINK.exec(token)?.[1];
+  if (inner === undefined) return null;
+
+  // Split on the *first* pipe only: Obsidian allows a label containing one, and
+  // a display string is not something to reject a link over.
+  const pipe = inner.indexOf("|");
+  const addressed = (pipe === -1 ? inner : inner.slice(0, pipe)).trim();
+  const label = pipe === -1 ? "" : inner.slice(pipe + 1).trim();
+
+  const hash = addressed.indexOf("#");
+  const target = (hash === -1 ? addressed : addressed.slice(0, hash)).trim();
+  const heading = hash === -1 ? null : addressed.slice(hash + 1).trim() || null;
+
+  // `[[|x]]` addresses nothing. Rendering it as a link would give the reader
+  // something to press that no vault can answer for.
+  if (!target && !heading) return null;
+
+  return { embed: token.startsWith("!"), target, heading, label: label || addressed };
+}
 
 /**
  * The one place model-written text becomes something clickable.
@@ -204,7 +265,47 @@ function link(href: string, label: string, key: string): ReactNode {
   );
 }
 
-function inline(text: string, key: string): ReactNode[] {
+/**
+ * A broken link has to be visible without colour: a dotted underline is the
+ * cue, the warn colour reinforces it, and the suffix is what carries it to a
+ * reader who gets neither.
+ */
+const BROKEN_CLASS =
+  "text-warn underline decoration-dotted decoration-warn underline-offset-2 [overflow-wrap:anywhere]";
+
+function wikilink(token: string, key: string, resolve: Resolve): ReactNode {
+  // No resolver means no vault to resolve against, so the token stays its own
+  // literal text — which is what every caller predating this prop already got,
+  // and is why adding the prop changed none of them.
+  if (!resolve) return token;
+  const parsed = parseWikilink(token);
+  if (!parsed) return token;
+
+  const found = resolve(parsed);
+  if (found.kind === "note") {
+    return (
+      // Same tab, unlike `link()`: a wikilink goes to another note on the page
+      // it was pressed from, where an external URL goes somewhere else entirely.
+      // A plain href rather than a router call, so this file keeps its promise
+      // of no local imports — the page delegates the click and navigates.
+      <a key={key} href={found.href} className={LINK_CLASS}>
+        {parsed.label}
+      </a>
+    );
+  }
+  // A target that exists and is not a page: an embedded image, a tag. It is not
+  // broken, so it must not be marked as broken.
+  if (found.kind === "other") return parsed.label;
+
+  return (
+    <span key={key} className={BROKEN_CLASS}>
+      {parsed.label}
+      <span className="sr-only"> — broken link</span>
+    </span>
+  );
+}
+
+function inline(text: string, key: string, resolve: Resolve): ReactNode[] {
   const out: ReactNode[] = [];
   let cut = 0;
 
@@ -239,6 +340,10 @@ function inline(text: string, key: string): ReactNode[] {
     }
     if (token.startsWith("*")) {
       out.push(<em key={id}>{token.slice(1, -1)}</em>);
+      continue;
+    }
+    if (token.startsWith("[[") || token.startsWith("![[")) {
+      out.push(wikilink(token, id, resolve));
       continue;
     }
     if (token.startsWith("[")) {
@@ -300,10 +405,12 @@ function nest(items: ItemBlock[]): ListNode[] {
 function List({
   items,
   keyBase,
+  resolve,
   nested = false,
 }: {
   items: ItemBlock[];
   keyBase: string;
+  resolve: Resolve;
   nested?: boolean;
 }) {
   // Only the outer call nests. `indentDepth` yields 0 or 1, so every item in a
@@ -328,9 +435,9 @@ function List({
               {node.item.marker}
             </span>
             <div className="min-w-0 flex-1">
-              {inline(node.item.text, id)}
+              {inline(node.item.text, id, resolve)}
               {node.children.length > 0 && (
-                <List items={node.children} keyBase={`${id}:sub`} nested />
+                <List items={node.children} keyBase={`${id}:sub`} resolve={resolve} nested />
               )}
             </div>
           </li>
@@ -340,7 +447,7 @@ function List({
   );
 }
 
-function leaf(block: Exclude<Block, ItemBlock>, key: string): ReactNode {
+function leaf(block: Exclude<Block, ItemBlock>, key: string, resolve: Resolve): ReactNode {
   // A blank line is spacing, and spacing is what the margins below already say.
   if (block.kind === "gap") return null;
   if (block.kind === "code") {
@@ -357,13 +464,13 @@ function leaf(block: Exclude<Block, ItemBlock>, key: string): ReactNode {
     const Tag = block.level <= 2 ? "h3" : block.level === 3 ? "h4" : "h5";
     return (
       <Tag key={key} className={HEADING_CLASS[block.level <= 2 ? "lead" : "sub"]}>
-        {inline(block.text, key)}
+        {inline(block.text, key, resolve)}
       </Tag>
     );
   }
   return (
     <p key={key} className="my-2.5">
-      {inline(block.text, key)}
+      {inline(block.text, key, resolve)}
     </p>
   );
 }
@@ -373,14 +480,14 @@ function leaf(block: Exclude<Block, ItemBlock>, key: string): ReactNode {
  * end it — that is a loose list, not two lists — but a change of marker kind
  * does, so a numbered sequence is never announced as an unordered pile.
  */
-function render(blocks: Block[]): ReactNode[] {
+function render(blocks: Block[], resolve: Resolve): ReactNode[] {
   const out: ReactNode[] = [];
   let i = 0;
 
   while (i < blocks.length) {
     const block = blocks[i];
     if (block.kind !== "item") {
-      out.push(leaf(block, String(i)));
+      out.push(leaf(block, String(i), resolve));
       i += 1;
       continue;
     }
@@ -405,21 +512,34 @@ function render(blocks: Block[]): ReactNode[] {
       }
       break;
     }
-    out.push(<List key={String(i)} items={items} keyBase={String(i)} />);
+    out.push(<List key={String(i)} items={items} keyBase={String(i)} resolve={resolve} />);
     i = j;
   }
 
   return out;
 }
 
-export function Markdown({ text }: { text: string }) {
+export function Markdown({
+  text,
+  resolveWikilink,
+}: {
+  text: string;
+  /**
+   * A vault to resolve `[[wikilinks]]` against. Optional, and absent everywhere
+   * this renderer draws model-written text: a work cycle's report is not a note
+   * and has no vault behind it, so a `[[…]]` there stays exactly the text the
+   * model wrote rather than becoming a link to somewhere or a warning about
+   * nowhere.
+   */
+  resolveWikilink?: (link: Wikilink) => WikilinkResolution;
+}) {
   return (
     // The first and last block lose their outer margin so this composes into a
     // chat turn or a card without adding a gap nobody asked for. Block layout,
     // not flex, so adjacent paragraph margins collapse to one gap rather than
     // stacking into two.
     <div className="text-sm leading-relaxed text-ink [&>:first-child]:mt-0 [&>:last-child]:mb-0">
-      {render(blocksOf(text))}
+      {render(blocksOf(text), resolveWikilink)}
     </div>
   );
 }

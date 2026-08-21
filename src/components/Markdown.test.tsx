@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { Markdown, blocksOf } from "./Markdown";
+import { Markdown, blocksOf, parseWikilink, type WikilinkResolution } from "./Markdown";
 
 /**
  * What is pinned here is content and structure, never styling, on the same
@@ -147,6 +147,116 @@ test("a link is a link, and an unknown scheme is not", () => {
   const quoted = renderToStaticMarkup(<Markdown text="curl `https://example.com/x`" />);
   assert.doesNotMatch(quoted, /<a /);
   assert.match(quoted, /<code[^>]*>https:\/\/example\.com\/x<\/code>/);
+});
+
+/* ------------------------------ wikilinks -------------------------------- */
+
+/**
+ * The vault this renderer is pointed at on the knowledge page. `Terraform State`
+ * is a note, `diagrams/state.png` exists and is not one, and everything else is
+ * a link somebody wrote against a note that was never created.
+ */
+const vault = (link: { target: string }): WikilinkResolution => {
+  if (link.target === "Terraform State") return { kind: "note", href: "/knowledge?note=ts.md" };
+  if (link.target === "diagrams/state.png") return { kind: "other" };
+  return { kind: "missing" };
+};
+
+test("a wikilink's parts are the ones that were written", () => {
+  // Each of these is silent when misread: a `|label` swallowed into the target
+  // breaks a link that resolves, and an alias read as a heading points one at a
+  // note that exists.
+  assert.deepEqual(parseWikilink("[[Terraform State]]"), {
+    embed: false,
+    target: "Terraform State",
+    heading: null,
+    label: "Terraform State",
+  });
+  assert.deepEqual(parseWikilink("[[Terraform State|the state file]]"), {
+    embed: false,
+    target: "Terraform State",
+    heading: null,
+    label: "the state file",
+  });
+  assert.deepEqual(parseWikilink("[[Terraform State#Locking]]"), {
+    embed: false,
+    target: "Terraform State",
+    heading: "Locking",
+    label: "Terraform State#Locking",
+  });
+  // A block reference keeps its caret: `#^abc` and `#abc` are different places.
+  assert.equal(parseWikilink("[[Terraform State#^abc123]]")?.heading, "^abc123");
+  assert.equal(parseWikilink("![[diagrams/state.png]]")?.embed, true);
+  // A label may contain a pipe, so only the first one separates.
+  assert.equal(parseWikilink("[[A|b | c]]")?.label, "b | c");
+  // `[[#Locking]]` addresses this note; `[[|x]]` addresses nothing at all.
+  assert.deepEqual(parseWikilink("[[#Locking]]"), {
+    embed: false,
+    target: "",
+    heading: "Locking",
+    label: "#Locking",
+  });
+  assert.equal(parseWikilink("[[|x]]"), null);
+});
+
+test("a wikilink with no vault behind it stays the text the model wrote", () => {
+  // Every caller that existed before the resolver prop passes only `text`, and
+  // this is what pins that adding the prop changed none of them: a run report
+  // saying `[[wikilinks]]` is prose about wikilinks, not a link to one.
+  const html = renderToStaticMarkup(<Markdown text="Handled [[Terraform State]] today." />);
+  assert.doesNotMatch(html, /<a |<span class/);
+  assert.match(html, /Handled \[\[Terraform State\]\] today\./);
+});
+
+test("a resolved wikilink is a link into this page, not a new tab", () => {
+  const html = renderToStaticMarkup(
+    <Markdown text="Start at [[Terraform State|the state file]]." resolveWikilink={vault} />,
+  );
+  assert.match(html, /<a [^>]*href="\/knowledge\?note=ts\.md"/);
+  assert.match(html, />the state file<\/a>/, "the label is what was written after the pipe");
+  assert.doesNotMatch(html, /target="_blank"/, "a note is not somewhere else");
+  assert.doesNotMatch(html, /\[\[/, "the markers are consumed");
+});
+
+test("an unresolved wikilink is visibly broken rather than ordinary text", () => {
+  // This is the whole point of the extension. A link to a note nobody wrote is
+  // indistinguishable from prose once the brackets are gone, so a vault with 40
+  // dangling links reads as a vault with none — and the operator's reason for
+  // opening the page is to find them.
+  const html = renderToStaticMarkup(
+    <Markdown text="A dangling one: [[Nothing Written Yet]]." resolveWikilink={vault} />,
+  );
+  assert.doesNotMatch(html, /<a /, "a link that goes nowhere is not something to press");
+  assert.match(html, /Nothing Written Yet/);
+  // Not colour alone: the dotted underline is the cue that survives a monochrome
+  // display, and the suffix is what reaches a reader who sees neither.
+  assert.match(html, /decoration-dotted/);
+  assert.match(html, /class="sr-only">[^<]*broken link/);
+});
+
+test("a target that exists and is not a note is neither a link nor broken", () => {
+  // The renderer draws no images, so an embed has nowhere to go — but marking it
+  // broken would report a healthy vault as a broken one, which is the same
+  // failure as the test above with the sign flipped.
+  const html = renderToStaticMarkup(
+    <Markdown text="See ![[diagrams/state.png]] for it." resolveWikilink={vault} />,
+  );
+  assert.doesNotMatch(html, /<a |decoration-dotted/);
+  assert.match(html, /See diagrams\/state\.png for it\./);
+});
+
+test("a wikilink inside code is a string being quoted, not a destination", () => {
+  const inlineCode = renderToStaticMarkup(
+    <Markdown text="Write `[[Terraform State]]` to link it." resolveWikilink={vault} />,
+  );
+  assert.doesNotMatch(inlineCode, /<a /);
+  assert.match(inlineCode, /<code[^>]*>\[\[Terraform State\]\]<\/code>/);
+
+  const fenced = renderToStaticMarkup(
+    <Markdown text={"```md\n[[Nothing Written Yet]]\n```"} resolveWikilink={vault} />,
+  );
+  assert.doesNotMatch(fenced, /<a |decoration-dotted/);
+  assert.match(fenced, /\[\[Nothing Written Yet\]\]/);
 });
 
 test("a heading in a turn never outranks the page's own", () => {
