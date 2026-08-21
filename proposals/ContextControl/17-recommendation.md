@@ -224,12 +224,18 @@ option's risk, because nothing on the parent's argv bounds a delegated turn's
 size and `02-`'s verdict on that is *could not establish*. One billed run with a
 deliberately expensive delegation answers it.
 
-The second is the harder one: **whether a delegation displaces about three
-mean-sized reads**, which is the break-even `11-` computes from the sub-agent's
-own fixed prefix. 30.3% of `Read` bytes in the re-measured corpus belong to files
-the run later edited or wrote, and those cannot be delegated — the parent needs
-the contents to make the edit. The question is what share of the other 69.7% is a
-question with an answer rather than reading that *is* the work.
+The second is the harder one, and the closing pass made it easier rather than
+harder. `11-` used to say a delegation had to displace about three mean-sized
+reads before its own fixed prefix paid for itself; that divided the prefix by the
+delegated cost of a read rather than by the saving, and the measured figure is
+**about two-thirds of one read** — the sub-agent's tool block and system prompt
+came to 46,582 bytes on the closing pass's probe, ≈ $0.073 at 1.25×, against
+$0.112 saved per mean-sized read moved. So the break-even is not the obstacle.
+**What remains is whether the work is separable at all.** 30.3% of `Read` bytes
+in the re-measured corpus belong to files the run later edited or wrote, and
+those cannot be delegated — the parent needs the contents to make the edit. The
+question is what share of the other 69.7% is a question with an answer rather
+than reading that *is* the work, and no measurement in this survey reaches it.
 
 If both come back well, H is a one-sentence change to `nextPrompt` with the
 readout, the card and the dashboard grouping all already built — and it should

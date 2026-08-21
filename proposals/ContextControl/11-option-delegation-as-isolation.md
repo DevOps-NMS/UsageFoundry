@@ -120,13 +120,19 @@ move is roughly **$0.145 → $0.033**. That is the best per-unit ratio in the
 survey.
 
 **And the counterweight is the sub-agent's own fixed prefix, which is paid per
-delegation.** The probe's sub-agent carried 14 tool definitions and a
-3,204-byte system prompt; at the main thread's measured 111,472 bytes for 28
-tools, half of that is roughly 55,700 bytes ≈ 13,900 tokens, written once at
-1.25× ≈ **$0.087**. So a delegation has to displace about three mean-sized
-reads before it breaks even — unless a second delegation in the same session
-matches that prefix from cache, which is plausible given the 5-minute TTL and
-is **not established**: no probe measured two delegations in one session.
+delegation.** The closing pass measured it directly rather than deriving it: on
+its own probe the sub-agent's tool block is **42,813 bytes for 10 definitions**
+beside the parent's 109,992 for 28, plus a 3,769-byte system prompt — 46,582
+bytes ≈ 11,646 tokens at 4 bytes per token, written once at 1.25× ≈ **$0.073**.
+Against a saving of $0.145 − $0.033 = **$0.112 per mean-sized read moved**, a
+delegation therefore breaks even at **about two-thirds of one read** — and on
+this file's original, larger estimate of the prefix it is still 0.78 of a read.
+**An earlier version of this paragraph said "about three mean-sized reads",
+which divided the prefix by the delegated cost of a read rather than by the
+saving; the closing pass corrected it, and the correction runs in this option's
+favour.** A second delegation in the same session may match that prefix from
+cache, which is plausible given the 5-minute TTL and is **not established**: no
+probe measured two delegations in one session.
 
 **The honest aggregate is that the addressable pool is small.** Delegated turns
 are already 6.5% of this container's bill, and
