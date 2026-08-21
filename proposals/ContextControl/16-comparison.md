@@ -14,10 +14,10 @@ Say this before the table, because otherwise five rows read as five mechanisms.
 ### D, G and J are the same act: clear `sessionId` at a cycle boundary
 
 All three end in a fresh conversation where a resumed one would have been. The
-mechanism is one assignment to the local at `src/lib/orchestrator.ts:6319`, which
-`nextPrompt` branches on (`:4330`) and `buildArgs` reads for `--resume` (`:4874`).
-Not one of them changes what is sent *inside* a conversation. They differ only in
-**who takes the decision and when**:
+mechanism is one assignment to the local at `src/lib/orchestrator.ts:6319`,
+which `nextPrompt` branches on (`:4330`) and `buildArgs` reads for `--resume`
+(`:4874`). Not one of them changes what is sent *inside* a conversation. They
+differ only in **who takes the decision and when**:
 
 | | Decision taken by | When | What the next cycle opens with |
 |---|---|---|---|
@@ -46,13 +46,14 @@ fresh cycle as *cheaper* than a resumed one only while it re-reads under about
 negative. D pays that every time; G is the version that does not; J does not
 arise, because a block boundary is a task boundary rather than a cycle boundary.
 
-### E and L are the same act: cap a tool result before it enters the conversation
+### E and L are the same act: cap a result before it enters the conversation
 
 Both intercept content on its way in rather than removing it afterwards, so both
 have `01-constraints.md`'s cut point at the tip — `S = D`, `T* = −1`, no
-invalidation, ever. Both act on the same bytes: `Read` results, 71.8% of
+invalidation, ever. Both act on the same bytes: `Read` results, 72.1% of
 tool-result bytes and 46% of a whole main-thread conversation
-(`00-problem.md`). Both leave the model free to undo the saving by asking for the
+(`00-problem.md`; the closing pass re-measures 71.8% and 46.2%). Both leave the
+model free to undo the saving by asking for the
 rest. They differ only in **who does the intercepting**:
 
 | | Executor | Where the dropped content goes | Off switch |
@@ -65,27 +66,27 @@ whole result back, because it is a file; L cannot. L invents no store, no sweep
 and no horizon, where E's fourth store holds "by construction the largest things
 the runs produced" — the CLI's own equivalent is 82.1 MB on this container
 (re-measured; `00-problem.md` says 81.7 MB). And E's failure is visible on the
-`hook_response` event `handleStreamLine` (`src/lib/orchestrator.ts:5830`) already
-reads, where L's is a typo that does nothing and says nothing.
+`hook_response` event `handleStreamLine` (`src/lib/orchestrator.ts:5830`)
+already reads, where L's is a typo that does nothing and says nothing.
 
 ### C and H are one shape, and are not merged
 
 Both are a sentence added to `nextPrompt`'s output
-(`src/lib/orchestrator.ts:4299`); both cost the same to build; both fail the same
-way, which is that the model does or does not comply and nothing checks. But they
-differ in *what is asked* rather than in where the asking happens, and their
-arithmetic differs in sign — C makes the conversation strictly larger and H makes
-it smaller. They keep separate columns and this paragraph is the note that they
-are siblings.
+(`src/lib/orchestrator.ts:4299`); both cost the same to build; both fail the
+same way, which is that the model does or does not comply and nothing checks.
+But they differ in *what is asked* rather than in where the asking happens, and
+their arithmetic differs in sign — C makes the conversation strictly larger and
+H makes it smaller. They keep separate columns and this paragraph is the note
+that they are siblings.
 
 ## The criteria, and their weights, stated before the scoring
 
 Ten criteria, from `01-constraints.md`'s closing list and from the fixed ten
 headings every option file answered. The weights encode a judgement about *this*
-measurement: a bill that is 82% carried context **at a tenth of the input rate**,
-a single identified waste of $173.95 a week that no lever this app holds reaches,
-and a survey in which no option's prize is measured rather than bounded.
-Disagreeing with the weights is the cleanest way to disagree with
+measurement: a bill that is 82% carried context **at a tenth of the input
+rate**, a single identified waste of $173.95 a week that no lever this app holds
+reaches, and a survey in which no option's prize is measured rather than
+bounded. Disagreeing with the weights is the cleanest way to disagree with
 `17-recommendation.md`.
 
 | Criterion | Weight | Why that weight |
@@ -103,10 +104,10 @@ Disagreeing with the weights is the cleanest way to disagree with
 
 Two things are deliberately **not** scored. **Which layer an option acts on** —
 the argv, the injected text, the folder, the session lifecycle, this app's
-accounting, the environment of the spawn — is a position each option takes rather
-than an axis it wins; it is laid out side by side below. And **how much of the
-bill an option can theoretically reach** is not scored separately from the
-measured prize, because rewarding reach on a question where every prize is a
+accounting, the environment of the spawn — is a position each option takes
+rather than an axis it wins; it is laid out side by side below. And **how much
+of the bill an option can theoretically reach** is not scored separately from
+the measured prize, because rewarding reach on a question where every prize is a
 ceiling on a proxy would reward the least disciplined arithmetic.
 
 ## Scores
@@ -130,41 +131,43 @@ spread named underneath.
 | **Weighted total** | **+20** | **+2** | **−8** | **+14** | **+5** | **−19** | **+17** | **−19** | **+15** |
 
 **Within D·G·J:** J takes +3 on build cost (nothing is built) and 0 on the
-fourth store (four rows, four protected sessions) against the family's +1 and −1;
-G takes +2 on "where in the cycle" against D's 0, because a threshold is what
-stops the option paying $0.13 on the 27% of handovers that would have hit the
-cache. Scored separately the three come out at roughly D +8, G +16, J +19 — and
-J's +19 is bought entirely by the two axes on which it is not really an option at
-all: it costs nothing because it ships, and it is safe because it is what a loop
-block already does.
+fourth store (four rows, four protected sessions) against the family's +1 and
+−1; G takes +2 on "where in the cycle" against D's 0, because a threshold is
+what stops the option paying $0.13 on the 27% of handovers that would have hit
+the cache. Scored separately the three come out at roughly D +8, G +16, J +19 —
+and J's +19 is bought entirely by the two axes on which it is not really an
+option at all: it costs nothing because it ships, and it is safe because it is
+what a loop block already does.
 
 **Within E·L:** L takes +3 on build cost against E's −1, because a zero-build
 variant exists — set the variables in compose and let `childEnv`
 (`src/lib/orchestrator.ts:5216`–`:5231`) inherit them, which it already does. E
 takes 0 on the two endings against L's −2, because
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` bounds `res.finalText`, which is exactly what
-`cycleEnding` (`:4543`) matches. And E takes −3 on the fourth store against L's 0.
+`cycleEnding` (`:4543`) matches. And E takes −3 on the fourth store against L's
+0.
 
 ## Reading the interesting cells rather than the totals
 
-**The `Measured prize` row is the finding, not a tiebreak.** Nothing scores above
-+2, and the +2 is a bet rather than a measurement: D·G·J removes the largest
-identified line in the bill — $173.95 a week in the re-measured window, 26.3% of
-the container's cache-write line — *conditional on a fresh agent finishing the
-same task in the same number of work cycles*, which `03-` says in as many words
-it could not test, because "no model answered any of the five questions; the
-recorder returned fixed strings". Every other +1 is a ceiling on a proxy
-`00-problem.md` explicitly refuses to call an oracle. **Nine options, and not one
-of them can name a dollar it would certainly save.**
+**The `Measured prize` row is the finding, not a tiebreak.** Nothing scores
+above +2, and the +2 is a bet rather than a measurement: D·G·J removes the
+largest identified line in the bill — $173.95 a week in the re-measured window,
+26.3% of the container's cache-write line — *conditional on a fresh agent
+finishing the same task in the same number of work cycles*, which `03-` says in
+as many words it could not test, because "no model answered any of the five
+questions; the recorder returned fixed strings". Every other +1 is a ceiling on
+a proxy `00-problem.md` explicitly refuses to call an oracle. **Nine options,
+and not one of them can name a dollar it would certainly save.**
 
 **Option A is the only +3 on "what an operator can see", and that column is the
 whole argument of `17-recommendation.md`.** It is not a chart. 72 of 99
 work-cycle handovers in the re-measured rolling week re-wrote a conversation
 nothing had changed, at a median $2.39; 27 paid $0.171 for the identical prompt.
 Neither the run page, the dashboard nor `run_events` distinguishes them, because
-all three read cost and none reads composition. Every other option in this survey
-is a bet on a number nobody can currently read back, and five of them —
-D, G, E, K and L — say so in their own files.
+all three read cost and none reads composition. Every other option in this
+survey is a bet on a number nobody can currently read back, and six of them — D,
+E, G, I, K and L — say so in their own files, each naming Option A's readout as
+the thing that would let it be scored.
 
 **Option K's +3 on loudness is the only one in the table and it is worth the
 whole of its case.** `--exclude-dynamic-system-prompt-sections` either parses or
@@ -178,40 +181,42 @@ counterweight is named in K's own file and is real: one flag, fleet-wide, that
 fails every spawn on a version bump.
 
 **Option F's −3 on "who decides" and −3 on the two endings are one sentence
-twice.** A compaction summary is written by a model, and `custom_instructions` is
-a field on the `PreCompact` payload that no argv this app emits reaches. So the
-option cannot promise that `COMPLETION_NOTICE` (`src/lib/orchestrator.ts:4466`)
-or `NEEDS_REVIEW_NOTICE` (`:4506`) survive it — and a compaction at turn 90 of a
-*first* cycle removes both from a conversation that will receive no continuation
-prompt before it ends, which is precisely the state the $162 over 92 runs
-measured. The mitigation `09-` finds in the tree repairs cycle 2 onwards and not
-cycle 1, and cycle 1 is where the measured failure lives.
+twice.** A compaction summary is written by a model, and `custom_instructions`
+is a field on the `PreCompact` payload that no argv this app emits reaches. So
+the option cannot promise that `COMPLETION_NOTICE`
+(`src/lib/orchestrator.ts:4466`) or `NEEDS_REVIEW_NOTICE` (`:4506`) survive it —
+and a compaction at turn 90 of a *first* cycle removes both from a conversation
+that will receive no continuation prompt before it ends, which is precisely the
+state the $162 over 92 runs measured. The mitigation `09-` finds in the tree
+repairs cycle 2 onwards and not cycle 1, and cycle 1 is where the measured
+failure lives.
 
 **Option I's −3 on loudness is a different kind of failure from everything else
 here.** Every other option's failure mode is *more expensive*. A stale index is
-*wrong*: a fragment returned from an index built before the last three commits is
-a confident, well-formed answer against code that no longer exists. Nothing
+*wrong*: a fragment returned from an index built before the last three commits
+is a confident, well-formed answer against code that no longer exists. Nothing
 throws. And its −3 on the fourth store is the only one in the table, because it
 is the only store with no liveness question the database can answer —
 `docs/agent/retention.md`'s "every sweep asks the database what is live; never a
-file's age" has no clean answer for an index, which is stale when *files* change.
+file's age" has no clean answer for an index, which is stale when *files*
+change.
 
 **Options E, H and L share the best arithmetic in the survey and reach different
 amounts of it.** All three intercept content before it lands, so all three have
-`T*` undefined rather than large. E's ceiling is the biggest number in the survey
-at about $213 a week plus about $93 on the write line; H's per-unit ratio is the
-best at roughly $0.145 → $0.033 per large read moved; L's is E's mechanism for
-free. And all three are bounded by the same fact: the model can ask for the
-content back, and `02-levers-on-the-pin.md` shows the CLI *instructing* it to —
-"Call Read with offset=388 limit=387 for the next page".
+`T*` undefined rather than large. E's ceiling is the biggest number in the
+survey at about $213 a week plus about $93 on the write line; H's per-unit ratio
+is the best at roughly $0.145 → $0.033 per large read moved; L's is E's
+mechanism for free. And all three are bounded by the same fact: the model can
+ask for the content back, and `02-levers-on-the-pin.md` shows the CLI
+*instructing* it to — "Call Read with offset=388 limit=387 for the next page".
 
 **Option B's −3 on the two endings is what decides it, and its own file says
 so.** `COMPLETION_NOTICE` and `NEEDS_REVIEW_NOTICE` are 1,082 of the 1,873 bytes
 this app writes per resumed cycle, and they are the two it may not touch. The
-four strings it *may* touch are the four an operator can already edit, and on any
-install that has pressed Save they are materialised into the stored blob and a
-shortened default reaches nobody (`docs/agent/conventions.md:14`). The prize on
-the whole exercise is about $4 to $6 a week against a container bill of
+four strings it *may* touch are the four an operator can already edit, and on
+any install that has pressed Save they are materialised into the stored blob and
+a shortened default reaches nobody (`docs/agent/conventions.md:14`). The prize
+on the whole exercise is about $4 to $6 a week against a container bill of
 $2,700.14.
 
 **Option A's +2 on "rests on the unestablished" is the largest such cell and it
@@ -228,27 +233,27 @@ that is true.
 `01-constraints.md` does not enumerate the layers; the option files do, in their
 `Shape` headings, and the distribution is informative:
 
-- **This app's own accounting.** A alone, and G in part — G reads the same figure
-  A displays and acts on it. That is the whole distance between an instrument and
-  an actuator, and `docs/agent/metering.md` already refuses the second without the
-  first for every window guard.
+- **This app's own accounting.** A alone, and G in part — G reads the same
+  figure A displays and acts on it. That is the whole distance between an
+  instrument and an actuator, and `docs/agent/metering.md` already refuses the
+  second without the first for every window guard.
 - **The text this app injects.** B, C, H. The layer that needs nothing from the
-  CLI and can never fail loudly. `02-levers-on-the-pin.md` has no verdict to give
-  about any of the three.
-- **The session lifecycle.** D, G, J — and this is the layer the tree contains an
-  argument *against*: `looksLikeResumeFailure` stops a run rather than starting
-  over, "the honest move is to stop and name the command rather than quietly start
-  a fresh session and lose the conversation the resume existed to keep"
-  (`src/lib/orchestrator.ts:7113`–`:7117`).
+  CLI and can never fail loudly. `02-levers-on-the-pin.md` has no verdict to
+  give about any of the three.
+- **The session lifecycle.** D, G, J — and this is the layer the tree contains
+  an argument *against*: `looksLikeResumeFailure` stops a run rather than
+  starting over, "the honest move is to stop and name the command rather than
+  quietly start a fresh session and lose the conversation the resume existed to
+  keep" (`src/lib/orchestrator.ts:7113`–`:7117`).
 - **The argv.** E (`--settings`), F (`--autocompact`), K
-  (`--exclude-dynamic-system-prompt-sections`). The layer where a failure can be a
-  non-zero exit, and the layer `buildArgs` already rebuilds per cycle
+  (`--exclude-dynamic-system-prompt-sections`). The layer where a failure can be
+  a non-zero exit, and the layer `buildArgs` already rebuilds per cycle
   (`:6701`) so that nothing has to be re-sent by hand.
 - **The environment of the spawn.** F in part, L entirely. The layer that is
   **already live and unrecorded**: `childEnv` (`:5216`–`:5231`) strips six
   classes and none of the seven context-shaping variables is among them, so an
-  install whose compose sets one is running a different context regime and nothing
-  in this app can tell.
+  install whose compose sets one is running a different context regime and
+  nothing in this app can tell.
 - **The folder.** I alone, which is why it is the largest build: everything else
   reuses a channel this app already has.
 
@@ -259,8 +264,8 @@ is invisible in the log is one whose misbehaviour reads as the agent being
 stupid." Six option files name Option A's readout as the thing that would let
 them be evaluated — D ("this option needs Option A's readout in order to be
 evaluated, and does not supply it"), E, G, I, K and L. Only A supplies it, and
-only J gets a partial one for free, because four blocks are four rows in the runs
-list with four spend figures.
+only J gets a partial one for free, because four blocks are four rows in the
+runs list with four spend figures.
 
 **An honest statement of what the prize is a proxy for.** `00-problem.md` names
 the trap in advance: 39.3% of `Read` bytes belong to files a run never mentions
@@ -272,12 +277,12 @@ different measurement.
 
 ## Two shapes the survey did not have, and why neither is added
 
-**`--fork-session`.** `02-levers-on-the-pin.md` established it: a new session id,
-a **new transcript file**, and the prior conversation carried into the forked
-request. A fork per cycle therefore changes nothing about what is sent — it
-changes only which file the turns land in, which multiplies transcript count and
-breaks `resumableSessions` (`src/lib/retention.ts:590`) the way D does, for no
-saving at all. It is the cost of Option D without its mechanism.
+**`--fork-session`.** `02-levers-on-the-pin.md` established it: a new session
+id, a **new transcript file**, and the prior conversation carried into the
+forked request. A fork per cycle therefore changes nothing about what is sent —
+it changes only which file the turns land in, which multiplies transcript count
+and breaks `resumableSessions` (`src/lib/retention.ts:590`) the way D does, for
+no saving at all. It is the cost of Option D without its mechanism.
 
 **`--no-session-persistence`.** Also established: a fresh id, one message, and
 **no transcript file written**. That removes the file `scanUsage()` reads, so a

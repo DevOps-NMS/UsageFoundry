@@ -11,9 +11,10 @@ as shortening.
 ## The recommendation
 
 **Build no context mechanism. Ship Option A — the per-cycle composition readout
-on the run page — plus two repairs that are owed whichever way the question goes.
-Build nothing else until somebody re-runs `03-experiment-resumed-vs-fresh.md`
-against a live model.** [17-recommendation.md](17-recommendation.md).
+on the run page — plus two repairs that are owed whichever way the question
+goes. Build nothing else until somebody re-runs
+`03-experiment-resumed-vs-fresh.md` against a live model.**
+[17-recommendation.md](17-recommendation.md).
 
 Nothing in it is new capability. `scanUsage()` already produces the entries
 (`src/lib/transcripts.ts:406`), the `iteration` event already carries the cycle
@@ -27,9 +28,10 @@ table.
 **What would overturn it:** re-run `03-`'s two arrangements with a live model in
 place of the recorder, on a tree that commits between cycles, and score work
 cycles and answers as well as cost. If a fresh conversation per cycle finishes
-the same task in the same number of cycles with the same answers, the $152 a week
-is real, this recommendation is wrong, and the answer is Option G. `03-` prices
-the three runs together at single-digit dollars and gives a four-step recipe.
+the same task in the same number of cycles with the same answers, the $152 a
+week is real, this recommendation is wrong, and the answer is Option G. `03-`
+prices the three runs together at single-digit dollars and gives a four-step
+recipe.
 
 **Runner-up:** Option H, delegation as context isolation. It wins if two billed
 questions come back well — whether a cycle's `--max-budget-usd` bounds its
@@ -38,8 +40,8 @@ delegated turns, and whether this install's work is separable at all.
 ## The measurement, and why it says wait
 
 From this install's own transcripts, through the app's own `scanUsage()` and
-`pricing.ts`, over the rolling seven days to 2026-08-21 and re-run by the closing
-pass:
+`pricing.ts`, over the rolling seven days to 2026-08-21 and re-run by the
+closing pass:
 
 | | |
 |---|---|
@@ -73,8 +75,8 @@ refused. Every prize figure in the survey descends from one proxy —
 | Whether the CLI compacted a run's conversation | **nowhere** — it fires unprompted under `-p` and leaves no marker in the transcript |
 | The fixed prefix, or the retained thinking | **never**, from this source: a median 31,373 invisible tokens and 13,734 stripped thinking blocks |
 
-The last three are live defects independent of the question, and the first two of
-them are Phase 0 of
+The last three are live defects independent of the question, and the first two
+of them are Phase 0 of
 [18-implementation-sketch.md](18-implementation-sketch.md).
 
 ## Index
@@ -105,10 +107,10 @@ them are Phase 0 of
 Every option file answers the same ten headings — the strongest case, its shape,
 what leaves the context and when the decision is taken, what it does to the
 prefix cache, what it does to the DONE contract / `needs-review` / `--resume` /
-retention, guards and the three cost sources, what the operator sees and how they
-override it, how it fails and whether loudly, what it costs to build, and what
-would have to be true — so [16-comparison.md](16-comparison.md) is a table over a
-fixed set rather than over twelve arguments.
+retention, guards and the three cost sources, what the operator sees and how
+they override it, how it fails and whether loudly, what it costs to build, and
+what would have to be true — so [16-comparison.md](16-comparison.md) is a table
+over a fixed set rather than over twelve arguments.
 
 **On the numbering.** The four closing files carry on from `15` rather than
 taking ModelRouter's `12`–`15`, because this survey ran to twelve options and
@@ -123,33 +125,33 @@ those numbers are option files. Nothing was renumbered.
 were wrong and all eight were fixed in place.** Whether each made the
 recommendation easier or harder:
 
-- **Fifty bare `` `:NNNN` `` references chained off the wrong file**, across eight
-  of the sixteen files. *Neither* — it is a legibility defect, and it is the same
-  class `proposals/ModelRouter/15-validation.md` found, recurring after a commit on
-  this branch claimed to have fixed it.
+- **Fifty bare `` `:NNNN` `` references chained off the wrong file**, across
+  eight of the sixteen files. *Neither* — it is a legibility defect, and it is
+  the same class `proposals/ModelRouter/15-validation.md` found, recurring after
+  a commit on this branch claimed to have fixed it.
 - **`docs/agent/architecture.md:131` cited for a claim it does not carry.**
-  *Neither.* That pass's finding #3, recurring at a different line in a different
-  proposal.
+  *Neither.* That pass's finding #3, recurring at a different line in a
+  different proposal.
 - **Option H's break-even was out by a factor of four, in H's favour** — a
   delegation pays for its own prefix at two-thirds of one mean-sized read, not
-  three. **Harder.** It is the only correction that moved a number in an option's
-  favour, and it is why H is the runner-up rather than a curiosity.
+  three. **Harder.** It is the only correction that moved a number in an
+  option's favour, and it is why H is the runner-up rather than a curiosity.
 - **The `--autocompact` range error was quoted truncated**, dropping a tail that
   says the flag takes `200` as shorthand for 200k. *Neither.*
 - **The file-read cap's paging instruction was paraphrased rather than quoted.**
   **Harder, slightly** — the real text names the token count and the cap, which
   makes the CLI's invitation to page more explicit than the paraphrase did, and
   paging is what bounds Option L.
-- **The tool block re-measures at 109,800 bytes, not 111,472**, same pin, same 28
-  tools. *Neither* — it makes Option I's per-tool standing cost good to 2% and not
-  better, in both directions.
+- **The tool block re-measures at 109,800 bytes, not 111,472**, same pin, same
+  28 tools. *Neither* — it makes Option I's per-tool standing cost good to 2%
+  and not better, in both directions.
 - **`14-`'s flag probe exits 124 with `Execution error`, not 143 with
-  `Terminated`.** *Neither.* The material claim — the flag parses where an unknown
-  one exits 1 — reproduces exactly.
-- **`grep -c system-reminder` "over a container transcript" no longer returns 0**
-  on 33 of 604 container transcripts, every one of them because an agent grepped
-  for the string, **this proposal's own measurement runs included**. *Neither* —
-  the named file still returns 0, and the fix is to name it.
+  `Terminated`.** *Neither.* The material claim — the flag parses where an
+  unknown one exits 1 — reproduces exactly.
+- **`grep -c system-reminder` "over a container transcript" no longer returns
+  0** on 33 of 604 container transcripts, every one of them because an agent
+  grepped for the string, **this proposal's own measurement runs included**.
+  *Neither* — the named file still returns 0, and the fix is to name it.
 
 And one thing nobody had claimed, found by the re-run:
 **`CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` is enforced against a

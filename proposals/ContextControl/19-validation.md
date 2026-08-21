@@ -1,9 +1,9 @@
 # Validation
 
-A pass over the nineteen files before this one, on 2026-08-21, from inside a live
-work cycle on the install they were written on and against the same tree. Every
-`path/file.ts:42` in `00-` through `18-` was resolved **mechanically** and the
-line it lands on was read; every measurement in `00-problem.md` was re-run
+A pass over the nineteen files before this one, on 2026-08-21, from inside a
+live work cycle on the install they were written on and against the same tree.
+Every `path/file.ts:42` in `00-` through `18-` was resolved **mechanically** and
+the line it lands on was read; every measurement in `00-problem.md` was re-run
 through the same compiled `src/lib/` rather than re-derived; and — unlike
 `proposals/ModelRouter/15-validation.md`, which explicitly did not — **this pass
 opened the pinned CLI and re-ran the load-bearing probes in
@@ -29,13 +29,13 @@ The compile and the reference resolver are two commands:
 
     $ node refs.js .          # every `path:NNN` and every bare `:NNN`, chained
                               # off the last full path cited before it
-    total refs 961, unresolvable 4
+    total refs 960, unresolvable 4
 
 Three of the four are `01:22`–`28` and `01:32`, cited from sibling files in this
-directory, which the resolver looks for at the repository root; both were checked
-by hand and are correct — `01:22`–`28` is the `P`/`S`/`D` derivation and `01:32`
-is `T* = 19·(S / D) − 20`. The fourth is the house rule's own exemplar, quoted in
-the first paragraph of this file.
+directory, which the resolver looks for at the repository root; both were
+checked by hand and are correct — `01:22`–`28` is the `P`/`S`/`D` derivation and
+`01:32` is `T* = 19·(S / D) − 20`. The fourth is the house rule's own exemplar,
+quoted in the first paragraph of this file.
 
 ---
 
@@ -131,24 +131,28 @@ Three that reproduce exactly and are load-bearing:
 `02-levers-on-the-pin.md`'s method was rebuilt from its own description — the
 real binary, a local HTTP recorder speaking enough of the Messages API to drive
 it, `ANTHROPIC_BASE_URL` and a dummy key, a fresh `CLAUDE_CONFIG_DIR` per probe.
-**No probe reached Anthropic and nothing here was billed**: every request went to
-`127.0.0.1`, and the one invocation that pointed at a real hostname was the
-`--not-a-real-flag` parse test, which exits before any API call.
+**No probe reached Anthropic and nothing here was billed**: every `claude`
+invocation carried `ANTHROPIC_BASE_URL` pointed at `127.0.0.1` — at the
+recorder's port, or at port 1 for the two probes whose whole subject is whether
+a flag parses, which it answers before any request is attempted.
 
-Five probes, all reproducing:
+Eight probes, all reproducing:
 
 | Probe | Result |
 |---|---|
 | Two cycles, one session, a commit and a `CLAUDE.md` edit in between | `sys[2]` diverges by the four expected lines; tools identical; the first user message's `claudeMd` block changes and the prompt block does not |
 | The same, with `--exclude-dynamic-system-prompt-sections` | `system identical: True`, `gitStatus` gone from the system block, the volatile content now in a 1.4 KB user block |
 | Three cycles with hooks on `--settings` and on `--plugin-dir` | 3 firings against 2; cycle 3 without the flag exits 0 with nothing on stderr |
-| `PostToolUse` returning `updatedToolOutput` | the model receives the hook's string in place of the file's contents |
+| `PostToolUse` returning `updatedToolOutput`, in the same session | the model receives `"1\tHOOK-REPLACED-THE-FILE-CONTENTS"` in place of the file's contents |
 | `--autocompact 100000` and `1000000` with `--debug-file` | `effectiveWindow=80000` and `180000` |
+| A `Read` of an 84,010-byte file, capped and uncapped, with a stub `count_tokens` answer and a realistic one | 88,988 chars uncapped; 88,988 with the cap and a stub count; 28,394 with the cap and a real count |
+| A `Read` of a 402,020-byte file | refused outright at 197 characters, naming a 256 KB ceiling |
+| A delegation, and a `Bash` call | the sub-agent's request carries 10 tools, a 3,769-byte system prompt and no parent history; `Bash` still cannot initialise its sandbox |
 
 **What the re-run adds that `02-` did not have** is in the next section. What it
 did *not* reach is the same list `02-` could not reach: a completed compaction,
-`BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS`
-and anything bounding a delegated turn's size.
+`BASH_MAX_OUTPUT_LENGTH`, `MAX_MCP_OUTPUT_TOKENS`,
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` and anything bounding a delegated turn's size.
 
 ## Also found, not a claim anyone made
 
@@ -156,24 +160,24 @@ and anything bounding a delegated turn's size.
   `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS` is enforced against a
   `/v1/messages/count_tokens` answer, not a count the CLI takes locally — with a
   recorder returning a fixed 1,000 tokens the cap did not fire at any value, and
-  with a realistic answer the same file went 88,988 → 28,394 chars. `02-` records
-  the `count_tokens` calls and the cap as two separate findings and attributes the
-  calls only to the compaction decision. Two consequences for
-  `15-option-cap-tool-output-at-the-source.md`, both added to it: the cap costs an
-  extra request per large read, and on a network where that endpoint is slow or
-  refused the cap silently stops applying.
+  with a realistic answer the same file went 88,988 → 28,394 chars. `02-`
+  records the `count_tokens` calls and the cap as two separate findings and
+  attributes the calls only to the compaction decision. Two consequences for
+  `15-option-cap-tool-output-at-the-source.md`, both added to it: the cap costs
+  an extra request per large read, and on a network where that endpoint is slow
+  or refused the cap silently stops applying.
 - **The 256 KB read ceiling.** The CLI refuses any `Read` whose content exceeds
   256 KB, naming the number. That is a bound on every option in this survey that
   reasons about large tool results — the corpus's 602,196-byte maximum
-  `tool_result` cannot have been a single unbounded `Read`, and `00-problem.md`'s
-  p99 of 42,120 bytes is what survives *after* both this refusal and the CLI's own
-  spilling of 82 MB to `<session>/tool-results/`.
+  `tool_result` cannot have been a single unbounded `Read`, and
+  `00-problem.md`'s p99 of 42,120 bytes is what survives *after* both this
+  refusal and the CLI's own spilling of 82 MB to `<session>/tool-results/`.
 - **On a resumed request the first user message carries no cache breakpoint at
-  all.** The third `cache_control` mark moves to the newest message. So on cycle 2
-  and after, everything in the first user message — the agent listing, the skills
-  listing, `claudeMd`, the original prompt — sits inside the prefix that `sys[2]`
-  breaks. This strengthens `14-option-move-the-volatile-prefix.md`'s central
-  sentence and weakens nothing.
+  all.** The third `cache_control` mark moves to the newest message. So on cycle
+  2 and after, everything in the first user message — the agent listing, the
+  skills listing, `claudeMd`, the original prompt — sits inside the prefix that
+  `sys[2]` breaks. This strengthens `14-option-move-the-volatile-prefix.md`'s
+  central sentence and weakens nothing.
 - **The tool block is not a constant.** 111,472 bytes in `02-`'s probe, 109,800
   in this one, same pin, same 28 tools. Any option that prices a *marginal* tool
   definition — Option I does, at about $8 a week — is working to about 2%.
@@ -185,9 +189,9 @@ and anything bounding a delegated turn's size.
   agents — `claude`, `Explore`, `general-purpose`, `Plan`, `statusline-setup` —
   which matches `BUILT_IN_AGENTS` (`src/lib/agents.ts:179`–`:185`) exactly and
   matches `docs/verification.md:479`'s recorded answer minus `uf-set-probe`.
-  `proposals/ModelRouter/15-validation.md` found `typescript` on a six-name list in
-  `docs/agent/agents-and-templates.md:10` and not in the CLI's own answer; that is
-  still true here and is still not this proposal's to correct.
+  `proposals/ModelRouter/15-validation.md` found `typescript` on a six-name list
+  in `docs/agent/agents-and-templates.md:10` and not in the CLI's own answer;
+  that is still true here and is still not this proposal's to correct.
 
 ## Unverifiable from here
 
@@ -200,11 +204,11 @@ Ten, and each is named in the file that depends on it.
    ever pressed Save on the settings page (`05-`), and whether `weeklyAnchor` is
    overridden (`00-`, marked "assumed", still the right word).
 2. **`03-experiment-resumed-vs-fresh.md`'s wire measurement.** Its harness lived
-   under `/tmp` and is gone with the run that built it — deliberately, and the file
-   says so and gives a four-step recipe for rebuilding it. Its arithmetic was
-   recomputed line by line and holds; its byte counts were not re-observed. **This
-   is the largest single thing this pass could not check, and it is the file the
-   overturning experiment would replace.**
+   under `/tmp` and is gone with the run that built it — deliberately, and the
+   file says so and gives a four-step recipe for rebuilding it. Its arithmetic
+   was recomputed line by line and holds; its byte counts were not re-observed.
+   **This is the largest single thing this pass could not check, and it is the
+   file the overturning experiment would replace.**
 3. **Whether a compaction survives `--resume`.** `02-`'s explicit *could not
    establish*, unchanged: no completed compaction is reachable without a live
    model, and no marker is written either way. Gates Option F entirely.
@@ -212,12 +216,12 @@ Ten, and each is named in the file that depends on it.
    calls it the single question that would most change its risk. Needs a billed
    run.
 5. **Whether the API's prefix match ends at a `cache_control` breakpoint or at
-   the first divergent byte.** This decides between the two readings of Option K's
-   saving — $1.44 a week or $5.02 — and no probe can answer it, because every
-   `usage` block a recorder produces is invented.
+   the first divergent byte.** This decides between the two readings of Option
+   K's saving — $1.44 a week or $5.02 — and no probe can answer it, because
+   every `usage` block a recorder produces is invented.
 6. **Whether a cheaper arrangement answers as well.** `03-`'s stated limit: "no
-   model answered any of the five questions; the recorder returned fixed strings."
-   The assumption the whole discard family rests on.
+   model answered any of the five questions; the recorder returned fixed
+   strings." The assumption the whole discard family rests on.
 7. **`BASH_MAX_OUTPUT_LENGTH`.** Re-attempted and re-refused: `Bash` cannot
    initialise its sandbox in this agent's container. 22.0% of tool-result bytes
    are behind it.
@@ -254,10 +258,10 @@ an experiment.**
 
 Experiments 8 and 9 are one session at a database an operator can open, and
 between them they bound two options. That they are blocked on the same thing is
-worth naming twice: **this app's own ledger is the evidence the survey most often
-wanted and least often had**, and every figure in `00-problem.md` comes from the
-transcripts instead. `proposals/ModelRouter/15-validation.md` wrote the same
-sentence about a different survey.
+worth naming twice: **this app's own ledger is the evidence the survey most
+often wanted and least often had**, and every figure in `00-problem.md` comes
+from the transcripts instead. `proposals/ModelRouter/15-validation.md` wrote the
+same sentence about a different survey.
 
 ## What this validation did not check
 
@@ -273,15 +277,15 @@ sentence about a different survey.
   gives. Five of the survey's claims about what operators do are therefore taken
   on the files' own "not established" markers.
 - **It did not check the rendering.** Whether a per-cycle table sits inside the
-  right band, stacks correctly below `md`, and renders unknown as a hatched meter
-  are claims about `docs/agent/conventions.md:46` and `docs/agent/metering.md`,
-  read and cited but not built.
+  right band, stacks correctly below `md`, and renders unknown as a hatched
+  meter are claims about `docs/agent/conventions.md:46` and
+  `docs/agent/metering.md`, read and cited but not built.
 - **It read the option files for accuracy rather than for completeness.** No
   search was made for a thirteenth shape. `16-comparison.md` names the two that
-  were considered and left out — `--fork-session` and `--no-session-persistence` —
-  and gives the reason for each.
+  were considered and left out — `--fork-session` and `--no-session-persistence`
+  — and gives the reason for each.
 - **It did not re-derive the price table.** `resolvePrice`'s answers were taken
-  from the function. Whether `claude-opus-5` really is $5/$25 is the table's claim
-  and nothing tests it — `proposals/ModelRouter/14-implementation-sketch.md`
-  already records that there is no `pricing.test.ts` in the tree, and that is
-  still true.
+  from the function. Whether `claude-opus-5` really is $5/$25 is the table's
+  claim and nothing tests it —
+  `proposals/ModelRouter/14-implementation-sketch.md` already records that there
+  is no `pricing.test.ts` in the tree, and that is still true.
