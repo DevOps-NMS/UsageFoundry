@@ -18,9 +18,12 @@ import {
  * of that format drive the design here:
  *
  *  1. The same assistant message is frequently written more than once (resumed
- *     sessions, sidechain replay, snapshot rewrites). Every duplicate carries
- *     an identical `message.id` + `requestId` pair, so that pair is the dedupe
- *     key. Summing without it roughly doubles reported usage.
+ *     sessions, sidechain replay, snapshot rewrites, and one line per content
+ *     block within a single turn). Every duplicate carries an identical
+ *     `message.id` + `requestId` pair, so that pair is the dedupe key. Summing
+ *     without it roughly doubles reported usage. The duplicates are not all
+ *     identical, though — see the resolution rule at the dedupe site, which is
+ *     why it keeps the record with the most output rather than the first.
  *
  *  2. Files are append-only, so we track a byte offset per file and parse only
  *     the newly written bytes on each refresh. A full re-parse of a busy
@@ -563,15 +566,29 @@ async function runScan(): Promise<ScanResult> {
 
   // Dedupe across files: a resumed session copies earlier turns into the new
   // transcript, so the same key legitimately appears in more than one file.
-  const seen = new Set<string>();
+  //
+  // Highest `output` wins rather than first-seen, because the records sharing a
+  // key are not all complete. Claude Code writes one line per content block and
+  // repeats the whole usage object on each, but every line before the last
+  // carries a streaming placeholder in the output field alone — a turn that
+  // emitted 40,199 output tokens is written three times, twice as
+  // `output_tokens: 4`. Input, cache read and cache creation are identical on
+  // every line of the turn, so the record with the most output is the finished
+  // one. Taking the first understated corpus output by 16% on CLI 2.1.226 and
+  // 75% on 2.1.238 — silently, and worse with each release.
+  const indexOfKey = new Map<string, number>();
   const entries: UsageEntry[] = [];
   const unpriced = new Set<string>();
 
   for (const r of results) {
     if (!r) continue;
     for (const e of r.entries) {
-      if (seen.has(e.key)) continue;
-      seen.add(e.key);
+      const kept = indexOfKey.get(e.key);
+      if (kept !== undefined) {
+        if (e.tokens.output > entries[kept].tokens.output) entries[kept] = e;
+        continue;
+      }
+      indexOfKey.set(e.key, entries.length);
       entries.push(e);
       if (e.unpriced) unpriced.add(e.model);
     }

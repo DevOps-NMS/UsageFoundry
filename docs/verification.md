@@ -8,6 +8,14 @@ Built and exercised against real transcripts:
   `$12.8436175` from the API, on 54 input / 83,517 output / 12,072,025 cache-read
   / 471,941 cache-1h tokens.
 - Dedup verified (99 → 31 records).
+- **Dedup resolution measured across 1,011 transcript files / 40,885 turns**, on
+  2026-08-21: every turn's lines share one `requestId` (0 exceptions), the last
+  line carries the largest `output_tokens` in 27,228 of 27,228 multi-line turns,
+  and `input_tokens`, `cache_read_input_tokens` and `cache_creation` are
+  identical on every line of a turn (0 differ). Corpus output under first-seen
+  29.61 Mtok against 38.80 Mtok under highest-output — understated 15.6% on CLI
+  2.1.226, 60.1% on 2.1.233, 74.4% on 2.1.234, 74.9% on 2.1.238. Worst single
+  turn recorded 4 output tokens against an actual 40,199.
 - Incremental re-scan picks up records appended mid-session.
 - Budget refusal returns `blocked` with 0 iterations and 0 spend.
 - Metric selection: cost ceiling wins when both are set; falls back to tokens
