@@ -41,7 +41,7 @@ export function isTextEntry(target: EventTarget | null): boolean {
  * Is this a chord this layer may look at at all?
  *
  * ⌘ and nothing else beside it. Ctrl is deliberately not treated as an
- * equivalent: on Windows and Linux, Ctrl+1…8 switches browser tab and Ctrl+K
+ * equivalent: on Windows and Linux, Ctrl+1…9 switches browser tab and Ctrl+K
  * is the address bar, so accepting it would shadow four of the browser's own
  * bindings to save a Mac-shaped app one modifier. ⌥ and ⇧ are excluded because
  * ⌘⇧K and ⌘⌥1 are other people's shortcuts, not aliases of ours.

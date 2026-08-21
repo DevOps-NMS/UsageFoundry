@@ -3,7 +3,7 @@ import type { IconName } from "@/components/ui/Icon";
 /**
  * The app's destinations, once.
  *
- * The source list draws them, the toolbar titles itself from them, ⌘1…⌘8
+ * The source list draws them, the toolbar titles itself from them, ⌘1…⌘9
  * navigates to them and quick open searches them. Four readers is why this is
  * a module rather than an array inside the sidebar: a pane added in one of
  * them and missed in the others is a pane you can reach and cannot get back
@@ -11,7 +11,9 @@ import type { IconName } from "@/components/ui/Icon";
  *
  * The digit follows the row's position rather than the pane's age: a shortcut
  * that names the fifth row and lands on the sixth is worse than one somebody
- * has to relearn, so inserting a pane renumbers the ones under it.
+ * has to relearn, so inserting a pane renumbers the ones under it. Nine is the
+ * ceiling and Knowledge is the ninth — a tenth destination has no digit, and a
+ * row without one is a row two of the four readers cannot describe.
  */
 export interface Pane {
   href: string;
@@ -28,8 +30,12 @@ export const PANES: readonly Pane[] = [
   { href: "/workflows", label: "Workflows", icon: "workflows", shortcut: "4" },
   { href: "/agents", label: "Agents", icon: "agents", shortcut: "5" },
   { href: "/branches", label: "Branches", icon: "branches", shortcut: "6" },
-  { href: "/account", label: "API account", icon: "account", shortcut: "7" },
-  { href: "/settings", label: "Settings", icon: "settings", shortcut: "8" },
+  // Above the last two rather than after them: those two are the install's own
+  // configuration and stay at the bottom, where Knowledge is a place the
+  // operator reads. The renumbering below it is what the rule above asks for.
+  { href: "/knowledge", label: "Knowledge", icon: "knowledge", shortcut: "7" },
+  { href: "/account", label: "API account", icon: "account", shortcut: "8" },
+  { href: "/settings", label: "Settings", icon: "settings", shortcut: "9" },
 ];
 
 /**

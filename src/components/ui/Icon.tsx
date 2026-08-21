@@ -24,6 +24,7 @@ export type IconName =
   | "workflows"
   | "agents"
   | "branches"
+  | "knowledge"
   | "account"
   | "settings"
   // The shell's own two controls: collapse the source list, and quick open.
@@ -92,6 +93,15 @@ const GLYPH: Record<IconName, ReactElement> = {
       <circle cx="4.75" cy="12" r="1.6" />
       <circle cx="11.25" cy="6.25" r="1.6" />
       <path d="M4.75 5.6v4.8M6.35 4h1.9a3 3 0 0 1 3 3v0" />
+    </>
+  ),
+  // An open book. Deliberately not a notebook — a rounded rect with a spine is
+  // `sidebar` drawn again, and two destinations the eye has to read to tell
+  // apart is the failure `agents` above records.
+  knowledge: (
+    <>
+      <path d="M8 4.6C6.9 3.4 5.4 2.85 3.5 2.85a1 1 0 0 0-1 1v7.4a1 1 0 0 0 1 1c1.9 0 3.4.55 4.5 1.75 1.1-1.2 2.6-1.75 4.5-1.75a1 1 0 0 0 1-1v-7.4a1 1 0 0 0-1-1c-1.9 0-3.4.55-4.5 1.75Z" />
+      <path d="M8 4.6V14" />
     </>
   ),
   account: (

@@ -156,9 +156,18 @@ Notes that are part of the rule, not commentary:
 
 Each of these is a thing a build run would plausibly reach for. None is allowed.
 
-1. **A ninth pane.** `panes.ts` is eight rows bound to ⌘1–⌘8 and four readers
-   (`panes.ts:3-14`). A ninth destination has no digit. New destinations are
+1. **A tenth pane.** `panes.ts` is nine rows bound to ⌘1–⌘9 and four readers
+   (`panes.ts:3-16`). A tenth destination has no digit. New destinations are
    sub-routes under an existing pane.
+
+   *This read "a ninth pane" until `/knowledge` was built.* The ban's whole
+   ground was the digit — "a ninth destination has no digit" — and nine rows
+   still have one, so the ninth was allowed and the sentence moved up by one
+   rather than being waived. Ten is where it stops, and there it stops for the
+   reason it always gave. `/knowledge` earned a row rather than a sub-route
+   because it is not *about* any existing pane: a vault is neither a run, a
+   workflow nor a setting, and filing it under Settings would have made a
+   destination out of a configuration page.
 2. **An accordion** — a *coordinated* set where opening one panel closes
 another. It is cards with extra clicks and a lost scroll position, and the
 coordination is a second state machine nothing else here has. **Independent
