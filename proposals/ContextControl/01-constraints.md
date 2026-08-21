@@ -31,14 +31,6 @@ Which gives the break-even, in further turns of the same conversation:
 
     T* = 19·(S / D) − 20
 
-The step that says the whole of `S−D` is *written* rather than partly re-read is
-not an assumption about the API: it is the shape `00-problem.md` observed at
-every re-writing handover, where a turn reads the 15,903-token shared base and
-writes everything above it (`read 15903 write 300560` on a 193-turn session,
-twenty seconds after the previous turn). Where the CLI places its cache
-breakpoints is its own business; what the transcripts record is that on this
-install a broken prefix costs the whole suffix.
-
 Read it twice, because both halves are load-bearing. It does not depend on the
 model — the multipliers are ratios of one rate — so it is the same number on
 Opus, Sonnet and Haiku. And it depends on *S/D* rather than on the absolute
@@ -46,6 +38,14 @@ sizes: **what matters is not how much an option removes, but how much it leaves
 standing after the cut.** A mechanism that drops a tool result from the middle of
 a long conversation has left almost all of *S* behind it and is paying nearly
 the full invalidation for a small *D*.
+
+The step that says the whole of `S−D` is *written* rather than partly re-read is
+not an assumption about the API: it is the shape `00-problem.md` observed at
+every re-writing handover, where a turn reads the 15,903-token shared base and
+writes everything above it (`read 15903 write 300560` on a 193-turn session,
+twenty seconds after the previous turn). Where the CLI places its cache
+breakpoints is its own business; what the transcripts record is that on this
+install a broken prefix costs the whole suffix.
 
 Priced from the measurement. `00-problem.md` gives a mid-life long session
 carrying a mean 229,059 cache-read tokens at its fifth decile, over a base
