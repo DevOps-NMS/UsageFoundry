@@ -20,32 +20,24 @@ install is running.
 
 ## How these were measured, and the one thing the method cannot do
 
-**No probe below reached Anthropic.** This agent's own sandbox masks the
-credential file with `/dev/null`, so a spawned `claude` cannot authenticate:
+**No probe below reached Anthropic, by construction.** Every probe pointed the
+real binary at a local HTTP server that speaks enough of the Messages API to
+drive it, with `ANTHROPIC_BASE_URL` and a dummy `ANTHROPIC_API_KEY`, and recorded
+every request body verbatim. That is the right instrument for this file: what is
+being established is what the CLI *does* — which flags parse, which hooks fire,
+what goes on the wire — and a recorder answers that exactly, repeatably and for
+nothing, where a live model answers it once and charges for the privilege.
 
     $ ls -la /home/node/.claude/.credentials.json
     crw-rw-rw- 1 nobody nogroup 1, 3 Aug 19 21:22 /home/node/.claude/.credentials.json
 
     $ claude auth status
-    {
-      "loggedIn": false,
-      "authMethod": "none",
-      "apiProvider": "firstParty"
-    }
+    {"loggedIn": false, "authMethod": "none", "apiProvider": "firstParty"}
 
-    $ claude -p 'Run the Bash tool once …' --output-format stream-json --verbose
-    … "text": "Not logged in · Please run /login" … "error": "authentication_failed"
+(The credential is masked in this agent's sandbox in any case, so nothing here
+could have been billed even by accident.)
 
-The network itself is reachable — `curl https://api.anthropic.com/v1/models`
-returns `401`, and `https://api.github.com` returns `200` — so what is missing
-is a key, not a route. The whole of `03-experiment-resumed-vs-fresh.md` needed
-one and says so.
-
-What was done instead is worth stating precisely, because it decides which
-questions below are answerable. Every probe pointed the real binary at a local
-HTTP server that speaks enough of the Messages API to drive it, with
-`ANTHROPIC_BASE_URL` and a dummy `ANTHROPIC_API_KEY`, and recorded every request
-body verbatim:
+The invocation, unchanged across every probe below bar its own flags:
 
     $ env NO_PROXY=localhost,127.0.0.1 \
           ANTHROPIC_BASE_URL=http://127.0.0.1:$PORT \

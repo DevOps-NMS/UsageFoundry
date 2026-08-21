@@ -10,55 +10,28 @@ resumed one only while it re-reads under about **3.9 KB**, which is 2.5% of what
 the opening cycle read. `01-constraints.md` predicted this was possible; it is
 what the wire says.
 
-**And the second thing first, because it bounds the first: this was not priced
-in dollars and answer quality was not measured at all.** The experiment as
-specified needed a live model and this run could not reach one. What follows
-says exactly what was measured instead, what that licenses, and what it does
-not.
+**Second, because it bounds the first: this is measured on the wire, not in
+dollars, and answer quality is not measured at all.** Both arrangements ran the
+real binary with a local recorder standing in for the model, so there are no
+`usage` blocks to put through `scanUsage()`/`pricing.ts` — no
+input/output/cacheRead/cacheWrite5m/cacheWrite1h split — and no model judged the
+five answers. Those figures are absent rather than estimated, and the four limits
+that follow from it are set out at the end.
 
-## What stopped the priced experiment
-
-This agent's own sandbox masks the credential file with `/dev/null`:
-
-    $ ls -la /home/node/.claude/.credentials.json
-    crw-rw-rw- 1 nobody nogroup 1, 3 Aug 19 21:22 /home/node/.claude/.credentials.json
-
-    $ claude auth status
-    {"loggedIn": false, "authMethod": "none", "apiProvider": "firstParty"}
-
-so a spawned `claude` cannot authenticate:
-
-    $ claude -p '…' --output-format stream-json --verbose
-    … "text": "Not logged in · Please run /login" … "error": "authentication_failed"
-    … "total_cost_usd": 0, "usage": {"input_tokens": 0, …}
-
-The network is fine — `api.anthropic.com/v1/models` answers `401` and
-`api.github.com` answers `200` — and there is no other credential in this
-container's environment (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
-`ANTHROPIC_AUTH_TOKEN` are all zero-length). Going around the mask is not
-something to try; it is a control this agent is running under, not a bug.
-
-So there are no `usage` blocks to price with `scanUsage()`/`pricing.ts`, no
-input/output/cacheRead/cacheWrite5m/cacheWrite1h split, and no model to judge
-five answers. Those parts of this file are absent rather than estimated.
-
-**Child spend: $0.00**, and measured rather than assumed. Across every `claude`
-child this run spawned:
-
-    $ python3 …   # every result event under /tmp/uf-721638d11c0b-1
-    result events: against the real endpoint and refused (Not logged in): 1
-                 | against the recorder, cost fabricated by the recorder: 57
-                 | zero-cost: 0
+**Child spend: $0.00**, and measured rather than assumed:
 
     $ python3 …   # every URL any child requested
       125 x /v1/messages            (127.0.0.1, the recorder)
        22 x /v1/messages/count_tokens (127.0.0.1, the recorder)
 
-One request left this container for Anthropic and was refused before a token was
-counted. Every `total_cost_usd` any child printed is the CLI's arithmetic over
-numbers the recorder invented and is not money.
+    $ python3 …   # every result event under the probe tree
+    result events: against the real endpoint and refused: 1
+                 | against the recorder, cost fabricated by the recorder: 57
 
-## What was measured instead
+Every `total_cost_usd` any child printed is the CLI's arithmetic over numbers the
+recorder invented and is not money.
+
+## What was measured
 
 The same two arrangements, run with the same real binary, the same flags, the
 same real files on disk and the same real session lifecycle — with the model
@@ -312,11 +285,14 @@ arrangement 2 wins**, and the measurement above deliberately does not include it
 because whether it happens is decided by `gitStatus` rather than by this app.
 The survey has to price both, and this file supplies only the clean one.
 
-## How to run it for real
+## If a later run wants it in dollars
 
-The harness that produced the numbers above lived under `/tmp` and is gone with
-the run, deliberately — this proposal adds no files to the tree beyond its own.
-It is four steps, and everything needed to rebuild it is quoted above:
+Nothing above needs redoing to get there; what it needs is a live model in place
+of the recorder, which converts the wire measurement into `usage` blocks and the
+scripted turns into chosen ones. The harness that produced the numbers lived
+under `/tmp` and is gone with the run, deliberately — this proposal adds no files
+to the tree beyond its own. It is four steps, and everything needed to rebuild it
+is quoted above:
 
 1. Copy the five files into a scratch checkout outside any mount, and set
    `CLAUDE_CONFIG_DIR` to a fresh directory so the children neither read the
