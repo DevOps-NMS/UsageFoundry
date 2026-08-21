@@ -70,13 +70,15 @@ tool definitions and carries a cache breakpoint. Two status lines and one
 app's argv stops that block changing, and this app's isolated runs are told to
 commit (`src/lib/settings.ts:559`–`:562`).
 
-**Every option's prize is a ceiling on a proxy, and the survey says so twelve
-times.** `16-comparison.md`'s prize row tops out at +2, and the +2 is a bet. The
-$213-a-week ceiling behind Option E, the $84 behind C, I and L, and the $152
-above all descend from the same figure — 39.3% of `Read` bytes belong to files a
-run never mentions again — which `00-problem.md` refuses to let anyone treat as
-an oracle: "a file whose name never recurs may still have been the thing that
-decided the next edit."
+**Every option's prize is a ceiling or a bet, and every option file says so in
+its own last section.** `16-comparison.md`'s prize row tops out at +2, and the
++2 is the bet above. The $213-a-week ceiling behind Option E and the $84 behind
+C, I and L descend from one figure — 39.5% of `Read` bytes belong to files a run
+never mentions again, re-measured at 39.3% — which `00-problem.md` refuses to
+let anyone treat as an oracle: "a file whose name never recurs may still have
+been the thing that decided the next edit." Twelve option files, twelve closing
+paragraphs naming the fact that most weakens the option, and not one of them
+retracted.
 
 **The app's own contribution to the problem is three orders of magnitude too
 small to matter.** Everything this app writes into a ten-cycle run is 19,927
@@ -142,15 +144,16 @@ Neither is context control and both are live today.
 nothing records it.** `childEnv` (`src/lib/orchestrator.ts:5216`–`:5231`) copies
 `process.env` and strips exactly six classes — `UF_*`, `OTEL_*`,
 `ANTHROPIC_ADMIN_KEY`, `CLAUDE_CODE_ENABLE_TELEMETRY`, `DATA_DIR`,
-`NODE_OPTIONS`. `DISABLE_AUTO_COMPACT`,
+`NODE_OPTIONS`. `DISABLE_AUTO_COMPACT`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`,
 `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`, `MAX_THINKING_TOKENS`,
-`CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS`,
-`BASH_MAX_OUTPUT_LENGTH` and `MAX_MCP_OUTPUT_TOKENS` are none of them, and all
-seven are in the binary (confirmed by the closing pass). So an install whose
-compose sets one is running a different context regime from one that does not,
-unstripped, unrecorded and unmentioned by any page. Two option files — `09-` and
-`15-` — found this independently and each made "make the leak an explicit key"
-its first act.
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and
+`BASH_MAX_OUTPUT_LENGTH` are none of them, and all seven are in the binary
+(confirmed by the closing pass; `MAX_MCP_OUTPUT_TOKENS` is there too and is left
+off this list because no MCP server is on a work cycle's argv). So an install
+whose compose sets one is running a different context regime from one that does
+not, unstripped, unrecorded and unmentioned by any page. Two option files —
+`09-` and `15-` — found this independently and each made "make the leak an
+explicit key" its first act.
 
 **The CLI is already compacting these runs and this app does not know.**
 `02-levers-on-the-pin.md` drove a `-p --output-format stream-json --verbose`
@@ -211,9 +214,10 @@ refusing.
 
 It has the one property Option A does not: it actually removes something. A
 delegated turn's context is structurally separate — the closing pass re-ran
-`02-`'s probe and got the same shape, half the tools, a fraction of the system
-prompt, its own first user message, no parent history, and the parent's own
-prefix byte-identical across the delegation. It is the only mechanism in the
+`02-`'s probe and got the same shape — a third to a half of the tools
+depending on which agent is delegated to, a fraction of the system prompt, its
+own first user message, no parent history, and the parent's own prefix
+byte-identical across the delegation. It is the only mechanism in the
 survey that takes bytes out of the main thread without touching the main thread.
 And its bytes are written at a cheaper rate: on this install every delegated
 turn writes a five-minute cache at 1.25× and every main-thread turn a one-hour
@@ -259,7 +263,7 @@ saving.
 
 ## Rejected by name
 
-**Option F, the budget for compaction.** Not because compaction is wrong but
+**Option F, compaction driven by this app.** Not because compaction is wrong but
 because of what this particular lever does. On a 200k-window model
 `--autocompact` can only *lower* the threshold — re-measured on this pin,
 `--autocompact 100000` gives `effectiveWindow=80000` and `--autocompact 1000000`
