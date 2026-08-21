@@ -634,6 +634,33 @@ Built and exercised against real transcripts:
   exercised the per-run `--settings` overlay (these had none), the `denyRead`
   paths, the network allowlist, or a work cycle doing real work; the write set
   and everything else below stay on the list.
+- **The vault reader against a real 773-note Obsidian vault, and all four of its
+  routes.** On 2026-08-21, against a live vault bind-mounted read-only at
+  `/workspace2` — the operator's own, edited by other runs while this ran, and
+  written to by nothing here. The compiled `knowledge.ts` indexed 773 notes into
+  19,438 edges over 885 nodes (773 notes, 95 tags, 17 phantoms), finding 20
+  orphans and 212 broken links, untruncated. A cold scan took **303ms** and the
+  next call **9ms**, returning the identical object — which is the whole of the
+  cache claim, measured rather than reasoned. The four routes were driven as
+  functions off a scratch `tsc` build with `DATA_DIR` and `WORKSPACE_ROOTS`
+  pointed at throwaways: `PUT /api/settings` refused `knowledgeBaseMountId:
+  "nope"` and a `../escape` subpath with 400 and accepted the real mount;
+  `/status` answered those counts; `/graph?kinds=note,phantom,tag` answered
+  885 nodes uncapped; `/note?path=…` answered a note with 13 frontmatter keys,
+  100 outgoing and 14 incoming links and its frontmatter block stripped from the
+  body; `/note?path=../../../etc/passwd` answered **404**, which is the
+  containment argument working as stated — the path is a key in a map, not a
+  join; and `/search?q=terraform` ranked an exact title first.
+
+  What it settles is that the parser and resolver are right about *this* vault's
+  conventions, which is what caught the defect worth naming: frontmatter tags
+  were not becoming tag nodes, and since 747 of the 773 notes carry every tag as
+  a property and not one writes a `#tag` in the body, the reader reported a
+  fully organised vault as having **zero** tags — a figure an operator reads as
+  a fact about their vault. What it does not settle is anything through a
+  browser: the Knowledge base settings section has been typechecked and built,
+  never looked at, and no `docker compose up --build` was possible in the
+  environment this landed from. Both are on the list below.
 
 ## Not yet verified by hand
 
@@ -2453,6 +2480,18 @@ through before trusting this unattended:
   was unavailable in the container this was implemented in, so the
   `docker compose up --build` half of the real verification loop has not been run
   against any of it.
+- **The Knowledge base settings section in a browser.** The section, its mount
+  picker, its subpath field and the figures panel typecheck and build, and the
+  route behind them is measured in the entry above — but nothing has rendered
+  them. Four states are drawn and none has been seen: nothing configured, a
+  mount that is gone (the picker keeps the stored id as *Folder no longer
+  mounted* and Save then refuses it by id), a vault that scanned, and a walk
+  that hit its cap. The third of those is also the only place `truncated` shows,
+  and no vault reachable from here is large enough to produce it — the cap is
+  5,000 notes and the vault measured above holds 773 — so the `≥` prefix and the
+  Truncated badge have never been on screen. Docker was unavailable in the
+  container this landed from, so the `docker compose up --build` half of the
+  loop was not run against any of it.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

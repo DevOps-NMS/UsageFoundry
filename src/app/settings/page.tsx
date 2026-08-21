@@ -13,6 +13,7 @@ import type {
   BudgetPolicyDTO,
   ClaudeAuthDTO,
   ClaudeAuthStateDTO,
+  KnowledgeStatusDTO,
   PluginsReportDTO,
   RunGuardsDTO,
   SandboxDTO,
@@ -90,6 +91,7 @@ const SECTIONS = [
   { id: "guards", label: "Default guard set" },
   { id: "unattended", label: "Unattended runs" },
   { id: "plugins", label: "Plugins" },
+  { id: "knowledge", label: "Knowledge base" },
   { id: "storage", label: "Storage" },
   { id: "prompts", label: "Prompts" },
 ];
@@ -230,6 +232,8 @@ const EDITABLE_PATHS = [
   "killProcessGroup",
   "resumeGraceHours",
   "telemetryForRuns",
+  "knowledgeBaseMountId",
+  "knowledgeBaseSubpath",
   "eventRetentionDays",
   "checkoutRetentionDays",
   "transcriptRetentionDays",
@@ -819,6 +823,119 @@ function StorageFigures({
   );
 }
 
+/**
+ * What the last scan of the vault found.
+ *
+ * `StorageFigures`' rule, and for a sharper reason: a knowledge base that
+ * cannot be read has no notes, no orphans and no broken links, and rendering
+ * that as three zeroes says "your vault is in perfect health" about a directory
+ * this container cannot open. So an unavailable vault gets a sentence and no
+ * figures at all, and the counts are `null` on the wire precisely so this
+ * cannot be got wrong by accident.
+ */
+function KnowledgeFigures({
+  report,
+  error,
+}: {
+  report: KnowledgeStatusDTO | null;
+  error: string | null;
+}) {
+  if (error !== null) {
+    return (
+      <Notice tone="warn">
+        <strong>The knowledge base could not be read.</strong> {error}
+      </Notice>
+    );
+  }
+  if (!report) return <Empty>Scanning…</Empty>;
+  if (!report.configured) {
+    return (
+      <Empty>
+        No knowledge base yet. Pick one of your mounted folders below and this
+        fills in with what is in it.
+      </Empty>
+    );
+  }
+  if (!report.available) {
+    return (
+      <Notice tone="warn">
+        <strong>Nothing was scanned.</strong> {report.error} No figures are shown
+        rather than zeroes, because an unreadable vault and an empty one are not
+        the same thing.
+      </Notice>
+    );
+  }
+
+  const where = report.subpath
+    ? `${report.mountLabel} / ${report.subpath}`
+    : report.mountLabel;
+
+  return (
+    <ListGroup
+      label="Found in the vault"
+      footnote={
+        <>
+          Read only — nothing in this app writes into the vault. Rescanned when
+          a file&rsquo;s size or timestamp moves
+          {report.scannedAt !== null && <> — last scan {ago(report.scannedAt)}</>}
+        </>
+      }
+    >
+      <ListRow
+        label="Vault"
+        description="One of the folders this container already mounts. Choosing it here adds no access an agent did not have"
+      >
+        <span className="text-sm">{where}</span>
+      </ListRow>
+
+      <ListRow
+        label="Notes"
+        description="Markdown files, excluding the vault's own configuration folders"
+      >
+        <span className="tabular-nums text-sm">
+          {/* "at least", for `StorageFigures`' reason: a walk that stopped at
+              its cap must not read as a total. */}
+          {report.truncated ? "≥ " : ""}
+          {(report.noteCount ?? 0).toLocaleString()}
+        </span>
+      </ListRow>
+
+      <ListRow
+        label="Orphans"
+        description="Notes with no link to another note and none from one. Tags do not count as a connection"
+      >
+        <span className="tabular-nums text-sm">
+          {(report.orphanCount ?? 0).toLocaleString()}
+        </span>
+      </ListRow>
+
+      <ListRow
+        label="Broken links"
+        description="Links naming a note that does not exist. Kept in the graph rather than dropped — in a vault they are usually intentions rather than mistakes"
+      >
+        <span className="tabular-nums text-sm">
+          {(report.brokenLinkCount ?? 0).toLocaleString()}
+        </span>
+      </ListRow>
+
+      <ListRow label="Tags" description="Distinct tags, from frontmatter and from the body">
+        <span className="tabular-nums text-sm">
+          {(report.tagCount ?? 0).toLocaleString()}
+        </span>
+      </ListRow>
+
+      {report.truncated && (
+        <ListRow
+          label="The scan stopped early"
+          description="This vault is larger than the walk's cap, so every figure above is a floor rather than a total. Narrowing the folder below is the fix"
+        >
+          <Badge tone="warn">Truncated</Badge>
+        </ListRow>
+      )}
+    </ListGroup>
+  );
+}
+
 /** One `label: value` line in the environment summary under the title. */
 /**
  * The one way to end a session from inside the app.
@@ -1259,6 +1376,11 @@ export default function SettingsPage() {
   const [plugins, setPlugins] = useState<PluginsReportDTO | null>(null);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
   const [pluginBusy, setPluginBusy] = useState<string | null>(null);
+  // The vault scan, on its own read for `storage`'s reason: it walks a
+  // directory tree, and a figure that could not be measured has to read as
+  // absent rather than as zero.
+  const [knowledge, setKnowledge] = useState<KnowledgeStatusDTO | null>(null);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const standalone = useStandalone();
   const [sectionHash, setSectionHash] = useSectionHash();
 
@@ -1336,6 +1458,20 @@ export default function SettingsPage() {
     },
     [],
   );
+
+  const loadKnowledge = useCallback(async () => {
+    const res = await jsonRequest<KnowledgeStatusDTO>("/api/knowledge/status");
+    if (!res.ok) {
+      setKnowledgeError(actionFailureMessage(res, "The knowledge base could not be read."));
+      return;
+    }
+    setKnowledgeError(null);
+    setKnowledge(res.data);
+  }, []);
+
+  useEffect(() => {
+    void loadKnowledge();
+  }, [loadKnowledge]);
 
   useEffect(() => {
     fetch("/api/storage", { cache: "no-store" })
@@ -1440,12 +1576,16 @@ export default function SettingsPage() {
       setCopyGlobsText(null);
       setSaved(true);
       setSaveError(null);
+      // The figures are a reading of whatever mount is now named, so a Save
+      // that repointed the vault must not leave the previous one's counts on
+      // screen under the new folder's name.
+      void loadKnowledge();
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
     }
-  }, [effective]);
+  }, [effective, loadKnowledge]);
 
   async function calibrate() {
     setCalBusy(true);
@@ -2877,6 +3017,70 @@ export default function SettingsPage() {
             ))}
           </ListGroup>
         )}
+      </Section>
+
+      <Section
+        id="knowledge"
+        title="Knowledge base"
+        lede="A folder of markdown notes, read as a graph of the links between them. It is one of the folders already mounted below — naming it here lets this app read it, and nothing here writes to it."
+      >
+        <KnowledgeFigures report={knowledge} error={knowledgeError} />
+
+        <ListGroup
+          className="mt-4"
+          label="Where the vault is"
+          footnote="Mounted folders come from your .env and are fixed when the container starts, so this picks one rather than adding one"
+        >
+          <SettingRow
+            htmlFor="kbmount"
+            edited={isEdited("knowledgeBaseMountId")}
+            label="Folder"
+            description="Which mounted folder holds the notes"
+          >
+            <div className="w-64">
+              <Select
+                id="kbmount"
+                value={effective.knowledgeBaseMountId ?? ""}
+                onChange={(e) =>
+                  patch({ knowledgeBaseMountId: e.target.value || null })
+                }
+              >
+                <option value="">No knowledge base</option>
+                {workspaceMounts.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+                {/* A mount that has gone since this was saved. Kept as an
+                    option rather than reverting the picker to "No knowledge
+                    base", which would read as a setting nobody ever made —
+                    and Save then refuses it by id. */}
+                {effective.knowledgeBaseMountId !== null &&
+                  !workspaceMounts.some((m) => m.id === effective.knowledgeBaseMountId) && (
+                    <option value={effective.knowledgeBaseMountId}>
+                      Folder no longer mounted
+                    </option>
+                  )}
+              </Select>
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="kbsub"
+            edited={isEdited("knowledgeBaseSubpath")}
+            label="Folder inside it"
+            description="Leave blank for the whole folder. A vault is usually one directory in a mount, and walking its parent files every unrelated note beside it as an orphan"
+          >
+            <div className="w-64">
+              <Input
+                id="kbsub"
+                placeholder="Knowledge Vault"
+                value={effective.knowledgeBaseSubpath}
+                onChange={(e) => patch({ knowledgeBaseSubpath: e.target.value })}
+              />
+            </div>
+          </SettingRow>
+        </ListGroup>
       </Section>
 
       <Section
