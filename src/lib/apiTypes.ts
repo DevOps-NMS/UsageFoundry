@@ -2030,6 +2030,19 @@ export interface KnowledgeEdgeDTO {
   line: number;
   /** `false` means `to` is a phantom. The edge is still on the wire. */
   resolved: boolean;
+  /**
+   * The target's vault-relative path when the target is a **note**, and `null`
+   * for everything else.
+   *
+   * One field rather than a path plus a kind, because the three states a reader
+   * has to tell apart are exactly the three this makes: a path is somewhere the
+   * page can open, `null` beside `resolved: true` is a real target the page
+   * does not open (a tag, an attachment), and `null` beside `resolved: false`
+   * is a link that goes nowhere. A plain `toPath` carrying an attachment's path
+   * would put the third and the second on the same footing and render an
+   * embedded image as a broken link.
+   */
+  toNotePath: string | null;
 }
 
 export interface KnowledgeHeadingDTO {
@@ -2123,4 +2136,84 @@ export interface KnowledgeGraphDTO {
   truncated: boolean;
   /** This answer hit its node cap — not everything indexed was sent. */
   capped: boolean;
+}
+
+/** One note as the browse list draws it. The body is deliberately not here. */
+export interface KnowledgeListEntryDTO {
+  path: string;
+  title: string;
+  /** The directory the note sits in. `""` is the vault root. */
+  folder: string;
+  tags: string[];
+  /** Frontmatter `type`, which is how a vault classifies a note, or `null`. */
+  type: string | null;
+  /** Degrees in the **whole** graph, not in the filtered page. */
+  inDegree: number;
+  outDegree: number;
+  /** The file's mtime, epoch ms. */
+  updatedAt: number;
+  /** No frontmatter block at all, which is one of the three health lists. */
+  missingFrontmatter: boolean;
+}
+
+/**
+ * One value a filter offers, with how many notes carry it.
+ *
+ * The count is over the **whole vault** and not over the current result set,
+ * which is the branches page's rule: a filter that hides the values you would
+ * use to change it is a filter you cannot get out of.
+ */
+export interface KnowledgeFacetDTO {
+  value: string;
+  count: number;
+}
+
+/** How the browse list is ordered. */
+export type KnowledgeSortDTO = "title" | "updated" | "links";
+
+export interface KnowledgeBrowseDTO {
+  notes: KnowledgeListEntryDTO[];
+  /** Notes matching the filter, before the page window is applied. */
+  total: number;
+  offset: number;
+  limit: number;
+  folders: KnowledgeFacetDTO[];
+  tags: KnowledgeFacetDTO[];
+  types: KnowledgeFacetDTO[];
+  sort: KnowledgeSortDTO;
+  /** The vault walk hit its cap, so `total` is a floor rather than a total. */
+  truncated: boolean;
+}
+
+/** A note named by one of the health lists. */
+export interface KnowledgeNoteRefDTO {
+  path: string;
+  title: string;
+  folder: string;
+}
+
+/**
+ * What is wrong with the vault, in the three shapes an operator can act on.
+ *
+ * Each list is cut to `listLimit` and each count is the whole of it, derived in
+ * the same pass — the count and the list can therefore never disagree, which is
+ * `restartClosedRuns`' rule: a badge computed by a second query is a badge that
+ * drifts from the list it opens onto.
+ */
+export interface KnowledgeHealthDTO {
+  /** Notes joined to no other note in either direction. Tags do not count. */
+  orphans: KnowledgeNoteRefDTO[];
+  orphanCount: number;
+  /** Every link that resolved to nothing, with the note that wrote it. */
+  brokenLinks: KnowledgeBrokenLinkDTO[];
+  brokenLinkCount: number;
+  /** Notes with no frontmatter block at all. */
+  missingFrontmatter: KnowledgeNoteRefDTO[];
+  missingFrontmatterCount: number;
+  /** Notes indexed, which every count above is a share of. */
+  noteCount: number;
+  /** How many rows each list above was cut to. */
+  listLimit: number;
+  truncated: boolean;
+  scannedAt: number;
 }

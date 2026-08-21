@@ -9,8 +9,12 @@ import {
   clearKnowledgeCache,
   extractHeadings,
   extractLinks,
+  knowledgeBrowse,
+  knowledgeHealth,
   knowledgeIndex,
   normalizeSubpath,
+  noteFolder,
+  noteType,
   parseFrontmatter,
   parseNote,
   searchKnowledge,
@@ -396,6 +400,175 @@ test("search finds a note by title, alias, tag and path", () => {
   assert.ok(searchKnowledge(idx, "status/seed").some((h) => h.path === "1 Projects/Lonely.md"));
   assert.ok(searchKnowledge(idx, "4 Archive").some((h) => h.path.startsWith("4 Archive/")));
   assert.deepEqual(searchKnowledge(idx, "   "), [], "a blank query is not a match-everything");
+});
+
+/* ------------------------- browsing and health --------------------------- */
+
+/**
+ * An index built from text alone, so a case can name the notes it needs.
+ *
+ * The fixture above is a vault, not a table: it has no `type:` property on any
+ * note and five notes is not enough to page. Both would be a fixture edit that
+ * every assertion above this line would have to be re-read against.
+ */
+function synthetic(notes: Array<{ rel: string; raw: string; mtimeMs?: number }>) {
+  const parsed = new Map<string, ParsedNote>();
+  for (const { rel, raw, mtimeMs } of notes) {
+    parsed.set(rel, { ...parseNote(rel, raw), abs: rel, mtimeMs: mtimeMs ?? 0, size: raw.length });
+  }
+  return buildIndex("/nowhere", parsed, new Map(), false);
+}
+
+const paths = (view: { notes: Array<{ path: string }> }) => view.notes.map((n) => n.path);
+
+test("a folder filter selects everything beneath it, not what sits directly in it", () => {
+  const idx = index();
+  assert.equal(noteFolder("4 Archive/old/State Locking.md"), "4 Archive/old");
+  assert.equal(noteFolder("INDEX.md"), "", "a note at the root is in no folder");
+
+  // `4 Archive` holds no note of its own — the one note is a level down. An
+  // equality test answers zero here, and zero reads as an empty folder rather
+  // than as the wrong question, which is the whole reason this is pinned.
+  assert.deepEqual(paths(knowledgeBrowse(idx, { folder: "4 Archive" })), [
+    "4 Archive/old/State Locking.md",
+  ]);
+  assert.equal(knowledgeBrowse(idx, { folder: "3 Resources" }).total, 2);
+  assert.equal(knowledgeBrowse(idx, {}).total, 5, "no folder is the whole vault");
+  assert.equal(knowledgeBrowse(idx, { folder: "/3 Resources/" }).total, 2, "one spelling");
+  // A prefix that is not a path segment is not a folder. `3 Res` matching
+  // `3 Resources` would be a filter nobody could have chosen from the facets.
+  assert.equal(knowledgeBrowse(idx, { folder: "3 Res" }).total, 0);
+});
+
+test("a filter's own values are counted over the whole vault", () => {
+  const idx = index();
+  const seeded = knowledgeBrowse(idx, { tag: "status/seed" });
+  assert.deepEqual(paths(seeded), ["1 Projects/Lonely.md"]);
+
+  // Counted over the vault rather than over the one matched note: a facet list
+  // narrowed to the result set offers only the filter you already have, and the
+  // way out of it is the browser's back button.
+  const folder = (value: string) => seeded.folders.find((f) => f.value === value)?.count;
+  assert.equal(folder("3 Resources"), 2);
+  // One entry per ancestor, because selecting `4 Archive` is what shows the
+  // note beneath it.
+  assert.equal(folder("4 Archive"), 1);
+  assert.equal(folder("4 Archive/old"), 1);
+  assert.equal(folder(""), undefined, "the vault root is not a folder to select");
+
+  assert.equal(seeded.tags.find((t) => t.value === "topic/terraform")?.count, 2);
+  assert.equal(seeded.total, 1, "the counts are the vault's, the total is the filter's");
+});
+
+test("a note's type is a frontmatter property and is never guessed", () => {
+  // INDEX.md is tagged `type/moc`, which is how this vault says what a note is
+  // — and is still not a `type:` property. Reading it as one fills the filter
+  // with values the operator never wrote and cannot correct from Obsidian.
+  const idx = index();
+  const indexEntry = knowledgeBrowse(idx, { q: "INDEX" }).notes[0];
+  assert.equal(indexEntry?.path, "INDEX.md");
+  assert.equal(indexEntry?.type, null);
+  assert.deepEqual(knowledgeBrowse(idx).types, [], "a tag was read as a type");
+
+  assert.equal(noteType({ type: "  reference  " }), "reference");
+  assert.equal(noteType({ type: "" }), null, "an empty property is not a type");
+  assert.equal(noteType({ type: ["a", "b"] }), null, "a list is not a type");
+
+  const typed = synthetic([
+    { rel: "a.md", raw: "---\ntype: reference\n---\n\n# A" },
+    { rel: "b.md", raw: "---\ntype: Reference\n---\n\n# B" },
+    { rel: "c.md", raw: "# C" },
+  ]);
+  // Case-insensitive against the property, so a facet chosen as written matches.
+  assert.deepEqual(paths(knowledgeBrowse(typed, { type: "reference" })), ["a.md", "b.md"]);
+});
+
+test("a query matches an alias, which is the name the link was written with", () => {
+  const idx = index();
+  assert.deepEqual(paths(knowledgeBrowse(idx, { q: "tfstate" })), [
+    "3 Resources/Terraform State.md",
+  ]);
+  assert.deepEqual(paths(knowledgeBrowse(idx, { q: "4 archive" })), [
+    "4 Archive/old/State Locking.md",
+  ]);
+});
+
+test("every page window is stable, and an offset past the end lands on the last page", () => {
+  // Two notes share a title, which is what the tie-break is for: without it the
+  // sort is whatever the engine does with equal keys, and the same note can
+  // appear on page 1 and page 2 while another appears on neither.
+  const idx = synthetic([
+    { rel: "a.md", raw: "# Same", mtimeMs: 5 },
+    { rel: "b.md", raw: "# Same", mtimeMs: 4 },
+    { rel: "c.md", raw: "# Same", mtimeMs: 3 },
+    { rel: "d.md", raw: "# Same", mtimeMs: 2 },
+    { rel: "e.md", raw: "# Same", mtimeMs: 1 },
+  ]);
+
+  assert.deepEqual(paths(knowledgeBrowse(idx, { limit: 2 })), ["a.md", "b.md"]);
+  assert.deepEqual(paths(knowledgeBrowse(idx, { limit: 2, offset: 2 })), ["c.md", "d.md"]);
+  assert.deepEqual(paths(knowledgeBrowse(idx, { limit: 2, offset: 4 })), ["e.md"]);
+
+  // Past the end lands on the last *page*, not on the last note: a pager two
+  // clicks deep can be past the end by the time it is followed, and a page of
+  // one row there reads as "the rest of these are gone".
+  const beyond = knowledgeBrowse(idx, { limit: 2, offset: 40 });
+  assert.equal(beyond.offset, 4);
+  assert.deepEqual(paths(beyond), ["e.md"]);
+  assert.equal(beyond.total, 5, "the total is the match count, never the page's");
+
+  const empty = knowledgeBrowse(idx, { limit: 2, offset: 40, q: "no such note" });
+  assert.equal(empty.offset, 0, "an offset into an empty result set is the first page");
+  assert.deepEqual(paths(empty), []);
+});
+
+test("the sort orders are the ones the page offers, each breaking its tie on the path", () => {
+  const idx = synthetic([
+    { rel: "old.md", raw: "# Zebra\n\nLinks to [[hub]] and [[leaf]].", mtimeMs: 10 },
+    { rel: "hub.md", raw: "# Apple", mtimeMs: 30 },
+    { rel: "leaf.md", raw: "# Mango", mtimeMs: 20 },
+  ]);
+
+  assert.deepEqual(paths(knowledgeBrowse(idx, { sort: "title" })), ["hub.md", "leaf.md", "old.md"]);
+  assert.deepEqual(paths(knowledgeBrowse(idx, { sort: "updated" })), [
+    "hub.md",
+    "leaf.md",
+    "old.md",
+  ]);
+  // `links` is both directions summed: the note that wrote two links is as
+  // connected as the note two links point at.
+  assert.equal(knowledgeBrowse(idx, { sort: "links" }).notes[0]?.path, "old.md");
+});
+
+test("the health lists and their counts come out of one pass", () => {
+  const health = knowledgeHealth(index());
+
+  assert.deepEqual(
+    health.orphans.map((o) => o.path),
+    ["1 Projects/Lonely.md", "4 Archive/old/State Locking.md"],
+  );
+  assert.equal(health.orphanCount, health.orphans.length);
+
+  // Both notes naming the missing target, each with the note and the target
+  // that failed — a count on its own tells an operator there is work and not
+  // where it is.
+  assert.equal(health.brokenLinkCount, 2);
+  assert.deepEqual(
+    health.brokenLinks.map((b) => b.target),
+    ["Nothing Written Yet", "Nothing Written Yet"],
+  );
+  assert.ok(health.brokenLinks.every((b) => b.line > 0 && b.from));
+
+  // The narrowest reading available: no frontmatter block at all. A required
+  // `title` or `tags` would be this app inventing a schema for somebody else's
+  // vault, and every note it flagged would be a false positive.
+  assert.deepEqual(
+    health.missingFrontmatter.map((m) => m.path),
+    ["3 Resources/State Locking.md", "4 Archive/old/State Locking.md"],
+  );
+  assert.equal(health.missingFrontmatterCount, 2);
+  assert.equal(health.noteCount, 5);
+  assert.equal(health.truncated, false);
 });
 
 /* -------------------------------- cache --------------------------------- */

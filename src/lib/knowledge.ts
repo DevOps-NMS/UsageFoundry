@@ -3,12 +3,18 @@ import path from "node:path";
 
 import type {
   KnowledgeBrokenLinkDTO,
+  KnowledgeBrowseDTO,
   KnowledgeEdgeDTO,
+  KnowledgeFacetDTO,
   KnowledgeHeadingDTO,
+  KnowledgeHealthDTO,
   KnowledgeLinkKindDTO,
+  KnowledgeListEntryDTO,
   KnowledgeNodeDTO,
   KnowledgeNoteDTO,
+  KnowledgeNoteRefDTO,
   KnowledgeSearchHitDTO,
+  KnowledgeSortDTO,
   KnowledgeStatusDTO,
 } from "./apiTypes";
 import { mountById } from "./config";
@@ -160,7 +166,7 @@ export interface KnowledgeIndex {
   /** Edges out of a note, keyed by note id. */
   outgoing: Map<string, KnowledgeEdgeDTO[]>;
   brokenLinks: KnowledgeBrokenLinkDTO[];
-  /** Note ids with no note-to-note link in either direction. */
+  /** Vault-relative paths with no note-to-note link in either direction. */
   orphans: string[];
 }
 
@@ -1014,6 +1020,9 @@ export function buildIndex(
     for (const link of note.links) {
       let toId: string;
       let resolved = true;
+      // Set only where the target is a note, which is what makes the edge say
+      // "somewhere you can open" rather than merely "somewhere that exists".
+      let toNotePath: string | null = null;
 
       if (link.kind === "tag") {
         toId = TAG_ID(link.target);
@@ -1031,6 +1040,7 @@ export function buildIndex(
         const hit = resolveTarget(resolver, link.target);
         if (hit?.kind === "note") {
           toId = NOTE_ID(hit.rel);
+          toNotePath = hit.rel;
           if (hit.rel !== note.rel) {
             connected.add(fromId);
             connected.add(toId);
@@ -1080,6 +1090,7 @@ export function buildIndex(
         block: link.block,
         line: link.line,
         resolved,
+        toNotePath,
       };
       edges.push(edge);
 
@@ -1408,4 +1419,232 @@ export function searchKnowledge(
   return hits
     .sort((a, b) => b.score - a.score || a.title.localeCompare(b.title))
     .slice(0, Math.max(1, limit));
+}
+
+/* ------------------------------------------------------------------ */
+/*                          Browsing and health                        */
+/* ------------------------------------------------------------------ */
+
+/** Notes one `/api/knowledge/notes` answer carries by default. */
+export const KNOWLEDGE_PAGE_SIZE = 50;
+
+/** The most one answer will carry, however large a `limit` asks for. */
+export const KNOWLEDGE_MAX_PAGE_SIZE = 200;
+
+/**
+ * Rows each health list is cut to.
+ *
+ * A vault with 300 broken links is exactly the vault this page is for, and a
+ * list of 300 rows is one nobody reads — but the *count* beside it is what an
+ * operator acts on, so the count is always the whole figure and the list says
+ * it was cut. Both come from one pass, which is what stops them disagreeing.
+ */
+export const KNOWLEDGE_HEALTH_LIST = 200;
+
+const SORTS: readonly KnowledgeSortDTO[] = ["title", "updated", "links"];
+
+/** Whether a string off the wire names one of the orders this offers. */
+export function isKnowledgeSort(raw: string | null): raw is KnowledgeSortDTO {
+  return raw !== null && (SORTS as readonly string[]).includes(raw);
+}
+
+/** The directory part of a vault-relative path. `""` is the vault root. */
+export function noteFolder(rel: string): string {
+  const at = rel.lastIndexOf("/");
+  return at === -1 ? "" : rel.slice(0, at);
+}
+
+/**
+ * The note's own classification, which is a frontmatter `type` and nothing
+ * else.
+ *
+ * Deliberately not inferred from a `type/…` tag or from the folder: a vault
+ * that classifies its notes says so in a property, and a page that guesses when
+ * it does not would show a filter full of values the operator never wrote.
+ */
+export function noteType(frontmatter: Record<string, unknown>): string | null {
+  const raw = frontmatter.type;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+function listEntry(note: ParsedNote, nodes: Map<string, KnowledgeNodeDTO>): KnowledgeListEntryDTO {
+  const node = nodes.get(NOTE_ID(note.rel));
+  return {
+    path: note.rel,
+    title: note.title,
+    folder: noteFolder(note.rel),
+    tags: note.tags,
+    type: noteType(note.frontmatter),
+    inDegree: node?.inDegree ?? 0,
+    outDegree: node?.outDegree ?? 0,
+    updatedAt: note.mtimeMs,
+    missingFrontmatter: Object.keys(note.frontmatter).length === 0,
+  };
+}
+
+/** Filters `/api/knowledge/notes` accepts. Every one of them is optional. */
+export interface BrowseFilter {
+  /** A folder and everything under it. `""` or absent is the whole vault. */
+  folder?: string | null;
+  tag?: string | null;
+  type?: string | null;
+  /** Substring over title, alias and path. */
+  q?: string | null;
+  sort?: KnowledgeSortDTO;
+  offset?: number;
+  limit?: number;
+}
+
+/**
+ * A folder filter is a prefix, not an equality test.
+ *
+ * This vault is four deep and its top level is five folders, so an equality
+ * test would make `1 Projects` — the value an operator reaches for first —
+ * select the nothing that sits directly in it. The failure is silent: an empty
+ * list reads as "no notes there" rather than as "that is not what this filter
+ * means".
+ */
+function inFolder(folder: string, prefix: string): boolean {
+  return prefix === "" || folder === prefix || folder.startsWith(`${prefix}/`);
+}
+
+function bump(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+/** A facet map as the wire wants it: most notes first, then alphabetical. */
+function facets(counts: Map<string, number>): KnowledgeFacetDTO[] {
+  return [...counts]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+}
+
+const BY_SORT: Record<
+  KnowledgeSortDTO,
+  (a: KnowledgeListEntryDTO, b: KnowledgeListEntryDTO) => number
+> = {
+  title: (a, b) => a.title.localeCompare(b.title) || a.path.localeCompare(b.path),
+  // Every order breaks its tie on the path, so a page window is stable across
+  // two reads of an unchanged vault — without it, the same note can appear on
+  // page 1 and page 2 and another on neither.
+  updated: (a, b) => b.updatedAt - a.updatedAt || a.path.localeCompare(b.path),
+  links: (a, b) =>
+    b.inDegree + b.outDegree - (a.inDegree + a.outDegree) || a.path.localeCompare(b.path),
+};
+
+/**
+ * The browse list: notes matching a filter, one page of them, and the values
+ * every filter offers.
+ *
+ * The facets are counted over the **whole** vault rather than over the result
+ * set, which is the rule the branches page's repository filter already records:
+ * a filter that hides the values you would use to change it is one you cannot
+ * get out of. So a folder that this tag rules out still appears, with the
+ * number of notes it holds, and choosing it replaces the tag rather than
+ * landing on an empty list with no way back.
+ */
+export function knowledgeBrowse(index: KnowledgeIndex, filter: BrowseFilter = {}): KnowledgeBrowseDTO {
+  const folder = (filter.folder ?? "").trim().replace(/^\/+|\/+$/g, "");
+  const tag = filter.tag?.trim().replace(/^#/, "").toLowerCase() || null;
+  const type = filter.type?.trim().toLowerCase() || null;
+  const q = filter.q?.trim().toLowerCase() || null;
+  const sort = filter.sort ?? "title";
+  const limit = Math.max(1, Math.min(filter.limit ?? KNOWLEDGE_PAGE_SIZE, KNOWLEDGE_MAX_PAGE_SIZE));
+
+  const folderCounts = new Map<string, number>();
+  const tagCounts = new Map<string, number>();
+  const typeCounts = new Map<string, number>();
+  const matched: KnowledgeListEntryDTO[] = [];
+
+  for (const note of index.notes.values()) {
+    const entry = listEntry(note, index.nodes);
+
+    // A folder facet counts every note *beneath* it, one entry per ancestor,
+    // because that is what selecting it will show. The counts therefore sum
+    // past the vault's note count, which is what a hierarchy does and not a
+    // figure to reconcile against `total`.
+    const parts = entry.folder ? entry.folder.split("/") : [];
+    for (let i = 1; i <= parts.length; i++) bump(folderCounts, parts.slice(0, i).join("/"));
+    for (const t of entry.tags) bump(tagCounts, t);
+    if (entry.type) bump(typeCounts, entry.type);
+
+    if (!inFolder(entry.folder, folder)) continue;
+    if (tag && !entry.tags.some((t) => t.toLowerCase() === tag)) continue;
+    if (type && entry.type?.toLowerCase() !== type) continue;
+    if (q) {
+      const haystack = [entry.title, entry.path, ...note.aliases].join("\n").toLowerCase();
+      if (!haystack.includes(q)) continue;
+    }
+    matched.push(entry);
+  }
+
+  matched.sort(BY_SORT[sort]);
+
+  // An offset past the end lands on the last page rather than on nothing. The
+  // vault is a store somebody else is editing, so a pager two clicks deep can
+  // be past the end by the time it is followed — and an empty page there reads
+  // as "these notes are gone".
+  const lastPage = Math.max(0, Math.floor(Math.max(0, matched.length - 1) / limit) * limit);
+  const offset = Math.min(Math.max(0, filter.offset ?? 0), lastPage);
+
+  return {
+    notes: matched.slice(offset, offset + limit),
+    total: matched.length,
+    offset,
+    limit,
+    folders: facets(folderCounts),
+    tags: facets(tagCounts),
+    types: facets(typeCounts),
+    sort,
+    truncated: index.truncated,
+  };
+}
+
+function noteRef(note: ParsedNote): KnowledgeNoteRefDTO {
+  return { path: note.rel, title: note.title, folder: noteFolder(note.rel) };
+}
+
+/**
+ * The three things wrong with a vault that an operator can go and fix.
+ *
+ * All three are absences, and an absence is what a browse list cannot show:
+ * a note nothing links to looks exactly like a note you have not scrolled to,
+ * and a `[[link]]` that resolves to nothing renders as a link until you press
+ * it. So they are counted here and named, with the note and — for a broken
+ * link — the target that failed to resolve and the line it was written on,
+ * which together are enough to find it in Obsidian.
+ *
+ * "Missing frontmatter" is deliberately the narrowest reading available: no
+ * frontmatter block at all. A schema — a required `title`, `tags`, `type` —
+ * would be this app inventing a rule for somebody else's vault, and every note
+ * it flagged would be a false positive the operator has to learn to ignore.
+ */
+export function knowledgeHealth(index: KnowledgeIndex): KnowledgeHealthDTO {
+  const orphanSet = new Set(index.orphans);
+  const orphans: KnowledgeNoteRefDTO[] = [];
+  const missingFrontmatter: KnowledgeNoteRefDTO[] = [];
+
+  for (const note of index.notes.values()) {
+    if (orphanSet.has(note.rel)) orphans.push(noteRef(note));
+    if (Object.keys(note.frontmatter).length === 0) missingFrontmatter.push(noteRef(note));
+  }
+  orphans.sort((a, b) => a.path.localeCompare(b.path));
+  missingFrontmatter.sort((a, b) => a.path.localeCompare(b.path));
+
+  const broken = [...index.brokenLinks].sort(
+    (a, b) => a.from.localeCompare(b.from) || a.line - b.line,
+  );
+
+  return {
+    orphans: orphans.slice(0, KNOWLEDGE_HEALTH_LIST),
+    orphanCount: orphans.length,
+    brokenLinks: broken.slice(0, KNOWLEDGE_HEALTH_LIST),
+    brokenLinkCount: broken.length,
+    missingFrontmatter: missingFrontmatter.slice(0, KNOWLEDGE_HEALTH_LIST),
+    missingFrontmatterCount: missingFrontmatter.length,
+    noteCount: index.notes.size,
+    listLimit: KNOWLEDGE_HEALTH_LIST,
+    truncated: index.truncated,
+    scannedAt: index.scannedAt,
+  };
 }
