@@ -881,8 +881,18 @@ and everything after it is written again.** Naming what sits
 immediately after that boundary — and therefore what changed — is not possible
 from the transcript, which records no system block, no environment block and no
 `<system-reminder>` (`grep -c system-reminder` over a container transcript
-returns 0). That is the pin probe's question, and it is the most valuable single
-thing this proposal does not yet know.
+returns 0).
+
+**It is possible from the wire, and `02-levers-on-the-pin.md` names it: the
+`gitStatus` section of the CLI's own system prompt, regenerated on every cycle
+and sitting in the first block that carries a cache breakpoint.** Two cycles of
+one session with a commit in between differ there by two status lines and one
+`Recent commits` entry, and the whole conversation after it is written again.
+The corpus agrees as far as it can — of the 74 re-writing handovers in the
+rolling week, none followed a cycle that changed nothing in the repository, and
+all six handovers whose previous cycle changed nothing hit the cache — but 23 of
+the 29 hits *did* follow a change, so a repository change is necessary and not
+sufficient in this data.
 
 ## A fresh conversation against a resumed one
 
@@ -1196,7 +1206,13 @@ the transcript:
 
 So it arrives in the fixed
 prefix the CLI builds and is invisible to every measurement above except as part
-of that 31,575-token median intercept.
+of that 31,575-token median intercept. **Where in that prefix is now known.**
+`02-levers-on-the-pin.md` reads it off the wire: `CLAUDE.md` is not in the
+system block at all but in a `<system-reminder>` inside the **first user
+message**, ahead of the only cache breakpoint that message carries — so it is
+cached, but as conversation content rather than as system content, and editing
+it mid-run invalidates everything after it exactly as a change to the system
+block would.
 
 An attempt to isolate it across the five repositories this container has run in,
 which have `CLAUDE.md` files of 0, 11, 7,079, 15,172 and 27,077 bytes, does not
@@ -1322,12 +1338,23 @@ cycle's argv at all.
       records 111845 compaction markers {}
 
   So either compaction did not happen in this window or it is not recorded here;
-  which of those is true is **not established**.
+  which of those is true is **not established** — except that the second half is
+  now known to be true on its own. `02-levers-on-the-pin.md` drove a `-p` session
+  to a `PreCompact` hook firing with `trigger: "auto"` and found the same empty
+  marker set in that session's own transcript. **A compaction leaves no trace in
+  the file this proposal reads**, so the count above is not evidence that none
+  happened.
 - **A delegated turn's context is visible here only through attribution.**
   `attributionAgent` (`src/lib/transcripts.ts:263`–`264`) says which bucket a
   turn belongs to and nothing about what that turn carried. A sub-agent's
-  conversation is a separate file under `<session>/subagents/`, and this app
-  neither builds it nor reads it.
+  conversation is a separate file under `<session>/subagents/`, which this app
+  does not build — but it **does** read it, and this file was wrong to say
+  otherwise. `listTranscriptFiles` (`src/lib/transcripts.ts:162`–`184`) walks the
+  projects directory recursively, so all 495 of those files are in the scan
+  beside the 513 main-thread ones, and their cost is already in
+  `buildSnapshot()`: 3,116 sidechain turns and $188.03 in the rolling week, 6.5%
+  of this container's bill (`02-levers-on-the-pin.md`). What is out of reach is
+  only the *composition* of a delegated turn, not its cost.
 
 ## What this proposal would prevent
 
@@ -1361,17 +1388,24 @@ new one begins; it decides when a session is resumed and when a fresh one opens;
 it decides what goes on the argv that precedes the conversation. Those three
 decisions are worth, on the measured evidence, $183.69 a week in cache writes at
 the handover, $95.74 at session openings, and an unmeasured share of a
-31,575-token fixed prefix paid on all 16,605 container turns. The one nobody has
+31,575-token fixed prefix paid on all 16,605 container turns. The one nobody had
 looked at is the biggest: 27% of handovers already hit the cache and 73% do not,
 for a reason that is not the clock, not the CLI version and not the process
-boundary — and until somebody names it, no option in this survey can be priced.
+boundary. `02-levers-on-the-pin.md` names it — `gitStatus`, regenerated per
+cycle into the first cached system block — and finds that the one flag aimed at
+it moves the break rather than removing it.
 
-Which leaves the survey with a question it must settle before it is read, and one
-it must not pre-empt. The question it must settle is whether it is answering the
-broad claim or the narrow one, because they have different answers. The one it
-must not pre-empt is the pin probe's: if the prefix that changes across a
-handover turns out to be the CLI's own and nothing on this app's argv reaches it,
-then every option aimed at the handover is priced at zero and what the
-measurement still supports is smaller than any of them. A survey that ends
-against building anything is a good outcome for this proposal rather than a
-failed one, and it is on the table from here.
+Which leaves the survey with a question it must settle before it is read: whether
+it is answering the broad claim or the narrow one, because they have different
+answers.
+
+The second question this section used to pose — whether the prefix that changes
+across a handover is the CLI's own, in which case every option aimed at the
+handover would be priced at zero — has since been answered, and the answer is
+half of each. It **is** the CLI's own environment block, so no lever this app
+holds can stop it changing. But one flag on the CLI's own argv,
+`--exclude-dynamic-system-prompt-sections`, moves it out of the system prompt,
+and `02-levers-on-the-pin.md` prices that at about 7.6 KB of prefix per cycle
+against a suffix of a median 231,644 written tokens. Small, certain, and not a
+fix. A survey that ends against building anything is a good outcome for this
+proposal rather than a failed one, and it is still on the table from here.

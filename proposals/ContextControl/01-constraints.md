@@ -274,13 +274,19 @@ One further thing the pin owes this proposal specifically. `00-problem.md`
 establishes that 79 of 108 work-cycle handovers re-wrote a prefix that a
 one-hour TTL had not expired, that 29 did not, and that the difference is
 neither the clock, the CLI version nor the process boundary. **What changed in
-the prefix is unknown, and every option is priced against it.** If the cause is
-something on this app's argv, the cheapest option in the survey is a one-line fix
-worth $183.69 a week. If it is the CLI's own environment block — a git status
-that moves whenever a cycle commits, a timestamp, a directory listing — then no
-lever here reaches it and the survey is about something else. That question is
-the pin probe's, and no option should be written as though it were already
-answered.
+the prefix is now known, and it is the second of the two possibilities this
+paragraph used to hold open.** `02-levers-on-the-pin.md` reads two cycles of one
+session off the wire and finds the divergence in the CLI's own environment
+block: the `gitStatus` section of the system prompt, regenerated per cycle, in
+the first block carrying a cache breakpoint. Nothing on this app's argv stops it
+changing, so the one-line fix worth $183.69 a week is not there.
+
+What *is* there is `--exclude-dynamic-system-prompt-sections`, which moves the
+volatile section out of the 27 KB system block into a 1.4 KB block of the first
+user message — still ahead of the only breakpoint in that message, so the
+conversation is still written again. It saves about 7.6 KB of prefix per
+re-writing cycle against a median 231,644 written tokens. An option may build on
+that, and must not describe it as fixing the handover.
 
 ## What the operator must still see, and still be able to override
 
