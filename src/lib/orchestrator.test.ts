@@ -2104,6 +2104,52 @@ describe("buildArgs", () => {
     assert.ok(notice.includes("sub-agent"), "the delegation notice is missing");
   });
 
+  it("hands the vault skill to the child, alongside the enabled plugins", () => {
+    // The whole feature reduced to one claim: the switch being on has to put
+    // the generated skill directory on the argv of the process that is spawned.
+    // Nothing downstream would report it missing — a run handed no skill
+    // answers from its own knowledge and reads, from the outside, exactly like
+    // one that consulted the vault and agreed with itself.
+    const args = buildArgs({
+      ...base,
+      isolated: false,
+      pluginDirs: ["/workspace/orient"],
+      vaultSkill: { pluginDir: "/run/uf-skills/uf-usagefoundry-skills", vaultPath: "/vault" },
+    });
+    const dirs = args.flatMap((a, i) => (a === "--plugin-dir" ? [args[i + 1]] : []));
+    assert.deepEqual(dirs, ["/workspace/orient", "/run/uf-skills/uf-usagefoundry-skills"]);
+    // Without this the skill names a path the run may not read: an isolated run
+    // gets its own checkout and nothing else, so the failure would arrive as a
+    // permission error in the middle of an answer rather than at the door.
+    const at = args.indexOf("--add-dir");
+    assert.notEqual(at, -1, "the vault must be readable by the run it was named to");
+    assert.equal(args[at + 1], "/vault");
+  });
+
+  it("carries the vault skill on a resumed cycle, not only the first", () => {
+    // `--plugin-dir` is not restored by `--resume`, and neither is `--add-dir`.
+    // A version of this that delivered the skill on the opening cycle alone
+    // would leave cycle 2 onward with a vault it can neither find nor read,
+    // silently.
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      resumeSessionId: "sess-1",
+      vaultSkill: { pluginDir: "/run/uf-skills/uf-usagefoundry-skills", vaultPath: "/vault" },
+    });
+    assert.equal(args[args.indexOf("--plugin-dir") + 1], "/run/uf-skills/uf-usagefoundry-skills");
+    assert.equal(args[args.indexOf("--add-dir") + 1], "/vault");
+    assert.ok(args.includes("--resume"));
+  });
+
+  it("names no vault flags when the skill is switched off", () => {
+    for (const vaultSkill of [undefined, null]) {
+      const args = buildArgs({ ...base, isolated: false, vaultSkill });
+      assert.equal(args.includes("--add-dir"), false);
+      assert.equal(args.includes("--plugin-dir"), false);
+    }
+  });
+
   it("names no plugin flag when none are enabled", () => {
     // A bare `--plugin-dir` would swallow the following flag as its value.
     assert.equal(buildArgs({ ...base, isolated: false }).includes("--plugin-dir"), false);

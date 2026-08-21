@@ -52,6 +52,7 @@ import {
 } from "./otlp";
 import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
 import { enabledPluginDirs, pluginDirArgs } from "./plugins";
+import { prepareVaultSkill } from "./vaultSkill";
 import {
   noteLiveTick,
   noteLiveTickFailure,
@@ -4890,6 +4891,25 @@ export function buildArgs(opts: {
    * something to acquire by omission.
    */
   pluginDirs?: readonly string[];
+  /**
+   * The generated vault-lookup skill, when the operator has switched it on.
+   *
+   * It arrives as a plugin directory for the reason `plugins.ts` gives — the
+   * shared `~/.claude` mount makes installing one a way to silently break the
+   * host's — and it rides `--plugin-dir` with the enabled plugins rather than a
+   * mechanism of its own, so `--resume` drops it and re-passing it per cycle
+   * covers it in exactly the same breath.
+   *
+   * `vaultPath` is separate from the directory because it becomes `--add-dir`.
+   * The vault is not the run's workspace, and an isolated run's checkout is the
+   * only directory it gets by default, so without this the skill would name a
+   * path the run may not read — a skill that reads as available and fails on
+   * use, which is the failure this whole feature is built to avoid. Note what
+   * measurement showed the flag actually does: `--add-dir` lands the directory
+   * in the session's sandbox **write** set, not a read-only one, so it is the
+   * skill's own text that has to forbid writing into the vault.
+   */
+  vaultSkill?: { pluginDir: string; vaultPath: string } | null;
 }): string[] {
   const args = ["-p", opts.prompt, "--output-format", "stream-json", "--verbose"];
   if (opts.model) args.push("--model", opts.model);
@@ -4928,7 +4948,18 @@ export function buildArgs(opts: {
   );
   // Above `--resume` only for reading order. What matters is that it is here at
   // all on a resumed cycle: see `pluginDirs`.
-  args.push(...pluginDirArgs(opts.pluginDirs ?? []));
+  args.push(
+    ...pluginDirArgs([
+      ...(opts.pluginDirs ?? []),
+      ...(opts.vaultSkill ? [opts.vaultSkill.pluginDir] : []),
+    ]),
+  );
+  // The run's cwd is its workspace and needs no flag; this is the one
+  // directory it is told about that is not its own. `--add-dir` is variadic,
+  // which is worth knowing when moving it — measured against the pinned CLI, a
+  // flag immediately after it parses as a flag rather than being eaten as
+  // another directory, so it is safe here in the middle of the argv.
+  if (opts.vaultSkill) args.push("--add-dir", opts.vaultSkill.vaultPath);
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   // A ceiling on the conversation the CLI carries forward. Not a guard: it
   // produces no `BudgetVerdict`, ends nothing, and sits in none of the check
@@ -6771,12 +6802,29 @@ export async function startRun(id: string): Promise<void> {
         );
       }
 
+      // Same cycle, same reason, and deliberately *not* the run-scoped
+      // `settings` a few lines up: the switch and the mount behind it are read
+      // afresh here so that both reach a run already in flight, which is what
+      // the plugin switch beside it does and what the settings page says both
+      // of them do. The contrast with `liveSpendTelemetry` is the point — that
+      // one is pinned for the run because changing it mid-run would make the
+      // run's own spend appear to jump backwards, and nothing here has that
+      // property.
+      const vaultSkill = prepareVaultSkill();
+      if (vaultSkill.kind === "unavailable") {
+        log(
+          id,
+          `Vault skill not loaded for this cycle — ${vaultSkill.reason}. This cycle answers from its own knowledge instead.`,
+        );
+      }
+
       const args = buildArgs({
         prompt,
         model: run.model,
         permissionMode: budget.permissionMode ?? "acceptEdits",
         resumeSessionId: sessionId,
         pluginDirs: plugins.dirs,
+        vaultSkill: vaultSkill.kind === "ready" ? vaultSkill : null,
         isolated: run.isolation === "worktree",
         // Written out as the guard's own expression rather than passed as one
         // number, because `buildArgs` is where the subtraction is tested and
