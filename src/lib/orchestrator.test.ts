@@ -2067,6 +2067,43 @@ describe("buildArgs", () => {
     assert.ok(args.includes("--resume"));
   });
 
+  it("carries the compaction ceiling on a resumed cycle, not only the first", () => {
+    // Same invariant as `--plugin-dir` above and the same silence if it breaks:
+    // `--resume` does not restore `--autocompact`, and a later cycle running
+    // under the CLI's default million-token window behaves exactly like one
+    // that was never given a ceiling. Nothing fails; the run simply goes back
+    // to carrying every token it has read to the end of the run.
+    const args = buildArgs({
+      ...base,
+      isolated: false,
+      resumeSessionId: "sess-1",
+    });
+    const at = args.indexOf("--autocompact");
+    assert.notEqual(at, -1, "a resumed cycle must still be given a ceiling");
+    // The CLI accepts 100k-1M and rejects the argv outside it, which would fail
+    // every spawn of every run rather than one.
+    const window = Number(args[at + 1]);
+    assert.ok(
+      Number.isInteger(window) && window >= 100_000 && window <= 1_000_000,
+      `--autocompact ${args[at + 1]} is outside the range the CLI accepts`,
+    );
+    assert.ok(args.includes("--resume"));
+  });
+
+  it("sends both system-prompt notices under one flag", () => {
+    // A second `--append-system-prompt` is a replacement rather than an
+    // addition, exactly as a second `--allowedTools` is, so the two notices
+    // have to travel together. Losing one is silent in both directions: an
+    // agent that never saw the process-safety half has not been told why
+    // `pkill` is denied, and one that never saw the delegation half simply
+    // costs more.
+    const args = buildArgs({ ...base, isolated: false });
+    assert.equal(args.filter((a) => a === "--append-system-prompt").length, 1);
+    const notice = args[args.indexOf("--append-system-prompt") + 1];
+    assert.ok(notice.includes("pgrep -af"), "the process-safety notice is missing");
+    assert.ok(notice.includes("sub-agent"), "the delegation notice is missing");
+  });
+
   it("names no plugin flag when none are enabled", () => {
     // A bare `--plugin-dir` would swallow the following flag as its value.
     assert.equal(buildArgs({ ...base, isolated: false }).includes("--plugin-dir"), false);

@@ -642,6 +642,22 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **`--autocompact` firing, and whether it saves money.** The flag parses on the
+  pin and the machinery is compiled in — `2.1.238` carries the option
+  (`100k-1M`, validated), an `Autocompact` phase in the query pipeline
+  (`query_autocompact_start`/`_end`), a trigger described as re-checked at each
+  turn start, a thrash circuit breaker, and `compact_boundary` records with
+  `compactMetadata`/`preCompactTokenCount`. **No compaction has been observed.**
+  Across 1,011 transcripts there are zero `compact_boundary` records, so nothing
+  here has ever run. The open question is not whether it fires but the *sign*:
+  compaction converts whatever the agent re-fetches afterwards from cache reads
+  at 0.1x into cache writes at 1.25-2x, and re-fetching about a twentieth of
+  what a compaction discards erases the whole saving. Both quantities are
+  already stored per turn — `TokenCounts` keeps `cacheRead`/`cacheWrite5m`/
+  `cacheWrite1h` separately (`pricing.ts:140-146`) and prices them separately
+  (`:208-210`) — so the measurement is a query, not a feature. See the
+  verification issue for the exact one.
+
 - **A second machine actually reaching a LAN-published install, and a browser
   staying signed in to it.** Every check in the entry above was made *from the
   host running the container*, at its own LAN address. That proves Docker

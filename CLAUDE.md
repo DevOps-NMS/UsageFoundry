@@ -55,6 +55,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - The DONE contract reaches cycle 1 as **generated** text, gated on `endsOnDone`. A prompt in `Settings` would not reach a saved install.
   - `needs-review` is the agent's own judgement about the *task*. Its rung sits below every refusal and exit-code test, above `DONE`, and clears `reportedDone` explicitly. Its notice is generated too and is **not** gated on `endsOnDone`.
   - `reopenPrompt`'s restart branch sits **above** the pushback: `reported_done` is stale after a mid-cycle kill.
+  - Three flags ride **every** cycle's argv because `--resume` restores none of them: `--plugin-dir`, `--autocompact`, and the two-notice `--append-system-prompt` (one flag — a second is a replacement). `--autocompact`'s *sign* is unmeasured; read `docs/verification.md` before moving the constant.
 
 - **`createRun`/`promoteQueued`, `serverLock.ts`, `db.ts`, `instrumentation.ts`** → `docs/agent/concurrency-and-ownership.md`
   - `createRun` runs from entry to INSERT with **no `await`**. Adding one silently puts two agents in one directory.

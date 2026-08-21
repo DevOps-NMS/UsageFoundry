@@ -4753,6 +4753,58 @@ const SELF_HOSTING_NOTICE =
   "title is `next-server`, which is also the title your own dev server takes, so " +
   "a match on it cannot tell the two apart.";
 
+/**
+ * Why a run should hand self-contained work to a sub-agent.
+ *
+ * Appended to the same flag rather than sent as a second
+ * `--append-system-prompt`, which the CLI would read as a replacement the way
+ * it reads a second `--allowedTools`. One notice arriving instead of two is
+ * silent, and the half that went missing would be the process-safety one.
+ *
+ * The numbers are here because they are the whole argument for spending tokens
+ * on the instruction. Measured over 1,011 transcripts: a tool call inside a
+ * sub-agent costs 6.5 cents against 13.9 in a run's own main thread, and almost
+ * all of the gap is cache re-read — 2.7 cents against 8.3. The mechanism is
+ * that nothing shrinks a main thread's context, so every file read there is
+ * re-read at every later turn of the run: the same tool call costs 6.8 cents at
+ * turn 20 and 15.4 at turn 150, while a sub-agent opens on a small context and
+ * its whole conversation is discarded when it answers.
+ *
+ * The floor is in the text because delegation is not free in the other
+ * direction. A sub-agent opens ~20k tokens of its own, and sessions under ten
+ * turns measured *worse* per tool call than the 10-25 band — a run that
+ * delegated every errand would spend more than one that delegated none.
+ */
+/**
+ * The context size the CLI compacts a work cycle's conversation at.
+ *
+ * A module constant rather than a setting, and the precedent is
+ * `--max-budget-usd`'s: a fact about how this app spawns agents, not an
+ * operator preference. `metering.md`'s rule against numeric ceilings in
+ * `DEFAULTS` points the same way — an operator has no way to pick this number,
+ * because the thing it trades is invisible to them.
+ *
+ * 200k of the 1M the CLI accepts. The floor it will take is 100k, which is also
+ * where its own thrash breaker becomes reachable, so this leaves that far off
+ * while still sitting below the 100-turn mark where the re-read bill
+ * concentrates. **The sign of the saving is not yet measured** — compaction
+ * flips whatever the agent re-fetches afterwards from cache reads at 0.1x to
+ * cache writes at 1.25-2x, and no session in the corpus this was chosen from
+ * had ever compacted. See the verification issue before moving it.
+ */
+const AUTOCOMPACT_WINDOW_TOKENS = 200_000;
+
+const DELEGATION_NOTICE =
+  "Prefer to hand self-contained investigation to a sub-agent rather than " +
+  "doing it on this thread: anything where you want the conclusion and not the " +
+  "files it was read out of — finding where something is implemented, reading " +
+  "across several modules to answer one question, checking whether a pattern " +
+  "holds everywhere. Nothing shrinks this conversation once it has grown, so " +
+  "every file you read here is read again on every later turn of this run, " +
+  "while a sub-agent's context is discarded when it answers. Delegate work you " +
+  "expect to take more than a handful of steps; below that a sub-agent's own " +
+  "start-up costs more than the thread saves, so do short lookups yourself.";
+
 export function buildArgs(opts: {
   prompt: string;
   model: string | null;
@@ -4867,11 +4919,32 @@ export function buildArgs(opts: {
   // a run in the operator's own checkout is inside the same process as one in a
   // worktree, and the kill does not care which.
   args.push("--disallowedTools", ...PROCESS_KILLERS);
-  args.push("--append-system-prompt", SELF_HOSTING_NOTICE);
+  // One flag carrying both notices, for the reason `--allowedTools` carries
+  // both its lists: a second `--append-system-prompt` is a replacement, not an
+  // addition, and losing one of the two would be silent.
+  args.push(
+    "--append-system-prompt",
+    `${SELF_HOSTING_NOTICE}\n\n${DELEGATION_NOTICE}`,
+  );
   // Above `--resume` only for reading order. What matters is that it is here at
   // all on a resumed cycle: see `pluginDirs`.
   args.push(...pluginDirArgs(opts.pluginDirs ?? []));
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
+  // A ceiling on the conversation the CLI carries forward. Not a guard: it
+  // produces no `BudgetVerdict`, ends nothing, and sits in none of the check
+  // orders `budget.ts` maintains — what it does is let the CLI compact a run's
+  // own context instead of carrying every token to the end of the run.
+  //
+  // Auto-compaction is already on and already re-checked at every turn start;
+  // its default window is sized for a million-token model, so across 1,011
+  // transcripts it never once fired. That is what makes cache re-read 59% of
+  // this workload: nothing ever resets a prefix, and 11% of sessions — the ones
+  // past 100 turns — carry 58% of the re-read bill.
+  //
+  // Per cycle for the same reason `--plugin-dir` is: `--resume` does not
+  // restore it, and a later cycle running under the default window behaves
+  // exactly like one that was never given a ceiling.
+  args.push("--autocompact", String(AUTOCOMPACT_WINDOW_TOKENS));
   // A hard stop inside the CLI, the same mechanism a chat turn and an
   // orchestrator block already carry — and the only one that can bound the
   // cycle that crosses the threshold rather than the one after it. Per
