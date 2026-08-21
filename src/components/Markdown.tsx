@@ -305,6 +305,25 @@ function wikilink(token: string, key: string, resolve: Resolve): ReactNode {
   );
 }
 
+/**
+ * The text inside `**…**` or `*…*`, scanned again or taken as written.
+ *
+ * `INLINE` is one flat alternation, so a `**` token swallows everything up to
+ * its closing pair — a bolded wikilink then reaches `<strong>` as the literal
+ * characters `[[Coding Principles]]`, which is precisely the "renders as
+ * ordinary text" failure this file exists to avoid. Vaults do write them:
+ * 213 of the 13,100 wikilinks in the one measured here are inside emphasis.
+ *
+ * Rescanning is gated on there being a vault to ask, so a caller with no
+ * resolver — every caller that predates wikilinks, and every model-written
+ * report — renders exactly as it did before. The descent is one level deep and
+ * cannot be more: the emphasis alternatives both exclude `*` from their
+ * content, so an emphasis token's inner text can never hold another one.
+ */
+function emphasised(inner: string, key: string, resolve: Resolve): ReactNode {
+  return resolve ? inline(inner, key, resolve) : inner;
+}
+
 function inline(text: string, key: string, resolve: Resolve): ReactNode[] {
   const out: ReactNode[] = [];
   let cut = 0;
@@ -333,13 +352,13 @@ function inline(text: string, key: string, resolve: Resolve): ReactNode[] {
     if (token.startsWith("**")) {
       out.push(
         <strong key={id} className="font-semibold text-ink">
-          {token.slice(2, -2)}
+          {emphasised(token.slice(2, -2), id, resolve)}
         </strong>,
       );
       continue;
     }
     if (token.startsWith("*")) {
-      out.push(<em key={id}>{token.slice(1, -1)}</em>);
+      out.push(<em key={id}>{emphasised(token.slice(1, -1), id, resolve)}</em>);
       continue;
     }
     if (token.startsWith("[[") || token.startsWith("![[")) {

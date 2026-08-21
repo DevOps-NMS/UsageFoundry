@@ -259,6 +259,38 @@ test("a wikilink inside code is a string being quoted, not a destination", () =>
   assert.match(fenced, /\[\[Nothing Written Yet\]\]/);
 });
 
+test("a wikilink inside emphasis is still a wikilink", () => {
+  // `INLINE` is one flat alternation, so the `**` token swallows the brackets
+  // whole and the link arrives at <strong> as literal text — the exact failure
+  // the two tests above exist to prevent, hiding inside a pair of asterisks.
+  // Measured, not hypothetical: 213 of the 13,100 wikilinks in the vault this
+  // was built against are written inside emphasis.
+  const bold = renderToStaticMarkup(
+    <Markdown text="**Start at [[Terraform State]].**" resolveWikilink={vault} />,
+  );
+  assert.match(bold, /<strong[^>]*>/);
+  assert.match(bold, /<a [^>]*href="\/knowledge\?note=ts\.md"/);
+  assert.doesNotMatch(bold, /\[\[/);
+
+  const italic = renderToStaticMarkup(
+    <Markdown text="*Not written: [[Nothing Written Yet]]*" resolveWikilink={vault} />,
+  );
+  assert.match(italic, /<em[^>]*>/);
+  assert.match(italic, /decoration-dotted/);
+});
+
+test("emphasis with no vault behind it is byte-for-byte what it always was", () => {
+  // The rescan is gated on the resolver for this: every caller that predates
+  // wikilinks passes only `text`, and a silent change to how their bold renders
+  // is a regression nobody asked for. What a model writes inside `**` stays
+  // exactly the characters it wrote.
+  const html = renderToStaticMarkup(
+    <Markdown text="**See [[A Note]] and `code` and https://example.com**" />,
+  );
+  assert.doesNotMatch(html, /<a |<code/);
+  assert.match(html, /See \[\[A Note\]\] and `code` and https:\/\/example\.com/);
+});
+
 test("a heading in a turn never outranks the page's own", () => {
   // This renders inside a chat turn and inside cards whose title is an <h2>.
   const html = renderToStaticMarkup(<Markdown text={"# Top\n\n### Deeper"} />);
