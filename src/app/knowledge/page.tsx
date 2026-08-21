@@ -646,8 +646,8 @@ export default function KnowledgePage() {
                   </Tr>
                 </THead>
                 <TBody>
-                  {health.brokenLinks.map((broken) => (
-                    <Tr key={brokenKey(broken)}>
+                  {health.brokenLinks.map((broken, i) => (
+                    <Tr key={brokenKey(broken, i)}>
                       <Td>
                         <a href={noteHref(broken.from)} className={NOTE_LINK}>
                           {broken.fromTitle}
@@ -799,7 +799,16 @@ function NoteRefTable({ notes }: { notes: KnowledgeNoteRefDTO[] }) {
  * the body — marked, not hidden — because this list is the other place an
  * operator meets one, and two renderings of the same fact is how a vault comes
  * to look healthier in one panel than in another.
+ *
+ * The rows are capped and the badge is not. A hub note in the vault this was
+ * measured against has 782 backlinks, and `capped` releases its height below
+ * `md` for the reason `ListView` records — so an uncapped list is a 782-item
+ * flat column on a phone, and the count that mattered is at the top of it. The
+ * cap is stated on the page rather than implied, because a silently shortened
+ * list reads as the whole one.
  */
+const LINK_ROWS = 100;
+
 function LinkList({
   title,
   edges,
@@ -823,8 +832,11 @@ function LinkList({
         ) : (
           <ListView box="capped">
             <ul className="flex flex-col gap-1.5 p-2 text-sm">
-              {edges.map((edge) => (
-                <li key={`${edge.from}:${edge.to}:${edge.line}`} className="min-w-0">
+              {edges.slice(0, LINK_ROWS).map((edge, i) => (
+                // The index is in the key because nothing else is unique: a
+                // note may write the same link twice on one line, and this
+                // list never reorders — it is rebuilt whole per note.
+                <li key={`${edge.from}:${edge.target}:${edge.line}:${i}`} className="min-w-0">
                   {edge.toNotePath ? (
                     <a href={noteHref(edge.toNotePath)} className={NOTE_LINK}>
                       {edge.label ?? edge.target}
@@ -849,12 +861,21 @@ function LinkList({
             </ul>
           </ListView>
         )}
+        {edges.length > LINK_ROWS && (
+          <Hint className="mt-2">
+            Showing the first {LINK_ROWS} of {edges.length}
+          </Hint>
+        )}
       </Card>
     </div>
   );
 }
 
-/** Two notes can write the same dangling link on the same line of each. */
-function brokenKey(broken: KnowledgeBrokenLinkDTO): string {
-  return `${broken.from}:${broken.line}:${broken.target}`;
+/**
+ * A note can write the same dangling link twice on one line — a template with
+ * two of the same placeholder does exactly that — so the position is part of
+ * the key. Safe here because this list is rebuilt whole and never reorders.
+ */
+function brokenKey(broken: KnowledgeBrokenLinkDTO, index: number): string {
+  return `${broken.from}:${broken.line}:${broken.target}:${index}`;
 }
