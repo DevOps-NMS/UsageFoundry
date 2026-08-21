@@ -314,17 +314,26 @@ The survey has to price both, and this file supplies only the clean one.
 
 ## How to run it for real
 
-Everything is in place except the credential. Given one, the same three scripts
-run unchanged against `api.anthropic.com`:
+The harness that produced the numbers above lived under `/tmp` and is gone with
+the run, deliberately — this proposal adds no files to the tree beyond its own.
+It is four steps, and everything needed to rebuild it is quoted above:
 
-    /tmp/uf-721638d11c0b-1/mock/arrangement.sh arr1-resume      resume
-    /tmp/uf-721638d11c0b-1/mock/arrangement.sh arr2-fresh-none  fresh-none
-    /tmp/uf-721638d11c0b-1/mock/arrangement.sh arr2-fresh-all   fresh-all
+1. Copy the five files into a scratch checkout outside any mount, and set
+   `CLAUDE_CONFIG_DIR` to a fresh directory so the children neither read the
+   operator's settings nor write into the shared bind mount.
+2. Arrangement 1: four invocations of the argv quoted above, `--session-id` on
+   the first and `--resume` with that id on the rest, the task as cycle 1's
+   prompt and `DEFAULT_CONTINUATION_PROMPT` as the other three.
+3. Arrangement 2: four invocations with no `--resume`, each prompted with the
+   brief-building snippet quoted above — task, handoff file, continuation
+   prompt — appending each cycle's `result` text to the handoff file. Run it
+   once as specified; the `-none`/`-all` bracket was only needed because no
+   model was choosing.
+4. Drop `ANTHROPIC_BASE_URL` and the dummy key. The plan files disappear with
+   the recorder, because the model decides the turns.
 
-with `ANTHROPIC_BASE_URL` dropped and the recorder replaced by the real endpoint;
-the plan files become unnecessary because the model decides the turns. Pricing is
-then this app's own, over the transcripts the children write into the per-probe
-`CLAUDE_CONFIG_DIR`:
+Pricing is then this app's own, over the transcripts the children write into the
+per-run `CLAUDE_CONFIG_DIR`:
 
     scanUsage() → entries filtered to the probe project → addTokens → resolvePrice
       → input, output, cacheRead, cacheWrite5m, cacheWrite1h
