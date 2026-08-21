@@ -110,7 +110,9 @@ The honest bound is `00-problem.md`'s own, and it is the same one Options C and
 I inherit: 39.5% of `Read` bytes belong to files the run never mentions again,
 which carried through this survey's shared chain — tool results are 64.2% of
 conversation content, `Read` is 72.1% of tool results, visible bytes buy about
-66.8% of the growth they cause, growth is 41.9% of a mean turn's cache read —
+66.8% of the growth they cause (from `00-problem.md`'s **assumed** four bytes
+per visible byte of text, against its fitted 2.67), growth is 41.9% of a mean
+turn's cache read —
 is **5.1% of the container main-thread cache-read line, about $84 a week**. And
 that figure is an upper bound on a proxy `00-problem.md` refuses to call an
 oracle: "a file whose name never recurs may still have been the thing that

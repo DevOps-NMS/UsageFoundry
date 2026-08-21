@@ -212,11 +212,21 @@ frozen behaviour and the option should say which it wants.
 ## How it fails, and whether loudly
 
 **Loud, and completely: an unrecognised flag exits 1 at the parser.** Measured
-on this pin, against `2.1.226 (Claude Code)`:
+on this pin, against `2.1.226 (Claude Code)`. Both invocations pointed at a
+closed local port with a dummy key and a scratch `CLAUDE_CONFIG_DIR`, so
+neither reached Anthropic and neither could have been billed —
+`02-levers-on-the-pin.md`'s arrangement, minus the recorder:
 
-    $ claude -p "hi" --not-a-real-flag
+    $ export ANTHROPIC_BASE_URL=http://127.0.0.1:1 ANTHROPIC_API_KEY=sk-ant-not-real \
+             NO_PROXY=localhost,127.0.0.1 CLAUDE_CONFIG_DIR=$SCRATCH/cfg
+
+    $ timeout 60 claude -p "hi" --not-a-real-flag
     error: unknown option '--not-a-real-flag'
     exit=1
+
+    $ timeout 60 claude -p "hi" --exclude-dynamic-system-prompt-sections
+    Terminated                    # parsed, then spent the timeout on 127.0.0.1:1
+    exit=143
 
 So on a future build that removes `--exclude-dynamic-system-prompt-sections`,
 every work cycle on the install fails to spawn — immediately, before any API
