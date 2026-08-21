@@ -1512,11 +1512,18 @@ function bump(counts: Map<string, number>, key: string): void {
   counts.set(key, (counts.get(key) ?? 0) + 1);
 }
 
-/** A facet map as the wire wants it: most notes first, then alphabetical. */
-function facets(counts: Map<string, number>): KnowledgeFacetDTO[] {
-  return [...counts]
-    .map(([value, count]) => ({ value, count }))
-    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
+/**
+ * A facet map as the wire wants it: most notes first, then alphabetical.
+ *
+ * Folders ask for `"value"` instead, because a folder list is a hierarchy and
+ * the count order scrambles it — `3 Resources/Terraform` lands nowhere near
+ * `3 Resources`, and a picker that does that is one nobody can read down.
+ */
+function facets(counts: Map<string, number>, order: "count" | "value" = "count"): KnowledgeFacetDTO[] {
+  const out = [...counts].map(([value, count]) => ({ value, count }));
+  return order === "value"
+    ? out.sort((a, b) => a.value.localeCompare(b.value))
+    : out.sort((a, b) => b.count - a.count || a.value.localeCompare(b.value));
 }
 
 const BY_SORT: Record<
@@ -1592,7 +1599,7 @@ export function knowledgeBrowse(index: KnowledgeIndex, filter: BrowseFilter = {}
     total: matched.length,
     offset,
     limit,
-    folders: facets(folderCounts),
+    folders: facets(folderCounts, "value"),
     tags: facets(tagCounts),
     types: facets(typeCounts),
     sort,

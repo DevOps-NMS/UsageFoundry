@@ -2177,7 +2177,9 @@ export interface KnowledgeBrowseDTO {
   total: number;
   offset: number;
   limit: number;
+  /** Every folder and every ancestor of one, in path order — it is a tree. */
   folders: KnowledgeFacetDTO[];
+  /** Most-used first: a tag list has no order of its own to preserve. */
   tags: KnowledgeFacetDTO[];
   types: KnowledgeFacetDTO[];
   sort: KnowledgeSortDTO;
