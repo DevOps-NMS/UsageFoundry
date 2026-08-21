@@ -22,10 +22,12 @@ src/lib/
   schedules.ts     when a saved workflow presses its own Run — the one place
                    an agent starts with nobody present
   workspace.ts     the folder walk, shared by the picker and the chat's tools
+  knowledge.ts     an Obsidian vault in one of the mounts, read as a link
+                   graph — parse, resolve, cache; read-only, and no write path
   db.ts            SQLite (runs, events, reviews, chats, proposals, workflows,
                    schedules, settings)
 src/app/api/       usage · account · runs · branches · calibrate · settings ·
-                   folders · chat · mcp · workflows
+                   folders · chat · mcp · workflows · knowledge
 ```
 
 Transcripts are re-read incrementally: only bytes appended since the last scan
