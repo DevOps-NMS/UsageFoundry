@@ -118,8 +118,9 @@ stdin carries `session_id`, `transcript_path`, `cwd`, `prompt_id`,
                        "cwd":"/tmp/…","prompt_id":"43255a06-…","permission_mode":"bypassPermissions",
                        "hook_event_name":"UserPromptSubmit","prompt":"Run the Bash tool exactly once …"}
 
-`PreCompact` fires too, and its own section is below. Only `Bash`-gated events
-could not be exercised, for the sandbox reason above.
+`PreCompact` fires too, and its own section is below. The tool-gated events were
+exercised through `Read` rather than `Bash`, for the sandbox reason above; no
+event listed in the settings payload failed to fire when its trigger occurred.
 
 ### Whether a hook can modify or replace what a tool returns — **exists**
 
@@ -356,9 +357,10 @@ betting that the model does not need the rest, and `00-problem.md` already
 refuses the equivalent claim about file reads generally: its own proxy "cannot
 distinguish *wasted* from *read and understood*".
 
-One further cap the CLI applies without being asked: a `Read` of a 396,000-byte
-file was refused outright, with the model told to use `offset`/`limit` or to
-search instead.
+One further cap the CLI applies without being asked: a `Read` of a 402,000-byte
+file was refused outright — a 199-character tool result ending "…mit parameters
+to read specific portions of the file, or search for specific content instead of
+reading the whole file." — and the env var above did not change that.
 
 ## Delegated turns
 
