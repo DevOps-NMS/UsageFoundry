@@ -516,3 +516,147 @@ export function Toggle({
     </label>
   );
 }
+
+/**
+ * A range control has no styling surface of its own: the track and the thumb are
+ * shadow parts, and the only way to reach them is the vendor pseudo-elements
+ * below. Both spellings are needed — Chrome and Safari drop a rule block
+ * entirely if it names a selector they do not know, so one combined selector
+ * would style neither.
+ *
+ * A 4px track under a 14px thumb, which is the macOS proportion. The thumb's
+ * negative margin centres it on the track in WebKit, which aligns the *top* of
+ * the thumb box with the top of the track; Firefox centres it already and would
+ * double-count a margin, so it gets none.
+ */
+const SLIDER_TRACK =
+  "[&::-webkit-slider-runnable-track]:h-1 [&::-webkit-slider-runnable-track]:rounded-full " +
+  "[&::-webkit-slider-runnable-track]:border [&::-webkit-slider-runnable-track]:border-line " +
+  "[&::-webkit-slider-runnable-track]:bg-inset " +
+  "[&::-moz-range-track]:h-1 [&::-moz-range-track]:rounded-full " +
+  "[&::-moz-range-track]:border [&::-moz-range-track]:border-line [&::-moz-range-track]:bg-inset";
+
+const SLIDER_THUMB =
+  "[&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:-mt-[5px] " +
+  "[&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 " +
+  "[&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-tint " +
+  "[&::-webkit-slider-thumb]:shadow-e1 " +
+  "[&::-moz-range-thumb]:h-3.5 [&::-moz-range-thumb]:w-3.5 [&::-moz-range-thumb]:border-0 " +
+  "[&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:bg-tint [&::-moz-range-thumb]:shadow-e1";
+
+/**
+ * A continuous setting, with the number it is currently at beside it.
+ *
+ * The figure is not optional. A slider whose effect is immediate still leaves
+ * the operator with no way to say what they set, no way to get back to it, and
+ * nothing to compare against a default — and `tabular-nums` on a fixed width so
+ * the track does not shorten by a few pixels every time a digit is added.
+ *
+ * The row is what takes the 44px touch floor rather than the input, because a
+ * range's own box is where the drag starts and shrinking it would be worse.
+ */
+export function Slider({
+  id,
+  value,
+  onChange,
+  min,
+  max,
+  step,
+  format = String,
+  disabled,
+  label,
+  className = "",
+}: {
+  id?: string;
+  value: number;
+  onChange: (next: number) => void;
+  min: number;
+  max: number;
+  step: number;
+  /** How the figure beside the track reads — a unit, or fewer decimals. */
+  format?: (value: number) => string;
+  disabled?: boolean;
+  /** Only where nothing else names the control — a ListRow's label already does. */
+  label?: string;
+  className?: string;
+}) {
+  const bits = useControlBits({ disabled });
+  const off = bits.disabled === true;
+  return (
+    <div className={`flex min-h-[var(--control-h-lg)] max-md:min-h-11 items-center gap-2 ${className}`}>
+      <input
+        id={id}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        aria-label={label}
+        aria-describedby={bits.describedBy}
+        disabled={off}
+        onChange={(e) => onChange(e.currentTarget.valueAsNumber)}
+        className={
+          "ui-transition h-4 min-w-0 flex-1 cursor-pointer appearance-none bg-transparent " +
+          "disabled:cursor-not-allowed disabled:opacity-50 " +
+          `${SLIDER_TRACK} ${SLIDER_THUMB}`
+        }
+      />
+      <span
+        className={`w-10 shrink-0 text-right text-xs tabular-nums ${
+          off ? "text-ink-faint" : "text-ink-muted"
+        }`}
+      >
+        {format(value)}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * A colour, as a swatch that opens the platform picker.
+ *
+ * Native rather than a palette of our own: the operator is choosing a colour to
+ * tell two groups of notes apart on their own display, so the set they can pick
+ * from should be the one their eyes can, not seven we guessed. The default that
+ * lands in the field still comes from `GROUP_PALETTE`, so nobody has to open a
+ * picker to get a usable colour.
+ */
+export function ColorSwatch({
+  id,
+  value,
+  onChange,
+  label,
+  disabled,
+  className = "",
+}: {
+  id?: string;
+  value: string;
+  onChange: (next: string) => void;
+  /** Names the control: a swatch on its own is an unexplained square. */
+  label: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const bits = useControlBits({ disabled });
+  const off = bits.disabled === true;
+  return (
+    <input
+      id={id}
+      type="color"
+      value={value}
+      aria-label={label}
+      aria-describedby={bits.describedBy}
+      disabled={off}
+      onChange={(e) => onChange(e.currentTarget.value)}
+      className={
+        "ui-transition h-7 w-7 max-md:h-11 max-md:w-11 shrink-0 cursor-pointer rounded-sm " +
+        "border border-line bg-inset p-0.5 enabled:hover:border-line-strong " +
+        "disabled:cursor-not-allowed disabled:opacity-50 " +
+        "[&::-webkit-color-swatch-wrapper]:p-0 " +
+        "[&::-webkit-color-swatch]:rounded-[3px] [&::-webkit-color-swatch]:border-0 " +
+        "[&::-moz-color-swatch]:rounded-[3px] [&::-moz-color-swatch]:border-0 " +
+        `${className}`
+      }
+    />
+  );
+}
