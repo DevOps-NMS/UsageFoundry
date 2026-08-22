@@ -19,7 +19,12 @@ import { Markdown, blocksOf, parseWikilink, type WikilinkResolution } from "./Ma
  * something clickable, and a model's `#` outranking the page's own heading are
  * all things that typecheck and render.
  *
- * The styling is not pinned and should not be.
+ * The styling is not pinned and should not be. The one exception is the
+ * reading measure, and it is here as a *gate* rather than as a look: it is the
+ * one class in this file that four other surfaces must never grow, and the way
+ * it would reach them — a `max-w` moved onto the root, or the vault switch
+ * dropped — typechecks, renders and silently narrows every chat turn and every
+ * work cycle's report in the app.
  */
 
 test("a fenced block is code, not a list of bullets", () => {
@@ -376,6 +381,43 @@ test("a fold never lands inside a fold", () => {
   );
   assert.equal(inner.match(/<details/g)?.length, 1, "the outer one folds and the inner one does not");
   assert.match(inner, /deep body/);
+});
+
+test("the reading measure is the note's alone, and never a table's", () => {
+  const prose = "A sentence long enough to want a measure behind it.";
+
+  // Four of this component's five callers draw a chat turn or a work cycle's
+  // report, and neither is prose somebody chose to write at length. A measure
+  // that reached them would narrow four surfaces nobody asked to change.
+  assert.doesNotMatch(renderToStaticMarkup(<Markdown text={prose} />), /max-w-\[68ch\]/);
+
+  const note = renderToStaticMarkup(<Markdown text={prose} resolveWikilink={vault} />);
+  assert.match(note, /<p[^>]*max-w-\[68ch\]/);
+
+  // The three blocks that legitimately want the whole column. A table is the
+  // case that matters most: 621 of the one measured vault's 785 notes carry
+  // one, and its columns are the author's, not the page's.
+  const table = renderToStaticMarkup(
+    <Markdown text={"| a | b |\n| - | - |\n| x | y |"} resolveWikilink={vault} />,
+  );
+  assert.doesNotMatch(table, /max-w-\[68ch\]/);
+
+  const fence = renderToStaticMarkup(
+    <Markdown text={"```sh\nnpm run build -- --some --very --long --invocation\n```"} resolveWikilink={vault} />,
+  );
+  assert.doesNotMatch(fence, /max-w-\[68ch\]/);
+
+  const figure = renderToStaticMarkup(
+    <Markdown text="![a diagram](https://example.com/d.png)" resolveWikilink={vault} />,
+  );
+  assert.doesNotMatch(figure, /max-w-\[68ch\]/);
+
+  // …but an image no browser will fetch is drawn as its alt text, which is
+  // prose and wants the measure like any other sentence.
+  const alt = renderToStaticMarkup(
+    <Markdown text="![a diagram](javascript:alert(1))" resolveWikilink={vault} />,
+  );
+  assert.match(alt, /max-w-\[68ch\]/);
 });
 
 test("a blockquote is a blockquote, and a nested one nests", () => {
