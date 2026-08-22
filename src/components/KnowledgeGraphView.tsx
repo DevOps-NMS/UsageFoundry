@@ -9,14 +9,20 @@ import {
   GROUP_PALETTE,
   MAX_DRAWN_NODES,
   MAX_GROUPS,
+  MAX_TAG_CHOICES,
   capGraph,
   coerceGraphSettings,
   defaultGraphSettings,
   filterGraph,
+  graphTags,
   localGraph,
   noteNodeId,
   parseGraphQuery,
+  tagGroupId,
+  tagGroupQuery,
+  tagGroups,
   type GraphGroup,
+  type GraphTag,
   type GraphView,
   type KnowledgeGraphSettings,
 } from "@/lib/knowledgeGraph";
@@ -25,7 +31,7 @@ import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { ColorSwatch, Input, Slider, Switch } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
-import { ListGroup, ListRow } from "@/components/ui/List";
+import { GroupLabel, ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import { SegmentedControl, type SegmentedOption } from "@/components/ui/SegmentedControl";
 
@@ -88,6 +94,16 @@ export function KnowledgeGraphView({
   const [settings, setSettings] = useState<KnowledgeGraphSettings>(defaultGraphSettings);
   /** Nothing is written back until the stored value has been read in. */
   const hydrated = useRef(false);
+  /**
+   * Whether the colour groups are still owed their tag seed.
+   *
+   * Decided by whether anything was *stored*, not by whether the list is empty:
+   * an operator who removed every group has an entry, and putting the tags back
+   * on their next visit would be undoing an edit for them. The first visit is
+   * the one moment nobody has expressed a preference yet. Cleared when the
+   * fetch settles, whichever way it settles — see both branches below.
+   */
+  const seedable = useRef(false);
 
   useEffect(() => {
     // After mount, never during render: the server has no localStorage, so a
@@ -101,11 +117,15 @@ export function KnowledgeGraphView({
         // operator's slider positions, and the defaults are already on screen.
       }
     }
+    seedable.current = stored === null;
     hydrated.current = true;
   }, []);
 
   useEffect(() => {
-    if (!hydrated.current) return;
+    // Held back while a seed is still owed, or the defaults would be written
+    // the moment this mounts and the *next* visit would find an entry — which
+    // is what says somebody has been here — and never seed at all.
+    if (!hydrated.current || seedable.current) return;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
   }, [settings]);
 
@@ -117,8 +137,24 @@ export function KnowledgeGraphView({
       if (res.ok) {
         setGraph(res.data);
         setError(null);
+        /* The seed, and the one moment it can happen: nobody has been here
+           before and this is the first sight of the vault. Both halves are
+           needed — seeding off an empty `graph` would write "no groups" as a
+           preference nobody expressed, and seeding on a later visit would put
+           back groups somebody had removed. */
+        if (seedable.current) {
+          seedable.current = false;
+          const seeded = tagGroups(graphTags(res.data));
+          if (seeded.length > 0) {
+            setSettings((s) => (s.groups.length > 0 ? s : { ...s, groups: seeded }));
+          }
+        }
       } else {
         setError(pollFailureMessage(res.status, res.error));
+        // Settled, unseeded, and that releases the hold above: a vault this
+        // browser cannot reach must not cost the operator their slider
+        // positions for as long as it stays unreachable.
+        seedable.current = false;
       }
     })();
     return () => {
@@ -139,6 +175,12 @@ export function KnowledgeGraphView({
 
   const filtered = useMemo(() => filterGraph(scoped, settings.filters), [scoped, settings.filters]);
   const shown = useMemo(() => capGraph(filtered), [filtered]);
+
+  /* Off the whole graph rather than off `shown`: a colour group paints a note
+     by the tags it carries whether or not tag *nodes* are drawn, and
+     `showTags` is off by default — a tag list that emptied when somebody
+     turned the nodes off would look like a vault that had lost its tags. */
+  const tags = useMemo(() => graphTags(graph ?? EMPTY_GRAPH), [graph]);
 
   const update = useCallback(
     (patch: (previous: KnowledgeGraphSettings) => KnowledgeGraphSettings) => {
@@ -171,23 +213,38 @@ export function KnowledgeGraphView({
           — below `lg` the panel goes underneath, because a 19rem column of
           sliders next to a 12rem canvas is neither.
 
-          Its box is 4:3 rather than a fixed height, and the two empty states
-          take the same ratio so the region does not change height when the
-          vault finishes loading. A ratio is what a *viewport* is for a graph:
-          the height follows the width the pane actually has, where a figure
-          like `32rem` was a portrait window on a phone and a letterbox on a
-          wide one — and the shape of the box is what decides how much of a
-          force layout is on screen at a given zoom. It is deliberately not a
-          `vh`: a box inside the pane is never sized in viewport units, because
-          the pane is the window less the toolbar less its own padding. */}
+          4:3 is the box's *floor*, not its size, and that is what the sizer
+          below is for. A ratio is what a viewport is for a graph — the height
+          follows the width the pane actually has, where a figure like `32rem`
+          was a portrait window on a phone and a letterbox on a wide one, and
+          the shape of the box decides how much of a force layout is on screen
+          at a given zoom. It is deliberately not a `vh`: a box inside the pane
+          is never sized in viewport units, because the pane is the window less
+          the toolbar less its own padding. But the panel beside it is taller
+          than 4:3 of the canvas column at every width that fits the two side by
+          side, so a fixed ratio left a few hundred pixels of empty card under
+          the graph and the row's height was decided by a column of sliders.
+
+          Both children sit in the same single grid cell: the sizer, which is
+          `self-start` so it contributes its ratio to the row and never takes
+          the row's height back, and the graph, which stretches to whatever the
+          row ends up being. `align-content` on a grid is `stretch`, so a lone
+          auto row grows to fill the card — and the card is itself a stretched
+          item of the outer grid, so what it fills is the taller of the two
+          columns. Stacked below `lg` there is no second column and the ratio is
+          all there is, which is where it belongs. */}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,19rem)]">
-        <Card emphasis="quiet">
+        <Card emphasis="quiet" className="grid">
+          <div
+            aria-hidden
+            className="pointer-events-none col-start-1 row-start-1 aspect-[4/3] self-start"
+          />
           {localUnavailable ? (
-            <div className="flex aspect-[4/3] items-center justify-center">
+            <div className="col-start-1 row-start-1 flex items-center justify-center">
               <Empty>Open a note to see the graph around it.</Empty>
             </div>
           ) : shown.nodes.length === 0 ? (
-            <div className="flex aspect-[4/3] items-center justify-center">
+            <div className="col-start-1 row-start-1 flex items-center justify-center">
               <Empty>
                 {graph === null ? "Reading the vault's links…" : "Nothing matches these filters."}
               </Empty>
@@ -203,13 +260,14 @@ export function KnowledgeGraphView({
               // No background of its own: the canvas is transparent over the
               // card, which is `--bg-raised` — the colour the phantom ring is
               // drawn in so that a hollow node reads as a hole.
-              className="aspect-[4/3] rounded-sm border border-line"
+              className="col-start-1 row-start-1 rounded-sm border border-line"
             />
           )}
         </Card>
 
         <GraphPanel
           settings={settings}
+          tags={tags}
           onChange={update}
           onReset={() => setSettings(defaultGraphSettings())}
           hasNote={focusId !== null}
@@ -245,11 +303,14 @@ export function KnowledgeGraphView({
 
 function GraphPanel({
   settings,
+  tags,
   onChange,
   onReset,
   hasNote,
 }: {
   settings: KnowledgeGraphSettings;
+  /** The vault's tags, most-used first, for the colour groups to be built from. */
+  tags: GraphTag[];
   onChange: (patch: (previous: KnowledgeGraphSettings) => KnowledgeGraphSettings) => void;
   onReset: () => void;
   hasNote: boolean;
@@ -384,7 +445,7 @@ function GraphPanel({
         </ListRow>
       </ListGroup>
 
-      <GroupList groups={groups} onChange={setGroups} />
+      <GroupList groups={groups} tags={tags} onChange={setGroups} />
 
       <ListGroup label="Display">
         <ListRow label="Arrows" htmlFor="graph-arrows">
@@ -507,13 +568,47 @@ function GraphPanel({
  */
 function GroupList({
   groups,
+  tags,
   onChange,
 }: {
   groups: GraphGroup[];
+  tags: GraphTag[];
   onChange: (next: GraphGroup[]) => void;
 }) {
   const nextId = useRef(0);
   const full = groups.length >= MAX_GROUPS;
+
+  /* A chip finds its group by the query it would write rather than by the id
+     it minted, so a group typed out by hand lights the chip too — and a seeded
+     one whose query has since been edited stops lighting it, which is the
+     honest answer: it no longer paints that tag. */
+  const byQuery = new Map(groups.map((g) => [g.query, g] as const));
+  const offered = tags.slice(0, MAX_TAG_CHOICES);
+  const beyond = tags.length - offered.length;
+
+  /** Unique among siblings, which is all a React key and a colour input need. */
+  function freshId(base: string): string {
+    if (!groups.some((g) => g.id === base)) return base;
+    nextId.current += 1;
+    return `${base}-${nextId.current}`;
+  }
+
+  function toggleTag(tag: GraphTag) {
+    const query = tagGroupQuery(tag.name);
+    const at = groups.findIndex((g) => g.query === query);
+    if (at >= 0) {
+      onChange(groups.filter((_, i) => i !== at));
+      return;
+    }
+    onChange([
+      ...groups,
+      {
+        id: freshId(tagGroupId(tag.name)),
+        query,
+        color: GROUP_PALETTE[groups.length % GROUP_PALETTE.length],
+      },
+    ]);
+  }
 
   function add() {
     nextId.current += 1;
@@ -603,6 +698,53 @@ function GroupList({
           ))
         )}
       </ListGroup>
+
+      {/* The vault's own tags, already here rather than something to be typed
+          out: `tag:` is the one query somebody wants often enough that spelling
+          it seven times was the whole friction. Bounded at MAX_TAG_CHOICES
+          rather than scrolled — see the constant for why a scroll box would be
+          the wrong shape here — and what is past it is still one `tag:` away. */}
+      {offered.length > 0 && (
+        <div className="mt-2">
+          <GroupLabel>Most-used tags</GroupLabel>
+          <ButtonRow>
+            {offered.map((tag) => {
+              const group = byQuery.get(tagGroupQuery(tag.name));
+              return (
+                <Button
+                  key={tag.name}
+                  variant={group ? "secondary" : "ghost"}
+                  size="compact"
+                  aria-pressed={group !== undefined}
+                  // An unlit chip is an eighth group; a lit one still turns off.
+                  disabled={!group && full}
+                  onClick={() => toggleTag(tag)}
+                >
+                  <span
+                    aria-hidden
+                    className="h-2 w-2 shrink-0 rounded-full border border-line-strong"
+                    // The one colour here that cannot come from a token: it is
+                    // the operator's own hex, out of the colour input above.
+                    style={
+                      group
+                        ? { backgroundColor: group.color, borderColor: group.color }
+                        : undefined
+                    }
+                  />
+                  #{tag.name}
+                  <span className="tabular-nums text-ink-faint">{tag.count}</span>
+                </Button>
+              );
+            })}
+          </ButtonRow>
+          {beyond > 0 && (
+            <p className="mt-1.5 px-1 text-xs text-ink-faint">
+              {beyond.toLocaleString()} more — put <code>tag:</code> in a group to reach one
+            </p>
+          )}
+        </div>
+      )}
+
       <ButtonRow className="mt-1.5">
         <Button variant="secondary" size="compact" disabled={full} onClick={add}>
           Add group

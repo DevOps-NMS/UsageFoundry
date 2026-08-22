@@ -4,16 +4,20 @@ import type { KnowledgeEdgeDTO, KnowledgeNodeDTO } from "./apiTypes";
 import {
   GRAPH_DEFAULTS,
   GRAPH_RANGES,
+  GROUP_PALETTE,
   MAX_GROUPS,
   capGraph,
   coerceGraphSettings,
   defaultGraphSettings,
   filterGraph,
+  graphTags,
   groupIndexFor,
   localGraph,
   matchesGraphQuery,
   noteNodeId,
   parseGraphQuery,
+  tagGroupQuery,
+  tagGroups,
   type GraphFilters,
   type GraphSlice,
 } from "./knowledgeGraph";
@@ -413,4 +417,80 @@ test("over the cap the hubs are what survives, and the loss is reported", () => 
   const under = capGraph(graph, 50);
   assert.equal(under.dropped, 0);
   assert.equal(under.nodes.length, 10);
+});
+
+/* --------------------------------- tags --------------------------------- */
+
+/**
+ * The tag list is what the colour groups seed themselves from, and every way it
+ * can be wrong is quiet: a miscount is a plausible number beside a chip, a case
+ * clash is two chips painting the same nodes, and an unstable order is a seed
+ * that picks different tags on two machines reading one vault.
+ */
+test("tags are counted per note, folded by case, and ordered by use", () => {
+  const graph: GraphSlice = {
+    nodes: [
+      note("a.md", { tags: ["research", "LLM", "llm"] }),
+      note("b.md", { tags: ["llm", "research"] }),
+      note("c.md", { tags: ["LLM"] }),
+      note("d.md", { tags: ["archive"] }),
+      // Neither carries tags of its own, and neither may be counted as a note.
+      other("tag:llm", "tag", { title: "llm" }),
+      other("file:diagram.png", "attachment"),
+    ],
+    edges: [],
+  };
+
+  assert.deepEqual(graphTags(graph), [
+    // Three notes carry it, not four mentions, and the first spelling wins.
+    { name: "LLM", count: 3 },
+    { name: "research", count: 2 },
+    { name: "archive", count: 1 },
+  ]);
+});
+
+test("a tag named twice in one note is one note", () => {
+  const graph: GraphSlice = { nodes: [note("a.md", { tags: ["llm", "llm"] })], edges: [] };
+  assert.deepEqual(graphTags(graph), [{ name: "llm", count: 1 }]);
+});
+
+test("ties break alphabetically, so one vault seeds the same groups twice", () => {
+  const graph: GraphSlice = {
+    nodes: [note("a.md", { tags: ["zeta"] }), note("b.md", { tags: ["alpha"] })],
+    edges: [],
+  };
+  assert.deepEqual(graphTags(graph).map((t) => t.name), ["alpha", "zeta"]);
+});
+
+test("a tag's query finds the notes carrying it, whitespace and all", () => {
+  const carrier = note("a.md", { tags: ["Half Life"] });
+  assert.equal(tagGroupQuery("Half Life"), 'tag:"Half Life"');
+  assert.equal(matchesGraphQuery(carrier, parseGraphQuery(tagGroupQuery("Half Life"))), true);
+
+  assert.equal(tagGroupQuery("llm"), "tag:llm");
+  assert.equal(
+    matchesGraphQuery(note("b.md", { tags: ["LLM"] }), parseGraphQuery(tagGroupQuery("llm"))),
+    true,
+    "the query lower-cases both sides, which is why the list folds case",
+  );
+});
+
+test("the seed stops at MAX_GROUPS, with distinct ids and palette colours", () => {
+  const tags = Array.from({ length: MAX_GROUPS + 5 }, (_, i) => ({
+    name: `t${i}`,
+    count: 100 - i,
+  }));
+  const seeded = tagGroups(tags);
+
+  assert.equal(seeded.length, MAX_GROUPS);
+  assert.equal(new Set(seeded.map((g) => g.id)).size, MAX_GROUPS);
+  assert.deepEqual(seeded.map((g) => g.color), [...GROUP_PALETTE]);
+  assert.deepEqual(seeded.map((g) => g.query), ["tag:t0", "tag:t1", "tag:t2", "tag:t3", "tag:t4", "tag:t5", "tag:t6"]);
+  assert.deepEqual(tagGroups([]), []);
+});
+
+test("a seeded group survives a round trip through storage", () => {
+  const seeded = tagGroups(graphTags({ nodes: [note("a.md", { tags: ["llm"] })], edges: [] }));
+  const restored = coerceGraphSettings(JSON.parse(JSON.stringify({ groups: seeded })));
+  assert.deepEqual(restored.groups, seeded);
 });

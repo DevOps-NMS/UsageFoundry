@@ -2826,6 +2826,44 @@ through before trusting this unattended:
   already published, but decode and parse of that JSON is a cost nothing here
   has measured, and it is paid once per page load rather than per frame.
 
+  **The box now takes the row's height rather than a fixed ratio, and that is
+  three CSS claims nothing here has watched resolve.** The canvas column was
+  4:3 while the panel beside it is taller than that at every width the two fit
+  side by side, so a few hundred pixels of empty card sat under the graph and
+  the row's height was being decided by a column of sliders. The card is now a
+  one-cell grid holding a `self-start aspect-[4/3]` sizer and the graph in the
+  same cell. Unverified: that a lone auto row really does stretch to a card
+  taller than its content (`align-content: normal` behaving as `stretch`),
+  which if it does not leaves the box exactly where it was and the change is
+  merely inert; that the sizer's ratio still floors the row when the panel is
+  the *shorter* column — every width below `lg` stacks, so this is the wide
+  window with the panel collapsed, and a failure there is a graph squashed to
+  the panel's height; and that the `ResizeObserver` redraws at the new size
+  rather than leaving the old backing store stretched, which is a soft picture
+  and not a missing one. The canvas element was moved to `absolute inset-0` in
+  the same change and that one is a *fix* for a fault the layout would
+  otherwise have introduced rather than a new risk: the observer writes the
+  measured height back as an inline `style.height`, so an in-flow canvas is a
+  child holding up the host's intrinsic height and the box would have ratcheted
+  — growing with the panel and never coming back down. Nothing has watched it
+  come back down either. To check all four: open `/knowledge` wide, switch the
+  graph between **Whole vault** and **This note** (which adds and removes four
+  panel rows), and narrow the window past `lg`.
+
+  **The tag seed writes to `localStorage` once and has no second chance.** The
+  colour groups now seed themselves from the vault's most-used tags, and the
+  moment is exactly one: nothing stored, and the first graph fetch has just
+  come back with something in it. `graphTags`, `tagGroups` and the query they
+  write are unit-tested; the *timing* is not testable here and is what can fail
+  quietly. Three orderings to watch, all in a browser with the key
+  `uf.knowledge-graph` cleared: that a first visit lands seven `tag:` groups
+  and the graph opens painted; that a second visit with every group removed by
+  hand comes back with them still removed rather than reseeded, which is the
+  whole reason the flag reads storage rather than the group list; and that a
+  first visit whose graph fetch *fails* still persists a slider moved
+  afterwards — the persist is held back while a seed is owed, and the error
+  branch is the only thing that releases the hold.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a

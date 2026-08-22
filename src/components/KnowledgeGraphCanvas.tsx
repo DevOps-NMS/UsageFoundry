@@ -736,7 +736,15 @@ export function KnowledgeGraphCanvas({
         // `touch-none` or the browser takes the drag for a scroll and the
         // canvas never sees a pointermove — the same reason WorkflowCanvas
         // carries it on everything draggable.
-        className="block h-full w-full touch-none select-none"
+        //
+        // Out of flow, and that is load-bearing rather than tidy: the resize
+        // observer writes the host's measured height back onto this element as
+        // an inline `style.height`, so an in-flow canvas is a child whose
+        // intrinsic height is whatever the host was last time. The host's box
+        // is now the grid row's — which the panel beside it can shrink — and a
+        // child holding the old height up would ratchet: the graph would grow
+        // with the panel and never come back down.
+        className="absolute inset-0 block h-full w-full touch-none select-none"
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

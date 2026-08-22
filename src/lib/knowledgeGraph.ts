@@ -214,6 +214,79 @@ export function groupIndexFor(node: KnowledgeNodeDTO, compiled: readonly GraphQu
   return -1;
 }
 
+export interface GraphTag {
+  /** As the vault spells it. */
+  name: string;
+  /** Notes carrying it. */
+  count: number;
+}
+
+/**
+ * The vault's tags, most-used first, then alphabetically.
+ *
+ * Counted off the note nodes rather than off the tag *nodes* the same fetch
+ * carries: a tag node's `inDegree` counts links, and a note naming one tag in
+ * its frontmatter and again in its body is still one note that has it. It also
+ * keeps the list independent of `kinds=tag` being asked for.
+ *
+ * Folded case-insensitively, because `tag:` lower-cases both sides and so a
+ * group for `#LLM` already paints `#llm` — two chips that paint the same nodes
+ * would read as two different tags. The first spelling seen is the one shown,
+ * which is arbitrary but stable: the walk returns notes in a fixed order.
+ */
+export function graphTags(graph: GraphSlice): GraphTag[] {
+  const counts = new Map<string, GraphTag>();
+  for (const node of graph.nodes) {
+    if (node.kind !== "note") continue;
+    // Per note, not per mention: the figure beside a chip is how many notes it
+    // would paint, and a note counted twice makes the graph look bigger than
+    // the picture the chip produces.
+    const seen = new Set<string>();
+    for (const raw of node.tags) {
+      const key = raw.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const hit = counts.get(key);
+      if (hit) hit.count += 1;
+      else counts.set(key, { name: raw, count: 1 });
+    }
+  }
+  return [...counts.values()].sort(
+    (a, b) => b.count - a.count || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+  );
+}
+
+/**
+ * The query that paints one tag.
+ *
+ * Quoted only where it has to be: `tokenize` splits on whitespace, so a tag
+ * with a space in it would otherwise arrive as `tag:my` and a stray `notes`.
+ */
+export function tagGroupQuery(tag: string): string {
+  return /\s/.test(tag) ? `tag:"${tag}"` : `tag:${tag}`;
+}
+
+/** The id a tag's group carries, so a chip can find its own group back. */
+export function tagGroupId(tag: string): string {
+  return `tag-${tag.toLowerCase()}`;
+}
+
+/**
+ * Colour groups for the vault's most-used tags, in palette order.
+ *
+ * What the panel opens on when nobody has set a colour group up yet — see the
+ * seed in `KnowledgeGraphView`. Capped at `MAX_GROUPS` because that is what the
+ * palette is: a vault with four hundred tags gets its top seven, and the rest
+ * are a chip away.
+ */
+export function tagGroups(tags: readonly GraphTag[]): GraphGroup[] {
+  return tags.slice(0, MAX_GROUPS).map((tag, i) => ({
+    id: tagGroupId(tag.name),
+    query: tagGroupQuery(tag.name),
+    color: GROUP_PALETTE[i % GROUP_PALETTE.length],
+  }));
+}
+
 /* ------------------------------------------------------------------ */
 /* Filters                                                             */
 /* ------------------------------------------------------------------ */
@@ -558,6 +631,18 @@ export const GROUP_PALETTE = [
 /** More than this is a legend nobody reads, and seven distinct colours is
  * already past what most people can tell apart on a dim node. */
 export const MAX_GROUPS = 7;
+
+/**
+ * The most tag chips the panel offers.
+ *
+ * Bounded by count rather than put in a scroll box, and the bound is small
+ * because only `MAX_GROUPS` of them can be on at once — a longer list is chips
+ * nobody can spend. A vault carrying four hundred tags would otherwise grow the
+ * panel without limit, and the panel is now what gives the canvas beside it its
+ * height, so an unbounded list is an unbounded graph box as well. What is past
+ * the cap is still reachable: `tag:` typed into a group is the same rule.
+ */
+export const MAX_TAG_CHOICES = 12;
 
 /**
  * The most nodes the canvas will lay out.
