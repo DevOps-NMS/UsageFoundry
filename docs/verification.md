@@ -824,6 +824,81 @@ Built and exercised against real transcripts:
 
   What it does not settle is every pixel, which is on the list below.
 
+- **`--autocompact`'s sign, and what the flag actually does.** Measured
+  2026-08-22 over 1,147 transcripts through this app's own `scanUsage()`,
+  `parseCompactionBoundary()` and `pricing.ts`, and settles issue #156. Read the
+  three findings in order, because the second is the one that changes what the
+  flag is understood to be.
+
+  **The flag does not lower a threshold. It creates the only one there is.**
+  Splitting container sessions at `ee93684`'s commit instant: **before the flag,
+  604 sessions, 246 of which carried more than 167,000 tokens, produced zero
+  `compact_boundary` records, and one request reached 752,172 tokens**; after
+  it, 53 sessions produced 42 boundaries and the largest prompt anywhere is
+  167,623. The mechanism is in the pinned bundle — `dQe(e,t){return
+  Nq(e,t).source!=="auto"}` gates the check and a window resolving to
+  `source:"auto"` at or above `1e6` refuses auto-compaction outright — so this
+  install's model never compacts on its own. That is a natural experiment and
+  not a randomised one: same container, same pin, same model, same `sdk-cli`
+  entrypoint, but different calendar periods and different workloads.
+
+  **The threshold is `min(asked, window) − min(maxOutput, 20,000) − 13,000`.**
+  Read off the 2.1.226 bundle: `SCe(e,t){let r=Math.min(cbr(e),eZu); … return
+  o-r}` with `eZu=20000`, and the fire point is `SCe(…)-WQu` with `WQu=13000`.
+  So `--autocompact 200000` fires at **167,000**, not the 180,000 that
+  `effectiveWindow` alone predicts. Observed median `preTokens` is 168,072, with
+  **30 of 42 boundaries within ±3,000 of 167,000 against 2 of 42 within ±3,000
+  of 180,000**. The same 13,000 reconciles the survey's own captured debug line,
+  where `effectiveWindow=80000` is refused against `threshold 67000`.
+
+  **The sign is positive, measured between the two arms** at the point each
+  session reaches the cap — for the uncapped arm the first turn past 167,000,
+  for the capped arm the first turn after its first boundary, because a capped
+  session never exceeds the cap and the two predicates cannot be the same:
+
+  | | sessions | turns | cache $/turn | $/1k output | output/turn |
+  |---|---|---|---|---|---|
+  | Uncapped | 227 | 15,933 | $0.1656 | $0.1849 | 896 |
+  | Capped | 16 | 1,541 | $0.0742 | $0.0930 | 798 |
+
+  **0.45× per turn and 0.50× per 1,000 output tokens.** The second denominator
+  is the one that matters: a within-session ±K-turn measurement of the same
+  corpus gives −18.6% at K=10 and −23.2% at K=20, and **that figure is a phase
+  contrast rather than an effect size** — per-turn cost is monotone in position
+  within a compaction cycle, so it measures the down edge of a saw-tooth and
+  never the up edge. A placebo comparing the first K to the last K turns of the
+  same *uncompacted* ramp reproduces about 87% of it; re-denominated per output
+  token it flips to +30% to +47%; and the net across a full cycle is −2% to −6%
+  by three methods. Do not quote the ±K figure as a saving.
+
+  **No thrash-breaker trip.** Every line in the corpus matching `circuit breaker
+  tripped` is `type: "user"`, `"assistant"` or `"result"` — a person or an agent
+  quoting the issue — and **zero are `type: "system"`**. The file count rose from
+  5 to 12 *while this measurement ran*, so the check is a record-type filter and
+  never a file count; a bare `grep -rl` returns a number that grows with every
+  investigation of it. This is the same self-pollution class
+  `proposals/ContextControl/19-validation.md` found with `system-reminder`.
+
+  **Decision: `AUTOCOMPACT_WINDOW_TOKENS` stays at 200,000**
+  (`src/lib/orchestrator.ts:4802`, pushed at `:4984`). The issue's "consider
+  150000" is **declined**, and the reason is its own floor clause: 150,000 fires
+  at 117,000, the observed firing spread is roughly ±12,000 around nominal, and
+  that lower tail reaches the 100,000 floor where the CLI's breaker lives. No
+  test is owed — `src/lib/orchestrator.test.ts:2074` already asserts the flag
+  survives `--resume` and pins the CLI's accepted range rather than the value,
+  which is the right shape and leaves this file as the only record of the number.
+
+  **What this does not establish.** That 200,000 is *optimal* — there is one arm
+  and no dose-response, so nothing here measures what another value would do.
+  That the firing arithmetic generalises to another model: it is model-dependent
+  through `min(cbr(model), 20000)` and through whether the window resolution
+  reaches `source:"auto"` at all. And **the summariser's own call is not in any
+  ledger**: all 42 `isCompactSummary` records carry no usage block and no
+  assistant-with-usage record sits between a boundary and its summary, so a call
+  of roughly 168,000 in and 6,300 out — order $0.24 to $1.84 per compaction — is
+  billed and invisible to `scanUsage()`. It does not threaten the between-arm
+  result, and it is the largest unmeasured term here. Both are on the list below.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
@@ -831,30 +906,20 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
-- **`--autocompact` firing, and whether it saves money.** The flag parses on the
-  pin and the machinery is compiled in — `2.1.238` carries the option
-  (`100k-1M`, validated), an `Autocompact` phase in the query pipeline
-  (`query_autocompact_start`/`_end`), a trigger described as re-checked at each
-  turn start, a thrash circuit breaker, and `compact_boundary` records with
-  `compactMetadata`/`preCompactTokenCount`. **Compactions have since been
-  observed, so the sentence this entry used to open with — that across 1,011
-  transcripts there were zero `compact_boundary` records — is no longer true and
-  was already stale when the reader below was built.** As of 2026-08-22 this
-  machine's 1,123 transcripts carry 23 of them across 14 files, every one
-  written by CLI `2.1.226` with `trigger: "auto"` and `entrypoint: "sdk-cli"`.
-  What that settles is only that the record exists and that compaction happens
-  on this pin under this app's own spawns. It does not settle that
-  `--autocompact` is what fired: the record names the trigger `auto` and nothing
-  in it distinguishes the flag's threshold from the CLI's own default, and this
-  app passes the flag on every cycle so there is no control group on disk. Nor
-  is the open question whether it fires. It is the *sign*:
-  compaction converts whatever the agent re-fetches afterwards from cache reads
-  at 0.1x into cache writes at 1.25-2x, and re-fetching about a twentieth of
-  what a compaction discards erases the whole saving. Both quantities are
-  already stored per turn — `TokenCounts` keeps `cacheRead`/`cacheWrite5m`/
-  `cacheWrite1h` separately (`pricing.ts:140-146`) and prices them separately
-  (`:208-210`) — so the measurement is a query, not a feature. See the
-  verification issue for the exact one.
+- **What `--autocompact` costs to run, and what another window would do.** The
+  flag's sign is measured and is in the *Verified* section above; two things it
+  could not reach stay here, and both need a billed run rather than a query.
+  **The summariser's own call has no price anywhere.** All 42
+  `compact_boundary` summaries carry no usage block, so a call of roughly
+  168,000 in and 6,300 out is billed and invisible to every source this app
+  reads; only out-of-band accounting — the account's usage view, an OTLP export,
+  or `--max-budget-usd` straddling a compaction — can bound it. **And one value
+  has ever run.** Comparable work at another window is the only thing that turns
+  keeping 200,000 from a default into a choice, and until then no claim that it
+  is the right number is available. A cheap intermediate step exists and has not
+  been taken: the CLI emits `effectiveWindow` on its own debug channel, so one
+  Docker run with that logging on prints the operating point directly instead of
+  inferring it from the bundle.
 
 - **A compaction notice arriving on a run log, and the metadata field names on
   any CLI but `2.1.226`.** `readCompactions`/`parseCompactionBoundary`
@@ -872,7 +937,14 @@ through before trusting this unattended:
     to a file. To check it: `docker compose up --build`, start a run whose
     prompt is long enough to compact (or set `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
     low in `.env` — which the run's own first log line will then name back), and
-    watch for `A compaction happened inside this work cycle` on `/runs/<id>`.
+    watch for `Claude Code compacted this run's conversation` on `/runs/<id>`.
+    That is the line the code actually writes (`orchestrator.ts:5291`); this
+    entry named a string that exists nowhere in `src/`, which is exactly the
+    failure it was written to catch. Everything below the run loop's call site
+    *has* been driven against a real boundary off this machine — the reader
+    matched the session, and `compactionNotice` rendered the full text with its
+    hypothesis wording and one line per injected thing — so what is untested is
+    only whether the call site fires with a session id and window that match.
   - The field names: whether `preTokens`, `postTokens`, `durationMs` and
     `trigger` keep those names on another CLI. `parseCompactionBoundary` reads
     every one defensively, so a rename does not throw — it renders as a real
