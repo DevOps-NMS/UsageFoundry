@@ -1122,11 +1122,17 @@ function leaf(block: Exclude<Block, ItemBlock>, key: string, ctx: Ctx): ReactNod
           // The info string, drawn rather than dropped: on a note it is often
           // the only thing saying what the block is (`dataview`, `mermaid`),
           // and this renders neither.
-          <div className="border-b border-line px-3 py-1 font-mono text-[11px] text-ink-muted">
+          <div className="border-b border-line px-3 py-1 font-mono text-[0.85em] text-ink-muted">
             {block.lang}
           </div>
         )}
-        <pre className="overflow-x-auto p-3 font-mono text-xs leading-relaxed text-ink">
+        {/*
+          `em` and not `text-xs`: an inline `` `path` `` is 0.9em, so with the
+          block on an absolute step the two drifted apart whenever the base
+          moved, and a fenced line came out larger than the same characters
+          quoted in the sentence above it. One relationship, stated once.
+        */}
+        <pre className="overflow-x-auto p-3 font-mono text-[0.9em] leading-relaxed text-ink">
           <code>{block.text}</code>
         </pre>
       </div>
@@ -1163,7 +1169,12 @@ function Footnotes({ notes, keyBase, ctx }: { notes: FootnoteBlock[]; keyBase: s
     // A `<div>` and not a `<section>`: the legacy layer still carries
     // `section + section { margin-top: 24px }`, which would push this down by a
     // figure nobody chose.
-    <div className="mt-5 border-t border-line pt-2 text-xs text-ink-muted">
+    //
+    // `leading-normal` is stated rather than inherited: an arbitrary `text-[…]`
+    // carries no line height of its own, so trading `text-xs` for a relative
+    // step would otherwise have handed footnotes the root's `leading-relaxed`
+    // too, moving two things where one was meant.
+    <div className="mt-5 border-t border-line pt-2 text-[0.9em] leading-normal text-ink-muted">
       <ol role="list" className="flex list-none flex-col gap-1">
         {notes.map((note, i) => (
           <li key={`${keyBase}:${i}`} id={anchorId(ctx.ids, note.id)} className="flex gap-2">
