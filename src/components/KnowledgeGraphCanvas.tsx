@@ -5,7 +5,6 @@ import {
   useEffect,
   useRef,
   type PointerEvent as ReactPointerEvent,
-  type WheelEvent as ReactWheelEvent,
 } from "react";
 import type { KnowledgeNodeDTO } from "@/lib/apiTypes";
 import {
@@ -60,6 +59,19 @@ const ZOOM_MAX = 8;
 
 /** How far a pointer may travel between down and up and still count as a click. */
 const CLICK_SLOP = 4;
+
+/**
+ * Pixels one line of `deltaMode: DOM_DELTA_LINE` is taken to be worth.
+ *
+ * Firefox reports a mouse wheel in lines and the other engines report pixels,
+ * and the two differ by about two orders of magnitude — so the same notch that
+ * zooms in Chrome moves this by a factor of 1.005 there, which reads as broken
+ * rather than absent. The browser will not say what a line is worth, and this
+ * is an estimate rather than a measurement: a rough line box at this app's
+ * 13px body, chosen so one notch travels about the same distance in both.
+ * Nobody has held the two side by side; a Firefox mouse is what would settle it.
+ */
+const LINE_HEIGHT_PX = 16;
 
 /** Zoom range over which a label ramps from invisible to solid. */
 const LABEL_RAMP = 0.35;
@@ -667,24 +679,43 @@ export function KnowledgeGraphCanvas({
     }
   }
 
-  function onWheel(event: ReactWheelEvent<HTMLCanvasElement>) {
+  /* The wheel is a native listener and not an `onWheel` prop, and that is a
+     correctness decision rather than a style one. React registers `wheel` at
+     the root as a **passive** listener, so `preventDefault()` from a synthetic
+     handler is discarded silently — the zoom happens *and* the page scrolls
+     out from under it, which is the one gesture this surface cannot share.
+     `{ passive: false }` is the only thing that lets the canvas take it. */
+  useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    touchedRef.current = true;
-    const view = viewRef.current;
-    const rect = canvas.getBoundingClientRect();
-    const px = event.clientX - rect.left;
-    const py = event.clientY - rect.top;
-    // Zoom about the pointer: the thing under it stays under it, which is what
-    // makes a wheel feel like moving a camera rather than rescaling a picture.
-    const factor = Math.exp(-event.deltaY * 0.0015);
-    const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, view.k * factor));
-    const scale = next / view.k;
-    view.x = px - (px - view.x) * scale;
-    view.y = py - (py - view.y) * scale;
-    view.k = next;
-    schedule();
-  }
+
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      touchedRef.current = true;
+      const view = viewRef.current;
+      const rect = canvas.getBoundingClientRect();
+      const px = event.clientX - rect.left;
+      const py = event.clientY - rect.top;
+      // A wheel reports lines or pages as readily as pixels, and Firefox's
+      // three lines a notch is a ~1.005 factor here — a zoom that looks broken
+      // rather than absent. The two non-pixel modes are scaled to roughly the
+      // pixels the same gesture would have produced.
+      const unit =
+        event.deltaMode === 1 ? LINE_HEIGHT_PX : event.deltaMode === 2 ? rect.height : 1;
+      // Zoom about the pointer: the thing under it stays under it, which is what
+      // makes a wheel feel like moving a camera rather than rescaling a picture.
+      const factor = Math.exp(-event.deltaY * unit * 0.0015);
+      const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, view.k * factor));
+      const scale = next / view.k;
+      view.x = px - (px - view.x) * scale;
+      view.y = py - (py - view.y) * scale;
+      view.k = next;
+      schedule();
+    };
+
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, [schedule]);
 
   /* The graph is centred on first sight rather than left wherever the spiral
      put it: the spiral is centred on the origin and the canvas's origin is its
@@ -711,7 +742,6 @@ export function KnowledgeGraphCanvas({
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
         onPointerLeave={onPointerLeave}
-        onWheel={onWheel}
       />
     </div>
   );

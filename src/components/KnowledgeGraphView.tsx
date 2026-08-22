@@ -168,15 +168,25 @@ export function KnowledgeGraphView({
 
       {/* The canvas is the wide half at every width the panel can sit beside it
           — below `lg` the panel goes underneath, because a 19rem column of
-          sliders next to a 12rem canvas is neither. */}
+          sliders next to a 12rem canvas is neither.
+
+          Its box is 4:3 rather than a fixed height, and the two empty states
+          take the same ratio so the region does not change height when the
+          vault finishes loading. A ratio is what a *viewport* is for a graph:
+          the height follows the width the pane actually has, where a figure
+          like `32rem` was a portrait window on a phone and a letterbox on a
+          wide one — and the shape of the box is what decides how much of a
+          force layout is on screen at a given zoom. It is deliberately not a
+          `vh`: a box inside the pane is never sized in viewport units, because
+          the pane is the window less the toolbar less its own padding. */}
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,19rem)]">
         <Card emphasis="quiet">
           {localUnavailable ? (
-            <div className="flex h-[20rem] items-center justify-center">
+            <div className="flex aspect-[4/3] items-center justify-center">
               <Empty>Open a note to see the graph around it.</Empty>
             </div>
           ) : shown.nodes.length === 0 ? (
-            <div className="flex h-[20rem] items-center justify-center">
+            <div className="flex aspect-[4/3] items-center justify-center">
               <Empty>
                 {graph === null ? "Reading the vault's links…" : "Nothing matches these filters."}
               </Empty>
@@ -192,7 +202,7 @@ export function KnowledgeGraphView({
               // No background of its own: the canvas is transparent over the
               // card, which is `--bg-raised` — the colour the phantom ring is
               // drawn in so that a hollow node reads as a hole.
-              className="h-[32rem] max-md:h-[20rem] rounded-sm border border-line"
+              className="aspect-[4/3] rounded-sm border border-line"
             />
           )}
         </Card>

@@ -2627,8 +2627,13 @@ through before trusting this unattended:
   every cell rather than becoming a column of unnamed figures; and that the
   not-configured branch renders as a warn Notice above a Settings link — the
   route half of that state answered correctly, but the branch that draws it has
-  never run. The graph region's `min-h-[20rem]` is stated so that dropping a
-  canvas in does not reflow the page under a reader; that claim is also unseen.
+  never run. The graph region's `min-h-[20rem]` is gone with the placeholder
+  that earned it: the canvas and both of its empty states are `aspect-[4/3]`,
+  so what used to be "dropping a canvas in must not reflow the page" is now
+  "the box is the same shape before and after the vault loads, at every width".
+  That is a stronger claim and it is unseen in exactly the same way — the box's
+  height now follows the pane's width, and nobody has looked at what 4:3 comes
+  out as on a wide window, where it is taller than the `32rem` it replaced.
   Docker was unavailable in the container this landed from, so the
   `docker compose up --build` half of the loop was not run against any of it.
 - **A run actually answering out of the vault, and the generated directory's
@@ -2684,7 +2689,24 @@ through before trusting this unattended:
   wheel notch and the next. Before trusting it: open `/knowledge` in a browser,
   watch the frame counter in the devtools performance panel through a settle
   with tags on, then drag, drop, zoom out past the fade threshold and switch
-  the theme. **The 7.3MB payload is the other thing a browser would price**:
+  the theme.
+
+  **Two things about the wheel are newer than the rest of this entry and
+  unmeasured in their own right.** The listener is registered natively with
+  `{ passive: false }` rather than through React's `onWheel`, because React
+  attaches `wheel` at the root as a passive listener and discards a
+  `preventDefault()` from a synthetic handler — so before the change the
+  gesture zoomed the graph *and* scrolled the pane behind it, and after it the
+  canvas is supposed to take the gesture whole. Nothing has confirmed either
+  half: that the page no longer moves under a wheel over the canvas, or that
+  the pane still scrolls normally the moment the pointer leaves it. And
+  `LINE_HEIGHT_PX` is an estimate — Firefox reports a mouse wheel in
+  `DOM_DELTA_LINE` and everything else in pixels, and 16 is a plausible line
+  box at this app's 13px body rather than a figure read off an engine. **The
+  two zooms have never been held side by side**, so what is unknown is whether
+  a notch travels the same distance in Firefox as it does in Chrome — a wrong
+  constant here is a zoom that feels twitchy or sluggish in one browser only,
+  which is invisible from the other. **The 7.3MB payload is the other thing a browser would price**:
   the route was not changed for this and its shape is the shape the reader
   already published, but decode and parse of that JSON is a cost nothing here
   has measured, and it is paid once per page load rather than per frame.
