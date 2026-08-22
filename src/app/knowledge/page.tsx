@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   KnowledgeBrokenLinkDTO,
   KnowledgeBrowseDTO,
@@ -21,6 +21,7 @@ import { Card, CardTitle, Empty, SkeletonText, Stat, StatSub } from "@/component
 import { Field, Input, Select } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { ListView, STICKY_HEAD } from "@/components/ui/ListView";
+import { Spinner } from "@/components/ui/Log";
 import { Notice } from "@/components/ui/Notice";
 import { SegmentedControl, type SegmentedOption } from "@/components/ui/SegmentedControl";
 import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
@@ -52,9 +53,30 @@ import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
  * `[[wikilinks]]` inside a note body — and because the href is real, ⌘-click
  * still opens a second note in a second tab, which is the only way this page
  * offers to hold two notes at once.
+ *
+ * ## Why the note leads the page
+ *
+ * The open note is the first block, above the list it was picked from. The list
+ * is a height-capped box, so with the note under it a click could scroll
+ * nothing, move no focus and change only a panel below the fold: the reader's
+ * own click was the only evidence anything had happened. Opening a note now
+ * also brings that block to them and puts focus on it, which is the half a
+ * keyboard reader gets; see `broughtIntoView` below.
+ *
+ * Nothing is keyed or reordered to do it. The note sits in its own JSX slot
+ * ahead of the list's, so React *inserts* a node rather than moving the list's,
+ * and the capped list keeps the scroll position the reader left it at.
  */
 
 const NOTE_HREF = "/knowledge?note=";
+
+/**
+ * How long a note read may take before the page admits to it. A vault read off
+ * a local disk usually answers inside a frame, and a spinner that appeared and
+ * vanished that fast reads as a glitch rather than as progress, so it waits out
+ * one `--motion-base` first.
+ */
+const PENDING_AFTER_MS = 180;
 
 function noteHref(path: string): string {
   return `${NOTE_HREF}${encodeURIComponent(path)}`;
@@ -221,6 +243,60 @@ export default function KnowledgePage() {
     setSelected(path);
   }, []);
 
+  const noteRegion = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * The note the region was last brought into view for.
+   *
+   * The scroll belongs to the *navigation*, not to the render: a poll answering
+   * or a filter changing re-renders this page with the same note open, and
+   * without this the page would yank itself back to a note the reader had
+   * deliberately scrolled away from.
+   */
+  const broughtIntoView = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!selected) {
+      broughtIntoView.current = null;
+      return;
+    }
+    if (broughtIntoView.current === selected) return;
+    const region = noteRegion.current;
+    if (!region) return;
+    broughtIntoView.current = selected;
+    // The `prefers-reduced-motion` blanket in @layer base flattens CSS
+    // durations and cannot reach a scroll the script asks for, so this is the
+    // one place on the page that has to read the query itself.
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    region.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
+    // Focus is the half a keyboard reader gets. The link that opened this was
+    // in a list or three paragraphs down another note's body, and the next Tab
+    // has to land in the note that arrived rather than back where the link was.
+    // `preventScroll` leaves the scroll above to finish on its own terms.
+    region.focus({ preventScroll: true });
+  }, [selected]);
+
+  /**
+   * Whether to admit that a *second* read is in flight.
+   *
+   * Only ever true with a note already on screen: a first open renders the
+   * skeleton instead, where there is no content to contradict and nothing to
+   * flicker. What was `opacity-60` over the whole card, which dimmed a note
+   * that was still perfectly readable and said "stale" where the honest fact is
+   * "another one is coming".
+   */
+  const [replacementPending, setReplacementPending] = useState(false);
+  const replacing = noteLoading && note !== null;
+
+  useEffect(() => {
+    if (!replacing) {
+      setReplacementPending(false);
+      return;
+    }
+    const timer = setTimeout(() => setReplacementPending(true), PENDING_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, [replacing]);
+
   const onNavigate = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       // The modified clicks stay the browser's: ⌘-click into a new tab is how a
@@ -324,6 +400,111 @@ export default function KnowledgePage() {
           The vault walk hit its cap, so every figure on this page is a floor
           rather than a total.
         </Notice>
+      )}
+
+      {/* ---------------------------- the note ---------------------------- */}
+      {/*
+        First on the page, and in its own slot: see "Why the note leads the
+        page" at the top of this file for both halves of that.
+
+        A `<div>` with a role rather than a `<section>`, which the conventions
+        doc rules out: the legacy layer still carries `section + section {
+        margin-top: 24px }`, so a second one here would space itself. The role
+        is what makes this focusable block announce as something rather than as
+        an unnamed box, and `aria-label` names it with whatever is open.
+      */}
+      {selected && (
+        <div
+          ref={noteRegion}
+          tabIndex={-1}
+          role="region"
+          aria-label={note?.title ?? "Note"}
+          className="mb-8 scroll-mt-4"
+        >
+          {/* First child, so the announcement is the first thing under the
+              focus that just landed here. */}
+          <p className="sr-only" aria-live="polite">
+            {note ? `Reading ${note.title}` : ""}
+          </p>
+          <CardTitle>
+            {note?.title ?? "Note"}
+            {replacementPending && <Spinner />}
+            <Button variant="ghost" size="compact" onClick={() => openNote(null)}>
+              Close
+            </Button>
+          </CardTitle>
+
+          {noteError ? (
+            <div role="alert">
+              <Notice tone="warn">{noteError}</Notice>
+            </div>
+          ) : !note ? (
+            <Card emphasis="default">
+              <div aria-busy="true">
+                <span className="sr-only">Reading the note…</span>
+                <SkeletonText lines={6} />
+              </div>
+            </Card>
+          ) : (
+            // The links sit *beside* the note above `lg` and under it below,
+            // which is the one place on this page that needs two columns: a
+            // backlink is context for what you are reading, not a second page.
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
+              <Card emphasis="default">
+                <p className="mb-3 font-mono text-xs text-ink-muted [overflow-wrap:anywhere]">
+                  {note.path}
+                </p>
+
+                {/* The tags the Tag picker filters by, on the note itself,
+                    which was the one place a reader could not see them. */}
+                {note.tags.length > 0 && (
+                  <div className="mb-3">
+                    <TagRow tags={note.tags} />
+                  </div>
+                )}
+
+                {Object.keys(note.frontmatter).length > 0 ? (
+                  // One column below `md`, key over value. A 390px screen
+                  // leaves 326px inside this card (the pane's px-4, then the
+                  // card's p-4), and the fixed key column plus its gap took
+                  // 176px of that, so the key had more room than the value it
+                  // names. `truncate` then hid whatever did not fit, which is
+                  // the half of the pair that says what the other half is.
+                  <dl className="mb-4 grid gap-x-4 gap-y-1 border-b border-line pb-4 text-sm md:grid-cols-[minmax(0,10rem)_minmax(0,1fr)]">
+                    {Object.entries(note.frontmatter).map(([key, value]) => (
+                      <div key={key} className="contents">
+                        <dt className="font-mono text-xs text-ink-muted [overflow-wrap:anywhere] max-md:mt-1.5">
+                          {key}
+                        </dt>
+                        <dd className="[overflow-wrap:anywhere]">{frontmatterValue(value)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : (
+                  <Hint tone="warn" className="mb-4">
+                    This note has no frontmatter
+                  </Hint>
+                )}
+
+                <Markdown text={note.body} resolveWikilink={resolveWikilink} />
+              </Card>
+
+              <div>
+                <LinkList
+                  title="Links out"
+                  edges={note.outgoing}
+                  empty="This note links to nothing."
+                />
+                <LinkList
+                  title="Backlinks"
+                  edges={note.incoming}
+                  empty="Nothing links here."
+                  className="mt-4"
+                />
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {/* --------------------------- browse --------------------------- */}
@@ -471,7 +652,7 @@ export default function KnowledgePage() {
                         {entry.folder || "—"}
                       </Td>
                       <Td label="Tags" labelPlacement="above" className="text-ink-muted">
-                        {entry.tags.length > 0 ? entry.tags.join(" ") : "—"}
+                        {entry.tags.length > 0 ? <TagRow tags={entry.tags} /> : "—"}
                       </Td>
                       <Td label="Links" num className="whitespace-nowrap">
                         {entry.inDegree + entry.outDegree}
@@ -512,76 +693,6 @@ export default function KnowledgePage() {
         </Card>
       </div>
 
-      {/* ---------------------------- the note ---------------------------- */}
-      {selected && (
-        <div className="mb-8">
-          <CardTitle>
-            {note?.title ?? "Note"}
-            <Button variant="ghost" size="compact" onClick={() => openNote(null)}>
-              Close
-            </Button>
-          </CardTitle>
-          <p className="sr-only" aria-live="polite">
-            {note ? `Reading ${note.title}` : ""}
-          </p>
-
-          {noteError ? (
-            <div role="alert">
-              <Notice tone="warn">{noteError}</Notice>
-            </div>
-          ) : !note ? (
-            <Card emphasis="default">
-              <div aria-busy="true">
-                <span className="sr-only">Reading the note…</span>
-                <SkeletonText lines={6} />
-              </div>
-            </Card>
-          ) : (
-            // The links sit *beside* the note above `lg` and under it below,
-            // which is the one place on this page that needs two columns: a
-            // backlink is context for what you are reading, not a second page.
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
-              <Card emphasis="default" className={noteLoading ? "opacity-60" : ""}>
-                <p className="mb-3 font-mono text-xs text-ink-muted [overflow-wrap:anywhere]">
-                  {note.path}
-                </p>
-
-                {Object.keys(note.frontmatter).length > 0 ? (
-                  <dl className="mb-4 grid grid-cols-[minmax(0,10rem)_minmax(0,1fr)] gap-x-4 gap-y-1 border-b border-line pb-4 text-sm">
-                    {Object.entries(note.frontmatter).map(([key, value]) => (
-                      <div key={key} className="contents">
-                        <dt className="truncate font-mono text-xs text-ink-muted">{key}</dt>
-                        <dd className="[overflow-wrap:anywhere]">{frontmatterValue(value)}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                ) : (
-                  <Hint tone="warn" className="mb-4">
-                    This note has no frontmatter
-                  </Hint>
-                )}
-
-                <Markdown text={note.body} resolveWikilink={resolveWikilink} />
-              </Card>
-
-              <div>
-                <LinkList
-                  title="Links out"
-                  edges={note.outgoing}
-                  empty="This note links to nothing."
-                />
-                <LinkList
-                  title="Backlinks"
-                  edges={note.incoming}
-                  empty="Nothing links here."
-                  className="mt-4"
-                />
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* ---------------------------- the graph ---------------------------- */}
       {/*
         `openNote` is the same door the list, the backlinks and every wikilink
@@ -599,11 +710,10 @@ export default function KnowledgePage() {
 
       {/* ---------------------------- the health --------------------------- */}
       <div className="mb-8">
+        {/* No lede: it restated the heading, and its second half restated the
+            read-only sentence in `PageHead`, which is where that fact is said
+            once for the whole page. */}
         <CardTitle>Health</CardTitle>
-        <p className="mb-3 max-w-[68ch] text-sm text-ink-muted">
-          Three absences a browse list cannot show. Each is fixed in Obsidian —
-          nothing here changes the vault.
-        </p>
 
         {!health ? (
           <Card emphasis="default">
@@ -692,10 +802,17 @@ export default function KnowledgePage() {
  * Same utilities as `Markdown`'s own links rather than an import of them: that
  * file states, at the top, that it has no local imports, and exporting its
  * class string to be pulled in the other direction would be the same coupling
- * written backwards.
+ * written backwards. The two strings have to stay in step by hand: the same link
+ * is drawn by this one in the list and by that one in a body, and a reader
+ * following it from either place is following one thing.
+ *
+ * `ui-transition` is the one addition, and it does not reach the underline:
+ * `text-decoration-color` is deliberately absent from that utility's property
+ * list, so the 40%-to-full step on hover is instant by the kit's own decision.
+ * It is here for the colour, which is what a theme swap moves.
  */
 const NOTE_LINK =
-  "text-accent underline decoration-accent/40 underline-offset-2 [overflow-wrap:anywhere] hover:decoration-accent";
+  "ui-transition text-accent underline decoration-accent/40 underline-offset-2 [overflow-wrap:anywhere] hover:decoration-accent";
 
 function PageHead({ mount }: { mount?: KnowledgeStatusDTO | null }) {
   const where = mount?.mountLabel
@@ -709,6 +826,32 @@ function PageHead({ mount }: { mount?: KnowledgeStatusDTO | null }) {
         <strong className="font-semibold text-ink">Read-only:</strong> nothing on this
         page writes to it, so a fix belongs in Obsidian.
       </p>
+    </div>
+  );
+}
+
+/**
+ * A note's tags, as chips.
+ *
+ * They were a space-joined string, which is what a vault's tags look like in a
+ * text editor and not what they are here: the Tag picker above the list filters
+ * by exactly one of them, so each is a thing rather than a phrase. The hash is
+ * written here rather than stored, since the indexer keeps the text after it.
+ *
+ * `Badge` rather than the mono chip `Markdown` draws an inline `#tag` in a body
+ * with, and the difference is deliberate: in a body a tag is a word in a
+ * sentence and has to sit in the line, while here it is one of a row of index
+ * values a reader scans down a column. `Badge` uppercases visually only, so the
+ * tag's own case is what is in the DOM and what a copy or a screen reader gets.
+ */
+function TagRow({ tags }: { tags: string[] }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {tags.map((tag) => (
+        <Badge key={tag} tone="neutral">
+          #{tag}
+        </Badge>
+      ))}
     </div>
   );
 }
@@ -742,8 +885,10 @@ function HealthCard({
         <div className="mt-3">
           <ListView box="capped">{children}</ListView>
           {shown < count && (
+            // One clause, like `LinkList`'s. The sentence that followed said the
+            // count above was the whole figure, which is what a count is.
             <Hint className="mt-2">
-              Showing the first {listLimit}. The count above is the whole figure
+              Showing the first {listLimit} of {count}
             </Hint>
           )}
         </div>

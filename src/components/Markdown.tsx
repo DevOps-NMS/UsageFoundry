@@ -497,7 +497,21 @@ type Ctx = {
    * **open**, which is the safe direction: hiding is the last move.
    */
   canFold: boolean;
+  /**
+   * The reading measure a top-level block wears, or `""` for none.
+   *
+   * On the context rather than read from the module const at each call site, so
+   * that a nested render can clear it: a blockquote and a callout are already
+   * inside a box the measure has bounded, and capping their children a second
+   * time would narrow the text by the box's own padding for no reason.
+   */
+  measure: string;
 };
+
+/** Class strings joined, skipping the empty ones — `measure` is often empty. */
+function cls(...parts: string[]): string {
+  return parts.filter(Boolean).join(" ");
+}
 
 /**
  * Exported for the test. A wikilink's parts are positional and silent when
@@ -820,20 +834,78 @@ function inlineLines(text: string, key: string, ctx: Ctx): ReactNode[] {
 /* ------------------------------------------------------------------ */
 
 /**
- * Two tiers, not six. This renders inside a chat turn or a card whose own title
- * is already an <h2>, so the levels a model writes are a relative outline
- * rather than a place in the page's — hence h3 downwards, and a size that says
- * "section of this answer" rather than competing with the page heading.
+ * The reading measure, worn by the blocks that hold sentences and by nothing
+ * else.
  *
- * `text-md` on the lead, not `text-base`: the two are 15px and 13px now, and
- * `text-sm` under it is also 13px — so on the macOS type scale the previous
- * pair rendered at one size in one weight, which is one tier wearing two names.
- * A model writing `#` and `###` in the same report got no outline at all.
+ * A note is read in the wide column of a two-column grid, so a paragraph with
+ * nothing capping it runs to whatever the window is — and a line the eye has to
+ * track back across is the one typographic failure that gets *worse* on a
+ * better display. 68ch is the figure `.lede` in `globals.css` already carries
+ * and the one the knowledge page's own intro paragraph is set to, so this is
+ * that column's existing answer rather than a second one.
+ *
+ * A class on each block rather than one on the root, because the three things
+ * that legitimately want the whole column — a table, a fenced block and a
+ * figure — are children of that root, and a `max-width` on a parent is not
+ * something a child can hand back.
  */
-const HEADING_CLASS: Record<"lead" | "sub", string> = {
-  lead: "mt-4 mb-1.5 text-md font-semibold tracking-tight text-ink",
-  sub: "mt-3.5 mb-1 text-sm font-semibold text-ink",
+const MEASURE = "max-w-[68ch]";
+
+/**
+ * A paragraph that is nothing but a drawable image is a figure, and a figure is
+ * the third thing the measure does not cap: a diagram squeezed to the width of
+ * the prose is a diagram nobody can read.
+ *
+ * `MD_LINK` and `safeHref` rather than a second pattern, so this answers the
+ * same question `inline` does a few lines later — an `![](…)` whose URL no
+ * browser will fetch is drawn as its alt text, which is prose and belongs at
+ * the measure like any other.
+ */
+function isFigure(text: string): boolean {
+  const only = text.trim();
+  if (!only.startsWith("!")) return false;
+  const image = MD_LINK.exec(only);
+  return image !== null && safeHref(image[2]) !== null;
+}
+
+/**
+ * Four visual steps over three ranks, which is deliberate on both counts.
+ *
+ * Three ranks because this renders inside a chat turn or a card whose own title
+ * is already a heading, so the levels an author writes are a relative outline
+ * rather than a place in the page's — hence h3 downwards. `#` and `##` share
+ * h3 so that a note opening at `##`, which is most of them, does not skip a
+ * level under the title above it.
+ *
+ * Four sizes because a note is an outline somebody wrote and six levels drawn
+ * at two near-body classes is a flat wall. Rank and size are allowed to
+ * disagree: the rank is the note's place in *this page*, the size is the
+ * author's own hierarchy, and only one of the two has to be clamped. `#` and
+ * `##` differ by weight, everything below them by size — 15 / 13 / 12 on the
+ * app's scale — because hierarchy here is said with size, weight and
+ * whitespace, never with a colour or a second border.
+ *
+ * The top margin carries the rest. A heading has to group with what is under
+ * it, and the gap *below* one is not the heading's to set: adjacent margins
+ * collapse, so a following paragraph's own `mt-2.5` wins whatever `mb` is
+ * written here. The space above is therefore what says "new section" — 28 / 24
+ * / 20 / 20 against the 10 a paragraph or a list contributes below and the 12 a
+ * table, a fence or a callout does.
+ */
+const HEADING_CLASS: Record<1 | 2 | 3 | 4, string> = {
+  1: "mt-7 mb-1 text-md font-bold tracking-tight text-ink",
+  2: "mt-6 mb-1 text-md font-semibold tracking-tight text-ink",
+  3: "mt-5 mb-1 text-sm font-semibold text-ink",
+  4: "mt-5 mb-1 text-xs font-semibold text-ink",
 };
+
+/** `#####` and `######` are the same step as `####`; nothing draws six. */
+function headingStep(level: number): 1 | 2 | 3 | 4 {
+  if (level <= 1) return 1;
+  if (level === 2) return 2;
+  if (level === 3) return 3;
+  return 4;
+}
 
 const LIST_CLASS: Record<"top" | "nested", string> = {
   top: "my-2.5 flex list-none flex-col gap-1",
@@ -938,7 +1010,10 @@ function List({
     // `role="list"` because `list-none` is what strips list semantics in Safari,
     // and the marker column is drawn rather than generated — a wrapped item has
     // to hang, and a two-digit number has to align with a one-digit one.
-    <Tag role="list" className={LIST_CLASS[nested ? "nested" : "top"]}>
+    <Tag
+      role="list"
+      className={nested ? LIST_CLASS.nested : cls(LIST_CLASS.top, ctx.measure)}
+    >
       {nodes.map((node, i) => {
         const id = `${keyBase}:${i}`;
         return (
@@ -995,7 +1070,7 @@ function Callout({ block, keyBase, ctx }: { block: QuoteBlock; keyBase: string; 
       // component's spacing is the failure this avoids by not writing one.
       <div className={`${gap} [&>:first-child]:mt-0 [&>:last-child]:mb-0`}>
         {/* Whatever is inside this one may not fold — see `Ctx.canFold`. */}
-        {render(blocksOf(block.body), `${keyBase}:b`, { ...ctx, canFold: false })}
+        {render(blocksOf(block.body), `${keyBase}:b`, { ...ctx, canFold: false, measure: "" })}
       </div>
     ) : null;
 
@@ -1009,14 +1084,14 @@ function Callout({ block, keyBase, ctx }: { block: QuoteBlock; keyBase: string; 
       <Disclosure
         summary={title}
         defaultOpen={block.fold === "open"}
-        className={`${CALLOUT_SHELL} ${CALLOUT_BOX[tone]}`}
+        className={cls(CALLOUT_SHELL, CALLOUT_BOX[tone], ctx.measure)}
       >
         {body("mt-1.5")}
       </Disclosure>
     );
   }
   return (
-    <div className={`${CALLOUT_SHELL} ${CALLOUT_BOX[tone]}`}>
+    <div className={cls(CALLOUT_SHELL, CALLOUT_BOX[tone], ctx.measure)}>
       <p className={block.body.trim() ? "mb-1.5" : ""}>{title}</p>
       {body("")}
     </div>
@@ -1090,20 +1165,29 @@ function leaf(block: Exclude<Block, ItemBlock>, key: string, ctx: Ctx): ReactNod
   // Collected and drawn once at the end — see `render`.
   if (block.kind === "footnote") return null;
   if (block.kind === "rule") {
-    return <hr key={key} className="my-4 border-0 border-t border-line" />;
+    return <hr key={key} className={cls("my-4 border-0 border-t border-line", ctx.measure)} />;
   }
   if (block.kind === "code") {
     return (
+      // No measure: a fence is the one block whose line lengths the author
+      // chose, so it keeps the whole column and scrolls sideways in its own box
+      // rather than being folded to the width of the prose.
       <div key={key} className="my-3 overflow-hidden rounded-sm border border-line bg-inset">
         {block.lang && (
           // The info string, drawn rather than dropped: on a note it is often
           // the only thing saying what the block is (`dataview`, `mermaid`),
           // and this renders neither.
-          <div className="border-b border-line px-3 py-1 font-mono text-[11px] text-ink-muted">
+          <div className="border-b border-line px-3 py-1 font-mono text-[0.85em] text-ink-muted">
             {block.lang}
           </div>
         )}
-        <pre className="overflow-x-auto p-3 font-mono text-xs leading-relaxed text-ink">
+        {/*
+          `em` and not `text-xs`: an inline `` `path` `` is 0.9em, so with the
+          block on an absolute step the two drifted apart whenever the base
+          moved, and a fenced line came out larger than the same characters
+          quoted in the sentence above it. One relationship, stated once.
+        */}
+        <pre className="overflow-x-auto p-3 font-mono text-[0.9em] leading-relaxed text-ink">
           <code>{block.text}</code>
         </pre>
       </div>
@@ -1112,24 +1196,33 @@ function leaf(block: Exclude<Block, ItemBlock>, key: string, ctx: Ctx): ReactNod
   if (block.kind === "heading") {
     const Tag = block.level <= 2 ? "h3" : block.level === 3 ? "h4" : "h5";
     return (
-      <Tag key={key} className={HEADING_CLASS[block.level <= 2 ? "lead" : "sub"]}>
+      <Tag key={key} className={cls(HEADING_CLASS[headingStep(block.level)], ctx.measure)}>
         {inline(block.text, key, ctx)}
       </Tag>
     );
   }
   if (block.kind === "table") {
+    // No measure: a note's table is the author's columns, and 621 of the one
+    // measured vault's 785 notes carry one.
     return <MarkdownTable key={key} block={block} keyBase={key} ctx={ctx} />;
   }
   if (block.kind === "quote") {
     if (block.callout) return <Callout key={key} block={block} keyBase={key} ctx={ctx} />;
     return (
-      <blockquote key={key} className="my-3 border-l-2 border-line pl-3 text-ink-muted">
-        {render(blocksOf(block.body), `${key}:q`, ctx)}
+      // Body colour, with the rule carrying the emphasis — which is what
+      // Obsidian draws and what a quote is: somebody else's sentence, not a
+      // disabled one. Muting the text made a quoted paragraph read as
+      // unavailable, and it is often the most-cited thing on the page.
+      <blockquote
+        key={key}
+        className={cls("my-3 border-l-2 border-line-strong pl-3", ctx.measure)}
+      >
+        {render(blocksOf(block.body), `${key}:q`, { ...ctx, measure: "" })}
       </blockquote>
     );
   }
   return (
-    <p key={key} className="my-2.5">
+    <p key={key} className={cls("my-2.5", isFigure(block.text) ? "" : ctx.measure)}>
       {inlineLines(block.text, key, ctx)}
     </p>
   );
@@ -1140,10 +1233,31 @@ function Footnotes({ notes, keyBase, ctx }: { notes: FootnoteBlock[]; keyBase: s
     // A `<div>` and not a `<section>`: the legacy layer still carries
     // `section + section { margin-top: 24px }`, which would push this down by a
     // figure nobody chose.
-    <div className="mt-5 border-t border-line pt-2 text-xs text-ink-muted">
+    //
+    // `leading-normal` is stated rather than inherited: an arbitrary `text-[…]`
+    // carries no line height of its own, so trading `text-xs` for a relative
+    // step would otherwise have handed footnotes the root's `leading-relaxed`
+    // too, moving two things where one was meant.
+    <div
+      className={cls(
+        "mt-5 border-t border-line pt-2 text-[0.9em] leading-normal text-ink-muted",
+        ctx.measure,
+      )}
+    >
       <ol role="list" className="flex list-none flex-col gap-1">
         {notes.map((note, i) => (
-          <li key={`${keyBase}:${i}`} id={anchorId(ctx.ids, note.id)} className="flex gap-2">
+          // `scroll-mt-4` because this is where a reference lands, and a note
+          // flush against the top edge of the pane's scroller reads as the top
+          // of the document rather than as the thing that was jumped to. Four
+          // and not the toolbar's height: the toolbar is a sibling *above*
+          // `<main>` rather than sticky over it, so nothing here is ever under
+          // it — `settings/page.tsx` picked the same figure for the same
+          // reason.
+          <li
+            key={`${keyBase}:${i}`}
+            id={anchorId(ctx.ids, note.id)}
+            className="flex scroll-mt-4 gap-2"
+          >
             <span aria-hidden="true" className="shrink-0 tabular-nums">
               {ctx.footnotes.get(note.id) ?? i + 1}.
             </span>
@@ -1189,9 +1303,10 @@ function render(blocks: Block[], keyBase: string, ctx: Ctx): ReactNode[] {
         if (next.kind !== "text") break;
         lines.push(next.text);
       }
+      const text = lines.join("\n");
       out.push(
-        <p key={key} className="my-2.5">
-          {inlineLines(lines.join("\n"), key, ctx)}
+        <p key={key} className={cls("my-2.5", isFigure(text) ? "" : ctx.measure)}>
+          {inlineLines(text, key, ctx)}
         </p>,
       );
       i = j;
@@ -1276,6 +1391,11 @@ export function Markdown({
         // renders a note, and the only one that does not already sit inside a
         // `Disclosure` of its own.
         canFold: resolveWikilink !== undefined,
+        // The same switch, for the same reason one more time. A note is prose
+        // somebody chose to write at length and is read; a work cycle's report
+        // and a chat turn are a list of what happened and are scanned, and
+        // narrowing those four surfaces is not what a measure is for.
+        measure: resolveWikilink === undefined ? "" : MEASURE,
       })}
     </div>
   );
