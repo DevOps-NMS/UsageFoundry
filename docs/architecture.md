@@ -26,6 +26,11 @@ src/lib/
                    graph — parse, resolve, cache; read-only, and no write path
   vaultSkill.ts    the vault-lookup skill a run is handed: generated per spawn
                    as a plugin directory, never installed into ~/.claude
+  knowledgeGraph.ts  what the graph view shows before anything draws it —
+                   the search query, the colour groups, the filters, the
+                   local-graph walk, and the settings the browser stores
+  forceLayout.ts   the force-directed layout under it: Barnes-Hut repulsion,
+                   link springs, centring, and an alpha that cools to a stop
   db.ts            SQLite (runs, events, reviews, chats, proposals, workflows,
                    schedules, settings)
 src/app/api/       usage · account · runs · branches · calibrate · settings ·

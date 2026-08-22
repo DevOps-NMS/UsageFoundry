@@ -121,6 +121,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - A caller's class never cancels a component's own spacing. Tailwind emits a utility's values ascending, so the larger one wins whatever the call site wrote — use a wrapper.
   - A table stacks below `md` only with `Table stack` **and** a `label` on every `Td`. One without the other is a column of unnamed figures.
   - `"use client"` files import from `apiTypes.ts` / `format.ts`, never `windows.ts` / `transcripts.ts`.
+  - A `<canvas>` reads a colour by probing a real element, never from `getComputedStyle(root).getPropertyValue("--fg")` — every token is a `light-dark()` no `@property` registers, so that returns source text a 2D context rejects silently. Re-probe on a theme change. Size the backing store in device pixels. And stop the frame loop when the layout cools.
   - Route handlers touching SQLite or the filesystem need `runtime = "nodejs"` and `dynamic = "force-dynamic"`.
   - `saveSettings` stores only what differs from `DEFAULTS`. Writing the whole object kills every future default on that install.
 

@@ -744,6 +744,45 @@ Built and exercised against real transcripts:
   What it does not settle is everything that needs a browser, which is on the
   list below.
 
+- **The graph view's server half and its arithmetic, at the real vault's size —
+  and nothing about its picture.** On 2026-08-22, against the same read-only
+  `/workspace2` mount as the two entries above, through a scratch `next dev` on
+  a spare port with `WORKSPACE_ROOTS=Vault=/workspace2`. The exact URL the
+  canvas fetches — `/api/knowledge/graph?kinds=note,phantom,tag,attachment&limit=5000`
+  — answered **200 in 605ms with 7,330,042 bytes**: **893 nodes** (785 note, 95
+  tag, 13 phantom, 0 attachment), **19,995 edges**, `truncated:false` and
+  `capped:false`, so nothing on this vault reaches either of the reader's two
+  caps. Sixteen of those nodes carry no edge at all and the largest hub carries
+  **1,082**, which is the shape the repulsion has to hold apart. `GET /knowledge`
+  answered **200** carrying the graph region and its panel — *Whole vault*,
+  *Existing files only*, *Orphans*, *Arrows*, *Label fade*, *Repel force*, *Link
+  distance*, *Add group*, *Reset to defaults* — with no `__next_error__` in the
+  HTML and nothing logged.
+
+  The layout was then measured in Node 22.23.2 against **that payload**, not a
+  synthetic one, by stepping the simulation from `alpha = 1` until `step()`
+  returns `false`. Whole vault with tags on, 893 nodes and 19,995 edges: it
+  settles in **251 frames / 374ms**, at **1.49ms mean per step** (median 1.31,
+  p95 3.07, worst 4.50). Notes only, which is what the default filters show —
+  785 nodes, 16,610 edges: **1.36ms mean** (median 1.12, p95 2.55). With Repel
+  at the slider's maximum: **1.23ms**. The draw loop's own JS — the viewport
+  cull plus the two path calls per surviving link, with a stub standing in for
+  the rasteriser — is **0.137ms a frame**, with **10,712 primitives past the
+  cull** at 1200x640 and `k = 1`. So the part of a frame this repository
+  controls is about **1.6ms of a 16.7ms budget** at this vault's size.
+
+  Barnes-Hut earns its place by measurement rather than by argument: at 893
+  nodes it is **0.901ms a frame against all-pairs' 2.393ms, 2.7x**, and the gap
+  is what the caps are set against — at the same edge density the step costs
+  **1.47ms at 1,000 nodes, 3.35ms at 2,000, 4.32ms at the 2,500 the renderer
+  caps at, and 7.67ms at the 4,000 the API caps at**. The 2,500 cap therefore
+  leaves roughly 12ms of every frame for rasterisation at the worst graph this
+  app will draw.
+
+  **What none of that settles is the picture**, which is on the list below: no
+  browser will start in this container, so no frame rate has been observed, no
+  gesture has been made, and nothing has been seen drawn.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
@@ -2618,6 +2657,37 @@ through before trusting this unattended:
   vault-skill switch in Settings has been typechecked and built but never
   rendered — including the state that matters most, which is the switch refused
   and disabled with no knowledge base configured.
+- **Every part of the graph view that needs a browser, which is all of it that
+  is visible.** The entry in the section above — the graph view's server half
+  and its arithmetic — measures the route, the payload and the simulation
+  against the real vault, and stops exactly where a canvas begins.
+  Chromium was installed into a scratch directory and refused to launch —
+  *Host system is missing dependencies to run browsers* (libnss3, libnspr4,
+  libgbm1, libasound2) with no `sudo` and no package index to install them
+  from — so **the frame rate the feature is specified in terms of has not been
+  measured, only the arithmetic underneath it**. Nothing here has been seen
+  drawn. Specifically unverified, and each fails in its own quiet way: that
+  the colour probe returns an `rgb(...)` a 2D context accepts rather than the
+  `light-dark()` source text `getComputedStyle` hands back for a custom
+  property — the failure is a canvas that renders in whatever colour was last
+  set, not an exception; that the probe re-runs on a `data-theme` change and on
+  a `prefers-color-scheme` change, which is the only thing keeping the graph
+  from staying in the old theme's palette until something else forces a
+  rebuild; that the device-pixel backing store makes the lines crisp rather
+  than soft; that the two batched `stroke()` calls draw the same picture as the
+  ten thousand separate ones they replaced, apart from the loss of
+  self-compositing that was accepted deliberately; that the rAF actually stops
+  when the layout cools, which is a warm laptop rather than a wrong picture;
+  that a wheel zooms about the pointer, a drag pans, a dropped node stays
+  dropped, and a hover dims what it should; and that the labels ramp in at the
+  fade threshold instead of the whole vault's titles appearing between one
+  wheel notch and the next. Before trusting it: open `/knowledge` in a browser,
+  watch the frame counter in the devtools performance panel through a settle
+  with tags on, then drag, drop, zoom out past the fade threshold and switch
+  the theme. **The 7.3MB payload is the other thing a browser would price**:
+  the route was not changed for this and its shape is the shape the reader
+  already published, but decode and parse of that JSON is a cost nothing here
+  has measured, and it is paid once per page load rather than per frame.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
