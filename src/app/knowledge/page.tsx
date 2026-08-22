@@ -708,11 +708,10 @@ export default function KnowledgePage() {
 
       {/* ---------------------------- the health --------------------------- */}
       <div className="mb-8">
+        {/* No lede: it restated the heading, and its second half restated the
+            read-only sentence in `PageHead`, which is where that fact is said
+            once for the whole page. */}
         <CardTitle>Health</CardTitle>
-        <p className="mb-3 max-w-[68ch] text-sm text-ink-muted">
-          Three absences a browse list cannot show. Each is fixed in Obsidian —
-          nothing here changes the vault.
-        </p>
 
         {!health ? (
           <Card emphasis="default">
@@ -877,8 +876,10 @@ function HealthCard({
         <div className="mt-3">
           <ListView box="capped">{children}</ListView>
           {shown < count && (
+            // One clause, like `LinkList`'s. The sentence that followed said the
+            // count above was the whole figure, which is what a count is.
             <Hint className="mt-2">
-              Showing the first {listLimit}. The count above is the whole figure
+              Showing the first {listLimit} of {count}
             </Hint>
           )}
         </div>
