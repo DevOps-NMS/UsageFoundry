@@ -1158,7 +1158,7 @@ export default function RunDetail({
                   ))}
                 </div>
               )}
-              <ListGroup footnote="A window guard steps this run aside when that window passes its percentage.">
+              <ListGroup>
                 <ListRow label="5-hour window">
                   <GuardValue>
                     {run.budget.maxSessionFraction === null
@@ -1293,14 +1293,13 @@ export default function RunDetail({
                     {fmtTokens(telemetry.tokens)} tokens
                   </div>
                 </div>
+                {/* Shortened, but never to nothing: this line is one of the two
+                    places the three cost readings say in user-visible copy that
+                    they must not be added, and the region's whole purpose is
+                    that prohibition. */}
                 <p className="mt-2 text-xs leading-snug text-ink-muted">
-                  Claude Code&rsquo;s own per-request cost for this run. Kept apart
-                  from the figure above rather than added to it: that one counts
-                  only work cycles the CLI got to report, so the two disagree by
-                  design
-                  {telemetry.costUSD > run.spent_usd
-                    ? " — and this one is the larger, which is what an interrupted cycle looks like."
-                    : "."}
+                  Claude Code&rsquo;s own per-request cost, never added to the
+                  figures above.
                 </p>
               </Section>
             )}
@@ -1322,8 +1321,8 @@ export default function RunDetail({
                 deleted. */}
             {run.agent && (
               <Section title="Agent">
-                <ListGroup footnote="This run was started as it, so the saved prompt is the run's own. It changes who the run is, not what it was allowed to do.">
-                  <ListRow label="Started as" description={run.agent.description}>
+                <ListGroup>
+                  <ListRow label="Started as">
                     <GuardValue>{run.agent.name}</GuardValue>
                   </ListRow>
                   <ListRow label="Its model">
@@ -1337,28 +1336,24 @@ export default function RunDetail({
 
             {isolated && (
               <Section title="Checkout">
-                <p className="text-xs leading-snug text-ink-muted">
-                  This run works on branch{" "}
-                  <span className="mono text-ink">{run.worktree_branch}</span>, not
-                  in your copy of the folder — so other runs can use the same
-                  project at the same time. Nothing lands in your checkout until
-                  you merge it.
-                  {run.continues_run && (
-                    <>
-                      {" "}
-                      It carries on the branch run{" "}
-                      <Link
-                        href={`/runs/${run.continues_run}`}
-                        className="mono underline underline-offset-2"
-                      >
-                        {run.continues_run.slice(0, 8)}
-                      </Link>{" "}
-                      was working on, so those commits are already here and the
-                      Changes tab covers both. Only the last run on a branch can
-                      land it.
-                    </>
-                  )}
-                </p>
+                <div className="mono break-all text-sm text-ink">
+                  {run.worktree_branch}
+                </div>
+                {/* The link rather than the sentence it was in: which run this
+                    branch carries on is a fact the Changes and Land tabs both
+                    act on, and it is the one thing here the branch name does
+                    not already say. */}
+                {run.continues_run && (
+                  <div className={SUB}>
+                    carries on{" "}
+                    <Link
+                      href={`/runs/${run.continues_run}`}
+                      className="mono underline underline-offset-2"
+                    >
+                      {run.continues_run.slice(0, 8)}
+                    </Link>
+                  </div>
+                )}
               </Section>
             )}
 
