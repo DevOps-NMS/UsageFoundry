@@ -612,6 +612,138 @@ async function runScan(): Promise<ScanResult> {
   };
 }
 
+/* ------------------------------------------------------------------ */
+/* Compaction boundaries — a reading of composition, never of cost      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One compaction the CLI performed on a conversation.
+ *
+ * **Not a cost source and never summed with one.** `01-constraints.md` names
+ * three cost sources and this is a fourth *reading* of one of them: the same
+ * files `scanUsage` walks, read for what happened to the conversation rather
+ * than for what it billed. Nothing here reaches `buildSnapshot`,
+ * `runs.spent_usd` or a `BudgetVerdict`, and `preTokens`/`postTokens` are the
+ * summariser's own accounting of a window rather than tokens anybody was
+ * charged for — adding them to a bill would double-count the turns
+ * `scanUsage` has already priced.
+ *
+ * `cliVersion` is carried because it is the only thing that makes the survival
+ * classification honest. Anthropic's table of what survives a compaction pins
+ * itself at one CLI version, and every row of it is documentation rather than
+ * measurement; a record that says which version compacted *this* conversation
+ * is what lets the copy read as a hypothesis where the two disagree instead of
+ * as a fact about this install.
+ */
+export interface CompactionBoundary {
+  sessionId: string;
+  /** Epoch milliseconds, from the record's own timestamp. */
+  ts: number;
+  /** `auto` on every one of the 21 records this install has produced. */
+  trigger: string;
+  /** What the window held going in, per the summariser. */
+  preTokens: number;
+  /** What it held coming out. */
+  postTokens: number;
+  /** Wall-clock the compaction itself took, which a duration guard is counting. */
+  durationMs: number;
+  /** CLI version that wrote the record, verbatim. */
+  cliVersion: string;
+}
+
+/**
+ * A `compact_boundary` record, or null for every other line.
+ *
+ * Separate from `parseLine` rather than folded into it, and the reason is the
+ * shape of `UsageEntry`: every consumer of that array treats a member as a
+ * billable turn, so a `type: "system"` record reaching it would be counted as
+ * one by `buildSnapshot`, by `agentSpend` and by the guard. The two parsers read
+ * the same lines for different questions and share nothing but the file.
+ *
+ * Every field is read defensively and defaults to zero or the empty string,
+ * because a partially-flushed or renamed record must not throw inside a scan.
+ * That makes a field rename **silent** — the log line would read "180,694
+ * tokens down to 0" — which is what `compaction.test.ts` pins against a real
+ * captured record, and what `docs/verification.md` records as unverified on any
+ * CLI other than the pinned one.
+ */
+export function parseCompactionBoundary(line: string): CompactionBoundary | null {
+  // The substring test before the parse, not after: a scan reads whole
+  // transcripts and JSON-parsing every line of one to find the few system
+  // records in it is the cost this reader exists inside a run loop to avoid.
+  if (!line.startsWith("{") || !line.includes('"compact_boundary"')) return null;
+
+  let rec: Record<string, unknown>;
+  try {
+    rec = JSON.parse(line);
+  } catch {
+    return null;
+  }
+
+  if (rec.type !== "system" || rec.subtype !== "compact_boundary") return null;
+
+  const ts = Date.parse(String(rec.timestamp ?? ""));
+  if (!Number.isFinite(ts)) return null;
+
+  const meta = (rec.compactMetadata ?? {}) as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+  return {
+    sessionId: typeof rec.sessionId === "string" ? rec.sessionId : "",
+    ts,
+    trigger: typeof meta.trigger === "string" ? meta.trigger : "",
+    preTokens: num(meta.preTokens),
+    postTokens: num(meta.postTokens),
+    durationMs: num(meta.durationMs),
+    cliVersion: typeof rec.version === "string" ? rec.version : "",
+  };
+}
+
+/**
+ * Compactions inside one session and one time window.
+ *
+ * Bounded by session id **and** by time, for `reconcileKilledCycle`'s reason: a
+ * resumed session copies earlier records forward into the new transcript
+ * carrying their original timestamps, so the id alone would re-report every
+ * boundary of every earlier cycle at the end of each new one.
+ *
+ * The transcript is read whole rather than from a cached offset. The offset
+ * cache is `scanUsage`'s and holds only assistant entries, and a second offset
+ * over the same file would be a second thing to keep honest across truncation
+ * and rotation for a read that happens once per work cycle, beside a full
+ * `currentSnapshot()` scan of every transcript on the machine.
+ */
+export async function readCompactions(
+  sessionId: string | null,
+  window: { from: number; to: number },
+): Promise<CompactionBoundary[]> {
+  if (!sessionId) return [];
+
+  const { files } = await listTranscriptFiles(PROJECTS_DIR);
+  const name = `${sessionId}.jsonl`;
+  const mine = files.filter((f) => path.basename(f) === name);
+
+  const found: CompactionBoundary[] = [];
+  for (const file of mine) {
+    // Read failures propagate. This is not the metering path, where a short
+    // history understates a window a guard reads and so is carried rather than
+    // thrown — here the caller has one run's log to say so on, and a reader
+    // that silently answered "no compactions" would be indistinguishable from a
+    // conversation that was never compacted.
+    const text = await fs.readFile(file, "utf8");
+    for (const line of text.split("\n")) {
+      const boundary = parseCompactionBoundary(line);
+      if (!boundary) continue;
+      if (boundary.sessionId !== sessionId) continue;
+      if (boundary.ts < window.from || boundary.ts > window.to) continue;
+      found.push(boundary);
+    }
+  }
+
+  found.sort((a, b) => a.ts - b.ts);
+  return found;
+}
+
 /**
  * Forget files that are no longer on disk, without touching the rest.
  *
