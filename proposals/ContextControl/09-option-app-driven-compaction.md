@@ -12,6 +12,15 @@ is spawned in — to a `PreCompact` hook firing unprompted with `trigger:
 "auto"`. So this option is not "add compaction". It is "stop having it happen
 by default at a threshold nobody chose".
 
+*Updated 2026-08-22.* That correction was made on the strength of one hook
+firing. It is now made on the strength of the corpus: **20 completed
+compactions** across 12 transcripts, every one `trigger: "auto"`, mean 171k
+`preTokens` down to 13.7k, audited in `01-constraints.md`. Two further things
+this file treated as unknowable are settled below — the transcript *does* record
+a marker, and the compaction *does* survive `--resume` — and one thing it
+treated as a judgement is now measured, which is the correctness price of asking
+a model to summarise a conversation an agent is still working in.
+
 ## The strongest case
 
 **No other option that edits a conversation already under way has compaction's
@@ -277,6 +286,23 @@ the compaction survives `--resume`. If it does not, every compaction is paid for
 and discarded at the next handover, and the bill looks like a mechanism that is
 not working rather than one that is being undone.
 
+> **2026-08-22 — measured, and it survives.** Two runs in the corpus resume
+> across a compaction boundary. In
+> `96ba3c02-1313-493c-b484-45f2f519ed3b.jsonl` a boundary at record 108 takes
+> 180,694 tokens to 17,456; a `--resume` spawn lands at record 366; the last
+> assistant turn of the old process reports a context of **147,513** and the
+> first turn of the new one reports **151,328**, a rise of 3,815 — the
+> continuation prompt and its attachments, and nothing else. In
+> `f291b888-df46-4dfa-998f-515360a7852f.jsonl` a boundary at 173 takes 174,613
+> to 12,296, the resume lands at 498, and the two figures are **127,731** and
+> **131,552**, a rise of 3,821. Had the resume replayed the pre-boundary
+> history, both would have jumped to at least the `preTokens` figure plus every
+> token earned since the boundary — over 300,000, past the window. Neither did.
+> Context size is read from each assistant record's own
+> `usage.input_tokens + cache_read_input_tokens + cache_creation_input_tokens`,
+> so it is what the API was sent rather than an estimate. **This closes the
+> option's load-bearing unknown, in the option's favour.**
+
 ## What it costs to build
 
 **Files touched:** `src/lib/orchestrator.ts` (one argv entry in `buildArgs`,
@@ -306,19 +332,69 @@ at the parser, so a number read wrong is a whole fleet failing to spawn.
 
 ## What would have to be true
 
-**That a compaction survives `--resume`.** This is the option's load-bearing
-unknown and `02-` names it as one: no completed compaction was reachable
-without a live model, and no marker is written either way. If it does not
-survive, the mechanism is undone at every cycle boundary — 108 of them in the
-rolling week.
+**~~That a compaction survives `--resume`.~~ Answered 2026-08-22: it does.**
+`02-` named this as unreachable without a live model, and it was — but the model
+has since run. The measurement is in "How it fails" above: two resumes across a
+boundary, both continuous, neither replaying the pre-boundary history. The
+mechanism is *not* undone at the cycle boundary. Strike this from the list.
 
-**That compacting earlier than the CLI already does is worth anything.** The
-flag can only lower the threshold on a 200k-window model, so this option's
-entire delta over doing nothing is the difference between the CLI's `auto` and
-a smaller number. Nothing measured here says what `auto` resolves to on
-`claude-opus-5`, or how often the runs in `00-problem.md`'s corpus reached it —
-because the transcript records no marker, the corpus cannot say whether any of
-them compacted at all.
+**~~That compacting earlier than the CLI already does is worth anything.~~
+Half-answered, and the half that changed is the premise.** The flag can only
+lower the threshold on a 200k-window model, so this option's entire delta over
+doing nothing is still the difference between the CLI's `auto` and a smaller
+number, and nothing measured here says what `auto` resolves to on
+`claude-opus-5`. What is no longer true is the sentence that followed: *"because
+the transcript records no marker, the corpus cannot say whether any of them
+compacted at all."* **The transcript records a full marker** — a
+`type: "system"`, `subtype: "compact_boundary"` record carrying `trigger`,
+`preTokens`, `postTokens`, `durationMs`, `cumulativeDroppedTokens`,
+`preservedSegment` and `preservedMessages` — and the corpus now holds 20 of
+them across 12 transcripts, every one `trigger: "auto"`. `01-constraints.md`
+carries the audit. So the question "how often did these runs compact" is
+answerable by counting, and the answer today is that this install compacts at
+roughly 171k `preTokens`, down to a mean 13.7k, at a cost of 143 seconds of
+wall-clock inside a run whose `maxDurationMinutes` guard is counting.
+
+**That the measured correctness price of this exact mechanism is one the
+operator will pay.** This is the addition of 2026-08-22 and it is the reason
+Option F scores −3 — the floor — on `16-comparison.md`'s eleventh criterion.
+Every other option in this survey is scored on that row by analogy. F is scored
+on it by name, because summary compaction is literally what all four
+measurements ran:
+
+| Source | Grade | What it measures on F's mechanism |
+|---|---|---|
+| `/workspace2/3 Resources/Sources/Governance Decay (Chen 2026).md` | `evidence: preprint`, `peer_reviewed: false`, `confidence: medium` | One compaction takes prohibited actions from **0% to 30%** across 1,323 episodes and seven model families, 59% on the worst. Mediated entirely by textual survival: "when the constraint survives the summary, violation remains 0%, but when it is dropped, violation reaches 38%" |
+| `/workspace2/3 Resources/Sources/Lost in Compaction (Wang et al 2026).md` | `evidence: preprint`, `confidence: low` | "Current compactors retain only **17%** of injected SCs on average, and most perform worse than running the same task without compaction" |
+| `/workspace2/3 Resources/Sources/Toward Reliable Context Compression for Long-Horizon Agents (Min et al 2026).md` | `evidence: preprint`, `confidence: medium` | AppWorld at the tightest budget: full context **85.7%**, summary compaction **72.8%**, FIFO **42.2%** — and the failure mode is *execution-state mislocalisation*, "agents that no longer know where they are in the task and so re-explore, repeat, and fail to terminate" |
+
+Read the third row against this file's own "Silent, third" paragraph. That
+paragraph guessed the symptom — "the observable symptom is the agent redoing
+work" — from `continuedWorkNotice`'s docblock. Min measured it and named it, on
+a benchmark, as the dominant failure. **The guess was right and it is no longer
+a guess**, which is the whole of what changed about Option F: the argument
+against it used to be a judgement about what a summariser might drop, and it is
+now three independent measurements of what summarisers do drop.
+
+Two honest limits on all three. They are unreplicated preprints, none tests
+Anthropic's implementation, and none tests a **re-injected instruction file** —
+which is precisely the arrangement that protects `SELF_HOSTING_NOTICE` here. The
+vault's own summary of the gap is that "the choice between them is not how much
+you lose but **whether the loss is recoverable**"
+(`/workspace2/3 Resources/AI Context and Memory/Compaction and Context Editing.md:23`),
+and a summary is the unrecoverable kind. And Chen publishes a fix — Constraint
+Pinning restores violation to 0% — which is not reachable from any argv this app
+emits, for the same reason `20-option-api-context-management.md` gives.
+
+**That a compaction earlier than the CLI's own is better than the CLI's own,
+given all of that.** This is the question the option now reduces to, and it is
+sharper than it was. The correctness price above is being paid on this install
+**today**, twenty times over, by a mechanism nobody configured. Option F does
+not introduce that price. What it asks for is the authority to move the
+threshold — which, on these measurements, means the authority to pay the price
+*more often* in exchange for cache savings. Lowering `--autocompact` is a
+request for more compactions, and more compactions is the independent variable
+in every row of the table above.
 
 **That a model's summary may decide what an agent forgets.** This is the option
 that most directly puts that decision in a model's hands, with no

@@ -219,7 +219,11 @@ all with `trigger: "auto"`, a mean 171,063 `preTokens` against 13,673
 `postTokens`, and a mean 143,427 ms spent compacting (2,582 s in total). Every
 one of them post-dates `ee93684`, which put `--autocompact` on the argv. The
 count grows while this app runs: the same scan earlier the same day, over 1,117
-transcripts, returned 16.
+transcripts, returned 16, and a third pass a few hours later returned **20
+across 12 transcripts** — three of the four new ones written by the session
+writing this paragraph. Read every figure in this section as a snapshot with a
+rising floor, not as a total. The per-boundary shape below did not change across
+any of the three passes.
 
 The records a boundary is followed by are the same every time:
 
