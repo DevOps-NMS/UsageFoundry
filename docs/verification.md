@@ -783,6 +783,47 @@ Built and exercised against real transcripts:
   browser will start in this container, so no frame rate has been observed, no
   gesture has been made, and nothing has been seen drawn.
 
+- **The Markdown renderer's Obsidian surface, over every note in the real
+  vault.** On 2026-08-22, against the `/workspace2` mount, by driving the
+  compiled `Markdown` over all **785 notes** with a resolver of the page's own
+  shape and counting markup that reached the reader as punctuation — the same
+  method as the wikilink measurement above, widened to every construct.
+
+  What it found first is the size of the gap the change closes: **760 of the
+  785 notes carry a callout, 621 carry a table, 524 carry a task list**, 764 a
+  blockquote and 81 a footnote definition, and before this every one of those
+  rendered as the literal characters the author typed. That is the whole of why
+  the page reads as unrendered — it was already rendering markdown, and almost
+  nothing a note is actually written in was in the subset it knew.
+
+  After: **0 notes leak a callout marker, a task box, a table row, a highlight,
+  a strikethrough, a footnote definition, a wikilink, a bold run or a comment**,
+  across 785 notes rendered with **0 throwing**. Two renderer bugs were found by
+  this pass and only by it, both invisible from the desktop: a table's stacked
+  `label` was handed the raw head string, so every cell on a phone showed
+  `**bold**` and `[[wikilinks]]` in a table that read correctly above `md`; and
+  `- [ ]` with nothing after it — the row every template in this vault leaves
+  for the reader — was a bullet whose text was `[ ]` rather than a checkbox.
+  Both have a test. One leak remains and is content rather than a bug:
+  `[link](url)` in a template, a schemeless URL the allowlist declines to make
+  clickable, which is the same refusal that keeps `javascript:` inert.
+
+  The unconditional strip of a trailing `^block-id` was checked rather than
+  assumed, because it is the one rule here that *removes* text and a report is
+  not a note: the pattern occurs **11 times in the vault**, all of them genuine
+  block ids, and **0 times in this repository's own prose**, which is the
+  closest available stand-in for what a model writes into a cycle report.
+
+  Unlike the two entries above, this mount is **read-write** — proved by a
+  `touch` that succeeded, and the probe file was removed in the same minute. The
+  probe itself writes nothing, which is measured rather than asserted: a
+  `sha256` over `find /workspace2 -printf '%T@ %s %p\n' | sort` is identical
+  either side of a full 785-note run. A digest taken across a *longer* window
+  did differ, and that is the vault being live rather than this touching it —
+  the same reason the note counts above drift between entries.
+
+  What it does not settle is every pixel, which is on the list below.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
@@ -2627,7 +2668,14 @@ through before trusting this unattended:
   every cell rather than becoming a column of unnamed figures; and that the
   not-configured branch renders as a warn Notice above a Settings link — the
   route half of that state answered correctly, but the branch that draws it has
-  never run. The graph region's `min-h-[20rem]` is gone with the placeholder
+  never run. The Obsidian constructs added on 2026-08-22 are unseen in the same
+  way and the measurement above is explicitly *not* a substitute: it counts what
+  reached the DOM, so it says a callout is a box with the right border token and
+  says nothing about whether four tones are distinguishable at 8% tint, whether
+  a `<summary>` inside a callout looks like a fold, whether a note's table
+  actually stacks below `md` rather than scrolling, whether a disabled checkbox
+  reads as "not yours to press" or as broken, or whether three levels of list
+  nesting stay legible in the note column's width. The graph region's `min-h-[20rem]` is gone with the placeholder
   that earned it: the canvas and both of its empty states are `aspect-[4/3]`,
   so what used to be "dropping a canvas in must not reflow the page" is now
   "the box is the same shape before and after the vault loads, at every width".
