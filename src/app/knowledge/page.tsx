@@ -800,10 +800,17 @@ export default function KnowledgePage() {
  * Same utilities as `Markdown`'s own links rather than an import of them: that
  * file states, at the top, that it has no local imports, and exporting its
  * class string to be pulled in the other direction would be the same coupling
- * written backwards.
+ * written backwards. The two strings have to stay in step by hand: the same link
+ * is drawn by this one in the list and by that one in a body, and a reader
+ * following it from either place is following one thing.
+ *
+ * `ui-transition` is the one addition, and it does not reach the underline:
+ * `text-decoration-color` is deliberately absent from that utility's property
+ * list, so the 40%-to-full step on hover is instant by the kit's own decision.
+ * It is here for the colour, which is what a theme swap moves.
  */
 const NOTE_LINK =
-  "text-accent underline decoration-accent/40 underline-offset-2 [overflow-wrap:anywhere] hover:decoration-accent";
+  "ui-transition text-accent underline decoration-accent/40 underline-offset-2 [overflow-wrap:anywhere] hover:decoration-accent";
 
 function PageHead({ mount }: { mount?: KnowledgeStatusDTO | null }) {
   const where = mount?.mountLabel
