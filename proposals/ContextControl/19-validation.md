@@ -418,9 +418,14 @@ binary: **it reads a directory that another process is writing.**
     mean preTokens             170852
     mean postTokens            13248
     mean durationMs            141975   total s 2839
-    metadata keys              ["trigger","preTokens","durationMs","preservedSegment",
-                                "preservedMessages","postTokens","cumulativeDroppedTokens",
-                                "preCompactDiscoveredTools"]
+    metadata keys              trigger                   20/20
+                               preTokens                 20/20
+                               durationMs                20/20
+                               preservedSegment          20/20
+                               preservedMessages         20/20
+                               postTokens                20/20
+                               cumulativeDroppedTokens   20/20
+                               preCompactDiscoveredTools  4/20
     by project                 {"…721638d11c0b-1":13, "…721638d11c0b-2":2, "-workspace2":5}
     summary mean bytes         24066 over 20 summaries
     post-boundary attachments (first 30 records after each):

@@ -147,6 +147,42 @@ the dashboard.
 about a completed compaction: "no completed compaction was reachable without a
 live model".
 
+> **2026-08-22 — build the reader instead, and keep the hook only if somebody
+> wants the warning.** The defect above rests on "found no marker in the
+> transcript either way", which is false: a completed compaction writes a
+> `subtype: "compact_boundary"` system record with seven metadata fields on
+> every one of them (and an eighth, `preCompactDiscoveredTools`, on 4 of 20),
+> and this install has produced 20. `02-` never reached a completed
+> compaction and generalised from the absence;
+> `02-levers-on-the-pin.md` and `00-problem.md` both carry the correction.
+>
+> **What this phase should be instead.** `scanUsage()`
+> (`src/lib/transcripts.ts:409`) already walks these files. Recognising the
+> record is one `subtype` comparison and carrying `preTokens`, `postTokens` and
+> `durationMs` onto the entry it already builds. That is a change to
+> `src/lib/transcripts.ts` and `src/lib/windows.ts` — the same two files Phase 1
+> touches — and it **collapses into Phase 1** rather than standing beside it.
+> The recommendation at the top of `17-recommendation.md` now says "including
+> the compaction boundary" for that reason.
+>
+> **What that removes from this phase, and it is the whole of its risk.** No
+> `--settings` entry, so the unestablished two-`--settings`-flags question above
+> stops applying; no change to `sandboxArgs`' contract; no
+> `--include-hook-events`; no new dispatch on the `stream-json` channel. The
+> four invariants listed above are all invariants of the *hook*, and a reader
+> breaks none of them. The half-day estimate for 0b (`:368` below) becomes an
+> hour inside Phase 1.
+>
+> **What is lost.** A `PreCompact` hook is the only way to know a compaction is
+> *about to* happen — a reader learns it 142 seconds later, which is the mean
+> `durationMs` measured across the 20. Nothing in this survey needs the advance
+> warning, and nothing here is a guard, so the hook stays unbuilt unless a later
+> phase wants to *act* before a compaction rather than record that one occurred.
+>
+> The `docs/verification.md` line is still owed, with different words: what is
+> unverified is no longer whether a marker exists but whether those metadata
+> fields keep their names on a CLI other than 2.1.226.
+
 ## Phase 1 — the reading
 
 **Touches** `src/lib/windows.ts` only, one pure function beside `agentSpend`
@@ -332,6 +368,12 @@ contained.**
 Phase 0: an hour for 0a, half a day for 0b (most of it in composing one
 `--settings` object rather than two). Phase 1: half a day including the test.
 Phase 2: a day. Phase 3: an afternoon.
+
+*2026-08-22:* if 0b becomes the reader rather than the hook, as the note under
+that phase now recommends, Phase 0 is an hour for 0a and nothing for 0b, and
+Phase 1 absorbs an hour. The `docs/verification.md` line below changes with it:
+what stays unverified is not whether the marker exists but whether its field
+names hold on a CLI other than 2.1.226.
 
 No schema change, no migration, no new module, no new settings key, no new
 `claude` child, no new store and no new sweep. Two lines in

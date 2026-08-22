@@ -1417,7 +1417,8 @@ cycle's argv at all.
   > compaction leaves a very full trace — `compactMetadata` on a
   > `subtype: "compact_boundary"` system record, carrying `trigger`,
   > `preTokens`, `postTokens`, `durationMs`, `cumulativeDroppedTokens`,
-  > `preservedSegment`, `preservedMessages` and `preCompactDiscoveredTools`, and
+  > `preservedSegment` and `preservedMessages` on all 20 measured (plus
+  > `preCompactDiscoveredTools` on 4 of them), and
   > `isCompactSummary` on the user record after it. The corpus was empty on
   > 2026-08-21 because **no compaction had happened yet**: `ee93684` put
   > `--autocompact` on every cycle's argv at 20:08:10 UTC that day and the

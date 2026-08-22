@@ -310,9 +310,9 @@ closed, and the file has been corrected.
 > this probe could not answer anything. **Wrong:** "the transcript carries no
 > marker either way". A completed compaction writes a `type: "system"`,
 > `subtype: "compact_boundary"` record carrying `trigger`, `preTokens`,
-> `postTokens`, `durationMs`, `cumulativeDroppedTokens`, `preservedSegment`,
-> `preservedMessages` and `preCompactDiscoveredTools`. The probe transcripts
-> above have no such record because **no compaction completed in them**, which
+> `postTokens`, `durationMs`, `cumulativeDroppedTokens`, `preservedSegment` and
+> `preservedMessages` on all 20 measured, and `preCompactDiscoveredTools` on 4.
+> The probe transcripts have none because **no compaction completed**, which
 > is the same fact as the sound claim stated twice, not a second finding. The
 > key scan quoted above also looked for `isCompactSummary` / `compactMetadata`
 > on the wrong records — `compactMetadata` hangs off the `system` record, and
