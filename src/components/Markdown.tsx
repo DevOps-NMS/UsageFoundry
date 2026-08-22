@@ -1181,7 +1181,18 @@ function Footnotes({ notes, keyBase, ctx }: { notes: FootnoteBlock[]; keyBase: s
     <div className="mt-5 border-t border-line pt-2 text-[0.9em] leading-normal text-ink-muted">
       <ol role="list" className="flex list-none flex-col gap-1">
         {notes.map((note, i) => (
-          <li key={`${keyBase}:${i}`} id={anchorId(ctx.ids, note.id)} className="flex gap-2">
+          // `scroll-mt-4` because this is where a reference lands, and a note
+          // flush against the top edge of the pane's scroller reads as the top
+          // of the document rather than as the thing that was jumped to. Four
+          // and not the toolbar's height: the toolbar is a sibling *above*
+          // `<main>` rather than sticky over it, so nothing here is ever under
+          // it — `settings/page.tsx` picked the same figure for the same
+          // reason.
+          <li
+            key={`${keyBase}:${i}`}
+            id={anchorId(ctx.ids, note.id)}
+            className="flex scroll-mt-4 gap-2"
+          >
             <span aria-hidden="true" className="shrink-0 tabular-nums">
               {ctx.footnotes.get(note.id) ?? i + 1}.
             </span>
