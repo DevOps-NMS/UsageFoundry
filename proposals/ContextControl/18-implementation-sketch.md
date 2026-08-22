@@ -45,6 +45,24 @@ of `10-option-context-guard.md` rather than a follow-up ticket.
 Neither is context control. Each is a live defect this survey found while
 looking for something else.
 
+> **2026-08-22 — landed, as revised, and nothing above it was.** Phase 0 is
+> implemented: `contextShapingEnv` for 0a, and for 0b the *reader* the dated note
+> at `0b` below replaces the hook with — `parseCompactionBoundary` /
+> `readCompactions` in `transcripts.ts`, `injectionFates` / `compactionNotice` in
+> `orchestrator.ts`, read after every cycle. So there is **no `PreCompact` hook,
+> no `--settings` entry and no `--include-hook-events`**, and `sandboxArgs`'
+> contract is untouched — read `0b`'s note rather than its body. What 0b's note
+> called the loss is real and stands: a reader learns of a compaction after it
+> finished, never before, so nothing here can warn.
+>
+> Beyond the two, one thing this phase did not originally claim: the notice also
+> says what the compaction *took*, quoting the survival table
+> `01-constraints.md` audits, and it words itself as a hypothesis whenever the
+> boundary record's own `version` differs from the `2.1.198` that table is
+> pinned to. Phases 1 to 4 are **not** implemented — no reading, no route, no
+> card, no dashboard. `docs/verification.md` carries what is unverified, and the
+> notice has not been seen on a run log.
+
 ### 0a. Record the context-shaping environment, or strip it
 
 **Touches** `src/lib/orchestrator.ts` (`childEnv` at `:5216`–`:5231`, and the
