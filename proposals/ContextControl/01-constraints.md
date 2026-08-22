@@ -129,25 +129,38 @@ records two runs killed by a literal in it.
 
 ## The two endings must survive every cycle
 
-`COMPLETION_NOTICE` (`src/lib/orchestrator.ts:4466`) and `NEEDS_REVIEW_NOTICE`
-(`:4506`) are the whole contract by which a run can end for a reason rather than
+`COMPLETION_NOTICE` (`src/lib/orchestrator.ts:4467`) and `NEEDS_REVIEW_NOTICE`
+(`:4507`) are the whole contract by which a run can end for a reason rather than
 by exhausting a cap, and both reach the agent as **generated** text on every
-cycle bar the operator's own follow-up (`nextPrompt`, `:4330`–`:4361`).
+cycle bar the operator's own follow-up (`nextPrompt`, `:4331`–`:4362`).
 
 Three properties, each with the measurement or the invariant behind it.
 
 **They are generated, not stored, and that is load-bearing.** `getSettings()` is
-`{...DEFAULTS, ...stored}` and the settings page PUTs the whole *effective*
-object on Save, so a sentence added to a `DEFAULT_*` prompt is dead on every
-install whose operator has ever pressed the button (`src/lib/orchestrator.ts:4448`–`4454`,
-`docs/agent/conventions.md:14`). Any context mechanism with configuration of its
-own inherits that rule: it must not be written out whole.
+`{...DEFAULTS, ...stored}`, so a sentence added to a `DEFAULT_*` prompt has to
+survive whatever the operator's install already has stored
+(`src/lib/orchestrator.ts:4449`–`4455`, `docs/agent/conventions.md:14`). Any
+context mechanism with configuration of its own inherits that rule: it must not
+be written out whole.
+
+> **Correction, 2026-08-22.** The original of this paragraph said the settings
+> page "PUTs the whole *effective* object on Save, so a sentence added to a
+> `DEFAULT_*` prompt is dead on every install whose operator has ever pressed
+> the button". It was quoting the docblock at `src/lib/orchestrator.ts:4449`–`:4455`
+> accurately, and the docblock is stale: `saveSettings`
+> (`src/lib/settings.ts:727`–`:731`) compares each key against `DEFAULTS` with
+> `sameValue` (`:756`) and stores **only what differs**, which is `CLAUDE.md`'s
+> own rule — "Writing the whole object kills every future default on that
+> install." So the hazard is real, the code already refuses it, and the comment
+> describing the old behaviour is a `src/` fix outside this revision's scope,
+> recorded in `19-validation.md` rather than made. The constraint on an option's
+> own configuration is unchanged either way: it must not be written out whole.
 
 **Dropping them is expensive in a way that is already measured.** Before
 `COMPLETION_NOTICE` existed, cycle 1 was judged against a protocol it had never
 been given, and the docblock records the count: of the runs whose budget allowed
 a second cycle, 92 of them cost $162 to say one word into a re-sent conversation
-(`src/lib/orchestrator.ts:4436`–`:4446`). An option that drops, summarises or
+(`src/lib/orchestrator.ts:4437`–`:4447`). An option that drops, summarises or
 rewrites turns must not
 drop these, and must not contradict them: `NEEDS_REVIEW_NOTICE` says "work you
 have not attempted is not a wall", and a summariser that replaces a cycle's
@@ -155,13 +168,121 @@ evidence with a paragraph is manufacturing exactly the ambiguity that sentence
 exists to refuse.
 
 **And the matcher runs over generated text.** `cycleEnding`
-(`src/lib/orchestrator.ts:4543`) tests both sentinels against a cycle's final
+(`src/lib/orchestrator.ts:4544`) tests both sentinels against a cycle's final
 text, alone on a line, with the two spellings deliberately different so a task
 quoting the *status* cannot fire it. A mechanism that writes a summary back into
 the conversation is writing text that this app will later read for those tokens.
 It has to say what stops a summary of a run about this feature from ending the
-run — the same hazard `:4531`–`:4537` accepts and bounds for task text, one door
+run — the same hazard `:4532`–`:4538` accepts and bounds for task text, one door
 further in.
+
+## What survives a compaction, audited row by row
+
+*Added 2026-08-22. The survey treated compaction as invisible and as somebody
+else's mechanism. Anthropic publishes a table saying which injected text
+survives one, and this app injects five kinds of text. This section is that
+table crossed with this app's argv.*
+
+The source is
+`/workspace2/3 Resources/AI Context and Memory/Mid-Session Context Mutation with Claude.md:63`–`:79`,
+which reproduces a vendor table it pins at **v2.1.198**. The vault grades the
+underlying page `evidence: documentation`, `confidence: medium`
+(`/workspace2/3 Resources/Sources/Claude Code Context Window Documentation (Anthropic).md`)
+and records that it carries "no measurement of any kind" — so every row below is
+a **documented mechanism**, not a measured outcome, and the distinction is
+carried into the last column rather than flattened.
+
+**This install pins 2.1.226** (`Dockerfile:215`, `ARG CLAUDE_CLI_VERSION=2.1.226`;
+`claude --version` → `2.1.226 (Claude Code)`). The vault's stated observation
+range for these pages is v2.1.198–v2.1.234, so 2.1.226 is inside the range the
+note's author watched, and it is **28 patch releases after the table's own
+pin**. Where a row was not independently probed here, it is a hypothesis about
+this install and is written as one.
+
+| What this app injects | How it reaches the model | Vendor table's row | Status on this install |
+|---|---|---|---|
+| `SELF_HOSTING_NOTICE` + `DELEGATION_NOTICE`, one `--append-system-prompt` (`src/lib/orchestrator.ts:4943`–`:4948`) | **system prompt** | "System prompt and output style — Unchanged; not part of message history" | **Survives.** Documented, unprobed. The argv is rebuilt per cycle (`:6821`) so it is re-sent regardless |
+| `COMPLETION_NOTICE` (`:4467`), `NEEDS_REVIEW_NOTICE` (`:4507`), the task prompt, `continuation`, `donePushback` — via `nextPrompt` (`:4331`–`:4362`) | **user message** | *no row* — message history is the thing being summarised | **Open, and the table cannot close it.** See below |
+| The generated vault skill, `renderVaultSkill` → `SKILL.md` (`src/lib/vaultSkill.ts:203`, `:370`) under `/run/uf-skills` (`:90`), on argv as `--plugin-dir` | **invoked skill body** | "Invoked skill bodies — Re-injected, capped at 5,000 tokens per skill and 25,000 total; oldest dropped first" | **Under the cap, measured.** 3,540 bytes rendered (3,479 with no ranked search script). No tokenizer can make 3,540 bytes exceed 3,540 tokens, so truncation cannot bite and the 25,000 total would need seven such skills |
+| The skill's *menu entry* | **skill listing** | "the **skill listing itself is not re-injected**" (vault note `:77`) | **Lost.** A run that compacts before it has ever invoked the vault skill loses the entry telling it the skill exists. `writeVaultSkill`'s own docblock (`src/lib/vaultSkill.ts:357`) already relies on the CLI reading `SKILL.md` at invocation rather than at startup |
+| Operator plugin directories — skills, agents, MCP servers (`src/lib/plugins.ts:129`, `:204`) | same as above, per component | skills as above; agents and MCP servers have **no row** | **Something is re-sent, contents unread.** Each of the 18 boundaries is followed by an `agent_listing_delta`, and 3 by an `mcp_instructions_delta`. What those carry was not opened |
+| Project-root `CLAUDE.md` in the mounted repository | file, read by the CLI | "Project-root `CLAUDE.md` and unscoped rules — **Re-injected from disk**" | **Survives, per the table, and not checkable here.** The marker text appears nowhere in any transcript, before or after a boundary, which `00-problem.md` already predicts for the invisible fixed prefix. Documented, unprobed |
+| A **nested** `CLAUDE.md` in a subdirectory of a mounted repository | file | "**Lost** until a file in that subdirectory is read again" | **Would be lost.** This repository has exactly one `CLAUDE.md`, at the root, so nothing is lost here today. A mounted monorepo with per-package `CLAUDE.md` files loses every one at a compaction, silently, and gets each back only where the agent happens to re-read a file in that package. Same mechanism as the row below, which *was* observed |
+| `paths:`-scoped rules under `~/.claude/rules/` | file | "Rules with `paths:` frontmatter — **Lost** until a matching file is read again" | **Confirmed on 2.1.226, in the exact shape the row describes** — see below. Live exposure: three of the five files on this install carry `paths:` (`typescript.md`, `python.md`, `interface-copy.md`) and two do not. `~/.claude` is one bind mount shared with the host, so those three govern every agent this app spawns |
+| Hooks, via `--settings` | code | "Hooks — Not applicable; hooks run as code, not context" | **Confirmed, and stronger than the row.** All 18 boundaries are followed by a `hook_success` attachment naming `SessionStart:compact`, so a hook not only survives but has a firing point at the boundary itself |
+
+**The corpus behind the last column, and the one row it turned from
+documentation into observation.** A JSON parse of all 1,120 transcripts under
+`~/.claude/projects` on 2026-08-22 finds **18** `compact_boundary` records — 12
+in this worktree's project, 1 in the sibling worktree's, 5 in `-workspace2` —
+all with `trigger: "auto"`, a mean 171,063 `preTokens` against 13,673
+`postTokens`, and a mean 143,427 ms spent compacting (2,582 s in total). Every
+one of them post-dates `ee93684`, which put `--autocompact` on the argv. The
+count grows while this app runs: the same scan earlier the same day, over 1,117
+transcripts, returned 16.
+
+The records a boundary is followed by are the same every time:
+
+    + 1  user (isCompactSummary)              ← the summary, mean 24,153 bytes
+    + 2..5  attachment:compact_file_reference ← a path, no content
+    + 6  attachment:file                      ← full content
+    + 7  attachment:deferred_tools_delta
+    + 8  attachment:agent_listing_delta
+    + 9  attachment:hook_success              ← hookName "SessionStart:compact"
+    +10  last-prompt
+    +11  agent-setting
+    +12  assistant (thinking)
+    +13  assistant tool_use Grep {"pattern":…,"path":"/workspace/.uf-worktrees/…
+    +14  user (the tool result)
+    +15  attachment:nested_memory  /home/node/.claude/rules/typescript.md
+
+**Read line +15 against line +13.** `typescript.md` carries `paths:`
+frontmatter, so the table says it is lost at the boundary "until a matching file
+is read again" — and it comes back not at the boundary but two records after the
+agent's *first tool call touching a matching path*. Across the 18 boundaries the
+first `nested_memory` lands at offset +15 to +18 with one or two tool uses in
+between, never earlier; and the five boundaries where no matching file was
+touched have **no `nested_memory` at all** within 200 records. That is the
+documented mechanism, observed on 2.1.226 rather than assumed from a page pinned
+at v2.1.198, and it is the strongest single reason to trust the rest of the
+table on this install.
+
+Two smaller readings from the same records. `compact_file_reference` outnumbers
+`file` 63 to 27, so more than twice as many files come back after a compaction
+as a **name** than as content — the summariser's own "carry forward the five
+most recently accessed files" is mostly carrying forward paths. And the boundary
+costs wall-clock: 143 seconds of compaction, per compaction, inside a run whose
+`maxDurationMinutes` guard is counting.
+
+**What this settles about "the two endings", and precisely what it does not.**
+It settles the **process-safety half and only that half**. `SELF_HOSTING_NOTICE`
+and `DELEGATION_NOTICE` — the text that tells an agent not to `pkill` its own
+supervisor, and how to delegate — ride `--append-system-prompt`, which the table
+puts in the one row that survives *unchanged*. That is the half of this section's
+title that is now answered, and it is answered by mechanism rather than by hope.
+
+**The ending contract is the open half.** `COMPLETION_NOTICE` and
+`NEEDS_REVIEW_NOTICE` are appended to a **user message**, and message history is
+not a row in the table because message history is the thing a compaction
+rewrites. So the two sentences that decide whether a run can end for a reason
+are in the one class the vendor documents no protection for. `nextPrompt` re-issues
+`NEEDS_REVIEW_NOTICE` on every continuation cycle (`:4331`–`:4362`), which
+repairs it at the next handover — but *within* a cycle, after a compaction, the
+contract is whatever the summariser chose to keep.
+
+**And the table settles less than it appears to even where it says "survives".**
+The vault flags this in its own callout at `:81`–`:82`, and the flag is the
+reason this section is not the end of the argument:
+
+> The table settles *what text is present after compaction*. It does not settle
+> whether a re-injected rule still **binds** — [[Governance Decay (Chen 2026)]]
+> measures 30% prohibited-action rates post-compaction, mediated entirely by
+> whether the constraint text survived, and nobody has run that experiment on a
+> re-injected file.
+
+So even the top row's "unchanged" is a claim about **presence**, not about
+force. `16-comparison.md` carries what the measurements say about the
+difference.
 
 ## `--resume` needs a file another sweep is entitled to delete
 
