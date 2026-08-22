@@ -40,7 +40,13 @@ import {
   planReadingAgeMs,
 } from "./budget";
 import { installBudgetRefusal, installBudgetVerdict } from "./installBudget";
-import { lastScanReadFailures, scanUsage, type UsageEntry } from "./transcripts";
+import {
+  lastScanReadFailures,
+  readCompactions,
+  scanUsage,
+  type CompactionBoundary,
+  type UsageEntry,
+} from "./transcripts";
 import { totalTokens } from "./pricing";
 import { buildSnapshot, type UsageSnapshot } from "./windows";
 import { planUsage } from "./planUsage";
@@ -4989,6 +4995,315 @@ export function buildArgs(opts: {
 }
 
 /* ------------------------------------------------------------------ */
+/* What a compaction took, read off the argv that put it there          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The CLI version Anthropic's compaction survival table pins itself to.
+ *
+ * The table says which parts of a window survive a compaction — system prompt
+ * unchanged, project-root `CLAUDE.md` re-injected from disk, `paths:`-scoped
+ * rules lost until a matching file is read again, invoked skill bodies
+ * re-injected under a cap, the skill listing not re-injected at all. It is
+ * **documentation carrying no measurement of any kind**, and it is pinned here
+ * rather than compared against `Dockerfile`'s `CLAUDE_CLI_VERSION` on purpose:
+ * what matters is not what this image installs but what version wrote the
+ * boundary record being described, which the record itself carries.
+ *
+ * Sourced at `proposals/ContextControl/01-constraints.md`, which audits the
+ * table row by row against this app's own argv.
+ */
+export const SURVIVAL_TABLE_CLI_VERSION = "2.1.198";
+
+/**
+ * One thing this app put into a run's window, and what the table says became of
+ * it at a compaction.
+ */
+export interface WindowInjection {
+  /** What it is, in the words an operator reading a run log would recognise. */
+  what: string;
+  /** The argv flag that carried it. */
+  via: string;
+  fate: "survives" | "reinjected" | "lost" | "unknown" | "unclassified";
+  /** The table's own row, or the reason there is not one. */
+  note: string;
+}
+
+/**
+ * How many values each flag this app emits consumes.
+ *
+ * The arity is here rather than inferred from "does the next token start with a
+ * dash", because two of these flags carry *generated text* as their value —
+ * `-p` a whole prompt and `--append-system-prompt` two notices — and a value
+ * that happened to begin with a dash would otherwise be read as a flag and
+ * reported as unclassified. `many` consumes to the next `--`, which is what the
+ * CLI's own variadic options do and what `--allowedTools` and `--add-dir` are.
+ *
+ * **Every flag `buildArgs` and `sandboxArgs` emit must appear here.** That is
+ * the whole anti-drift property of `injectionFates`: a flag with no entry is
+ * reported as unclassified rather than silently dropped from the record, so the
+ * first change to `buildArgs` that adds an injection says so on the run's log
+ * instead of quietly falling out of it.
+ */
+const ARGV_ARITY: Record<string, "none" | "one" | "many"> = {
+  "-p": "one",
+  "--output-format": "one",
+  "--verbose": "none",
+  "--model": "one",
+  "--permission-mode": "one",
+  "--forward-subagent-text": "none",
+  "--agents": "one",
+  "--agent": "one",
+  "--allowedTools": "many",
+  "--disallowedTools": "many",
+  "--append-system-prompt": "one",
+  "--plugin-dir": "one",
+  "--add-dir": "many",
+  "--resume": "one",
+  "--autocompact": "one",
+  "--max-budget-usd": "one",
+  "--settings": "one",
+};
+
+/** Every flag above that carries no text into the model's context window. */
+const CARRIES_NO_CONTEXT = new Set([
+  // Stream shape and model selection.
+  "--output-format",
+  "--verbose",
+  "--model",
+  "--forward-subagent-text",
+  // Capabilities and grants, not text: `--allowedTools` names what skips a
+  // prompt, `--add-dir` names a directory the session may reach, and neither
+  // puts anything in the window that a compaction could take.
+  "--permission-mode",
+  "--allowedTools",
+  "--disallowedTools",
+  "--add-dir",
+  // The conversation itself, which is the thing being summarised rather than
+  // something injected into it, and the threshold that decides when.
+  "--resume",
+  "--autocompact",
+  "--max-budget-usd",
+  // Hooks and a sandbox write set. The table's own row: "Hooks — not
+  // applicable; hooks run as code, not context."
+  "--settings",
+]);
+
+/**
+ * Every flag below that this function turns into a row.
+ *
+ * Held apart from the `switch` that reads them so that the two sets can be
+ * checked against `ARGV_ARITY`: a flag with an arity but in neither set is a
+ * flag somebody taught this function to *parse* without deciding whether it
+ * injects anything, and it reports itself rather than passing as non-context.
+ */
+const CLASSIFIED_INJECTIONS = new Set([
+  "-p",
+  "--append-system-prompt",
+  "--agents",
+  "--agent",
+  "--plugin-dir",
+]);
+
+/**
+ * What this run's own argv put in the window, classified against the table.
+ *
+ * **Derived from the argv rather than from a list of what this app injects**,
+ * which is the difference between a record that stays true and one that is
+ * wrong the first time `buildArgs` changes. A cycle spawned without plugins
+ * reports no skills; a cycle spawned with three plugin directories reports
+ * three; and a flag this function has never been taught reports itself as
+ * unclassified.
+ *
+ * Unclassified rows sort first, because `log()` cuts a message at
+ * `MAX_LOG_CHARS` and the one row that asks somebody to do something is the one
+ * that must not be the row that got cut.
+ *
+ * Nothing here is measured. Every `note` is the vendor's documentation quoted
+ * back, and `compactionNotice` is what says so — no caller should render these
+ * rows without it.
+ */
+export function injectionFates(argv: readonly string[]): WindowInjection[] {
+  const rows: WindowInjection[] = [];
+  const unclassified: WindowInjection[] = [];
+  const pluginDirs: string[] = [];
+  let appendedPrompt: string | null = null;
+  let agentDefinition = false;
+  let agentName: string | null = null;
+  let prompt: string | null = null;
+  let unknownFlag: string | null = null;
+  let previousFlag: string | null = null;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const flag = argv[i];
+    const arity = ARGV_ARITY[flag];
+
+    if (arity === undefined) {
+      if (flag.startsWith("-")) {
+        unknownFlag = flag;
+        unclassified.push({
+          what: `whatever ${flag} carries`,
+          via: flag,
+          fate: "unclassified",
+          note:
+            "This app emits it and nothing here has a row for it. Give it one, or record in `ARGV_ARITY` and `CARRIES_NO_CONTEXT` that it carries no context.",
+        });
+      } else if (unknownFlag === null) {
+        // A bare token that did not follow an unknown flag followed a *known*
+        // one, which means the arity recorded for it is short — and that is the
+        // failure that silently turns a value into a flag and back again. One
+        // row per unknown flag, so an unknown flag's own values do not each add
+        // one.
+        unclassified.push({
+          what: `a value this function did not expect: ${flag}`,
+          via: previousFlag ?? flag,
+          fate: "unclassified",
+          note: "`ARGV_ARITY` records fewer values for this flag than the argv carries.",
+        });
+      }
+      continue;
+    }
+
+    unknownFlag = null;
+    previousFlag = flag;
+
+    const values: string[] = [];
+    if (arity === "one") {
+      values.push(argv[i + 1] ?? "");
+      i += 1;
+    } else if (arity === "many") {
+      // Stops at any token starting with a dash, not only at `--`: `-p` is the
+      // one short flag on this argv and a variadic scan that ate it would drop
+      // the prompt from the record. Every variadic value this app emits is a
+      // tool name or an absolute path, so none can be mistaken for a flag.
+      while (i + 1 < argv.length && !argv[i + 1].startsWith("-")) {
+        values.push(argv[i + 1]);
+        i += 1;
+      }
+    }
+
+    switch (flag) {
+      case "-p":
+        prompt = values[0] ?? "";
+        break;
+      case "--append-system-prompt":
+        appendedPrompt = values[0] ?? "";
+        break;
+      case "--agents":
+        agentDefinition = true;
+        break;
+      // A name, carrying no text of its own — but the definition it selects
+      // becomes the session's system prompt, so the row belongs to `--agents`
+      // and this is only what makes the line readable.
+      case "--agent":
+        agentName = values[0] ?? null;
+        break;
+      case "--plugin-dir":
+        if (values[0]) pluginDirs.push(values[0]);
+        break;
+    }
+
+    if (!CARRIES_NO_CONTEXT.has(flag) && !CLASSIFIED_INJECTIONS.has(flag)) {
+      unclassified.push({
+        what: `whatever ${flag} carries`,
+        via: flag,
+        fate: "unclassified",
+        note:
+          "This function parses it and has not decided whether it injects anything. Give it a row, or name it in `CARRIES_NO_CONTEXT`.",
+      });
+    }
+  }
+
+  if (appendedPrompt !== null) {
+    rows.push({
+      what: `the appended system prompt (${appendedPrompt.length} characters)`,
+      via: "--append-system-prompt",
+      fate: "survives",
+      note: "System prompt and output style — unchanged; not part of message history.",
+    });
+  }
+
+  if (agentDefinition) {
+    rows.push({
+      what: agentName
+        ? `the definition of the agent this run is, "${agentName}"`
+        : "the definition of the agent this run is",
+      via: "--agents",
+      fate: "survives",
+      note: "Same row: it becomes the session's system prompt, which is not part of message history.",
+    });
+  }
+
+  for (const dir of pluginDirs) {
+    rows.push({
+      what: `skill bodies from ${dir}`,
+      via: "--plugin-dir",
+      fate: "reinjected",
+      note:
+        "Invoked skill bodies — re-injected, capped at 5,000 tokens per skill and 25,000 in total, oldest dropped first, and a truncated body keeps the start of the file.",
+    });
+    rows.push({
+      what: `the listing that told this cycle those skills exist (${dir})`,
+      via: "--plugin-dir",
+      fate: "lost",
+      note:
+        "The skill listing itself is not re-injected. A cycle that had not yet invoked a skill loses the entry saying it is there.",
+    });
+  }
+
+  if (prompt !== null) {
+    rows.push({
+      what: `this work cycle's prompt (${prompt.length} characters), and any ending contract inside it`,
+      via: "-p",
+      fate: "unknown",
+      note:
+        "No row in the table. Message history is the thing a compaction rewrites, so what is left of it is whatever the summariser kept.",
+    });
+  }
+
+  return [...unclassified, ...rows];
+}
+
+/**
+ * One log line for a compaction, and the sentence that keeps it honest.
+ *
+ * The honesty is the point of the function rather than a caveat on it. The
+ * classification above is a vendor table with no measurement behind it, pinned
+ * to one CLI version, and the record being described says which version
+ * actually compacted the conversation. Where those differ — which is every
+ * install of this app today, since it pins a later CLI — the notice has to read
+ * as a hypothesis, because an operator who takes it as a reading of their own
+ * install will trust a row that was never tested here.
+ *
+ * It states no judgement about the conversation and quotes none of it: what was
+ * summarised is between the run and its own agent, and this app does not read
+ * it. `preTokens`/`postTokens` are the summariser's accounting of a window and
+ * are never a cost — nothing in this notice reaches `runs.spent_usd`, a
+ * snapshot or a guard.
+ */
+export function compactionNotice(
+  boundary: CompactionBoundary,
+  injections: readonly WindowInjection[],
+): string {
+  const seconds = (boundary.durationMs / 1000).toFixed(0);
+  const trigger = boundary.trigger || "an unnamed trigger";
+  const head =
+    `Claude Code compacted this run's conversation (${trigger}): ` +
+    `${boundary.preTokens.toLocaleString("en-US")} tokens summarised down to ` +
+    `${boundary.postTokens.toLocaleString("en-US")}, taking ${seconds}s.`;
+
+  const version = boundary.cliVersion || "an unreported version";
+  const basis =
+    boundary.cliVersion === SURVIVAL_TABLE_CLI_VERSION
+      ? `Anthropic documents the following for CLI ${SURVIVAL_TABLE_CLI_VERSION}, which is the version that compacted this conversation. It is documentation and not a measurement of this install.`
+      : `What follows is what Anthropic documents for CLI ${SURVIVAL_TABLE_CLI_VERSION}; this conversation was compacted by ${version}. Nothing here was measured on this install, so read every line as a hypothesis about it.`;
+
+  const lines = injections.map((i) => `  ${i.fate}: ${i.what} (${i.via}) — ${i.note}`);
+
+  return [head, basis, ...lines].join("\n");
+}
+
+/* ------------------------------------------------------------------ */
 /* What one child may write                                            */
 /* ------------------------------------------------------------------ */
 
@@ -5317,6 +5632,64 @@ export function sandboxArgsFor(scope: SandboxScope): string[] {
  * proxy and CA settings, and locale to function at all, so an allowlist would
  * fail in ways that are tedious to diagnose from inside a container.
  */
+/**
+ * Environment variables that change what a run's conversation carries.
+ *
+ * All seven pass through `childEnv` untouched, and that is deliberate rather
+ * than an oversight to fix: the strip list below exists for credentials and for
+ * telemetry routing, and an operator who set one of these in their compose file
+ * meant it. Stripping them would be this app overruling a configuration
+ * decision it does not own.
+ *
+ * What was wrong was that nothing recorded it. Two installs whose compose files
+ * differ by `CLAUDE_CODE_MAX_CONTEXT_TOKENS` run different context regimes, and
+ * every page in this app rendered them identically — so a run whose agent
+ * compacted at a third of the usual window, or whose `Read` output was capped
+ * at a tenth, looked exactly like one that was not. Named on the run's own log
+ * for `githubTokenFor`'s reason: nothing else in this app would ever mention
+ * it.
+ *
+ * Not settings keys, and not compose keys. `docs/agent/environment.md` is
+ * explicit that compose renders every optional variable as `${VAR:-}`, so
+ * seven new keys would render blank on every stock install — and there is
+ * nothing for this app to *decide* here, only something to report. A stock
+ * install's argv, environment and boot warnings are byte-identical after this.
+ *
+ * Verified present in the pinned binary by the survey that found them
+ * (`proposals/ContextControl/18-implementation-sketch.md`, phase 0a); this app
+ * neither sets nor validates them, so a value the CLI rejects is still the
+ * CLI's to reject.
+ */
+export const CONTEXT_SHAPING_ENV = [
+  "DISABLE_AUTO_COMPACT",
+  "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+  "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS",
+  "MAX_THINKING_TOKENS",
+  "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+  "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+  "BASH_MAX_OUTPUT_LENGTH",
+] as const;
+
+/**
+ * Which of those are set, and to what.
+ *
+ * Blank counts as unset, which is the same rule `env()`'s blank-is-the-answer
+ * sibling in `config.ts` applies and the reason this cannot become a permanent
+ * line on a stock install: compose renders an unset optional variable as the
+ * empty string, and an empty string is not an operator naming a ceiling.
+ */
+export function contextShapingEnv(
+  env: Record<string, string | undefined> = process.env,
+): { key: string; value: string }[] {
+  const set: { key: string; value: string }[] = [];
+  for (const key of CONTEXT_SHAPING_ENV) {
+    const value = env[key];
+    if (value === undefined || value === "") continue;
+    set.push({ key, value });
+  }
+  return set;
+}
+
 function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, FORCE_COLOR: "0" };
   for (const key of Object.keys(env)) {
@@ -6513,6 +6886,26 @@ export async function startRun(id: string): Promise<void> {
       log(id, `No GitHub credential: ${github.key} is configured to get none`);
     }
 
+    // Once per pick-up rather than per cycle, because `process.env` is fixed for
+    // the life of this process: a line on every cycle would be the same line
+    // eleven times. A reopened run says it again, and that is not redundant —
+    // the container may have been recreated under a different compose file
+    // since, which is the whole reason this is worth recording.
+    //
+    // These reach the agent whatever this app does (`CONTEXT_SHAPING_ENV`), and
+    // until now nothing said so. A run whose agent compacted at a third of the
+    // usual window looked identical to one that did not.
+    const shaping = contextShapingEnv();
+    if (shaping.length > 0) {
+      log(
+        id,
+        `Context-shaping environment reaching this run's agent: ${shaping
+          .map((v) => `${v.key}=${v.value}`)
+          .join(", ")}. Set on this container, not by this app.`,
+        { contextShapingEnv: shaping },
+      );
+    }
+
     for (;;) {
       const preScan = interrupts.get(id);
       if (preScan) {
@@ -7014,6 +7407,63 @@ export async function startRun(id: string): Promise<void> {
           doneRetriggers,
           id,
         );
+
+      // Did the CLI summarise this run's conversation while the cycle ran?
+      //
+      // Read here rather than watched for, and after the row is written rather
+      // than before it. The CLI compacts a `-p` session unprompted and says
+      // nothing about it on the stream, but it writes a full `compact_boundary`
+      // record to the transcript — so this is a reading of a completed
+      // compaction, arriving a couple of minutes after the fact, and not a
+      // warning that one is about to happen. Nothing here acts on it: no
+      // threshold, no flag, no guard, no `sessionId` cleared. A `PreCompact`
+      // hook is the only way to learn it in advance and nothing in this app
+      // needs to, because nothing here is allowed to intervene.
+      //
+      // After the cycle has returned, which is what makes the file complete:
+      // a turn only reaches a transcript when Claude Code flushes it, and by
+      // this point the child has exited. Bounded by `cycleStartedAt` so a
+      // resumed session's copied-forward boundaries are not re-reported at the
+      // end of every later cycle — `reconcileKilledCycle`'s bound, for its
+      // reason.
+      //
+      // Before the interrupt check below, so a cycle an operator stopped still
+      // says what happened to its conversation. An interrupt landing during
+      // this read is still caught: the check reads `interrupts` afterwards.
+      try {
+        const compactions = await readCompactions(sessionId, {
+          from: cycleStartedAt,
+          to: Date.now(),
+        });
+        if (compactions.length > 0) {
+          // Off this cycle's own argv rather than a list of what this app
+          // injects, so a cycle spawned without plugins reports no skills and a
+          // future flag reports itself as unclassified.
+          const injections = injectionFates(args);
+          for (const boundary of compactions) {
+            log(id, compactionNotice(boundary, injections), {
+              compaction: {
+                trigger: boundary.trigger,
+                preTokens: boundary.preTokens,
+                postTokens: boundary.postTokens,
+                durationMs: boundary.durationMs,
+                cliVersion: boundary.cliVersion,
+              },
+            });
+          }
+        }
+      } catch (err) {
+        // Said rather than swallowed, and it does not fail the cycle. A read
+        // that returned nothing quietly would be indistinguishable from a
+        // conversation that was never compacted, which is the exact failure
+        // this whole reading exists to remove.
+        log(
+          id,
+          `Could not read this run's transcript for compactions: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
 
       // Before the exit-code test, because a killed child closes with a null
       // code that reads as -1. Judging that as a crash would file every stop —

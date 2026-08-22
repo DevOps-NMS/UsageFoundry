@@ -62,12 +62,15 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 // above, and the module reads WORKSPACE_ROOTS once at load.
 const {
   buildArgs,
+  compactionNotice,
   conflictKey,
+  contextShapingEnv,
   cycleEnding,
   cycleSilenceMs,
   dependencyCycle,
   duePausedRuns,
   edgeSatisfied,
+  injectionFates,
   interruptOutcome,
   overlaps,
   planPausedRun,
@@ -106,6 +109,7 @@ const {
   MAX_RESUMES_PER_SWEEP,
   MAX_TRANSIENT_RETRIES,
   NEEDS_REVIEW_NOTICE,
+  SURVIVAL_TABLE_CLI_VERSION,
 } = require("./orchestrator") as typeof import("./orchestrator");
 
 const { CLAUDE_CONFIG_DIR } = require("./config") as typeof import("./config");
@@ -2444,6 +2448,237 @@ describe("buildArgs", () => {
     assert.equal(args[args.indexOf("--model") + 1], "claude-opus-5");
     assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
     assert.equal(args[args.indexOf("--resume") + 1], "sess-1");
+  });
+});
+
+/**
+ * Which context-shaping variables reached the agent.
+ *
+ * `18-implementation-sketch.md` costed this phase as "a `log()` call beside an
+ * existing one" and said it earned no test on that basis. It grew one branch
+ * that changes the answer, so it earns the two cases that pin the branch and
+ * nothing else.
+ *
+ * **Blank is unset**, and getting it wrong is silent in the direction the
+ * environment doc warns about: compose renders every optional variable as
+ * `${VAR:-}`, so a blank string counted as "set" would put a line naming seven
+ * empty variables on every run of every stock install — a permanent notice
+ * about a configuration nobody made, which is how a real one stops being read.
+ */
+describe("contextShapingEnv", () => {
+  it("treats a blank value as unset, the way compose renders one", () => {
+    assert.deepEqual(
+      contextShapingEnv({ DISABLE_AUTO_COMPACT: "", MAX_THINKING_TOKENS: undefined }),
+      [],
+    );
+  });
+
+  it("names what an operator actually set, and only that", () => {
+    assert.deepEqual(
+      contextShapingEnv({
+        MAX_THINKING_TOKENS: "31999",
+        PATH: "/usr/bin",
+        CLAUDE_CODE_MAX_CONTEXT_TOKENS: "200000",
+      }),
+      [
+        { key: "MAX_THINKING_TOKENS", value: "31999" },
+        { key: "CLAUDE_CODE_MAX_CONTEXT_TOKENS", value: "200000" },
+      ],
+    );
+  });
+});
+
+/**
+ * What a compaction took, classified off the argv that put it there.
+ *
+ * It earns a test on `agentSpend`'s grounds — a pure classifier whose every
+ * failure is silent — and the failures point three different ways.
+ *
+ * **Drift** is the one this file is the right home for, and the reason these
+ * cases run `buildArgs` rather than hand-written argv. The classification is a
+ * reading of `buildArgs`' output, so the first flag added there that carries
+ * text into the window would otherwise fall out of the record silently: the
+ * compaction line would go on listing four things while the run injected five,
+ * and nothing throws, nothing fails to typecheck, and the log reads complete.
+ * The assertion that no real argv produces an `unclassified` row is what makes
+ * that a failed test instead.
+ *
+ * **A fabricated row** is the opposite and worse. Every `note` here is
+ * Anthropic's own documentation, pinned to a CLI version, carrying no
+ * measurement — and an operator who reads it as a reading of their own install
+ * will trust a row nobody tested. `compactionNotice` is the only thing that says
+ * so, so the wording is pinned rather than left to a later edit to soften.
+ *
+ * **A row in the wrong direction** is the quiet one: the skill *listing* is lost
+ * where the skill *bodies* are re-injected, and swapping those two would tell an
+ * operator their vault skill survived a compaction when the entry saying it
+ * exists did not.
+ */
+describe("injectionFates", () => {
+  const base = {
+    prompt: "do the thing",
+    model: null,
+    permissionMode: "acceptEdits" as const,
+    resumeSessionId: null,
+    maxRunCostUSD: null,
+    spentGuardUSD: 0,
+  };
+
+  const fatesOf = (argv: string[]) =>
+    Object.fromEntries(injectionFates(argv).map((i) => [i.what, i.fate]));
+
+  /**
+   * The anti-drift assertion, run over the widest argv this app emits — every
+   * optional flag present at once, so nothing is missed by being absent.
+   */
+  it("classifies every flag a real spawn emits", () => {
+    const args = buildArgs({
+      ...base,
+      model: "claude-opus-5",
+      resumeSessionId: "sess-1",
+      isolated: true,
+      forwardSubAgentText: true,
+      maxRunCostUSD: 10,
+      spentGuardUSD: 1,
+      pluginDirs: ["/workspace/plug"],
+      vaultSkill: { pluginDir: "/run/uf-skills/vault", vaultPath: "/workspace2" },
+      agent: {
+        name: "reviewer",
+        description: "reviews",
+        prompt: "You review.",
+        model: null,
+      },
+    });
+    // Plus the flag the run loop pushes after `buildArgs` returns.
+    args.push(...sandboxArgs({ kind: "confined", allowWrite: ["/tmp"] }, "on"));
+
+    const unclassified = injectionFates(args).filter((i) => i.fate === "unclassified");
+    assert.deepEqual(
+      unclassified.map((i) => i.via),
+      [],
+      "a flag on a real argv with no row means the compaction record is short by one",
+    );
+  });
+
+  it("reports a flag it has never been taught rather than dropping it", () => {
+    const rows = injectionFates(["--append-user-prompt", "some text"]);
+    assert.equal(rows.length, 1, "the unknown flag's own value must not add a second row");
+    assert.equal(rows[0].fate, "unclassified");
+    assert.equal(rows[0].via, "--append-user-prompt");
+  });
+
+  /**
+   * The other way `ARGV_ARITY` goes wrong, and the quieter one: a flag it knows
+   * but records as taking fewer values than the argv carries. The extra value is
+   * then read as a token in its own right — which is how a value became a flag
+   * in the first place — so it is reported against the flag it belongs to.
+   */
+  it("reports a value a known flag's recorded arity did not account for", () => {
+    const rows = injectionFates(["--model", "opus", "an-extra-value"]);
+    const stray = rows.filter((r) => r.fate === "unclassified");
+    assert.equal(stray.length, 1);
+    assert.equal(stray[0].via, "--model");
+    assert.match(stray[0].what, /an-extra-value/);
+  });
+
+  /**
+   * Unclassified first, because `log()` cuts at `MAX_LOG_CHARS` and the row that
+   * asks somebody to do something is the row that must survive the cut.
+   */
+  it("puts an unclassified flag ahead of the rows it does know", () => {
+    const rows = injectionFates(["-p", "go", "--brand-new-flag", "x"]);
+    assert.equal(rows[0].fate, "unclassified");
+  });
+
+  it("splits a plugin directory's skill bodies from the listing that names them", () => {
+    const args = buildArgs({
+      ...base,
+      isolated: false,
+      vaultSkill: { pluginDir: "/run/uf-skills/vault", vaultPath: "/workspace2" },
+    });
+    const fates = fatesOf(args);
+    assert.equal(fates["skill bodies from /run/uf-skills/vault"], "reinjected");
+    assert.equal(
+      fates["the listing that told this cycle those skills exist (/run/uf-skills/vault)"],
+      "lost",
+    );
+  });
+
+  it("reports no skills for a cycle spawned without any", () => {
+    const rows = injectionFates(buildArgs({ ...base, isolated: false }));
+    assert.equal(
+      rows.some((i) => i.via === "--plugin-dir"),
+      false,
+    );
+  });
+
+  /**
+   * The two notices ride one `--append-system-prompt`, which the vendor table
+   * puts in the row that survives unchanged — and the prompt they are *not* on
+   * has no row at all, because message history is the thing being summarised.
+   * Collapsing those two into one answer is how an operator comes to believe the
+   * ending contract is safe.
+   */
+  it("separates the appended system prompt from the message history", () => {
+    const args = buildArgs({ ...base, isolated: true });
+    const rows = injectionFates(args);
+    const system = rows.find((i) => i.via === "--append-system-prompt");
+    const prompt = rows.find((i) => i.via === "-p");
+    assert.equal(system?.fate, "survives");
+    assert.equal(prompt?.fate, "unknown");
+  });
+
+  it("does not mistake the prompt for a variadic tool value", () => {
+    // `--disallowedTools` is variadic and `-p` is the one short flag on the
+    // argv, so a scan that stopped only at `--` would swallow the prompt.
+    const rows = injectionFates(["--disallowedTools", "Bash(pkill:*)", "-p", "go"]);
+    assert.equal(rows.find((i) => i.via === "-p")?.fate, "unknown");
+    assert.equal(
+      rows.some((i) => i.fate === "unclassified"),
+      false,
+    );
+  });
+
+  it("says a compaction happened, and says the classification is not measured", () => {
+    const boundary = {
+      sessionId: "sess-1",
+      ts: 1,
+      trigger: "auto",
+      preTokens: 180694,
+      postTokens: 17456,
+      durationMs: 140432,
+      cliVersion: "2.1.226",
+    };
+    const notice = compactionNotice(boundary, injectionFates(["-p", "go"]));
+    assert.match(notice, /compacted this run's conversation \(auto\)/);
+    assert.match(notice, /180,694 tokens summarised down to 17,456/);
+    assert.match(notice, /140s/);
+    // The pin, both versions named, and the word that keeps it a claim about
+    // documentation rather than about this install.
+    assert.match(notice, new RegExp(`CLI ${SURVIVAL_TABLE_CLI_VERSION}`));
+    assert.match(notice, /compacted by 2\.1\.226/);
+    assert.match(notice, /hypothesis/);
+  });
+
+  /**
+   * The one case where the table's own pin is the version that ran. Still
+   * documentation and still unmeasured, so the notice must say that too — the
+   * matching version removes the version caveat, not the evidence one.
+   */
+  it("still refuses to call the table a measurement when the versions match", () => {
+    const notice = compactionNotice(
+      {
+        sessionId: "s",
+        ts: 1,
+        trigger: "auto",
+        preTokens: 1,
+        postTokens: 1,
+        durationMs: 1000,
+        cliVersion: SURVIVAL_TABLE_CLI_VERSION,
+      },
+      [],
+    );
+    assert.match(notice, /documentation and not a measurement/);
   });
 });
 
