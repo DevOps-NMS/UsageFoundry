@@ -13,6 +13,7 @@ import type {
 } from "@/lib/apiTypes";
 import { fmtDateTime, pollFailureMessage } from "@/lib/format";
 import { jsonRequest } from "@/lib/jsonRequest";
+import { KnowledgeGraphView } from "@/components/KnowledgeGraphView";
 import { Markdown, type Wikilink, type WikilinkResolution } from "@/components/Markdown";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonLink, ButtonRow } from "@/components/ui/Button";
@@ -583,28 +584,18 @@ export default function KnowledgePage() {
 
       {/* ---------------------------- the graph ---------------------------- */}
       {/*
-        The graph canvas goes here, and this region is its shape rather than a
-        gap beside one. What belongs in the card below: an interactive canvas
-        over `/api/knowledge/graph` — `KnowledgeGraphDTO`, whose `nodes` already
-        carry `inDegree`/`outDegree` for sizing and whose `edges` carry
-        `resolved` for drawing a dangling link differently. It reads the same
-        four filters as the list above (`folder`, `tag`, `type`, `q`), which is
-        why they are page state rather than the browse card's, and selecting a
-        node calls `openNote(path)` — the same door the list, the backlinks and
-        every wikilink already go through, so a graph click lands in the reader
-        above with Back still working.
+        `openNote` is the same door the list, the backlinks and every wikilink
+        already go through, so a click on a node lands in the reader above with
+        Back still working.
 
-        The minimum height is stated now so that dropping a canvas in does not
-        reflow the page under whoever is reading it.
+        The graph deliberately does *not* read this page's four browse filters,
+        which an earlier note here expected it to. Its own search and toggles
+        are the ones Obsidian's graph view has, over the whole vault; a graph
+        silently showing only the twenty notes the list happened to be filtered
+        to would be a second view that disagrees with the first about what is in
+        the vault. See the note at the top of `KnowledgeGraphView`.
       */}
-      <div className="mb-8">
-        <CardTitle>Graph</CardTitle>
-        <Card emphasis="quiet">
-          <div className="flex min-h-[20rem] items-center justify-center">
-            <Empty>The link graph is not drawn yet.</Empty>
-          </div>
-        </Card>
-      </div>
+      <KnowledgeGraphView notePath={selected} onOpenNote={openNote} />
 
       {/* ---------------------------- the health --------------------------- */}
       <div className="mb-8">
