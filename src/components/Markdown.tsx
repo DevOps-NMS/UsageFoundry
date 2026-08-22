@@ -820,20 +820,43 @@ function inlineLines(text: string, key: string, ctx: Ctx): ReactNode[] {
 /* ------------------------------------------------------------------ */
 
 /**
- * Two tiers, not six. This renders inside a chat turn or a card whose own title
- * is already an <h2>, so the levels a model writes are a relative outline
- * rather than a place in the page's — hence h3 downwards, and a size that says
- * "section of this answer" rather than competing with the page heading.
+ * Four visual steps over three ranks, which is deliberate on both counts.
  *
- * `text-md` on the lead, not `text-base`: the two are 15px and 13px now, and
- * `text-sm` under it is also 13px — so on the macOS type scale the previous
- * pair rendered at one size in one weight, which is one tier wearing two names.
- * A model writing `#` and `###` in the same report got no outline at all.
+ * Three ranks because this renders inside a chat turn or a card whose own title
+ * is already a heading, so the levels an author writes are a relative outline
+ * rather than a place in the page's — hence h3 downwards. `#` and `##` share
+ * h3 so that a note opening at `##`, which is most of them, does not skip a
+ * level under the title above it.
+ *
+ * Four sizes because a note is an outline somebody wrote and six levels drawn
+ * at two near-body classes is a flat wall. Rank and size are allowed to
+ * disagree: the rank is the note's place in *this page*, the size is the
+ * author's own hierarchy, and only one of the two has to be clamped. `#` and
+ * `##` differ by weight, everything below them by size — 15 / 13 / 12 on the
+ * app's scale — because hierarchy here is said with size, weight and
+ * whitespace, never with a colour or a second border.
+ *
+ * The top margin carries the rest. A heading has to group with what is under
+ * it, and the gap *below* one is not the heading's to set: adjacent margins
+ * collapse, so a following paragraph's own `mt-2.5` wins whatever `mb` is
+ * written here. The space above is therefore what says "new section" — 28 / 24
+ * / 20 / 20 against the 10 a paragraph or a list contributes below and the 12 a
+ * table, a fence or a callout does.
  */
-const HEADING_CLASS: Record<"lead" | "sub", string> = {
-  lead: "mt-4 mb-1.5 text-md font-semibold tracking-tight text-ink",
-  sub: "mt-3.5 mb-1 text-sm font-semibold text-ink",
+const HEADING_CLASS: Record<1 | 2 | 3 | 4, string> = {
+  1: "mt-7 mb-1 text-md font-bold tracking-tight text-ink",
+  2: "mt-6 mb-1 text-md font-semibold tracking-tight text-ink",
+  3: "mt-5 mb-1 text-sm font-semibold text-ink",
+  4: "mt-5 mb-1 text-xs font-semibold text-ink",
 };
+
+/** `#####` and `######` are the same step as `####`; nothing draws six. */
+function headingStep(level: number): 1 | 2 | 3 | 4 {
+  if (level <= 1) return 1;
+  if (level === 2) return 2;
+  if (level === 3) return 3;
+  return 4;
+}
 
 const LIST_CLASS: Record<"top" | "nested", string> = {
   top: "my-2.5 flex list-none flex-col gap-1",
@@ -1112,7 +1135,7 @@ function leaf(block: Exclude<Block, ItemBlock>, key: string, ctx: Ctx): ReactNod
   if (block.kind === "heading") {
     const Tag = block.level <= 2 ? "h3" : block.level === 3 ? "h4" : "h5";
     return (
-      <Tag key={key} className={HEADING_CLASS[block.level <= 2 ? "lead" : "sub"]}>
+      <Tag key={key} className={HEADING_CLASS[headingStep(block.level)]}>
         {inline(block.text, key, ctx)}
       </Tag>
     );
