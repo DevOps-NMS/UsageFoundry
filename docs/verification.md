@@ -836,9 +836,18 @@ through before trusting this unattended:
   (`100k-1M`, validated), an `Autocompact` phase in the query pipeline
   (`query_autocompact_start`/`_end`), a trigger described as re-checked at each
   turn start, a thrash circuit breaker, and `compact_boundary` records with
-  `compactMetadata`/`preCompactTokenCount`. **No compaction has been observed.**
-  Across 1,011 transcripts there are zero `compact_boundary` records, so nothing
-  here has ever run. The open question is not whether it fires but the *sign*:
+  `compactMetadata`/`preCompactTokenCount`. **Compactions have since been
+  observed, so the sentence this entry used to open with — that across 1,011
+  transcripts there were zero `compact_boundary` records — is no longer true and
+  was already stale when the reader below was built.** As of 2026-08-22 this
+  machine's 1,123 transcripts carry 23 of them across 14 files, every one
+  written by CLI `2.1.226` with `trigger: "auto"` and `entrypoint: "sdk-cli"`.
+  What that settles is only that the record exists and that compaction happens
+  on this pin under this app's own spawns. It does not settle that
+  `--autocompact` is what fired: the record names the trigger `auto` and nothing
+  in it distinguishes the flag's threshold from the CLI's own default, and this
+  app passes the flag on every cycle so there is no control group on disk. Nor
+  is the open question whether it fires. It is the *sign*:
   compaction converts whatever the agent re-fetches afterwards from cache reads
   at 0.1x into cache writes at 1.25-2x, and re-fetching about a twentieth of
   what a compaction discards erases the whole saving. Both quantities are
@@ -846,6 +855,40 @@ through before trusting this unattended:
   `cacheWrite1h` separately (`pricing.ts:140-146`) and prices them separately
   (`:208-210`) — so the measurement is a query, not a feature. See the
   verification issue for the exact one.
+
+- **A compaction notice arriving on a run log, and the metadata field names on
+  any CLI but `2.1.226`.** `readCompactions`/`parseCompactionBoundary`
+  (`transcripts.ts`) and `injectionFates`/`compactionNotice`
+  (`orchestrator.ts`) are unit-tested against a record copied verbatim off this
+  machine, and the run loop reads the transcript after every cycle — but **no
+  compaction has been driven end to end here**, so nobody has seen the notice on
+  a run's own log. Nothing in this repository's probes reaches a *completed*
+  compaction without a live model: the 23 records above were all written by
+  other agents' work, not by a probe, and this container has no `docker` to run
+  the app under. Two things are unverified, and they fail differently.
+  - The wiring: whether the notice appears at all. It is a `log()` call on a
+    path that already ran, so its failure mode is silence — an empty read on a
+    transcript that had not flushed, or a session id the reader could not match
+    to a file. To check it: `docker compose up --build`, start a run whose
+    prompt is long enough to compact (or set `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+    low in `.env` — which the run's own first log line will then name back), and
+    watch for `A compaction happened inside this work cycle` on `/runs/<id>`.
+  - The field names: whether `preTokens`, `postTokens`, `durationMs` and
+    `trigger` keep those names on another CLI. `parseCompactionBoundary` reads
+    every one defensively, so a rename does not throw — it renders as a real
+    figure of zero. "180,694 tokens summarised down to 0" is what that looks
+    like on a run log, and there is nothing on the page to check it against.
+    The pin is `2.1.226` (`Dockerfile:215`) and all 23 records came from it, so
+    the names are pinned to exactly one version and to nothing else.
+
+  Separately and by design, the survival table those notices quote — which parts
+  of a window a compaction keeps — is **not** a measurement of this install and
+  must never be presented as one. It is Anthropic's documentation, self-pinned
+  to Claude Code `v2.1.198`; this install pins `2.1.226`, so `compactionNotice`
+  words every line as a hypothesis whenever the record's own `version` differs
+  from `SURVIVAL_TABLE_CLI_VERSION`, which today is always. Measuring it would
+  mean reading a real post-compaction window, which is a different piece of work
+  from anything here.
 
 - **A second machine actually reaching a LAN-published install, and a browser
   staying signed in to it.** Every check in the entry above was made *from the
