@@ -18,6 +18,7 @@ import type {
   KnowledgeStatusDTO,
 } from "./apiTypes";
 import { mountById } from "./config";
+import { noteNodeId } from "./knowledgeGraph";
 import { SKIP_DIRS } from "./plugins";
 import type { Settings } from "./settings";
 
@@ -968,7 +969,11 @@ function resolveTarget(
 /*                            Graph assembly                           */
 /* ------------------------------------------------------------------ */
 
-const NOTE_ID = (rel: string) => `note:${rel}`;
+// The note's id comes from `knowledgeGraph.ts` rather than being spelled again
+// here: the page has a note *path* in its URL and needs the *id* to focus a
+// local graph on it, so the scheme is shared and the client-safe module is the
+// half that can own it. The other three have no client-side caller.
+const NOTE_ID = noteNodeId;
 const ATTACHMENT_ID = (rel: string) => `attachment:${rel}`;
 const TAG_ID = (tag: string) => `tag:${tag.toLowerCase()}`;
 const PHANTOM_ID = (target: string) => `phantom:${targetKey(target)}`;
