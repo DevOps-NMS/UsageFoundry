@@ -25,7 +25,7 @@ import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { ColorSwatch, Input, Slider, Switch } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
-import { GroupLabel, ListGroup, ListRow } from "@/components/ui/List";
+import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import { SegmentedControl, type SegmentedOption } from "@/components/ui/SegmentedControl";
 
@@ -153,14 +153,15 @@ export function KnowledgeGraphView({
     <div className="mb-8">
       <CardTitle>Graph</CardTitle>
 
-      {error && (
-        <Notice tone="warn" className="mb-3">
-          {error}
-        </Notice>
-      )}
+      {/* No `className="mb-3"` on either: `Notice` already states `mb-4`, and
+          two margin utilities on one element resolve by stylesheet order rather
+          than by what the caller wrote: `.mb-3` is emitted at byte 11483 of
+          the sheet against `.mb-4` at 11578, so the caller's 12px was a silent
+          no-op that read as a decision. */}
+      {error && <Notice tone="warn">{error}</Notice>}
 
       {graph?.truncated && (
-        <Notice tone="warn" quiet className="mb-3">
+        <Notice tone="warn" quiet>
           The vault walk hit its cap, so this graph is drawn from part of the
           vault rather than all of it.
         </Notice>
@@ -216,16 +217,23 @@ export function KnowledgeGraphView({
       </div>
 
       <p className="mt-2 text-xs text-ink-muted">
-        {shown.nodes.length.toLocaleString()} of {(graph?.nodes.length ?? 0).toLocaleString()}{" "}
-        drawn
-        {shown.dropped > 0 && (
+        {/* The count is gated on the fetch, not defaulted to 0: "0 of 0 drawn"
+            under a loading skeleton is a measurement of an empty vault, and a
+            reader who saw it before the walk finished had no way to tell it
+            apart from the real thing. */}
+        {graph !== null && (
           <>
-            {" "}
-            — {shown.dropped.toLocaleString()} past the {MAX_DRAWN_NODES.toLocaleString()}-node
-            drawing cap were left out, least-linked first. Narrow the filters to see them.
+            {shown.nodes.length.toLocaleString()} of {graph.nodes.length.toLocaleString()} drawn.
+            {shown.dropped > 0 && (
+              <>
+                {" "}
+                {shown.dropped.toLocaleString()} past the {MAX_DRAWN_NODES.toLocaleString()}-node
+                drawing cap were left out, least-linked first. Narrow the filters to see them.
+              </>
+            )}{" "}
           </>
         )}
-        . Drag to pan, scroll to zoom, drag a node to place it, click one to open the note.
+        Drag to pan, scroll to zoom, drag a node to place it, click one to open the note.
       </p>
     </div>
   );
@@ -325,14 +333,18 @@ function GraphPanel({
         }
       >
         <ListRow label="Search" htmlFor="graph-query">
-          <Input
-            id="graph-query"
-            type="search"
-            value={filters.query}
-            onChange={(e) => setFilters({ query: e.currentTarget.value })}
-            placeholder="tag:#project -archive"
-            className="w-44"
-          />
+          {/* The width is on the wrapper, not on the control: `Input` puts a
+              caller's class on the `<input>` beside its own `w-full`, and the
+              sheet emits `w-full` after `w-44`, so `w-44` never applied. */}
+          <div className="w-44">
+            <Input
+              id="graph-query"
+              type="search"
+              value={filters.query}
+              onChange={(e) => setFilters({ query: e.currentTarget.value })}
+              placeholder="tag:#project -archive"
+            />
+          </div>
         </ListRow>
         <ListRow label="Tags" description="Draw each tag as a node" htmlFor="graph-tags">
           <Switch
@@ -527,8 +539,7 @@ function GroupList({
 
   return (
     <div>
-      <GroupLabel>Colour groups</GroupLabel>
-      <div className="divide-y divide-line rounded-lg border border-line bg-grouped">
+      <ListGroup label="Colour groups">
         {groups.length === 0 ? (
           <p className="px-3 py-2 text-xs text-ink-muted">
             A group paints every node its search matches. The first match wins.
@@ -544,23 +555,26 @@ function GroupList({
                 }
                 label={`Colour for group ${index + 1}`}
               />
-              <Input
-                value={group.query}
-                onChange={(e) =>
-                  onChange(
-                    groups.map((g, i) =>
-                      i === index ? { ...g, query: e.currentTarget.value } : g,
-                    ),
-                  )
-                }
-                placeholder="path:Areas"
-                aria-label={`Search for group ${index + 1}`}
-                aria-invalid={
-                  group.query.trim() !== "" && parseGraphQuery(group.query).clauses.length === 0
-                }
-                className="w-32 min-w-0 flex-1"
-              />
-              <ButtonRow className="gap-1">
+              {/* Grows on the wrapper rather than on the control: `Input`'s own
+                  `w-full` outranks anything a caller writes about width. */}
+              <div className="min-w-0 flex-1">
+                <Input
+                  value={group.query}
+                  onChange={(e) =>
+                    onChange(
+                      groups.map((g, i) =>
+                        i === index ? { ...g, query: e.currentTarget.value } : g,
+                      ),
+                    )
+                  }
+                  placeholder="path:Areas"
+                  aria-label={`Search for group ${index + 1}`}
+                  aria-invalid={
+                    group.query.trim() !== "" && parseGraphQuery(group.query).clauses.length === 0
+                  }
+                />
+              </div>
+              <ButtonRow>
                 <Button
                   variant="ghost"
                   size="compact"
@@ -588,7 +602,7 @@ function GroupList({
             </div>
           ))
         )}
-      </div>
+      </ListGroup>
       <ButtonRow className="mt-1.5">
         <Button variant="secondary" size="compact" disabled={full} onClick={add}>
           Add group
