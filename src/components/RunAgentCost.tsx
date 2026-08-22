@@ -205,15 +205,19 @@ export function RunAgentCost({
         </div>
       )}
 
+      {/* Shortened, but two of its claims may not go: this is one of the two
+          places the three cost readings say in user-visible copy that they must
+          not be added, and the `startedAs` sentence is the whole reason the
+          prop exists — under `--agent` a card reading entirely `(main thread)`
+          and one reading entirely the agent's name are both correct, and both
+          read as a bug to anyone expecting the other. */}
       <p className="mt-2 text-xs leading-snug text-ink-muted">
-        Priced from your own transcripts for this run&rsquo;s session, so every
-        turn lands in a row and the rows add up to the total. A third reading
-        beside the two above, never added to either — they measure the same work
-        through Claude Code&rsquo;s own reporting.
+        Priced from your own transcripts. A third reading, never added to the
+        two above.
         {startedAs &&
-          ` Started as ${startedAs}, so these rows may sit entirely under that name or entirely under (main thread) — which Claude Code writes is its own bookkeeping.`}
+          ` Started as ${startedAs}, so the rows may sit wholly under that name or wholly under (main thread).`}
         {spend?.excludedFromTotals &&
-          " Sub-agent turns are excluded from the dashboard totals in Settings; they are counted here."}
+          " Sub-agent turns are excluded from the dashboard totals; counted here."}
         {spend ? ` Read up to ${fmtRelative(spend.to, now)}.` : ""}
       </p>
     </>
