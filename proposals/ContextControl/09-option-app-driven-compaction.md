@@ -89,6 +89,37 @@ buys nothing.** So the only version of this option that changes anything is one
 that compacts *earlier* than the CLI would — which is the version whose refusal
 case, below, is live.
 
+> **Corrected 2026-08-22, and it changes what the flag is.** Two things above
+> are wrong for *this install*, and both were established by measuring the
+> fleet's own transcripts rather than by re-probing (`docs/verification.md`).
+>
+> **`effectiveWindow` is not the threshold.** The fire point is
+> `effectiveWindow − 13,000`, read off the pinned bundle as `SCe(…)-WQu` with
+> `WQu=13000`. So `--autocompact 200000` fires at **167,000**, and the observed
+> median `preTokens` over 42 real boundaries is 168,072 — 30 of them within
+> ±3,000 of 167,000 against 2 within ±3,000 of 180,000. This closes the unknown
+> the "What it does to..." section below names by hand as "lower still by an
+> amount the probe did not establish", and it reconciles that section's own
+> quoted debug line: `effectiveWindow=80000` refused against `threshold 67000`
+> is exactly 80,000 − 13,000. The answer was in the file the whole time.
+>
+> **The premise "on a 200k-window model" does not describe this install.** The
+> probe above ran against `claude-haiku-4-5-20251001`. On the model this app
+> actually spawns, the window resolves near 1M — a pre-flag container session
+> recorded a single 752,172-token request — and the bundle's own gate
+> (`dQe(e,t){return Nq(e,t).source!=="auto"}`, with the `model-default` branch
+> guarded by `o<1e6`) **refuses** auto-compaction outright for such a model. So
+> here `--autocompact` does not lower an existing threshold. It creates the only
+> one there is: 604 pre-flag container sessions, 246 of them past 167,000
+> tokens, produced **zero** compactions.
+>
+> **This does not revive the option.** The refusal case below stands unchanged,
+> the three correctness measurements stand, and `custom_instructions` is still
+> reachable from no argv this app emits. What changes is that the sentence "the
+> only version that changes anything is one that compacts *earlier* than the CLI
+> would" is false as stated — the CLI would not compact at all — and that the
+> observation half this survey kept is now measured rather than assumed.
+
 ## What leaves the context, and when the decision is taken
 
 **Mid-cycle, at a threshold, and what leaves is decided by a model this app
@@ -148,6 +179,10 @@ tokens at the median and 108,000 at p90. Set `--autocompact 100000` —
 `effectiveWindow=80000`, and the *threshold* is lower still by an amount the
 probe did not establish — and a p90 UsageFoundry run is refused compaction
 outright, with the reason in the debug log and nowhere else.
+
+> *2026-08-22: the amount is **13,000**, so that threshold is 67,000 — which is
+> the number the debug line above already carried. See the correction under
+> "What the flag can and cannot do".*
 
 ## What it does to the DONE contract, `needs-review`, `--resume` and retention
 

@@ -398,6 +398,28 @@ runs killed by a literal in text that was "only text"
 (`src/lib/orchestrator.ts:4719`–`:4731`). **Its observation half is kept and is
 Phase 0b.**
 
+> **Corrected 2026-08-22: the first sentence of that paragraph does not
+> describe this install, and the rejection does not rest on it.** Two
+> measurements, both in `docs/verification.md` and argued at
+> `09-option-app-driven-compaction.md`. The threshold is `effectiveWindow −
+> 13,000`, not `effectiveWindow` — `--autocompact 200000` fires at **167,000**,
+> matching 30 of 42 observed boundaries within ±3,000 and reconciling the
+> `threshold 67000` debug line quoted three sentences above. And "on a
+> 200k-window model" is the probe's model, not this app's: here the window
+> resolves near 1M, the CLI's own auto-compaction is refused outright for such a
+> model, and **604 pre-flag container sessions — 246 of them past 167,000
+> tokens, one request reaching 752,172 — produced zero compactions**. So the
+> flag does not lower a threshold that already existed; it is the only reason
+> any compaction happens here at all.
+>
+> That makes the "whole delta is compacting earlier than the CLI already does"
+> clause false, and it is why the flag is kept and measured (`0.45×` per turn,
+> `0.50×` per 1,000 output tokens, between arms) rather than reverted. **None of
+> it reaches this paragraph's actual grounds** — the refusal above a fixed
+> prefix, the unreachable `custom_instructions`, and the three correctness
+> measurements below — so Option F stays rejected by name and stays last on the
+> table. What moved is one supporting sentence, not the verdict.
+
 > *2026-08-22 — the last sentence of that paragraph is no longer a judgement.*
 > "Hands a model the decision about what an agent may be permitted to have
 > forgotten" was an argument from principle. Three independent measurements now
