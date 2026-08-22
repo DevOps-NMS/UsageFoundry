@@ -2684,6 +2684,30 @@ through before trusting this unattended:
   out as on a wide window, where it is taller than the `32rem` it replaced.
   Docker was unavailable in the container this landed from, so the
   `docker compose up --build` half of the loop was not run against any of it.
+
+  The chrome pass of 2026-08-22 puts five more behaviours on this same list, and
+  a build can see none of them. **That opening a note brings it to the reader**:
+  the note is now the page's first block, and a click on a list row, on a
+  wikilink inside a body or on a graph node scrolls that block into view and
+  moves focus onto it. What wants looking at is whether the smooth scroll from
+  the health cards at the bottom of the page reads as travel rather than as a
+  jolt, whether `scroll-mt-4` is enough to clear the pane's top edge, and
+  whether a focus ring around a whole region is feedback or noise. A mouse click
+  should draw no ring at all, because `:focus-visible` is heuristic on a
+  programmatic focus and nothing here overrides it, but that heuristic is the
+  browser's and it has not been watched in one. **That the reduced-motion branch
+  is taken**, which is the one place on this page that reads the query in script
+  rather than in CSS, because the blanket in `@layer base` cannot reach a
+  `scrollIntoView`. **That 180ms is the right threshold** before a second read
+  admits itself with a spinner in the heading: long enough to stay silent on a
+  local read, short enough that a slow one does not read as unanswered. Both
+  ends of that are reasoned from `--motion-base` and measured against nothing.
+  **That the frontmatter list stacks** key over value below `md`, where it was a
+  fixed 10rem column whose keys were truncated. And **that a tag reads as a
+  chip**: `Badge` uppercases visually, and a vault's tags are lowercase
+  hierarchical paths, so whether `#TOPIC/ENGINEERING/STANDARDS` in a table cell
+  scans or shouts is a judgement nobody has made with their eyes. All five are
+  `/knowledge` only; the pass touched no other page and no kit component.
 - **A run actually answering out of the vault, and the generated directory's
   ownership under privilege separation.** The delivery is measured — the entry
   above shows the skill reaching the model's skill list from `--plugin-dir`, and
