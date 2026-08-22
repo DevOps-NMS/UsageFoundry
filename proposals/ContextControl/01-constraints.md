@@ -247,6 +247,17 @@ documented mechanism, observed on 2.1.226 rather than assumed from a page pinned
 at v2.1.198, and it is the strongest single reason to trust the rest of the
 table on this install.
 
+The vendor publishes a remedy for this row, quoted in the vault at
+`/workspace2/3 Resources/Questions/Do Standing Instructions Survive Compaction.md:72`:
+*"If a rule must persist across compaction, drop the `paths:` frontmatter or
+move it to the project-root CLAUDE.md."* It is actionable and it is **not this
+repository's to action** — the three scoped files live in the operator's
+`~/.claude/rules/`, which is a bind mount this app reads and must not write.
+Recorded here as the finding it is: on this install, three standing rules
+governing every spawned agent are documented-lost after a compaction and
+observed to come back only on a matching read, and the fix is one frontmatter
+key in a directory outside the checkout.
+
 Two smaller readings from the same records. `compact_file_reference` outnumbers
 `file` 63 to 27, so more than twice as many files come back after a compaction
 as a **name** than as content — the summariser's own "carry forward the five

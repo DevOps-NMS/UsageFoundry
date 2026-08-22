@@ -81,16 +81,79 @@ that they are siblings.
 
 ## The criteria, and their weights, stated before the scoring
 
-Ten criteria, from `01-constraints.md`'s closing list and from the fixed ten
-headings every option file answered. The weights encode a judgement about *this*
-measurement: a bill that is 82% carried context **at a tenth of the input
+**Eleven criteria as of 2026-08-22.** Ten came from `01-constraints.md`'s closing
+list and the fixed ten headings every option file answered. The eleventh —
+correctness — was missing, and its absence is the one substantive defect the
+closing pass did not find in itself: the survey scored twelve mechanisms on what
+they cost and none on what they break. The weights encode a judgement about
+*this* measurement: a bill that is 82% carried context **at a tenth of the input
 rate**, a single identified waste of $173.95 a week that no lever this app holds
 reaches, and a survey in which no option's prize is measured rather than
 bounded. Disagreeing with the weights is the cleanest way to disagree with
 `17-recommendation.md`.
 
+### The eleventh criterion, and why it is weighted 4
+
+Every published measurement of context compression that has been gathered since
+this survey closed prices it as a **correctness** event rather than a cost one.
+Four, all held in the operator's vault, all graded there, and the grades are
+carried rather than flattened:
+
+| Source | Grade | What it measures | What it says |
+|---|---|---|---|
+| `/workspace2/3 Resources/Sources/Governance Decay (Chen 2026).md` | `evidence: preprint`, `peer_reviewed: false`, `confidence: medium` | 1,323 episodes, seven model families; prohibited-action rate before and after one compaction | 0% → **30%** overall, 59% on the worst model. Mediated entirely by survival: "when the constraint survives the summary, violation remains 0%, but when it is dropped, violation reaches 38%" |
+| `/workspace2/3 Resources/Sources/Lost in Compaction (Wang et al 2026).md` | `evidence: preprint`, `confidence: low`, `status: seed` | constraint retention through compaction | "Current compactors retain only **17%** of injected SCs on average, and most perform worse than running the same task without compaction" |
+| `/workspace2/3 Resources/Sources/Toward Reliable Context Compression for Long-Horizon Agents (Min et al 2026).md` | `evidence: preprint`, `confidence: medium` | AppWorld task success under three context regimes | full context **85.7%**, summary compaction **72.8%**, FIFO **42.2%**. At a 2K budget the summary condition "terminates in only 44.6% of samples, with 37.3% using the required form, compared with 77.2%/68.1% for FIFO" |
+| `/workspace2/3 Resources/Sources/Instruction Adherence in Coding Agent Configuration Files (McMillan 2026).md` | `evidence: preprint`, `confidence: medium` | 1,650 sessions, 16,050 function-level observations of config-file rule compliance | four **structural nulls** (BF 0.05–0.10 for instruction size and for conflict), and one effect: "approximately 5.6% lower odds of compliance per step (OR = 0.944)" per function generated, 95% CI [0.937, 0.951] |
+
+**Weight 4, above every gate and below nothing.** Three reasons, and the
+counter-argument, which is real.
+
+It is the only criterion that prices the *product* rather than the bill. Every
+other row asks what an option costs to build, to operate or to be wrong about;
+this one asks whether the agent still does the job. An option that saves
+$173.95 a week and raises the prohibited-action rate to 30% has not made the
+fleet cheaper, it has made it different and worse, and no weighting of the other
+ten rows would say so.
+
+"The two endings survive" is already weighted 3, and it is a **special case of
+this criterion** — one named instruction whose loss was priced at $162 over 92
+runs. A general criterion cannot sit below its own instance.
+
+And the four measurements agree on a *mediator* rather than on an effect size,
+which is what makes them usable here. Chen's 0% versus 38% split turns entirely
+on whether the constraint text survived; Wang's 17% is a retention rate; Min's
+gap is between having the context and having a summary of it. Every one of them
+scores the same thing: **how much of what the agent was told is still there,
+and who chose**. That is an axis, not an anecdote.
+
+**Against a higher weight, and it is why this is 4 and not 6.** All four are
+preprints. None is peer-reviewed. None has been replicated. Each uses its own
+benchmark, and two of the four also publish the fix for the problem they
+measure. Chen compacts **once** per episode and measures rule violation rather
+than task accuracy; Wang was read at abstract-and-listing depth only, three
+weeks old, and its constraints are *issued in conversation* rather than
+re-injected from a file; Min is a method paper for TRACE reporting "one point on
+one benchmark under one budget setting"; McMillan's decay result is explicitly
+post-hoc and exploratory, pre-registration is not stated, and it sits beside the
+paper's four *primary* nulls. Most importantly for
+this app: **not one of them tests a re-injected file**, which is exactly what
+the survival table in `01-constraints.md` says happens to `CLAUDE.md` and
+unscoped rules here. The vault says so itself — "nobody has run that experiment
+on a re-injected file".
+
+**And the baseline moved, which is why this criterion bites even on options that
+do nothing.** The survey scored against a world in which nothing compacted.
+`ee93684` put `--autocompact` on every cycle's argv on 2026-08-21, and 18
+`compact_boundary` records are now in the corpus (`01-constraints.md`). So
+"0 = no change from today" now means *as much compaction as the CLI already
+does on its own*, and the correctness price in the table above is being paid on
+this install today, by default, unscored. An option scoring 0 on this row is not
+avoiding that price. It is declining to add to it.
+
 | Criterion | Weight | Why that weight |
 |---|---|---|
+| **Correctness cost of the compression** | **4** | Added 2026-08-22. The four measurements above, and the argument for 4 rather than 3 or 6 immediately preceding. The only row that prices what the agent does rather than what it costs. |
 | Measured prize | 3 | What the thing is for — and `00-problem.md` refuses the broad claim outright, so an option that cannot show a measured prize is arguing against the file that opened the survey. |
 | Where in the cycle it acts | 3 | `T* = 19·(S/D) − 20` (`01-constraints.md:32`). An option that removes a tenth of a mid-life conversation waits 170 further turns, and only 807 of 11,422 turns live past index 160 at all. |
 | Loudness of failure | 3 | The standing complaint (`CLAUDE.md`), and the measured shape: `--plugin-dir` not surviving `--resume` is silent, "since a session missing a hook behaves exactly like one that never had it" (`src/lib/orchestrator.ts:4828`–`:4831`), re-confirmed on the pin by this closing pass. |
@@ -104,14 +167,38 @@ bounded. Disagreeing with the weights is the cleanest way to disagree with
 
 **How sensitive the ranking is to the one weight most worth arguing about.**
 Option A scores 0 on measured prize by construction, so its total does not move
-with that weight at all; Option H scores +1 and D·G·J +2. Solving for where they
-overtake: at a weight of **7** rather than 3, H reaches +21 and D·G·J +22
-against A's unchanged +20, and the recommendation inverts. So a reader who
-believes the prize is worth more than twice what this table says should read
-`17-recommendation.md` as wrong and `10-option-context-guard.md` as the answer.
+with that weight at all; Option H scores +1 and D·G·J +2. On the ten-criteria
+table, solving for where they overtake gave a weight of **7** rather than 3: H
+reached +21 and D·G·J +22 against A's unchanged +20, and the recommendation
+inverted. **On the eleven-criteria table that crossing moves to 12.** A is +24
+regardless of the prize weight; D·G·J totals `2p` and needs `p > 12`, H totals
+`10 + p` and needs `p > 14`. So a reader now has to believe the unmeasured
+prize is worth **four times** what this table says before the discard family
+overtakes the readout, where before it was a little over twice.
+
+That is a large move from one added row, and it should be read with suspicion
+rather than satisfaction: a criterion introduced after a recommendation was
+written, which then strengthens that recommendation, is exactly the shape of a
+criterion chosen to strengthen it. Three things are offered against that
+reading. The criterion was named by the operator's brief rather than by this
+pass. Its weight was argued from the existing "two endings" row rather than
+picked to produce a total. And it does **not** simply reward inaction: it moves
+K ahead of H, changes B's sign, and leaves the second and third places
+different from what they were — which a criterion built to protect A would not
+need to do.
+
 The next most sensitive weight is loudness, which would have to be **6** rather
-than 3 before Option K displaced A — K carries the only +3 on that axis and A
-only a +1.
+than 3 before Option K displaced A on the old table — K carries the only +3 on
+that axis and A only a +1. On the new table A gains 4 and K gains 0, so with
+loudness at weight `L` the two are `21 + L` against `6 + 3L` and the crossing
+moves from 6 to **8**.
+
+**And the K-versus-H swap is the one crossing the correctness weight itself
+controls.** H is `17 − w`, K is a flat `15`. They tie at `w = 2`; below that H
+leads, at 3 and above K leads. So a reader who thinks the four preprints are
+worth *something* but not much — weight 1 or 2 — keeps the old second place. The
+swap is not robust to a low weight and is stated here rather than buried in the
+total.
 
 Two things are deliberately **not** scored. **Which layer an option acts on** —
 the argv, the injected text, the folder, the session lifecycle, this app's
@@ -129,6 +216,7 @@ spread named underneath.
 
 | | A: see it | B: trim text | C: notes | D·G·J: discard | E·L: cap the result | F: compact | H: delegate | I: index | K: move the prefix |
 |---|---|---|---|---|---|---|---|---|---|
+| **Correctness (×4)** | **+1** | −2 | −1 | −2 | −1 | **−3** | −1 | −2 | **0** |
 | Measured prize (×3) | 0 | 0 | 0 | **+2** | +1 | 0 | +1 | 0 | +1 |
 | Where in the cycle (×3) | 0 | +2 | 0 | +1 | **+3** | +2 | **+3** | +1 | +1 |
 | Loudness (×3) | +1 | −1 | −2 | −2 | −1 | −2 | −2 | **−3** | **+3** |
@@ -139,7 +227,8 @@ spread named underneath.
 | Off / per run / mid-run (×2) | 0 | 0 | 0 | +1 | +1 | +1 | 0 | +2 | +1 |
 | Build cost (×2) | +2 | **+3** | +2 | +1 | +1 | +2 | **+3** | −2 | **+3** |
 | Rests on the unestablished (×2) | **+2** | +1 | −2 | −3 | −2 | −3 | −3 | −2 | −1 |
-| **Weighted total** | **+20** | **+2** | **−8** | **+14** | **+5** | **−19** | **+17** | **−19** | **+15** |
+| Weighted total, ten criteria | +20 | +2 | −8 | +14 | +5 | −19 | +17 | −19 | +15 |
+| **Weighted total, eleven** | **+24** | **−6** | **−12** | **+6** | **+1** | **−31** | **+13** | **−27** | **+15** |
 
 **Within D·G·J:** J takes +3 on build cost (nothing is built) and 0 on the
 fourth store (four rows, four protected sessions) against the family's +1 and
@@ -157,6 +246,161 @@ takes 0 on the two endings against L's −2, because
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` bounds `res.finalText`, which is exactly what
 `cycleEnding` (`:4543`) matches. And E takes −3 on the fourth store against L's
 0.
+
+## The correctness row, cell by cell, and what it moved
+
+*Added 2026-08-22.*
+
+**A: +1, and the point is conditional on a change to Option A.** A removes
+nothing, so 0 is the floor-and-obvious score. The +1 is for the one thing no
+other option does: Chen's entire effect is mediated by *whether the constraint
+survived the summary*, which means the operationally useful quantity is not
+"did a compaction happen" but "what did it keep" — and a per-cycle composition
+readout is the only place in this app that could ever show either. **This is a
+new requirement on Option A rather than a free point**: the readout as specified
+in `04-option-see-it.md` reports carried context and carried write, and it must
+also report the compaction boundary, which `01-constraints.md` now proves the
+transcript carries as a `compact_boundary` record with `preTokens`, `postTokens`
+and `durationMs`. Without that addition A scores 0 and totals +20.
+
+**B: −2, and this is the sign change worth arguing about.** B trims injected
+text — the notices, the guidance, the standing instructions this app writes.
+Under Chen the quantity that predicts violation is whether the constraint text
+is present, and B's whole mechanism is making less of it present, permanently,
+on every cycle, by design. Its existing −3 on "the two endings" was the narrow
+form of this; the correctness row is the general form, and it takes B from +2 to
+−6 — from a small positive to a small negative. B is no longer a free win.
+
+**C: −1.** The agent writes notes and the notes replace history. The loss is
+**recoverable** — the note is a file the agent can re-read — and the vault's own
+synthesis of the 2026 literature is that recoverability is the axis that
+matters: "the choice between them is not how much you lose but **whether the
+loss is recoverable**"
+(`/workspace2/3 Resources/AI Context and Memory/Compaction and Context Editing.md:23`).
+What keeps C negative rather than 0 is that *what gets written down* is the
+model's choice, which is Wang's 17% with an extra step.
+
+**D·G·J: −2, and yes, this partly restates "rests on the unestablished".** The
+two rows measure different failures and both are earned. "Rests on the
+unestablished" asks whether the +2 prize is real. Correctness asks what happens
+**if it is** — a fresh agent per cycle is not summary compaction and not FIFO,
+it is the condition none of the four papers ran, and Min's ordering (full
+85.7% > summary 72.8% > FIFO 42.2%) is monotone in how much of the context
+survives, with the discard family sitting off the bottom of that ordering.
+`03-experiment-resumed-vs-fresh.md` remains the experiment that would settle it,
+and the correctness criterion is the reason it is now the *blocking* experiment
+rather than a nice-to-have.
+
+**E·L: −1.** A capped tool result is content that never enters the conversation,
+so none of the four measurements applies directly: nothing is summarised and
+nothing is evicted. It is negative rather than 0 because a truncated result is a
+fact the agent did not receive, and because L truncates the model's **own
+output**, which is where `cycleEnding` reads the sentinel. Within the family L
+takes −2 against E's −1, for the same reason L already takes −2 on the two
+endings.
+
+**F: −3, the floor, and the only option in the survey where all four
+measurements land on the mechanism itself.** F is app-driven compaction: ask a
+model to summarise the conversation, continue from the summary. That is Chen's
+independent variable, Wang's subject, and Min's `summary` condition, by name.
+The rejection is written out with citations in
+`09-option-app-driven-compaction.md`; it used to be a judgement and now it is
+not.
+
+**H: −1.** A sub-agent starts from a written brief and the parent keeps its
+context, so the loss is designed, bounded and reversible by the parent. What it
+is not is free: the brief is a summary, written by a model, of what the
+sub-agent needs — Wang's shape at one remove. H's fall from +17 to +13 is what
+costs it second place.
+
+**I: −2.** Retrieval over history means a constraint is present if and only if it
+is retrieved, which is Chen's mediator with a retrieval miss added underneath
+it. Nothing in the four measurements covers retrieval, so this is the least
+evidenced cell in the row and is scored on the mechanism rather than on a
+number.
+
+**K: 0, and it is the only non-A option that earns a clean zero.** Nothing
+leaves the context, ever; the model receives the same information in a different
+block. `14-option-move-the-volatile-prefix.md` says so in its own words — "it is
+not a context-reduction mechanism at all. It changes cache geometry." Under a
+criterion that prices removal, an option that removes nothing is unpriced, and
+K's flat 0 against H's −1 is what moves it from third to second.
+
+**What moved.** A stays first and its lead over second widens from +3 to +9. K
+overtakes H for second. D·G·J falls from third to fourth. B changes sign. F
+separates from I at the bottom and is now clear last by four points. Nothing
+that was below zero rose above it.
+
+**Why Option M is not a column.** `20-option-api-context-management.md` is the
+thirteenth shape and the API layer's answer to this survey's question, and it is
+rejected on reachability: at CLI 2.1.226 this app cannot emit the
+`context_management` block from an argv or from `--settings`, proved by probe.
+Scoring an unreachable lever on eleven criteria would put a number on a
+hypothetical and invite a reader to compare it with nine real ones. Its one
+scoreable property is recorded instead in words: had it been reachable,
+`clear_tool_uses` replaces a tool result with **placeholder text** rather than
+with a summary, which is the recoverable class the vault says is the one that
+survives repetition — so M would have scored above F on this row and below K.
+
+## What McMillan's decay curve implies for the two notices, and what it does not
+
+The brief asks specifically whether the compliance decay bears on
+`COMPLETION_NOTICE` (`src/lib/orchestrator.ts:4467`) and `NEEDS_REVIEW_NOTICE`
+(`:4507`) in a long resumed conversation. **Mostly it does not, and saying so is
+more useful than stretching it.**
+
+The measured effect is "Each additional function the agent generates is
+associated with approximately 5.6% lower odds of compliance per step
+(OR = 0.944)", 95% CI [0.937, 0.951], p = 1.08 × 10⁻⁴⁶, median first omission at
+generation position 4
+(`/workspace2/3 Resources/Sources/Instruction Adherence in Coding Agent Configuration Files (McMillan 2026).md:52`–`:54`).
+The grade is `evidence: preprint`, `peer_reviewed: false`, `confidence: medium`
+— arXiv v1, single author, no venue, no replication. Three things stop it
+transferring.
+
+**The unit of decay is a generated function, not a turn, a token or a cycle.** A
+work cycle that reads, greps, runs tests and commits generates no functions and
+sits nowhere on that curve. There is no mapping from this app's unit of work to
+McMillan's *x* axis, and inventing one would be the survey's own house rule
+about proxies broken in the other direction.
+
+**The dependent variable is one deliberately trivial style rule** — whether a
+`// @tracked` annotation is the first line of every new or modified function,
+AST-detected, across five coding tasks on two TypeScript codebases. The vault
+records the boundary in its own words: "Nothing here transfers to 'match the
+surrounding code' or 'state your assumptions'" (`:70`). A terminal protocol
+tested by an exact-string sentinel at the end of a cycle is further from that DV
+than "match the surrounding code" is.
+
+**And the decay is the post-hoc result, beside four primary nulls.** The four
+factorial factors — instruction size, position in the file, file architecture,
+and a directly contradictory instruction in an adjacent `AGENTS.md` — all come
+back null. Size and conflict carry Bayes factors of **0.05–0.10**, evidence
+*for* the null rather than a failure to reject; position and architecture are
+failures to reject with power sufficient to exclude effects larger than **6
+percentage points** (`:49`). Pre-registration is *not stated*, and the author
+labels the decay itself post-hoc and exploratory (`:41`) — so the strongest
+result in the paper is the one with the weakest inferential standing, and it
+should not be leaned on.
+
+**One thing here is actionable, and it is the nulls rather than the curve.**
+Option B's implicit premise is that a shorter notice is a better-obeyed notice.
+The only measurement anyone has of that premise is a Bayes factor supporting the
+null, on the axis B is aimed at. So trimming the notices buys tokens and, on the
+available evidence, buys **no compliance** — which removes the second half of
+B's case and is part of why B's sign changed above. The same nulls remove the
+grounds for Option B's sibling argument about *where* in the injected text the
+endings sit.
+
+**And one thing is worth naming even though no option addresses it.** If
+compliance decays with work done rather than with context length, then this
+app's repair — re-issuing `NEEDS_REVIEW_NOTICE` on every continuation cycle
+(`nextPrompt`, `:4331`–`:4362`) — repairs *presence* at the cycle boundary, and
+the decay, if it is real at all, lives *inside* a cycle. No option in this
+survey has a lever there, Option A's readout would not show it, and inventing
+one on the strength of a post-hoc analysis of a TypeScript naming rule would be
+exactly the sort of thing `01-constraints.md` exists to refuse. Recorded as a
+place a lever would have to go, not as a lever.
 
 ## Reading the interesting cells rather than the totals
 
