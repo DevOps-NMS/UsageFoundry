@@ -218,26 +218,62 @@ export function KnowledgeGraphCanvas({
     const bottom = top + height / view.k + margin * 2;
     const visible = (x: number, y: number) => x >= left && x <= right && y >= top && y <= bottom;
 
-    /* Links first, so a node is never drawn under one of its own edges. */
+    /* Links first, so a node is never drawn under one of its own edges.
+       Every link that survives the cull goes into one of two paths, and each
+       path is stroked once. This vault has ~16k edges among 785 notes, and a
+       `stroke()` is a rasteriser dispatch: one per edge spends the whole frame
+       budget before a node is drawn. Two paths is all it takes because a link
+       has exactly two appearances — inside the hovered neighbourhood or dimmed
+       out of it — so nothing interleaves and the draw order stays dim-then-lit.
+
+       The visible consequence is that overlapping links no longer composite
+       against each other, since a path is stroked as one region. A hairball
+       reads as one translucent mass rather than saturating to solid, which is
+       the more honest picture of it. */
     ctx.lineCap = "round";
+    const dimPath = new Path2D();
+    const litPath = new Path2D();
+    const dimHeads = arrows ? new Path2D() : null;
+    const litHeads = arrows ? new Path2D() : null;
+    let dimCount = 0;
+    let litCount = 0;
     for (const edge of sim.edges) {
       const a = nodes[edge.source];
       const b = nodes[edge.target];
       if (a === b) continue;
       if (!visible(a.x, a.y) && !visible(b.x, b.y)) continue;
       const involved = hover === null || edge.source === hover || edge.target === hover;
-      ctx.globalAlpha = involved ? 0.85 : 0.08;
-      const stroke = involved && hover !== null ? palette["--accent"] : palette["--border"];
-      ctx.strokeStyle = stroke;
-      ctx.lineWidth = ((involved && hover !== null ? 1.6 : 1) * linkThickness) / view.k;
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
+      const path = involved ? litPath : dimPath;
+      path.moveTo(a.x, a.y);
+      path.lineTo(b.x, b.y);
+      if (involved) litCount++;
+      else dimCount++;
       if (arrows) {
-        ctx.fillStyle = stroke;
-        drawArrow(ctx, a, b, radiusOf(b, nodeSize), linkThickness / view.k);
+        arrowInto(
+          involved ? (litHeads as Path2D) : (dimHeads as Path2D),
+          a,
+          b,
+          radiusOf(b, nodeSize),
+          linkThickness / view.k,
+        );
       }
+    }
+    if (dimCount > 0) {
+      ctx.globalAlpha = 0.08;
+      ctx.strokeStyle = palette["--border"];
+      ctx.fillStyle = palette["--border"];
+      ctx.lineWidth = linkThickness / view.k;
+      ctx.stroke(dimPath);
+      if (dimHeads) ctx.fill(dimHeads);
+    }
+    if (litCount > 0) {
+      const stroke = hover === null ? palette["--border"] : palette["--accent"];
+      ctx.globalAlpha = 0.85;
+      ctx.strokeStyle = stroke;
+      ctx.fillStyle = stroke;
+      ctx.lineWidth = ((hover === null ? 1 : 1.6) * linkThickness) / view.k;
+      ctx.stroke(litPath);
+      if (litHeads) ctx.fill(litHeads);
     }
 
     /* Nodes. */
@@ -690,8 +726,8 @@ function colourFor(node: KnowledgeNodeDTO, palette: Palette): string {
 }
 
 /** A head on the target end of a link, clear of the node it points at. */
-function drawArrow(
-  ctx: CanvasRenderingContext2D,
+function arrowInto(
+  path: Path2D,
   from: { x: number; y: number },
   to: { x: number; y: number },
   clearance: number,
@@ -706,10 +742,8 @@ function drawArrow(
   const tipX = to.x - ux * clearance;
   const tipY = to.y - uy * clearance;
   const size = Math.max(3, width * 4);
-  ctx.beginPath();
-  ctx.moveTo(tipX, tipY);
-  ctx.lineTo(tipX - ux * size + uy * size * 0.5, tipY - uy * size - ux * size * 0.5);
-  ctx.lineTo(tipX - ux * size - uy * size * 0.5, tipY - uy * size + ux * size * 0.5);
-  ctx.closePath();
-  ctx.fill();
+  path.moveTo(tipX, tipY);
+  path.lineTo(tipX - ux * size + uy * size * 0.5, tipY - uy * size - ux * size * 0.5);
+  path.lineTo(tipX - ux * size - uy * size * 0.5, tipY - uy * size + ux * size * 0.5);
+  path.closePath();
 }
