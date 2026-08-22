@@ -495,6 +495,51 @@ the reasoning does not, so how much of a resumed conversation is retained
 thinking **cannot be answered from the transcript**. It is not nothing: the
 calibration below shows context growing faster than the visible bytes explain.
 
+> **Added 2026-08-22 — the hole has a mechanism, and it is not a logging
+> choice.** This section read the stripped blocks as a gap in the corpus.
+> Vendor documentation says they are the documented default, and says what is
+> in the window behind them
+> (`/workspace2/3 Resources/AI Context and Memory/Mid-Session Context Mutation with Claude.md:90`–`:99`,
+> graded `evidence: documentation`, `confidence: medium`). Three parts, in the
+> order they bite.
+>
+> **Retention is per-model, and this install is on the keep-everything side.**
+> Opus 4.5 and later, Sonnet 4.6 and later, Fable 5, Mythos 5 and Mythos Preview
+> "keep all prior turns"; earlier Opus and Sonnet models and every Haiku through
+> 4.5 keep only the last. `claude-opus-5` is in the first group, so **every
+> previous turn's reasoning is still in the window**, counts toward it, and "is
+> billed as input like any other history".
+>
+> **The emptiness is the API's default, not the CLI's.** `display: "omitted"` is
+> the default on Opus 5 among others and "returns an empty `thinking` field with
+> the signature intact" — which is exactly the shape of all 13,454 blocks above.
+> The full text is encrypted into the `signature` the API decrypts to
+> reconstruct the turn. So the transcript is not failing to record something the
+> CLI had; the CLI never received it.
+>
+> **Which turns the intercept below from an unattributed residual into a
+> partially named one.** A median 31,575 tokens of context per turn appear in no
+> transcript. The fixed prefix explains part; retained thinking, billed and
+> invisible by construction, explains an unmeasured further part, and the
+> documentation adds one more line that this survey should have known: thinking
+> blocks "cached alongside tool results" are paid for on cache reads even though
+> "you never see [them] again in responses".
+>
+> **And exactly one lever anywhere in this survey is aimed at it.**
+> `clear_thinking_20251015`, in the API's `context_management` block. That is
+> the whole of what Option M (`20-option-api-context-management.md`) has going
+> for it — and Option M is rejected there because this app cannot emit the
+> block: the pinned CLI sends it on every request with `keep: "all"`, which is
+> "clear nothing", and neither an argv nor `--settings` changes that. So the
+> largest invisible line in this problem statement has one named lever and the
+> lever is out of reach.
+>
+> One vendor sentence in the same section is **not** carried over. "*No
+> intelligence impact:* preserving thinking blocks has no negative effect on
+> model performance" is a null result published with no benchmark and no power
+> analysis; the vault flags it as a hypothesis rather than a finding, and this
+> proposal repeats it as one.
+
 **`user text` is 100 blocks averaging 42 KB, and almost none of it is a person.**
 It is the opening `-p` prompt — the task plus everything `nextPrompt` composes —
 plus harness-injected blocks like sub-agent task notifications. This app writes
@@ -582,6 +627,16 @@ The per-file intercept — a median 31,575 tokens of context that never appears 
 the transcript at all — is the fixed prefix: system prompt, tool schemas,
 `CLAUDE.md`, the skill and agent listings, the environment block. It is paid on
 every single turn of every run, and no part of it is legible from here.
+
+**One correction to that list, 2026-08-22.** It is not only the fixed prefix.
+On `claude-opus-5` every prior turn's thinking stays in the window and is billed
+as input, and arrives back stripped by the API's own `display: "omitted"`
+default — so an unmeasured share of this intercept is *retained reasoning*,
+which is not fixed, grows with the conversation, and would show up in an
+intercept fit precisely because it is invisible to the byte counter on the other
+axis. See the note above. This does not change the number and it changes what
+the number is a name for: some of it is a prefix an option could shrink, and
+some of it is history no option in this survey can reach.
 
 ## The one-hour cache-write line
 

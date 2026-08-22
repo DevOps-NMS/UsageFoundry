@@ -64,10 +64,11 @@ down. `clear_at_least` is `T*` with the algebra solved for *D* and the answer
 enforced by the party that can actually count the tokens.
 
 **Its other half is aimed at the one line in the bill nothing else in this
-survey touches.** `00-problem.md` measures a fixed, invisible prefix — 31,373
-bytes at the intercept, 13,734 of it unattributed — and separately records
-`thinking blocks: empty 13454 non-empty 0`: thinking is billed and is not in the
-transcript. `clear_thinking_20251015` is the only lever anywhere in this
+survey touches.** `00-problem.md` fits a median **31,373 tokens** of context per
+turn that appear in no transcript, and separately counts **13,734** thinking
+blocks with their text stripped, not one carrying a byte: thinking is billed,
+retained in full on `claude-opus-5`, and invisible.
+`clear_thinking_20251015` is the only lever anywhere in this
 proposal aimed at that mass. It is also, as the probes below show, the only
 strategy the pinned CLI actually constructs — which is the one thing this option
 has going for it, and it has it in a form this app cannot configure.
