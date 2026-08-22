@@ -705,6 +705,44 @@ Built and exercised against real transcripts:
   privilege separation, so the ownership and mode of the generated directory are
   reasoned from `chat.ts`'s precedent rather than measured, and no model has yet
   been asked a question and answered it out of a real vault.
+- **The Knowledge page's server half, and its Markdown renderer over every note
+  in a real vault.** On 2026-08-21, against the same read-only `/workspace2`
+  mount as the entry above, through a scratch `next dev` on a spare port. The
+  routes the page calls answered: `/status` with no mount configured, then the
+  four browse figures once one was — **785 notes, 35 folders, 95 tags, 7 note
+  types** — a folder filter narrowing the list, `/health` with **19 orphans, 183
+  broken links and 25 notes missing frontmatter**, `/note?path=…` 200 for a real
+  note and **404** for one that is not, and `GET /knowledge` itself 200 carrying
+  its `<h1>` and the words *Read-only*, with no Next error overlay in the HTML.
+  Those counts differ from the 773/20/212 measured the day before because the
+  vault is live and other runs edit it, which is the point of not hard-coding
+  any of them.
+
+  The renderer was measured separately and harder, because that is where a
+  silent failure lives: the compiled `Markdown` was driven over all 785 notes
+  with the page's own resolver wired in, and it found **213 of the vault's
+  13,100 wikilinks reaching the DOM as literal `[[…]]` text** — every one of
+  them inside `**bold**` or `*italic*`, which the inline scanner took whole.
+  After the fix that rescans emphasis content, 13,076 render as links and **24**
+  remain, and all 24 are vault content rather than renderer bugs: truncated
+  links in generated index notes with no closing `]]`, and empty `[[]]`
+  placeholders in templates.
+
+  Nothing under `/workspace2` was written, and that is proved rather than
+  asserted: every probe brackets its own run with a `sha256` over
+  `find /workspace2 -printf '%T@ %s %p\n' | sort`, and every run printed the two
+  digests equal.
+
+  Two environment facts worth keeping. `NODE_ENV=production` is inherited in
+  this container and `next dev` under it 500s every request — an `EvalError:
+  Code generation from strings disallowed` out of the edge instrumentation, a
+  `globals.css` parse failure and a missing `.next/required-server-files.json`;
+  `NODE_ENV=development npx next dev` is the whole fix, and none of the three
+  symptoms points at it. And `/api/settings` takes a **PUT**, not a POST — a
+  POST answers 405.
+
+  What it does not settle is everything that needs a browser, which is on the
+  list below.
 
 ## Not yet verified by hand
 
@@ -2536,6 +2574,24 @@ through before trusting this unattended:
   Truncated badge have never been on screen. Docker was unavailable in the
   container this landed from, so the `docker compose up --build` half of the
   loop was not run against any of it.
+- **Every part of the Knowledge page that needs a browser.** The entry above
+  measured its routes and its renderer; no pixel of it has been seen, and the
+  parts that carry the most behaviour are exactly the parts a server response
+  cannot show. Specifically unverified: that a click on a wikilink is caught by
+  the delegated handler on the page's wrapper and opens that note rather than
+  navigating away; that a modified click (⌘, ctrl, shift, middle) is still let
+  through to the browser; that **Back** returns to the previous note, which
+  rides on `popstate` and on nothing else; that the 250ms search debounce feels
+  like a search box rather than a stutter; that the note column and its
+  links/frontmatter column sit side by side above `md` and stack below it; that
+  the browse table's `Table stack` fallback actually stacks with a label on
+  every cell rather than becoming a column of unnamed figures; and that the
+  not-configured branch renders as a warn Notice above a Settings link — the
+  route half of that state answered correctly, but the branch that draws it has
+  never run. The graph region's `min-h-[20rem]` is stated so that dropping a
+  canvas in does not reflow the page under a reader; that claim is also unseen.
+  Docker was unavailable in the container this landed from, so the
+  `docker compose up --build` half of the loop was not run against any of it.
 - **A run actually answering out of the vault, and the generated directory's
   ownership under privilege separation.** The delivery is measured — the entry
   above shows the skill reaching the model's skill list from `--plugin-dir`, and
