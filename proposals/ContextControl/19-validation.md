@@ -305,8 +305,17 @@ and every published measurement gathered since prices context compression as a
 correctness event.
 
 Five items were brought to this pass as claims to check rather than findings to
-repeat. **Four survived verification and one was refuted.** The refuted one was
-the most consequential, and it was refuted in the survey's favour.
+repeat. **All five survived**, though item 3's central question resolved
+against the mechanism: the API block is real and this app cannot reach it, which
+is the answer the brief asked for and not a failure of the item. The one
+outright refutation this pass produced belongs to the survey rather than to the
+five — "a compaction leaves no trace in the file this proposal reads" is false —
+and it was found while checking item 1. It is also the most consequential thing
+here, and it cuts in the survey's favour: the marker the survey said was missing
+is the instrument the recommendation wanted to build.
+
+Eight probes were run, each with its command and output below. Probes 1 to 7
+answer the five items; Probe 8 re-resolves every citation the revision added.
 
 ## What each of the five items turned into
 
