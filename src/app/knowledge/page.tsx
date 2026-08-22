@@ -455,8 +455,8 @@ export default function KnowledgePage() {
                   {note.path}
                 </p>
 
-                {/* The tags the browse list sorts and filters by, on the note
-                    itself, the one place a reader could not see them. */}
+                {/* The tags the Tag picker filters by, on the note itself,
+                    which was the one place a reader could not see them. */}
                 {note.tags.length > 0 && (
                   <div className="mb-3">
                     <TagRow tags={note.tags} />
@@ -464,10 +464,12 @@ export default function KnowledgePage() {
                 )}
 
                 {Object.keys(note.frontmatter).length > 0 ? (
-                  // One column below `md`, key over value. A 10rem key column
-                  // on a 390px screen left the value about 14 characters, and
-                  // `truncate` on the key hid the half of the pair that says
-                  // what the other half is.
+                  // One column below `md`, key over value. A 390px screen
+                  // leaves 326px inside this card (the pane's px-4, then the
+                  // card's p-4), and the fixed key column plus its gap took
+                  // 176px of that, so the key had more room than the value it
+                  // names. `truncate` then hid whatever did not fit, which is
+                  // the half of the pair that says what the other half is.
                   <dl className="mb-4 grid gap-x-4 gap-y-1 border-b border-line pb-4 text-sm md:grid-cols-[minmax(0,10rem)_minmax(0,1fr)]">
                     {Object.entries(note.frontmatter).map(([key, value]) => (
                       <div key={key} className="contents">
