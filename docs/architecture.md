@@ -4,13 +4,20 @@
 
 ```
 src/lib/
-  transcripts.ts   JSONL parser — incremental byte-offset reads, dedupe
+  transcripts.ts   JSONL parser — incremental byte-offset reads, dedupe; and
+                   `parseCompactionBoundary`/`readCompactions`, a separate pass
+                   for the compaction records, off the metering path entirely
   windows.ts       5-hour block + weekly rollups, burn rate, projection,
                    calendar day/week/month history (display only)
   pricing.ts       per-model rates, cache-TTL multipliers, fast mode
   adminApi.ts      Admin API client (rate limits, usage, cost) w/ pagination
   budget.ts        policy evaluation
-  orchestrator.ts  run loop, process spawn, stream-json parsing, SSE bus
+  orchestrator.ts  run loop, process spawn, stream-json parsing, SSE bus;
+                   `contextShapingEnv` names the seven inherited variables that
+                   change a run's context regime, and `injectionFates`/
+                   `compactionNotice` say what a compaction took — read off the
+                   cycle's own argv, quoting the vendor's table, acting on
+                   nothing
   git.ts           the one way this app runs git — argv only, environment scrubbed
   diff.ts          a run's <base>...<branch> as a budgeted file list + patches
   review.ts        the on-demand reviewer (a third, deliberate child process)
