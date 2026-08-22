@@ -1152,7 +1152,11 @@ function leaf(block: Exclude<Block, ItemBlock>, key: string, ctx: Ctx): ReactNod
   if (block.kind === "quote") {
     if (block.callout) return <Callout key={key} block={block} keyBase={key} ctx={ctx} />;
     return (
-      <blockquote key={key} className="my-3 border-l-2 border-line pl-3 text-ink-muted">
+      // Body colour, with the rule carrying the emphasis — which is what
+      // Obsidian draws and what a quote is: somebody else's sentence, not a
+      // disabled one. Muting the text made a quoted paragraph read as
+      // unavailable, and it is often the most-cited thing on the page.
+      <blockquote key={key} className="my-3 border-l-2 border-line-strong pl-3">
         {render(blocksOf(block.body), `${key}:q`, ctx)}
       </blockquote>
     );
