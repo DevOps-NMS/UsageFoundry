@@ -320,9 +320,14 @@ the most consequential, and it was refuted in the survey's favour.
 
 **The one refutation, and it is the survey's own.**
 `02-levers-on-the-pin.md:291`–`:303`, `00-problem.md`'s corpus scan,
-`17-recommendation.md`'s second repair and this directory's README all rest on
-"a compaction leaves no trace in the file this proposal reads". It is false. The
-transcript records a full `compact_boundary` record. Corrected in all four.
+`17-recommendation.md`'s second repair, `18-implementation-sketch.md`'s Phase
+0b and this directory's README all rest on "a compaction leaves no trace in the
+file this proposal reads". It is false. The transcript records a full
+`compact_boundary` record carrying `trigger`, `preTokens`, `postTokens`,
+`durationMs`, `cumulativeDroppedTokens`, `preservedSegment` and
+`preservedMessages` on all 20 measured, plus `preCompactDiscoveredTools` on 4 of
+them. Corrected in all five, and Phase 0b loses its reason to be a hook: a
+reader in `scanUsage()` answers the same question 142 s later.
 
 The cleanest form of the correction is `00-problem.md`'s own command, unchanged,
 re-run against the same corpus root a day later:
@@ -543,6 +548,42 @@ business being in a summary at all. Suggestive, not measured. A clean version of
 this measurement is the experiment at
 `/workspace2/3 Resources/Questions/Do Standing Instructions Survive Compaction.md:83`
 and it is not this repository's to run.
+
+## Probe 8 — every citation this revision added, re-resolved
+
+A citation that has drifted is worse than no citation, because it reads as
+verified. Every `path` and `path:line` in the eleven proposal files this
+revision touched was resolved against the tree and against the vault, and every
+line-pinned vault reference was printed so the quoted text beside it could be
+checked by eye.
+
+    $ node /tmp/ctxctl-rev-721638d11c0b-1/refs.js
+    files 11 refs checked 270 bad 5
+      proposals/ContextControl/01-constraints.md: MISSING FILE src/app/settings/page.ts
+      proposals/ContextControl/16-comparison.md: MISSING FILE src/components/WorkflowEditor.ts
+      proposals/ContextControl/18-implementation-sketch.md: MISSING FILE src/components/RunAgentCost.ts
+      proposals/ContextControl/18-implementation-sketch.md: MISSING FILE src/components/RunAgentCost.ts
+      proposals/ContextControl/18-implementation-sketch.md: MISSING FILE src/app/page.ts
+
+All five are the scanner's own bug rather than the proposal's: the pattern
+matches `.ts` inside `.tsx`, and `src/app/settings/page.tsx`,
+`src/components/WorkflowEditor.tsx`, `src/components/RunAgentCost.tsx` and
+`src/app/page.tsx` all exist. So **270 of 270 resolve**, none past end of file.
+
+The vault side, 18 distinct references, all resolving, and the 11 that carry a
+line number printed with that line: `Compaction and Context Editing.md`
+`:23 :46 :57 :63 :65`, `Mid-Session Context Mutation with Claude.md`
+`:63 :81 :90`, `Prompt Caching.md:59`,
+`Do Standing Instructions Survive Compaction.md:72 :83`, and
+`Instruction Adherence in Coding Agent Configuration Files (McMillan 2026).md:52`,
+which prints the 5.6%-per-function decay sentence the `16-` section quotes. The
+four source notes cited without a line — Chen 2026, Wang et al 2026, Min et al
+2026, and the two Anthropic documentation notes — are cited for their
+frontmatter grade, which is the note as a whole.
+
+**What this probe does not establish.** That a resolving citation says what the
+sentence beside it claims. Existence and range are mechanical; the reading is
+not, and only the line-pinned vault quotes above were checked that way.
 
 ## Line-number drift found and corrected
 
