@@ -289,3 +289,288 @@ same sentence about a different survey.
   claim and nothing tests it —
   `proposals/ModelRouter/14-implementation-sketch.md` already records that there
   is no `pricing.test.ts` in the tree, and that is still true.
+
+---
+
+# Second pass — 2026-08-22, the context-research revision
+
+Everything above this line is the closing pass of 2026-08-21 and **stands as
+written**. Its verdict table is not amended: none of its thirty-nine
+confirmations was reopened, and none of its eight refutations was re-argued.
+What follows is a separate pass with a different question. The first asked
+whether the survey's numbers were right. This one asked whether its **criteria**
+were complete, against context research in the operator's vault at
+`/workspace2`, and found one missing: the survey scored twelve options on cost,
+and every published measurement gathered since prices context compression as a
+correctness event.
+
+Five items were brought to this pass as claims to check rather than findings to
+repeat. **Four survived verification and one was refuted.** The refuted one was
+the most consequential, and it was refuted in the survey's favour.
+
+## What each of the five items turned into
+
+| # | Brought as | Verdict | Where it landed |
+|---|---|---|---|
+| 1 | Compaction has a published survival table and the survey treated compaction as invisible | **Confirmed, and stronger than stated.** The survey did not merely fail to model compaction — one of its load-bearing observations about compaction is false | `01-constraints.md`, new audit section |
+| 2 | Independent evidence that compaction costs correctness; the survey has no criterion for it | **Confirmed.** Four sources, all graded in the vault, all pointing one way | `16-comparison.md`, eleventh criterion at weight 4; `09-` rejection |
+| 3 | A vendor mechanism at the API layer the survey never considered | **Confirmed that it exists; refuted that this app can reach it.** Answered by probe, not by reasoning, as the brief required | `20-option-api-context-management.md`, rejected on reachability |
+| 4 | The invisible tokens now have a mechanism | **Confirmed, with one correction to `00-problem.md`'s arithmetic** | `00-problem.md` |
+| 5 | Every vendor claim is version-pinned and mostly unreproduced | **Confirmed, and the pin does not match.** The table self-pins v2.1.198; this repository pins 2.1.226 | Carried on every imported claim |
+
+**The one refutation, and it is the survey's own.**
+`02-levers-on-the-pin.md:291`–`:303` and `17-recommendation.md`'s second repair
+both rest on "the transcript records no marker either way". It is false. The
+transcript records a full `compact_boundary` record. `02-`'s probe never drove a
+session to a *completed* compaction — only to the `PreCompact` hook that
+precedes one — and generalised from the absence. Corrected in both files.
+
+## Probe 1 — the pin, and whether the vendor table covers it
+
+    $ grep -n CLAUDE_CLI_VERSION Dockerfile
+    215:ARG CLAUDE_CLI_VERSION=2.1.226
+    216:RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CLI_VERSION}" && npm cache clean --force
+
+    $ claude --version
+    2.1.226 (Claude Code)
+
+The survival table pins itself at **v2.1.198**. The vault's stated observation
+range for the surrounding note is v2.1.198–v2.1.234, so 2.1.226 is **inside the
+observed range but 28 patch releases after the table's own pin**. Consequence,
+applied throughout: a row independently confirmed here is a finding about this
+install; a row not confirmed here is a **hypothesis** about this install and is
+written as one. `01-constraints.md`'s audit marks which is which per row.
+
+## Probe 2 — is `context_management` reachable? (item 3)
+
+Five probes, all against 2.1.226, all converging on **no**. Full commands and
+outputs are in `20-option-api-context-management.md`; the summary is:
+
+1. **The wire body.** A recording proxy captured a complete request body from a
+   work-cycle-shaped spawn. No `context_management` key at any depth.
+2. **The producer literal.** The request-assembly function in the bundle was
+   located and read. It emits the block only from a code path no CLI flag
+   reaches.
+3. **The beta gate.** `n$t=hC("context_management","context-management-2025-06-27")`
+   — the header is gated behind a feature check nothing on the argv sets.
+4. **String counts, as matches rather than lines** (the first attempt used
+   `grep -ac`, which counts *lines*; corrected to `grep -ao … | wc -l`):
+
+        $ B=/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+        clear_at_least                0
+        exclude_tools                 0
+        clear_tool_uses_20250919      3
+        clear_thinking_20251015       4
+        compact_20260112              6
+        clear_tool_inputs             2
+        context_management           59
+        context-management-2025-06-27 7
+
+   The two parameters that would make the mechanism safe under
+   `01-constraints.md`'s cache arithmetic — `clear_at_least` and
+   `exclude_tools` — are **absent from the binary entirely**.
+
+5. **The `--settings` channel.** Three runs back to back, one
+   `CLAUDE_CONFIG_DIR`, one `--settings` file carrying both a
+   `context_management` key and a `SessionStart` hook:
+
+        $ ls -l bodyA.json bodyB.json bodyC.json
+        -rw-r--r-- 124380  bodyA.json
+        -rw-r--r-- 124380  bodyB.json
+        -rw-r--r-- 124380  bodyC.json
+        $ cmp bodyA.json bodyB.json && echo "bodyA == bodyB"
+        bodyA == bodyB
+        $ cmp bodyA.json bodyC.json && echo "bodyA == bodyC"
+        bodyA == bodyC
+
+   The hook **fired** (it wrote `marker.txt`), so the settings file was read.
+   The `context_management` key changed the request body by zero bytes.
+
+**A false start worth recording.** The first version of probe 5 compared two
+runs and found them different, and the difference was reported as evidence
+before it was understood. It was not the settings key: the two runs used
+different `CLAUDE_CONFIG_DIR` paths, carried different per-run session uuids,
+and straddled a change to a `/loop` skill description on the shared `~/.claude`
+bind mount. Re-run as three back-to-back probes under one config dir, the bodies
+are byte-identical. The lesson is the one `02-` already learned about this
+binary: **it reads a directory that another process is writing.**
+
+## Probe 3 — the compaction corpus (item 1)
+
+    $ node audit.js          # JSON-parses every transcript under ~/.claude/projects
+    transcripts scanned        1120
+    compact_boundary records   20 in 12 transcripts
+    triggers                   ["auto"]
+    mean preTokens             170852
+    mean postTokens            13248
+    mean durationMs            141975   total s 2839
+    metadata keys              ["trigger","preTokens","durationMs","preservedSegment",
+                                "preservedMessages","postTokens","cumulativeDroppedTokens",
+                                "preCompactDiscoveredTools"]
+    by project                 {"…721638d11c0b-1":13, "…721638d11c0b-2":2, "-workspace2":5}
+    summary mean bytes         24066 over 20 summaries
+    post-boundary attachments (first 30 records after each):
+        compact_file_reference     72
+        budget_usd                 59
+        file                       28
+        deferred_tools_delta       25
+        nested_memory              22
+        agent_listing_delta        20
+        hook_success               20
+        mcp_instructions_delta      5
+        date_change                 1
+
+**The count is a snapshot with a rising floor.** Three passes the same day
+returned 16, 18 and 20; three of the last four were written by the session
+writing this file. The *shape* — the metadata keys, the attachment sequence, the
+`trigger: "auto"` — did not change across any of them.
+
+## Probe 4 — does a `paths:`-scoped rule come back only on a matching read?
+
+The vendor table says `paths:`-scoped rules are "lost until a matching file is
+read again". A second scan walked forward 200 records from each boundary looking
+for `nested_memory` attachments and counting tool uses in between:
+
+    offset +15 to +18, always after 1 or 2 tool uses, never at the boundary
+    the boundaries with no matching file read: no nested_memory within 200 records
+
+A record dump of one instance gives the sequence in full — summary, four
+`compact_file_reference`, a `file`, `deferred_tools_delta`,
+`agent_listing_delta`, `hook_success`, `last-prompt`, `agent-setting`, thinking,
+**a `Grep` against a path under the TypeScript repository**, the tool result,
+then `nested_memory typescript.md`. That is the documented mechanism observed
+rather than assumed, and it is the strongest single reason to trust the rest of
+a table pinned two versions back.
+
+Live exposure on this install:
+
+    $ grep -l '^paths:' /home/node/.claude/rules/*.md
+    /home/node/.claude/rules/interface-copy.md
+    /home/node/.claude/rules/python.md
+    /home/node/.claude/rules/typescript.md
+    $ ls /home/node/.claude/rules/
+    coding-principles.md  interface-copy.md  python.md  response-style.md  typescript.md
+
+    $ find . -name CLAUDE.md -not -path './node_modules/*' -not -path './.git/*'
+    ./CLAUDE.md
+
+Three of five standing rules are documented-lost after a compaction and observed
+to return only on a matching read. This repository has exactly one `CLAUDE.md`,
+at the project root, which is the row that survives — so the "nested `CLAUDE.md`
+is lost" row has **no exposure here today** and would acquire some the moment
+anyone added a second one.
+
+## Probe 5 — does a compaction survive `--resume`? (`09-`'s load-bearing unknown)
+
+Two runs in the corpus resume across a boundary. Context size is read from each
+assistant record's own
+`usage.input_tokens + cache_read_input_tokens + cache_creation_input_tokens`, so
+it is what the API was sent rather than an estimate.
+
+    96ba3c02-…jsonl   boundary @108   pre=180694 post=17456
+                      --resume  @366
+                      last assistant before  @363  147513
+                      first assistant after  @368  151328   (+3815)
+
+    f291b888-…jsonl   boundary @173   pre=174613 post=12296
+                      --resume  @498
+                      last assistant before  @494  127731
+                      first assistant after  @501  131552   (+3821)
+
+A discarded compaction would have put the resumed process at `preTokens` plus
+everything earned since the boundary — over 300,000 tokens, past the window.
+Both rises are the continuation prompt and its attachments. **It survives.**
+
+**How the resume was identified, and the check that nearly went wrong.** The
+continuation prompt is preceded by two `queue-operation` records and followed by
+attachments but *not* by a `SessionStart` `hook_success`, which initially looked
+like a queued in-session message rather than a spawn. Two things settle it: the
+same two `queue-operation` records precede the **first** prompt at the head of
+every transcript, where a spawn is certain; and the attachment at the resume
+carries `budget_usd` with `used: 0`, which is a fresh process's counter.
+
+## Probe 6 — the generated vault skill, measured rather than guessed (item 1)
+
+The vendor table caps a re-injected skill body at **5,000 tokens per skill**,
+25,000 total, oldest dropped first, truncation keeping the start.
+`renderVaultSkill` (`src/lib/vaultSkill.ts:203`) was called and its output
+written out:
+
+    -rw-r--r-- 3540  SKILL-with-search.md      # with the ranked search script
+    -rw-r--r-- 3479  SKILL-no-search.md        # without it
+
+**No tokenizer exists in the container**, so this is a *bound* rather than a
+count: at the ≥1 byte per token floor, 3,540 bytes cannot exceed 3,540 tokens.
+The generated skill is therefore decisively under the 5,000 cap, with the
+nearest plausible tokenisation putting it near 900. Recorded as a bound, because
+a guessed token count is exactly what item 1 asked not to be given.
+
+## Probe 7 — the ending contract across the 20 summaries, and why it is not a rate
+
+    "reply with exactly"      20/20
+    "NEEDS_REVIEW"            20/20
+    "DONE on its own line"    18/20
+    "pkill"                   13/20
+    "work cycle"              10/20
+    "sub-agent"                4/20
+
+**This sample is contaminated and the numbers must not be read as retention
+rates.** Every one of the 20 summaries was produced by an agent working on this
+codebase, and several by agents working on this very brief — so the summariser
+had every reason to carry protocol strings forward as *subject matter*. The tell
+is `pkill` at 13/20: it is a string that lives only in the system prompt, which
+the vendor table says survives compaction unchanged and which therefore has no
+business being in a summary at all. Suggestive, not measured. A clean version of
+this measurement is the experiment at
+`/workspace2/3 Resources/Questions/Do Standing Instructions Survive Compaction.md:83`
+and it is not this repository's to run.
+
+## Line-number drift found and corrected
+
+`01-constraints.md`'s citations into `src/lib/orchestrator.ts` were off by one
+below roughly line 4750 and by more above it. Cause: two commits landed after
+the proposal's last commit `b6396cf` — `ee93684` and `e83f405` — adding **123
+lines** to that file. Seven citations were corrected: `:4466`→`:4467`,
+`:4506`→`:4507`, `:4330`–`:4361`→`:4331`–`:4362`, `:4543`→`:4544`,
+`:4531`–`:4537`→`:4532`–`:4538`, `:4436`–`:4446`→`:4437`–`:4447`,
+`:4448`–`:4454`→`:4449`–`:4455`. `buildArgs` moved from `:4757` to `:4809` and
+its call site from `:6701` to `:6821`.
+
+The same drift is the reason `ee93684` matters twice over: it is also the commit
+that put `--autocompact` on every cycle's argv, and **every one of the 20
+compaction boundaries post-dates it** (earliest 2026-08-21T21:58:12Z against the
+commit at 20:08:10 UTC).
+
+## One stale docblock, recorded and not fixed
+
+`01-constraints.md` accurately quoted a docblock at
+`src/lib/orchestrator.ts:4449`–`:4455` describing how settings are materialised.
+**The docblock is stale.** `saveSettings` (`src/lib/settings.ts:727`–`:731`)
+compares against `DEFAULTS` with `sameValue` (`:756`) and stores only what
+differs — which is the behaviour `CLAUDE.md` names as an invariant. The proposal
+now records the discrepancy rather than reproducing the docblock's claim. **It
+was not fixed**, because the brief for this revision put `src/` out of scope.
+Whoever next edits that function should delete those seven lines.
+
+## Not verified by this pass
+
+- **Whether a re-injected rule still *binds*.** The vendor table settles what
+  text is present; Chen's 30% is about what is obeyed. The vault says nobody has
+  run that experiment on a re-injected file
+  (`/workspace2/3 Resources/AI Context and Memory/Mid-Session Context Mutation with Claude.md:81`–`:82`).
+  It needs a benchmark and a model budget, not a code change.
+- **Every row of the survival table that this install does not exercise.**
+  Output styles, auto memory, and nested `CLAUDE.md` have no live exposure here,
+  so their rows are carried on the vendor's word at v2.1.198 and marked as such.
+- **What `agent_listing_delta` and `mcp_instructions_delta` carry.** They appear
+  after every boundary and after 5 of 20 respectively. The counts are observed;
+  the contents were not opened.
+- **The token count of the generated skill**, as distinct from its byte bound.
+  No tokenizer is available in the container and none was installed.
+- **Anything about a CLI other than 2.1.226.** See the standing obligation in
+  `17-recommendation.md`: two of this pass's findings are pinned to string
+  literals inside a vendor bundle, and a version bump is a one-line diff that
+  changes them silently.
+- **Anything requiring a billed model.** No probe in this pass spent money on
+  the API. `03-experiment-resumed-vs-fresh.md` is still unrun, and it is still
+  the thing that would settle the proposal.
