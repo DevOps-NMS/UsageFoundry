@@ -1,7 +1,8 @@
 # Recommendation
 
-**Build Option A — the per-cycle composition readout — plus two repairs that are
-owed whichever way the question goes. Build nothing else until somebody has run
+**Build Option A — the per-cycle composition readout, now including the
+compaction boundary — plus two repairs that are owed whichever way the question
+goes. Build nothing else until somebody has run
 `03-experiment-resumed-vs-fresh.md` against a live model.**
 `04-option-see-it.md`.
 
@@ -11,6 +12,33 @@ survey found one real, identified waste; it also found that no lever this app
 holds reaches the mechanism behind it, and that the largest option aimed at
 routing around it is a bet on a quantity nobody has measured. The honest
 response to that is an instrument, not an actuator.
+
+## What the 2026-08-22 revision changed, in one place
+
+*Read this section instead of diffing the file.* The survey scored twelve
+options on cost. Every published measurement of context compression gathered
+since it closed prices compression as a **correctness** event instead, and the
+survey had no criterion for that. `16-comparison.md` now carries one, at weight
+4, and the twelve options are re-scored against it.
+
+**The recommendation holds, and holds by more.** Option A goes from +20 to +24
+and its lead over second place widens from 3 points to 9.
+
+| Decided by this revision | Where |
+|---|---|
+| Compaction is **not invisible**. The transcript carries a full `compact_boundary` record with seven metadata fields, and this install has produced 20 of them across 12 transcripts, all `trigger: "auto"` | `01-constraints.md`, audited row by row against the vendor's survival table |
+| A compaction **survives `--resume`**. Two runs resume across a boundary and neither replays the pre-boundary history | `09-option-app-driven-compaction.md`, "How it fails" |
+| The process-safety half of "the two endings must survive every cycle" is **settled by mechanism**: `SELF_HOSTING_NOTICE` and `DELEGATION_NOTICE` ride `--append-system-prompt`, which the vendor table puts in the row that survives unchanged | `01-constraints.md` |
+| The `context_management` API block — the vendor's own answer to this survey's question — is **unreachable** from any argv this app emits or from `--settings`, at CLI 2.1.226, on five converging probes | `20-option-api-context-management.md` |
+| Option F's rejection is now three independent measurements of its exact mechanism rather than a judgement about what a summariser might drop | `09-option-app-driven-compaction.md` |
+| Option K overtakes Option H for second place, because K is the only non-A option that removes nothing from the context and so is unpriced by the new criterion | `16-comparison.md` |
+
+| Still open | Why it stays open |
+|---|---|
+| **Whether a re-injected rule still binds.** The vendor table settles what text is *present* after a compaction. Chen's 30% is about what is *obeyed*, and nobody has run that experiment on a re-injected file | The vault says so itself, at `/workspace2/3 Resources/AI Context and Memory/Mid-Session Context Mutation with Claude.md:81`–`:82` |
+| **The ending contract's own half.** `COMPLETION_NOTICE` and `NEEDS_REVIEW_NOTICE` are appended to a *user message*, and message history is the one thing a compaction rewrites. There is no row in the vendor's table for it | `01-constraints.md` |
+| **`03-experiment-resumed-vs-fresh.md` against a live model.** Unchanged, and now the blocking experiment rather than a nice-to-have — the correctness criterion is what makes the fresh-agent family's unmeasured quantity the whole question | "The fact that would overturn it", below |
+| **Whether the survival table's `v2.1.198` describes 2.1.226.** It is inside the vault's stated observation range and 28 patch releases after the table's own pin. Every row not independently confirmed here is a hypothesis about this install | `01-constraints.md`, and the grade paragraph before its table |
 
 ## First, the prize, stated the way the measurement allows
 
@@ -113,9 +141,9 @@ directly rather than being quietly satisfied by the outcome.
 
 **It is a reason to hold a bought-in mechanism to the same evidence bar as a
 built one, in both directions, and this file has tried to.** Option K is one
-`args.push` on a vendor flag and it scores +15, third in the table, because its
-failure mode is a non-zero exit and its saving is certain. Option F is also a
-vendor flag and it scores −19, because on a 200k-window model it can only lower
+`args.push` on a vendor flag and it scores +15, **second** in the table, because
+its failure mode is a non-zero exit and its saving is certain. Option F is also
+a vendor flag and it scores **−31**, because on a 200k-window model it can only lower
 a threshold, its refusal is a debug line, and it hands a model the decision
 about what an agent may forget. The same bar produced opposite answers, which is
 what a bar is for.
@@ -158,17 +186,58 @@ explicit key" its first act.
 **The CLI is already compacting these runs and this app does not know.**
 `02-levers-on-the-pin.md` drove a `-p --output-format stream-json --verbose`
 session — the exact shape a work cycle is spawned in — to a `PreCompact` hook
-firing unprompted with `trigger: "auto"`, and found that the transcript records
-no marker either way, on a session that demonstrably reached it. So a run's
-conversation may already have been summarised by a model, with the two endings
-in it, with no record anywhere. That is `01-constraints.md`'s "the two endings
-must survive every cycle" already at risk on today's install, independent of
-every option here.
+firing unprompted with `trigger: "auto"`. So a run's conversation may already
+have been summarised by a model, with the two endings in it, with no record this
+app reads. That is `01-constraints.md`'s "the two endings must survive every
+cycle" already at risk on today's install, independent of every option here.
+
+> **Corrected 2026-08-22, and the repair gets smaller.** `02-` also found that
+> "the transcript records no marker either way", and both this file and
+> `02-levers-on-the-pin.md:291`–`:303` were written on that finding. **It is
+> false.** The transcript records a `type: "system"`, `subtype:
+> "compact_boundary"` record carrying `trigger`, `preTokens`, `postTokens`,
+> `durationMs`, `cumulativeDroppedTokens`, `preservedSegment` and
+> `preservedMessages.uuids`, and this install has produced 20 of them. `02-`'s
+> probe could not see one because it never drove a session to a *completed*
+> compaction — only to the hook that precedes it — and it generalised from the
+> absence.
+>
+> So repair #2 no longer needs a hook. It needs a **reader**: `scanUsage()`
+> already walks these files (`src/lib/transcripts.ts:406`), and the record it
+> would have to recognise is one `subtype` comparison. That moves the repair out
+> of the `--settings` payload entirely, which also removes the one invariant it
+> put at risk — Option E's single-`--settings`-flag question. A `PreCompact`
+> hook would still be the only way to know a compaction is *about to* happen;
+> nothing in this survey needs that.
 
 Both are Phase 0 of `18-implementation-sketch.md`. The second is Option F's
-observation half without Option F: a `PreCompact` hook on the `--settings`
-channel, which the closing pass re-confirmed survives `--resume` where
-`--plugin-dir` does not.
+observation half without Option F, and it is now the cheaper half of Option A
+rather than a separate mechanism — which is why the recommendation at the top of
+this file says "including the compaction boundary" where it used not to.
+
+## One standing obligation this revision creates
+
+*Added 2026-08-22.* Every finding in `01-constraints.md`'s survival audit and
+every probe in `20-option-api-context-management.md` is pinned to **CLI
+2.1.226** (`Dockerfile:215`). Two of them are pinned to something narrower than
+a version: a string literal inside the vendor's bundle.
+`20-option-api-context-management.md` locates the request-body producer and
+reads the block it does *not* emit; `01-constraints.md` reads the compaction
+survival behaviour off records that producer's sibling writes.
+
+**A future CLI can change either without changing anything this app reads.** A
+bumped `CLAUDE_CLI_VERSION` in the `Dockerfile` is a one-line diff that
+typechecks, builds, boots, and silently changes what every agent this app spawns
+carries in its context — whether `paths:`-scoped rules come back, whether a
+compaction leaves a marker `scanUsage()` can find, whether the
+`context_management` block becomes reachable and therefore whether Option M is
+still rejected. Nothing in this repository notices.
+
+That is not a reason to pin harder; it is a reason to say what a version bump
+owes. **Re-run the probes in `19-validation.md`'s dated section before believing
+this proposal on a CLI other than 2.1.226.** They are cheap — the expensive one
+is the recording proxy, and it runs in under a minute. Writing that obligation
+down is the whole of the mitigation available to a document.
 
 ## The fact that would overturn it
 
@@ -207,10 +276,53 @@ Cost: `03-` estimates the three runs together at single-digit dollars on
 proposal**, and it is the reason this file recommends waiting rather than
 refusing.
 
+*Added 2026-08-22.* Item 3 above — "whether each arrangement answered the five
+questions correctly" — used to be one of four things to record. It is now the
+**reason to run the experiment at all**. With a correctness criterion in the
+table, the fresh-agent family's open quantity is no longer "does it cost less",
+which `03-` already answered at 2.59× against; it is "does an agent that starts
+from a brief do the same work", and Min's 85.7 / 72.8 / 42.2 ordering is the
+only published thing pointing at it. Score item 3 first and the other three
+become bookkeeping.
+
+**And a second fact would overturn a different part of this, in the other
+direction.** If somebody runs Wang's COMPINT-style constraints **delivered as a
+re-injected file** rather than as a conversational turn — the experiment the
+vault has open at
+`/workspace2/3 Resources/Questions/Do Standing Instructions Survive Compaction.md:83`
+— and re-injection turns out to be immune, then the whole 30-point violation
+effect is an argument about *delivery mechanism* and not about compaction. On
+that result the correctness criterion's weight drops, Option F's floor score
+rises, and `16-comparison.md`'s sensitivity paragraph says what happens next:
+below weight 2, Option H takes second place back from Option K. Nothing else in
+the table changes rank. **That experiment is not this repository's to run** —
+it needs a benchmark and a model budget, not a code change — but its result is
+the single largest input to a criterion this revision added.
+
 ## The runner-up, and what would make it win
 
-**Option H — delegation as context isolation**
-(`11-option-delegation-as-isolation.md`), at +17 against Option A's +20.
+*Rewritten 2026-08-22: the runner-up changed.* On the ten-criteria table Option
+H was second at +17 against Option A's +20. On the eleven-criteria table
+**Option K is second at +15 against Option A's +24**, and Option H is third at
++13. The two options did not change; the criterion that separates them is new.
+
+**Why K passed H.** Option K moves the volatile prefix and removes nothing from
+the context — its own file says it "is not a context-reduction mechanism at all.
+It changes cache geometry" — so it is the only non-A option the correctness
+criterion cannot charge. H removes something by design: a sub-agent starts from
+a brief, and a brief is a summary written by a model of what the sub-agent needs,
+which is Wang's shape at one remove. H scores −1 and K scores 0, and a 4-point
+weight on a 1-point gap is a 4-point swing on a 4-point lead. `16-comparison.md`
+records that the swap is controlled by the new criterion's own weight: at weight
+2 or below, H is second again.
+
+**This does not make K the thing to build and it does not make H worse than it
+was.** The two sections below are both kept, in the order the new table puts
+them, and both still say "beside A rather than instead of it".
+
+### Option H — delegation as context isolation
+
+(`11-option-delegation-as-isolation.md`), now at +13 against Option A's +24.
 
 It has the one property Option A does not: it actually removes something. A
 delegated turn's context is structurally separate — the closing pass re-ran
@@ -251,15 +363,22 @@ readout, the card and the dashboard grouping all already built — and it should
 ship beside A rather than instead of it, because A is how anyone would know
 whether it worked.
 
-**And one thing that should ship beside A if anything does: Option K.** One
-`args.push`, a failure mode that is a non-zero exit before any API call, and a
-certain 1% to 3% correction on the largest line in the bill. It is not
-recommended on its own for the reason its own file gives — "without it this
+### Option K — move the volatile prefix
+
+**The new second place, and the one thing that should ship beside A if anything
+does.** One `args.push`, a failure mode that is a non-zero exit before any API
+call, and a certain 1% to 3% correction on the largest line in the bill. It is
+not recommended on its own for the reason its own file gives — "without it this
 option ships into the same blind spot `00-problem.md` opened on" — and that
 blind spot is exactly what Phase 1 and 2 close. What would settle it into the
 recommendation is one billed pair of cycles with and without the flag, priced
 through `scanUsage()`, which also decides between the two readings of its
 saving.
+
+Second place is worth less here than it sounds, and the reason is worth saying
+plainly: K's prize is $1.44 to $5.02 a week. It rose because the field fell
+around it, not because it got better. An option that removes nothing wins a
+criterion about the cost of removing things by not entering.
 
 ## Rejected by name
 
@@ -278,6 +397,40 @@ this app emits, on a codebase where `SELF_HOSTING_NOTICE`'s docblock records two
 runs killed by a literal in text that was "only text"
 (`src/lib/orchestrator.ts:4719`–`:4731`). **Its observation half is kept and is
 Phase 0b.**
+
+> *2026-08-22 — the last sentence of that paragraph is no longer a judgement.*
+> "Hands a model the decision about what an agent may be permitted to have
+> forgotten" was an argument from principle. Three independent measurements now
+> price it: prohibited actions **0% → 30%** after one compaction, mediated
+> entirely by whether the constraint survived the summary (Chen 2026);
+> constraint retention at **17%**, with most compactors worse than not
+> compacting at all (Wang et al 2026); and AppWorld task success at **85.7%**
+> full context against **72.8%** summarised, failing as agents that "no longer
+> know where they are in the task" (Min et al 2026). All three are unreplicated
+> preprints, all three are cited with their vault paths and grades in
+> `09-option-app-driven-compaction.md`, and none of them tests a re-injected
+> file. The rejection did not need them. It has them.
+>
+> Two things in F's own file changed *in its favour* on the same day and are
+> recorded there: the compaction survives `--resume`, and the transcript records
+> a marker. Neither reaches the objection above. F scores −31 on the
+> eleven-criteria table, last by four points.
+
+**Option M, the `context_management` API block** —
+`20-option-api-context-management.md`, written 2026-08-22 and rejected on
+**reachability** rather than on merit. It is the vendor's own answer to this
+survey's question and the only mechanism anywhere that aims at
+`00-problem.md`'s stripped thinking. At CLI 2.1.226 this app cannot emit it: not
+from an argv, not from `--settings`. Five converging probes, each with its
+command and output in the option file — the wire body captured through a
+recording proxy, the producer literal in the bundle, the beta-header gate, the
+string counts, and three back-to-back runs whose `--settings` file carried a
+`context_management` key and a `SessionStart` hook, where the hook fired and
+`cmp` reports the request bodies byte-identical. The option is rejected with a
+named condition for reopening it, because an option file that establishes a
+lever does not exist is worth what one that establishes it does. **It carries no
+column in `16-comparison.md`**: scoring an unreachable lever on eleven criteria
+would invite a reader to compare a hypothetical with nine real options.
 
 **Option I, the retrieval index.** The largest build in the survey, the only
 store with no liveness question the database can answer, and the only option
@@ -360,3 +513,20 @@ It does not claim Option A saves money. It saves nothing. $173.95 a week goes on
 being spent while it is deployed. What it buys is that the next person who wants
 to know whether a handover cost $2.40 or $0.17 can find out, and that the
 experiment that would settle this proposal has somewhere to report its answer.
+
+*Added 2026-08-22.* It does not claim the correctness criterion is a
+measurement. It is a **weight placed on four unreplicated preprints**, none
+peer-reviewed, none testing this vendor's implementation, and none testing the
+re-injected-file arrangement that is exactly how this app delivers the
+instructions it most needs to survive. `16-comparison.md` argues for weight 4
+and against 6 on precisely those grounds. A reader who thinks the weight is
+wrong should change it and read the sensitivity paragraph rather than discard
+the row: below weight 2, second place returns to Option H, and **first place
+does not move at any weight**, because the option in first removes nothing.
+
+And it does not claim this revision found a lever the survey missed. It found
+that the vendor has one, at a layer this app cannot reach
+(`20-option-api-context-management.md`), and that the compression the survey
+treated as invisible has been running on this install all along, twenty times,
+recorded in a field nothing reads. Both of those make the instrument more worth
+building. Neither makes an actuator available.
