@@ -1407,6 +1407,29 @@ cycle's argv at all.
   marker set in that session's own transcript. **A compaction leaves no trace in
   the file this proposal reads**, so the count above is not evidence that none
   happened.
+
+  > **Answered 2026-08-22, and it was the first half.** The same command,
+  > unchanged, run against the same corpus root a day later:
+  >
+  >       records 121766 compaction markers {"compactMetadata":20,"isCompactSummary":20}
+  >
+  > So the scan was right and the *conclusion* drawn beside it was wrong. A
+  > compaction leaves a very full trace — `compactMetadata` on a
+  > `subtype: "compact_boundary"` system record, carrying `trigger`,
+  > `preTokens`, `postTokens`, `durationMs`, `cumulativeDroppedTokens`,
+  > `preservedSegment`, `preservedMessages` and `preCompactDiscoveredTools`, and
+  > `isCompactSummary` on the user record after it. The corpus was empty on
+  > 2026-08-21 because **no compaction had happened yet**: `ee93684` put
+  > `--autocompact` on every cycle's argv at 20:08:10 UTC that day and the
+  > earliest boundary in the corpus is 21:58:12Z, 110 minutes later. The
+  > disjunction resolved to its first branch and `02-levers-on-the-pin.md`
+  > carries the correction in full.
+  >
+  > What this changes about the bullet above: nothing about the numbers, and
+  > everything about the last sentence. `01-constraints.md` audits the 20
+  > boundaries against the vendor's published survival table, and
+  > `17-recommendation.md`'s second repair shrinks from a `PreCompact` hook to a
+  > `subtype` comparison inside `scanUsage()`.
 - **A delegated turn's context is visible here only through attribution.**
   `attributionAgent` (`src/lib/transcripts.ts:263`–`264`) says which bucket a
   turn belongs to and nothing about what that turn carried. A sub-agent's

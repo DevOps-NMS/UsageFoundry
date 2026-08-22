@@ -319,11 +319,25 @@ the most consequential, and it was refuted in the survey's favour.
 | 5 | Every vendor claim is version-pinned and mostly unreproduced | **Confirmed, and the pin does not match.** The table self-pins v2.1.198; this repository pins 2.1.226 | Carried on every imported claim |
 
 **The one refutation, and it is the survey's own.**
-`02-levers-on-the-pin.md:291`–`:303` and `17-recommendation.md`'s second repair
-both rest on "the transcript records no marker either way". It is false. The
-transcript records a full `compact_boundary` record. `02-`'s probe never drove a
-session to a *completed* compaction — only to the `PreCompact` hook that
-precedes one — and generalised from the absence. Corrected in both files.
+`02-levers-on-the-pin.md:291`–`:303`, `00-problem.md`'s corpus scan,
+`17-recommendation.md`'s second repair and this directory's README all rest on
+"a compaction leaves no trace in the file this proposal reads". It is false. The
+transcript records a full `compact_boundary` record. Corrected in all four.
+
+The cleanest form of the correction is `00-problem.md`'s own command, unchanged,
+re-run against the same corpus root a day later:
+
+    records 111845 compaction markers {}                                    (2026-08-21)
+    records 121766 compaction markers {"compactMetadata":20,"isCompactSummary":20}   (2026-08-22)
+
+**The scan was always right; the conclusion drawn beside it was not.** The
+corpus was empty because no compaction had yet happened — `ee93684` put
+`--autocompact` on every cycle's argv at 20:08:10 UTC on 2026-08-21 and the
+earliest boundary is 21:58:12Z, 110 minutes later. `02-`'s probe compounded it
+by never driving a session to a *completed* compaction — only to the
+`PreCompact` hook that precedes one — and generalising from the absence, with a
+key scan that also looked on the wrong records (`compactMetadata` hangs off the
+`system` record, `isCompactSummary` off the `user` record after it).
 
 ## Probe 1 — the pin, and whether the vendor table covers it
 

@@ -284,7 +284,7 @@ already over the line, and the answer this pin gives is *nothing happens*.
 `PreCompact` stops firing. `DISABLE_COMPACT` and `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
 are also in the binary; their behaviour was not exercised.
 
-### Whether a compaction survives `--resume`, and what the transcript shows — **could not establish**
+### Whether a compaction survives `--resume`, and what the transcript shows — ~~could not establish~~ **both answered 2026-08-22, see below**
 
 Two things stopped this. The recording upstream cannot produce a summary a real
 compaction would accept, so no probe reached a *completed* compaction — only the
@@ -301,6 +301,39 @@ which is `00-problem.md`'s corpus result — `records 111845 compaction markers 
 absence of markers in the corpus is not evidence that compaction did not
 happen.** `00-problem.md` left that as an open disjunction; one half of it is now
 closed, and the file has been corrected.
+
+> **2026-08-22 — both halves answered, and one sentence above is wrong.** The
+> two claims in this subsection are not equally sound and they should not have
+> been made in one breath.
+>
+> **Sound:** "no probe reached a *completed* compaction". True, and it is why
+> this probe could not answer anything. **Wrong:** "the transcript carries no
+> marker either way". A completed compaction writes a `type: "system"`,
+> `subtype: "compact_boundary"` record carrying `trigger`, `preTokens`,
+> `postTokens`, `durationMs`, `cumulativeDroppedTokens`, `preservedSegment`,
+> `preservedMessages` and `preCompactDiscoveredTools`. The probe transcripts
+> above have no such record because **no compaction completed in them**, which
+> is the same fact as the sound claim stated twice, not a second finding. The
+> key scan quoted above also looked for `isCompactSummary` / `compactMetadata`
+> on the wrong records — `compactMetadata` hangs off the `system` record, and
+> `isCompactSummary` off the `user` record after it.
+>
+> This install has since produced **20** completed compactions across 12
+> transcripts, all `trigger: "auto"`, mean 170,852 `preTokens` to 13,248
+> `postTokens`. `01-constraints.md` audits them against the vendor's survival
+> table and `19-validation.md` records the scan.
+>
+> **And a compaction does survive `--resume`.** Two of those runs resume across
+> a boundary, and the first assistant turn of the resumed process reports
+> 151,328 and 131,552 tokens of context against 147,513 and 127,731 before it —
+> a rise of about 3,800 each, which is the continuation prompt and its
+> attachments. A replayed pre-boundary history would have put both past the
+> window. Read from each record's own `usage` fields; the detail is in
+> `09-option-app-driven-compaction.md`.
+>
+> Two files were written on the wrong half of this and are corrected:
+> `17-recommendation.md`'s second repair, and `proposals/ContextControl/README.md`'s
+> "what this app can see today" table.
 
 ## Session flags
 
