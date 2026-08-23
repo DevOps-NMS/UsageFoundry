@@ -551,18 +551,33 @@ export function RunLand({ run }: { run: RunDTO }) {
                 {/* The kit's control, not a hand-rolled one: this was the app's
                     own select geometry spelled a second time, so it wore a
                     different height, a different border on hover and no focus
-                    ring from the two beside it. Width is the one thing `Select`
-                    never states, so it is stated here — see the note in
-                    `Field`. */}
-                <Select
-                  className="w-auto"
-                  value={effectiveStrategy}
-                  onChange={(e) => setStrategy(e.target.value as MergeStrategyDTO)}
-                  aria-label="How to land it"
-                >
-                  <option value="merge">Merge, keeping its commits</option>
-                  <option value="squash">Squash into one commit</option>
-                </Select>
+                    ring from the two beside it.
+
+                    The width is on the wrapper and never on the control.
+                    `Select` composes `CONTROL`, which already states `w-full`,
+                    and two width utilities on one element resolve by their
+                    order in the emitted stylesheet rather than by the class
+                    attribute — Tailwind emits `.w-auto` ahead of `.w-full`, so
+                    the `w-auto` that used to sit here lost silently: the select
+                    filled the flex line and `flex-wrap` put `Land into …`, the
+                    most consequential button in the app, on a row of its own
+                    beneath a full-width dropdown. `shrink-0` so a line too
+                    narrow for both wraps that button rather than squeezing the
+                    choice it is pressed with. Same wrapper as the branches
+                    page's copy of this picker; see the note at the top of
+                    `ui/Field`. */}
+                <div className="w-auto shrink-0">
+                  <Select
+                    value={effectiveStrategy}
+                    onChange={(e) =>
+                      setStrategy(e.target.value as MergeStrategyDTO)
+                    }
+                    aria-label="How to land it"
+                  >
+                    <option value="merge">Merge, keeping its commits</option>
+                    <option value="squash">Squash into one commit</option>
+                  </Select>
+                </div>
                 <Button
                   className="transition-colors duration-150"
                   onClick={() => act("land")}
