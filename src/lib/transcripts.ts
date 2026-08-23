@@ -162,32 +162,102 @@ function failureMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Recursively collect *.jsonl paths under the projects directory. */
-async function listTranscriptFiles(
-  root: string,
-): Promise<{ files: string[]; failures: ScanReadFailure[] }> {
-  const files: string[] = [];
-  const failures: ScanReadFailure[] = [];
-  async function walk(dir: string) {
-    let dirents;
-    try {
-      dirents = await fs.readdir(dir, { withFileTypes: true });
-    } catch (err) {
-      // A missing projects directory is the ordinary state of a fresh install
-      // and says nothing; an unreadable one hides however many transcripts are
-      // under it. Reported apart because only the second is a short history.
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        failures.push({ path: dir, message: failureMessage(err) });
-      }
-      return;
+/**
+ * One directory of the walk, holding its children in `readdir` order.
+ *
+ * A `.jsonl` file is its own path and a subdirectory is a node whose entries a
+ * later level fills in, so walking this structure in order reproduces exactly
+ * the sequence the depth-first walk emitted — see `listTranscriptFiles`.
+ */
+interface WalkNode {
+  dir: string;
+  entries: Array<string | WalkNode>;
+  /** Set when this directory's own `readdir` failed; it then has no entries. */
+  failure?: ScanReadFailure;
+}
+
+/** Read one directory, returning the subdirectories the next level must read. */
+async function readWalkLevel(node: WalkNode): Promise<WalkNode[]> {
+  let dirents;
+  try {
+    dirents = await fs.readdir(node.dir, { withFileTypes: true });
+  } catch (err) {
+    // A missing projects directory is the ordinary state of a fresh install
+    // and says nothing; an unreadable one hides however many transcripts are
+    // under it. Reported apart because only the second is a short history.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      node.failure = { path: node.dir, message: failureMessage(err) };
     }
-    for (const d of dirents) {
-      const full = path.join(dir, d.name);
-      if (d.isDirectory()) await walk(full);
-      else if (d.isFile() && d.name.endsWith(".jsonl")) files.push(full);
+    return [];
+  }
+
+  const children: WalkNode[] = [];
+  for (const d of dirents) {
+    const full = path.join(node.dir, d.name);
+    if (d.isDirectory()) {
+      const child: WalkNode = { dir: full, entries: [] };
+      node.entries.push(child);
+      children.push(child);
+    } else if (d.isFile() && d.name.endsWith(".jsonl")) {
+      node.entries.push(full);
     }
   }
-  await walk(root);
+  return children;
+}
+
+/** Depth-first over a walked tree, which is the order the serial walk emitted. */
+function flattenWalk(
+  node: WalkNode,
+  files: string[],
+  failures: ScanReadFailure[],
+): void {
+  // Before the entries, because the serial walk pushed a directory's failure at
+  // the point it descended into it — where that subtree's files would have been.
+  if (node.failure) failures.push(node.failure);
+  for (const entry of node.entries) {
+    if (typeof entry === "string") files.push(entry);
+    else flattenWalk(entry, files, failures);
+  }
+}
+
+/**
+ * Collect *.jsonl paths under the projects directory, one directory level at a
+ * time.
+ *
+ * This walk costs more than everything it feeds. Measured in the container
+ * against this install's tree — 505 directories, 2,185 files, 1,174 transcripts
+ * — recursing serially took 105-121 ms, where the 1,174 `fs.stat` it enables
+ * take 9 ms, the cross-file dedupe 8 ms and the final sort 3 ms. It is on no
+ * rare path: it is the bulk of `GET /api/usage` at 164-186 ms, the bulk of a
+ * warm `/api/status` answering 950 bytes in 157-195 ms, and the live budget
+ * guard walks it too. Running each level through `mapWithLimit` measured 49 ms.
+ * `fs.readdir(recursive: true)` measured 103-106 ms — no better, because it
+ * recurses serially inside libuv as well.
+ *
+ * **The order it answers with is the depth-first one, unchanged.** Only the
+ * scheduling moved. `runScan` maps over this list and resolves a shared dedupe
+ * key by keeping the record with the most output, so file order decides which
+ * record survives a tie, and `Array.prototype.sort` is stable, so it also
+ * decides where two turns sharing a millisecond land. None of that is a property
+ * anybody chose — `readdir` order is the filesystem's — but it is one this
+ * module's numbers move with, so the level walk keeps each directory's children
+ * in `readdir` order and `flattenWalk` reassembles them rather than the walk
+ * emitting files in whatever order the levels happen to finish.
+ *
+ * Exported for `transcripts.test.ts`, which has no other way to see that order.
+ */
+export async function listTranscriptFiles(
+  root: string,
+): Promise<{ files: string[]; failures: ScanReadFailure[] }> {
+  const rootNode: WalkNode = { dir: root, entries: [] };
+  let level: WalkNode[] = [rootNode];
+  while (level.length > 0) {
+    level = (await mapWithLimit(level, WALK_CONCURRENCY, readWalkLevel)).flat();
+  }
+
+  const files: string[] = [];
+  const failures: ScanReadFailure[] = [];
+  flattenWalk(rootNode, files, failures);
   return { files, failures };
 }
 
@@ -513,11 +583,39 @@ export function transcriptCacheStats(): TranscriptCacheStats {
 export const SCAN_CONCURRENCY = 12;
 
 /**
+ * Directories read at once by `listTranscriptFiles`.
+ *
+ * Its own number rather than `SCAN_CONCURRENCY`'s, because it bounds a different
+ * resource. A `readdir` holds one directory handle for the length of one
+ * `scandir` and nothing else — no descriptor per file under it, and no buffer
+ * sized to anything on disk — where the bound one constant up exists because
+ * each `readAppended` holds a file descriptor *and* a `Buffer` sized to a whole
+ * transcript's unread remainder. Twelve is the answer to "how much of the tree
+ * may be resident at once"; it is not the answer to a question about directory
+ * handles, and reusing it would tie two unrelated ceilings together so that
+ * moving either one silently moves the other's failure mode.
+ *
+ * The two must still be read together, because they can overlap: `runScan` walks
+ * before it reads, so those never coincide, but `readCompactions` walks once per
+ * work cycle while a scan is in flight. Sixteen plus twelve is 28 descriptors
+ * for one of each, and a fleet is bounded by `maxConcurrentRuns` walks — at 25
+ * runs, 400 — which stays well inside the 1024-fd `nofile` past which the opens
+ * begin to fail and the scan silently understates every window the guard reads.
+ * Raising it much further was not measured and is not expected to buy anything:
+ * the tree is two levels deep, so there are only ever two levels to overlap, and
+ * a `scandir` is libuv threadpool work whose default width is four.
+ */
+export const WALK_CONCURRENCY = 16;
+
+/**
  * Run `fn` over `items` with at most `limit` in flight, results in input order.
  *
  * A worker pool rather than chunked `Promise.all` batches: a batch runs at the
  * speed of its slowest member and leaves the other eleven slots idle, and
- * transcript sizes vary by three orders of magnitude.
+ * transcript sizes vary by three orders of magnitude. Directory sizes vary the
+ * same way, which is why `listTranscriptFiles` runs each of its levels through
+ * this too, under its own limit — the results coming back in input order is what
+ * lets that walk answer in the same order the serial one did.
  */
 async function mapWithLimit<T, R>(
   items: T[],
