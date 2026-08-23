@@ -32,7 +32,7 @@ a failure and none is worth raising without a reason from outside the code.
 Row 9 is the only one in this group whose *cost* rises with the axis rather than
 its likelihood: a parked-in-place retry holds the folder, a worktree slot and one
 of `maxConcurrentRuns` for the whole ladder
-([UnattendedOperation](../UnattendedOperation/00-problem.md) row 3 owns that
+([UnattendedOperation](<../implemented - UnattendedOperation/00-problem.md>) row 3 owns that
 finding and this proposal does not restate it).
 
 ---

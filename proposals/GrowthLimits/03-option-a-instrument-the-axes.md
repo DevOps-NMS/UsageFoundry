@@ -79,7 +79,7 @@ Two fields, one shape, two payloads.
    self-report and already has a DTO.
 2. **The same two fields on `/api/status`**, which is the surface behind
    `UF_STATUS_TOKEN` that an alert rule reads, and which
-   [UnattendedOperation](../UnattendedOperation/00-problem.md) established is
+   [UnattendedOperation](<../implemented - UnattendedOperation/00-problem.md>) established is
    the app's designed pull-based position. `README.md` documents twelve
    alertable conditions; this makes a thirteenth possible without adding a
    channel.
@@ -117,7 +117,7 @@ all ([05-option-c](05-option-c-raise-the-run-ceiling.md)).
 
 **It is worth nothing on an install nobody looks at.** A number on a payload is
 a pull, and every criticism
-[UnattendedOperation](../UnattendedOperation/02-option-a-change-nothing.md) makes
+[UnattendedOperation](<../implemented - UnattendedOperation/02-option-a-change-nothing.md>) makes
 of the pull-based position applies here. The mitigation is that this figure moves
 on a timescale of months, so a monthly glance is a sufficient cadence — which is
 not true of anything in that survey.

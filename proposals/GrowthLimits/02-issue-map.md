@@ -217,7 +217,7 @@ built, but neither is this proposal's contribution to make.
 - **Built:** `/api/health` unauthenticated and bounded to counts,
   `/api/status` behind `UF_STATUS_TOKEN`, and twelve documented alertable
   conditions in `README.md`.
-  [UnattendedOperation](../UnattendedOperation/00-problem.md) audited that
+  [UnattendedOperation](<../implemented - UnattendedOperation/00-problem.md>) audited that
   surface row by row and owns the finding that four of nine endings are outside
   it. **This proposal does not restate it.**
 
