@@ -143,6 +143,66 @@ export interface Settings {
    */
   forwardSubAgentText: boolean;
   /**
+   * Refuse a `Read` this session has already made, and cap one whole read.
+   *
+   * Delivered as a generated hook plugin — `readGuard.ts` carries the argument
+   * and the mechanism — and **off**, which is the honest position rather than a
+   * cautious one. What is measured is that carrying context is 83% of this
+   * fleet's bill and that `Read` places most of it; what is *not* measured is
+   * that refusing a read makes a run cheaper. An agent that answers a denial
+   * with four ranged reads of the same file has spent more, and nothing in this
+   * app would see that happen. `readGuard.ts` names the experiment that would
+   * settle it.
+   *
+   * On, it changes what the agent may do rather than what it is told, so the
+   * two failure modes are worth stating apart: the guard being silently absent
+   * costs money, and the guard being silently wrong costs work cycles. The
+   * second is the worse one, which is why every refusal it makes leaves
+   * `offset`/`limit` open — see the hook's own rules.
+   */
+  readGuard: boolean;
+  /**
+   * The most one whole `Read` may add, in tokens. Null caps nothing.
+   *
+   * Inert while `readGuard` is off, and that is the shape rather than a second
+   * switch: one thing an operator turns on, one number under it they may leave
+   * alone. Null leaves the repeat-read half running by itself, which is the
+   * half that needs no figure from anybody.
+   *
+   * `metering.ts`'s no-numeric-ceilings rule does not reach it, for
+   * `maxConcurrentRuns`' reason: that rule refuses guessing at a limit
+   * *Anthropic* knows and we do not, and there is nothing to guess here — the
+   * number is a preference about this install's own spending. It ships null all
+   * the same, because the feature above it ships off.
+   *
+   * The useful range has a hard top the operator cannot see, so the settings
+   * page states it: the CLI already refuses a whole read past
+   * `CLI_MAX_READ_TOKENS`, so anything at or above that is a switch that reads
+   * as on and does nothing.
+   */
+  readGuardMaxTokens: number | null;
+  /**
+   * Start the next work cycle fresh, rather than resuming, once the last one's
+   * context passed this many tokens. Null is off and is today's behaviour.
+   *
+   * Every cycle after the first opens with `--resume`, so cycle 2 pays for the
+   * whole of cycle 1's context on every one of its own turns. The measurements
+   * either side of that are real: runs that took two cycles averaged $19.19
+   * against $10.05 for one, and a tool call costs 12.0c at turns 1-10 against
+   * 20.4c past turn 200. A cycle that started fresh would price at the first
+   * rate rather than the second.
+   *
+   * **This is the one in this file I would not switch on, and the reason is in
+   * `docs/verification.md`.** It trades tokens for re-discovery: the agent has
+   * to re-learn what it just did, from the branch and the files rather than
+   * from a conversation, and the neighbouring question — compaction — is a
+   * direct warning against assuming a smaller context is a cheaper one. The
+   * handoff is `nextPrompt`'s existing cycle-1 path, so a fresh cycle is told
+   * what a picked-up run is told; whether that is enough is exactly what is
+   * unmeasured. `startsFresh` in `orchestrator.ts` names the experiment.
+   */
+  freshStartContextTokens: number | null;
+  /**
    * How many **work cycles** may be running at once. Null means no limit.
    *
    * A concurrency knob, not a usage ceiling — the no-default-ceilings rule
@@ -645,6 +705,9 @@ export const DEFAULTS: Settings = {
   continuationPrompt: DEFAULT_CONTINUATION_PROMPT,
   includeSidechains: true,
   forwardSubAgentText: true,
+  readGuard: false,
+  readGuardMaxTokens: null,
+  freshStartContextTokens: null,
   maxConcurrentRuns: 4,
   maxConcurrentAssists: 2,
   resolveVerifyTools: [],

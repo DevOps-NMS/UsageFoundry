@@ -98,6 +98,7 @@ const {
   reopenRun,
   sandboxArgs,
   sandboxSettings,
+  startsFresh,
   SEARCH_TOOLS,
   selectPromotable,
   sweepPaused,
@@ -1129,6 +1130,71 @@ describe("prompt for the next work cycle", () => {
     );
     // And never on the operator's own words, which are promised verbatim.
     assert.equal(nextPrompt({ ...base, followUp: "NOTE" }), "NOTE");
+  });
+});
+
+/**
+ * Whether a work cycle drops its `--resume` because the conversation it would
+ * inherit is already large.
+ *
+ * Pure, billed, and silent in both directions, which is why it is separated
+ * from the loop at all. A threshold that fires when it should not throws away a
+ * conversation the run had paid for and makes the agent re-derive it; one that
+ * never fires is indistinguishable from the setting being off, which is what
+ * every install has. Neither shows up anywhere except on the bill.
+ *
+ * The three refusals are the part worth pinning. Two of them are about a cycle
+ * whose prompt is a *reply* — the operator's own message, or the pushback for a
+ * run that said DONE and is set to carry on — and `nextPrompt` sends neither
+ * once there is no session, so restarting there would answer a reply with the
+ * original task. The third is that no reading is not a small reading.
+ */
+describe("starting a work cycle fresh instead of resuming", () => {
+  const base = {
+    sessionId: "sess-1",
+    contextTokens: 200_000,
+    threshold: 150_000 as number | null,
+    justRetriggered: false,
+    followUp: null as string | null,
+  };
+
+  it("is off unless the operator set a threshold", () => {
+    // Null is the shipped value and has to mean today's behaviour exactly: the
+    // resume goes on every cycle, whatever the conversation has grown to.
+    assert.equal(startsFresh({ ...base, threshold: null }), false);
+    assert.equal(startsFresh({ ...base, threshold: null, contextTokens: 9_000_000 }), false);
+  });
+
+  it("fires at the threshold and not below it", () => {
+    assert.equal(startsFresh(base), true);
+    assert.equal(startsFresh({ ...base, contextTokens: 150_000 }), true);
+    assert.equal(startsFresh({ ...base, contextTokens: 149_999 }), false);
+  });
+
+  it("does nothing when there is no session to drop", () => {
+    // The opening cycle of a run, and the first cycle after a pick-up. Both are
+    // already starting a conversation; there is nothing here to be an
+    // optimisation of.
+    assert.equal(startsFresh({ ...base, sessionId: null }), false);
+  });
+
+  it("treats no reading as no reading, never as a small one", () => {
+    // A cycle that reported no usage — killed before its first turn, or a
+    // provider refusal — measured nothing. Reading a zero as a small context
+    // would keep the resume in place, which is the safe direction and the one
+    // this pins.
+    assert.equal(startsFresh({ ...base, contextTokens: 0 }), false);
+    assert.equal(startsFresh({ ...base, contextTokens: -1 }), false);
+  });
+
+  it("never restarts a cycle whose prompt is a reply", () => {
+    // `nextPrompt` sends the operator's note verbatim only while a session
+    // exists, and sends the DONE pushback only there too. Dropping the session
+    // under either would replace the reply with the original task — the
+    // operator's message silently unanswered, or an agent told to carry on
+    // being told instead to start.
+    assert.equal(startsFresh({ ...base, followUp: "look at the migration too" }), false);
+    assert.equal(startsFresh({ ...base, justRetriggered: true }), false);
   });
 });
 
@@ -2212,6 +2278,41 @@ describe("buildArgs", () => {
       buildArgs({ ...base, isolated: false, pluginDirs: [] }).includes("--plugin-dir"),
       false,
     );
+  });
+
+  it("hands the read guard over on the same flag, on a resumed cycle too", () => {
+    // Two invariants in one call, both silent. The guard is a hook plugin, so it
+    // has to join the `--plugin-dir` list rather than acquire a flag of its own
+    // — and `--resume` restores none of them, so a version that sent it on the
+    // opening cycle alone would leave every later cycle reading as much as it
+    // liked, which is exactly what the switch being off looks like.
+    const args = buildArgs({
+      ...base,
+      isolated: false,
+      resumeSessionId: "sess-1",
+      pluginDirs: ["/workspace/orient"],
+      vaultSkill: { pluginDir: "/run/uf-skills/vault", vaultPath: "/vault" },
+      readGuardDir: "/run/uf-read-guard/uf-usagefoundry-read-guard",
+    });
+    const dirs = args.flatMap((a, i) => (a === "--plugin-dir" ? [args[i + 1]] : []));
+    assert.deepEqual(dirs, [
+      "/workspace/orient",
+      "/run/uf-skills/vault",
+      "/run/uf-read-guard/uf-usagefoundry-read-guard",
+    ]);
+    assert.ok(args.includes("--resume"));
+    // It ships hooks and no skill, so unlike the vault skill it names no
+    // directory the run has to be granted.
+    assert.equal(args.filter((a) => a === "--add-dir").length, 1);
+  });
+
+  it("names no plugin flag for a read guard that is switched off", () => {
+    for (const readGuardDir of [undefined, null]) {
+      assert.equal(
+        buildArgs({ ...base, isolated: false, readGuardDir }).includes("--plugin-dir"),
+        false,
+      );
+    }
   });
 
   /**

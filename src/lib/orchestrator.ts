@@ -59,6 +59,7 @@ import {
 import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
 import { enabledPluginDirs, pluginDirArgs } from "./plugins";
 import { fileCostNotice } from "./fileCostNotice";
+import { prepareReadGuard } from "./readGuard";
 import { prepareVaultSkill } from "./vaultSkill";
 import {
   noteLiveTick,
@@ -4216,6 +4217,28 @@ interface IterationResult {
   exitCode: number;
   costUSD: number;
   tokens: number;
+  /**
+   * How large the conversation was when this cycle stopped talking — the
+   * context the *next* cycle would inherit if it resumed.
+   *
+   * A different quantity from `tokens` above and the two must not be confused.
+   * `tokens` is the cycle's whole bill summed over every turn, so it grows with
+   * how much work was done; this is one turn's resident window, so it grows
+   * with how much has been *said*. `startsFresh` reads this one, because the
+   * question it answers is what a `--resume` would cost per turn, not what the
+   * last cycle cost in total.
+   *
+   * **Last, not largest.** After a compaction the final turn is genuinely small
+   * and resuming into it is genuinely cheap, which is exactly the case a
+   * high-water mark would get backwards — it would restart a conversation the
+   * CLI had just finished shrinking, paying for the re-discovery twice.
+   *
+   * Main thread only: a forwarded sub-agent turn carries the sub-agent's own
+   * window, which nothing resumes into and which is discarded when it answers.
+   * Zero when the cycle reported no usage at all, and `startsFresh` treats that
+   * as "no reading" rather than as "small".
+   */
+  contextTokens: number;
   sessionId: string | null;
   finalText: string;
   isError: boolean;
@@ -4396,6 +4419,74 @@ export function nextPrompt(o: {
   // four times and about this once, on a turn that has scrolled out of reach,
   // has been told there is one ending.
   return `${o.justRetriggered ? o.donePushback : o.continuation}\n\n${NEEDS_REVIEW_NOTICE}`;
+}
+
+/**
+ * Should the cycle about to spawn drop its `--resume` and open a new session?
+ *
+ * ## What it trades
+ *
+ * Every cycle after the first resumes, so cycle 2 opens on the whole of cycle
+ * 1's context and pays for it again on every turn it takes. The arithmetic
+ * behind wanting to stop that is measured on this install: runs that took two
+ * work cycles averaged $19.19 against $10.05 for one, and one tool call costs
+ * 12.0c at turns 1-10 against 15.7c at 101-200 and 20.4c past 200 — the same
+ * call, dearer only because of what is in front of it. A cycle that started
+ * fresh would be charged at the first rate.
+ *
+ * What it costs is **re-discovery**, and that cost is not measured at all. The
+ * conversation holding what the last cycle tried, rejected and learned is gone;
+ * what survives is the branch, the files and `priorWorkNotice`. An agent that
+ * spends its first twenty turns working out where it had got to has spent the
+ * saving and some of the next cycle's as well, and from outside that run looks
+ * exactly like one that started cheap.
+ *
+ * **So this ships off, and `docs/verification.md` is the reason it should stay
+ * off until somebody measures it.** That file's analysis of the neighbouring
+ * question — compaction — is a direct warning against assuming a smaller
+ * context is a cheaper one, and it also names the shape of measurement that
+ * settles nothing: a within-run before/after reads the down edge of a saw-tooth
+ * that a placebo reproduces. What would settle *this* is a matched pair of runs
+ * on one task, one arm resuming and one arm fresh, compared on two things
+ * rather than one — total spend, **and** whether the task actually finished.
+ * An arm that is cheaper because it never got anywhere is the failure this
+ * cannot be allowed to report as a win.
+ *
+ * ## Why the three refusals below are not conditions on a threshold
+ *
+ * Pure, and separated from the loop because every branch of it is a billing
+ * decision that fails silently: a run that restarts when it should not have
+ * re-reads its own work, and a run that never restarts is simply the app as it
+ * was, which is what a broken threshold looks like.
+ *
+ * `followUp` and `justRetriggered` are refusals rather than inputs to the
+ * comparison. Both name a cycle whose prompt is a *reply* — the operator's own
+ * words, or the pushback telling an agent that said DONE to carry on anyway —
+ * and `nextPrompt` sends neither on the no-session branch. Restarting there
+ * would answer a reply into a conversation that no longer exists: the operator
+ * would get the original task back instead of their note acted on, and the
+ * pushback would be replaced by the task it was pushing back against.
+ * `contextTokens === 0` is the third: a cycle that reported no usage measured
+ * nothing, and "no reading" must not be read as "small".
+ */
+export function startsFresh(o: {
+  /** The session this cycle would resume, or null if there is nothing to drop. */
+  sessionId: string | null;
+  /** The window the last cycle's final main-thread turn was billed against. */
+  contextTokens: number;
+  /** `settings.freshStartContextTokens`. Null is off. */
+  threshold: number | null;
+  /** The last cycle said DONE and this run is set to carry on anyway. */
+  justRetriggered: boolean;
+  /** A message the operator left for this run. */
+  followUp: string | null;
+}): boolean {
+  if (o.threshold === null) return false;
+  if (o.sessionId === null) return false;
+  if (o.justRetriggered) return false;
+  if (o.followUp) return false;
+  if (o.contextTokens <= 0) return false;
+  return o.contextTokens >= o.threshold;
 }
 
 /**
@@ -4991,6 +5082,22 @@ export function buildArgs(opts: {
    */
   vaultSkill?: { pluginDir: string; vaultPath: string } | null;
   /**
+   * The generated read-guard plugin, when the operator has switched it on.
+   *
+   * A third entry in the **same** `--plugin-dir` list rather than a flag of its
+   * own, which is the property to preserve: the CLI takes one directory per
+   * flag and repeats the flag, so anything that invented a second mechanism
+   * here would have to re-earn the "not restored by `--resume`, therefore on
+   * every cycle's argv" rule that this list already has. It ships hooks and no
+   * skill, so unlike the vault skill it puts nothing into the window and needs
+   * no `--add-dir`: the directories it guards are the ones the run already has.
+   *
+   * `readGuard.ts` carries what it does and why it is off by default. Optional
+   * for `pluginDirs`' reason — the call sites in the tests need not thread it,
+   * and absent means no guard rather than a default one.
+   */
+  readGuardDir?: string | null;
+  /**
    * The run's own frozen file price list, or nothing.
    *
    * Read from `runs.file_cost_notice` and **never** rebuilt here. It is the one
@@ -5055,6 +5162,7 @@ export function buildArgs(opts: {
     ...pluginDirArgs([
       ...(opts.pluginDirs ?? []),
       ...(opts.vaultSkill ? [opts.vaultSkill.pluginDir] : []),
+      ...(opts.readGuardDir ? [opts.readGuardDir] : []),
     ]),
   );
   // The run's cwd is its workspace and needs no flag; this is the one
@@ -6074,6 +6182,7 @@ export function runIteration(
       exitCode: -1,
       costUSD: 0,
       tokens: 0,
+      contextTokens: 0,
       sessionId: null,
       finalText: "",
       isError: false,
@@ -6464,6 +6573,26 @@ function handleStreamLine(
     //                  A report that silently interleaves two voices is worse
     //                  than one that omits the second.
     const parent = parentToolUseId(ev, message);
+
+    // The window this turn was billed against, kept for `startsFresh`. The sum
+    // is the whole of what a request carries — fresh input, what was written to
+    // cache and what was read back from it — so it is the size of the
+    // conversation at that moment rather than any one price band of it. Last
+    // one wins: what the next cycle would resume into is the state the last
+    // turn left, not the largest the cycle ever reached.
+    //
+    // Skipped for a forwarded sub-agent turn, whose usage is its own session's
+    // and is discarded when it answers, and skipped for a zero, which is what a
+    // `<synthetic>` refusal reports and is not a reading of anything.
+    if (parent === null) {
+      const usage = (message?.usage ?? {}) as Record<string, unknown>;
+      const n = (v: unknown) => (typeof v === "number" ? v : 0);
+      const window =
+        n(usage.input_tokens) +
+        n(usage.cache_creation_input_tokens) +
+        n(usage.cache_read_input_tokens);
+      if (window > 0) acc.contextTokens = window;
+    }
 
     for (const b of blocks as Array<Record<string, unknown>>) {
       if (b.type === "text" && typeof b.text === "string") {
@@ -6938,6 +7067,16 @@ export async function startRun(id: string): Promise<void> {
   let pausedUntil: number | null = null;
   /** The next prompt should be the DONE pushback rather than the continuation. */
   let justRetriggered = false;
+  /**
+   * The window the last cycle of **this segment** ended on, for `startsFresh`.
+   *
+   * Zero at the top of a segment on purpose, which is what stops a picked-up
+   * run from restarting its first cycle: nothing here has read a window yet,
+   * and a run resumed after a park is already opening on the conversation it
+   * left. `transientRetries`' reasoning — this is a fact about a stretch of
+   * work, not about the run, and it is not worth a column.
+   */
+  let lastContextTokens = 0;
   let cyclesThisSegment = 0;
   let resumeRetried = false;
   /** Transient API failures retried since the last cycle that got through. */
@@ -7233,6 +7372,45 @@ export async function startRun(id: string): Promise<void> {
       // is a first attempt or a restart on top of existing work.
       const priorCycles = iterations;
       iterations += 1;
+
+      // Drop the resume when the conversation this cycle would inherit is
+      // already past what the operator is willing to pay for on every turn of
+      // it. Done *here*, by clearing the loop's own session id, rather than by
+      // teaching `nextPrompt` and `buildArgs` a second mode: every branch
+      // downstream already asks "is there a session", and the cycle-1 path it
+      // then takes — the task again, under `priorWorkNotice`, pointed at the
+      // branch the work is on — is the handoff a picked-up run already gets.
+      // Inventing a second way to say the same thing is how the two drift.
+      //
+      // The old session id is written off with it, and that is the intended
+      // reading rather than a loss: `adoptSession` overwrites the column with
+      // whatever this cycle opens, so a spawn that fails here leaves the run
+      // reopening into the same restart it was about to make anyway.
+      // Read into a local so the line below can name it: `startsFresh` takes
+      // the null and answers false for it, but a message that quotes the
+      // threshold has to have one to quote.
+      const freshStartAt = settings.freshStartContextTokens;
+      if (
+        freshStartAt !== null &&
+        startsFresh({
+          sessionId,
+          contextTokens: lastContextTokens,
+          threshold: freshStartAt,
+          justRetriggered,
+          followUp,
+        })
+      ) {
+        // On the run's own log, because nothing else would ever mention it. A
+        // cycle that opened fresh looks, from every page in this app, exactly
+        // like a cycle that resumed — same run, same branch, same counter — and
+        // the one visible difference is a bill that moved for no stated reason.
+        log(
+          id,
+          `Starting this work cycle fresh rather than resuming: the last one ended on about ${Math.round(lastContextTokens / 1000)}k tokens of context, past the ${Math.round(freshStartAt / 1000)}k this install restarts at. The task is sent again and the work so far is on disk; nothing of the previous conversation carries over.`,
+        );
+        adoptSession(null);
+      }
+
       const prompt = nextPrompt({
         sessionId,
         followUp,
@@ -7342,6 +7520,20 @@ export async function startRun(id: string): Promise<void> {
         );
       }
 
+      // Same cycle and the same argument, with one difference worth stating:
+      // this one is safe to move under a run in flight in a way the file price
+      // list next door is not. A hook is code the CLI runs, not text in the
+      // cached prefix, so an operator switching it off because a run is
+      // fighting it gets that at the next cycle and pays nothing for the
+      // change.
+      const readGuard = prepareReadGuard();
+      if (readGuard.kind === "unavailable") {
+        log(
+          id,
+          `Read guard not loaded for this cycle — ${readGuard.reason}. This cycle may re-read files it has already read.`,
+        );
+      }
+
       const args = buildArgs({
         prompt,
         model: run.model,
@@ -7349,6 +7541,7 @@ export async function startRun(id: string): Promise<void> {
         resumeSessionId: sessionId,
         pluginDirs: plugins.dirs,
         vaultSkill: vaultSkill.kind === "ready" ? vaultSkill : null,
+        readGuardDir: readGuard.kind === "ready" ? readGuard.pluginDir : null,
         isolated: run.isolation === "worktree",
         // Written out as the guard's own expression rather than passed as one
         // number, because `buildArgs` is where the subtraction is tested and
@@ -7509,6 +7702,12 @@ export async function startRun(id: string): Promise<void> {
 
       spentUSD += res.costUSD;
       spentTokens += res.tokens;
+      // Assigned rather than latched, unlike `incompleteIteration` below: what
+      // the next cycle would inherit is what *this* cycle ended on, and a cycle
+      // that reported no usage at all leaves the previous reading standing
+      // rather than resetting it — `startsFresh` refuses on a zero either way,
+      // and the last real reading is the better guess of the two.
+      if (res.contextTokens > 0) lastContextTokens = res.contextTokens;
       // Latched, not assigned: a cycle that died before reporting its cost
       // leaves the run's total understated for the rest of the run, and a
       // later cycle that reports normally does not undo that.

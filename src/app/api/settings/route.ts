@@ -29,6 +29,7 @@ import { loginFailureSummary } from "../../../lib/loginAttempts";
 import { activeSessionCount } from "../../../lib/sessions";
 import { FIVE_HOURS_MS } from "../../../lib/windows";
 import { invalidatePlanUsage } from "../../../lib/planUsage";
+import { CLI_MAX_READ_TOKENS } from "../../../lib/readGuard";
 import { auditMutation } from "../../../lib/requestLog";
 
 export const runtime = "nodejs";
@@ -293,6 +294,38 @@ async function putHandler(req: Request) {
 
   if ("forwardSubAgentText" in body) {
     patch.forwardSubAgentText = Boolean(body.forwardSubAgentText);
+  }
+
+  if ("readGuard" in body) {
+    patch.readGuard = Boolean(body.readGuard);
+  }
+
+  if ("readGuardMaxTokens" in body) {
+    const n = optionalNumber(body.readGuardMaxTokens);
+    // Blank means no cap, which is the rule every switchable limit here
+    // follows, and leaves the repeat-read half of the guard running alone.
+    //
+    // Clamped rather than refused at the top, and the ceiling is not this
+    // app's: the CLI already refuses a whole read past `CLI_MAX_READ_TOKENS`
+    // with the same advice, so a stored 50,000 would be a number the operator
+    // typed, the page echoed back, and nothing ever acted on. One below it is
+    // the largest value that still means something. The floor is a whole line
+    // of guessing avoided — 500 tokens is small enough to be a deliberate
+    // choice and large enough that a file of any substance is not refused
+    // before the operator has seen what the guard does.
+    patch.readGuardMaxTokens =
+      n === null
+        ? null
+        : Math.min(CLI_MAX_READ_TOKENS - 1, Math.max(500, Math.floor(n)));
+  }
+
+  if ("freshStartContextTokens" in body) {
+    const n = optionalNumber(body.freshStartContextTokens);
+    // Blank is off, and off is `--resume` on every cycle — what every install
+    // does today. Floored at 20,000 because a threshold under one cycle's
+    // opening context would restart every cycle unconditionally, which is not
+    // a threshold but a different feature, and one nobody asked for.
+    patch.freshStartContextTokens = n === null ? null : Math.max(20_000, Math.floor(n));
   }
 
   if ("maxConcurrentRuns" in body) {

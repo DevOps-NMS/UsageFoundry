@@ -1779,6 +1779,23 @@ export interface SettingsDTO {
   includeSidechains: boolean;
   /** Put a delegated turn's own words in the run log. */
   forwardSubAgentText: boolean;
+  /**
+   * Refuse a `Read` this session has already made, and cap one whole read.
+   * Off by default — see `settings.readGuard`, which states what is measured
+   * about it and what is not.
+   */
+  readGuard: boolean;
+  /**
+   * The most one whole `Read` may add, in tokens. Null caps nothing, and the
+   * whole field is inert while `readGuard` is off.
+   */
+  readGuardMaxTokens: number | null;
+  /**
+   * Open the next work cycle without `--resume` once the last one's context
+   * passed this many tokens. Null is off, which is what every install does
+   * today.
+   */
+  freshStartContextTokens: number | null;
   /** Work cycles only. Null means no limit. */
   maxConcurrentRuns: number | null;
   /**

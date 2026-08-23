@@ -73,6 +73,18 @@ const WEEKDAYS = [
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 
 /**
+ * Mirrors `readGuard.CLI_MAX_READ_TOKENS`, which the route clamps to.
+ *
+ * Copied rather than imported for the reason `FIVE_HOURS_MS` above is: this
+ * file is `"use client"`, and `readGuard.ts` reaches `node:fs` and the
+ * database. What it says is a fact about Claude Code rather than about this
+ * app — the CLI's own file-reading limit, past which a whole read is refused
+ * with the same advice — so the number moving is the CLI's business and the
+ * route is where the two would be reconciled.
+ */
+const CLI_MAX_READ_TOKENS = 25_000;
+
+/**
  * Anchors for the section nav; order is the page order, and the page order is
  * how often a setting is reached for rather than when it was written.
  *
@@ -81,7 +93,9 @@ const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
  * form most people open every day starts at; the chat's guard set follows,
  * being what the *app* starts under rather than what a person does; the
  * unattended settings and the four prompts are at the end because they are
- * typed once, if ever.
+ * typed once, if ever. Token use sits with them and for the same reason, one
+ * step further out: both of its switches are experiments an operator turns on
+ * deliberately, and neither is something a working install ever needs to visit.
  */
 const SECTIONS = [
   { id: "limits", label: "Subscription limits" },
@@ -90,6 +104,7 @@ const SECTIONS = [
   // reads as a section that is missing and one that arrived unannounced.
   { id: "guards", label: "Default guard set" },
   { id: "unattended", label: "Unattended runs" },
+  { id: "tokens", label: "Token use" },
   { id: "plugins", label: "Plugins" },
   { id: "knowledge", label: "Knowledge base" },
   { id: "storage", label: "Storage" },
@@ -232,6 +247,9 @@ const EDITABLE_PATHS = [
   "killProcessGroup",
   "resumeGraceHours",
   "telemetryForRuns",
+  "readGuard",
+  "readGuardMaxTokens",
+  "freshStartContextTokens",
   "knowledgeBaseMountId",
   "knowledgeBaseSubpath",
   "eventRetentionDays",
@@ -2970,6 +2988,95 @@ export default function SettingsPage() {
               checked={effective.telemetryForRuns}
               onChange={(v) => patch({ telemetryForRuns: v })}
             />
+          </SettingRow>
+        </ListGroup>
+      </Section>
+
+      {/* Two ways of spending fewer tokens on the same work, both of which
+          change what an agent *does* rather than what it is told, and neither
+          of which has been measured on this install. So both ship off and the
+          copy says which is which: what is measured is where the money goes,
+          not that either of these moves it. */}
+      <Section
+        id="tokens"
+        title="Token use"
+        lede="Most of what a run costs is carrying what it has already read, not writing anything new. These two try to carry less. Both are off, because neither has been measured here — switch one on for a job you can compare against a job you have already done."
+      >
+        <ListGroup>
+          <SettingRow
+            htmlFor="readguard"
+            edited={isEdited("readGuard")}
+            label="Refuse a file the agent has already read"
+            description="A file read once is charged again on every later turn of the same work cycle, so reading it twice is paid for twice over. This stops a second identical read of a file nothing has changed since, and tells the agent to use what it has. It can always read a part of the file — offset and limit are never refused — so nothing it needs goes out of reach"
+          >
+            <Switch
+              id="readguard"
+              checked={effective.readGuard}
+              onChange={(v) => patch({ readGuard: v })}
+            />
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="readcap"
+            edited={isEdited("readGuardMaxTokens")}
+            label="Largest file an agent may read whole"
+            description={
+              <>
+                Past this, the agent is told to search the file or read the part
+                it wants instead. Only applies while the setting above is on,
+                and only below about {CLI_MAX_READ_TOKENS / 1000}k — Claude Code
+                already refuses a whole read past that on its own, so a larger
+                number here changes nothing. Blank leaves file size alone and
+                keeps only the repeat check
+              </>
+            }
+          >
+            <div className="w-36">
+              <Input
+                id="readcap"
+                type="number"
+                min={500}
+                max={CLI_MAX_READ_TOKENS - 1}
+                className="tabular-nums"
+                unit="tokens"
+                placeholder="No limit"
+                value={effective.readGuardMaxTokens ?? ""}
+                onChange={(e) =>
+                  patch({
+                    readGuardMaxTokens: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="freshstart"
+            edited={isEdited("freshStartContextTokens")}
+            label="Start a work cycle over once the conversation gets this long"
+            description="Normally each work cycle carries on the last one's conversation, so a long run pays for everything said so far on every turn it takes. Past this, the next cycle starts a new conversation: it is sent the task again and pointed at the work already on disk. The saving is real and so is the cost — the agent has to work out again what it had just decided, and this app cannot tell you which was bigger. Blank keeps today's behaviour"
+          >
+            <div className="w-36">
+              <Input
+                id="freshstart"
+                type="number"
+                min={20000}
+                step={10000}
+                className="tabular-nums"
+                unit="tokens"
+                placeholder="Never"
+                value={effective.freshStartContextTokens ?? ""}
+                onChange={(e) =>
+                  patch({
+                    freshStartContextTokens: e.target.value
+                      ? Number(e.target.value)
+                      : null,
+                  })
+                }
+              />
+            </div>
           </SettingRow>
         </ListGroup>
       </Section>

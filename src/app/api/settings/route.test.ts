@@ -81,6 +81,12 @@ const PROBES: Record<keyof Settings, Probe> = {
   continuationPrompt: { send: "CHANGED continuation" },
   includeSidechains: { send: false },
   forwardSubAgentText: { send: false },
+  readGuard: { send: true },
+  // Sent above the CLI's own 25,000-token refusal and stored just under it: a
+  // cap at or past that is a number nothing would ever act on, so the route
+  // clamps rather than storing what was typed.
+  readGuardMaxTokens: { send: 40_000, stored: 24_999 },
+  freshStartContextTokens: { send: 150_000 },
   maxConcurrentRuns: { send: 3 },
   maxConcurrentAssists: { send: 5 },
   resolveVerifyTools: { send: ["Bash(npm run typecheck:*)"] },
