@@ -121,6 +121,15 @@ without a browser; Playwright in CI, which means starting the container that
 manual checklist in `docs/verification.md`, which is the cheapest and is what
 the four unverified narrow-viewport entries at `:1033+` are already asking for.
 
+**One narrowing, added after the fact.**
+[`proposals/OperatorInterface/`](../OperatorInterface/README.md) took the
+contrast criterion, the one automated checkers are best at, and settled four
+failures with arithmetic on declared tokens, no DOM and no dependency. So a
+harness does not have to buy that criterion, and jsdom cannot supply it anyway:
+`light-dark()` inside `color-mix()` is exactly what a non-rendering engine
+returns `incomplete` for. Whatever this survey chooses, it should be chosen for
+what only a rendered page can decide.
+
 **Why it ranks second overall and third here.** It is the only row whose cost
 grows with the codebase rather than staying flat, so the case for it strengthens
 every month. It is third in this list because rows 1 and 3–4 cost something
