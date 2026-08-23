@@ -15,12 +15,13 @@ import { getSettings, type Settings } from "./settings";
  * ## Why a hook rather than more words in the prompt
  *
  * `fileCostNotice.ts` next door is the persuasion half of this and states the
- * measurement both halves rest on: 58% of this fleet's spend is cache **read**
- * and 20% cache write, so 83% of the bill is carrying context rather than
- * generating anything, and `Read` alone placed 27.4M tokens over 9,334 calls on
- * this machine. Nothing shrinks a main thread between compactions, so a file
- * read on turn 12 is paid for again on every turn after it — which is why the
- * same tool call costs 12.0c at turns 1-10 and 20.4c past turn 200.
+ * measurement both halves rest on, so this cites that one figure rather than a
+ * second reading of the same corpus: **60.7% cache read and 26.3% cache write**,
+ * i.e. 87% of the bill is carrying context rather than generating anything, and
+ * `Read` alone placed 27.4M tokens over 9,334 calls on this machine. Nothing
+ * shrinks a main thread between compactions, so a file read on turn 12 is paid
+ * for again on every turn after it — which is why the same tool call costs 12.0c
+ * at turns 1-10 and 20.4c past turn 200.
  *
  * A price list can only ask. This refuses, and the difference is the class of
  * mistake it catches: a model that has genuinely forgotten it already read a

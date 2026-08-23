@@ -9,9 +9,9 @@ import { db } from "./db";
  *
  * ## Why this is worth spending tokens on
  *
- * Measured over this machine's own transcripts — 1,194 files, 49,038 deduped
- * turns, $6,537 over 12.3 days, priced through `pricing.ts` — the bill splits
- * **60.5% cache read, 26.5% cache write, 13.0% output and 0.1% input**. Six
+ * Measured over this machine's own transcripts — 1,209 files, 49,885 deduped
+ * turns, $6,626 over 12.4 days, priced through `pricing.ts` — the bill splits
+ * **60.7% cache read, 26.3% cache write, 12.9% output and 0.1% input**. Six
  * sevenths of what this fleet spends is carrying context rather than generating
  * anything, and `DELEGATION_NOTICE` next door states the mechanism: nothing
  * shrinks a main thread, so a file read on turn 12 is paid for again on every
@@ -64,7 +64,8 @@ import { db } from "./db";
  * literal — every run on this repository carries them — so the property that
  * makes them safe is that nothing here suggests selecting a process with one.
  * They are repo-relative, they sit in a price list, and no verb near them is
- * `kill`. `noticeIsInert` pins that, and `SELF_HOSTING_NOTICE`'s own sentence
+ * `kill`. The case named "offers no literal as a thing to run" in
+ * `fileCostNotice.test.ts` pins that, and `SELF_HOSTING_NOTICE`'s own sentence
  * about literals is scoped to the whole appended prompt, so it already covers
  * this half.
  */

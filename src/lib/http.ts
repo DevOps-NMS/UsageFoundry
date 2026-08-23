@@ -41,8 +41,9 @@ const gzipAsync = promisify(gzip);
  * body, and a `Vary` that splits any cache entry in front of the app in two.
  * 1400 is one segment with room for the headers, and every route this is
  * wired into answers either far below it (`/api/knowledge/note` on a missing
- * path, 59 bytes) or far above it (`/api/runs`, 698 KB). Nothing here sits
- * near the line, which is why the exact value is not delicate.
+ * path, 59 bytes) or far above it (`/api/runs`, 175 KB after the list trim, and
+ * `/api/usage`, measured at 54,512 bytes against a live build). Nothing here
+ * sits near the line, which is why the exact value is not delicate.
  */
 const GZIP_FLOOR_BYTES = 1400;
 
@@ -132,11 +133,14 @@ export function shouldGzip(
  * `gzipSync` would be one line shorter and is refused. This process runs the
  * fleet: twenty-five agents' worth of guards, the SSE bus, and the run loop's
  * own budget checks all live on this event loop, and a guard that evaluates
- * late is a run that spends past its ceiling. Measured here, `gzipSync` on the
- * 8.8 MB `/api/knowledge/graph` body blocks for 30.6 ms and fires **zero**
- * timer callbacks while it does, against 43 in an idle 50 ms; `/api/runs` at
- * 698 KB blocks for 10 ms. The promisified form costs the same wall clock
- * (28.7 ms and 10.3 ms) and spends it on the libuv threadpool instead. Note
+ * late is a run that spends past its ceiling. Measured here, `gzipSync` on an
+ * 8.8 MB body blocks for 30.6 ms and fires **zero** timer callbacks while it
+ * does, against 43 in an idle 50 ms; a 698 KB body blocks for 10 ms. The
+ * promisified form costs the same wall clock (28.7 ms and 10.3 ms) and spends it
+ * on the libuv threadpool instead. Those two bodies were `/api/knowledge/graph`
+ * and `/api/runs` as they stood before the payload trims landed in the same
+ * pass; they are cited as sizes rather than as routes, because neither route
+ * answers with that many bytes any more. Note
  * that the threadpool is four wide by default and shared with every `fs` call
  * this app makes, which is the reason for the size floor above as much as the
  * byte count is.
