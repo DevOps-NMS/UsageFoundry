@@ -318,6 +318,101 @@ describe("evaluateBudget", () => {
   });
 
   /**
+   * …and one window with nothing to read must not switch the other one off.
+   *
+   * `no_ceiling` is the one refusal nothing acts on — `RUN_ENFORCEABLE_CODES`
+   * below — so returning it the moment the weekly window came back unreadable
+   * meant the session check was never reached, and the run spawned its cycle
+   * under a log line naming the *weekly* guard. On a stock install that is not
+   * an exotic state: ceilings ship null and the weekly reading is the
+   * provider's own percentage, which goes away whenever the host does. The runs
+   * a workflow member or a chat approval creates never pass
+   * `windowGuardRefusal`, so the door does not catch it either.
+   */
+  it("still enforces the 5-hour guard when the weekly window cannot be read", () => {
+    const policy = {
+      ...base,
+      maxWeeklyFraction: 0.8,
+      maxSessionFraction: 0.5,
+    };
+    const snap = snapshot(0.97, null);
+
+    const stopped = evaluateBudget(policy, snap, noProgress, 0);
+    assert.equal(stopped.allowed, false);
+    assert.equal(stopped.allowed === false && stopped.code, "session_fraction");
+    assert.equal(stopped.allowed === false && stopped.disposition, "stop");
+
+    // And the park survives it: the one verdict here that yields the folder
+    // rather than ending the run must not be shadowed by the held refusal.
+    const parked = evaluateBudget(
+      { ...policy, enforcement: "live-resume" },
+      snap,
+      noProgress,
+      0,
+    );
+    assert.equal(parked.allowed, false);
+    assert.equal(parked.allowed === false && parked.disposition, "pause");
+    assert.equal(parked.allowed === false && parked.code, "session_fraction");
+  });
+
+  it("still reports the unreadable window once every readable guard passes", () => {
+    // Held, not dropped. The operator set a weekly guard that is measuring
+    // nothing, and a run proceeding under a guard the user believes is active
+    // is the failure the refusal exists to prevent — so it is still the verdict
+    // when the guards that *can* be read all have room.
+    const v = evaluateBudget(
+      { ...base, maxWeeklyFraction: 0.8, maxSessionFraction: 0.5 },
+      snapshot(0.1, null),
+      noProgress,
+      0,
+    );
+    assert.equal(v.allowed, false);
+    assert.equal(v.allowed === false && v.code, "no_ceiling");
+    // The window that could not be read is the one named.
+    assert.match(v.allowed === false ? v.reason : "", /weekly-fraction guard/);
+
+    // With neither readable, the one checked first names it — the same
+    // precedence `windowGuardRefusal` gives it at the door, so the two doors
+    // cannot report different windows for the same snapshot.
+    const both = evaluateBudget(
+      { ...base, maxWeeklyFraction: 0.8, maxSessionFraction: 0.5 },
+      snapshot(null, null),
+      noProgress,
+      0,
+    );
+    assert.equal(
+      both.allowed === false ? both.reason : "",
+      windowGuardRefusal(
+        { ...base, maxWeeklyFraction: 0.8, maxSessionFraction: 0.5 },
+        snapshot(null, null),
+      ),
+    );
+  });
+
+  it("keeps the documented order when a window cannot be read", () => {
+    // Holding the refusal changes *when* an unreadable guard speaks, never the
+    // order the readable ones are consulted in: a run out of money is out of
+    // money whatever the weekly window can report.
+    const spent = evaluateBudget(
+      { ...base, maxWeeklyFraction: 0.8, maxRunCostUSD: 5 },
+      snapshot(null, null),
+      { ...noProgress, spentUSD: 6 },
+      0,
+    );
+    assert.equal(spent.allowed === false && spent.code, "run_cost");
+
+    // Same the other way round: a weekly window with a reading past its guard
+    // outranks a 5-hour window with none.
+    const weekly = evaluateBudget(
+      { ...base, maxWeeklyFraction: 0.8, maxSessionFraction: 0.5 },
+      snapshot(null, 0.9),
+      noProgress,
+      0,
+    );
+    assert.equal(weekly.allowed === false && weekly.code, "weekly_fraction");
+  });
+
+  /**
    * …and the run must not be *ended* on it, which is a separate decision from
    * whether the verdict exists.
    *
@@ -836,6 +931,38 @@ describe("evaluateInstanceBudget — the cap on everything one press of Run spen
       assert.equal(v.allowed, false, window);
       assert.equal(v.allowed === false && v.code, "no_ceiling", window);
     }
+  });
+
+  it("still enforces the 5-hour guard when the weekly window cannot be read", () => {
+    // The run guard's failure, one level up: `no_ceiling` halts nothing, so
+    // returning it where the weekly reading went missing left the 5-hour guard
+    // unread for every block of the instance — and the reading that goes
+    // missing on a stock install is the provider's own percentage, which is the
+    // same outage this code refuses to halt a graph over.
+    const policy = {
+      ...instanceBase,
+      maxWeeklyFraction: 0.8,
+      maxSessionFraction: 0.5,
+    };
+    const over = evaluateInstanceBudget(policy, snapshot(0.97, null), settled(0));
+    assert.equal(over.allowed, false);
+    assert.equal(over.allowed === false && over.code, "session_fraction");
+
+    // Held rather than dropped: with every readable guard under its threshold,
+    // the unreadable one is still the verdict.
+    const under = evaluateInstanceBudget(policy, snapshot(0.1, null), settled(0));
+    assert.equal(under.allowed, false);
+    assert.equal(under.allowed === false && under.code, "no_ceiling");
+    assert.match(under.allowed === false ? under.reason : "", /weekly window/);
+
+    // And the order is untouched: spend is settled where a fraction is not, so
+    // it still answers first.
+    const spent = evaluateInstanceBudget(
+      { ...policy, maxInstanceCostUSD: 20 },
+      snapshot(0.1, null),
+      settled(25),
+    );
+    assert.equal(spent.allowed === false && spent.code, "instance_cost");
   });
 
   it("does not let that refusal halt a workflow that is already running", () => {

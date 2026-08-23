@@ -542,10 +542,25 @@ export function evaluateBudget(
   // it is deliberately not "end the run" — see `RUN_ENFORCEABLE_CODES`, which
   // moves this one code to the door and leaves a log line here.
   // Which field answers which question is `readWindowGuard`'s business.
+  //
+  // It is *held* rather than returned where it is found, because returning it
+  // there disables every guard below it. `no_ceiling` is the one refusal
+  // nothing acts on, so an install whose weekly window has no reading — the
+  // ordinary state of a stock install while the provider is unreachable — would
+  // otherwise never reach the session check at all: a `live-resume` run at 97%
+  // of a 50% 5-hour guard logs a line about the *weekly* guard and spawns the
+  // cycle anyway, and the runs a workflow member or a chat approval creates
+  // never pass `windowGuardRefusal`, so nothing catches it at the door either.
+  // A guard that can be read still wins, in the documented order, and the held
+  // refusal is returned only once every readable one has passed.
+  let unreadable: BudgetVerdict | null = null;
+
   if (policy.maxWeeklyFraction !== null) {
     const weekly = readWindowGuard(snapshot.weekly, policy.maxWeeklyFraction);
     if (weekly.state === "no-ceiling") {
-      return block("no_ceiling", NO_READING_REASON.weekly);
+      // `??=` throughout, so the window checked first names the refusal — the
+      // same precedence `windowGuardRefusal` gives it at the door.
+      unreadable ??= block("no_ceiling", NO_READING_REASON.weekly);
     }
     if (weekly.state === "over") {
       return block(
@@ -559,7 +574,7 @@ export function evaluateBudget(
   if (policy.maxSessionFraction !== null) {
     const session = readWindowGuard(snapshot.session, policy.maxSessionFraction);
     if (session.state === "no-ceiling") {
-      return block("no_ceiling", NO_READING_REASON.session);
+      unreadable ??= block("no_ceiling", NO_READING_REASON.session);
     }
     if (session.state === "over") {
       const at = pct(session.at);
@@ -585,6 +600,11 @@ export function evaluateBudget(
       );
     }
   }
+
+  // Last, and only here: a park is a decision about a guard that *was* read, so
+  // it must have had its chance above before a guard that could not be read
+  // gets to speak.
+  if (unreadable !== null) return unreadable;
 
   return { allowed: true, meters };
 }
@@ -809,10 +829,17 @@ export function evaluateInstanceBudget(
     );
   }
 
+  // Held rather than returned, for `evaluateBudget`'s reason one level up: this
+  // code is on nothing's enforceable list, so returning it where it is found
+  // makes an unreadable weekly window switch the 5-hour guard off silently for
+  // every block of the instance. The refusal is returned once every guard that
+  // *can* be read has passed, and `??=` keeps the weekly wording in front.
+  let unreadable: BudgetVerdict | null = null;
+
   if (policy.maxWeeklyFraction !== null) {
     const weekly = readWindowGuard(snapshot.weekly, policy.maxWeeklyFraction);
     if (weekly.state === "no-ceiling") {
-      return block(
+      unreadable ??= block(
         "no_ceiling",
         "This workflow stops at a share of the weekly window, but no weekly " +
           "ceiling is configured. Set one in Settings (or run Calibrate) " +
@@ -830,7 +857,7 @@ export function evaluateInstanceBudget(
   if (policy.maxSessionFraction !== null) {
     const session = readWindowGuard(snapshot.session, policy.maxSessionFraction);
     if (session.state === "no-ceiling") {
-      return block(
+      unreadable ??= block(
         "no_ceiling",
         "This workflow stops at a share of the 5-hour window, but no 5-hour " +
           "ceiling is configured. Set one in Settings (or run Calibrate) " +
@@ -844,6 +871,8 @@ export function evaluateInstanceBudget(
       );
     }
   }
+
+  if (unreadable !== null) return unreadable;
 
   return { allowed: true, meters };
 }
