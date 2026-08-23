@@ -1187,6 +1187,39 @@ function migrate(db: Database.Database) {
     }
   })();
 
+  // One row per outbound notification attempt — see `notify.ts`.
+  //
+  // The table is what makes the webhook safe to depend on rather than a thing
+  // that appears to work. Delivery is fire-and-forget by construction (an
+  // `await` on that path would put a run ending behind a receiver's DNS
+  // lookup), so a receiver that has been answering 404 for a week produces
+  // exactly the same silence as a fleet with nothing wrong — and an operator who
+  // stopped watching the runs page because the notifications were arriving is
+  // precisely the person that silence misleads. `webhookHealth` derives the
+  // consecutive-failure count `/api/status` reports from these rows, from the
+  // table rather than from a counter in memory, because "dead since Tuesday" has
+  // to survive a restart.
+  //
+  // `http_status` is 0 when the request never got one at all: DNS, a refused
+  // connection, the five-second timeout. `error` is truncated and never a stack.
+  // Bounded on every insert in `recordDelivery`, `request_log`'s pattern.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts          INTEGER NOT NULL,
+      -- The run the notification was about. A plain column and not a foreign
+      -- key: nothing deletes a runs row (see retention.ts), so a cascade would
+      -- describe a deletion that does not happen, and this table outliving a run
+      -- it names is the harmless direction.
+      run_id      TEXT NOT NULL,
+      event       TEXT NOT NULL,
+      http_status INTEGER NOT NULL,
+      ok          INTEGER NOT NULL,
+      error       TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_ok ON webhook_deliveries(ok, id);
+  `);
+
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as
   // one it left behind.

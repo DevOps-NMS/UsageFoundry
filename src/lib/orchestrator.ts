@@ -69,6 +69,11 @@ import {
   opsLog,
   recordOpsEvent,
 } from "./ops";
+// The outbound half of the same projection `logLifecycle` performs. It imports
+// this module's types back, which is why that import is `import type` there: a
+// runtime cycle between the run loop and a notifier would be one more thing
+// that can fail at module load, and there is nothing here it needs at runtime.
+import { notifyLifecycle } from "./notify";
 // The log's own extraction of what a tool call is about, so the parser retains
 // the same line for a call whose result comes back an error. Client-safe and
 // pure; the dependency runs the permitted way round.
@@ -512,6 +517,14 @@ function emit(e: RunEvent) {
   bus.emit(e.runId, published);
   bus.emit("*", published);
   logLifecycle(published);
+  // Third sink, same event, same position: after the publish and never before
+  // it. It reads what `logLifecycle` reads on purpose — that projection is an
+  // already-reviewed decision about what may leave this container — and it
+  // starts no request at all unless `UF_WEBHOOK_URL` is set. **It must never
+  // become an `await`.** This function is synchronous from the INSERT to here,
+  // and a run ending waiting on a receiver's socket is the one way an outbound
+  // notification can break the loop it reports on.
+  notifyLifecycle(published);
 }
 
 /**
