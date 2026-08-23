@@ -236,6 +236,31 @@ services:
       # keeps the uid split and drops this one boundary, which the boot log
       # states — it is not silent either way.
       UF_CHAT_GID: "${UF_CHAT_GID:-65533}"
+      # Optional: where this container POSTs when a run reaches an ending that
+      # needs a person — needs-review, a guard that stopped it, a crash, the
+      # first rung of the 429 ladder. Blank is off and is the shipped state.
+      #
+      # One generic signed JSON body goes to one URL you name; nothing here
+      # knows about any vendor. Discord's and Slack's incoming webhooks accept
+      # only their own body shape, so neither can be pointed at directly — a
+      # bare Discord URL answers 400. Home Assistant's
+      # POST /api/webhook/<webhook_id> takes arbitrary JSON and is the shaping
+      # layer that fans out to them. See docs/install.md, "Being told".
+      UF_WEBHOOK_URL: "${UF_WEBHOOK_URL:-}"
+      # The HMAC key for X-UF-Signature: sha256=<hex>, over the exact body
+      # bytes. Required alongside the URL rather than optional beside it —
+      # nothing is delivered while this is empty, because a Home Assistant
+      # webhook id is an unauthenticated URL and the signature is the only thing
+      # that tells your automation this install's POST from anyone else's.
+      UF_WEBHOOK_SECRET: "${UF_WEBHOOK_SECRET:-}"
+      # Optional: how this install is reached from wherever you read the
+      # notification, e.g. https://uf.example.com. It is the only absolute URL
+      # this app builds, and it exists for the `url` field of that body. Blank
+      # sends an empty one.
+      UF_PUBLIC_URL: "${UF_PUBLIC_URL:-}"
+      # Optional: a name for this install, for an operator who runs more than
+      # one. It is the `install` field of that body and nothing else reads it.
+      UF_INSTALL_LABEL: "${UF_INSTALL_LABEL:-}"
 
     volumes:
       # Credentials + transcripts. Read-write because Claude Code writes new

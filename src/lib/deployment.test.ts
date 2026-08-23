@@ -617,6 +617,33 @@ describe("compose's blank-by-default variables and config.ts's own env split", (
       [...BLANK_MEANINGFUL_ENV_VARS].sort(),
     );
   });
+
+  it("forwards every variable of its own that config.ts reads", () => {
+    // There is no `env_file:` in docker-compose.yml, so the `environment:` block
+    // is the whole of what reaches the container: a name added to `config.ts`
+    // and not to that block is read as unset on every compose install, for ever,
+    // no matter what the operator put in `.env`. It typechecks, it boots, and
+    // the feature behind it is simply off — which for a notifier is silence, the
+    // same thing a healthy fleet looks like.
+    //
+    // Scoped to this app's own prefix on purpose. `CLAUDE_BIN`, `GIT_BIN` and
+    // `ANTHROPIC_API_BASE` are escape hatches with code defaults that compose
+    // deliberately does not expose, and `PORT` is set in the image.
+    const forwarded = new Set(environmentKeys().keys());
+    const missing = [...namesRead("env"), ...namesRead("optionalEnv")]
+      .filter((name) => name.startsWith("UF_") && !forwarded.has(name))
+      .sort();
+
+    assert.deepEqual(
+      missing,
+      [],
+      `config.ts reads ${missing.join(", ")}, and docker-compose.yml's ` +
+        `environment: block does not name ${
+          missing.length === 1 ? "it" : "them"
+        }. There is no env_file, so nothing an operator writes in .env can ` +
+        `reach the container.`,
+    );
+  });
 });
 
 /**

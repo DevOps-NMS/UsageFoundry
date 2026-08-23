@@ -447,6 +447,46 @@ export function githubTokenFor(folder: string | null): {
   return selectGithubToken(folder, GITHUB_TOKENS, GITHUB_TOKEN, WORKSPACE_MOUNTS);
 }
 
+/**
+ * Where a run ending that needs a person is announced, or empty for nowhere.
+ *
+ * All four of these are the environment and **never** `settings.json`, and that
+ * is a security decision rather than a convenience. `saveSettings` stores only
+ * what differs from `DEFAULTS` — it is a product-defaults mechanism, not a
+ * secret store — and `/api/settings` is reachable with `UF_AUTH_TOKEN`, so a
+ * webhook target held there is repointable by anything holding the master key,
+ * which would turn one credential into an exfiltration channel aimed anywhere
+ * the container can reach. Here it takes a container restart, which is a
+ * decision a person makes at a shell.
+ *
+ * Blank is the answer for every one of them and blank is what a stock install
+ * has, so they are read through `optionalEnv` and listed in
+ * `BLANK_MEANINGFUL_ENV_VARS` below. See that list's docblock for what reading
+ * one of these through `env()` would cost.
+ */
+export const WEBHOOK_URL = optionalEnv("UF_WEBHOOK_URL");
+
+/**
+ * The HMAC key for `X-UF-Signature`. Required alongside the URL, not optional
+ * beside it: `notify.ts` delivers nothing while this is blank, because the
+ * receiver of an unauthenticated webhook URL has no other way to tell this
+ * install's POST from anything else that can reach it.
+ */
+export const WEBHOOK_SECRET = optionalEnv("UF_WEBHOOK_SECRET");
+
+/**
+ * How this install is reached from wherever the notification is read.
+ *
+ * Nothing else in this app needs it — every URL it builds is relative — so it
+ * exists for the one field in a notification body that has to be absolute.
+ * Blank means the body carries an empty `url` and the operator navigates
+ * themselves, which is a worse notification and not a broken one.
+ */
+export const PUBLIC_URL = optionalEnv("UF_PUBLIC_URL");
+
+/** A name for this install, for an operator who runs more than one. */
+export const INSTALL_LABEL = optionalEnv("UF_INSTALL_LABEL");
+
 /** Path to the Claude Code executable inside the container. */
 export const CLAUDE_BIN = env("CLAUDE_BIN", "claude");
 
@@ -490,6 +530,13 @@ export const BLANK_MEANINGFUL_ENV_VARS = [
   "UF_ALLOW_NO_AUTH",
   "UF_COOKIE_SECURE",
   "UF_TRANSCRIPT_CACHE_MAX_ENTRIES",
+  // Blank is "off" for the whole outbound notification channel, and blank is
+  // what every stock install has. The two beside them shape a body that is only
+  // ever built when the first two are set.
+  "UF_WEBHOOK_URL",
+  "UF_WEBHOOK_SECRET",
+  "UF_PUBLIC_URL",
+  "UF_INSTALL_LABEL",
   // Blank is the *success* case, and it is not an operator value at all:
   // compose computes it from the workspace slots it could not mount, so any
   // non-blank value here refuses the boot. There is no `.env` edit that clears
