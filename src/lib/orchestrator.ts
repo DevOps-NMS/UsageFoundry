@@ -560,6 +560,12 @@ function logLifecycle(e: PersistedRunEvent): void {
     typeof p[k] === "number" ? (p[k] as number) : null;
   const str = (k: string): string | null =>
     typeof p[k] === "string" ? (p[k] as string).slice(0, 300) : null;
+  // Same shape as the two above, and `null` means there what it means there:
+  // the field is absent, which is not `false`. The `error` case below needs
+  // all three — a refusal being retried, one that is not, and an event that is
+  // not about a refusal at all and carries neither field.
+  const bool = (k: string): boolean | null =>
+    typeof p[k] === "boolean" ? (p[k] as boolean) : null;
 
   switch (e.kind) {
     case "status": {
@@ -593,7 +599,21 @@ function logLifecycle(e: PersistedRunEvent): void {
       });
       return;
     case "error":
-      opsLog("error", "run.error", { run_id: e.runId, message: str("message") });
+      // The 429 ladder is the most expensive wait in the app — roughly 17-26
+      // minutes holding the folder, the worktree slot and one of
+      // `maxConcurrentRuns` — and it changes no status, so the run reads
+      // `running` everywhere state is read and every rung arrives here at the
+      // same level as a run that has actually died. These two are what tell
+      // the two apart. Two *named* booleans and not a spread of the payload,
+      // for the docblock's reason: `apiError`, `exitCode` and `waiting` sit
+      // beside them and a spread is how the next field added to an emit site
+      // reaches stdout without anybody deciding it should.
+      opsLog("error", "run.error", {
+        run_id: e.runId,
+        message: str("message"),
+        retrying: bool("retrying"),
+        usage_limit: bool("usageLimit"),
+      });
       return;
     case "sandbox":
       // The one tool failure that reaches stdout, and it is here for the

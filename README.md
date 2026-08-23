@@ -280,7 +280,11 @@ than dumped, so no prompt text, folder path or credential reaches it.
 for `needs-review`, `blocked` and `failed` and `info` for the other six, so the
 endings that want a person are filterable without parsing the line — and a
 cancel stays `info`, because it arrives as `stopped` and whoever pressed Stop
-does not need waking.
+does not need waking. `run.error` carries `retrying` and `usage_limit` beside
+its message: a rate limit is retried **in place** over roughly 17-26 minutes
+without the run ever leaving `running`, and those two fields are what tell that
+wait apart from a run that has actually died. Absent is not `false` — an error
+that is not a refusal at all carries `null` for both.
 
 ### Who started what
 
