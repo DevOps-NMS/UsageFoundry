@@ -205,6 +205,66 @@ ENV PATH="/usr/local/go/bin:${PATH}" \
     GOPATH=/home/node/go \
     GOCACHE=/home/node/go/build-cache
 
+# `uv`, which is to Python what `gh extension install` is to gh: the installer
+# behind UF_PY_TOOLS, and the reason a plugin whose hooks shell out to a Python
+# command can work here at all.
+#
+# The image ships python3 for node-gyp and nothing to install a package with —
+# no pip, no ensurepip (Debian splits `python3-venv` out), and
+# /usr/lib/python3.11/EXTERNALLY-MANAGED refusing a system-wide install even if
+# there were. A plugin registered through `--plugin-dir` whose hook runs
+# `cozempic …` therefore meets `command not found` inside a hook the CLI
+# discards the stderr of, which is the quietest failure this image has: the hook
+# exits 0, the session is told the plugin is active, and nothing whatever ran.
+#
+# `uv` over apt's `python3-venv` + `python3-pip` for two reasons that are not
+# taste. It gives each tool its own environment, so two Python-backed plugins
+# are not each other's dependency-resolution problem; and its bin directory
+# holds launchers rather than an interpreter, where putting a shared venv's
+# `bin` on PATH would shadow `python3` for every agent in the fleet — a
+# fleet-wide change to what `python3` means, to install one plugin's dependency.
+#
+# Same shape as the `gh` and Go blocks above: the release tarball, one layer,
+# and the checksum verified against Astral's own published digest because this
+# container holds credentials.
+ARG UV_VERSION=0.12.5
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) uvarch=x86_64-unknown-linux-gnu ;; \
+      arm64) uvarch=aarch64-unknown-linux-gnu ;; \
+      *) echo "no uv release for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    cd /tmp; \
+    base="https://github.com/astral-sh/uv/releases/download/${UV_VERSION}"; \
+    curl -fsSL -O "${base}/uv-${uvarch}.tar.gz"; \
+    curl -fsSL -O "${base}/uv-${uvarch}.tar.gz.sha256"; \
+    sha256sum --check "uv-${uvarch}.tar.gz.sha256"; \
+    tar -xzf "uv-${uvarch}.tar.gz"; \
+    install -m 0755 "uv-${uvarch}/uv" /usr/local/bin/uv; \
+    install -m 0755 "uv-${uvarch}/uvx" /usr/local/bin/uvx; \
+    rm -rf /tmp/uv-*; \
+    uv --version
+
+# Where the tools UF_PY_TOOLS names live, and the one part of this that is not
+# the image's.
+#
+# All three under one root so a single named volume covers them, which is the
+# argument GOPATH/GOCACHE above are stated for. `bin` is on PATH because that is
+# what a plugin's hook resolves the command through — `childEnv` copies the
+# server's environment and strips only UF_*, OTEL_* and four named keys, so a
+# PATH set here is the PATH the CLI and its hooks run with.
+#
+# `python` is on the volume for the case UV_PYTHON_PREFERENCE does not cover: a
+# tool needing a newer interpreter than this image's 3.11 makes uv fetch one,
+# and unpersisted that is a ~30 MB download repeated after every `up --build`.
+# The preference is `system` rather than the default `managed` so that the
+# ordinary case uses the interpreter already here and downloads nothing at all.
+ENV PATH="/home/node/pytools/bin:${PATH}" \
+    UV_TOOL_DIR=/home/node/pytools/tools \
+    UV_TOOL_BIN_DIR=/home/node/pytools/bin \
+    UV_PYTHON_INSTALL_DIR=/home/node/pytools/python \
+    UV_PYTHON_PREFERENCE=system
+
 # The agent runs inside this container, so Claude Code has to be in the image.
 #
 # Pinned because the run loop parses this CLI's `stream-json` output and its
@@ -292,8 +352,16 @@ COPY scripts/backup-db.mjs scripts/restore-db.mjs ./scripts/
 # rather than root. `extensions/` is created with it because `gh extension list`
 # is what the entrypoint asks before installing anything, and gh reports a
 # missing directory the same way it reports an empty one.
+#
+# `/home/node/pytools` is the fourth and is the same arrangement once more: the
+# tools `UF_PY_TOOLS` names, installed at boot and run by the children. All
+# three subdirectories are created rather than the root alone, because uv makes
+# a missing one itself and would make it as whoever the install ran as — which
+# on an install that never set UF_AGENT_UID is root, leaving the agents unable
+# to upgrade or remove what they run.
 RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.claude \
       /home/node/go/build-cache /home/node/.local/share/gh/extensions \
+      /home/node/pytools/tools /home/node/pytools/bin /home/node/pytools/python \
  && chown -R node:node /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
  && chown root:root /data \
  && chmod 0700 /data

@@ -683,6 +683,122 @@ describe("gh extensions survive the rebuild that installs them by hand does not"
 });
 
 /**
+ * Where the tools `UF_PY_TOOLS` names land, pinned across the same three files
+ * for the same reason — and one the gh block does not carry, because the two
+ * mechanisms fail differently.
+ *
+ * A `gh` extension that went missing on the rebuild is at least an `unknown
+ * command`. These are invoked by a *plugin's hooks*, and a hook body ends in
+ * `|| true`: a command that is not there makes the hook exit 0 having done
+ * nothing, so a plugin announcing itself on session start keeps announcing
+ * itself against a tool that was discarded. That is what was measured on this
+ * install before any of this existed — 213 sessions told a plugin was active
+ * with the command absent — and it is what a path moving in one of these three
+ * files would restore, wearing a configuration variable that says it is fixed.
+ *
+ * The image's `PATH` is the fourth thing that has to agree, and it is not
+ * optional in the way it is for gh: `gh` resolves its own extensions, while
+ * `uv` only writes launchers into a directory, and a hook finds them by `PATH`
+ * or not at all. `childEnv` copies the server's environment and strips only
+ * `UF_*`, `OTEL_*` and four named keys, so a `PATH` set in the image is the one
+ * the CLI and its hooks run with.
+ */
+describe("Python tools survive the rebuild that installs them by hand does not", () => {
+  const entrypoint = fs.readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8");
+
+  /** The directory the entrypoint treats as uv's, off the entrypoint itself. */
+  function pyToolsVolume(): string {
+    const match = /^PY_TOOLS_VOLUME=(\S+)$/m.exec(entrypoint);
+    assert.ok(match, "docker-entrypoint.sh no longer names a Python tools directory");
+    return match[1];
+  }
+
+  it("mounts a named volume over the directory the entrypoint installs into", () => {
+    const target = pyToolsVolume();
+    assert.match(
+      compose,
+      new RegExp(`^\\s*-\\s*[A-Za-z0-9][\\w.-]*:${target}\\s*$`, "m"),
+      `${target} is not a named volume in docker-compose.yml. Without one it ` +
+        `is the image's writable layer, which \`docker compose up --build\` ` +
+        `discards along with every tool UF_PY_TOOLS installed.`,
+    );
+  });
+
+  it("ships that directory in the image, so a fresh volume is not root's", () => {
+    // Same mechanics as the gh volume: Docker copies the mount point's
+    // ownership onto a fresh volume's root and never revisits it. Absent from
+    // the image that root is root-owned, and every install fails on a directory
+    // it cannot write.
+    const target = pyToolsVolume();
+    assert.match(
+      dockerfile,
+      new RegExp(`mkdir -p[^\\n]*(\\\\\\s*\\n[^\\n]*)*${target}`),
+      `the image never creates ${target}, so the volume created over it ` +
+        `belongs to root and every install fails on a directory it cannot write`,
+    );
+  });
+
+  it("points uv at that directory rather than at its own defaults", () => {
+    // uv's defaults are under $XDG_DATA_HOME — the writable layer, which the
+    // rebuild discards. The volume is worth nothing unless uv is told to use
+    // it, and being told is three variables rather than one: the tools, the
+    // launchers, and any interpreter uv had to fetch.
+    const target = pyToolsVolume();
+    for (const key of ["UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_PYTHON_INSTALL_DIR"]) {
+      assert.match(
+        dockerfile,
+        new RegExp(`${key}=${target}/`),
+        `${key} does not point inside ${target}, so what it names is the ` +
+          `image's writable layer and the next \`up --build\` discards it`,
+      );
+    }
+  });
+
+  it("puts uv's launcher directory on the PATH a hook resolves through", () => {
+    // The one requirement gh does not have. `uv tool install` writes launchers
+    // into UV_TOOL_BIN_DIR and stops there; nothing resolves them for a hook.
+    // Off PATH, every tool this variable installs is present, correct, owned by
+    // the right uid, and never found.
+    const binDir = /UV_TOOL_BIN_DIR=(\S+)/.exec(dockerfile);
+    assert.ok(binDir, "the image no longer names a UV_TOOL_BIN_DIR");
+    assert.match(
+      dockerfile,
+      new RegExp(`ENV PATH="${binDir[1]}:\\$\\{PATH\\}"`),
+      `${binDir[1]} is not prepended to PATH in the Dockerfile, so a plugin ` +
+        `hook running the command it installed gets "not found" — and, ending ` +
+        `in \`|| true\`, reports nothing at all`,
+    );
+  });
+
+  it("installs as the uid that will run them, never as root", () => {
+    // A tool here is an executable a hook invokes. Root-owned files in a volume
+    // the agents own leave them unable to upgrade or remove what they run.
+    assert.match(
+      entrypoint,
+      /uv_as_agent\(\)[\s\S]*?setpriv --reuid="\$UF_AGENT_UID"/,
+      "docker-entrypoint.sh installs Python tools without dropping to " +
+        "UF_AGENT_UID, so the executables a hook runs belong to root",
+    );
+  });
+
+  it("does not split entries on commas, which belong to version specifiers", () => {
+    // The one place this parts company with UF_GH_EXTENSIONS, and it is silent:
+    // `cozempic>=1.8,<2` split on commas is two entries, neither installable,
+    // both reported as a failed tool rather than as a mis-parsed line.
+    const loop = /UF_PY_TOOLS:-[^\n]*\n(?:.*?\n)*?\s*for entry in \$\(echo "\$UF_PY_TOOLS"[^)]*\)/s.exec(
+      entrypoint,
+    );
+    assert.ok(loop, "docker-entrypoint.sh no longer loops over UF_PY_TOOLS");
+    assert.doesNotMatch(
+      loop[0],
+      /tr '[^']*,/,
+      "the UF_PY_TOOLS loop treats a comma as a separator, which splits a " +
+        "single pinned requirement into two unpinnable ones",
+    );
+  });
+});
+
+/**
  * The sandbox switch, pinned across the four files that have to agree for it to
  * mean anything — and, first, for it to stay *off*.
  *

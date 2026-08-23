@@ -106,6 +106,13 @@ services:
       # Needs UF_GITHUB_TOKEN: gh refuses every API call unauthenticated, even
       # for a public repository.
       UF_GH_EXTENSIONS: "${UF_GH_EXTENSIONS:-}"
+      # Optional: Python tools to install at boot, space- or "|"-separated, each
+      # a PEP 508 requirement (`cozempic`, `cozempic==1.8.39`). Read by
+      # docker-entrypoint.sh and by nothing in the app, the same arrangement
+      # UF_GH_EXTENSIONS has. This is what makes a Claude Code plugin whose
+      # hooks shell out to a Python command work: the image has no pip, and a
+      # hook whose command is missing exits 0 having done nothing.
+      UF_PY_TOOLS: "${UF_PY_TOOLS:-}"
       # The CLI's own sandbox around the commands an agent runs. Blank is off
       # and is the shipped state: nothing is written, nothing is confined, and
       # this install behaves exactly as it did before the switch existed. "1"
@@ -300,6 +307,18 @@ services:
       # `docker compose down -v` is what discards them.
       - usagefoundry-gh:/home/node/.local/share/gh
 
+      # Where the tools UF_PY_TOOLS names live — uv's tool directory, its
+      # launcher directory and any interpreter it had to fetch, under one root
+      # so one mount covers all three. A named volume for the reason the two
+      # above are: the default location is the writable layer, which
+      # `docker compose up --build` discards.
+      #
+      # What that costs here is quieter than gh's `unknown command`. These are
+      # invoked by a plugin's hooks, and a hook body ends in `|| true` — so a
+      # missing command is not an error the run loop can read, it is a hook that
+      # exits 0 having done nothing, on every session start.
+      - usagefoundry-pytools:/home/node/pytools
+
       # Where `scripts/backup-db.mjs` writes, and the one thing here that is
       # deliberately *not* the named volume above: a snapshot kept inside the
       # volume dies with `docker compose down -v`, which is the command this
@@ -465,3 +484,4 @@ volumes:
   usagefoundry-data:
   usagefoundry-gocache:
   usagefoundry-gh:
+  usagefoundry-pytools:

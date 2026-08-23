@@ -159,6 +159,61 @@ the next boot reinstalls whatever `.env` still names. What happened at boot is i
 `docker compose logs`, one `[usagefoundry]` line per extension installed or
 refused.
 
+### Python tools, and the plugins that need them
+
+The same mechanism one language over, and it exists for a plugin rather than for
+an agent. A Claude Code plugin registered through `--plugin-dir` speaks to you
+through its hooks; a hook that shells out to a Python command finds none here,
+because the image ships `python3` for node-gyp and nothing to install a package
+with — no `pip`, no `ensurepip`, and Debian's `EXTERNALLY-MANAGED` marker
+refusing a system-wide install even if there were.
+
+What makes that worth a variable is how it fails. Hook bodies conventionally end
+in `|| true`, so a missing command is not an error anything reads: the hook exits
+0 having done nothing, and a plugin that prints "active" on session start goes on
+printing it. Measured on one install here — 213 sessions told a plugin was
+active against a command that was never present.
+
+```bash
+UF_PY_TOOLS=cozempic==1.8.39
+```
+
+One PEP 508 requirement per tool, separated by spaces or `|`. **Not commas**,
+which is the one place this parts company with `UF_GH_EXTENSIONS` above: a comma
+is meaningful inside a version specifier. `uv` installs each one at boot into a
+named volume, each in its own environment, with the launchers on the agents'
+`PATH` — so a rebuild keeps them, and nothing here changes what `python3` means
+for the rest of the fleet.
+
+No token is needed; the container needs outbound network at boot and nothing
+else. Pin the version, for the same reason a dependency is pinned.
+
+Then turn off two things in the tool itself, if it has them — both set alongside
+the other variables, since anything not beginning `UF_` or `OTEL_` reaches the
+agents and their hooks. **Its auto-updater**, because the pin is only the version
+that gets *installed*, and a tool that upgrades on every session start is one
+whose version nobody chose (`COZEMPIC_NO_AUTO_UPDATE=1`). And **anything that
+installs itself into `~/.claude`**, which is the sharper one: that directory is a
+bind mount of your own, the same file your host's Claude Code reads, so a tool
+that wires itself in "globally" on first run is editing your machine's settings
+from inside this container — for every session on it, not just this app's. One
+`cozempic --version` in a throwaway container wrote 7 hooks into
+`~/.claude/settings.json` (`COZEMPIC_NO_GLOBAL_INIT=1`). Its own plugin hooks
+already set that; what they do not cover is an agent, or you, running the command
+directly.
+
+A tool already installed is left alone, including one whose version has since
+moved, on the same argument the extensions above are. To move a pin or drop one:
+
+```bash
+docker compose exec usagefoundry uv tool list
+docker compose exec usagefoundry uv tool uninstall cozempic
+```
+
+Then restart. `docker compose down -v` discards them with the volume. What
+happened at boot is in `docker compose logs`, one `[usagefoundry]` line per tool
+installed or refused.
+
 ## Required environment
 
 | Variable | Purpose |
@@ -172,6 +227,7 @@ refused.
 | `UF_GITHUB_TOKEN` | Optional. What a run pushes, opens PRs and reads issues with. Reaches the agent only, and every repository. |
 | `UF_GITHUB_TOKENS` | Optional. `folder=token` entries separated by `\|`, narrowing the credential to the repository a run is working in. |
 | `UF_GH_EXTENSIONS` | Optional. `gh` extensions to install at boot, `owner/repo` or `owner/repo@tag`, space-separated. Kept in a named volume, so a rebuild does not lose them. Needs `UF_GITHUB_TOKEN`. |
+| `UF_PY_TOOLS` | Optional. Python tools to install at boot, one PEP 508 requirement each, separated by spaces or `\|` (not commas). Kept in a named volume. What a plugin whose hooks shell out to Python needs to work at all. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid every spawned agent runs as; must own the mounts. The server itself runs as root and drops to this. Default 1000. |
 | `UF_CHAT_GID` | The group the orchestrator chat runs in, which owns the per-turn MCP capability file that a concurrent agent must not read. Default 65533. **Must differ from `UF_GID`** — the server refuses to boot when they match rather than hand that file to the group it is being kept from. |
 | `UF_BACKUP_DIR` | Host directory mounted at `/backups`, where `scripts/backup-db.mjs` writes. Default `./backups`, which this repository ships. Point it elsewhere and create that directory first: Docker makes a missing bind source root-owned, and the children that write it are `UF_UID`. |

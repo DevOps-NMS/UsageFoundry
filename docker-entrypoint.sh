@@ -76,6 +76,27 @@ if [ -n "${UF_AGENT_UID:-}" ] && [ -d "$GH_DATA_VOLUME" ]; then
   fi
 fi
 
+# The Python tools UF_PY_TOOLS names, in the fourth named volume, on exactly the
+# terms the gh extensions above are on.
+#
+# The reason this exists at all is one step further out than gh's. A plugin
+# registered through `--plugin-dir` reaches the operator through its hooks and
+# nothing else, and a hook whose command is not installed does not fail: the
+# `|| true` every hook body ends with makes it exit 0, having done nothing, on
+# every session start for as long as the plugin stays enabled. There is no
+# `unknown command` to read here — measured on this install, a plugin ran 213
+# times against a command that was never present, announcing itself active each
+# time. So the mechanism is the same one and the symptom it prevents is quieter.
+PY_TOOLS_VOLUME=/home/node/pytools
+if [ -n "${UF_AGENT_UID:-}" ] && [ -d "$PY_TOOLS_VOLUME" ]; then
+  want="${UF_AGENT_UID}:${UF_AGENT_GID:-$UF_AGENT_UID}"
+  have="$(stat -c '%u:%g' "$PY_TOOLS_VOLUME" 2>/dev/null || echo '')"
+  if [ "$have" != "$want" ] && ! chown -R "$want" "$PY_TOOLS_VOLUME" 2>/dev/null; then
+    echo "[usagefoundry] cannot give $PY_TOOLS_VOLUME to $want — installing a" \
+         "Python tool will fail on a directory it cannot write." >&2
+  fi
+fi
+
 # Every install runs as the uid that will *run* the extension — an extension is
 # an executable an agent invokes, and root-owned files here would leave the
 # agents unable to remove or upgrade what they run. That is root only where
@@ -147,6 +168,59 @@ if [ -n "${UF_GH_EXTENSIONS:-}" ]; then
       fi
     done
   fi
+fi
+
+# Installed as the uid that will run them, for the reason `gh_as_agent` is: a
+# tool here is an executable a hook invokes, and root-owned files in a volume
+# the agents own leave them unable to upgrade or remove what they run.
+uv_as_agent() {
+  if [ -n "${UF_AGENT_UID:-}" ]; then
+    setpriv --reuid="$UF_AGENT_UID" --regid="${UF_AGENT_GID:-$UF_AGENT_UID}" \
+            --clear-groups \
+      env HOME=/home/node uv "$@"
+  else
+    env HOME=/home/node uv "$@"
+  fi
+}
+
+# Best-effort throughout and never fatal, on the same argument as the gh block:
+# a tool that will not install is a degraded install, and refusing the boot over
+# it would take the dashboard and every guard away from an operator whose
+# plugins may not need it.
+if [ -n "${UF_PY_TOOLS:-}" ]; then
+  # Split on spaces and "|" but *not* on commas, which is where this parts
+  # company with UF_GH_EXTENSIONS: a comma is meaningful inside a version
+  # specifier (`cozempic>=1.8,<2`), so accepting it as a separator would turn
+  # one pinned entry into two unpinnable ones.
+  #
+  # Read once, so ten tools on an install that already has them cost one uv call
+  # rather than ten. `uv tool list` prints `<name> v<version>` for each tool and
+  # indents the commands under it, which is what the pattern selects.
+  installed=" $(uv_as_agent tool list 2>/dev/null \
+                | awk '/^[A-Za-z0-9_.-]+ v/ { print $1 }' | tr '\n' ' ') "
+  for entry in $(echo "$UF_PY_TOOLS" | tr '|' ' '); do
+    # The entry goes to uv verbatim — it is a PEP 508 requirement, and uv is
+    # what understands `==`, `>=`, an extra or a direct URL. Only the *name* is
+    # parsed out here, and only to ask whether it is already installed.
+    name="${entry%%[=<>!~[@]*}"
+    # Exact-name matching rather than the substring test the gh block uses, and
+    # the difference matters here: `rich` is a substring of `rich-cli`, so a
+    # substring test would silently skip a tool an operator asked for on the
+    # strength of an unrelated one already being there.
+    case "$installed" in
+      *" $name "*) continue ;;
+    esac
+    if error="$(uv_as_agent tool install "$entry" 2>&1 >/dev/null)"; then
+      # Added to the list read before the loop, so a name written twice is
+      # skipped the second time rather than answered with uv's "already
+      # installed" as though something had gone wrong.
+      installed="$installed$name "
+      echo "[usagefoundry] installed Python tool $entry"
+    else
+      echo "[usagefoundry] could not install Python tool $entry:" \
+           "$(echo "$error" | tr '\n' ' ')" >&2
+    fi
+  done
 fi
 
 # The CLI's own sandbox policy, written here rather than baked into the image.

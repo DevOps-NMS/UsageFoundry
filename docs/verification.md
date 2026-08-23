@@ -1030,6 +1030,36 @@ Built and exercised against real transcripts:
   on a read measures the read rather than the file: a long thin file never
   reaches a cap it would otherwise be refused for.
 
+- **That `--plugin-dir` registers a plugin's *hooks*, observed at last** — the
+  thing the entry below used to say had never been seen here. Read off the live
+  install's own `run_events` on 2026-08-23, from a third-party plugin
+  (`/workspace/winnow/plugin`) sitting in `plugins.enabled` beside `orient`: 213
+  `hook_response` rows, `hook_name` `SessionStart:startup` (93),
+  `SessionStart:compact` (88) and `SessionStart:resume` (32), each `exit_code:
+  0` with the hook's own `Cozempic: guard active` as `stdout`, and each followed
+  by a `log` row reading `SessionStart:… hook added this to the agent's
+  context`. So the flag delivers hooks as well as skills, a resumed cycle gets
+  them (`--resume` restores no flags, and this is the flag being on the argv
+  doing its work), and an autocompact fires `SessionStart` a second time inside
+  one cycle.
+
+  **What this does not establish, and the reason is in the CLI rather than in
+  the data.** Only `SessionStart` was ever *seen*, and that is not evidence
+  about the others: `hook_response` is emitted through `zRo(hookEvent)`, whose
+  allowlist is `JKy = ["SessionStart","Setup"]` with everything else behind
+  `CLAUDE_CODE_REMOTE`. `PostToolUse`, `PreCompact`, `PostCompact` and `Stop`
+  therefore run — or do not — entirely unobserved from here, and this plugin
+  registers all four. `readGuard`'s `PreToolUse` is in that unobserved set, so
+  what it inherits from this is the general claim and not its own.
+
+  And what was running was the hook *shell*, not the plugin: `cozempic` was
+  absent from the image the whole time — no `pip`, no `ensurepip`,
+  `EXTERNALLY-MANAGED` — so every command in every one of those hook bodies fell
+  through its `|| true` having done nothing. The `echo` sits outside those
+  chains, which is exactly what makes it evidence: it proves the body executed
+  and proves nothing about what the body does. 213 sessions were told a guard
+  was active with no guard present. `UF_PY_TOOLS` is the answer to that half.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
@@ -3074,18 +3104,18 @@ through before trusting this unattended:
   --build`, no browser, no billed run. Five things follow, and they fail
   differently.
 
-  - **That `--plugin-dir` registers a plugin's *hooks* has never been observed
-    here**, so the read guard may do nothing whatever when an operator switches
-    it on. What `vaultSkill.ts` measured is that the flag delivers a plugin's
-    *skills*, which is a different component of the same object. The evidence
-    for hooks is indirect and one-sided: the CLI carries a
-    `--plugin-dir-no-mcp` variant, which only means anything if the plain flag
-    loads every component, and the hooks loader is generic over plugin objects
-    rather than over installed ones. The symptom of it being false is the
-    feature being absent, which is indistinguishable from the setting being off
-    — and off is what it ships as. Confirming it costs one billed run:
-    switch `readGuard` on, spawn a cycle, and read the CLI's own debug output
-    for the hook registration the same way the skill load was read.
+  - **That `--plugin-dir` registers a plugin's hooks is now observed** — see the
+    entry above, which supersedes what stood here — **but only for
+    `SessionStart`, and `readGuard`'s hook is `PreToolUse`.** The general claim
+    the read guard rested on has held; its own event has still never been seen
+    to fire, and cannot be seen from here, because the CLI emits a
+    `hook_response` for `SessionStart` and `Setup` alone. So the guard may still
+    do nothing whatever when an operator switches it on, and the symptom is
+    indistinguishable from the setting being off — which is how it ships.
+    Settling it costs the same one billed run it always did, now narrowed:
+    switch `readGuard` on, spawn a cycle that reads one file twice, and confirm
+    the second read is refused. A refusal is the only channel this hook has that
+    the stream does not filter out.
   - **The fresh-start lever's saving is unmeasured, and the measurement that
     would settle it is a specific one.** `freshStartContextTokens` opens a cycle
     without `--resume` past a threshold, trading tokens for re-discovery; the
