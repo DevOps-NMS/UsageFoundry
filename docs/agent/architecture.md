@@ -71,6 +71,40 @@ vaultSkill.ts   the vault-lookup skill, delivered the same way and for the same
                 or the skill names a path the run may not read; measurement says
                 that flag grants **write**, so the skill's own text is the only
                 thing forbidding writes into the vault
+readGuard.ts    the second *generated* directory on that same --plugin-dir list
+                — which now carries three kinds of entry, the plugins found in
+                the mounts, the vault skill and this — and the only one shipping
+                hooks rather than a skill, so unlike the vault skill it puts
+                nothing in the window and needs no --add-dir. It is a PreToolUse
+                hook on Read that refuses a repeat of a read this session has
+                already made (size and mtime unchanged) and a whole
+                read past settings.readGuardMaxTokens. A *ranged* read is tested
+                first and never refused, so nothing it says no to becomes
+                unreachable — an agent stranded by a guard burns work cycles,
+                which costs more than the tokens saved. /run rather than
+                DATA_DIR for vaultSkill.ts's reason, root-owned so no agent can
+                rewrite the script; the per-session ledger is a *sibling*
+                directory the agents may write. Off by default: the savings it
+                attacks are measured and that refusing a read produces them is
+                not, and it is not confirmed that --plugin-dir registers a
+                plugin's hooks as well as its skills
+fileCostNotice.ts
+                what a Read of this repository's largest files costs, ranked on
+                tokens x how often this fleet has read each one, generated once
+                at createRun and frozen on runs.file_cost_notice — the appended
+                system prompt is part of the cached prefix, so a version of this
+                text that differed between two cycles of one run would cold-start
+                every token behind it. Every failure degrades to "", because a
+                run that could not be created for want of a cost hint would cost
+                infinitely more than the hint saves
+toolComposition.ts
+                what is *in* the contexts this machine paid for — a second reader
+                over the same transcripts, in parseCompactionBoundary's shape,
+                denominated in characters of tool output. Not a sixth breakdown
+                and not a cost source: a tool_result carries no usage block, so
+                it reconciles to itself and never to a window total, and its type
+                is an object of rows so nothing written for the five compiles
+                against it
 agents.ts       saved agents — form input, never a run: the role a run itself
                 takes, carried onto a spawn by sessionAgentArgs as an --agents
                 definition *and* an --agent selection, built on the one encoder
@@ -131,16 +165,17 @@ health.ts       what /api/health answers with, and the one thing it is for:
                 being false when this server cannot do its job
 status.ts       what /api/status answers with — gauges for a monitor rather
                 than a person, behind a read-only credential of its own
-db.ts           SQLite: every table migrate() creates, and there are 21 —
+db.ts           SQLite: every table migrate() creates, and there are 22 —
                 runs, run_deps, run_events, run_reviews, run_templates, agents,
                 settings, chat_sessions, chat_messages, chat_proposals,
-                workflows, workflow_instances, workflow_instance_runs,
-                workflow_instance_blocks, workflow_schedules, merge_queue,
-                ops_events, request_log, otlp_requests, auth_sessions,
-                login_attempts. The list is a completeness claim, so check it
-                against `grep -oE 'CREATE TABLE IF NOT EXISTS [a-z_]+'
+                chat_turn_spend, workflows, workflow_instances,
+                workflow_instance_runs, workflow_instance_blocks,
+                workflow_schedules, merge_queue, ops_events, request_log,
+                otlp_requests, auth_sessions, login_attempts. The list is a
+                completeness claim, so check it against
+                `grep -oE 'CREATE TABLE IF NOT EXISTS [a-z_]+'
                 src/lib/db.ts | sort -u | wc -l` when adding one — a plain
-                `grep -c` says 23 and counts two comments
+                `grep -c` says 24 and counts two comments
 ```
 
 **Four kinds of agent child process, from four modules, and no more — and two numbers bound how many of them exist at once.** (A fifth kind of child exists and starts no agent: `claudeAuth.ts`'s, argued out further down this paragraph.) `settings.maxConcurrentRuns` bounds the work cycles in `promoteQueued` and `settings.maxConcurrentAssists` bounds the other three at `assistRefusal`'s door; the invariant beside `maxRunCostUSD` below argues out why they are two numbers and why neither ships null. `git.ts` holds the git primitives (`gitSync` for the admission decision, `git` for everything else); `orchestrator.ts` spawns the agent; `review.ts` spawns the one-shot invocations that are not work cycles — a review, or a conflict resolution (`run_reviews.kind`); `chat.ts` spawns the orchestrator chat. All go through an argv array and never a shell. A workflow's orchestrator block is **not a fifth kind**: it is the fourth one invoked without a thread, through `runOrchestratorChild` — the same argv, the same environment, the same capability token, the same MCP config file. That function exists rather than a second `spawn` call site precisely because two of those would be two sets of flags to keep in step, and the flags are what bound the child; what differs between the two callers is a subject, a system prompt and a cwd. The review spawn was the deliberate third and differs from the agent in every way that matters: it is never automatic, it runs `--permission-mode plan` so it cannot write, its cost lands in `run_reviews` and never in `runs.spent_usd`, and it gets no telemetry env even when `telemetryForRuns` is on — `otlp_requests.run_id` is compared against the run's own spend, and a review's requests in that comparison would make an accounted-for run look unaccounted-for. Adding a fifth kind is a decision, not a detail, and one has been added: `claudeAuth.ts` spawns `claude auth status --json`, `claude auth login` and `claude auth logout`, so that signing the container in and out is a page rather than a `docker compose exec` into a shell the app otherwise never needs. What makes it a kind of its own rather than a variant of the other four is that it is the only child spawned for its **effect on disk** instead of for its output: it rewrites the credential the other four authenticate with. Everything the two concurrency numbers bound is therefore absent from it — no prompt, no context window, no repository, no cost, no telemetry env, no `run_events` and no row anywhere — so `maxConcurrentAssists` does not apply and would mean nothing if it did; what bounds this one is that **at most one login may be pending per install**, held on `globalThis` like every other long-lived handle here, because the CLI keeps a login's PKCE verifier in the memory of the process that printed the link and a second link would issue codes the first process cannot redeem. Two properties are load-bearing rather than incidental. `childCredentials()` is dropped for the *opposite* reason it is dropped everywhere else — not to keep an agent out of what the server can reach, but because the credential is written 0600 owned by the writer and the uid that must open it afterwards is the agent's, so a login taken with the server's authority would leave the page reporting an account in good standing while every work cycle failed on `Not logged in`. And the pasted code reaches the child on **stdin**, never in argv, which is what keeps the one value a person types into a child process from being able to mean anything but one answer to one prompt. A **named agent** is not a fifth kind either, and is not a sub-kind of one: it changes what a child *is*, never how many of them there are. It travels as two flags that go together — `--agents` defines the member, `--agent` selects it, both emitted by `sessionAgentArgs` — and the session it starts is the same process under the same permission mode, the same allow and deny lists and the same cost destination as the same child started with no agent. Three modules, four callers, and two of the four carry one today; both of those *select* it, a work cycle taking the run's own frozen copy and an orchestrator block taking its node's. The other two are decisions rather than gaps. `runTurn` withholds one (see the chat invariant below). `spawnAssist` is the one caller left on the plural flag alone, and it stays there: a review is not a run and has no operator-chosen role to take — what it is is fixed by `--permission-mode plan` and its own prompt, and selecting somebody's saved agent would replace exactly that — and no caller supplies one anyway. There is one encoder (`agentsFlagValue`, which `sessionAgentArgs` is built *on* rather than beside) rather than one per site, for the reason that paragraph gives about `runOrchestratorChild`: several copies of a shape whose every violation is unreported would be several sets of flags to keep in step. What the singular flag changed is the direction of the failure, and it is the one place this move made the app's behaviour better rather than merely different — a member the CLI will not register used to cost a run its specialist at exit 0 with nothing on stderr, and named on `--agent` it now fails the spawn outright, exit 1 before any API call. The encoder is worth more for it, not less: the one remaining silent way to get this wrong is a definition and a selection that disagree, which no run would report either. **What each child may *write*** travels the same way and for the same reason: `sandboxSettings`/`sandboxArgs` beside `buildArgs` are one encoder for the three `claude` spawns that start an agent — a work cycle's own checkout and its repository's `.git`, a reviewer's nothing at all, a resolver's throwaway checkout, the chat's every mount, and `CLAUDE_CONFIG_DIR` in all of them because that is the metering path — so the difference between the sets is an argument a reader can see beside the others rather than a fourth code path that drifted. It configures a sandbox the managed policy switched on and never switches one on, is withheld entirely from an install whose reading is `none`, and is narrower than it looks: `docs/verification.md` carries the two open questions that decide whether it confines anything at all.

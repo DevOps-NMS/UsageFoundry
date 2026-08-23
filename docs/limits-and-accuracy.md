@@ -134,6 +134,15 @@ Three things to know about that source:
   the derived reading instead of passing off a stale percentage as current.
 - **It is undocumented**, so every failure is a miss and never an error.
 
+The weekly meter takes the **worst** of the all-model week and every
+model-scoped wall it reports, because being cut off by the Opus week is being
+cut off. An account whose payload names a scoped wall and *no* all-model figure
+at all is the case worth stating on its own: that wall now stands as the weekly
+reading rather than being dropped, which left the weekly guard on such an
+account falling back to the derived reading — a reading that did not fire at 90%
+of a week that was nearly spent. The meter still reports no all-model percentage
+there, because the provider named none.
+
 Turn it off with **Settings → "Read plan usage from Anthropic"**, and everything
 below is what you get back — which is also what you get for a window the
 provider did not answer for:
@@ -205,6 +214,29 @@ record's own sidechain flag, which is a genuinely delegated turn, and the origin
 chip beside a row says only where **this install** found a definition for that
 name.
 
+**What filled the context is a sixth reading and is deliberately not a sixth
+breakdown.** The five above answer *who* spent the money; that card answers what
+the money was spent carrying — tool results, which an agent puts into a session
+once and then pays to re-read on every later turn. It cannot be a breakdown,
+because a tool result is not a billable turn: it carries no usage block, no
+model and no price, and what it costs is billed on the *next* assistant turn
+mixed in with everything else placed beside it. So its rows are denominated in
+**characters of tool output** and carry no dollar figure at all, nothing on it
+reconciles to the window total, and no figure on it may be added to one above
+it. What it does carry is a price for *placing* a token — the window's whole
+bill over the tokens that entered a context in it, beside how many times the
+average one was read back — and that price is a floor rather than an estimate,
+because a re-written cache prefix counts twice in its denominator.
+
+**The counterfactual column beside the agent breakdown is arithmetic, not a
+forecast.** On the agent view each row carries a second dollar figure — these
+exact turns, the same input, output and cache tokens, repriced at one tier-down
+model's rate on the day each one ran. It says nothing about whether the same
+task on that model would have taken the same number of turns; it cannot, since
+those turns do not exist. The page says so under the table rather than leaving
+it to be inferred, because a second dollar figure with nothing beside it is a
+figure somebody will quote as a saving.
+
 **Usage by period (day / week / month).** The two meters answer *may I start a
 run right now*; the **Usage by period** card answers *what has this been
 costing me*. It cuts the same deduplicated, same-priced entries into calendar
@@ -266,8 +298,13 @@ It is a third reading rather than a correction: the meters count every Claude
 Code session on this machine through our price table, the card counts one class
 of session through Anthropic's own, and the work overlaps — so the two are shown
 side by side and never added. While a run is working the dashboard polls every
-5s instead of 10s; the rest of the time it does not, because rebuilding the
-snapshot competes with the agent for the same CPU.
+**60 seconds** instead of 120 — minutes rather than seconds either way, because
+every poll re-aggregates the whole transcript history and the agent the page is
+watching wants the same CPU. A run's own page is the exception, at 3 seconds,
+because what it asks for is one row rather than a rollup and the log beside it
+arrives over a stream rather than on the poll at all; it stands down completely
+once the run reaches an ending it cannot move from, and re-arms if an event says
+somebody picked it up again.
 
 It cannot replace the transcript scan: there is no historical backfill, no `cwd`
 so no per-project attribution, and `cache_creation_tokens` is a single number

@@ -34,18 +34,23 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - Three cost sources, never summed or mixed in the UI. OTLP telemetry must never reach `buildSnapshot()` or `runs.spent_usd`.
   - Four kinds of *agent* child process, from four modules, plus `claudeAuth.ts`'s, which starts no agent and is bounded by one pending login rather than by `maxConcurrentAssists`. Another is a decision, not a detail.
   - `emit()` persists to `run_events` **then** publishes. That order is what makes reconnect lossless.
+  - Three modules joined the map: `fileCostNotice.ts` and `readGuard.ts` ride flags that already existed and both ship off or empty, and `toolComposition.ts` is a second *reader* of the transcripts, never a fourth source.
 
 - **`windows.ts`, `transcripts.ts`, `pricing.ts`, `planUsage.ts`, `repoSpend.ts`, `otlp.ts`** → `docs/agent/metering.md`
   - Unknown renders as a hatched indeterminate meter, never a 0% bar. No numeric ceilings in `DEFAULTS`.
   - `costUSD`/`fraction` are what the user is shown; `costGuardUSD`/`guardFraction` are what the guard acts on. Never collapse the two.
   - The provider's own percentage outranks anything derived from a ceiling — and its body reports **percent** where the headers carry a 0–1 fraction.
-  - Every turn must land in a bucket, so each rollup reconciles to the window total.
+  - Every turn must land in a bucket, so each of the five rollups reconciles to the window total. `byTool` is the one reading that deliberately does **not** — a `tool_result` carries no usage, so it counts characters, reconciles only to itself, and takes a shape (`{rows}`, not `{…, agg}[]`) the five cannot compile against.
+  - `byAgent`'s `counterfactualUSD` reprices the same turns at another model's rate on the day each ran. It is a counterfactual, never a forecast, and never a cost source.
+  - A model-scoped weekly wall stands alone when the provider named no all-model figure, with `planFraction` still null. An exhaustion projection past its own window's reset is dropped, never clamped.
 
 - **`budget.ts`, `installBudget.ts`, every guard site in `orchestrator.ts`** → `docs/agent/budgets-and-guards.md`
   - `null` / `""` / `0` all mean "off". Only an explicit `null` asks for an uncapped loop.
   - The loop must always have a monotone terminus: `maxIterations` is nullable only alongside `maxDurationMinutes`.
   - `no_ceiling` is refused at the door and never acted on afterwards; `no_terminus` stays enforceable.
-  - The check order — terminus, cycles, duration, run spend, weekly, then session — is load-bearing.
+  - The check order — terminus, cycles, duration, run spend, weekly, then session — is load-bearing, and an unreadable window must not end it early: `no_ceiling` is **held** and returned only once every readable guard has passed, in `evaluateBudget` and `evaluateInstanceBudget` alike.
+  - The display-versus-guard split holds in `reconcileKilledCycle` too. There is no column for the guard half, so what survives a restart or a pick-up is the floor.
+  - The install ceiling's rolling 24 hours bounds a run on `finished_at` or on `paused_at` while it is still `paused`, a block on `started_at`, and a chat per **turn** through `chat_turn_spend` — never a thread's lifetime total.
 
 - **`orchestrator.ts`'s run loop, `fleet.ts`, `requestLog.ts`** → `docs/agent/run-lifecycle.md`
   - `runs.origin` is a **required** field at every `createRun` call site. `reopenRun` deliberately writes none.
@@ -55,16 +60,21 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - The DONE contract reaches cycle 1 as **generated** text, gated on `endsOnDone`. A prompt in `Settings` would not reach a saved install.
   - `needs-review` is the agent's own judgement about the *task*. Its rung sits below every refusal and exit-code test, above `DONE`, and clears `reportedDone` explicitly. Its notice is generated too and is **not** gated on `endsOnDone`.
   - `reopenPrompt`'s restart branch sits **above** the pushback: `reported_done` is stale after a mid-cycle kill.
-  - Three flags ride **every** cycle's argv because `--resume` restores none of them: `--plugin-dir`, `--autocompact`, and the two-notice `--append-system-prompt` (one flag — a second is a replacement). `--autocompact` is what makes anything compact here at all — this install's window is near 1M and the CLI refuses to compact such a model on its own — and it fires at `min(asked, window) − min(maxOutput, 20,000) − 13,000`, not at `effectiveWindow`. Its sign is measured; read `docs/verification.md` before moving the constant.
+  - `reopenFleet` lays its two fields **over** each run's stored budget, never in place of it. `reopenRun` carries a fourth check that is not one of the three carried-forward guards: the terminus pair, moved to the one door every caller passes because the fleet sheet never sees the route's.
+  - A 429 has its own ladder and its own ending. `RATE_LIMIT_BACKOFF_MS` retries **in place** over ~17-26 minutes, holding the folder, the worktree slot and one of `maxConcurrentRuns` the whole time, and `rate-limited` is a distinct `RefusalCause` naming that setting.
+  - `runs.file_cost_notice` is generated once at `createRun` and never rebuilt at a spawn: the appended prompt is part of the **cached prefix**, so text that differed between two cycles of one run would cold-start a 190,000-token context and cost far more than the notice saves. Null and empty both mean an argv byte-identical to the one before the column existed.
+  - `startsFresh` is the one branch where a cycle *with* a session deliberately does not resume. Off by default, refused on a follow-up or a re-trigger (both are replies), and it reads the last main-thread turn's window rather than the largest.
+  - Three flags ride **every** cycle's argv because `--resume` restores none of them: `--plugin-dir` (now carrying two generated directories as well), `--autocompact`, and the **three**-notice `--append-system-prompt` (one flag — a second is a replacement). `--autocompact` is what makes anything compact here at all — this install's window is near 1M and the CLI refuses to compact such a model on its own — and it fires at `min(asked, window) − min(maxOutput, 20,000) − 13,000`, not at `effectiveWindow`. Its sign is measured; read `docs/verification.md` before moving the constant.
 
 - **`createRun`/`promoteQueued`, `serverLock.ts`, `db.ts`, `instrumentation.ts`** → `docs/agent/concurrency-and-ownership.md`
-  - `createRun` runs from entry to INSERT with **no `await`**. Adding one silently puts two agents in one directory.
+  - `createRun` runs from entry to INSERT with **no `await`**. Adding one silently puts two agents in one directory — and what that one turn may contain is bounded by constants rather than by a repository's history: the slot walk's `MAX_SLOT_PROBES_PER_ADMISSION`, and the file price list's `MAX_WALK_ENTRIES` and per-folder memo.
   - Never key occupancy on `isRunning()`.
   - Every writer asks the lock at the moment of the write. `unclaimed` is not a refusal.
 
 - **`retention.ts`** → `docs/agent/retention.md`
   - Nothing deletes a `runs` row. What expires is the evidence behind it, on three separate horizons.
   - Every sweep asks the database what is live; never a file's age.
+  - The Storage card's two walks are read through a five-minute TTL with single-flight; `treeSize` itself is **not** cached, so no delete path can act on a stale size.
 
 - **`releasableRuns`/`admitDependencies`/`releaseDependents`** → `docs/agent/dependencies.md`
   - A run that ran no work cycle satisfies nothing. Both edge conditions are explicit on the wire, never defaulted.
@@ -76,12 +86,14 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - The operator's checkout must be clean **and** standing on the recorded target branch.
   - Isolation being *unavailable* degrades to `mode: "none"`; isolation being *used up* throws.
   - Nothing on the landing path has a clock on it. Do not add one.
+  - `branchInventory`'s probes run concurrently, so `MAX_PENDING_PROBES` is applied by `selectProbeTargets` in one synchronous pass before the first is dispatched: a counter test spread across awaits caps nothing and makes *which* branch was probed a function of the event loop.
 
 - **`plugins.ts`, `vaultSkill.ts`, the `--plugin-dir` argv, `/api/plugins`** → `docs/agent/architecture.md`
   - Never `claude plugin install`: `~/.claude` is one bind mount shared with the host and its registry records absolute paths.
   - `--plugin-dir` does not survive `--resume`, so it goes on **every** cycle's argv. Neither does `--add-dir`.
   - A stored path is proved contained in a mount again at use time. It becomes a directory whose hooks the container runs.
   - The vault skill is generated per spawn and never written to `DATA_DIR`, which the agent uid cannot read. `--add-dir` grants **write**, so only the skill's own text forbids writing into the vault.
+  - The read guard is a third kind of entry on that list and the only one carrying hooks. **A ranged read is tested first and never refused**, so nothing it says no to becomes unreachable — an agent stranded by a guard burns work cycles, which costs more than the reads it prevented. `/run` again, root-owned, with the ledger a *sibling* the agents may write. It ships off, and that `--plugin-dir` registers hooks as well as skills is not confirmed.
 
 - **`agents.ts`, `agentRegistry.ts`, `templates.ts`** → `docs/agent/agents-and-templates.md`
   - An agent carries a role, never a capability: no `tools`, no permission mode, no folder. A `tools` field is refused by name at save.
@@ -90,7 +102,8 @@ This app's invariants encode the product's reasoning, not style preferences, and
 - **`chat.ts`, `src/app/api/mcp/`** → `docs/agent/chat.md`
   - Prompt text is the one half of a run a model may write. Guards come from a named template or `settings.chatDefaultGuards`.
   - Approval takes the explicit list of ids the page displayed, in one synchronous pass.
-  - The capability token is minted per turn, dies with it, and is never `UF_AUTH_TOKEN`.
+  - The capability token is minted per turn, dies with it, and is never `UF_AUTH_TOKEN`. Its 401 is answered **outside** `auditMutation`: `request_log` is capped and evicts on every insert, so auditing a credential-free refusal is a lever on the audit log itself.
+  - A turn's cost lands on `chat_turn_spend` beside the thread's running total, because the install ceiling reads a window and the total reads a lifetime.
 
 - **`workflows.ts`, `schedules.ts`, `canvasGraph.ts`** → `docs/agent/workflows-and-schedules.md`
   - Instantiation is topological, one synchronous pass, all or nothing. Half a graph is not a smaller workflow.
@@ -112,7 +125,8 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - `resolveInMount()` checks containment on the resolved path **and again** after `realpathSync`. Both are load-bearing.
   - Never a shell. Argv arrays only, at every spawn site.
   - `middleware.ts`'s five exemptions each stay paired with the check that stands in for them.
-  - `SELF_HOSTING_NOTICE` carries no literal an agent could `pgrep -f`: it is on every sibling's argv, so a literal matches the fleet.
+  - `SELF_HOSTING_NOTICE` carries no literal an agent could `pgrep -f`: it is on every sibling's argv, so a literal matches the fleet. All **three** notices on that one flag inherit the rule, the file price list included — it is a list of repo-relative paths every run on that repository shares, and what keeps it safe is that nothing near them offers a pattern.
+  - `UF_GITHUB_TOKEN` reaches three kinds of child, not one: a work cycle through `selectGithubToken`, and the orchestrator chat turn and a workflow's orchestrator-block child through `chatEnv` — install-wide, under `bypassPermissions` with write access to every mount. Leaving it blank and configuring only `UF_GITHUB_TOKENS` is the lever that withholds it there.
 
 - **`src/components/`, route handlers, `globals.css`** → `docs/agent/conventions.md`
   - Variants are typed props with `Record<Union, string>` lookup maps, never `data-[…]` Tailwind variants.
@@ -122,7 +136,10 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - A table stacks below `md` only with `Table stack` **and** a `label` on every `Td`. One without the other is a column of unnamed figures.
   - `"use client"` files import from `apiTypes.ts` / `format.ts`, never `windows.ts` / `transcripts.ts`.
   - A `<canvas>` reads a colour by probing a real element, never from `getComputedStyle(root).getPropertyValue("--fg")` — every token is a `light-dark()` no `@property` registers, so that returns source text a 2D context rejects silently. Re-probe on a theme change. Size the backing store in device pixels. Keep the element **out of flow**, or the height the observer writes back onto it holds its own host up. And stop the frame loop when the layout cools.
-  - Route handlers touching SQLite or the filesystem need `runtime = "nodejs"` and `dynamic = "force-dynamic"`.
+  - Route handlers touching SQLite or the filesystem need `runtime = "nodejs"` and `dynamic = "force-dynamic"`. Eighteen of them answer through `jsonMaybeGzipped` — Next filters every app-router handler out of its own compression by content type — and the streaming routes are excluded by name. A route that moves onto it writes its own `Cache-Control`.
+  - A list route ships the list's own DTO (`RunListItemDTO`, `WorkflowListItemDTO`), and quick open reads those same lists: `jsonRequest` is an unchecked cast, so a field dropped on the wire and not at its reader typechecks clean and throws on the shortcut.
+  - A payload may carry positions into itself (the graph's links do), but they are resolved to ids at the fetch boundary — a stale index draws a line between two notes that are not linked rather than throwing.
+  - A poll stands down when its subject can no longer move, and the re-arm is the half to design: the run page's first load sits above the gate, the last poll after a run settles is what catches its ending, and SSE is what wakes a poll that has stood down.
   - `saveSettings` stores only what differs from `DEFAULTS`. Writing the whole object kills every future default on that install.
 
 - **`docker-compose.yml`, `.env`, `Dockerfile`, `config.ts`** → `docs/agent/environment.md`
@@ -134,7 +151,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
 
 - **The UI says "work cycle", the code says "iteration".** User-facing copy names the unit a first-time user must reason about; `Settings`, `BudgetPolicy`, the API payloads and the `runs` table keep `iteration`/`maxIterations`. Don't rename the internals to match the copy, and don't reintroduce "iteration" into the UI.
 - **Comments explain *why* a decision was made** — usually a correctness or safety trade-off — never what the code does. Match that when editing.
-- **Long-lived module state goes on `globalThis`** (e.g. `__ufDb`, `__ufBus`, `__ufProcs`, `__ufInterrupts`, `__ufTranscriptCache`), or it silently resets on every request in dev. Those five are examples and not the roster — there are thirty-odd such keys; `grep -rn "globalThis as unknown" src/` finds every one. Note `__ufInterrupts`: reusing a key whose *shape* changed is the trap `orchestrator.ts:373` records, because `??=` only initialises when absent, so a pre-upgrade value survives a dev hot reload and every call on it throws.
+- **Long-lived module state goes on `globalThis`** (e.g. `__ufDb`, `__ufBus`, `__ufProcs`, `__ufInterrupts`, `__ufTranscriptCacheV2`), or it silently resets on every request in dev. Those five are examples and not the roster — there are thirty-odd such keys; `grep -rn "globalThis as unknown" src/` finds every one. Note `__ufInterrupts`, and now `__ufTranscriptCacheV2`: reusing a key whose *shape* changed is the trap `orchestrator.ts:373` records, because `??=` only initialises when absent, so a pre-upgrade value survives a dev hot reload and every call on it throws. Take a new key; the cost is one cold rebuild.
 - **Schema changes** are idempotent statements in `migrate()` in `db.ts`. A destructive one is the exception and runs inside a single `db.transaction`.
 - **A pure function whose failure mode is silent gets a unit test.** That is the bar the existing suite was built to; `docs/agent/testing.md` records what each one earned.
 

@@ -220,6 +220,24 @@ neither your files nor the agents — the entrypoint asks an agent's own uid
 whether it can still write that file and says so on the boot log, and that line
 is the only evidence here that the boundary exists.
 
+**This app can now put a hook on that path itself, and it ships off.**
+Settings → *Read guard* generates a small plugin directory of this app's own —
+a `PreToolUse` hook that refuses a whole re-read of a file the session has
+already read, and a whole read past a token cap — and hands it to every work
+cycle on the same `--plugin-dir` list the vault skill rides. It only ever
+refuses, never grants, which is what bounds everything that follows. The code
+is written root-owned and `0755` under `/run`, so every agent uid can read it
+and none can rewrite it: a sibling able to edit that script would be on the tool
+path of every call another run makes. What agents *do* write is the ledger
+beside it, in a separate world-writable directory carrying the sticky bit, so
+one run cannot unlink or replace another's by name. What a sibling can still do
+is write into a ledger whose session id it guessed, and the worst that buys is a
+read refused in a run that was not asking for it — which that run gets around
+with a ranged read, because a ranged read is always allowed. One thing to know
+before you weigh any of that: whether the CLI registers a plugin's *hooks* at
+all, as opposed to its skills, has never been observed here, so switching this
+on may do nothing whatever. `docs/verification.md` carries what would settle it.
+
 ## Everything else
 
 - Compose binds to **`127.0.0.1:3000`**, not `0.0.0.0`. `UF_BIND_ADDRESS` moves
@@ -265,6 +283,15 @@ is the only evidence here that the boundary exists.
   the app's master token, in the agent's own environment, in a variable `env`
   prints. The ingest route is exempt from the shared-secret gate and checks
   that capability itself — as `/api/mcp` does, and for the same reason.
+- **A credential-free request to `/api/mcp` is refused without writing to the
+  audit log.** That is deliberate and it is the one place a request is
+  mutating-shaped and not audited. `request_log` keeps its newest 20,000 lines
+  and evicts on every insert, so a row written for a request that passed nothing
+  is a lever on the table: twenty thousand refusals, and every line naming a run
+  that was started or a sign-in that failed is gone. The refusal is logged to
+  stdout instead — visible to whatever reads your container logs, and out of
+  reach of the cap. A tool call refused under a capability that *is* valid is
+  audited as before.
 - `UF_GITHUB_TOKEN` is handed to the agent's work cycles and to nothing else.
   The reviewer does not get it (it cannot write), and neither does the git this
   app runs itself — `worktree add` and `merge` execute hooks the repository

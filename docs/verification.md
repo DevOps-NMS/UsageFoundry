@@ -899,6 +899,137 @@ Built and exercised against real transcripts:
   billed and invisible to `scanUsage()`. It does not threaten the between-arm
   result, and it is the largest unmeasured term here. Both are on the list below.
 
+- **What this app puts on the wire, and what it spends answering — measured
+  against the running container, and every figure a *before*.** Taken on
+  2026-08-23 by asking the container as it was then running, ahead of the
+  changes that answer them. `GET /api/runs` answered **696,197 bytes**
+  for 100 rows, of which **522,541 — 75.1% — was prompt text**, for a column the
+  table clips at 56 characters. `GET /api/runs/[id]` answered **591,574 bytes**,
+  of which **582,469 was an events array no caller reads**, on a three-second
+  poll. `GET /api/knowledge/graph` answered **9,864,990 bytes**;
+  `GET /api/branches` **254,752**; `GET /api/workflows` **30,290** for two saved
+  workflows, of which the node graphs — task prompts, drawn by neither reader —
+  were **28,934**. `GET /api/storage` took **5.3–7.4 s warm to answer 585
+  bytes**, and two concurrent readers each paid it in full. The runs page pulled
+  **10.5 MB a minute from an idle browser**, none of it compressed.
+
+  Three of those were profiled rather than only weighed, which is what says
+  where the time goes. Of the storage route, **5,981 ms was one serial `lstat`
+  walk of 88,325 entries / 2.62 GB** — the two `COUNT(*)`s beside it are 0.05 ms
+  and 0.01 ms — against **1,750 ms** for the same walk with 64 stats
+  outstanding. Of a **1.13 s** `/api/branches`, **1.12 s was eight serial `git
+  status` probes at 140 ms each** against a 15,082-entry worktree, and the cap
+  of twenty puts the worst case at 2.8 s. And `listTranscriptFiles` recursing
+  serially measured **105–121 ms** of a 165 ms `/api/usage` against **49 ms**
+  for a level-parallel walk of the same tree, where everything it feeds is
+  trivial beside it (1,174 `fs.stat` 9 ms, the dedupe 8, the sort 3).
+
+  **The figures after each change are computed, not curled.** No server was
+  asked a second time. The graph payload's **734,233 bytes** as pairs of
+  positions — from 9,864,990 whole, 4,601,846 with the eight unread edge fields
+  dropped and the ids kept, 1,056,865 as `{from, to}` objects — and the workflow
+  list's **471 bytes** are re-serialisations of the captured payloads under the
+  new shapes: arithmetic over a measurement rather than a second measurement.
+  The distinction matters more than usual here because the sixteen changes were
+  made in parallel against one baseline capture, so the readings do not compose
+  — the compression entry below prices an 8.8 MB graph body that the
+  link-position change had already made smaller.
+
+- **Why no `/api` response was compressed, which is not what the audit that
+  found it guessed.** HTML and JS from this same server came back gzipped and no
+  route handler's answer ever did. The guess was that route handlers flush their
+  own headers past Next's `compression` hook. They do flush, in
+  `pipe-readable.js`, and it makes no difference: the flush goes through the
+  patched `writeHead` and the hook fires normally. The mechanism is one step
+  further out. `sendResponse` copies a handler's headers across with
+  `NodeNextResponse.appendHeader`, which stores **every** value as an array, so
+  the raw response holds `content-type: ['application/json']`; `compression`'s
+  default filter asks `compressible()` about that value, and `compressible()`
+  returns false for anything that is not a string. Every app-router route
+  handler in this version is filtered out of compression by a one-element array.
+
+  Reproduced rather than reasoned: against Next 15.5.23's own `sendResponse` and
+  its own bundled `compression`, with `DEBUG=compression` printing
+  `[ 'application/json' ] not compressible` and then `no compression: filtered`
+  for the handler path, and `gzip compression` for a plain `res.end()` of the
+  same body on the same server. The tell that led there is worth keeping too:
+  what was missing was `Vary`, not `Content-Encoding` — the hook sets `Vary`
+  *before* it checks the size threshold, so a response missing it never reached
+  the threshold at all.
+
+  Two things measured beside it. The small-body break-even: 111→120, 169→178,
+  283→215, 374→264 and 586→336 bytes through `gzip -6`, so below roughly 250
+  bytes the answer comes back larger than it went in. And that `gzipSync` on the
+  8.8 MB graph body blocks the loop **30.6 ms and fires zero timer callbacks**
+  while it does, against 43 in an idle 50 ms, where the promisified form costs
+  the same wall clock (28.7 ms) and spends it on the threadpool — which is the
+  whole reason this process, which carries the fleet's guards on that loop, does
+  not take the synchronous call. The four before/after pairs (graph 8.8 MB →
+  488 KB, `/api/runs` 699 KB → 174 KB, `/api/branches` 255 KB → 76 KB,
+  `/api/usage` 52 KB → 10 KB) are gzip run over bodies captured at the start of
+  this pass, so they price what those routes answered that morning rather than
+  what they answer now.
+
+- **Where this fleet's money goes, over the whole recorded corpus.** Measured
+  2026-08-23 through this app's own `scanUsage()` and `pricing.ts` over 1,194
+  transcripts — **49,038 deduped turns, $6,537, 12.3 days**. Most of the bill is
+  carrying context rather than generating anything: **58% cache read and 20%
+  cache write**. Two readings of that split were taken separately in this pass
+  and they do not agree to the point — `readGuard.ts` records 58/20 and
+  `fileCostNotice.ts` records 60.5% read / 26.5% write / 13.0% output / 0.1%
+  input over the same corpus — so the split is good to a few points and no
+  better, while the direction is not in doubt. Both levers that landed in this
+  pass rest on the direction alone, which is the only reason the disagreement is
+  recorded here rather than resolved.
+
+  Split on the transcripts' own `isSidechain` flag, a tool call costs **13.55c
+  on a main thread against 5.01c in a sub-agent**, and within a thread it climbs
+  with position: **12.0c over turns 1–10 against 20.4c past turn 200**. The
+  first of those is confounded and the second is not — sub-agents are handed the
+  self-contained errands precisely because those are the ones worth delegating,
+  and easier work costs less per call in any context, whereas the gradient is
+  the same threads doing the same work further along. Count tool calls from
+  every assistant record rather than the deduped ones: Claude Code writes one
+  line per content block sharing a message id and a usage block, so the dedupe
+  that makes the cost right drops every `tool_use` after the first and triples
+  the apparent price per call.
+
+  **What is in those contexts, denominated in characters and never in money.**
+  Over the weekly window, **29,707 tool calls placed 97,970,351 characters**, of
+  which **`Read` is 57.1% and `Bash` 38.2%** — 95.3% between them. Characters
+  because a `tool_result` carries no usage block at all, so attributing a share
+  of the bill to one would be inventing it. Denominated in tokens instead:
+  **114,686,394 were placed into a context and re-read 30.6 times on average**,
+  which is **$26.53 per million placed** against Opus's $5/M list input. That
+  price is a **floor**, and knowably so — a re-written cache prefix counts twice
+  in the denominator, which understates the multiple and therefore the price.
+
+  **And the counterfactual, which is not a forecast.** Every one of this
+  install's 327 runs is Opus. Repricing each recorded turn at sonnet-5's rate on
+  the day it ran takes **$3,043.09 to $1,241.30**: **0.408×, not the 0.60× the
+  rate table implies today**, because Sonnet's introductory price runs to
+  2026-09-01. It is arithmetic over the tokens that were actually produced, so
+  it does not know that the same task on a smaller model may take more turns,
+  and the card that renders it says so in the same breath.
+
+- **Four things read out of the pinned CLI bundle rather than run.** All four
+  decide the shape of something that shipped in this pass, and all four fail
+  silently if they are wrong, which is why they were read rather than assumed —
+  and reading a bundle is not running one, so each stays on this footing until a
+  billed run says otherwise. `PreToolUse` hook output is validated against a
+  discriminated union keyed on `hookSpecificOutput.hookEventName`, carrying
+  `permissionDecision` of allow/deny/ask/defer: a deny missing the event name is
+  not a refusal, it is output the CLI discards without a word. A plugin's
+  `hooks/hooks.json` takes the wrapper shape
+  `{"hooks": {"PreToolUse": [{matcher, hooks: […]}]}}`, which is not the
+  settings-file shape, and the wrong one registers nothing — again silently.
+  `agent_id` appears on hook stdin **only inside a sub-agent**, which is what
+  lets a hook tell the two apart at all. And the CLI's own whole-file read is
+  capped at **25,000 tokens** and truncated to the **first 2,000 lines** ("was
+  too large and has been truncated to the first 2000 lines"), which is why a cap
+  on a read measures the read rather than the file: a long thin file never
+  reaches a cap it would otherwise be refused for.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
@@ -2935,6 +3066,61 @@ through before trusting this unattended:
   first visit whose graph fetch *fails* still persists a slider moved
   afterwards — the persist is held back while a seed is owed, and the error
   branch is the only thing that releases the hold.
+
+- **The whole of the 2026-08-23 pass, because none of it ran against a real
+  agent or a rebuilt container.** The entries in the section above are
+  measurements of the container as it *was*, of the transcript corpus, and of
+  the CLI bundle. Nothing after them was executed: no `docker compose up
+  --build`, no browser, no billed run. Five things follow, and they fail
+  differently.
+
+  - **That `--plugin-dir` registers a plugin's *hooks* has never been observed
+    here**, so the read guard may do nothing whatever when an operator switches
+    it on. What `vaultSkill.ts` measured is that the flag delivers a plugin's
+    *skills*, which is a different component of the same object. The evidence
+    for hooks is indirect and one-sided: the CLI carries a
+    `--plugin-dir-no-mcp` variant, which only means anything if the plain flag
+    loads every component, and the hooks loader is generic over plugin objects
+    rather than over installed ones. The symptom of it being false is the
+    feature being absent, which is indistinguishable from the setting being off
+    — and off is what it ships as. Confirming it costs one billed run:
+    switch `readGuard` on, spawn a cycle, and read the CLI's own debug output
+    for the hook registration the same way the skill load was read.
+  - **The fresh-start lever's saving is unmeasured, and the measurement that
+    would settle it is a specific one.** `freshStartContextTokens` opens a cycle
+    without `--resume` past a threshold, trading tokens for re-discovery; the
+    prices either side of that trade are measured (a two-cycle run averaged
+    $19.19 against $10.05 for one; 12.0c a call early against 20.4c late) and
+    the *net* is not. What would settle it is a matched pair of runs on one
+    task, one arm each way, compared on total spend **and** on whether the task
+    finished. Never a within-run before/after: cost per call climbs with
+    position all on its own, so the second half of any run is dearer than the
+    first whatever this setting says — the same trap the `--autocompact` entry
+    above records as a phase contrast.
+  - **The file-cost notice has never been seen on a real argv, and not one
+    avoided read has been measured.** What is measured is the price of the reads
+    it is trying to prevent — `orchestrator.ts` at ~116,000 tokens read 496
+    times across 78 runs, `workflows.ts` 68,000 over 185 — and the arithmetic
+    that one avoided full read of the first is worth about $3.19 in the re-reads
+    and cache writes behind it. That an agent handed a price list reads less is
+    the claim, and it is untested. Its opposite failure is cheap to check and
+    has not been checked either: that `runs.file_cost_notice` is byte-identical
+    on cycle 1 and cycle 2 of one run, since a notice that drifted inside a run
+    would cold-start a 190,000-token prefix and cost far more than it could
+    save.
+  - **No page has been rendered from this build.** The new dashboard card
+    (*What filled the context*) and the counterfactual column beside the agent
+    breakdown, the narrower runs-list and workflows-list payloads, the run
+    page's poll standing down on a terminal row, and the Land row's wrapped
+    select are verified by types and arithmetic only. The Land fix has one
+    measurement under it and it is of the stylesheet rather than of the row:
+    `.w-auto` is emitted at byte 15178 and `.w-full` at 15197 with the same
+    specificity, so the later one won and the select resolved to 100% whatever
+    the call site passed. Nobody has seen the button come back onto its row.
+  - **The graph route's "after" byte figure is computed from the new code**,
+    as the entry above says, rather than curled from a server — and the same is
+    true of the workflow list's. Both are the arithmetic that justified the
+    change, not a reading of the change.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

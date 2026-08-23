@@ -25,7 +25,9 @@
 into exact token volumes and costs, and reads your real utilisation percentage
 from the same first-party endpoint `claude /usage` calls. 5-hour window, weekly
 quota, burn rate, projected exhaustion, and breakdowns by model, project, agent,
-skill and reasoning effort.
+skill and reasoning effort. Beside those five, one reading of what the money was
+spent *carrying* — which tools filled those contexts, in characters rather than
+dollars, since a tool result carries no price of its own.
 
 **Spend it deliberately.** Point a run at a folder, give it a task and a budget,
 and it drives `claude -p` headlessly in a loop — re-checking the guard before
@@ -301,6 +303,17 @@ Never a request body, a query string, a cookie or a token: `actor` says *how* a
 caller authenticated (`session`, `bearer`, `capability`, `open`) and never with
 what. The table keeps its newest 20,000 lines.
 
+That cap is why one refusal is deliberately **not** in there. `/api/mcp` is the
+one route that authenticates itself rather than passing the shared-secret gate,
+so a request carrying no live capability reaches the handler — and auditing it
+would hand anybody who can reach that path a lever on the table itself: twenty
+thousand correctly-refused requests, and every line naming a run that was
+started or a sign-in that failed is evicted. Those refusals go to the container's
+stdout instead, so somebody hammering the path is still visible without being
+able to push anything out. A tool call refused under a *real* capability is
+audited as it always was, because that is the burst you come looking for
+afterwards.
+
 ---
 
 ## Read this before you trust a number
@@ -325,7 +338,13 @@ name on it: **[docs/limits-and-accuracy.md](docs/limits-and-accuracy.md)**.
 
 Agents produce data on three different volumes, and all three grow with the work
 rather than with your settings. What each one is bounded by is on
-**Settings → Storage**, which also shows what is in it right now.
+**Settings → Storage**, which also shows what is in each of them. The two
+figures that come from walking a directory — checkouts and transcripts — are
+measured once and reused for five minutes rather than re-walked per reader: on a
+real checkout store that walk is 88,325 `lstat` calls and seconds of wall clock,
+and two people opening the page together each used to pay it in full. Nothing
+that *deletes* reads the cached figure. Every sweep decides from the database,
+from git, or from its own walk.
 
 | Store | Where | Grows with | Kept for |
 |---|---|---|---|

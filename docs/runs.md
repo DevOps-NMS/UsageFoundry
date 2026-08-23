@@ -50,8 +50,9 @@ limit, or the cycle cap) ends it for good.
 
 A dropped connection is a third thing again, and it is handled in every mode.
 `API Error: Connection closed mid-response`, an overloaded upstream, a burst of
-429s — none of these say anything about your allowance or about the task, and
-all of them clear in seconds.
+429s — none of these say anything about your allowance or about the task. The
+first two clear in seconds. A 429 does not, and is handled apart from them
+below.
 
 Often Claude Code has already dealt with it before UsageFoundry sees it: when a
 stream drops part-way, the CLI finalises what it had and carries the work cycle
@@ -70,6 +71,23 @@ down ends the run inside a minute and a half and says how many attempts it made.
 Each attempt is one line in the run log. A bad key, a malformed request or an
 exhausted credit balance is not in this category and still fails immediately:
 retrying those buys three more copies of the same answer.
+
+**A 429 climbs a much slower ladder, and it is the one failure whose cause is
+this app.** A dropped socket clears in seconds whatever anybody does. A rate
+limit at twenty-five concurrent runs against one account *is* your own request
+rate, so it lasts exactly as long as the fleet keeps asking — and seconds-apart
+retries are three fleet-wide waves back into the condition that produced it. So
+a work cycle refused for rate waits **30 seconds, then 2, 5 and 10 minutes**,
+each rung spread by a jitter of up to half its own length so runs stop arriving
+together, and gives up after **five attempts** — between roughly 17 and 26
+minutes of backing off. It is not parked while it waits: the run stays
+*running* and holds its folder, its isolated checkout and one of your
+concurrent-run slots for the whole of it, and its own time limit is re-read
+before each re-spawn, so `maxDurationMinutes` still ends it. If the fifth
+attempt is refused too, the run ends **failed** with a reason that says how many
+attempts it made, over how long, and that the lever is
+**Settings → Runs at the same time** rather than patience: waiting changes
+nothing that lowering the concurrent-run limit would not change faster.
 
 Only the 5-hour window is ever waited out, because it is the only limit here that
 refills on its own, on a schedule, without being told anything. A weekly window
@@ -118,6 +136,18 @@ breakdown of a run's cost, so it over-counts rather than under-counts, which is
 the direction a ceiling should err in. The dashboard shows it as its own card,
 and hatched rather than empty when no limit is set. It ships off, because no
 single figure is right for both a laptop and a fleet.
+
+Over-counting has to stay *bounded*, though, and two shapes used to make it
+unbounded. A **parked** run has no finish time — it is waiting for the 5-hour
+window, not finished — so its spend never aged out of the window at all: three
+runs parked at $40 against a $100 limit closed every door in the app for as long
+as they stayed parked, under a refusal saying the spend would age out. A parked
+run is now aged from the moment it parked, while one that parked yesterday and
+is spending right now still counts whole. And a **chat** contributed the entire
+lifetime cost of its thread the moment one message was sent into it, so a
+four-cent question put to a fortnight-old conversation charged the fortnight to
+today — closing the same doors and stopping runs already in flight. Each turn
+now carries its own date, and the window sums the turns inside it.
 
 ### When the agent cannot finish: Needs review
 
@@ -261,6 +291,14 @@ Two controls pick up runs by the handful: the notice at the top of **Runs** afte
 a restart, and **Pick up N stopped** on the Fleet card. Both act on a set, so a
 run you deliberately stopped is in it — and a press aimed at the other
 twenty-four starts it again.
+
+That sheet asks for two limits, a cycle count and a spending cap, and they apply
+to every run in the batch. They are laid **over** each run's own rather than in
+place of it: a time limit, a token ceiling or an enforcement mode you chose per
+run and the sheet never asked about survives the press. And a run that would be
+left with neither a cycle cap nor a time limit is refused by name and left
+alone, exactly as one picked up on its own page is — the loop needs a limit that
+only moves one way, and a bulk press is not a way around that.
 
 **Set aside** on the run's page is the answer. Both controls skip it from then
 on, and their counts drop by one so the number on the button is what the press
@@ -417,7 +455,10 @@ install that reading is the account's own percentage, which is discarded after a
 hour without a fresh answer, so acting on its absence would turn an unreachable
 host into every fraction-guarded run in the install stopping at its next cycle
 boundary. The run logs, once, that the guard cannot be enforced and carries on
-under its remaining guards.
+under its remaining guards — and *every* guard that can be read is evaluated
+before that verdict is returned. That ordering is the whole of it: the
+unenforceable weekly guard used to answer first, so a run at 97% of a 50%
+5-hour guard spawned another cycle anyway, under a log line about the weekly one.
 
 `maxRunCostUSD` is the one guard that needs **no ceiling** — it is absolute. Use
 it on day one, before you have enough history to calibrate.

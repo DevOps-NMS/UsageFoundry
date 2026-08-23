@@ -257,11 +257,16 @@ and nowhere else. Two reasons for bounding at the write rather than at the read:
 it is what `log()` does with `MAX_LOG_CHARS` and what `runIteration` does with the
 stderr tail, and a second bound at a second place is a second number to keep in
 step. Two reasons for 2000: `RunDTO` is polled every three seconds by the run
-detail page and is the row shape the runs list ships for every row, so an
-unbounded model-authored blob multiplies by the length of the list; and the full
+detail page and was, when this was written, the row shape the runs list shipped
+for every row, so an unbounded model-authored blob multiplied by the length of
+the list; and the full
 text is not lost — it is the cycle's assistant output in `run_events`, which the
 Report tab already renders. Truncate at 2000 characters with a trailing `…` so a
-clipped reason cannot read as a complete one.
+clipped reason cannot read as a complete one. (Both halves of the first reason
+have since narrowed: the runs list reads a DTO of its own and this field is not
+on it, and the detail page's poll stands down once the run is terminal, which a
+`needs-review` run is. The bound stays where it is, for the second reason and
+for the one above it.)
 
 **`reported_done` must not be set.** It is the sole input to `reopenPrompt`'s
 pushback branch (`orchestrator.ts:7684`) and it means one thing: the agent replied

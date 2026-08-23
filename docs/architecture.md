@@ -9,6 +9,10 @@ src/lib/
                    for the compaction records, off the metering path entirely
   windows.ts       5-hour block + weekly rollups, burn rate, projection,
                    calendar day/week/month history (display only)
+  toolComposition.ts  what *filled* those contexts — tool calls paired with the
+                   size of the result that answered them, denominated in
+                   characters because a `tool_result` carries no usage block;
+                   its own dedupe key and rollup, never a cost source
   pricing.ts       per-model rates, cache-TTL multipliers, fast mode
   adminApi.ts      Admin API client (rate limits, usage, cost) w/ pagination
   budget.ts        policy evaluation
@@ -18,6 +22,13 @@ src/lib/
                    `compactionNotice` say what a compaction took — read off the
                    cycle's own argv, quoting the vendor's table, acting on
                    nothing
+  fileCostNotice.ts  what a `Read` of this repository's largest files costs,
+                   generated once at `createRun` and frozen on the row, because
+                   the appended prompt is part of the cached prefix
+  readGuard.ts     an optional generated hook plugin (off by default) that
+                   refuses a whole re-read and caps one read, delivered on the
+                   same `--plugin-dir` list; root-owned code, agent-writable
+                   ledger beside it
   git.ts           the one way this app runs git — argv only, environment scrubbed
   diff.ts          a run's <base>...<branch> as a budgeted file list + patches
   review.ts        the on-demand reviewer (a third, deliberate child process)
