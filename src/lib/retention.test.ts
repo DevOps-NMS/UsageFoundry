@@ -27,6 +27,7 @@ const {
   planCheckoutReclaim,
   reclaimableCheckouts,
   retentionCutoff,
+  treeSize,
 } = require("./retention") as typeof import("./retention");
 
 /**
@@ -35,8 +36,9 @@ const {
  *
  * Every function here decides something that lands on disk and throws nothing,
  * which is `releasableRuns`' grounds for a test. This file holds the ones that
- * need no database and no filesystem; `retentionSweep.test.ts` beside it drives
- * the SQL, which is its own decision and its own file.
+ * need no database; `retentionSweep.test.ts` beside it drives the SQL, which is
+ * its own decision and its own file. `treeSize` is the one case here that
+ * reaches the filesystem, and it earns the exception on its own terms below.
  */
 
 describe("clipToolInput", () => {
@@ -301,5 +303,86 @@ describe("expiredTranscripts", () => {
       }),
       [],
     );
+  });
+});
+
+/**
+ * The one figure on the Storage card that is measured rather than counted.
+ *
+ * Not a pure function, and the exception is the same one `settleOnExit` earns:
+ * what can go wrong is a property of the concurrency and nothing else, so there
+ * is no value to hand a pure function and no stub that would pin it. The stats
+ * this sums are issued and left outstanding — that is the whole of why the walk
+ * is 1,750 ms rather than 5,981 — and a batch the walk forgets to wait for is a
+ * total that is silently short. An operator reading 1.4 GB where the store
+ * holds 2.6 sets a horizon against a store half the size of the real one, and
+ * nothing on the page, in the log or in the types says so.
+ *
+ * The tree below is deliberately larger than one batch and does not divide into
+ * whole ones: the tail is where a drain that only fires on a full batch loses
+ * its files, and it is the case a small fixture would pass either way.
+ */
+describe("treeSize", () => {
+  const bytesOf = (i: number) => 1 + (i % 17);
+
+  const tree = (name: string, files: number): string => {
+    const root = path.join(tmp, "trees", name);
+    for (let i = 0; i < files; i++) {
+      // Spread across nested directories, so a batch spans a recursion the way
+      // a real checkout's `node_modules` does rather than one flat readdir.
+      const dir = path.join(root, `d${Math.floor(i / 7)}`, `e${i % 3}`);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `f${i}`), "x".repeat(bytesOf(i)));
+    }
+    return root;
+  };
+
+  const totalOf = (files: number) => {
+    let sum = 0;
+    for (let i = 0; i < files; i++) sum += bytesOf(i);
+    return sum;
+  };
+
+  it("counts every file, including the ones past the last full batch", async () => {
+    // 200 crosses the bound three times and leaves a remainder, which is the
+    // shape a drain that never runs at the end reports short.
+    const root = tree("many", 200);
+
+    const { bytes, partial } = await treeSize(root, { left: 120_000 });
+
+    assert.equal(bytes, totalOf(200), "the total is every file's size, not a batch's");
+    assert.equal(partial, false, "a budget that was never spent is not a partial answer");
+  });
+
+  it("gives a symlink neither its bytes nor a walk", async () => {
+    const root = tree("links", 3);
+    const outside = path.join(tmp, "trees", "outside");
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, "big"), "x".repeat(50_000));
+    fs.symlinkSync(path.join(outside, "big"), path.join(root, "big-link"));
+    fs.symlinkSync(outside, path.join(root, "dir-link"));
+
+    const { bytes } = await treeSize(root, { left: 120_000 });
+
+    assert.equal(
+      bytes,
+      totalOf(3),
+      "a link out of the store contributes neither the file's bytes nor the directory's",
+    );
+  });
+
+  it("says so when the budget runs out, and answers with what it had", async () => {
+    const root = tree("bounded", 40);
+    const budget = { left: 12 };
+
+    const { bytes, partial } = await treeSize(root, budget);
+
+    assert.equal(partial, true, "a walk that stopped early is a floor, not a total");
+    assert.ok(bytes > 0, "what it did measure is still reported");
+    assert.ok(
+      bytes < totalOf(40),
+      "and it is a floor: a bounded walk cannot have reached every file",
+    );
+    assert.equal(budget.left, 0, "the budget is spent, so a second store gets none of it");
   });
 });

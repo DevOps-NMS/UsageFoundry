@@ -724,13 +724,56 @@ function sizeOf(file: string): number {
  */
 const MAX_WALK_ENTRIES = 120_000;
 
-/** Bytes under a directory, bounded, following no symlink. */
-async function treeSize(
+/**
+ * `lstat` calls in flight during one walk.
+ *
+ * Awaiting them one at a time is what this card actually cost: replaying the
+ * walk over a real checkout store — 88,325 entries, 2.62 GB — took 5,981 ms
+ * serially, which was essentially the whole of `GET /api/storage`, against
+ * 1,750 ms with 64 of them outstanding. A stat is a syscall that spends its
+ * life waiting on a disk, so a serial walk leaves the pool that services it
+ * idle for the whole of that difference.
+ *
+ * Bounded rather than fanned out whole, `SCAN_CONCURRENCY`'s reason with a
+ * different ceiling. What that number protects is `nofile`: `readAppended`
+ * holds an open descriptor and a buffer the size of the file's unread
+ * remainder for the duration of its read, so an unbounded fan-out holds every
+ * one of both at once. An `lstat` holds neither — it is one libuv request that
+ * ends when the syscall does — so what an unbounded fan-out costs here is depth
+ * instead: 88,325 requests and their promises resident at once, on the event
+ * loop that is also carrying every live guard's ticker. 64 keeps the pool
+ * saturated without the queue becoming a store of its own.
+ */
+const TREE_STAT_CONCURRENCY = 64;
+
+/**
+ * Bytes under a directory, bounded, following no symlink.
+ *
+ * Exported for `runRetentionSweep`'s reason — so a test can drive it — and it
+ * earns one despite reaching the filesystem rather than being pure: what it can
+ * now get wrong is a total that is quietly *short*, because the stats it sums
+ * are outstanding when the walk that issued them returns. A store that reads as
+ * 1.4 GB when it holds 2.6 is the figure an operator sets a horizon against,
+ * and nothing about it looks wrong.
+ */
+export async function treeSize(
   root: string,
   budget: { left: number },
 ): Promise<{ bytes: number; partial: boolean }> {
   let bytes = 0;
   let partial = false;
+
+  // Drained in whole batches rather than through a worker pool, which is where
+  // this differs from `mapWithLimit`: that one exists because transcript sizes
+  // vary by three orders of magnitude, so a batch runs at the speed of its
+  // slowest member. Every unit of work here is one `lstat`, and a batch's
+  // slowest member is its typical one.
+  let pending: Array<Promise<void>> = [];
+  const drain = async (): Promise<void> => {
+    const batch = pending;
+    pending = [];
+    await Promise.all(batch);
+  };
 
   const walk = async (dir: string): Promise<void> => {
     let entries;
@@ -753,15 +796,29 @@ async function treeSize(
         await walk(full);
         continue;
       }
-      try {
-        bytes += (await fsp.lstat(full)).size;
-      } catch {
-        /* removed between the readdir and the stat */
-      }
+      // Rejection is handled here rather than at the await, because one of
+      // these sits unawaited until its batch fills: an unhandled rejection on a
+      // file that vanished between the readdir and the stat would take the
+      // process down, where the serial version simply counted it as nothing.
+      pending.push(
+        fsp.lstat(full).then(
+          (stat) => {
+            bytes += stat.size;
+          },
+          () => {
+            /* removed between the readdir and the stat */
+          },
+        ),
+      );
+      if (pending.length >= TREE_STAT_CONCURRENCY) await drain();
     }
   };
 
   await walk(root);
+  // The tail, and the batch a spent budget abandoned mid-directory: both are
+  // already in flight, and a total that returned without them would be short by
+  // however many the last drain did not reach.
+  await drain();
   return { bytes, partial };
 }
 
@@ -789,13 +846,87 @@ async function checkoutSizes(): Promise<StorageReport["checkouts"]> {
 }
 
 /**
+ * How long a measured store size is reused, and why it is measured at all.
+ *
+ * Five minutes, `STORE_TTL_MS` in `status.ts` for its reasons: the answer moves
+ * slowly — a store grows when a run installs a dependency tree and shrinks only
+ * when a sweep fires, six hours apart — and the measurement is by three orders
+ * of magnitude the costliest thing on this route. The two `COUNT(*)`s beside it
+ * are 0.05 ms and 0.01 ms; the walk was 5,981 ms, and two operators opening the
+ * Settings page together each paid it in full rather than sharing one.
+ *
+ * **Nothing that deletes reads this.** The cache is on the *card's* reading and
+ * deliberately not on `treeSize`, which is the shape that keeps a size five
+ * minutes old out of a removal: `sweepCheckouts` decides from the database and
+ * from git, `sweepTranscripts` from its own walk of `~/.claude/projects`, and
+ * neither asks for a size at all. A figure this old is something an operator
+ * reads; it is not something to delete against, and the only way it could
+ * become one is if a future sweep reached for `measuredStores` instead.
+ */
+const STORE_TTL_MS = 5 * 60_000;
+
+interface MeasuredStores {
+  checkouts: StorageReport["checkouts"];
+  transcripts: StorageReport["transcripts"];
+  measuredAt: number;
+}
+
+/**
+ * `globalThis`-pinned for the sweeper's timer's reason: module state that is not
+ * pinned silently resets on every request in dev, which is where a walk that
+ * has just been made shareable would go back to being run once per reader.
+ */
+const storeSizes = ((globalThis as unknown as {
+  __ufStorageSizes?: {
+    value: MeasuredStores | null;
+    inFlight: Promise<MeasuredStores> | null;
+  };
+}).__ufStorageSizes ??= { value: null, inFlight: null });
+
+async function measureStores(now: number): Promise<MeasuredStores> {
+  // Sequential rather than concurrent: both walks are bounded at
+  // `TREE_STAT_CONCURRENCY` stats each, and running them together would put
+  // twice that on the loop the live guards' tickers share for no better figure.
+  const checkouts = await checkoutSizes();
+  const transcripts = await transcriptSize();
+  return { checkouts, transcripts, measuredAt: now };
+}
+
+/** The measured half of the report, at most one walk at a time. */
+function measuredStores(now: number): Promise<MeasuredStores> {
+  const cached = storeSizes.value;
+  if (cached && now - cached.measuredAt < STORE_TTL_MS) {
+    return Promise.resolve(cached);
+  }
+  // Single-flight: a second reader arriving during the walk joins it rather
+  // than starting one, which is the half of this that a TTL alone does not
+  // give — the measurement takes seconds, so concurrent readers are the normal
+  // case rather than a race.
+  storeSizes.inFlight ??= measureStores(now)
+    .then((value) => {
+      storeSizes.value = value;
+      return value;
+    })
+    .finally(() => {
+      storeSizes.inFlight = null;
+    });
+  return storeSizes.inFlight;
+}
+
+/**
  * What is on disk right now, for the one card that says so.
  *
  * Measured rather than derived from the retention settings: a horizon says what
  * *will* be discarded, and an operator deciding whether to change it is asking
  * what is there now.
+ *
+ * The two figures the database can answer are read fresh on every call and only
+ * the walks are cached, so the row counts and the sweep's own record move the
+ * moment a sweep does — which is the half of this card an operator watches
+ * after changing a horizon.
  */
-export async function storageReport(): Promise<StorageReport> {
+export async function storageReport(now = Date.now()): Promise<StorageReport> {
+  const measured = await measuredStores(now);
   const count = (sql: string) =>
     (db().prepare(sql).get() as { n: number }).n;
 
@@ -807,8 +938,8 @@ export async function storageReport(): Promise<StorageReport> {
       runEvents: count("SELECT COUNT(*) AS n FROM run_events"),
       telemetryRows: count("SELECT COUNT(*) AS n FROM otlp_requests"),
     },
-    checkouts: await checkoutSizes(),
-    transcripts: await transcriptSize(),
+    checkouts: measured.checkouts,
+    transcripts: measured.transcripts,
     lastSweep: lastSweep(),
   };
 }
