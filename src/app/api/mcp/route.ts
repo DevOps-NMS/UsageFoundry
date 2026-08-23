@@ -51,7 +51,8 @@ import { chatGuards } from "@/lib/settings";
 import { githubRemotes, scanWorkspace } from "@/lib/workspace";
 import { mountById } from "@/lib/config";
 import { fmtUSD } from "@/lib/format";
-import { auditMutation } from "../../../lib/requestLog";
+import { auditMutation, sourceAddress } from "../../../lib/requestLog";
+import { opsLog } from "../../../lib/ops";
 
 /**
  * What one `get_run_diff` may return.
@@ -631,17 +632,46 @@ function toolsFor(subject: CapabilitySubject) {
     : [...SHARED_TOOLS, ...BLOCK_TOOLS];
 }
 
-async function postHandler(req: Request) {
+/**
+ * The capability check, and why it stands outside the audited handler.
+ *
+ * `middleware.ts` exempts this path from the shared-secret gate, so a request
+ * reaching here has passed nothing yet — this check *is* the authentication for
+ * the whole tool surface, and every answer other than the 401 below is given
+ * with a subject in hand. What it must not do is answer that 401 from inside
+ * `auditMutation`: the wrapper records every request it wraps and then evicts
+ * everything past the 20,000-row cap, so auditing a credential-free refusal
+ * hands any caller who can reach this path a lever on the audit table itself —
+ * twenty thousand correctly-refused requests, and every line naming a run that
+ * was started, a setting that was changed or a sign-in that failed is gone.
+ *
+ * Only the handler that already has a subject is wrapped, which keeps the case
+ * the table exists for: a real capability whose tool call is refused — a
+ * deleted template, a folder it may not have — still leaves a line, because
+ * that is the burst somebody comes looking for afterwards.
+ */
+export async function POST(req: Request) {
   const header = req.headers.get("authorization") ?? "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7) : "";
   const subject = subjectForCapability(bearer);
   if (!subject) {
+    // On stdout rather than in `request_log`, which is the whole point: the
+    // table is capped and evicts its oldest line on every insert, so the one
+    // record a credential-free caller may write must be the one they cannot
+    // use to push anything out. Leaving no trace at all was not an option
+    // either — this is the path an unauthenticated caller reaches, so somebody
+    // hammering it is exactly what an operator needs to be able to see.
+    opsLog("warn", "mcp.unauthorized", { address: sourceAddress(req.headers) });
     return NextResponse.json(
       { error: "Unauthorized" },
       { status: 401 },
     );
   }
 
+  return auditMutation((request: Request) => postHandler(request, subject))(req);
+}
+
+async function postHandler(req: Request, subject: CapabilitySubject) {
   let body: JsonRpcRequest | JsonRpcRequest[];
   try {
     body = (await req.json()) as JsonRpcRequest | JsonRpcRequest[];
@@ -668,7 +698,15 @@ async function postHandler(req: Request) {
   return NextResponse.json(Array.isArray(body) ? replies : replies[0]);
 }
 
-/** The transport's other verbs. Neither is needed: there is no server stream. */
+/**
+ * The transport's other verbs. Neither is needed: there is no server stream.
+ *
+ * Neither is audited, and DELETE is the one that used to be: a 405 answered
+ * without reading the request mutates nothing, so it has nothing to tell an
+ * audit — and since it is answered before any credential is looked at, the row
+ * it wrote was a free line against the 20,000-row cap for anybody who could
+ * reach this path.
+ */
 export async function GET() {
   return NextResponse.json(
     { jsonrpc: "2.0", id: null, error: { code: -32601, message: "No server stream" } },
@@ -676,8 +714,7 @@ export async function GET() {
   );
 }
 
-// Takes the request it does not read, so the audit wrapper has one to log.
-async function deleteHandler(_req: Request) {
+export async function DELETE() {
   return new Response(null, { status: 405 });
 }
 
@@ -1649,8 +1686,3 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
       "It is waiting for the operator to approve it; nothing is running.",
   );
 }
-
-/** Wrapped so the request that changed something is on the audit log. */
-export const POST = auditMutation(postHandler);
-/** Wrapped so the request that changed something is on the audit log. */
-export const DELETE = auditMutation(deleteHandler);

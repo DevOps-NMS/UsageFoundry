@@ -84,6 +84,11 @@ export function sourceAddress(headers: Headers): string | null {
 
 /** Which credential class the caller used. Reads headers, stores neither. */
 export function actorOf(req: Request, path: string): RequestActor {
+  // Named by path rather than by header, and that is only honest because
+  // `/api/mcp` answers a request carrying no live capability with a 401 from
+  // *outside* this wrapper. Wrap that route's refusal and this line starts
+  // calling an unauthenticated caller a capability holder — and every such
+  // caller starts spending the row cap below.
   if (path === "/api/mcp") return "capability";
   if ((req.headers.get("authorization") ?? "").startsWith("Bearer ")) return "bearer";
   if (/(?:^|;\s*)uf_session=/.test(req.headers.get("cookie") ?? "")) return "session";
