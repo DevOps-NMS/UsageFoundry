@@ -13,6 +13,7 @@ import {
   capGraph,
   coerceGraphSettings,
   defaultGraphSettings,
+  expandGraph,
   filterGraph,
   graphTags,
   localGraph,
@@ -24,6 +25,7 @@ import {
   type GraphGroup,
   type GraphTag,
   type GraphView,
+  type KnowledgeGraph,
   type KnowledgeGraphSettings,
 } from "@/lib/knowledgeGraph";
 import { KnowledgeGraphCanvas } from "@/components/KnowledgeGraphCanvas";
@@ -71,7 +73,7 @@ const VIEW_OPTIONS: readonly SegmentedOption<GraphView>[] = [
   { value: "local", label: "This note" },
 ];
 
-const EMPTY_GRAPH: KnowledgeGraphDTO = {
+const EMPTY_GRAPH: KnowledgeGraph = {
   nodes: [],
   edges: [],
   truncated: false,
@@ -89,7 +91,7 @@ export function KnowledgeGraphView({
   notePath: string | null;
   onOpenNote: (path: string) => void;
 }) {
-  const [graph, setGraph] = useState<KnowledgeGraphDTO | null>(null);
+  const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState<KnowledgeGraphSettings>(defaultGraphSettings);
   /** Nothing is written back until the stored value has been read in. */
@@ -135,7 +137,21 @@ export function KnowledgeGraphView({
       const res = await jsonRequest<KnowledgeGraphDTO>(GRAPH_URL);
       if (!live) return;
       if (res.ok) {
-        setGraph(res.data);
+        /* The edges arrive as positions in `nodes` — see `KnowledgeGraphEdgeDTO`
+           — and `expandGraph` throws on one that is out of range. Reported here
+           as the fetch failing, because a graph this browser cannot make sense
+           of and a graph it could not fetch leave the operator in the same
+           place, and the alternative is an unhandled rejection under a panel
+           that goes on saying it is loading. */
+        let expanded: KnowledgeGraph;
+        try {
+          expanded = expandGraph(res.data);
+        } catch (err) {
+          setError(pollFailureMessage(null, err instanceof Error ? err.message : String(err)));
+          seedable.current = false;
+          return;
+        }
+        setGraph(expanded);
         setError(null);
         /* The seed, and the one moment it can happen: nobody has been here
            before and this is the first sight of the vault. Both halves are
@@ -144,7 +160,7 @@ export function KnowledgeGraphView({
            back groups somebody had removed. */
         if (seedable.current) {
           seedable.current = false;
-          const seeded = tagGroups(graphTags(res.data));
+          const seeded = tagGroups(graphTags(expanded));
           if (seeded.length > 0) {
             setSettings((s) => (s.groups.length > 0 ? s : { ...s, groups: seeded }));
           }

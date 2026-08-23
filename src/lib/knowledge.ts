@@ -6,6 +6,8 @@ import type {
   KnowledgeBrowseDTO,
   KnowledgeEdgeDTO,
   KnowledgeFacetDTO,
+  KnowledgeGraphDTO,
+  KnowledgeGraphEdgeDTO,
   KnowledgeHeadingDTO,
   KnowledgeHealthDTO,
   KnowledgeLinkKindDTO,
@@ -1231,16 +1233,17 @@ export interface GraphFilter {
  * mean different things: the walk's says the vault was not all read, this one
  * says the answer was not all sent. Reporting one as the other would tell an
  * operator to widen a subpath that was never the problem.
+ *
+ * The edges are **projected** rather than handed over: this is the one place
+ * the internal `KnowledgeEdgeDTO` used to reach the wire, and eight of its ten
+ * fields have no reader on the other end — see `KnowledgeGraphEdgeDTO`, which
+ * carries the measurement. `knowledgeNoteView` below keeps the whole edge and
+ * must, so the two projections stay two.
  */
 export function knowledgeGraphView(
   index: KnowledgeIndex,
   filter: GraphFilter = {},
-): {
-  nodes: KnowledgeNodeDTO[];
-  edges: KnowledgeEdgeDTO[];
-  truncated: boolean;
-  capped: boolean;
-} {
+): KnowledgeGraphDTO {
   const kinds = new Set(filter.kinds?.length ? filter.kinds : (["note"] as const));
   const tag = filter.tag?.trim().replace(/^#/, "").toLowerCase() || null;
   const q = filter.q?.trim().toLowerCase() || null;
@@ -1263,8 +1266,18 @@ export function knowledgeGraphView(
   const all = [...index.nodes.values()].filter(matches);
   const capped = all.length > limit;
   const nodes = all.slice(0, limit);
-  const kept = new Set(nodes.map((n) => n.id));
-  const edges = index.edges.filter((e) => kept.has(e.from) && kept.has(e.to));
+
+  // The position map is what "both ends survived" is asked with as well as what
+  // the answer is written in, so an edge can never carry a position for a node
+  // this answer did not send.
+  const position = new Map(nodes.map((n, i) => [n.id, i]));
+  const edges: KnowledgeGraphEdgeDTO[] = [];
+  for (const edge of index.edges) {
+    const from = position.get(edge.from);
+    const to = position.get(edge.to);
+    if (from === undefined || to === undefined) continue;
+    edges.push([from, to]);
+  }
 
   return { nodes, edges, truncated: index.truncated, capped };
 }

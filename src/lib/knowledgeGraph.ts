@@ -20,7 +20,7 @@
  * note's title, aliases, path and tags, and the panel says so.
  */
 
-import type { KnowledgeEdgeDTO, KnowledgeNodeDTO } from "./apiTypes";
+import type { KnowledgeGraphDTO, KnowledgeNodeDTO } from "./apiTypes";
 
 /** The node id `/api/knowledge/graph` gives a note, from its vault path.
  *
@@ -301,9 +301,58 @@ export interface GraphFilters {
   showOrphans: boolean;
 }
 
+/**
+ * One link, as everything in the browser reads it: the ids of its two ends.
+ *
+ * The wire carries positions instead (`KnowledgeGraphEdgeDTO`, which says why)
+ * and `expandGraph` is the only thing that ever sees one. **Ids from there on,
+ * never indices**, because every stage below drops nodes — `filterGraph` by
+ * kind and by query, `localGraph` by reach, `capGraph` by degree — so a
+ * position into the answer's `nodes` stops meaning the same node the moment any
+ * of them runs. A stale index does not throw and does not draw nothing: it
+ * draws a line between two notes that are not linked, which is a wrong graph,
+ * and a wrong graph is still a graph.
+ */
+export interface GraphLink {
+  from: string;
+  to: string;
+}
+
 export interface GraphSlice {
   nodes: KnowledgeNodeDTO[];
-  edges: KnowledgeEdgeDTO[];
+  edges: GraphLink[];
+}
+
+/** A whole `/api/knowledge/graph` answer, decoded — a slice plus its two caps. */
+export interface KnowledgeGraph extends GraphSlice {
+  /** The vault walk hit its cap — not everything was indexed. */
+  truncated: boolean;
+  /** That answer hit its node cap — not everything indexed was sent. */
+  capped: boolean;
+}
+
+/**
+ * The wire's position pairs, back to node ids.
+ *
+ * Throws rather than dropping an edge whose position is out of range.
+ * `knowledgeGraphView` builds the positions out of the very array it sends
+ * beside them, so a mismatch is this app disagreeing with itself rather than
+ * bad input — and a graph quietly short of links is the one failure that cannot
+ * be seen in the picture it produces. The single caller catches it and reports
+ * it the way it reports a fetch that failed.
+ */
+export function expandGraph(dto: KnowledgeGraphDTO): KnowledgeGraph {
+  const edges = dto.edges.map(([from, to]) => {
+    const source = dto.nodes[from];
+    const target = dto.nodes[to];
+    if (!source || !target) {
+      throw new Error(
+        `knowledge graph link [${from}, ${to}] names a node outside the ${dto.nodes.length} this answer carries`,
+      );
+    }
+    return { from: source.id, to: target.id };
+  });
+  return { nodes: dto.nodes, edges, truncated: dto.truncated, capped: dto.capped };
 }
 
 /**
@@ -386,8 +435,8 @@ export function localGraph(
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   if (!byId.has(focusId)) return { nodes: [], edges: [] };
 
-  const out = new Map<string, KnowledgeEdgeDTO[]>();
-  const into = new Map<string, KnowledgeEdgeDTO[]>();
+  const out = new Map<string, GraphLink[]>();
+  const into = new Map<string, GraphLink[]>();
   for (const edge of graph.edges) {
     if (edge.from === edge.to) continue;
     const forward = out.get(edge.from);
@@ -399,14 +448,14 @@ export function localGraph(
   }
 
   const depthOf = new Map<string, number>([[focusId, 0]]);
-  const treeEdges = new Set<KnowledgeEdgeDTO>();
+  const treeEdges = new Set<GraphLink>();
   let frontier = [focusId];
   const maxDepth = Math.max(1, Math.min(5, Math.floor(options.depth)));
 
   for (let hop = 1; hop <= maxDepth && frontier.length > 0; hop++) {
     const next: string[] = [];
     for (const id of frontier) {
-      const reachable: Array<[KnowledgeEdgeDTO, string]> = [];
+      const reachable: Array<[GraphLink, string]> = [];
       if (options.outgoing) for (const e of out.get(id) ?? []) reachable.push([e, e.to]);
       if (options.incoming) for (const e of into.get(id) ?? []) reachable.push([e, e.from]);
 

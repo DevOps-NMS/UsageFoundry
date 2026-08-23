@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import type { KnowledgeEdgeDTO, KnowledgeNodeDTO } from "./apiTypes";
+import type { KnowledgeGraphDTO, KnowledgeNodeDTO } from "./apiTypes";
 import {
   GRAPH_DEFAULTS,
   GRAPH_RANGES,
@@ -9,6 +9,7 @@ import {
   capGraph,
   coerceGraphSettings,
   defaultGraphSettings,
+  expandGraph,
   filterGraph,
   graphTags,
   groupIndexFor,
@@ -19,6 +20,7 @@ import {
   tagGroupQuery,
   tagGroups,
   type GraphFilters,
+  type GraphLink,
   type GraphSlice,
 } from "./knowledgeGraph";
 
@@ -43,6 +45,11 @@ import {
  * **Saved settings are a browser value that survives an upgrade.** They arrive
  * as `unknown`, from a store an operator can edit and a previous release wrote,
  * and one field falling to `undefined` is a slider whose position is `NaN`.
+ *
+ * **The wire's links are positions rather than ids**, and `expandGraph` is the
+ * only thing that ever reads one. A position resolved against the wrong array,
+ * or off by one, is not a missing line: it is a line between two notes that are
+ * not linked, in a picture nobody can check against the vault.
  */
 
 function note(path: string, over: Partial<KnowledgeNodeDTO> = {}): KnowledgeNodeDTO {
@@ -77,22 +84,52 @@ function other(
   };
 }
 
-function edge(from: string, to: string): KnowledgeEdgeDTO {
-  return {
-    from,
-    to,
-    kind: "wikilink",
-    target: to,
-    label: null,
-    heading: null,
-    block: null,
-    line: 1,
-    resolved: true,
-    toNotePath: to.startsWith("note:") ? to.slice(5) : null,
-  };
+function edge(from: string, to: string): GraphLink {
+  return { from, to };
 }
 
 const FILTERS: GraphFilters = { ...GRAPH_DEFAULTS.filters };
+
+/* ------------------------------ the wire -------------------------------- */
+
+test("a link's positions become the ids of the nodes they point at", () => {
+  const nodes = [note("a.md"), note("b.md"), other("tag:x", "tag")];
+  const dto: KnowledgeGraphDTO = {
+    nodes,
+    // Deliberately not in node order, and one link back to an earlier node:
+    // reading a position as an offset from the previous link, or as a node's
+    // own index in some other array, both pass on a diagonal fixture.
+    edges: [
+      [2, 0],
+      [0, 1],
+      [1, 0],
+    ],
+    truncated: true,
+    capped: false,
+  };
+
+  const graph = expandGraph(dto);
+
+  assert.deepEqual(graph.edges, [
+    { from: "tag:x", to: noteNodeId("a.md") },
+    { from: noteNodeId("a.md"), to: noteNodeId("b.md") },
+    { from: noteNodeId("b.md"), to: noteNodeId("a.md") },
+  ]);
+  assert.deepEqual(graph.nodes, nodes, "the nodes come through whole and in order");
+  assert.equal(graph.truncated, true, "both caps survive the decode");
+  assert.equal(graph.capped, false);
+});
+
+test("a position outside the nodes throws rather than dropping the link", () => {
+  const dto: KnowledgeGraphDTO = {
+    nodes: [note("a.md")],
+    edges: [[0, 7]],
+    truncated: false,
+    capped: false,
+  };
+
+  assert.throws(() => expandGraph(dto), /\[0, 7\] names a node outside the 1/);
+});
 
 /* -------------------------------- queries ------------------------------- */
 

@@ -2164,9 +2164,36 @@ export interface KnowledgeStatusDTO {
   skillSearchScript: string | null;
 }
 
+/**
+ * One link of `GET /api/knowledge/graph`: two positions in the same answer's
+ * `nodes`.
+ *
+ * Its own type rather than a quietly weakened `KnowledgeEdgeDTO`, because that
+ * one is what `knowledgeNoteView` ships and the reader genuinely needs all ten
+ * of its fields — `target`, `resolved` and `toNotePath` are the three answers a
+ * wikilink in a body resolves to, and `label`, `heading`, `block` and `line`
+ * are what the backlink lists draw. A shared shape whose fields had silently
+ * gone would be wrong on the page that renders those links and correct nowhere
+ * it was checked. The graph reads two: which node each end is.
+ *
+ * Positions rather than the ids, and a pair rather than an object, because the
+ * ratio is what makes this the payload: measured on the vault this was written
+ * against, on the URL `KnowledgeGraphView` actually requests, 26,886 edges over
+ * 1,134 nodes — so every node id, which is a vault path, was on the wire an
+ * average of forty-seven times. 9,864,990 bytes whole; 4,601,846 with the eight
+ * unread fields dropped and the ids kept; 1,056,865 as `{ from, to }` positions;
+ * 734,233 as a pair.
+ *
+ * Nothing past the fetch ever sees one. `expandGraph` turns them back into ids
+ * at the boundary, so every filter, the local-graph walk, `capGraph` and the
+ * canvas keep reading `from`/`to` as the ids they always were — see the note on
+ * `GraphLink` for why an index must not survive a stage that drops nodes.
+ */
+export type KnowledgeGraphEdgeDTO = readonly [from: number, to: number];
+
 export interface KnowledgeGraphDTO {
   nodes: KnowledgeNodeDTO[];
-  edges: KnowledgeEdgeDTO[];
+  edges: KnowledgeGraphEdgeDTO[];
   /** The vault walk hit its cap — not everything was indexed. */
   truncated: boolean;
   /** This answer hit its node cap — not everything indexed was sent. */
