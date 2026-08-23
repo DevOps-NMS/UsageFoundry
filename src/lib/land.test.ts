@@ -10,6 +10,7 @@ import {
   parseStatusZ,
   purgeRefusal,
   selectBranchCandidates,
+  selectProbeTargets,
   unresolvedFiles,
   type CheckoutState,
   type ConflictFile,
@@ -898,5 +899,51 @@ describe("selectBranchCandidates", () => {
     const sel = selectBranchCandidates(runs);
     assert.equal(sel.total, 2);
     assert.equal(selectBranchCandidates(runs, { repo: "/w/b" }).examined[0].id, "b");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Which of those branches get a status probe                          */
+/* ------------------------------------------------------------------ */
+
+describe("selectProbeTargets", () => {
+  /**
+   * The probes run concurrently, so this is the only thing left holding the
+   * per-request cap, and both ways of being wrong are silent. Too many picked
+   * and the page forks more `git status` children than it is allowed to — the
+   * cost the cap exists to bound, on a container also running agents. Picked by
+   * the wrong index and a checkout's uncommitted count lands on some other
+   * branch's row, which reads as ordinary work in the wrong place rather than
+   * as an error.
+   */
+  const rows = (...slots: Array<string | null>) => slots.map((slot) => ({ slot }));
+
+  it("picks the checkout-bearing rows, in page order, by index", () => {
+    assert.deepEqual(
+      selectProbeTargets(rows(null, "/s/1", null, "/s/2", "/s/3"), 20),
+      [1, 3, 4],
+    );
+  });
+
+  it("spends no cap on a row no checkout holds", () => {
+    // Sixty rows, three of them held: the page pays for three probes, not for
+    // the first twenty rows it walked past.
+    const held = [null, null, null, "/s/a", null, "/s/b", "/s/c"] as Array<string | null>;
+    const many = [...held, ...Array<string | null>(53).fill(null)];
+    assert.deepEqual(selectProbeTargets(rows(...many), 20), [3, 5, 6]);
+  });
+
+  it("stops at the cap and keeps the earlier rows", () => {
+    // Which rows are dropped matters: the page order is the order the operator
+    // reads, so the ones on screen first are the ones worth the probe.
+    const many = Array.from({ length: 30 }, (_, i) => `/s/${i}`);
+    const picked = selectProbeTargets(rows(...many), 20);
+    assert.equal(picked.length, 20);
+    assert.equal(picked[0], 0);
+    assert.equal(picked[19], 19);
+  });
+
+  it("probes nothing when the cap is nothing", () => {
+    assert.deepEqual(selectProbeTargets(rows("/s/1", "/s/2"), 0), []);
   });
 });

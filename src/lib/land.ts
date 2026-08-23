@@ -2442,6 +2442,93 @@ function branchBearingRuns(): Array<BranchCandidate & { createdAt: number }> {
     .all() as Array<BranchCandidate & { createdAt: number }>;
 }
 
+/** A collected branch row, as far as the probe decision needs to see it. */
+export interface ProbeCandidate {
+  /** The checkout still holding this branch, or null when none does. */
+  slot: string | null;
+}
+
+/**
+ * Which collected rows are worth a `git status`, by index into the list.
+ *
+ * Decided in one synchronous pass before any probe is dispatched, because the
+ * probes below run concurrently and a `probes < MAX_PENDING_PROBES` test spread
+ * across awaits no longer caps anything: every turn scheduled together reads
+ * the counter before any of them has incremented it, so the cap is exceeded by
+ * however many happened to start at once, and *which* rows got a probe becomes
+ * a function of how the event loop interleaved them — two identical requests
+ * answering with `uncommitted` on different branches, with nothing anywhere
+ * saying so. Deciding here keeps the cap exact and keeps the answer the one the
+ * serial loop gave: the first `limit` rows, in page order, whose branch some
+ * checkout still holds. Rows without a checkout are skipped without spending
+ * cap, since there is nothing to ask git about.
+ */
+export function selectProbeTargets(
+  rows: readonly ProbeCandidate[],
+  limit: number,
+): number[] {
+  const picked: number[] = [];
+  for (let i = 0; i < rows.length && picked.length < limit; i++) {
+    if (rows[i].slot) picked.push(i);
+  }
+  return picked;
+}
+
+/**
+ * Read-only git children one pool of this page keeps in flight.
+ *
+ * The page runs two — the commit counts and the status probes are independent
+ * of each other — so at most sixteen `git` processes exist at once, against a
+ * page whose ceilings are sixty counts and twenty probes. The bound is about
+ * the container rather than about correctness: this app is also running agents,
+ * and forking every probe at once to save a wave is not a trade worth making.
+ */
+const BRANCH_GIT_CONCURRENCY = 8;
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight, results in input order.
+ *
+ * Deliberately the same worker pool `transcripts.ts` runs its scan through,
+ * copied rather than imported because that one is private to its module. A pool
+ * rather than chunked `Promise.all` batches for the same reason it gives: a
+ * batch runs at the speed of its slowest member and leaves the other slots
+ * idle, and a `git status` costs whatever the checkout it lands on is worth —
+ * 140 ms against a 15,082-entry worktree, a few against a small one.
+ */
+async function mapWithLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i]);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+  );
+  return out;
+}
+
+/**
+ * One branch's row with its two per-branch git reads still outstanding.
+ *
+ * Collected across every repository before either is run, so both can be
+ * resolved concurrently: neither depends on the other, on any other branch's
+ * answer, or on anything the collecting loop writes.
+ */
+interface PendingBranch extends ProbeCandidate {
+  summary: Omit<BranchSummary, "ahead" | "uncommitted">;
+  repoRoot: string;
+  /** `<target>..<branch>`, or null when there is nothing to count. */
+  aheadRange: string | null;
+}
+
 /**
  * Every branch this app has produced, with enough state to decide about it.
  *
@@ -2480,9 +2567,8 @@ export async function branchInventory(
     byRepo.set(run.repo_root!, list);
   }
 
-  const branches: BranchSummary[] = [];
+  const pending: PendingBranch[] = [];
   const roots: string[] = [];
-  let probes = 0;
 
   for (const [rawRoot, runs] of byRepo) {
     const repoRoot = repoPathFor(rawRoot);
@@ -2531,41 +2617,65 @@ export async function branchInventory(
       const exists = tips.has(branch);
       const merged = exists && !!target && (mergedByTarget.get(target)?.has(branch) ?? false);
 
-      const ahead =
-        exists && target
-          ? Number(
-              (await git(repoRoot, ["rev-list", "--count", `${target}..${branch}`]))
-                .stdout,
-            ) || 0
-          : 0;
-
-      const slot = exists ? heldBy.get(branch) : undefined;
-      let uncommitted: number | null = null;
-      if (slot && probes < MAX_PENDING_PROBES) {
-        probes++;
-        const status = await git(slot, ["status", "--porcelain", "-z"], { trim: false });
-        uncommitted = status.ok ? parseStatusZ(status.stdout).length : null;
-      }
-
-      branches.push({
-        runId: run.id,
-        runStatus: run.status,
-        branch,
-        target,
+      pending.push({
         repoRoot,
-        repoLabel: describeFolder(repoRoot).relPath || repoRoot,
-        createdAt: run.created_at,
-        ahead,
-        merged,
-        landedUnchanged: !!run.landed_tip && run.landed_tip === tips.get(branch),
-        uncommitted,
-        exists,
-        active: active.has(run.id),
-        landedAt: run.landed_at,
-        prompt: run.prompt,
+        aheadRange: exists && target ? `${target}..${branch}` : null,
+        slot: (exists ? heldBy.get(branch) : undefined) ?? null,
+        summary: {
+          runId: run.id,
+          runStatus: run.status,
+          branch,
+          target,
+          repoRoot,
+          repoLabel: describeFolder(repoRoot).relPath || repoRoot,
+          createdAt: run.created_at,
+          merged,
+          landedUnchanged: !!run.landed_tip && run.landed_tip === tips.get(branch),
+          exists,
+          active: active.has(run.id),
+          landedAt: run.landed_at,
+          prompt: run.prompt,
+        },
       });
     }
   }
+
+  // Both per-branch reads are resolved here rather than one per turn of the
+  // loop above, because serially they *were* the request: a `git status`
+  // against a 15,082-entry checkout measures 140 ms, and eight of them made up
+  // 1.12 s of a 1.13 s `GET /api/branches` — each probe holding up the next
+  // branch's turn for no reason, since neither read decides anything the other
+  // one or the loop needs. `MAX_PENDING_PROBES` still bounds how many probes
+  // run at all; `selectProbeTargets` is where it is applied, and its own note
+  // says why that has to happen before the first one is dispatched.
+  const probeTargets = selectProbeTargets(pending, MAX_PENDING_PROBES);
+  const [aheads, probed] = await Promise.all([
+    mapWithLimit(pending, BRANCH_GIT_CONCURRENCY, async (p) =>
+      p.aheadRange === null
+        ? 0
+        : Number(
+            (await git(p.repoRoot, ["rev-list", "--count", p.aheadRange])).stdout,
+          ) || 0,
+    ),
+    mapWithLimit(probeTargets, BRANCH_GIT_CONCURRENCY, async (i) => {
+      // Non-null: `selectProbeTargets` picks only rows a checkout holds.
+      const status = await git(pending[i].slot!, ["status", "--porcelain", "-z"], {
+        trim: false,
+      });
+      return status.ok ? parseStatusZ(status.stdout).length : null;
+    }),
+  ]);
+
+  const uncommittedByRow = new Map<number, number | null>();
+  probeTargets.forEach((row, i) => uncommittedByRow.set(row, probed[i]));
+
+  const branches: BranchSummary[] = pending.map((p, i) => ({
+    ...p.summary,
+    ahead: aheads[i],
+    // A row nothing probed stays null, which the page reads as "not asked" —
+    // the same answer a failed probe gives, and never a claim of clean.
+    uncommitted: uncommittedByRow.get(i) ?? null,
+  }));
 
   // Back into the order the selection listed them in, rather than re-sorted by
   // the kept run's own `created_at`. The two differ for a chain — the row kept
