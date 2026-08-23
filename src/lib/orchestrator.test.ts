@@ -2108,6 +2108,57 @@ describe("buildArgs", () => {
     assert.ok(notice.includes("sub-agent"), "the delegation notice is missing");
   });
 
+  it("adds the file price list to that same flag rather than a second one", () => {
+    // The third notice is per-run and the trap is the same one `--allowedTools`
+    // carries: a second `--append-system-prompt` is a replacement, so a version
+    // of this that pushed its own flag would silently drop the process-safety
+    // and delegation notices from every run that had a price list — which is
+    // every run.
+    const args = buildArgs({
+      ...base,
+      isolated: false,
+      fileCostNotice: "src/lib/orchestrator.ts — 116k",
+    });
+    assert.equal(args.filter((a) => a === "--append-system-prompt").length, 1);
+    const notice = args[args.indexOf("--append-system-prompt") + 1];
+    assert.ok(notice.includes("pgrep -af"), "the process-safety notice is missing");
+    assert.ok(notice.includes("sub-agent"), "the delegation notice is missing");
+    assert.ok(notice.includes("116k"), "the file price list is missing");
+  });
+
+  it("carries the file price list on a resumed cycle, not only the first", () => {
+    // `--resume` restores no `--append-system-prompt`, exactly as it restores no
+    // `--plugin-dir`, so a cycle that omitted this would stop being told what a
+    // file costs and read from the outside like one that was never told. What is
+    // passed is the run's stored copy: regenerating it here would change the
+    // cached prefix mid-run, which costs far more than the notice saves and
+    // makes no run look wrong while it happens.
+    const stored = "src/lib/orchestrator.ts — 116k";
+    const args = buildArgs({
+      ...base,
+      isolated: true,
+      resumeSessionId: "sess-1",
+      fileCostNotice: stored,
+    });
+    assert.ok(args.includes("--resume"));
+    assert.ok(args[args.indexOf("--append-system-prompt") + 1].endsWith(stored));
+  });
+
+  it("leaves the prompt byte-identical when a run has no price list", () => {
+    // Every run created before `runs.file_cost_notice` existed reads null here,
+    // and so does any run whose folder could not be walked. The appended prompt
+    // for those has to be the exact string this app sent before the feature —
+    // trailing blank lines included — because a run mid-flight across a deploy
+    // that gained one newline pays a cold prefix on its next cycle for a notice
+    // it did not get.
+    const without = buildArgs({ ...base, isolated: true });
+    const at = without.indexOf("--append-system-prompt");
+    for (const fileCostNotice of [undefined, null, "", "   \n  "]) {
+      const args = buildArgs({ ...base, isolated: true, fileCostNotice });
+      assert.equal(args[args.indexOf("--append-system-prompt") + 1], without[at + 1]);
+    }
+  });
+
   it("hands the vault skill to the child, alongside the enabled plugins", () => {
     // The whole feature reduced to one claim: the switch being on has to put
     // the generated skill directory on the argv of the process that is spawned.
@@ -2542,6 +2593,7 @@ describe("injectionFates", () => {
       spentGuardUSD: 1,
       pluginDirs: ["/workspace/plug"],
       vaultSkill: { pluginDir: "/run/uf-skills/vault", vaultPath: "/workspace2" },
+      fileCostNotice: "src/lib/orchestrator.ts — 116k",
       agent: {
         name: "reviewer",
         description: "reviews",

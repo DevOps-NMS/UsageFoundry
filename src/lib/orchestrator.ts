@@ -58,6 +58,7 @@ import {
 } from "./otlp";
 import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
 import { enabledPluginDirs, pluginDirArgs } from "./plugins";
+import { fileCostNotice } from "./fileCostNotice";
 import { prepareVaultSkill } from "./vaultSkill";
 import {
   noteLiveTick,
@@ -245,6 +246,16 @@ export interface RunRow {
    * through `parseRunAgent`, never parsed at a call site.
    */
   agent: string | null;
+  /**
+   * What a `Read` of this folder's largest files costs, frozen at creation and
+   * put on every cycle's `--append-system-prompt` unchanged.
+   *
+   * Frozen because the appended prompt is part of the cached prefix — see the
+   * column note in `db.ts` and `fileCostNotice.ts`. Null on every run created
+   * before the column, and on any run whose folder could not be walked, and both
+   * mean the same thing: this run's prompt is exactly what it was before.
+   */
+  file_cost_notice: string | null;
   /**
    * 1 when this run ended because the server went down under it, rather than
    * for any reason of its own. Cleared when it is picked up again.
@@ -3168,6 +3179,21 @@ export function createRun(input: CreateRunInput): RunRow {
   // get, and the reason deleting a template cannot reach a run started from one.
   const agentBlob = input.agent ? JSON.stringify(input.agent) : null;
 
+  // Frozen here for a sharper reason than the agent above: this text goes on
+  // every cycle's `--append-system-prompt`, and the appended prompt is part of
+  // the cached prefix, so a version of it that differed between two cycles of
+  // one run would leave every token behind it cold on the second. Generating it
+  // once, at the one door every run comes through, is what makes "byte-identical
+  // on every cycle" a property of the schema rather than of a later editor's
+  // care. Synchronous, like everything else between here and the INSERT: a
+  // bounded `readdirSync` walk and one SQLite aggregate, no `await` to offer and
+  // none introduced.
+  //
+  // `folder` rather than the worktree the plan below may pick: the worktree is a
+  // checkout of this same tree, it does not exist yet at a waiting run's
+  // creation, and `folder` is also the key the read history is stored under.
+  const costNotice = fileCostNotice(folder);
+
   const isolate = input.isolate !== false;
   const { links, waiting, continuesRun } = admitDependencies(
     id,
@@ -3202,8 +3228,8 @@ export function createRun(input: CreateRunInput): RunRow {
         `INSERT INTO runs
            (id, folder, prompt, model, status, budget, max_iterations, iterations, created_at, spent_usd, spent_tokens,
             work_dir, isolation, repo_root, worktree_path, worktree_branch, worktree_base, worktree_base_branch,
-            continues_run, agent, origin, origin_ref)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            continues_run, agent, file_cost_notice, origin, origin_ref)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -3226,6 +3252,10 @@ export function createRun(input: CreateRunInput): RunRow {
         plan?.baseBranch ?? null,
         continuesRun,
         agentBlob,
+        // Empty means "nothing worth pricing here" and is stored as null, so
+        // that the two ways a run has no notice — this one and a row written
+        // before the column — read the same at the spawn.
+        costNotice || null,
         input.origin,
         input.originRef ?? null,
       );
@@ -4761,28 +4791,6 @@ const SELF_HOSTING_NOTICE =
   "a match on it cannot tell the two apart.";
 
 /**
- * Why a run should hand self-contained work to a sub-agent.
- *
- * Appended to the same flag rather than sent as a second
- * `--append-system-prompt`, which the CLI would read as a replacement the way
- * it reads a second `--allowedTools`. One notice arriving instead of two is
- * silent, and the half that went missing would be the process-safety one.
- *
- * The numbers are here because they are the whole argument for spending tokens
- * on the instruction. Measured over 1,011 transcripts: a tool call inside a
- * sub-agent costs 6.5 cents against 13.9 in a run's own main thread, and almost
- * all of the gap is cache re-read — 2.7 cents against 8.3. The mechanism is
- * that nothing shrinks a main thread's context, so every file read there is
- * re-read at every later turn of the run: the same tool call costs 6.8 cents at
- * turn 20 and 15.4 at turn 150, while a sub-agent opens on a small context and
- * its whole conversation is discarded when it answers.
- *
- * The floor is in the text because delegation is not free in the other
- * direction. A sub-agent opens ~20k tokens of its own, and sessions under ten
- * turns measured *worse* per tool call than the 10-25 band — a run that
- * delegated every errand would spend more than one that delegated none.
- */
-/**
  * The context size the CLI compacts a work cycle's conversation at.
  *
  * A module constant rather than a setting, and the precedent is
@@ -4822,6 +4830,51 @@ const SELF_HOSTING_NOTICE =
  */
 const AUTOCOMPACT_WINDOW_TOKENS = 200_000;
 
+/**
+ * Why a run should hand self-contained work to a sub-agent.
+ *
+ * Appended to the same flag rather than sent as a second
+ * `--append-system-prompt`, which the CLI would read as a replacement the way
+ * it reads a second `--allowedTools`. There are three notices on that flag now
+ * and any of them arriving alone is silent — the one that would go missing is
+ * whichever the last edit did not think about, and one of the three is the
+ * process-safety one.
+ *
+ * The numbers are here because they are the whole argument for spending tokens
+ * on the instruction, and they are **re-measured** rather than carried forward:
+ * 1,194 transcripts, 49,038 deduped assistant turns, $6,522 over 12.3 days,
+ * priced through `pricing.ts`, split on the transcripts' own `isSidechain` the
+ * way `transcripts.ts` splits it. A tool call inside a sub-agent costs **5.0
+ * cents against 13.6** on a main thread, and most of the gap is cache re-read —
+ * **3.0 cents against 8.2**. The mechanism is that nothing shrinks a main
+ * thread's context, so every file read there is re-read at every later turn of
+ * the run: the same tool call costs 8.4 cents over turns 11-25, 15.7 over turns
+ * 101-200 and 20.4 past turn 200. The previous reading, over 1,011 transcripts,
+ * was 6.5 against 13.9 with 2.7 against 8.3 — the same claim, and the sub-agent
+ * side has if anything got cheaper.
+ *
+ * **One thing the split does not separate, and the claim is weaker for it.**
+ * Sub-agents are handed the self-contained errands — find where this lives, read
+ * across three modules and answer one question — precisely because those are the
+ * ones worth delegating. Easier work costs less per tool call whatever context
+ * it runs in, so an unknown share of the 5.0-against-13.6 gap is the task rather
+ * than the context. What is *not* confounded is the within-thread gradient, 8.4
+ * to 20.4 across turn position on the same threads doing the same kind of work,
+ * and that gradient alone is the reason to delegate.
+ *
+ * Count tool calls from every assistant record, not from the deduped ones:
+ * Claude Code writes one line per content block, all carrying the same message
+ * id and the same usage block, so the dedupe that makes the cost right drops
+ * every `tool_use` after the first and triples the apparent price per call.
+ *
+ * The floor is in the text because delegation is not free in the other
+ * direction. A sub-agent's opening turn averages 10.6 cents of its own, and
+ * grouped by `agentId` the invocations under five turns measured *worse* per
+ * tool call than every longer band — 6.7 cents against 4.1 at 11-25 — so a run
+ * that delegated every errand would spend more than one that delegated none.
+ * That floor has moved down: it was ten turns and is now about five, which is
+ * why the text below still reads "more than a handful of steps" unchanged.
+ */
 const DELEGATION_NOTICE =
   "Prefer to hand self-contained investigation to a sub-agent rather than " +
   "doing it on this thread: anything where you want the conclusion and not the " +
@@ -4937,6 +4990,23 @@ export function buildArgs(opts: {
    * skill's own text that has to forbid writing into the vault.
    */
   vaultSkill?: { pluginDir: string; vaultPath: string } | null;
+  /**
+   * The run's own frozen file price list, or nothing.
+   *
+   * Read from `runs.file_cost_notice` and **never** rebuilt here. It is the one
+   * value on this argv whose recomputation would be silently expensive rather
+   * than silently wrong: it joins the appended system prompt, the appended
+   * system prompt is part of the cached prefix, and a prefix that changes
+   * between two cycles of one run is a full-price re-read of a context that
+   * averages 190,000 tokens. That is why it arrives as a stored string instead
+   * of a folder this function could walk — the shape makes the mistake hard to
+   * make. `fileCostNotice.ts` carries the measurement behind the feature.
+   *
+   * Optional, and absent means an argv byte-identical to the one this app
+   * emitted before the notice existed — which is what every run created before
+   * the column gets, and what a run whose folder could not be walked gets.
+   */
+  fileCostNotice?: string | null;
 }): string[] {
   const args = ["-p", opts.prompt, "--output-format", "stream-json", "--verbose"];
   if (opts.model) args.push("--model", opts.model);
@@ -4966,12 +5036,18 @@ export function buildArgs(opts: {
   // a run in the operator's own checkout is inside the same process as one in a
   // worktree, and the kill does not care which.
   args.push("--disallowedTools", ...PROCESS_KILLERS);
-  // One flag carrying both notices, for the reason `--allowedTools` carries
-  // both its lists: a second `--append-system-prompt` is a replacement, not an
-  // addition, and losing one of the two would be silent.
+  // One flag carrying all three notices, for the reason `--allowedTools`
+  // carries both its lists: a second `--append-system-prompt` is a replacement,
+  // not an addition, and losing one of them would be silent. The third is
+  // per-run and may be absent, so it is filtered rather than interpolated — an
+  // empty one must leave this string exactly as it was before the feature
+  // existed, trailing blank lines included, or every run predating the column
+  // pays a cold prefix on its next cycle for a notice it did not get.
   args.push(
     "--append-system-prompt",
-    `${SELF_HOSTING_NOTICE}\n\n${DELEGATION_NOTICE}`,
+    [SELF_HOSTING_NOTICE, DELEGATION_NOTICE, opts.fileCostNotice?.trim()]
+      .filter((notice): notice is string => Boolean(notice))
+      .join("\n\n"),
   );
   // Above `--resume` only for reading order. What matters is that it is here at
   // all on a resumed cycle: see `pluginDirs`.
@@ -7288,6 +7364,14 @@ export async function startRun(id: string): Promise<void> {
         // between cycle 3 and cycle 4 would leave cycle 4 selecting a name
         // nothing defines, which the CLI refuses at the spawn.
         agent: parseRunAgent(run.agent),
+        // The row's own copy, on every cycle including a resumed one — the same
+        // shape as `--plugin-dir` above and for a second reason on top of it.
+        // `--resume` restores no `--append-system-prompt`, so a cycle that
+        // omitted this would simply stop being told what a file costs; and
+        // regenerating it here instead of reading it would change the cached
+        // prefix mid-run, which costs more than the notice saves. Never
+        // `fileCostNotice(...)` at this line.
+        fileCostNotice: run.file_cost_notice,
         // Off the same `settings` read every prompt on this run comes from, so
         // it is fixed for the segment rather than per cycle. It changes only
         // what reaches the log — it is not a capability, nothing acts on it,

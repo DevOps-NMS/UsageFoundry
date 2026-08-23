@@ -777,6 +777,26 @@ function migrate(db: Database.Database) {
   // is this run's own system prompt and not a role inside it.
   addColumn(db, "runs", "agent", "TEXT");
 
+  // What this run's largest files cost to read, generated once and never again.
+  //
+  // A frozen copy for `runs.agent`'s reason turned up one notch. That column is
+  // frozen so a run's later cycles open as the agent it was started as; this one
+  // is frozen because **the appended system prompt is part of the cached
+  // prefix**, so text that differed between cycle 1 and cycle 2 would leave
+  // every token behind it cold on cycle 2. On the context sizes this app runs at
+  // that costs far more than the notice can ever save, and nothing about the run
+  // would look wrong while it happened — the failure is a bill, not an error.
+  // Both of its inputs move under a recomputation: the read counts change as the
+  // fleet works, and the file sizes change as this very run edits them.
+  //
+  // Null is the whole of the backward-compatible case and there is no backfill.
+  // A run created before this column reads null, `buildArgs` drops an empty
+  // notice from the joined prompt, and its argv is byte-identical to what it was
+  // spawned with — which is what a run mid-flight across a deploy needs, for
+  // exactly the prefix reason above. See `fileCostNotice.ts` for what the text
+  // is and why it is worth its tokens.
+  addColumn(db, "runs", "file_cost_notice", "TEXT");
+
   // The agent a template names, by id — and this one *is* a reference, which is
   // the opposite of the column above for a reason. A template is form input
   // applied again and again, so an operator who fixes their reviewer's prompt
