@@ -4,6 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 import type { BudgetPolicy } from "./budget";
+// Type-only, so it is erased rather than hoisted above the environment setup
+// below — the same reason the values come through `require`.
+import type { PersistedRunEvent, RunStatus } from "./orchestrator";
 
 /**
  * Covers the folder-collision predicate, and only that.
@@ -83,6 +86,7 @@ const {
   isTransientApiError,
   isUsageLimit,
   copyGlobsFor,
+  logLifecycle,
   maxRetriesFor,
   transientBackoffMs,
   matchesCopyGlobs,
@@ -4275,5 +4279,142 @@ describe("applying the sweeper's decision", () => {
     }
 
     saveSettings({ maxConcurrentRuns: null });
+  });
+});
+
+/**
+ * Covers what one lifecycle event says on container stdout, and at what level.
+ *
+ * Not a pure function, and it earns the exception the way `settleOnExit` does:
+ * what it decides is a *line*, and both halves of that line fail silently. A
+ * level is a routing decision — one `info` for all nine statuses makes the
+ * ending whose entire content is "a person should look at this" arrive
+ * indistinguishable from an ordinary completion, and the only evidence is an
+ * alert that never fires, which reads exactly like a fleet with nothing wrong.
+ * The field set is the other half and fails the other way: the docblock over
+ * `logLifecycle` says it **projects** rather than serialising, because a
+ * `status` payload at creation carries the folder and an `iteration` payload
+ * carries the whole prompt, so a spread added here would put both on a stream
+ * with a different audience and a different lifetime from `run_events`.
+ * Neither throws, neither fails to typecheck, and neither shows on any page.
+ */
+describe("what a lifecycle event says on stdout", () => {
+  /** The JSON lines one call writes, parsed, whichever stream they went to. */
+  function capture(fn: () => void): Array<Record<string, unknown>> {
+    const lines: Array<Record<string, unknown>> = [];
+    const real = { log: console.log, warn: console.warn, error: console.error };
+    const take = (text: unknown) => {
+      lines.push(JSON.parse(String(text)) as Record<string, unknown>);
+    };
+    console.log = take;
+    console.warn = take;
+    console.error = take;
+    try {
+      fn();
+    } finally {
+      Object.assign(console, real);
+    }
+    return lines;
+  }
+
+  const event = (
+    kind: PersistedRunEvent["kind"],
+    payload: Record<string, unknown>,
+  ): PersistedRunEvent => ({ id: 1, runId: "run-1", ts: 1_700_000_000_000, kind, payload });
+
+  const one = (e: PersistedRunEvent): Record<string, unknown> => {
+    const lines = capture(() => logLifecycle(e));
+    assert.equal(lines.length, 1, "one event is one line");
+    return lines[0];
+  };
+
+  it("routes the three endings that want a person at warn, and nothing else", () => {
+    // All nine, both directions: a status that stops being routed is as silent
+    // as one that starts being, and the second wakes somebody for a press they
+    // just made.
+    const levels: Array<[RunStatus, string]> = [
+      ["waiting", "info"],
+      ["queued", "info"],
+      ["running", "info"],
+      ["paused", "info"],
+      ["completed", "info"],
+      ["needs-review", "warn"],
+      // An operator's own cancel arrives as `stopped`, and a run a guard took
+      // down already has `run.guard_tripped` at warn naming the code.
+      ["stopped", "info"],
+      ["failed", "warn"],
+      ["blocked", "warn"],
+    ];
+    for (const [status, level] of levels) {
+      const line = one(event("status", { status }));
+      assert.equal(line.level, level, `${status} must reach stdout at ${level}`);
+      assert.equal(line.event, "run.status", "the event name is not part of the change");
+      assert.equal(line.status, status);
+    }
+  });
+
+  it("still says exactly what it said before the levels moved", () => {
+    // The creation `status` event is the one that carries the folder, which is
+    // this install's own layout on a stream something else retains.
+    const line = one(
+      event("status", {
+        status: "running",
+        folder: "/workspace/PrivateRepo",
+        prompt: "the whole task text",
+      }),
+    );
+    assert.deepEqual(Object.keys(line).sort(), ["event", "level", "run_id", "status", "ts"]);
+  });
+
+  it("tells the 429 ladder's wait apart from a run that has died", () => {
+    // A rung of the ladder: retried in place for 17-26 minutes holding the
+    // folder, the worktree slot and one of `maxConcurrentRuns`, with the row
+    // still reading `running` everywhere state is read.
+    const line = one(
+      event("error", {
+        message: "API Error: 429 — retrying in 30s (1 of 4).",
+        apiError: "API Error: 429",
+        exitCode: 1,
+        usageLimit: false,
+        waiting: false,
+        retrying: true,
+      }),
+    );
+    assert.equal(line.level, "error");
+    assert.equal(line.retrying, true);
+    assert.equal(line.usage_limit, false);
+    // Two named booleans, never a spread: `apiError`, `exitCode` and `waiting`
+    // are beside them in the payload and must not follow them out.
+    assert.deepEqual(Object.keys(line).sort(), [
+      "event",
+      "level",
+      "message",
+      "retrying",
+      "run_id",
+      "ts",
+      "usage_limit",
+    ]);
+  });
+
+  it("names an exhausted allowance on the refusal that parks rather than retries", () => {
+    const line = one(
+      event("error", {
+        message: "Claude usage limit reached.",
+        usageLimit: true,
+        waiting: true,
+        retrying: false,
+      }),
+    );
+    assert.equal(line.usage_limit, true);
+    assert.equal(line.retrying, false, "a park is not a retry, and false is not absent");
+  });
+
+  it("distinguishes absent from false on an error that is not a refusal at all", () => {
+    // A spawn failure carries neither field. `null` is what the two accessors
+    // beside it already mean by absent, and reading it as `false` would file
+    // every dead container as a refusal the ladder had given up on.
+    const line = one(event("error", { message: "Failed to launch /nope: ENOENT" }));
+    assert.equal(line.retrying, null);
+    assert.equal(line.usage_limit, null);
   });
 });

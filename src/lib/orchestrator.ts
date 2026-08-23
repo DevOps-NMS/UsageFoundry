@@ -553,8 +553,12 @@ const WARN_STATUSES: ReadonlySet<string> = new Set<RunStatus>([
  * The kinds left out are the noisy ones — `log`, `assistant`, `subagent`,
  * `tool` — which at this scale would be a stream nobody can read, defeating the
  * point. `run_events` still has all of them.
+ *
+ * Exported for `orchestrator.test.ts` and for nothing else, `tickSchedules`'
+ * reason: what a line carries and what level it arrives at are two decisions
+ * no pure function beside this one can be asked about, and both are silent.
  */
-function logLifecycle(e: PersistedRunEvent): void {
+export function logLifecycle(e: PersistedRunEvent): void {
   const p = e.payload;
   const num = (k: string): number | null =>
     typeof p[k] === "number" ? (p[k] as number) : null;
