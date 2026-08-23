@@ -147,6 +147,7 @@ This app's invariants encode the product's reasoning, not style preferences, and
   - `DATA_DIR` **refuses** the boot; every other variable warns. That asymmetry is the decision.
   - Compose renders every optional variable as `${VAR:-}`, so a blank-by-default key read through `env()` becomes a permanent warning on every stock install.
   - Never restore a default to `UF_WORKSPACE` or `HOME` in compose.
+  - `DISCORD_WEBHOOK_URL` starts the in-container relay and is **unset** before `exec`, between the two because agents are spawned with `{ ...process.env }`. Never forward it to anything downstream, and never auto-fill `UF_WEBHOOK_URL` from it — blank is off.
 
 ## Always
 

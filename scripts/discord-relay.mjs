@@ -22,15 +22,26 @@
 // Collapsing them would mean the app's target and the vendor's target could
 // never differ, which is the coupling the split exists to prevent.
 //
-// Usage:
-//   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... \
-//   UF_WEBHOOK_SECRET=<the same value the app has> \
-//   node scripts/discord-relay.mjs
+// **It runs inside the app's own container, started by `docker-entrypoint.sh`
+// when `DISCORD_WEBHOOK_URL` is set**, listening on loopback so that nothing
+// about it is on any network. That is one process for an operator to think
+// about rather than two: the failure it replaces is a relay nobody remembered
+// to start, which is silent at the sending end and at the receiving one.
 //
-// Then, in the app's .env:
-//   UF_WEBHOOK_URL=http://host.docker.internal:8787/uf   (Docker Desktop)
-//   UF_WEBHOOK_SECRET=<the same value>
-//   UF_PUBLIC_URL=http://localhost:3000                  (or the link is empty)
+// It is a separate *process* rather than a module for the reason at the top —
+// the app must not link vendor code — and the entrypoint drops
+// `DISCORD_WEBHOOK_URL` from the environment once this has it, because
+// `orchestrator.ts` builds an agent's environment as `{ ...process.env }` and
+// this URL posts to a channel on possession alone.
+//
+// Nothing stops it running on a host instead; point `UF_WEBHOOK_URL` at
+// `http://host.docker.internal:8787/uf` and start it by hand.
+//
+// Configuration, whether the entrypoint or a shell supplies it:
+//   DISCORD_WEBHOOK_URL      the channel to post to (required)
+//   UF_WEBHOOK_SECRET        the same value the app signs with (required)
+//   DISCORD_MENTION_USER_ID  who to ping, or no ping at all
+//   RELAY_PORT, RELAY_BIND   default 8787 on 127.0.0.1
 
 import crypto from "node:crypto";
 import http from "node:http";
@@ -81,11 +92,13 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
 /**
  * Loopback by default, matching `UF_BIND_ADDRESS`.
  *
- * Measured on 2026-08-24: the container reaches a loopback-bound listener here
- * through `host.docker.internal`, so the default needs no widening on Docker
- * Desktop. Set `0.0.0.0` only if some other runtime routes that name to an
- * address a strictly loopback-bound listener never sees. Widening it is
- * defensible here and only here: every accepted request has already proved it
+ * In the shipped arrangement the sender is the *same container*, so loopback is
+ * not a default to be relaxed but the whole boundary: the relay is reachable
+ * from nowhere else, whatever the host's firewall says. Widen it only to run
+ * this beside a container rather than inside one — measured 2026-08-24, a
+ * container reaches a host's loopback listener through `host.docker.internal`
+ * on Docker Desktop, so even that needs no widening there. Widening is
+ * defensible at all only because every accepted request has already proved it
  * holds the shared secret.
  */
 const BIND = optionalEnv("RELAY_BIND", "127.0.0.1");

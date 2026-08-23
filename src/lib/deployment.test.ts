@@ -965,3 +965,95 @@ describe("the sandbox ships off, and its switch reaches the container", () => {
     );
   });
 });
+
+/**
+ * The Discord relay's three files agreeing, and the third assertion is the one
+ * that matters.
+ *
+ * `notify.ts` sends one generic signed body and will not learn a vendor's shape,
+ * so reaching Discord needs a process in between; that process now lives in this
+ * image and is started by the entrypoint, because the arrangement it replaces —
+ * an operator running it beside the container — failed twice in a row by simply
+ * not being running, which is silent at the sending end and at the receiving
+ * one. What is pinned here is the agreement between the path the Dockerfile
+ * copies to, the path the entrypoint runs, and the condition that starts it.
+ *
+ * **The unset is the reason this block is a test rather than a comment.**
+ * `orchestrator.ts` builds every agent's environment as `{ ...process.env }`, so
+ * a variable the server process still holds is one every unattended agent can
+ * read, and `DISCORD_WEBHOOK_URL` posts to a channel on possession alone. The
+ * entrypoint therefore hands it to the relay and removes it before `exec`. A
+ * later edit that reorders those two lines, or that drops the `unset` while
+ * keeping everything working, is invisible in every other way: the channel still
+ * receives its notifications, and the credential is merely also readable by
+ * twenty-five unattended models.
+ */
+describe("the Discord relay ships, starts, and does not leak its credential", () => {
+  const entrypoint = fs.readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8");
+  const RELAY_PATH = "/app/scripts/discord-relay.mjs";
+
+  it("copies the relay into the image the entrypoint runs it from", () => {
+    assert.match(
+      dockerfile,
+      /^COPY .*scripts\/discord-relay\.mjs .*\.\/scripts\/$/m,
+      `the image no longer ships scripts/discord-relay.mjs, so the entrypoint ` +
+        `starts a relay that is not there and every notification is lost with ` +
+        `"fetch failed" — the app records the attempt and nothing else says why`,
+    );
+    assert.ok(
+      fs.existsSync(path.join(root, "scripts/discord-relay.mjs")),
+      "Dockerfile copies scripts/discord-relay.mjs, which this repository does not ship",
+    );
+  });
+
+  it("starts it only when DISCORD_WEBHOOK_URL names a channel", () => {
+    assert.match(
+      entrypoint,
+      /if \[ -n "\$\{DISCORD_WEBHOOK_URL:-\}" \]; then/,
+      "docker-entrypoint.sh no longer gates the relay on DISCORD_WEBHOOK_URL, " +
+        "so a stock install starts a process that can only fail",
+    );
+    assert.ok(
+      entrypoint.includes(`node ${RELAY_PATH}`),
+      `docker-entrypoint.sh no longer runs ${RELAY_PATH}, the path the ` +
+        `Dockerfile copies the relay to`,
+    );
+  });
+
+  it("removes the credential from the environment before exec'ing the server", () => {
+    const unset = entrypoint.indexOf("unset DISCORD_WEBHOOK_URL");
+    assert.notEqual(
+      unset,
+      -1,
+      "docker-entrypoint.sh no longer unsets DISCORD_WEBHOOK_URL. " +
+        "orchestrator.ts spawns agents with { ...process.env }, so the server " +
+        "holding it hands a channel-posting credential to every unattended agent.",
+    );
+    const started = entrypoint.indexOf(`node ${RELAY_PATH}`);
+    assert.ok(
+      started !== -1 && started < unset,
+      "docker-entrypoint.sh unsets DISCORD_WEBHOOK_URL before starting the " +
+        "relay, which leaves the relay with nothing to forward to",
+    );
+    assert.ok(
+      unset < entrypoint.lastIndexOf('exec "$@"'),
+      "docker-entrypoint.sh unsets DISCORD_WEBHOOK_URL after exec'ing the " +
+        "server, which never runs — the variable reaches every agent",
+    );
+  });
+
+  it("forwards both Discord variables from compose, or .env cannot reach them", () => {
+    // There is no env_file: a key an operator writes in .env reaches this
+    // container only when a line here interpolates it. The same omission that
+    // configCheck.test.ts pins for every variable config.ts reads, for the two
+    // it does not.
+    for (const name of ["DISCORD_WEBHOOK_URL", "DISCORD_MENTION_USER_ID"]) {
+      assert.match(
+        compose,
+        new RegExp(`^\\s*${name}: "\\$\\{${name}:-\\}"\\s*$`, "m"),
+        `docker-compose.yml does not forward ${name}, so setting it in .env ` +
+          `does nothing at all and the boot log says the relay is off`,
+      );
+    }
+  });
+});

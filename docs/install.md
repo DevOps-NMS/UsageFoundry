@@ -594,6 +594,48 @@ in the code is what would turn one signed body into a per-vendor payload nobody
 audits. Point it at something that accepts arbitrary JSON, and let *that* fan out
 to Discord.
 
+### Discord, with the relay this image ships
+
+For Discord there is one in the box. Set two variables:
+
+```
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/<id>/<token>
+UF_WEBHOOK_URL=http://127.0.0.1:8787/uf
+UF_WEBHOOK_SECRET=<openssl rand -hex 32>
+DISCORD_MENTION_USER_ID=<your user id>          # optional, but see below
+```
+
+`DISCORD_WEBHOOK_URL` is the switch: with it set, `docker-entrypoint.sh` starts
+`scripts/discord-relay.mjs` inside the container at boot and restarts it if it
+dies. It listens on **loopback inside the container**, so it is reachable from
+nowhere else — not from your LAN, not from the host — and its port is not
+published. It verifies `X-UF-Signature` against the same `UF_WEBHOOK_SECRET` the
+app signs with, reshapes the six fields into a Discord message, and forwards it.
+
+`UF_WEBHOOK_URL` still has to name the relay. Blank means notifications are off
+everywhere else in this app and the entrypoint will not quietly change that, so
+setting only `DISCORD_WEBHOOK_URL` starts a relay nothing sends to. The boot log
+says so.
+
+Set `DISCORD_MENTION_USER_ID` if you want this to reach a phone. Without it the
+message posts to the channel and pings nobody, which is the same silence the
+webhook exists to end. It is also the *only* id the relay lets Discord act on:
+mentions are sent as a whitelist, so text arriving in the body cannot ping anyone
+else. Discord → Settings → Advanced → Developer Mode, then right-click yourself →
+Copy User ID.
+
+One thing this deliberately does: the entrypoint hands `DISCORD_WEBHOOK_URL` to
+the relay and then **removes it from the environment** before starting the
+server. Agents are spawned with a copy of the server's environment, and a webhook
+URL posts to your channel on possession alone — so it is present for the relay,
+which starts first and runs as root, and absent from everything downstream. A
+Discord webhook remains a credential; treat a leaked one the way you would any
+other and rotate it in Discord's UI.
+
+Note that a Discord *webhook* posts to its channel and cannot send you a DM. That
+needs a bot token and a server you share with the bot, which is a different thing
+from what this relays.
+
 ### Home Assistant, the reference receiver
 
 `POST /api/webhook/<webhook_id>` takes arbitrary JSON and hands it to an

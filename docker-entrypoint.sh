@@ -765,4 +765,52 @@ else
   fi
 fi
 
+# The Discord relay, and the unset under it is the load-bearing half.
+#
+# `notify.ts` POSTs one generic signed body and will not learn a vendor's shape;
+# Discord's incoming webhooks accept only their own, so a bare Discord URL
+# answers 400 and the notification is lost. This is the shaping layer, and it
+# lives here rather than beside the container so that an operator has one thing
+# to start rather than two — the failure it replaces is a relay nobody
+# remembered to run, which is silent at both ends.
+#
+# It listens on loopback *inside* this container, so nothing about it is on any
+# network. UF_WEBHOOK_URL has to name it; blank still means notifications off and
+# is left alone, because that meaning is load-bearing everywhere else.
+#
+# DISCORD_WEBHOOK_URL is then removed from the environment before the server is
+# exec'd, and that is not tidiness. `orchestrator.ts` builds every agent's
+# environment as `{ ...process.env }`, so a variable this process still holds is
+# one every unattended agent can read — and this one posts to your channel on
+# possession alone. The relay keeps it because it was started before the unset;
+# it runs as root, so its /proc/<pid>/environ is unreadable by the agent uid.
+if [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
+  case "${UF_WEBHOOK_URL:-}" in
+    "")
+      echo "[usagefoundry] DISCORD_WEBHOOK_URL is set and UF_WEBHOOK_URL is" \
+           "empty, which still means notifications are off. Set" \
+           "UF_WEBHOOK_URL=http://127.0.0.1:${RELAY_PORT:-8787}/uf to send" \
+           "them through the relay." >&2 ;;
+    *127.0.0.1:*|*localhost:*) : ;;
+    *)
+      echo "[usagefoundry] DISCORD_WEBHOOK_URL is set but UF_WEBHOOK_URL does" \
+           "not name this container's relay. The relay is starting and will" \
+           "receive nothing; notifications are going to" \
+           "$UF_WEBHOOK_URL instead." >&2 ;;
+  esac
+
+  # Restarted rather than started once: a relay that died at 03:00 is
+  # indistinguishable from a quiet fleet, which is the whole failure this
+  # channel exists to end. The delay bounds a misconfigured binary's log spam.
+  (
+    while :; do
+      node /app/scripts/discord-relay.mjs || true
+      echo "[usagefoundry] discord relay exited; restarting in 5s" >&2
+      sleep 5
+    done
+  ) &
+
+  unset DISCORD_WEBHOOK_URL DISCORD_MENTION_USER_ID
+fi
+
 exec "$@"

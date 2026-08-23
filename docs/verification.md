@@ -1097,6 +1097,41 @@ Built and exercised against real transcripts:
   `warn` and left `webhookHealth()` reading `consecutiveFailures: 1`, which is the
   path `/api/status`'s alert row depends on.
 
+- **Discord's 400, the in-container relay, and the credential it does not
+  hand on.** 2026-08-24, against a real Discord channel webhook and a real
+  container on Docker Desktop.
+
+  The generic six-field body posted to a live Discord webhook answered **400**
+  with `{"message": "Cannot send an empty message", "code": 50006}`, and a
+  `{"content": …}` control to the same URL answered **204**. So the claim that
+  a Discord URL cannot be a receiver is now a request this project sent rather
+  than a reading of Discord's documentation, and the URL was proved live in the
+  same pass — the two failure modes that look identical from here.
+
+  A real run loop produced a real notification. Run `2ed6f591`, `completed` under
+  `UF_NOTIFY_ON_SUCCESS=1`, wrote `webhook_deliveries` `event: run.completed,
+  http_status: 0, ok: 0, error: "fetch failed"` — the emit, the filter, the body
+  and the recording all exercised by an actual ending rather than a constructed
+  `PersistedRunEvent`, with the failure being the receiver that was not running.
+
+  `scripts/discord-relay.mjs` then ran **inside the container**, started by
+  `docker-entrypoint.sh` off `DISCORD_WEBHOOK_URL`, listening on
+  `127.0.0.1:8787`. A correctly signed body sent from inside that container to
+  the `UF_WEBHOOK_URL` the *server process* holds was answered `204` and logged
+  `forwarded run.completed`, and the message arrived in the channel. The relay
+  also refused an unsigned body with `401`, a wrong signature with `401`, a `GET`
+  with `405` and a signed unparseable body with `400`.
+
+  The unset was measured on the right process, which took three attempts and is
+  the reason this paragraph exists. `docker compose exec` starts a process from
+  the container's *configured* environment and `/proc/1/environ` is `tini`'s —
+  both still carry `DISCORD_WEBHOOK_URL`, and both are the wrong probe. The
+  server is the process the entrypoint `exec`s into: its environ carries
+  `UF_WEBHOOK_URL`, `UF_WEBHOOK_SECRET` and `UF_NOTIFY_ON_SUCCESS` and **no
+  `DISCORD_*` at all**, which is what `orchestrator.ts` copies into an agent. The
+  relay keeps the URL, runs as root, and `setpriv --reuid=1000` reading its
+  `/proc/<pid>/environ` was refused.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
@@ -1110,15 +1145,18 @@ through before trusting this unattended:
   webhook trigger and has not been loaded, so its field names (`trigger.json.*`,
   `allowed_methods`, `local_only`) are unconfirmed against a running install; the
   claim that endpoint accepts arbitrary JSON is the vendor's, not this project's.
-  The Discord/Slack **400** is the same kind of claim — documented body shapes,
-  not a request this project sent. Docker is unavailable in the environment this
-  was built in, so the webhook has also never run inside the container: the four
-  variables are pinned to compose's `environment:` block by
-  `deployment.test.ts` reading the file, which proves the forwarding is *written*
-  and not that a container reads it. And no notification has been produced by an
-  actual run loop — the events driven through `notifyLifecycle` were constructed,
-  so what is unproven is the shape of a real `PersistedRunEvent` at each of those
-  endings, not the filter's answer to it.
+  The Discord **400**, the relay running in the container and a notification
+  produced by a real run loop have since been measured and moved to the section
+  above; what stays here is every *other* receiver, and the endings other than
+  `completed`. Only a `completed` ending has been driven through
+  `notifyLifecycle` by an actual run — the events behind `needs-review`,
+  `blocked`, `failed`, a guard-caused `stopped` and the 429's first rung were
+  constructed, so the shape of a real `PersistedRunEvent` at those five is
+  unproven, not the filter's answer to it. Nor has any single run gone the whole
+  way to a Discord message: the run that fired predates the relay, and the body
+  the relay forwarded was signed by hand. The relay's mention (no
+  `DISCORD_MENTION_USER_ID` has been configured, so no ping has ever been
+  produced) and its one 429 retry are both unexercised.
 
 - **What `--autocompact` costs to run, and what another window would do.** The
   flag's sign is measured and is in the *Verified* section above; two things it

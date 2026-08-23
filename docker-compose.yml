@@ -245,7 +245,9 @@ services:
       # only their own body shape, so neither can be pointed at directly — a
       # bare Discord URL answers 400. Home Assistant's
       # POST /api/webhook/<webhook_id> takes arbitrary JSON and is the shaping
-      # layer that fans out to them. See docs/install.md, "Being told".
+      # layer that fans out to them. For Discord there is one in this image:
+      # set DISCORD_WEBHOOK_URL below and point this at
+      # http://127.0.0.1:8787/uf. See docs/install.md, "Being told".
       UF_WEBHOOK_URL: "${UF_WEBHOOK_URL:-}"
       # The HMAC key for X-UF-Signature: sha256=<hex>, over the exact body
       # bytes. Required alongside the URL rather than optional beside it —
@@ -259,6 +261,24 @@ services:
       # exists for. Worth turning on if you run a handful of runs a day and want
       # the "it is done" signal; it widens `completed` and nothing else.
       UF_NOTIFY_ON_SUCCESS: "${UF_NOTIFY_ON_SUCCESS:-}"
+      # Optional: the Discord channel webhook that scripts/discord-relay.mjs
+      # forwards to. Setting it is what starts the relay at boot; blank is off
+      # and starts nothing. UF_WEBHOOK_URL above must then name the relay
+      # (http://127.0.0.1:8787/uf) or nothing reaches it, which the boot log
+      # says.
+      #
+      # The entrypoint hands this to the relay and then **unsets it** before the
+      # server starts, so it is absent from the process that spawns agents.
+      # orchestrator.ts builds an agent's environment as { ...process.env }, and
+      # this URL posts to your channel on possession alone — a variable left
+      # here would be one every unattended agent could read. Nothing else in
+      # this file may forward it without answering that.
+      DISCORD_WEBHOOK_URL: "${DISCORD_WEBHOOK_URL:-}"
+      # Optional: whose mention the relay puts in the message, which is what
+      # Discord turns into a push. Without it the notification sits in a channel
+      # until somebody looks — the same silence the webhook exists to end.
+      # Unset alongside the URL above.
+      DISCORD_MENTION_USER_ID: "${DISCORD_MENTION_USER_ID:-}"
       # Optional: how this install is reached from wherever you read the
       # notification, e.g. https://uf.example.com. It is the only absolute URL
       # this app builds, and it exists for the `url` field of that body. Blank

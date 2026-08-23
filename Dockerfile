@@ -308,7 +308,7 @@ COPY --from=builder /app/.next/static ./.next/static
 # run through `docker compose run` against a volume the app is not holding.
 # They resolve `better-sqlite3` out of the standalone bundle's own node_modules,
 # which is the same build of the same addon the server uses.
-COPY scripts/backup-db.mjs scripts/restore-db.mjs ./scripts/
+COPY scripts/backup-db.mjs scripts/restore-db.mjs scripts/discord-relay.mjs ./scripts/
 
 # /data is the one path here whose permissions are the *image's* problem rather
 # than the host's, because it is a named volume: Docker initialises a fresh
