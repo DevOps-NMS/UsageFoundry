@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { RunListItemDTO, WorkflowDTO } from "@/lib/apiTypes";
+import type { RunListItemDTO, WorkflowListItemDTO } from "@/lib/apiTypes";
 import { pollFailureMessage, shortPath } from "@/lib/format";
 import { jsonRequest } from "@/lib/jsonRequest";
 import { Icon } from "@/components/ui/Icon";
@@ -68,7 +68,7 @@ export function QuickOpen({
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
   const [runs, setRuns] = useState<RunListItemDTO[]>([]);
-  const [workflows, setWorkflows] = useState<WorkflowDTO[]>([]);
+  const [workflows, setWorkflows] = useState<WorkflowListItemDTO[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Read when the sheet opens rather than on mount: this is a list of things
@@ -80,7 +80,7 @@ export function QuickOpen({
     void (async () => {
       const [runsResult, workflowsResult] = await Promise.all([
         jsonRequest<{ runs: RunListItemDTO[] }>("/api/runs"),
-        jsonRequest<{ workflows: WorkflowDTO[] }>("/api/workflows"),
+        jsonRequest<{ workflows: WorkflowListItemDTO[] }>("/api/workflows"),
       ]);
       if (!live) return;
       const failure = !runsResult.ok ? runsResult : !workflowsResult.ok ? workflowsResult : null;
@@ -134,7 +134,7 @@ export function QuickOpen({
       key: `workflow:${workflow.id}`,
       group: "Workflows",
       label: workflow.name,
-      detail: `${workflow.nodes.length} block${workflow.nodes.length === 1 ? "" : "s"}`,
+      detail: `${workflow.nodeCount} block${workflow.nodeCount === 1 ? "" : "s"}`,
       href: `/workflows/${workflow.id}`,
       haystack: workflow.name.toLowerCase(),
     }));

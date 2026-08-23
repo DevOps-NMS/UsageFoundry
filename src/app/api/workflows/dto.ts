@@ -3,6 +3,7 @@ import type {
   WorkflowInstanceBlockDTO,
   WorkflowInstanceDTO,
   WorkflowInstanceNodeDTO,
+  WorkflowListItemDTO,
   WorkflowScheduleDTO,
 } from "@/lib/apiTypes";
 import { getSchedule, scheduleView, type ScheduleView } from "@/lib/schedules";
@@ -55,6 +56,25 @@ export function workflowDTO(workflow: Workflow): WorkflowDTO {
     lastRunAt: lastRunAt(workflow.id),
     schedule: schedule ? scheduleDTO(scheduleView(schedule, workflow)) : null,
   };
+}
+
+/**
+ * The same workflow without its graph, for the two readers that only count it.
+ *
+ * A second, narrower shape beside `workflowDTO` rather than a weakening of it —
+ * `WorkflowListItemDTO` argues that out, and the detail route, the editor and
+ * the duplicate route all still need the whole graph. Derived from `workflowDTO`
+ * rather than restated so the fields the two shapes share cannot drift apart:
+ * what this drops is the graph and the instance budget, and nothing else.
+ */
+export function workflowListDTO(workflow: Workflow): WorkflowListItemDTO {
+  const {
+    nodes,
+    edges: _edges,
+    instanceBudget: _instanceBudget,
+    ...rest
+  } = workflowDTO(workflow);
+  return { ...rest, nodeCount: nodes.length };
 }
 
 export function instanceDTO(instance: WorkflowInstance): WorkflowInstanceDTO {

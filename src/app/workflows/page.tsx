@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import type { WorkflowDTO } from "@/lib/apiTypes";
+import type { WorkflowListItemDTO } from "@/lib/apiTypes";
 import { fmtDateTime, pollFailureMessage } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { ButtonLink } from "@/components/ui/Button";
@@ -22,7 +22,7 @@ import {
 const POLL_MS = 10_000;
 
 export default function WorkflowsPage() {
-  const [workflows, setWorkflows] = useState<WorkflowDTO[]>([]);
+  const [workflows, setWorkflows] = useState<WorkflowListItemDTO[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
 
@@ -30,7 +30,7 @@ export default function WorkflowsPage() {
     try {
       const res = await fetch("/api/workflows", { cache: "no-store" });
       const data = (await res.json().catch(() => ({}))) as {
-        workflows?: WorkflowDTO[];
+        workflows?: WorkflowListItemDTO[];
         error?: string;
       };
       if (!res.ok || !data.workflows) {
@@ -147,7 +147,7 @@ export default function WorkflowsPage() {
                       )}
                     </Td>
                     <Td num label="Blocks" className="align-top text-ink-muted">
-                      {w.nodes.length}
+                      {w.nodeCount}
                     </Td>
                     <Td
                       label="Last run"

@@ -1129,6 +1129,35 @@ export interface WorkflowDTO {
 }
 
 /**
+ * A workflow as the workflows list and quick open read it, which is less than a
+ * workflow.
+ *
+ * Its own type rather than a quietly weakened `WorkflowDTO`, for the reason
+ * `RunListItemDTO` is one: `WorkflowDTO` is what the detail route, the editor
+ * and the duplicate route ship, and all three need the whole graph to do their
+ * job — a shared shape whose `nodes` had silently become optional would be
+ * wrong on the page that draws the canvas and correct nowhere it was checked.
+ *
+ * Three fields are absent rather than clipped, and a node's body is why. A node
+ * holds a task prompt, so the graph is nearly the whole response: measured over
+ * two saved workflows, `nodes` was 28,934 bytes of 30,290, `edges` 513 and
+ * `instanceBudget` 156. Neither reader opens any of them — the list prints a
+ * block count in one column and quick open prints the same count as a detail
+ * line — and the list polls every ten seconds, so what was being carried was a
+ * graph that grows without bound in service of one integer. `nodeCount` is that
+ * integer, and the same two workflows come to 471 bytes. The graph and the
+ * instance budget belong to the workflow's own pages, which ask the route that
+ * has them.
+ */
+export type WorkflowListItemDTO = Omit<
+  WorkflowDTO,
+  "nodes" | "edges" | "instanceBudget"
+> & {
+  /** How many blocks the saved graph holds. Both lists print exactly this. */
+  nodeCount: number;
+};
+
+/**
  * One block of an instance, and what became of its run.
  *
  * `run` is null when the run row has gone — the mapping is a historical record
