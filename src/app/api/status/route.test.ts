@@ -111,6 +111,7 @@ test("carries every documented key", async () => {
     "stores",
     "sweeper",
     "liveGuard",
+    "webhook",
     "lastBootReconcile",
   ]) {
     assert.ok(key in body, `the status payload lost "${key}"`);
@@ -151,6 +152,46 @@ test("measures a checkout store's bytes, and says when it stopped early", async 
   assert.equal(body.stores.partial, false);
 });
 
+test("counts the delivery attempts since the webhook last succeeded", async () => {
+  // The one number on this payload that reports on a *sink* rather than on this
+  // app, and the reason the delivery table exists: an outbound webhook is
+  // fire-and-forget, so a receiver that has been refusing every POST since
+  // Tuesday looks exactly like a quiet fleet. Derived from the rows rather than
+  // counted in memory, so a restart does not reset the answer — which is what
+  // this seeds and asserts.
+  const { db } = await import("../../../lib/db");
+  const insert = db().prepare(
+    "INSERT INTO webhook_deliveries (ts, run_id, event, http_status, ok, error)" +
+      " VALUES (?, ?, ?, ?, ?, ?)",
+  );
+  const now = Date.now();
+  insert.run(now - 5_000, "s-run", "run.blocked", 0, 0, "the failure before the success");
+  insert.run(now - 4_000, "s-run", "run.needs_review", 204, 1, null);
+  insert.run(now - 3_000, "s-run", "run.failed", 0, 0, "getaddrinfo ENOTFOUND hooks.example.invalid");
+  insert.run(now - 2_000, "s-run", "run.blocked", 502, 0, "HTTP 502");
+
+  const { body } = await get();
+
+  assert.equal(
+    body.webhook.consecutiveFailures,
+    2,
+    "since the last success, not every failure ever retained",
+  );
+  assert.ok(
+    body.webhook.lastAttemptAgeSeconds !== null &&
+      body.webhook.lastAttemptAgeSeconds >= 1,
+    `an attempt was made, so its age is a number: ${body.webhook.lastAttemptAgeSeconds}`,
+  );
+  // Nothing in this process set `UF_WEBHOOK_URL`, and the flag is what tells a
+  // monitor that a zero count means "delivering" rather than "never tried".
+  assert.equal(body.webhook.configured, false);
+  assert.ok(
+    !JSON.stringify(body).includes("hooks.example.invalid"),
+    "a fetch failure names the receiver's host, and this endpoint is scraped and " +
+      "retained elsewhere — the message stays on stdout and in the table",
+  );
+});
+
 test("carries no prompt, no folder path, no setting and no credential", async () => {
   process.env.UF_AUTH_TOKEN = "master-token-value";
   process.env.UF_STATUS_TOKEN = "monitor-token-value";
@@ -164,6 +205,7 @@ test("carries no prompt, no folder path, no setting and no credential", async ()
       "/workspace", // any path at all
       "master-token-value",
       "monitor-token-value",
+      "hooks.example.invalid", // a webhook receiver's host, from the rows above
       root,
     ]) {
       assert.ok(

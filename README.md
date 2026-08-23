@@ -249,6 +249,7 @@ point; the *conditions* are the ones that have gone wrong here.
 | Transcripts are filling the disk (#95) | `stores.transcriptsBytes` | site-specific |
 | A restart terminated runs | `lastBootReconcile.closed` | `> 0` — each one needs picking up by hand |
 | Another process took the data directory | `dataDirOwned` | `false` |
+| The notification channel has stopped delivering | `webhook.consecutiveFailures` | `> 3` while `webhook.configured` — a fire-and-forget sink nobody receives from looks exactly like a quiet fleet |
 
 A `guardFraction` of `null` means *no ceiling is configured and the provider
 reported nothing* — it is not zero, and an alert that treats it as a number will

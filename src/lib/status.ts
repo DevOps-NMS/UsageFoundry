@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { DB_PATH, PROJECTS_DIR, WORKSPACE_MOUNTS } from "./config";
 import { db } from "./db";
+import { webhookHealth } from "./notify";
 import { opsCounters, recentOpsEvents } from "./ops";
 import { currentSnapshot } from "./orchestrator";
 import { ownsDataDir } from "./serverLock";
@@ -81,6 +82,28 @@ export interface StatusReport {
     lastTickAgeSeconds: number | null;
     failures: number;
     lastError: string | null;
+  };
+  /**
+   * The outbound notification channel — see `notify.ts`.
+   *
+   * Here rather than only in the table because a webhook is fire-and-forget by
+   * construction, so a receiver that has been refusing every POST for a week
+   * produces the same silence as a fleet with nothing wrong. This is the number
+   * to alert on, and it is the condition
+   * `proposals/UnattendedOperation/04-option-c-outbound-webhook.md` puts on the
+   * whole feature.
+   *
+   * Counts and a clock, and deliberately **no error string**: a fetch failure's
+   * message carries the receiver's hostname, and this payload is retained and
+   * forwarded by whatever scrapes it. That text is on stdout and in
+   * `webhook_deliveries`, both of which are the operator's own.
+   */
+  webhook: {
+    /** A URL *and* a secret. Either alone sends nothing. */
+    configured: boolean;
+    /** Attempts since the last success. Non-zero means notifications are lost. */
+    consecutiveFailures: number;
+    lastAttemptAgeSeconds: number | null;
   };
   /** The newest restart reconciliation, retained rather than only logged. */
   lastBootReconcile: { at: number; closed: number; kept: number } | null;
@@ -257,6 +280,7 @@ export async function statusReport(now = Date.now()): Promise<StatusReport> {
   const [snapshot, stores] = await Promise.all([currentSnapshot(), storeUsage(now)]);
   const ops = opsCounters();
   const boot = recentOpsEvents(1, "boot.reconciled")[0] ?? null;
+  const webhook = webhookHealth();
   const age = (at: number | null) => (at === null ? null : Math.round((now - at) / 1000));
 
   return {
@@ -282,6 +306,11 @@ export async function statusReport(now = Date.now()): Promise<StatusReport> {
       lastTickAgeSeconds: age(ops.lastLiveTickAt),
       failures: ops.liveTickFailures,
       lastError: ops.lastLiveTickError,
+    },
+    webhook: {
+      configured: webhook.configured,
+      consecutiveFailures: webhook.consecutiveFailures,
+      lastAttemptAgeSeconds: age(webhook.lastAttemptAt),
     },
     lastBootReconcile: boot
       ? {
