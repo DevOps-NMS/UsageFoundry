@@ -223,6 +223,63 @@ const SANDBOX_REASON: Record<SandboxRefusalKindDTO, string> = {
   "sandbox-message": "the CLI's Linux sandbox reported this",
 };
 
+/**
+ * The prefixes a `log` row may be attributed to a plugin by name.
+ *
+ * A plugin registered through `--plugin-dir` has exactly one channel back to
+ * the operator — its hooks' stderr — and that arrives here as a `log` row
+ * carrying the text and nothing else. No field on the event says which child
+ * wrote it, so this list is the whole of what tells a plugin's sentence apart
+ * from a chunk of `npm ci` output, and the question that answers is the one an
+ * operator actually has: whether the plugin ran this cycle at all.
+ *
+ * A closed list rather than a `^([a-z][a-z0-9-]+): ` pattern, because the two
+ * are wrong in unequal directions. Build output is full of that shape —
+ * `error:`, `warning:`, `note:`, `fatal:`, and a bare `TypeError:` from
+ * anything that threw — and each toolchain a run builds with has its own
+ * vocabulary of them, so the denylist a pattern would need is not boundable.
+ * Every miss on it puts a plugin's name on a sentence a compiler wrote, which
+ * is worse than no label at all: it answers "did the plugin run" with a yes it
+ * invented. A name *missing* from this list costs only the row it would have
+ * labelled, which renders exactly as it did before any of this existed. So a
+ * plugin joins by being added here, and forgetting is the cheap mistake.
+ *
+ * Not derived from the registered `--plugin-dir` paths: a directory's name is
+ * not what its hooks print, this file runs in the browser where no such list
+ * exists, and a plugin whose lines are already in the database outlives its
+ * registration.
+ */
+const PLUGIN_PREFIXES = ["winnow"] as const;
+
+/**
+ * The plugin a `log` row belongs to and what it said, or null for anything
+ * else — which is nearly every row.
+ *
+ * The separator is a colon *and a space*, so `winnow:/tmp/x` stays a path
+ * rather than a plugin speaking. The remainder has to survive as well: a bare
+ * prefix is attributed to nobody, because a blank `text` means "a tool call
+ * that carried no arguments" everywhere else in this file.
+ *
+ * Stripped per line rather than once, because stderr reaches `run_events` one
+ * *chunk* per row and not one line (`orchestrator.ts:6212-6219`), so a hook
+ * that wrote twice inside one tick is one row with the prefix on both lines.
+ * A row whose *first* line is somebody else's is left unlabelled: a chunk that
+ * mixes a plugin's words with a compiler's belongs to neither.
+ */
+function pluginLine(message: string): { plugin: string; text: string } | null {
+  for (const plugin of PLUGIN_PREFIXES) {
+    const prefix = `${plugin}: `;
+    if (!message.startsWith(prefix)) continue;
+    const text = message
+      .split("\n")
+      .map((line) => (line.startsWith(prefix) ? line.slice(prefix.length) : line))
+      .join("\n")
+      .trim();
+    return text === "" ? null : { plugin, text };
+  }
+  return null;
+}
+
 /** How loudly a hand-driven transition should read. */
 function statusTone(status: unknown): LogTone {
   if (status === "failed") return "danger";
@@ -518,16 +575,24 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
     case "log": {
       const message = String(p.message ?? "");
       if (message === "" || message.startsWith("system:")) return null;
+      // `accent` rather than `ok` or `warn`, and the same tone whatever the
+      // sentence says: one prefix carries a checkpoint that was written and a
+      // refusal that was not, and this file cannot tell them apart. The tone is
+      // about who is speaking; how it went is in the words. Neutral was the bug
+      // — a plugin reporting that it worked was one grey line inside a build,
+      // and a cycle where it never loaded looked the same.
+      const spoken = pluginLine(message);
+      const body = spoken?.text ?? message;
       // Same mark as a tool input, for the same reason: an agent's build output
       // arrives here one stderr chunk per row and is cut at `MAX_LOG_CHARS`.
       return {
         voice: "system",
-        tone: "neutral",
-        label: null,
+        tone: spoken ? "accent" : "neutral",
+        label: spoken?.plugin ?? null,
         text:
           typeof p.truncatedFrom === "number"
-            ? `${message} · line shortened for storage`
-            : message,
+            ? `${body} · line shortened for storage`
+            : body,
       };
     }
 
