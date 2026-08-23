@@ -58,7 +58,18 @@ export async function GET(req: Request) {
     // one row rather than a hundred. `runAgentDTO` and the budget normalisation
     // that used to happen here are still in the single-run route, and are still
     // the reason a client never sees the stored blob.
-    const { budget: _budget, agent: _agent, ...rest } = r;
+    //
+    // `needs_review_reason` is the same decision with a delay on it: up to
+    // `MAX_NEEDS_REVIEW_REASON` characters of an agent's own account of why it
+    // stopped, read by the run's page and by nothing on this list. It measured
+    // as free above only because that capture held no `needs-review` rows, and
+    // a fleet that ends that way puts ~200KB back on a four-second poll.
+    const {
+      budget: _budget,
+      agent: _agent,
+      needs_review_reason: _needsReviewReason,
+      ...rest
+    } = r;
     return {
       ...rest,
       // Clipped for the reason `budget` is absent, and the reason

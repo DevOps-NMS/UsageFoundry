@@ -8,6 +8,7 @@ import {
   resolvePrice,
   totalTokens,
 } from "./pricing";
+import { type ToolCall, parseToolRecord } from "./toolComposition";
 
 /**
  * Reads Claude Code's local session transcripts and turns them into billable
@@ -95,6 +96,30 @@ interface FileCacheEntry {
   cwd: string;
   entries: UsageEntry[];
   /**
+   * The composition reading's own records, retained for `entries`' reason.
+   *
+   * A second array rather than a field on `UsageEntry`, which is the invariant
+   * `parseCompactionBoundary` states and this one is bound by: every consumer
+   * of that array treats a member as a billable turn, and a `tool_result` is
+   * not one. They are held here because the offset cache means a later scan
+   * re-parses only the appended bytes, so a call parsed three passes ago has to
+   * survive to be counted — and because the cross-file dedupe that makes the
+   * total honest needs the call's own id, which only the record carries.
+   */
+  toolCalls: ToolCall[];
+  /**
+   * `tool_use.id` → index in `toolCalls`, for calls whose result has not
+   * arrived yet.
+   *
+   * Only the *unanswered* ones, which is what keeps this from being a second
+   * 60,000-entry map beside the array: a result is always written after the
+   * call it answers, so within a pass this drains as it goes and what survives
+   * to the next one is the tail of a live session plus whatever a kill left
+   * unanswered. An entry is deleted the moment it is filled in, so a session
+   * that ends cleanly leaves nothing here at all.
+   */
+  pendingToolCalls: Map<string, number>;
+  /**
    * Newest timestamp in `entries`, or 0 when it holds none.
    *
    * Only eviction reads it, and it is kept here rather than derived because the
@@ -107,12 +132,20 @@ interface FileCacheEntry {
 
 // Persist across hot reloads in dev; a fresh Map per module evaluation would
 // silently re-parse every transcript on each request.
+//
+// A **new key** rather than the former `__ufTranscriptCache`, because the shape
+// at that key changed: `??=` only initialises when the key is absent, so a
+// pre-upgrade entry would survive a dev hot reload and every pass over it would
+// throw on a `toolCalls` array that is not there. That is `__ufInterrupts`'
+// rule, and the cost of obeying it is one full re-read of the tree after an
+// upgrade — the same cost every container restart already pays.
 const globalCache = globalThis as unknown as {
-  __ufTranscriptCache?: Map<string, FileCacheEntry>;
+  __ufTranscriptCacheV2?: Map<string, FileCacheEntry>;
   __ufTranscriptCacheStats?: { evictions: number };
 };
 const cache: Map<string, FileCacheEntry> =
-  globalCache.__ufTranscriptCache ?? (globalCache.__ufTranscriptCache = new Map());
+  globalCache.__ufTranscriptCacheV2 ??
+  (globalCache.__ufTranscriptCacheV2 = new Map());
 /** Pinned beside the cache it counts, for that Map's reason. */
 const cacheStats =
   globalCache.__ufTranscriptCacheStats ??
@@ -365,7 +398,15 @@ async function readAppended(file: string): Promise<FileCacheEntry> {
   const base: FileCacheEntry =
     prev && !rotated
       ? prev
-      : { offset: 0, size: 0, cwd: "", entries: [], lastTs: 0 };
+      : {
+          offset: 0,
+          size: 0,
+          cwd: "",
+          entries: [],
+          toolCalls: [],
+          pendingToolCalls: new Map(),
+          lastTs: 0,
+        };
 
   if (stat.size === start) {
     base.size = stat.size;
@@ -397,6 +438,28 @@ async function readAppended(file: string): Promise<FileCacheEntry> {
 
   for (const line of complete.split("\n")) {
     if (!line) continue;
+
+    // Two parsers over one line, reading it for different questions and
+    // sharing nothing but the bytes — `parseCompactionBoundary`'s rule, and the
+    // reason the tool reader takes the raw line rather than a record `parseLine`
+    // already produced: its own substring test skips the parse entirely on the
+    // three quarters of lines that carry no tool block, which is cheaper than
+    // threading a parsed record through a function whose whole contract is that
+    // what it returns is billable.
+    const tools = parseToolRecord(line);
+    if (tools) {
+      for (const call of tools.calls) {
+        base.pendingToolCalls.set(call.id, base.toolCalls.length);
+        base.toolCalls.push(call);
+      }
+      for (const result of tools.results) {
+        const at = base.pendingToolCalls.get(result.toolUseId);
+        if (at === undefined) continue; // a result whose call is in another file
+        base.toolCalls[at].resultChars = result.chars;
+        base.pendingToolCalls.delete(result.toolUseId);
+      }
+    }
+
     const entry = parseLine(line, cwdRef);
     if (!entry) continue;
     base.entries.push(entry);
@@ -433,6 +496,16 @@ function refreshFile(file: string): Promise<FileCacheEntry> {
 
 export interface ScanResult {
   entries: UsageEntry[];
+  /**
+   * The composition reading's records, deduplicated the same way `entries` are
+   * and never mixed with them.
+   *
+   * These are not turns and carry no usage, no model and no price — see
+   * `toolComposition.ts`. Nothing that consumes `entries` may consume these, and
+   * `buildSnapshot` keeps them on their own field of the snapshot for the same
+   * reason.
+   */
+  toolCalls: ToolCall[];
   fileCount: number;
   /** Distinct model strings seen that we have no price for. */
   unpricedModels: string[];
@@ -497,6 +570,28 @@ function retainedEntries(): number {
   return n;
 }
 
+/** Tool calls currently held across every cached file. */
+function retainedToolCalls(): number {
+  let n = 0;
+  for (const e of cache.values()) n += e.toolCalls.length;
+  return n;
+}
+
+/**
+ * What the bound is actually applied to: turns **and** tool calls together.
+ *
+ * `TRANSCRIPT_CACHE_MAX_ENTRIES` exists to bound a heap, not to count a
+ * particular kind of record, and the composition reading put a second array in
+ * every cache entry — about 60% as many records as the first on this install's
+ * corpus. Measuring only turns would have left the bound reading the same
+ * number while the memory behind it grew, which is precisely the silent
+ * loosening the bound was introduced to prevent. The two stats stay separate on
+ * `TranscriptCacheStats` so an operator can still see which array is growing.
+ */
+function retainedRecords(): number {
+  return retainedEntries() + retainedToolCalls();
+}
+
 /**
  * Drop whole files until the retained turn count is back under the bound.
  *
@@ -519,17 +614,20 @@ function retainedEntries(): number {
  * retention, and the entries the caller is holding are unaffected.
  */
 function evictToBound(): void {
-  let retained = retainedEntries();
+  let retained = retainedRecords();
   if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return;
 
   const candidates = [...cache.entries()]
-    .filter(([file, e]) => e.entries.length > 0 && !inflight.has(file))
+    .filter(
+      ([file, e]) =>
+        e.entries.length + e.toolCalls.length > 0 && !inflight.has(file),
+    )
     .sort((a, b) => a[1].lastTs - b[1].lastTs);
 
   for (const [file, e] of candidates) {
     if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return;
     cache.delete(file);
-    retained -= e.entries.length;
+    retained -= e.entries.length + e.toolCalls.length;
     cacheStats.evictions += 1;
   }
 }
@@ -540,7 +638,9 @@ export interface TranscriptCacheStats {
   files: number;
   /** Parsed turns held across those files. */
   entries: number;
-  /** The bound `entries` is kept at or below. */
+  /** Tool calls held across those files — the composition reading's records. */
+  toolCalls: number;
+  /** The bound `entries` **plus** `toolCalls` is kept at or below. */
   maxEntries: number;
   /** Files dropped to stay under that bound since this process started. */
   evictions: number;
@@ -557,6 +657,7 @@ export function transcriptCacheStats(): TranscriptCacheStats {
   return {
     files: cache.size,
     entries: retainedEntries(),
+    toolCalls: retainedToolCalls(),
     maxEntries: TRANSCRIPT_CACHE_MAX_ENTRIES,
     evictions: cacheStats.evictions,
   };
@@ -678,6 +779,16 @@ async function runScan(): Promise<ScanResult> {
   const entries: UsageEntry[] = [];
   const unpriced = new Set<string>();
 
+  // The composition reading's own dedupe, over its own key and in its own
+  // array. Same problem as above — a resumed session copies the conversation
+  // forward, so the same call is written into more than one file — and the
+  // resolution rule is the same shape for the same kind of reason: the copy
+  // that was written before the tool answered carries a null `resultChars`, so
+  // the record that saw the most is the complete one. Taking the first would
+  // report a call with no result whenever a session was resumed across it.
+  const indexOfToolId = new Map<string, number>();
+  const toolCalls: ToolCall[] = [];
+
   for (const r of results) {
     if (!r) continue;
     for (const e of r.entries) {
@@ -689,6 +800,17 @@ async function runScan(): Promise<ScanResult> {
       indexOfKey.set(e.key, entries.length);
       entries.push(e);
       if (e.unpriced) unpriced.add(e.model);
+    }
+    for (const c of r.toolCalls) {
+      const kept = indexOfToolId.get(c.id);
+      if (kept !== undefined) {
+        if ((c.resultChars ?? -1) > (toolCalls[kept].resultChars ?? -1)) {
+          toolCalls[kept] = c;
+        }
+        continue;
+      }
+      indexOfToolId.set(c.id, toolCalls.length);
+      toolCalls.push(c);
     }
   }
 
@@ -703,6 +825,7 @@ async function runScan(): Promise<ScanResult> {
 
   return {
     entries,
+    toolCalls,
     fileCount: files.length,
     unpricedModels: [...unpriced],
     scannedAt: Date.now(),

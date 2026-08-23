@@ -80,6 +80,44 @@ export type AgentOriginDTO =
   | "both"
   | "unknown";
 
+/** Mirror of `ToolCompositionRow` in `toolComposition.ts`. Never money. */
+export interface ToolCompositionRowDTO {
+  tool: string;
+  calls: number;
+  /** Characters of text this tool's results placed into a context. */
+  resultChars: number;
+  /** Share of `totalResultChars`, 0–1. */
+  share: number;
+}
+
+/**
+ * Mirror of `ToolComposition` — what filled the contexts, and what filling one
+ * costs.
+ *
+ * **Not a cost source and never summed with one.** The five breakdowns beside
+ * it on `SnapshotDTO` reconcile to the window total because every turn lands in
+ * exactly one bucket; this cannot, because a `tool_result` is not a billable
+ * turn and carries no usage block at all. Its rows are denominated in
+ * characters and carry no dollar figure by construction, and the three
+ * placement figures are **rates** — a price per million tokens placed and a
+ * re-read multiple — so there is nothing here that could be added to a bill
+ * even by accident. The argument in full is on `toolComposition.ts`.
+ */
+export interface ToolCompositionDTO {
+  from: number;
+  rows: ToolCompositionRowDTO[];
+  totalCalls: number;
+  totalResultChars: number;
+  /** Calls with no result recorded — interrupted, or answered in a file we could not read. */
+  unansweredCalls: number;
+  /** Tokens that entered a context in this window, counted once each. */
+  placedTokens: number;
+  /** How many times the average placed token was read back. Null when none was. */
+  reReadRatio: number | null;
+  /** The window's whole bill over the tokens placed into it. Null when none was. */
+  costPerMillionPlacedUSD: number | null;
+}
+
 export interface SessionBlockDTO {
   startsAt: number;
   endsAt: number;
@@ -105,9 +143,22 @@ export interface SnapshotDTO {
     agg: AggregateDTO;
     /** Null when nothing looked the names up — not the same as `unknown`. */
     origin: AgentOriginDTO | null;
+    /**
+     * The same recorded turns repriced at `counterfactualModel`'s rates, or
+     * null when nobody asked.
+     *
+     * A counterfactual over the tokens that were actually produced, **not** a
+     * forecast: the same task on a smaller model may take more turns, and this
+     * figure does not know that. Anything rendering it has to say so.
+     */
+    counterfactualUSD: number | null;
   }>;
   bySkill: Array<{ skill: string; agg: AggregateDTO }>;
   byEffort: Array<{ effort: string; agg: AggregateDTO }>;
+  /** Which model the counterfactual above was priced at. Null when none was. */
+  counterfactualModel: string | null;
+  /** A composition reading, never a cost source — see `ToolCompositionDTO`. */
+  byTool: ToolCompositionDTO;
   totalCostUSD: number;
   /** The provider's own reading, when it answered. Never a cost. */
   plan: PlanUsageDTO | null;
@@ -244,7 +295,12 @@ export interface UsageResponse {
         files: number;
         /** Parsed turns held across those files. */
         entries: number;
-        /** The bound `entries` is kept at or below. */
+        /**
+         * Tool calls held across those files — the composition reading's own
+         * records, which are not turns and are not billable.
+         */
+        toolCalls: number;
+        /** The bound `entries` **plus** `toolCalls` is kept at or below. */
         maxEntries: number;
         /**
          * Files dropped to stay under that bound since boot. Non-zero means the
@@ -703,14 +759,25 @@ export const MAX_LIST_PROMPT = 400;
  * shape whose `prompt` had silently become a prefix would be wrong on the page
  * that renders the task in full and correct nowhere it was checked.
  *
- * Two fields are absent rather than clipped. `budget` is the whole normalised
+ * Three fields are absent rather than clipped. `budget` is the whole normalised
  * policy and `agent` the run's frozen copy of its role, 37KB between them over a
  * hundred rows, and neither list reads either: the list draws status, task,
  * folder, cycles, tokens, spend and what a run is waiting on, and quick open
  * draws an id, a status and a folder. The guards belong to the run's own page,
  * which asks the route that has them.
+ *
+ * `needs_review_reason` is the third and it is the same argument with a delay
+ * on it. It holds up to `MAX_NEEDS_REVIEW_REASON` characters of what an agent
+ * said when it could not finish, only the run's own page renders it, and it cost
+ * nothing in the payload measured above **only because that capture happened to
+ * hold no `needs-review` rows**. A fleet that ends that way puts it back on
+ * every row of a list polled every four seconds. A field that is free on one
+ * install's data and expensive on the next is not a field this list carries.
  */
-export type RunListItemDTO = Omit<RunDTO, "prompt" | "budget" | "agent"> & {
+export type RunListItemDTO = Omit<
+  RunDTO,
+  "prompt" | "budget" | "agent" | "needs_review_reason"
+> & {
   /**
    * The task, clipped to `MAX_LIST_PROMPT` with a trailing `…` when it did not
    * fit — `clipReason`'s marker, so a shortened value cannot read as a whole

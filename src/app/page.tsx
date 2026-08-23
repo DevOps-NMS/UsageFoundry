@@ -120,6 +120,13 @@ interface BreakdownRow {
   label: string;
   cost: number;
   mark?: { text: string; tone: BadgeTone } | null;
+  /**
+   * The same recorded turns repriced at a cheaper model's rates, or null/absent
+   * where the dimension has no such reading. Only `agent` does: an agent is the
+   * one thing here a model can be set on, which is what makes the comparison a
+   * lever rather than a curiosity.
+   */
+  counterfactual?: number | null;
 }
 
 interface Breakdown {
@@ -131,9 +138,10 @@ interface Breakdown {
 const POLL_IDLE_MS = 120_000;
 const POLL_WORKING_MS = 60_000;
 
-/** Both tables cut their tail. What is cut is counted rather than dropped. */
+/** Every table cuts its tail. What is cut is counted rather than dropped. */
 const MAX_BREAKDOWN_ROWS = 12;
 const MAX_BLOCK_ROWS = 15;
+const MAX_TOOL_ROWS = 12;
 
 /**
  * The figure at the right of a grouped row.
@@ -401,6 +409,7 @@ export default function Dashboard() {
           label: r.agent,
           cost: r.agg.costUSD,
           mark: agentOriginBadge(r.origin),
+          counterfactual: r.counterfactualUSD,
         })),
         // `(main thread)` is the bucket whose meaning moved. It was "not an
         // agent"; it is now "no agent name on the turn", which a run started as
@@ -487,6 +496,14 @@ export default function Dashboard() {
     s.weekly.tokens > 0 ? s.weekly.agg.tokens.cacheRead / s.weekly.tokens : null;
   const current = breakdowns[dimension];
   const breakdownOmitted = Math.max(0, current.rows.length - MAX_BREAKDOWN_ROWS);
+  // The column and the sentence under the table are one decision: a second
+  // dollar figure beside the first, with nothing saying it describes a run that
+  // never happened, is a figure a reader will quote as a saving.
+  const counterfactualModel = s.counterfactualModel;
+  const showCounterfactual = dimension === "agent" && counterfactualModel !== null;
+  // The table's key is `claude-sonnet-5`; the column head has one line for it.
+  const counterfactualLabel = (counterfactualModel ?? "").replace("claude-", "");
+  const toolsOmitted = Math.max(0, s.byTool.rows.length - MAX_TOOL_ROWS);
   const blocksOmitted = Math.max(0, s.blocks.length - MAX_BLOCK_ROWS);
   // `wkEnd` is `now` itself unless a weekly anchor is configured, so this is a
   // reading of the window rather than a guess about the setting behind it.
@@ -1005,6 +1022,11 @@ export default function Dashboard() {
                     <Th num className={STICKY_HEAD}>
                       Cost
                     </Th>
+                    {showCounterfactual && (
+                      <Th num className={STICKY_HEAD}>
+                        On {counterfactualLabel}
+                      </Th>
+                    )}
                     <Th num className={STICKY_HEAD}>
                       Share
                     </Th>
@@ -1033,6 +1055,17 @@ export default function Dashboard() {
                       <Td num label="Cost">
                         {fmtUSD(r.cost)}
                       </Td>
+                      {/* Labelled with the model rather than "Counterfactual":
+                          stacked below `md` this line is read on its own, and
+                          the word the reader needs there is which model it is. */}
+                      {showCounterfactual && (
+                        <Td num label={`On ${counterfactualLabel}`}>
+                          {r.counterfactual === null ||
+                          r.counterfactual === undefined
+                            ? "—"
+                            : fmtUSD(r.counterfactual)}
+                        </Td>
+                      )}
                       <Td num label="Share">
                         {s.weekly.costUSD > 0
                           ? fmtPct(r.cost / s.weekly.costUSD)
@@ -1055,8 +1088,153 @@ export default function Dashboard() {
               but not listed.
             </div>
           )}
+          {/* Never folded away and never shortened. The column beside Cost is a
+              dollar figure for work that did not happen, and a reader who quotes
+              it as a saving has been misled by this page rather than by their
+              own arithmetic. */}
+          {showCounterfactual && (
+            <div className="mt-2 max-w-[68ch] text-xs text-ink-muted">
+              <strong>On {counterfactualLabel}</strong> is these exact turns —
+              the same input, output and cache tokens — repriced at that
+              model&rsquo;s rate on the day each one ran. It is a counterfactual,
+              not a forecast: the same task on a smaller model may take more work
+              cycles, longer conversations or more retries, and this figure knows
+              nothing about that. It is worth reading because the discount lands
+              on cache reads, which are {fmtPct(cacheShare)} of the tokens here
+              and the largest single share of the bill. An agent carries a model
+              and a run started as that agent runs on it, so pointing a
+              template&rsquo;s agent at it is how you would find out for real.
+            </div>
+          )}
           {current.hint && (
             <div className="mt-2 text-xs text-ink-muted">{current.hint}</div>
+          )}
+        </Card>
+
+        {/* Sits with the breakdowns because it reads the same transcripts, and
+            it is deliberately *not* a sixth slice of them: every row above is a
+            share of the money, and every row here is a share of the characters.
+            A tool result is not a billable turn — it carries no usage block at
+            all — so this card draws no per-tool dollar figure and none can be
+            derived from it. What it does carry is the price of *placing* a
+            token, which is the number that makes the composition actionable. */}
+        <Card emphasis="quiet" className="mb-4">
+          <CardTitle>What filled the context</CardTitle>
+          <p className="mb-3 max-w-[68ch] text-xs text-ink-muted">
+            Tool results are what an agent puts into a context and then pays to
+            carry: each one is re-read on every later turn of the session. The
+            shares below are of characters of tool output over{" "}
+            {s.weekly.label.toLowerCase()} — not of money, and not comparable
+            with any figure above.
+          </p>
+
+          <ListGroup>
+            <ListRow
+              label="Tokens placed"
+              description="Entered a context once — as fresh input, as a cache write, or as generated output. Re-reads are excluded, which is the point of the two rows below."
+            >
+              <ListValue>{fmtTokens(s.byTool.placedTokens)}</ListValue>
+            </ListRow>
+            <ListRow
+              label="Read back"
+              description="Times the average placed token was re-read across this window"
+            >
+              <ListValue>
+                {s.byTool.reReadRatio === null
+                  ? "—"
+                  : `${s.byTool.reReadRatio.toFixed(1)}×`}
+              </ListValue>
+            </ListRow>
+            <ListRow
+              label="Cost per million placed"
+              description="This window’s whole bill over the tokens placed into it. Not a rate anyone is charged — it is what a token ends up costing once it has been carried, which is far above any list input price."
+            >
+              <ListValue>
+                {s.byTool.costPerMillionPlacedUSD === null
+                  ? "—"
+                  : fmtUSD(s.byTool.costPerMillionPlacedUSD)}
+              </ListValue>
+            </ListRow>
+          </ListGroup>
+
+          {s.byTool.rows.length === 0 ? (
+            <div className="mt-4">
+              <Empty>No tool calls recorded in this window.</Empty>
+            </div>
+          ) : (
+            <div className="mt-4">
+              <ListView box="capped">
+                <Table stack>
+                  <caption className="sr-only">
+                    Characters of tool output placed into contexts over{" "}
+                    {s.weekly.label.toLowerCase()}, largest first
+                  </caption>
+                  <THead>
+                    <tr>
+                      <Th className={STICKY_HEAD}>Tool</Th>
+                      <Th num className={STICKY_HEAD}>
+                        Calls
+                      </Th>
+                      <Th num className={STICKY_HEAD}>
+                        Characters
+                      </Th>
+                      <Th num className={STICKY_HEAD}>
+                        Share
+                      </Th>
+                    </tr>
+                  </THead>
+                  <TBody>
+                    {s.byTool.rows.slice(0, MAX_TOOL_ROWS).map((r) => (
+                      <Tr key={r.tool}>
+                        {/* No label: the tool's own name is what the record is.
+                            `break-all` below the breakpoint because an MCP tool
+                            id is one long token with nothing to wrap at. */}
+                        <Td className="max-md:break-all">
+                          <span className="mono">{r.tool}</span>
+                        </Td>
+                        <Td num label="Calls">
+                          {r.calls.toLocaleString()}
+                        </Td>
+                        <Td num label="Characters">
+                          {fmtTokens(r.resultChars)}
+                        </Td>
+                        <Td num label="Share">
+                          {fmtPct(r.share)}
+                        </Td>
+                      </Tr>
+                    ))}
+                  </TBody>
+                </Table>
+              </ListView>
+            </div>
+          )}
+
+          {toolsOmitted > 0 && (
+            <div className="mt-2 text-xs tabular-nums text-ink-muted">
+              {toolsOmitted} smaller{" "}
+              {toolsOmitted === 1 ? "tool is" : "tools are"} in the totals above
+              but not listed.
+            </div>
+          )}
+          {/* Only where there is something to qualify: an empty window has
+              already said so above, and a caveat with no figure under it is a
+              sentence the eye learns to skip. */}
+          {s.byTool.totalCalls > 0 && (
+            <div className="mt-2 max-w-[68ch] text-xs text-ink-muted">
+              {s.byTool.totalCalls.toLocaleString()} calls placed{" "}
+              {fmtTokens(s.byTool.totalResultChars)} characters.
+              {s.byTool.unansweredCalls > 0 && (
+                <>
+                  {" "}
+                  {s.byTool.unansweredCalls.toLocaleString()} of them have no
+                  recorded result — interrupted, or answered in a transcript this
+                  scan could not read — and count towards the calls and towards
+                  no share.
+                </>
+              )}{" "}
+              A result that came back as an image counts no characters, so a tool
+              that answers in pictures reads low here.
+            </div>
           )}
         </Card>
 

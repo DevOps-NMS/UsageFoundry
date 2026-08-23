@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ZERO_TOKENS } from "./pricing";
+import { ZERO_TOKENS, costOf, resolvePrice } from "./pricing";
 import type { UsageEntry } from "./transcripts";
+import type { ToolCall } from "./toolComposition";
 import {
   FIVE_HOURS_MS,
   MAIN_THREAD_BUCKET,
@@ -883,5 +884,205 @@ describe("agent attribution", () => {
     assert.equal(spend.costUSD, 0);
     assert.equal(spend.entryCount, 0);
     assert.deepEqual(spend.rows, []);
+  });
+});
+
+/**
+ * The cheaper-model counterfactual on the agent column.
+ *
+ * It earns a test because everything about it is quiet. It is arithmetic over
+ * every turn in the window against a *second* price table lookup, it is
+ * date-dependent (Sonnet 5's introductory rate is a different number from its
+ * list rate, and which one applies is decided per turn), and it is rendered as
+ * a dollar figure beside a real one. Every way of getting it wrong produces a
+ * plausible number: a memo keyed too coarsely prices a September turn at
+ * August's rate, a bucket missed in the second pass reads as work that would
+ * have been free, and `null` collapsing to `0` says the same thing about the
+ * whole column on the guard path — which is the one caller that never asks.
+ */
+describe("cheaper-model counterfactual", () => {
+  const tokenEntry = (
+    ts: number,
+    agent: string | undefined,
+    input: number,
+  ): UsageEntry => ({
+    ...entry(ts, 0),
+    agent,
+    tokens: { ...ZERO_TOKENS, input },
+  });
+
+  it("leaves the figure unasked when no model is named", () => {
+    const snap = buildSnapshot(
+      [tokenEntry(now - HOUR, "Reviewer", 1_000_000)],
+      NO_LIMITS,
+      now,
+    );
+    // Null is "nobody asked", which is the orchestrator's guard path. A 0 there
+    // would read as "the same work would have cost nothing".
+    assert.equal(snap.counterfactualModel, null);
+    assert.equal(snap.byAgent[0].counterfactualUSD, null);
+  });
+
+  it("reprices every bucket, and the buckets still add up to the window", () => {
+    const at = now - HOUR;
+    const entries = [
+      tokenEntry(at, undefined, 1_000_000),
+      tokenEntry(at + 1, "Reviewer", 2_000_000),
+      tokenEntry(at + 2, "Reviewer", 1_000_000),
+    ];
+    const snap = buildSnapshot(
+      entries,
+      NO_LIMITS,
+      now,
+      null,
+      null,
+      null,
+      [],
+      "claude-sonnet-5",
+    );
+
+    assert.equal(snap.counterfactualModel, "claude-sonnet-5");
+    const perToken = costOf(
+      { ...ZERO_TOKENS, input: 1_000_000 },
+      resolvePrice("claude-sonnet-5", { at }),
+    );
+    const byName = new Map(snap.byAgent.map((r) => [r.agent, r]));
+    assert.equal(byName.get(MAIN_THREAD_BUCKET)?.counterfactualUSD, perToken);
+    assert.equal(byName.get("Reviewer")?.counterfactualUSD, perToken * 3);
+
+    // The same reconciliation the cost column makes: every turn is in exactly
+    // one bucket, so the rows add to what the whole window would have cost.
+    assert.equal(
+      snap.byAgent.reduce((s, r) => s + (r.counterfactualUSD ?? 0), 0),
+      perToken * 4,
+    );
+  });
+
+  it("prices each turn at the rate in force on the day it ran", () => {
+    // Sonnet 5's introductory rate runs through 2026-08-31 inclusive, so these
+    // two turns are the same tokens at two different prices. A memo keyed on
+    // anything coarser than the day would give them both the same one — and the
+    // whole point of the figure is to inform a decision about *future* work, so
+    // a page that quietly extended an expiring rate over it would be wrong in
+    // the direction that costs money.
+    const intro = Date.UTC(2026, 7, 30, 12);
+    const list = Date.UTC(2026, 8, 2, 12);
+    const later = Date.UTC(2026, 8, 3, 12);
+    const snap = buildSnapshot(
+      [
+        tokenEntry(intro, "before", 1_000_000),
+        tokenEntry(list, "after", 1_000_000),
+      ],
+      NO_LIMITS,
+      later,
+      null,
+      null,
+      null,
+      [],
+      "claude-sonnet-5",
+    );
+
+    const byName = new Map(snap.byAgent.map((r) => [r.agent, r]));
+    assert.equal(byName.get("before")?.counterfactualUSD, 2);
+    assert.equal(byName.get("after")?.counterfactualUSD, 3);
+  });
+
+  it("reprices a turn upwards when the target is dearer than what ran", () => {
+    // Correct, and the reason the actual figure stays beside it rather than
+    // being replaced: this is a comparison, not a correction.
+    const at = now - HOUR;
+    const haiku: UsageEntry = {
+      ...tokenEntry(at, "cheap", 1_000_000),
+      model: "claude-haiku-4-5",
+      costUSD: 1,
+    };
+    const snap = buildSnapshot(
+      [haiku],
+      NO_LIMITS,
+      now,
+      null,
+      null,
+      null,
+      [],
+      "claude-sonnet-5",
+    );
+    assert.equal(snap.byAgent[0].agg.costUSD, 1);
+    assert.equal((snap.byAgent[0].counterfactualUSD ?? 0) > 1, true);
+  });
+});
+
+/**
+ * The composition reading reaching the snapshot.
+ *
+ * What this pins is the boundary rather than the arithmetic, which
+ * `toolComposition.test.ts` covers: that `byTool` is scoped to the same window
+ * the five breakdowns are, that its placement rates come from that window's own
+ * aggregate, and that a caller who supplies no calls gets an empty reading
+ * rather than a wrong one. The failure it guards against is the quiet kind — a
+ * card of tool shares over one span sitting under a table of costs over
+ * another, both plausible and describing different weeks.
+ */
+describe("tool composition on the snapshot", () => {
+  const call = (id: string, name: string, ts: number, chars: number): ToolCall => ({
+    id,
+    ts,
+    name,
+    isSidechain: false,
+    resultChars: chars,
+  });
+
+  it("is empty for a caller that supplies none", () => {
+    const snap = buildSnapshot([entry(now - HOUR)], NO_LIMITS, now);
+    assert.deepEqual(snap.byTool.rows, []);
+    assert.equal(snap.byTool.totalCalls, 0);
+  });
+
+  it("covers the same window as the breakdowns beside it", () => {
+    const at = now - HOUR;
+    const snap = buildSnapshot(
+      [entry(at)],
+      NO_LIMITS,
+      now,
+      null,
+      null,
+      null,
+      [
+        call("old", "Read", now - 8 * 24 * 3_600_000, 500),
+        call("new", "Read", at, 300),
+      ],
+    );
+
+    assert.equal(snap.byTool.from, snap.weekly.startsAt);
+    assert.equal(snap.byTool.totalCalls, 1);
+    assert.equal(snap.byTool.totalResultChars, 300);
+  });
+
+  it("prices placement off the same aggregate the weekly meter reports", () => {
+    const at = now - HOUR;
+    const rich: UsageEntry = {
+      ...entry(at, 5),
+      tokens: {
+        input: 0,
+        output: 10_000,
+        cacheRead: 900_000,
+        cacheWrite5m: 0,
+        cacheWrite1h: 90_000,
+      },
+    };
+    const snap = buildSnapshot([rich], NO_LIMITS, now, null, null, null, [
+      call("a", "Bash", at, 10),
+    ]);
+
+    assert.equal(snap.byTool.placedTokens, 100_000);
+    assert.equal(snap.byTool.reReadRatio, 9);
+    assert.equal(
+      snap.byTool.costPerMillionPlacedUSD,
+      (snap.weekly.costUSD / snap.byTool.placedTokens) * 1_000_000,
+    );
+    // Denominated in characters and reconciling only to itself. The window
+    // total is money and these are not, so no sum across the two is meaningful
+    // — which is why nothing on this shape carries a cost at all.
+    assert.equal(snap.byTool.rows[0].share, 1);
+    assert.equal("costUSD" in snap.byTool.rows[0], false);
   });
 });

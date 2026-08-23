@@ -21,6 +21,25 @@ import { jsonMaybeGzipped } from "@/lib/http";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * The model the `byAgent` counterfactual is priced at.
+ *
+ * Named here rather than inside `windows.ts` because what makes a target right
+ * is what an operator could plausibly point an agent at, which is a product
+ * decision and not a metering one — the rollup takes it as an argument for the
+ * same reason `agentNames` is an argument. Sonnet 5 is the one that earns it:
+ * it is the next tier down from the `claude-opus-5` every recorded run here
+ * used, `pricing.ts` has real rates for it, and an agent carrying
+ * `"model": "sonnet"` selected with `--agent` is the whole of the mechanism —
+ * no schema change, and deliberately no model column on `run_templates`, which
+ * `templates.ts` refuses by name.
+ *
+ * A constant rather than a setting: nothing acts on this figure, one target is
+ * enough to answer "is this worth trying", and a picker would be a control that
+ * changes a number nobody is billed for.
+ */
+const COUNTERFACTUAL_MODEL = "claude-sonnet-5";
+
 export async function GET(req: Request) {
   try {
     const settings = getSettings();
@@ -32,6 +51,14 @@ export async function GET(req: Request) {
     const entries = settings.includeSidechains
       ? scan.entries
       : scan.entries.filter((e) => !e.isSidechain);
+    // The composition reading obeys the same setting the meters do. It is a
+    // different array of a different type over the same files, so nothing here
+    // sums the two — but a card saying `Read` is a third of the context while
+    // the card above it has excluded every sub-agent turn would be two
+    // statements about two different corpora under one heading.
+    const toolCalls = settings.includeSidechains
+      ? scan.toolCalls
+      : scan.toolCalls.filter((c) => !c.isSidechain);
 
     const now = Date.now();
     const limits = limitConfig(settings);
@@ -54,6 +81,8 @@ export async function GET(req: Request) {
       settings.sessionResetOverrideAt,
       plan,
       agentNames,
+      toolCalls,
+      COUNTERFACTUAL_MODEL,
     );
 
     // Calendar buckets are wrong at every edge if they are cut in the wrong
