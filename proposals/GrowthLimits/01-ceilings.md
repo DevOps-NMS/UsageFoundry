@@ -167,7 +167,7 @@ in this proposal actually landed.
 | 28 | `readCountsFor`'s `run_events` scan | `src/lib/fileCostNotice.ts:322-350` | A `json_extract(e.payload, '$.input.file_path')` over 30 days of payloads. **No index can serve it** and the docblock explains why one was refused: an index "would move the cost onto every `run_events` insert instead, and that table is written on every tool call of every cycle". Memoised per folder for `READ_COUNTS_TTL_MS = 60_000` (`:304`). Measured here at 8.29 ms against an **empty** table, which is a floor; **the project's own figure is 38 ms against 131,572 rows** (`:290-291`). The memo is per *folder*, so the docblock's worst case is the one that matters: "a workflow instantiating twenty nodes … would pay it twenty times, blocking the event loop for the sum" — **≈950 ms at `MAX_WORKFLOW_NODES = 25`** on one press. Largest synchronous cost in this survey | history × concurrency | **M (in-tree; floor only here)** |
 | 29 | Event-loop delay during a cold scan | — | **Measured p50 ≈8, p90 17-20, p99 29-34, max 36-45 ms** (n = 5). Well inside `HEARTBEAT_MS = 1_000` (`serverLock.ts:51`) and three orders of magnitude inside `STALE_MS = GIT_SYNC_TIMEOUT_MS * 6` = 120 s (`serverLock.ts:84`, `git.ts:111`). The scan is `await`-ed I/O, not a block | history | **M** |
 | 30 | Peak RSS during a cold scan | — | **Measured 323-372 MB RSS, 149-205 MB heap** at 973.8 MB of transcripts, against `NODE_OPTIONS: --max-old-space-size=2048` (`docker-compose.yml:201`) and `mem_limit: 10g` (`:423`) | history | **M** |
-| 31 | `run_deps(run_id)` — no index | `src/lib/db.ts:655-656` indexes `depends_on` only | Full scan on the `run_id` side. The table grows with edges and is never swept, but edges per instance are bounded by `MAX_WORKFLOW_NODES = 25`, and SQLite scans a few thousand narrow rows in tens of microseconds | history | I |
+| 31 | `run_deps` growth on the `run_id` side | `src/lib/db.ts:344-350` (the table), `:655-656` (the one explicit index) | **Not a scan, and this row is a correction — see below.** `PRIMARY KEY (run_id, depends_on)` gives SQLite `sqlite_autoindex_run_deps_1`, which serves `run_id` as its leading column. Both hot queries `SEARCH`. The table is never swept, but edges per instance are bounded by `MAX_WORKFLOW_NODES = 25` | history | **M** |
 
 Row 30 is the one that refutes a prior claim outright. **Peak RSS is not the
 size of the transcript tree.** `SCAN_CONCURRENCY = 12` (`transcripts.ts:684`)
@@ -176,6 +176,32 @@ replaced: an unbounded `Promise.all` held every descriptor and every
 whole-remainder buffer at once, so "peak memory was therefore the size of the
 tree and peak descriptors its file count". At 973.8 MB of tree, peak RSS
 measured **367 MB**, not 974 MB.
+
+**Row 31 is where this catalogue was wrong and then corrected.** It was written
+as "`run_deps(run_id)` — no index, full scan on the `run_id` side", reasoned from
+`db.ts:655-656` indexing `depends_on` and nothing indexing `run_id`, and marked
+`I`. Running the plan settles it the other way:
+
+```
+EXPLAIN QUERY PLAN SELECT d.run_id, d.depends_on, d.edge FROM run_deps d
+  JOIN runs r ON r.id = d.depends_on WHERE d.run_id IN ('x');
+    → SEARCH d USING INDEX sqlite_autoindex_run_deps_1 (run_id=?)
+      SEARCH r USING COVERING INDEX sqlite_autoindex_runs_1 (id=?)
+
+EXPLAIN QUERY PLAN SELECT run_id, depends_on, edge FROM run_deps
+  WHERE run_id IN (SELECT id FROM runs WHERE status = 'waiting');
+    → SEARCH run_deps USING INDEX sqlite_autoindex_run_deps_1 (run_id=?)
+      LIST SUBQUERY 1
+      SEARCH runs USING INDEX idx_runs_status (status=?)
+```
+
+`PRIMARY KEY (run_id, depends_on)` (`db.ts:349`) is an implicit unique index
+whose **leading** column is `run_id`, so the queries at
+`orchestrator.ts:3815-3818` and `:3956-3957` both search rather than scan.
+`idx_run_deps_depends_on` exists precisely because `depends_on` is the one side
+the autoindex cannot serve. **The finding was not that the index is unnecessary;
+it was that the index already exists and is not written down anywhere.** #68
+asked for this plan and it has now been run.
 
 ---
 
@@ -188,7 +214,7 @@ measured **367 MB**, not 974 MB.
 | That queue or refuse visibly | 9 |
 | That truncate and report it | 8 |
 | **That truncate silently** | **2** (rows 18, 19) |
-| Measured against in this container | **11** rows |
+| Measured against in this container | **12** rows |
 | Reachable at this install's measured growth rate within 30 days | **0** of the numeric bounds |
 | Already exceeded at this install's size | **1**, and it is not in this catalogue: `listRuns(100)` (`src/app/api/runs/route.ts:50`), which [GapRegister G1](../GapRegister/03-growth.md) owns |
 | Bounds whose docblock records a growth problem somebody already fixed | **4** (rows 14, 17, 25's `SCAN_CONCURRENCY`, 26's single-flight) |

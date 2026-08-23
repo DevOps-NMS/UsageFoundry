@@ -1,8 +1,12 @@
 # Validation
 
-Five measurements would confirm or overturn this proposal. **None of the five
-could be taken in this container**, and each is phrased so that a different
+Five measurements would confirm or overturn this proposal. **Four of the five
+could not be taken in this container**, and each is phrased so that a different
 answer falsifies a specific claim rather than merely adding colour.
+
+The fifth, §3, was written as a fifth thing that could not be checked, then
+checked, and it overturned a row of [01-ceilings.md](01-ceilings.md). That
+correction is left visible rather than folded in.
 
 Then the commands that *were* run, with what they returned when this was
 written, so a reader on a different tree can tell whether the ground moved.
@@ -87,30 +91,49 @@ during a cold scan**, n = 5 — so the children are the whole of the unknown.
 **Read it at the peak.** A figure taken between cycles measures a sleeping
 process and would license a raise the running one cannot survive.
 
-## §3 — `run_deps` on the `run_id` side
+## §3 — `run_deps` on the `run_id` side: **run, and it overturned a row of this proposal**
 
-`db.ts:655-656` indexes `run_deps(depends_on)` and nothing indexes
-`run_deps(run_id)`. Two hot queries filter on the unindexed side:
-`orchestrator.ts:3815-3818` (`WHERE d.run_id IN (…)`) and `:3956-3957`
-(`WHERE run_id IN (SELECT id FROM runs WHERE status = 'waiting')`).
+This section was written as a fourth thing that could not be checked here. It
+could, a query plan does not need rows, and running it corrected
+[01-ceilings.md](01-ceilings.md) row 31 before this file was finished. It is kept
+in place rather than deleted because the sequence is the point.
 
-This proposal **reasoned** that it does not matter — edges per instance are
-bounded by `MAX_WORKFLOW_NODES = 25` and SQLite scans a few thousand narrow rows
-in tens of microseconds — and #68 asked for the same check. It is arithmetic, not
-a measurement, and catalogue row 31 is marked `I` for that reason.
+**The claim it overturned**, reasoned from `db.ts:655-656` indexing
+`run_deps(depends_on)` and nothing indexing `run_id`, was that the two hot
+queries — `orchestrator.ts:3815-3818` and `:3956-3957` — scan the `run_id` side,
+and that this is affordable because edges per instance are bounded by
+`MAX_WORKFLOW_NODES = 25`. The conclusion "leave it alone" was right and every
+step of the reasoning was wrong.
+
+```sh
+sqlite3 <db> "EXPLAIN QUERY PLAN SELECT d.run_id, d.depends_on, d.edge
+  FROM run_deps d JOIN runs r ON r.id = d.depends_on WHERE d.run_id IN ('x');"
+    → SEARCH d USING INDEX sqlite_autoindex_run_deps_1 (run_id=?)
+      SEARCH r USING COVERING INDEX sqlite_autoindex_runs_1 (id=?)
+```
+
+`PRIMARY KEY (run_id, depends_on)` (`db.ts:349`) is an implicit unique index led
+by `run_id`. Both queries search. #68's suspected finding on this is answered in
+the negative and no `CREATE INDEX` is owed.
+
+**What remains worth running, and it is a row count rather than a plan:**
 
 ```sh
 sqlite3 "$DATA_DIR/usagefoundry.db" "SELECT COUNT(*) FROM run_deps;"
-sqlite3 "$DATA_DIR/usagefoundry.db" \
-  "EXPLAIN QUERY PLAN SELECT d.run_id, d.depends_on, d.edge FROM run_deps d
-     JOIN runs r ON r.id = d.depends_on WHERE d.run_id IN ('x');"
 ```
 
-**What overturns what.** A `SCAN run_deps` in the plan is expected and is not the
-finding — the finding would be a row count in the hundreds of thousands, which
-would mean workflow instances are accumulating edges faster than
-`MAX_WORKFLOW_NODES` suggests. At that point the index is one idempotent
-`CREATE INDEX IF NOT EXISTS` in `migrate()`.
+**What overturns what.** A count in the hundreds of thousands would mean workflow
+instances accumulate edges faster than `MAX_WORKFLOW_NODES = 25` implies, which
+would make the *table's* growth a finding even though its access path is not. The
+plan above is settled; this number is not, because the only database this
+container can open holds zero `run_deps` rows.
+
+**And the lesson, since a proposal that catches itself should say what it cost.**
+Row 31 was marked `I` for inferred, and the inference was drawn from the list of
+`CREATE INDEX` statements in `migrate()` — which is exactly the wrong place to
+look, because an implicit index has no statement. Any other row in
+[01-ceilings.md](01-ceilings.md) marked `I` and reasoned from the absence of
+something in `db.ts` deserves the same suspicion.
 
 ## §4 — `request_log` depth and where its rows come from
 
@@ -225,6 +248,9 @@ find src/app/api -name route.ts | wc -l                                 → 56
 runs / run_events / run_deps / request_log / ops_events                  → 0 / 0 / 0 / 8 / 1
 ls -la /workspace/UsageFoundry/.data/  → usagefoundry.db 278,528 bytes (Aug 19 16:35)
                                           usagefoundry.db-wal 0 bytes
+
+# 15. The run_deps query plans — see §3. This is the one that overturned a row.
+both hot queries                       → SEARCH … USING INDEX sqlite_autoindex_run_deps_1
 ```
 
 **On that last line, because it looks like a §-free answer to Option F and is

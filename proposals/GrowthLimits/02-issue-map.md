@@ -65,16 +65,24 @@ used. That was #58, and #68's "a container hits its memory ceiling in weeks —
 and it hits at boot, so the server never comes up" does not follow from a
 0.38:1 ratio against a 10 GiB `mem_limit`.
 
-**Refined, still open: `run_deps.run_id` has no index.** #68's suspected
-finding 1 is correct at HEAD. `db.ts:655-656` indexes `run_deps(depends_on)`
-and nothing indexes `run_id`. What this proposal adds is the arithmetic #68 said
-it had not done: edges per workflow instance are bounded by
-`MAX_WORKFLOW_NODES = 25` (`apiTypes.ts:980`), the rows are narrow, and SQLite
-scans a few thousand of them in tens of microseconds — so at any row count this
-install will reach in years, the scan is cheaper than the index page reads would
-be. **Not worth an index.** #68's own verification command is still the right
-one and is carried forward verbatim into
-[12-validation.md](12-validation.md) §3.
+**Superseded: `run_deps.run_id` has no index.** #68's suspected finding 1 asked
+for an `EXPLAIN QUERY PLAN`. It has now been run, and the answer is that the
+index exists:
+
+```
+SEARCH d USING INDEX sqlite_autoindex_run_deps_1 (run_id=?)
+```
+
+`PRIMARY KEY (run_id, depends_on)` (`db.ts:349`) is an implicit unique index led
+by `run_id`, so both hot queries — `orchestrator.ts:3815-3818` and `:3956-3957` —
+search rather than scan, and `idx_run_deps_depends_on` (`db.ts:655-656`) exists
+precisely because `depends_on` is the side the autoindex cannot serve. **Nothing
+is owed here.**
+
+Recorded at length rather than quietly, because this proposal reached the same
+conclusion by the wrong route first: it inferred a scan from the absence of a
+`CREATE INDEX` on `run_id` in `migrate()`, which is the wrong place to look, and
+[12-validation.md](12-validation.md) §3 keeps the correction visible.
 
 **Refined, still open: WAL growth under long-lived readers.** #68's suspected
 finding 5 says "not investigated at all". It now is, to the extent it can be
@@ -275,7 +283,7 @@ exactly this reason.
 | Refined | **3** (#78, #114, #99) |
 | Left alone | **1** (#89) |
 | Distinct sub-issues whose finding no longer reproduces at HEAD | **10** — #58, #59, #61, #62, #63, #64, #67, #77, #92, #93 |
-| Findings from those issues that **still hold** and this proposal carries forward | **2** — `run_deps(run_id)` unindexed (#68 suspected 1, and the arithmetic says leave it), and the sizing of `mem_limit`/`maxConcurrentRuns` (#91, #114) |
+| Findings from those issues that **still hold** and this proposal carries forward | **1** — the sizing of `mem_limit`/`maxConcurrentRuns` (#91, #114). #68's suspected finding 1 was carried forward and then closed by running its own `EXPLAIN QUERY PLAN`; #68's suspected finding 5 was closed by `grep -rc "\.iterate(" src/` → 0 |
 | Filed, closed or commented on | **0** |
 
 Ten of the twelve growth-axis findings across these issues have been fixed since

@@ -68,7 +68,7 @@ horizon (the shape was chosen deliberately and is a term in a security argument)
 | **That truncate silently** | **2** — `walkRepo`'s 20,000 and `MAX_REMOTES_READ` |
 | That evict | 4 |
 | Costs that grow with an axis and have **no** bound at all | 8 |
-| Measured against in this container | **11** rows |
+| Measured against in this container | **12** rows |
 | Reachable at the measured growth rate within 30 days | **0** of the numeric bounds |
 | Already exceeded at this install's size | **1** — `listRuns(100)` against 294 measured runs, which [GapRegister](../GapRegister/03-growth.md) owns |
 | Bounds whose docblock records a growth problem somebody already fixed | **4** |
@@ -175,7 +175,7 @@ Recorded because it is why one option is nearly free and three are refused.
 |---|---|
 | [00-problem.md](00-problem.md) | The three axes, every figure measured here with its n, the reconciliation of the two entry counts, and everything that could not be reached |
 | [01-ceilings.md](01-ceilings.md) | **The spine.** Thirty-one bounds in five groups — queue or refuse, truncate and report, truncate silently, evict, and grow unbounded — each with file, line, what happens at the bound, the axis that reaches it, and whether it was measured or inferred |
-| [02-issue-map.md](02-issue-map.md) | The seven open issues, one verdict each: #77 superseded outright, #68 and #91 superseded in the majority of their mechanisms, #78, #114 and #99 refined with a measurement, #89 left alone. Ten sub-issues that no longer reproduce, two findings carried forward, nothing filed |
+| [02-issue-map.md](02-issue-map.md) | The seven open issues, one verdict each: #77 superseded outright, #68 and #91 superseded in the majority of their mechanisms, #78, #114 and #99 refined with a measurement, #89 left alone. Ten sub-issues that no longer reproduce, one finding carried forward, nothing filed |
 | [03-option-a-instrument-the-axes.md](03-option-a-instrument-the-axes.md) | **Recommended first.** Two fields, no threshold, no warning colour — report the number, do not judge it |
 | [04-option-b-report-the-truncation.md](04-option-b-report-the-truncation.md) | **Recommended second.** One boolean out of `walkRepo`, and the honesty asymmetry against `retention.ts` that makes it a defect rather than a nicety |
 | [05-option-c-raise-the-run-ceiling.md](05-option-c-raise-the-run-ceiling.md) | The survey's only non-refused raise, deferred on one reading. Why "measured, not reasoned" and "reasoned rather than measured" are both true of the same number |
