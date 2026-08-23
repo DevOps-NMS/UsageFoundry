@@ -72,14 +72,16 @@ function addRun(o: {
   spent: number;
   est?: number;
   finishedAt: number | null;
+  pausedAt?: number | null;
   activeStartedAt?: number | null;
 }): void {
   dbMod
     .db()
     .prepare(
       `INSERT INTO runs (id, folder, prompt, status, budget, max_iterations, iterations,
-                         created_at, finished_at, spent_usd, spent_usd_est, active_started_at)
-       VALUES (?, ?, 'work', ?, '{"maxIterations":1}', 1, 1, ?, ?, ?, ?, ?)`,
+                         created_at, finished_at, paused_at, spent_usd, spent_usd_est,
+                         active_started_at)
+       VALUES (?, ?, 'work', ?, '{"maxIterations":1}', 1, 1, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       o.id,
@@ -87,10 +89,25 @@ function addRun(o: {
       o.status,
       NOW - 48 * HOUR,
       o.finishedAt,
+      o.pausedAt ?? null,
       o.spent,
       o.est ?? 0,
       o.activeStartedAt ?? null,
     );
+}
+
+/** A chat and one settled turn of it, which is what the ceiling reads. */
+function addChatTurn(id: string, at: number, cost: number): void {
+  dbMod
+    .db()
+    .prepare(
+      "INSERT INTO chat_sessions (id, created_at, updated_at, cost_usd) VALUES (?, ?, ?, ?)",
+    )
+    .run(id, NOW - 50 * HOUR, at, cost);
+  dbMod
+    .db()
+    .prepare("INSERT INTO chat_turn_spend (chat_id, ts, cost_usd) VALUES (?, ?, ?)")
+    .run(id, at, cost);
 }
 
 function clearAll(): void {
@@ -100,6 +117,7 @@ function clearAll(): void {
     "workflow_instance_blocks",
     "workflow_instances",
     "workflows",
+    "chat_turn_spend",
     "chat_sessions",
   ]) {
     dbMod.db().prepare(`DELETE FROM ${table}`).run();
@@ -149,22 +167,81 @@ describe("what the install-wide ceiling is measured from", () => {
          VALUES ('i1', 'n2', 'Older', 1, 'orchestrator', 'emitted', ?, 700)`,
       )
       .run(NOW - 30 * HOUR);
-    dbMod
-      .db()
-      .prepare(
-        "INSERT INTO chat_sessions (id, created_at, updated_at, cost_usd) VALUES ('c1', ?, ?, 2)",
-      )
-      .run(NOW - 3 * HOUR, NOW - HOUR);
-    dbMod
-      .db()
-      .prepare(
-        "INSERT INTO chat_sessions (id, created_at, updated_at, cost_usd) VALUES ('c2', ?, ?, 900)",
-      )
-      .run(NOW - 50 * HOUR, NOW - 40 * HOUR);
+    addChatTurn("c1", NOW - HOUR, 2);
+    addChatTurn("c2", NOW - 40 * HOUR, 900);
 
     const spend = installBudget.installSpend(NOW);
     assert.equal(spend.spentUSD, 10 + 4 + 3 + 2, "one run row, one block, one chat");
     assert.equal(spend.spentGuardUSD, spend.spentUSD, "nothing killed, nothing in flight");
+  });
+
+  it("ages a parked run out of the window without waiting for it to finish", () => {
+    clearAll();
+
+    // A parked run deliberately carries no `finished_at` — it is waiting for
+    // the 5-hour window, not over — so bounding on that column alone counted
+    // this $40 for ever, and the refusal that says spend will age out of the
+    // window was the one thing that could never happen while it stayed parked.
+    addRun({
+      id: "parked-long-ago",
+      status: "paused",
+      spent: 40,
+      finishedAt: null,
+      pausedAt: NOW - 30 * HOUR,
+    });
+    // Parked an hour ago: still inside, and still money this install spent
+    // today.
+    addRun({
+      id: "parked-today",
+      status: "paused",
+      spent: 7,
+      finishedAt: null,
+      pausedAt: NOW - HOUR,
+    });
+
+    assert.equal(installBudget.installSpend(NOW).spentUSD, 7);
+  });
+
+  it("counts a run that parked yesterday and is spending again now", () => {
+    clearAll();
+
+    // Nothing clears `paused_at` on the way out of a park, so this row carries
+    // an instant a day old while an agent works in it. Bounding an unfinished
+    // run on that column alone would drop the live spender out of the reading —
+    // the one direction a ceiling must never move by accident.
+    addRun({
+      id: "resumed",
+      status: "running",
+      spent: 12,
+      finishedAt: null,
+      pausedAt: NOW - 30 * HOUR,
+    });
+    addRun({ id: "never-parked", status: "running", spent: 5, finishedAt: null });
+
+    assert.equal(installBudget.installSpend(NOW).spentUSD, 17);
+  });
+
+  it("counts a chat turn taken inside the window, not the thread's whole life", () => {
+    clearAll();
+
+    // `chat_sessions.cost_usd` is a running total over weeks of conversation.
+    // Summing it charged all of that to whichever window the latest message
+    // fell in, so one four-cent question into an old thread closed every door
+    // in the app — including the pre-cycle guard, which ends runs already going.
+    const old = "long-lived";
+    addChatTurn(old, NOW - 40 * HOUR, 30);
+    dbMod
+      .db()
+      .prepare(
+        "INSERT INTO chat_turn_spend (chat_id, ts, cost_usd) VALUES (?, ?, 0.04)",
+      )
+      .run(old, NOW - 10 * 60_000);
+    dbMod
+      .db()
+      .prepare("UPDATE chat_sessions SET updated_at = ?, cost_usd = ? WHERE id = ?")
+      .run(NOW - 10 * 60_000, 30.04, old);
+
+    assert.equal(installBudget.installSpend(NOW).spentUSD, 0.04);
   });
 
   it("splits the measured floor from what the guard acts on", () => {

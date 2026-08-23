@@ -1963,6 +1963,23 @@ function finishTurn(chatId: string, r: TurnResult): void {
       ).changes > 0;
   if (!changed) return;
 
+  // The same money again, as one dated row rather than as a running total.
+  //
+  // Both are needed and neither is derivable from the other: the column above
+  // answers "what has this thread cost", which is what the chat page shows,
+  // and this answers "what did this install spend on chat inside the window",
+  // which is what the install-wide ceiling reads. Summing the running total
+  // charged a thread's whole history to whichever 24 hours its last message
+  // fell in — see `chat_turn_spend` in db.ts. Written after the latch above
+  // rather than beside it, so a late settle that changed no total adds no row.
+  if ((r.costUSD ?? 0) > 0) {
+    db()
+      .prepare(
+        "INSERT INTO chat_turn_spend (chat_id, ts, cost_usd) VALUES (?, ?, ?)",
+      )
+      .run(chatId, now, r.costUSD ?? 0);
+  }
+
   // Session id is adopted rather than compared, and a change is recorded rather
   // than treated as a failure — same posture the run loop takes. Which id the
   // CLI reports for a resumed conversation is its business; what must not

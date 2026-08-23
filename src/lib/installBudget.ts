@@ -25,7 +25,9 @@ import { getSettings } from "./settings";
  *
  * **No new cost source.** Every figure here is one this app already records:
  * `runs.spent_usd` and `runs.spent_usd_est`, `workflow_instance_blocks.cost_usd`,
- * `chat_sessions.cost_usd`, and — for cycles in flight — `telemetrySpendSince`,
+ * `chat_turn_spend.cost_usd` (the same money `chat_sessions.cost_usd` totals,
+ * dated per turn so a day's window can be taken out of it), and — for cycles in
+ * flight — `telemetrySpendSince`,
  * through the same one door and with the same per-run, per-cycle bound the live
  * run guard and the instance guard already use. None of it reaches
  * `buildSnapshot()`, `runs.spent_usd` or any existing meter; this is its own
@@ -48,19 +50,45 @@ function windowStart(now: number): number {
  * a card of its own and never a dashboard meter or a period rollup. The settings
  * copy says so.
  *
- * Blocks and chats are bounded the same way, on the only instants their rows
- * carry: a block's `finished_at` and a chat's `updated_at`. A row that has not
- * finished is inside the window by definition.
+ * **But over-counting has to stay bounded, and every row here says which instant
+ * bounds it.** A row that has nothing but a start is inside the window by
+ * definition; one that stopped spending has to name when.
+ *
+ * - A run: `finished_at`, or `paused_at` while the row is still `paused`. A
+ *   parked run deliberately has no `finished_at` — it is not finished, it is
+ *   waiting for the 5-hour window and keeps its folder and session — so
+ *   bounding on that column alone counted its whole spend for ever. Three runs
+ *   parked at $40 each read $120 against a $100 ceiling on every call, and
+ *   nothing could start, resume or continue while they stayed parked: the
+ *   refusal says spend will age out of the window, and this was the one shape
+ *   where it never would. The status test is load-bearing and not decoration —
+ *   nothing clears `paused_at` on the way out of a park, so a run that parked
+ *   yesterday and is spending right now still carries it, and a bare
+ *   `COALESCE(finished_at, paused_at)` would drop the live spender out of the
+ *   reading. Both instants null is a run that has never stopped, counted whole.
+ * - A block: `finished_at`, or `started_at` while it has none. Every UPDATE
+ *   that adds to `workflow_instance_blocks.cost_usd` writes `finished_at` in
+ *   the same statement, so nothing live is dropped by this and the case it
+ *   bounds is the one where a settled block is put back to `waiting` with its
+ *   `finished_at` cleared and its accumulated cost kept.
+ * - A chat: the `ts` of each `chat_turn_spend` row. `chat_sessions.cost_usd` is
+ *   a running total over the life of a thread and summing it bounded on
+ *   `updated_at` charged that whole history to whichever window the latest
+ *   message landed in — see the table's own note in `db.ts`.
  */
 export function installSpend(now = Date.now()): InstallProgress {
   const since = windowStart(now);
 
   const runs = db()
     .prepare(
-      `SELECT id, status, spent_usd AS spent, spent_usd_est AS est,
-              active_started_at AS cycleStartedAt
-         FROM runs
-        WHERE finished_at IS NULL OR finished_at >= ?`,
+      `SELECT id, status, spent, est, cycleStartedAt
+         FROM (SELECT id, status, spent_usd AS spent, spent_usd_est AS est,
+                      active_started_at AS cycleStartedAt,
+                      COALESCE(finished_at,
+                               CASE WHEN status = 'paused' THEN paused_at END)
+                        AS stoppedAt
+                 FROM runs)
+        WHERE stoppedAt IS NULL OR stoppedAt >= ?`,
     )
     .all(since) as Array<{
     id: string;
@@ -89,15 +117,17 @@ export function installSpend(now = Date.now()): InstallProgress {
   const blocks = db()
     .prepare(
       "SELECT COALESCE(SUM(cost_usd), 0) AS spent FROM workflow_instance_blocks" +
-        " WHERE finished_at IS NULL OR finished_at >= ?",
+        " WHERE COALESCE(finished_at, started_at) IS NULL" +
+        " OR COALESCE(finished_at, started_at) >= ?",
     )
     .get(since) as { spent: number };
 
   // And the orchestrator chat, which passes through no `evaluateBudget` at all
-  // and is bounded only by `chatTurnBudgetUSD` and the clock.
+  // and is bounded only by `chatTurnBudgetUSD` and the clock. Per turn rather
+  // than per thread: a thread is open for weeks and the window is a day.
   const chats = db()
     .prepare(
-      "SELECT COALESCE(SUM(cost_usd), 0) AS spent FROM chat_sessions WHERE updated_at >= ?",
+      "SELECT COALESCE(SUM(cost_usd), 0) AS spent FROM chat_turn_spend WHERE ts >= ?",
     )
     .get(since) as { spent: number };
 

@@ -1118,6 +1118,55 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_ops_events_event ON ops_events(event, ts);
   `);
 
+  // What one chat turn cost, and when.
+  //
+  // `chat_sessions.cost_usd` beside it is a running total over the whole life
+  // of a thread, and it was the only chat figure recorded anywhere — so the
+  // install-wide ceiling, which is a reading over a rolling 24 hours, summed
+  // that column bounded on `updated_at` and charged a fortnight of
+  // conversation to the window the moment one four-cent message was sent into
+  // an old thread. Over-counting is the safe direction for a ceiling (see
+  // `installSpend`), but that is over-counting with no upper bound at all:
+  // a limit on the install's whole history wearing a 24-hour label, closing
+  // every door in the app and ending the runs already in flight at their next
+  // pre-cycle guard.
+  //
+  // The running total stays exactly what it is. The chat page displays it, and
+  // a column that quietly began meaning something narrower would be the worse
+  // repair. This is written beside it inside the same `finishTurn` latch, so a
+  // late settle that moves no total writes no row here either.
+  //
+  // A thread that predates this table has no rows in it, and reading that as
+  // "$0 spent" would *widen* the ceiling on the boot that upgrades — the one
+  // direction a ceiling must never move by accident. So every thread with a
+  // total is backfilled as a single turn at its `updated_at`, which is
+  // bit-for-bit what the old query counted, and ages out of the window within a
+  // day on its own. The probe and the CREATE are one transaction because they
+  // are one decision: a crash between them would leave the table present, the
+  // backfill skipped for ever, and the reading short by everything this install
+  // had spent on chat before the upgrade.
+  const chatTurnSpendExisted = tableExists(db, "chat_turn_spend");
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS chat_turn_spend (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id  TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+        -- When the turn settled, which is the instant the window bound is
+        -- applied to. Not the chat's updated_at, which moves again every time
+        -- anything at all is appended to the thread.
+        ts       INTEGER NOT NULL,
+        cost_usd REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_turn_spend_ts ON chat_turn_spend(ts);
+    `);
+    if (!chatTurnSpendExisted) {
+      db.prepare(
+        `INSERT INTO chat_turn_spend (chat_id, ts, cost_usd)
+         SELECT id, updated_at, cost_usd FROM chat_sessions WHERE cost_usd > 0`,
+      ).run();
+    }
+  })();
+
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as
   // one it left behind.
