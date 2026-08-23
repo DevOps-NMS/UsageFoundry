@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getRun } from "@/lib/orchestrator";
 import { listReviews, startReview } from "@/lib/review";
 import { auditMutation } from "../../../../../lib/requestLog";
+import { jsonMaybeGzipped } from "../../../../../lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,11 +10,14 @@ export const dynamic = "force-dynamic";
 type Ctx = { params: Promise<{ id: string }> };
 
 /** Every review of this run, newest first. Cheap: one indexed read. */
-export async function GET(_req: Request, ctx: Ctx) {
+export async function GET(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   if (!getRun(id)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  return NextResponse.json({
+  // Gzipped: `text` is a whole model-written review per row and nothing caps
+  // how many rows a run accumulates, so this is prose that only grows. A run
+  // with no review at all answers 14 bytes and stays under the floor.
+  return jsonMaybeGzipped(req, {
     reviews: listReviews(id, "review").map((r) => ({
       id: r.id,
       kind: r.kind,

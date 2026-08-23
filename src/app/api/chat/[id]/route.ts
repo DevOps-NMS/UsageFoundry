@@ -2,7 +2,7 @@
 // rewrites the path alias at runtime, so a module a test loads has to import
 // the way src/lib and Meter.tsx already do.
 import { getChat } from "../../../../lib/chat";
-import { jsonNoStore } from "../../../../lib/http";
+import { jsonMaybeGzipped, jsonNoStore } from "../../../../lib/http";
 import { chatDTO, chatListDTO } from "../dto";
 
 export const runtime = "nodejs";
@@ -20,9 +20,16 @@ type Ctx = { params: Promise<{ id: string }> };
  * poll's period follows the thread's status, and the list has no business
  * making the page ask more often than that.
  */
-export async function GET(_req: Request, ctx: Ctx) {
+export async function GET(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const chat = getChat(id);
   if (!chat) return jsonNoStore({ error: "Not found" }, { status: 404 });
-  return jsonNoStore({ chat: chatDTO(chat), chats: chatListDTO() });
+  // Gzipped: 73,565 bytes to 20,136, measured — the same body `GET /api/chat`
+  // answers with, on the poll that runs for the life of the page.
+  // `Cache-Control` written out for the reason that route gives.
+  return jsonMaybeGzipped(
+    req,
+    { chat: chatDTO(chat), chats: chatListDTO() },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }

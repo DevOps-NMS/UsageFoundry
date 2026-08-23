@@ -37,6 +37,18 @@ const REPLAY_BYTE_BUDGET = 4 * 1024 * 1024;
  * without it, a page opened after a run started would show an empty log even
  * though the work is well underway, and a reconnect after a dropped connection
  * would silently lose everything emitted during the gap.
+ *
+ * **Never `jsonMaybeGzipped`, and never any encoding at all.** This is the one
+ * route here whose body has no end: a run's log arrives frame by frame over
+ * minutes or hours, and gzip is a stream cipher over a sliding window that
+ * emits nothing until it has something to emit. Compressing this would hold
+ * each `log` line in a deflate buffer until the next one pushed it out — a
+ * live log that runs one event behind, and a run that goes quiet showing its
+ * last line only when the run ends. The replay would land in one lump and the
+ * tail would stall. The frames are also small enough individually that the
+ * floor in `http.ts` would decline every one of them anyway; this comment is
+ * here because the *right* answer is not "the floor catches it", it is that
+ * buffering a stream to compress it is the wrong shape.
  */
 export async function GET(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;

@@ -12,6 +12,7 @@ import {
   type Settings,
 } from "../../../lib/settings";
 import { normalizePolicy } from "../../../lib/budget";
+import { jsonMaybeGzipped } from "../../../lib/http";
 import { normalizeSubpath } from "../../../lib/knowledge";
 import { agentKnowledgeOf, agentRefusal, getAgent } from "../../../lib/agents";
 import {
@@ -97,9 +98,9 @@ function nonDefaultKeys(settings: Settings): string[] {
   return paths;
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const settings = getSettings();
-  return NextResponse.json({
+  return jsonMaybeGzipped(req, {
     settings,
     // A third top-level field rather than a member of `env`: that object is
     // about the environment the container was given, and this is about the

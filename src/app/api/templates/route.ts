@@ -6,6 +6,7 @@ import {
 } from "@/lib/templates";
 import { currentAgentKnowledge } from "@/lib/agents";
 import { auditMutation } from "../../../lib/requestLog";
+import { jsonMaybeGzipped } from "../../../lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,8 +29,10 @@ export const dynamic = "force-dynamic";
  * fixed. `currentAgentKnowledge()` is the read both doors share.
  */
 
-export async function GET() {
-  return NextResponse.json({ templates: listTemplates() });
+export async function GET(req: Request) {
+  // Gzipped: 14,788 bytes to 5,674, measured. A template carries a whole
+  // prompt and a whole normalised policy, and the shape repeats per row.
+  return jsonMaybeGzipped(req, { templates: listTemplates() });
 }
 
 async function postHandler(req: Request) {

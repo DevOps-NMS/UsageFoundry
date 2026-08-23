@@ -12,6 +12,7 @@ import { telemetryForRun } from "@/lib/otlp";
 import { runAgentDTO } from "@/lib/agents";
 import { normalizePolicy } from "@/lib/budget";
 import { auditMutation } from "../../../../lib/requestLog";
+import { jsonMaybeGzipped } from "../../../../lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,7 +35,7 @@ type Ctx = { params: Promise<{ id: string }> };
  * went — 582,469 bytes of a 591,574-byte response, repeated 20 times a minute
  * per open tab.
  */
-export async function GET(_req: Request, ctx: Ctx) {
+export async function GET(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const run = getRun(id);
   if (!run) return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -47,7 +48,10 @@ export async function GET(_req: Request, ctx: Ctx) {
   // them and one client forgetting.
   const rawBudget = JSON.parse(run.budget) as Record<string, unknown>;
 
-  return NextResponse.json({
+  // Gzipped: 14,170 bytes to 3,717, measured — the row carries the agent's
+  // whole system prompt and the normalised policy, and this is the three-second
+  // poll every open run page runs. The 404 above stays plain.
+  return jsonMaybeGzipped(req, {
     run: {
       ...run,
       budget: {

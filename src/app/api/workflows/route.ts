@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { WorkflowListItemDTO } from "@/lib/apiTypes";
 import {
   createWorkflow,
   currentKnowledge,
@@ -6,7 +7,8 @@ import {
   listWorkflows,
   normalizeWorkflowInput,
 } from "@/lib/workflows";
-import { workflowDTO } from "./dto";
+import { workflowDTO, workflowListDTO } from "./dto";
+import { jsonMaybeGzipped } from "@/lib/http";
 import { auditMutation } from "../../../lib/requestLog";
 
 export const runtime = "nodejs";
@@ -24,8 +26,19 @@ export const dynamic = "force-dynamic";
  * about again, where a block's folder is what its run will use.
  */
 
-export async function GET() {
-  return NextResponse.json({ workflows: listWorkflows().map(workflowDTO) });
+export async function GET(req: Request) {
+  // `workflowListDTO`, not `workflowDTO`: this is the only route that ships
+  // every saved graph at once, and the two readers of it — the workflows list
+  // and quick open — draw a block count and nothing else off the nodes. See
+  // `WorkflowListItemDTO`. The POST below keeps the whole shape, because what it
+  // answers with is the workflow the editor has just saved.
+  //
+  // Annotated for the reason `GET /api/runs` annotates its own list: nothing
+  // else would catch this being put back to `workflowDTO`, since `json()` takes
+  // anything and both clients cast what they get — the graph would simply
+  // return to the wire and the block count would keep rendering.
+  const workflows: WorkflowListItemDTO[] = listWorkflows().map(workflowListDTO);
+  return jsonMaybeGzipped(req, { workflows });
 }
 
 async function postHandler(req: Request) {

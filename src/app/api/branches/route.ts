@@ -1,6 +1,6 @@
-import { NextResponse } from "next/server";
 import { branchInventory } from "@/lib/land";
 import { getSettings } from "@/lib/settings";
+import { jsonMaybeGzipped } from "@/lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,7 +25,11 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   const params = new URL(req.url).searchParams;
   const repo = params.get("repo");
-  return NextResponse.json({
+  // Gzipped: 254,752 bytes to 75,613, measured. Not polled, but it is the one
+  // response here whose size is set by how many branches a repository has
+  // rather than by a page size — `MAX_INVENTORY` bounds the git work, not the
+  // row count.
+  return jsonMaybeGzipped(req, {
     ...(await branchInventory({
       // A blank `repo=` is every repository, not a repository named "". The
       // picker's own "All repositories" option submits exactly that.

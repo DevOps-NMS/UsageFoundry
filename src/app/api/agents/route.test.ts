@@ -109,7 +109,7 @@ describe("POST /api/agents — the create path", () => {
     );
     assert.ok(body.agent.id, "a saved agent with no id cannot be edited or deleted");
 
-    const listed = (await (await route.GET()).json()) as {
+    const listed = (await (await route.GET(new Request("http://localhost/api/agents"))).json()) as {
       agents: AgentDTO[];
       ambient: { name: string }[];
     };

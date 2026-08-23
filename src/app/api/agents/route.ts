@@ -8,6 +8,7 @@ import {
   normalizeAgentInput,
 } from "../../../lib/agents";
 import { auditMutation } from "../../../lib/requestLog";
+import { jsonMaybeGzipped } from "../../../lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,8 +35,8 @@ export const dynamic = "force-dynamic";
  * takes a directory for a caller that already has one.
  */
 
-export async function GET() {
-  return NextResponse.json({
+export async function GET(req: Request) {
+  return jsonMaybeGzipped(req, {
     agents: listAgents(),
     ambient: listAmbientAgents(),
   });

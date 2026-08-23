@@ -159,7 +159,7 @@ type Answer = { settings: Settings; nonDefaultKeys: string[] };
 
 async function readAll(): Promise<Answer> {
   const { GET } = await import("./route");
-  return (await (await GET()).json()) as Answer;
+  return (await (await GET(new Request("http://localhost/api/settings"))).json()) as Answer;
 }
 
 async function read(): Promise<Settings> {

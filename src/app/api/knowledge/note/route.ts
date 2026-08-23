@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { knowledgeIndex, knowledgeNoteView, resolveKnowledgeRoot } from "../../../../lib/knowledge";
 import { getSettings } from "../../../../lib/settings";
+import { jsonMaybeGzipped } from "../../../../lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,5 +29,8 @@ export async function GET(req: Request) {
       { status: 404 },
     );
   }
-  return NextResponse.json(note);
+  // Gzipped: a note body is a markdown file this app did not write and has no
+  // bound on, so the size is the vault's to decide. Prose is the case the
+  // floor exists for — a stub note stays under it and is sent as it is.
+  return jsonMaybeGzipped(req, note);
 }

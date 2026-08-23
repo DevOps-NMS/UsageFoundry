@@ -16,6 +16,7 @@ import { retentionCutoff } from "@/lib/retention";
 import { installSpendReport } from "@/lib/installBudget";
 import { PROJECTS_DIR } from "@/lib/config";
 import { configProblems } from "@/lib/configCheck";
+import { jsonMaybeGzipped } from "@/lib/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -85,7 +86,11 @@ export async function GET(req: Request) {
       ? telemetryWindow(snapshot.session.startsAt)
       : null;
 
-    return NextResponse.json({
+    // Gzipped: 51,984 bytes to 9,785, measured — three granularities of
+    // calendar bucket over the same entries repeat their keys on every one, and
+    // this is the dashboard's ten-second heartbeat. The error branch below is
+    // one sentence and stays plain.
+    return jsonMaybeGzipped(req, {
       snapshot,
       periods,
       telemetry,
