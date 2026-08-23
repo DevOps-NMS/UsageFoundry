@@ -31,7 +31,7 @@ import { haltSteps, stopInstance, type HaltReport } from "./workflows";
  *   - The hold on new work is `settings.newWorkPaused`, read by the four places
  *     that start work and by nothing else. It is documented beside the flag.
  *   - `reopenFleet` is `reopenRun` in a loop over an explicit list of ids, with
- *     one budget.
+ *     one budget laid over each run's own rather than in place of it.
  *
  * This module sits *above* both `orchestrator.ts` and `workflows.ts` and nothing
  * in either imports it, which is what keeps the graph acyclic. The flag itself
@@ -217,6 +217,20 @@ export interface FleetReopenReport {
  * refusals are unchanged: a run that has already used the cycles this budget
  * allows is still refused, and still says so.
  *
+ * That one budget is **merged over each run's own stored blob rather than
+ * substituted for it**, and the difference is the whole of this function's
+ * correctness. `reopenRun` writes `budget=?` from the policy it is handed, so
+ * handing it the sheet's two fields would rewrite every run's ceilings to the
+ * two the sheet happens to expose and silently drop the rest — a time limit, a
+ * token limit, an enforcement mode the operator chose per run, gone on a press
+ * aimed at the cycle cap. Spreading the wire over the stored blob keeps an
+ * explicit answer explicit (a blank cycle cap arrives as `null` and means "no
+ * cycle limit" here exactly as it does anywhere else) while a field the sheet
+ * never asked about keeps the value that run was started with. `permissionMode`
+ * is untouched by this: it rides on the stored blob, `normalizePolicy` drops it,
+ * and `reopenRun` reads it back off the row — reopening is not a second route
+ * to `--permission-mode` and merging must not make it one.
+ *
  * Sequential and synchronous, `approveProposal`'s rule: `createRun`'s folder
  * claim and `reopenRun`'s checkout check are only atomic inside one event-loop
  * turn, and two runs reopened into one checkout is exactly what that check
@@ -228,6 +242,7 @@ export function reopenFleet(
 ): FleetReopenReport {
   const report: FleetReopenReport = { reopened: [], refused: [] };
   const seen = new Set<string>();
+  const wire = (budget ?? {}) as Record<string, unknown>;
 
   for (const id of ids) {
     if (seen.has(id)) continue;
@@ -251,7 +266,12 @@ export function reopenFleet(
       });
       continue;
     }
-    const outcome = reopenRun(id, budget);
+    // The sheet's fields over this run's own, never in place of them. Parsed
+    // unguarded for `reopenRun`'s reason: every `runs.budget` this app writes
+    // is JSON it wrote itself, and a row that is not is a corrupted database
+    // rather than a refusal to word.
+    const stored = JSON.parse(run.budget) as Record<string, unknown>;
+    const outcome = reopenRun(id, { ...stored, ...wire });
     if (outcome.ok) report.reopened.push(id);
     else report.refused.push({ id, reason: outcome.reason });
   }

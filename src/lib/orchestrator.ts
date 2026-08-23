@@ -4794,10 +4794,31 @@ const SELF_HOSTING_NOTICE =
  * 200k of the 1M the CLI accepts. The floor it will take is 100k, which is also
  * where its own thrash breaker becomes reachable, so this leaves that far off
  * while still sitting below the 100-turn mark where the re-read bill
- * concentrates. **The sign of the saving is not yet measured** — compaction
- * flips whatever the agent re-fetches afterwards from cache reads at 0.1x to
- * cache writes at 1.25-2x, and no session in the corpus this was chosen from
- * had ever compacted. See the verification issue before moving it.
+ * concentrates.
+ *
+ * **It fires at 167,000, not at 200,000 and not at the 180,000 `effectiveWindow`
+ * alone predicts.** Read off the pinned 2.1.226 bundle, the threshold is
+ * `min(asked, window) − min(maxOutput, 20,000) − 13,000`, and the measurement
+ * agrees: 30 of 42 observed boundaries land within ±3,000 of 167,000 against 2
+ * of 42 within ±3,000 of 180,000. That is also why the issue's "consider
+ * 150,000" is declined — 150,000 would fire at 117,000, and with a firing
+ * spread of roughly ±12,000 the lower tail reaches the 100,000 floor where the
+ * CLI's own thrash breaker lives.
+ *
+ * **The sign is measured and it is positive**, between the two arms of a
+ * natural experiment over 1,147 transcripts split at the commit that added the
+ * flag: turns past the cap cost **0.45× per turn and 0.50× per 1,000 output
+ * tokens**. Do not re-derive that from a within-session before/after reading —
+ * per-turn cost is monotone in position within a compaction cycle, so such a
+ * reading measures the down edge of a saw-tooth and a placebo over an
+ * *uncompacted* ramp reproduces about 87% of it.
+ *
+ * Two terms stay open and are in `docs/verification.md` rather than here: the
+ * summariser's own call carries no usage block in any of the 42 boundaries, so
+ * roughly 168,000 in and 6,300 out per compaction is billed and invisible to
+ * `scanUsage()` — the largest unmeasured term — and only one window value has
+ * ever run, so nothing measures what another would do. Read that section before
+ * moving the constant.
  */
 const AUTOCOMPACT_WINDOW_TOKENS = 200_000;
 
@@ -4833,7 +4854,7 @@ export function buildArgs(opts: {
    *
    * The arithmetic is here rather than at the call site because both ways of
    * getting it wrong are silent. `spentGuardUSD` is the *guard* figure — the
-   * same `spentUSD + spentEstUSD` the pre-cycle check compares, never
+   * same `spentUSD + spentGuardEstUSD` the pre-cycle check compares, never
    * `runs.spent_usd` alone, which is a floor of what the CLI itself measured
    * and excludes a killed cycle's reconciled estimate. Handing over a ceiling
    * derived from the floor would give the child more room than the guard
@@ -4972,11 +4993,15 @@ export function buildArgs(opts: {
   // orders `budget.ts` maintains — what it does is let the CLI compact a run's
   // own context instead of carrying every token to the end of the run.
   //
-  // Auto-compaction is already on and already re-checked at every turn start;
-  // its default window is sized for a million-token model, so across 1,011
-  // transcripts it never once fired. That is what makes cache re-read 59% of
-  // this workload: nothing ever resets a prefix, and 11% of sessions — the ones
-  // past 100 turns — carry 58% of the re-read bill.
+  // This flag does not lower a threshold the CLI already had — it creates the
+  // only one there is. The pinned bundle gates the check on the window not
+  // resolving to `source:"auto"` at or above 1e6, and this install's model
+  // resolves exactly that, so the CLI refuses to auto-compact here on its own:
+  // before the flag, 604 container sessions — 246 of them past 167,000 tokens,
+  // one request reaching 752,172 — produced zero `compact_boundary` records.
+  // That is what makes cache re-read 59% of this workload: nothing ever resets
+  // a prefix, and 11% of sessions — the ones past 100 turns — carry 58% of the
+  // re-read bill. Remove the flag and nothing in this app compacts at all.
   //
   // Per cycle for the same reason `--plugin-dir` is: `--resume` does not
   // restore it, and a later cycle running under the default window behaves
@@ -6720,6 +6745,17 @@ async function buildCurrentSnapshot(): Promise<UsageSnapshot> {
  * It is kept in its own column rather than added to `spent_usd`, which stays a
  * floor of what the CLI itself measured.
  *
+ * **It returns both sides of the display-versus-guard split, because a killed
+ * cycle is exactly where collapsing them costs money.** `costUSD` is the
+ * displayed figure and it is what `spent_usd_est` and the run's own log carry;
+ * `costGuardUSD` charges an unpriced model the fallback rate and is what the
+ * pre-cycle check, the live ticker and `--max-budget-usd`'s remainder read.
+ * Summing `costUSD` alone left the guard side of a run on an unpriced model at
+ * $0 however much it burned — so `maxRunCostUSD` could never fire on a run
+ * whose cycles are always killed before they report, which is precisely the run
+ * this function exists for. `metering.md`'s rule, at the one site that had it
+ * backwards.
+ *
  * Bounded by session *and* by the cycle's own time range, because a resumed
  * session copies earlier turns forward into the same file carrying their
  * original timestamps.
@@ -6731,19 +6767,23 @@ async function buildCurrentSnapshot(): Promise<UsageSnapshot> {
 async function reconcileKilledCycle(
   sessionId: string | null,
   from: number,
-): Promise<{ costUSD: number; tokens: number } | null> {
+): Promise<{ costUSD: number; costGuardUSD: number; tokens: number } | null> {
   if (!sessionId) return null;
   try {
     const { entries } = await scanUsage();
     const to = Date.now();
     let costUSD = 0;
+    let costGuardUSD = 0;
     let tokens = 0;
     for (const e of entries as UsageEntry[]) {
       if (e.sessionId !== sessionId || e.ts < from || e.ts > to) continue;
       costUSD += e.costUSD;
+      costGuardUSD += e.costGuardUSD;
       tokens += totalTokens(e.tokens);
     }
-    return costUSD > 0 || tokens > 0 ? { costUSD, tokens } : null;
+    return costUSD > 0 || costGuardUSD > 0 || tokens > 0
+      ? { costUSD, costGuardUSD, tokens }
+      : null;
   } catch {
     // An unreadable transcript directory is not a reason to fail a run that has
     // already stopped. The figure stays understated and the run says so.
@@ -6784,6 +6824,21 @@ export async function startRun(id: string): Promise<void> {
   let spentUSD = run.spent_usd;
   let spentTokens = run.spent_tokens;
   let spentEstUSD = run.spent_usd_est;
+  /**
+   * The same recovered estimate charged at the guard rate, which is what every
+   * `spentGuardUSD` below is built from. Separate from `spentEstUSD` for
+   * `costUSD`/`costGuardUSD`'s reason: an unpriced model contributes $0 to the
+   * displayed figure and the fallback rate to this one, so a run whose cycles
+   * are always killed before they report had a guard reading of exactly zero.
+   *
+   * Hydrated from `spent_usd_est` because that column is the *displayed*
+   * estimate and there is no guard column beside it — so what survives a
+   * restart or a pick-up is a floor, and this segment's own killed cycles are
+   * the part that is charged correctly. Understating a guard is the direction
+   * that admits a cycle it should have refused, so it is named here rather than
+   * left to be inferred from a column name.
+   */
+  let spentGuardEstUSD = run.spent_usd_est;
   let spentEstTokens = run.spent_tokens_est;
   let iterations = run.iterations;
   let doneRetriggers = run.done_retriggers;
@@ -6939,7 +6994,7 @@ export async function startRun(id: string): Promise<void> {
           iterations,
           spentUSD,
           spentTokens,
-          spentGuardUSD: spentUSD + spentEstUSD,
+          spentGuardUSD: spentUSD + spentGuardEstUSD,
           spentGuardTokens: spentTokens + spentEstTokens,
           startedAt,
         },
@@ -7162,7 +7217,7 @@ export async function startRun(id: string): Promise<void> {
       // returns move it. Held so the branch that reports a cycle stopped at
       // its ceiling can say what that ceiling was rather than recomputing it
       // from a total that now includes the cycle itself.
-      const spentGuardBeforeCycle = spentUSD + spentEstUSD;
+      const spentGuardBeforeCycle = spentUSD + spentGuardEstUSD;
 
       // The same fact as the event above, on the row. The event only reaches a
       // page that is streaming this one run's log; everything that renders a
@@ -7306,7 +7361,7 @@ export async function startRun(id: string): Promise<void> {
               // page never shows an estimate as the run's cost.
               spentUSD,
               spentTokens,
-              spentGuardUSD: spentUSD + spentEstUSD + inFlight.costUSD,
+              spentGuardUSD: spentUSD + spentGuardEstUSD + inFlight.costUSD,
               spentGuardTokens: spentTokens + spentEstTokens + inFlight.tokens,
               startedAt,
             };
@@ -7382,10 +7437,17 @@ export async function startRun(id: string): Promise<void> {
       // The cycle died before Claude Code reported what it cost, so the two
       // `+=` lines above added nothing. Recover an estimate from the transcripts;
       // it is held apart from `spent_usd` and reported as an estimate.
+      //
+      // Two figures, and which one goes where is the point: `costUSD` is what
+      // the run reports and what `spent_usd_est` stores, `costGuardUSD` is what
+      // the next pre-cycle check and the next `--max-budget-usd` remainder are
+      // computed from. They differ only for an unpriced model, which is the
+      // case where taking the first for both leaves the guard at zero.
       if (!res.sawResult) {
         const recovered = await reconcileKilledCycle(sessionId, cycleStartedAt);
         if (recovered) {
           spentEstUSD += recovered.costUSD;
+          spentGuardEstUSD += recovered.costGuardUSD;
           spentEstTokens += recovered.tokens;
         }
       }
@@ -8188,9 +8250,11 @@ export function duePausedRuns<T extends { resume_at: number | null }>(
  * what the backoff had spread.
  *
  * A cap here rather than anywhere else because `promoteQueued` must stay the
- * one owner of FIFO order, the folder claim and the concurrency cap — and
- * because `maxConcurrentRuns` ships as `null`, so on a stock install nothing
- * downstream bounds the wave at all. A run over the cap simply stays `paused`
+ * one owner of FIFO order, the folder claim and the concurrency cap. That last
+ * one is `settings.maxConcurrentRuns`, **4** in `DEFAULTS` and nullable only as
+ * an explicit opt-out — so a stock install is bounded twice over, here and
+ * downstream, and this cap is the only bound left on an install that has taken
+ * that opt-out deliberately. A run over the cap simply stays `paused`
  * with a `resume_at` already in the past, which is the state the next tick is
  * built to pick up: nothing is written, so nothing is rewritten every 60
  * seconds, which is `FOLDER_TAKEN_REASON`'s rule one branch over.
@@ -8632,7 +8696,10 @@ const RESTART_KILLED_NOTICE =
  * reproduces the stop. The three carried-forward guards are checked here rather
  * than left to the pre-cycle check, which would refuse a few seconds later with
  * the run already flickering queued → stopped and no indication of what to
- * change.
+ * change. The terminus pair is checked here too, and for a different reason: it
+ * is a fact about the budget rather than about this run, and this is the one
+ * door every caller goes through — `reopenFleet` reaches this function without
+ * passing the route where that refusal used to live alone.
  *
  * `completed` is included because the agent's judgement that a task is finished
  * is not the operator's. What it costs is one branch, and `reopenPrompt` owns
@@ -8724,6 +8791,24 @@ export function reopenRun(
   const spentUSD = run.spent_usd + run.spent_usd_est;
   const spentTokens = run.spent_tokens + run.spent_tokens_est;
 
+  // The terminus pair, refused at this door rather than only at the route's.
+  // `POST /api/runs/[id]/reopen` already answers it with the longer explanation
+  // a form can show, and keeps doing so — but that route is one of the two ways
+  // in, and the other is `reopenFleet`, which calls this function directly with
+  // a budget composed by a sheet that has no time-limit field at all. Without
+  // this, one press could queue twenty-five runs with no monotone terminus
+  // between them. `evaluateBudget` does refuse the pair again as `no_terminus`,
+  // but only once the row has flickered queued → blocked with nothing said
+  // about what to change, which is the same few-seconds-later refusal the three
+  // carried-forward checks below exist to pre-empt.
+  if (policy.maxIterations === null && policy.maxDurationMinutes === null) {
+    return {
+      ok: false,
+      reason:
+        "This run would have no work-cycle limit and no time limit, so nothing " +
+        "would ever end it. Give it one of the two.",
+    };
+  }
   if (policy.maxIterations !== null && run.iterations >= policy.maxIterations) {
     return {
       ok: false,
@@ -8948,6 +9033,13 @@ function cyclesInFlight(): RunRow[] {
  * A cycle whose estimate cannot be recovered says so in the run's own log,
  * because a run whose spend is understated and a run that spent nothing are
  * indistinguishable on every page in this app.
+ *
+ * It writes the **displayed** half of what `reconcileKilledCycle` returns,
+ * which is what `spent_usd_est` is and the only half that has a column. The
+ * guard-rate half lives in `startRun`'s own frame and does not survive the
+ * restart, so a run picked up afterwards carries a guard reading that is a
+ * floor — the same understatement that existed before the split, now confined
+ * to a run whose model is unpriced *and* whose cycle died in a restart.
  */
 export async function reconcileInterruptedCycles(): Promise<number> {
   let recovered = 0;

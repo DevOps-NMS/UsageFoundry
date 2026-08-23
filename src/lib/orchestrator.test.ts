@@ -3715,6 +3715,93 @@ describe("picking up a blocked run", () => {
 });
 
 /**
+ * Covers the terminus pair at the door every pick-up goes through.
+ *
+ * `POST /api/runs/[id]/reopen` refused this pair with a written-out explanation
+ * and was the only place that did — so `reopenFleet`, which calls `reopenRun`
+ * directly with a budget composed by a sheet that has no time-limit field,
+ * could queue a whole fleet with nothing that would ever end it. The failure is
+ * silent in the way this file exists for: `normalizePolicy` is total and
+ * refuses nothing, the row flips to `queued` and the page looks right.
+ *
+ * It is worth a case rather than trusted to `evaluateBudget`'s own
+ * `no_terminus` for the reason the three carried-forward checks beside it are:
+ * that refusal arrives a cycle later, with the row already flickering
+ * queued → blocked, and it is not what an operator watching a bulk press sees.
+ * So the assertion is the refusal *and* the untouched status, never just `ok`.
+ */
+describe("the terminus a picked-up run must have", () => {
+  let seq = 0;
+
+  /** One row in `${ws}/Other`, in whatever state the case needs it. */
+  function insertRun(status: string, budget: string): string {
+    const id = `terminus-${++seq}`;
+    db()
+      .prepare(
+        `INSERT INTO runs (id, folder, prompt, status, budget, max_iterations,
+                           iterations, created_at, finished_at, work_dir)
+         VALUES (?, ?, 'do the thing', ?, ?, 1, 0, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        `${ws}/Other`,
+        status,
+        budget,
+        Date.now() + seq,
+        Date.now() + seq,
+        `${ws}/Other`,
+      );
+    return id;
+  }
+
+  /**
+   * A finished row whose own stored budget names no time limit, with the folder
+   * already occupied so the `promoteQueued` at the end of a successful reopen
+   * has nothing to start. The subject here is the row, not a spawn.
+   */
+  function stoppedRun(budget: string): string {
+    const id = insertRun("stopped", budget);
+    insertRun("running", budget);
+    return id;
+  }
+
+  it("refuses a pick-up with no cycle limit and no time limit, and leaves the row alone", () => {
+    const id = stoppedRun('{"maxIterations":1,"permissionMode":"acceptEdits"}');
+
+    const outcome = reopenRun(id, { maxIterations: null });
+
+    assert.equal(outcome.ok, false);
+    assert.match(
+      outcome.ok ? "" : outcome.reason,
+      /no work-cycle limit and no time limit/,
+    );
+    const row = getRun(id)!;
+    assert.equal(
+      row.status,
+      "stopped",
+      "refused before the row is touched — a run whose budget cannot be " +
+        "accepted must not be left queued under it",
+    );
+  });
+
+  it("accepts the same uncapped loop once a time limit answers for it", () => {
+    const id = stoppedRun('{"maxIterations":1,"permissionMode":"acceptEdits"}');
+
+    const outcome = reopenRun(id, { maxIterations: null, maxDurationMinutes: 60 });
+
+    assert.equal(outcome.ok, true, outcome.ok ? "" : `refused: ${outcome.reason}`);
+    const row = getRun(id)!;
+    assert.equal(row.status, "queued");
+    assert.equal(
+      row.max_iterations,
+      0,
+      "0 is how an explicit null is stored — the refusal above is about the " +
+        "pair, not about the null on its own",
+    );
+  });
+});
+
+/**
  * Covers what the sweeper does with one parked run.
  *
  * It earns a test on exactly the grounds `selectPromotable` and

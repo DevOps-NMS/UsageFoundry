@@ -201,15 +201,16 @@ export function FleetControls({
         <p className="mb-4">
           The {reopenable.length} failed or stopped run
           {reopenable.length === 1 ? "" : "s"} listed on this page, each
-          continuing its own session. One budget applies to all of them; a run
-          that has already used more than it allows is refused by name and left
+          continuing its own session. The two limits below apply to all of them
+          and every other limit each run was started with is kept; a run that
+          has already used more than they allow is refused by name and left
           alone. Two kinds are not in this list at all: one that reported the
           task done, and one you set aside — both are a decision per run, on its
           own page.
         </p>
         <Field
           label="Work cycles"
-          hint="Blank means no cycle limit, which needs a time limit on each run"
+          hint="Blank means no cycle limit — a run with no time limit of its own is then refused"
         >
           <Input
             type="number"

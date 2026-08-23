@@ -90,7 +90,7 @@ let seq = 0;
 function run(
   id: string,
   status: string,
-  extra: { folder?: string; iterations?: number } = {},
+  extra: { folder?: string; iterations?: number; budget?: string } = {},
 ): string {
   const folder = extra.folder ?? path.join(workspace, id);
   fs.mkdirSync(folder, { recursive: true });
@@ -99,10 +99,17 @@ function run(
     .prepare(
       `INSERT INTO runs (id, folder, prompt, status, budget, max_iterations,
                          iterations, created_at, work_dir)
-       VALUES (?, ?, 'do it', ?, '{"maxIterations":1,"permissionMode":"acceptEdits"}',
-               1, ?, ?, ?)`,
+       VALUES (?, ?, 'do it', ?, ?, 1, ?, ?, ?)`,
     )
-    .run(id, folder, status, extra.iterations ?? 0, Date.now() + seq++, folder);
+    .run(
+      id,
+      folder,
+      status,
+      extra.budget ?? '{"maxIterations":1,"permissionMode":"acceptEdits"}',
+      extra.iterations ?? 0,
+      Date.now() + seq++,
+      folder,
+    );
   return id;
 }
 
@@ -459,6 +466,91 @@ describe("a run set aside", () => {
       orch.getRun(id)!.set_aside_at,
       null,
       "a run picked up by hand is not still held back from the next bulk press",
+    );
+  });
+});
+
+/**
+ * What one budget for twenty-five runs is allowed to do to each of them.
+ *
+ * `reopenRun` writes `budget=?` from the policy it is handed, so passing the
+ * fleet sheet's two fields straight through **replaced** every run's stored
+ * ceilings with those two — a time limit, a token limit, an enforcement mode
+ * chosen per run, all silently gone on a press aimed at the cycle cap. Nothing
+ * throws, the report says twenty-five reopened, and the guards that were
+ * dropped are guards: the next thing that notices is the spend. So the wire is
+ * laid *over* the stored blob and the assertion has to be the stored blob after
+ * the write, never the report.
+ *
+ * The second case is the other half of the same change. `reopenRun` now refuses
+ * the no-cycle-limit-and-no-time-limit pair at the door — the sheet has no
+ * time-limit field at all, so before the merge a blank cycle cap could only
+ * ever mean "nothing will end these runs".
+ */
+describe("what a fleet budget does to each run's own", () => {
+  // Suppresses `promoteQueued`, so a reopened row stays `queued` and nothing
+  // reaches a spawn.
+  before(() => settings.setNewWorkPaused(true));
+  after(() => settings.setNewWorkPaused(false));
+
+  const budgetOf = (id: string) =>
+    JSON.parse(orch.getRun(id)!.budget) as Record<string, unknown>;
+
+  it("keeps a ceiling the sheet never asked about", () => {
+    const id = run("merge-kept", "stopped", {
+      budget: JSON.stringify({
+        maxIterations: 1,
+        maxDurationMinutes: 90,
+        maxRunTokens: 500_000,
+        enforcement: "live",
+        permissionMode: "acceptEdits",
+      }),
+    });
+
+    // Exactly what `FleetControls` puts on the wire: two fields, no more.
+    const report = fleet.reopenFleet([id], { maxIterations: 3, maxRunCostUSD: 5 });
+    assert.deepEqual(report.reopened, [id]);
+
+    const stored = budgetOf(id);
+    assert.equal(stored.maxIterations, 3, "the sheet's answer wins where it gave one");
+    assert.equal(stored.maxRunCostUSD, 5);
+    assert.equal(
+      stored.maxDurationMinutes,
+      90,
+      "not exposed by the sheet, so not rewritten",
+    );
+    assert.equal(stored.maxRunTokens, 500_000);
+    assert.equal(stored.enforcement, "live");
+    // Carried off the row by `reopenRun` rather than merged: reopening is not a
+    // second route to `--permission-mode`, and the merge must not make it one.
+    assert.equal(stored.permissionMode, "acceptEdits");
+  });
+
+  it("refuses a blank cycle cap on a run with no time limit of its own", () => {
+    const bounded = run("merge-timed", "stopped", {
+      budget: JSON.stringify({ maxIterations: 1, maxDurationMinutes: 30 }),
+    });
+    const unbounded = run("merge-untimed", "stopped", {
+      budget: JSON.stringify({ maxIterations: 1 }),
+    });
+
+    const report = fleet.reopenFleet([bounded, unbounded], {
+      maxIterations: null,
+      maxRunCostUSD: null,
+    });
+
+    assert.deepEqual(
+      report.reopened,
+      [bounded],
+      "its own time limit is the terminus, so an uncapped loop is legal for it",
+    );
+    assert.equal(report.refused.length, 1);
+    assert.equal(report.refused[0].id, unbounded);
+    assert.match(report.refused[0].reason, /no work-cycle limit and no time limit/);
+    assert.equal(
+      statusOf(unbounded),
+      "stopped",
+      "refused by name and left exactly as it ended",
     );
   });
 });
