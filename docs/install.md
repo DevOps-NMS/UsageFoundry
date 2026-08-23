@@ -188,19 +188,31 @@ for the rest of the fleet.
 No token is needed; the container needs outbound network at boot and nothing
 else. Pin the version, for the same reason a dependency is pinned.
 
-Then turn off two things in the tool itself, if it has them — both set alongside
-the other variables, since anything not beginning `UF_` or `OTEL_` reaches the
-agents and their hooks. **Its auto-updater**, because the pin is only the version
+Then turn off two things in the tool itself, if it has them. Neither goes in
+`.env`: compose reads that file for interpolation only and there is no
+`env_file`, so a name `docker-compose.yml` does not forward never reaches the
+container. They go in a `docker-compose.override.yml`, which is where one host's
+answer to a third-party tool belongs:
+
+```yaml
+services:
+  usagefoundry:
+    environment:
+      COZEMPIC_NO_GLOBAL_INIT: "1"
+      COZEMPIC_NO_AUTO_UPDATE: "1"
+```
+
+From there they reach the agents and their hooks — `childEnv` strips only `UF_`,
+`OTEL_` and four named keys. **The auto-updater**, because the pin is only the version
 that gets *installed*, and a tool that upgrades on every session start is one
-whose version nobody chose (`COZEMPIC_NO_AUTO_UPDATE=1`). And **anything that
-installs itself into `~/.claude`**, which is the sharper one: that directory is a
+whose version nobody chose. And **anything that installs itself into
+`~/.claude`**, which is the sharper one: that directory is a
 bind mount of your own, the same file your host's Claude Code reads, so a tool
 that wires itself in "globally" on first run is editing your machine's settings
 from inside this container — for every session on it, not just this app's. One
 `cozempic --version` in a throwaway container wrote 7 hooks into
-`~/.claude/settings.json` (`COZEMPIC_NO_GLOBAL_INIT=1`). Its own plugin hooks
-already set that; what they do not cover is an agent, or you, running the command
-directly.
+`~/.claude/settings.json`. Its own plugin hooks already export both; what they do
+not cover is an agent, or you, running the command directly.
 
 A tool already installed is left alone, including one whose version has since
 moved, on the same argument the extensions above are. To move a pin or drop one:
