@@ -684,6 +684,41 @@ export interface RunDTO {
   reopened_at?: number | null;
 }
 
+/**
+ * How much of a run's task the *list* carries.
+ *
+ * Long enough that the line the table truncates at `56ch` and the `title` on it
+ * are both still the task rather than a fragment of one, short enough that a
+ * hundred of them are not the response. Measured before it existed: 522,541 of
+ * a 696,197-byte list was prompts, on a page that polls every four seconds.
+ * `GET /api/runs/[id]` is the full-text source and is what the task page reads.
+ */
+export const MAX_LIST_PROMPT = 400;
+
+/**
+ * A run as the runs list and quick open read it, which is less than a run.
+ *
+ * Its own type rather than a quietly weakened `RunDTO`, because `RunDTO` is what
+ * the single-run route ships and that one must keep the whole prompt — a shared
+ * shape whose `prompt` had silently become a prefix would be wrong on the page
+ * that renders the task in full and correct nowhere it was checked.
+ *
+ * Two fields are absent rather than clipped. `budget` is the whole normalised
+ * policy and `agent` the run's frozen copy of its role, 37KB between them over a
+ * hundred rows, and neither list reads either: the list draws status, task,
+ * folder, cycles, tokens, spend and what a run is waiting on, and quick open
+ * draws an id, a status and a folder. The guards belong to the run's own page,
+ * which asks the route that has them.
+ */
+export type RunListItemDTO = Omit<RunDTO, "prompt" | "budget" | "agent"> & {
+  /**
+   * The task, clipped to `MAX_LIST_PROMPT` with a trailing `…` when it did not
+   * fit — `clipReason`'s marker, so a shortened value cannot read as a whole
+   * one. The hover `title` on the list is therefore a prefix on a long task.
+   */
+  prompt: string;
+};
+
 /** Mirrors `RunOrigin` in `orchestrator.ts`; see the column note in `db.ts`. */
 export type RunOriginDTO =
   | "form"

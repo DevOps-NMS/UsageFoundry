@@ -14,7 +14,11 @@ import {
   type RunDependencyInput,
 } from "../../../lib/orchestrator";
 import { recentOpsEvents } from "../../../lib/ops";
-import type { BootReconcileDTO } from "../../../lib/apiTypes";
+import {
+  MAX_LIST_PROMPT,
+  type BootReconcileDTO,
+  type RunListItemDTO,
+} from "../../../lib/apiTypes";
 import { PERMISSION_MODES, type PermissionMode } from "../../../lib/settings";
 import { resolveAgentForRun, runAgentDTO } from "../../../lib/agents";
 import {
@@ -27,25 +31,40 @@ import { auditMutation, SUBJECT_HEADER } from "../../../lib/requestLog";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * The task, short enough that a hundred of them are not the response.
+ *
+ * `MAX_LIST_PROMPT - 1` plus the ellipsis, `clipReason`'s shape, so a clipped
+ * value is the marked length rather than one character over it and cannot be
+ * mistaken for a whole task. The list truncates the line it draws anyway; what
+ * this bounds is the wire.
+ */
+function clipPrompt(prompt: string): string {
+  return prompt.length <= MAX_LIST_PROMPT
+    ? prompt
+    : `${prompt.slice(0, MAX_LIST_PROMPT - 1)}…`;
+}
+
 export async function GET() {
   const rows = listRuns(100);
   const deps = dependenciesOf(rows.map((r) => r.id));
-  const runs = rows.map((r) => {
+  const runs: RunListItemDTO[] = rows.map((r) => {
     const { mountId, mountLabel, relPath } = describeFolder(r.folder);
-    // Normalised on read: rows predating enforcement modes carry no
-    // `enforcement` or `continueAfterDone` key, and the DTO must not claim they
-    // do. See the same note in the single-run route.
-    const rawBudget = JSON.parse(r.budget) as Record<string, unknown>;
+    // Dropped rather than shipped and ignored. `budget` is the whole normalised
+    // policy and `agent` the run's frozen copy of its role — 37KB between them
+    // over a hundred rows, measured — and neither the runs list nor quick open
+    // reads either. The run's own page asks the route that has them, which is
+    // one row rather than a hundred. `runAgentDTO` and the budget normalisation
+    // that used to happen here are still in the single-run route, and are still
+    // the reason a client never sees the stored blob.
+    const { budget: _budget, agent: _agent, ...rest } = r;
     return {
-      ...r,
-      budget: {
-        ...normalizePolicy(rawBudget),
-        permissionMode: rawBudget.permissionMode,
-      },
-      // Read out of the stored blob rather than passed through as one: the
-      // column holds the whole definition, including the agent's system prompt,
-      // and this list is polled. Same treatment `budget` gets one line up.
-      agent: runAgentDTO(r.agent),
+      ...rest,
+      // Clipped for the reason `budget` is absent, and the reason
+      // `MAX_NEEDS_REVIEW_REASON` clips at the write: the column holds whatever
+      // an operator typed and this list is polled every four seconds. Measured:
+      // 522,541 bytes of a 696,197-byte response.
+      prompt: clipPrompt(r.prompt),
       mountId,
       mountLabel,
       relPath,

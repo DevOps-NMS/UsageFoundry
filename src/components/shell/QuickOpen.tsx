@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { RunDTO, WorkflowDTO } from "@/lib/apiTypes";
+import type { RunListItemDTO, WorkflowDTO } from "@/lib/apiTypes";
 import { pollFailureMessage, shortPath } from "@/lib/format";
 import { jsonRequest } from "@/lib/jsonRequest";
 import { Icon } from "@/components/ui/Icon";
@@ -67,7 +67,7 @@ export function QuickOpen({
 
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
-  const [runs, setRuns] = useState<RunDTO[]>([]);
+  const [runs, setRuns] = useState<RunListItemDTO[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowDTO[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -79,7 +79,7 @@ export function QuickOpen({
     let live = true;
     void (async () => {
       const [runsResult, workflowsResult] = await Promise.all([
-        jsonRequest<{ runs: RunDTO[] }>("/api/runs"),
+        jsonRequest<{ runs: RunListItemDTO[] }>("/api/runs"),
         jsonRequest<{ workflows: WorkflowDTO[] }>("/api/workflows"),
       ]);
       if (!live) return;

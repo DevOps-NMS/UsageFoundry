@@ -467,7 +467,45 @@ export default function RunDetail({
   const [missed, setMissed] = useState(0);
   const seenLines = useRef(0);
 
+  const status = run?.status;
+  const active = status !== undefined && ACTIVE_STATUSES.has(status);
+
+  /**
+   * Whether this page still has a reason to ask the row again.
+   *
+   * A row nobody has read yet is one of them — the first load is not gated on
+   * anything, or a page opened on a finished run would never read it. A row the
+   * orchestrator still owns is the other.
+   */
+  const polling = run === null || active;
+  // Read by the SSE handler, which is created once per run id and would
+  // otherwise close over the first render's answer for the life of the page.
+  const pollingRef = useRef(true);
+  useEffect(() => {
+    pollingRef.current = polling;
+  }, [polling]);
+  // Bumped to re-arm the poll after it has stood down — see the third edge in
+  // the note below.
+  const [woken, setWoken] = useState(0);
+
   // Poll the run row for status/spend; the SSE stream carries the log.
+  //
+  // The interval is for a run that can still move. A terminal row cannot change
+  // on its own, and this route is polled every three seconds for as long as the
+  // tab is left open — on a finished run that is an unbounded number of requests
+  // asking a question whose answer was settled hours ago.
+  //
+  // Three edges, and which of them the code relies on rather than hopes for.
+  // The first load sits above the gate, so opening a finished run still reads
+  // it. A run that finishes while the page is open flips `active` false only
+  // *because* a poll said so, and this effect re-runs on that flip and loads
+  // once more before declining to re-arm — that last read is what catches a
+  // `finished_at`, a stop reason or a spend figure written between the two. And
+  // a run picked up again from another tab reaches this page over SSE, which
+  // stays subscribed to the bus whatever the row says: the first event to
+  // arrive after the poll has stood down bumps `woken`, which re-runs this
+  // effect, and the load it does sees the row running again and re-arms. So the
+  // page is never frozen on an ending that has since been undone.
   useEffect(() => {
     let alive = true;
     const load = async () => {
@@ -498,12 +536,17 @@ export default function RunDetail({
       }
     };
     void load();
+    if (!polling) {
+      return () => {
+        alive = false;
+      };
+    }
     const t = setInterval(() => void load(), 3000);
     return () => {
       alive = false;
       clearInterval(t);
     };
-  }, [id]);
+  }, [id, polling, woken]);
 
   useEffect(() => {
     const es = new EventSource(`/api/runs/${id}/stream`);
@@ -514,6 +557,11 @@ export default function RunDetail({
         const e = JSON.parse(msg.data) as RunEventDTO;
         if (e.kind === "replay-complete") return;
         setEvents((prev) => [...prev, e]);
+        // An event on a run this page had written off means somebody picked it
+        // up. Guarded on the ref rather than sent unconditionally: while the
+        // poll is running this would tear the interval down and re-create it on
+        // every log line the agent writes.
+        if (!pollingRef.current) setWoken((n) => n + 1);
       } catch {
         /* malformed frame — skip rather than tear down the stream */
       }
@@ -537,9 +585,6 @@ export default function RunDetail({
   // Computed here rather than inside `RunOutput` because the tab bar has to
   // know whether there is a report before it offers a tab for one.
   const cycles = useMemo(() => cycleOutputs(events), [events]);
-
-  const status = run?.status;
-  const active = status !== undefined && ACTIVE_STATUSES.has(status);
 
   // Follow the tail, but stop fighting the user if they scroll up to read.
   // Keyed on the tab as well: the pane is unmounted while another tab is up, so

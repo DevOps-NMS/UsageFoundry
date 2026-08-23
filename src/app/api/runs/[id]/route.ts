@@ -6,7 +6,6 @@ import {
   haltedWorkflowOf,
   isRunning,
   queuePosition,
-  runEvents,
   stopRun,
 } from "@/lib/orchestrator";
 import { telemetryForRun } from "@/lib/otlp";
@@ -20,20 +19,25 @@ export const dynamic = "force-dynamic";
 type Ctx = { params: Promise<{ id: string }> };
 
 /**
- * Cap on the events returned when the caller asks for all of them.
+ * One run's row, and nothing that belongs to its log.
  *
- * The run page polls this route every few seconds and reads the row, not the
- * log — the log arrives over SSE. Serialising a multi-day run's entire history
- * on each poll is pure waste, and on a long run it is a hard failure.
+ * The run page polls this every three seconds for as long as the tab is open,
+ * and what it reads is the row: status, spend, guards, telemetry. The log
+ * arrives over `/api/runs/[id]/stream`, which is the one place that bounds a
+ * history — it replays under both a row cap and a byte budget and says what it
+ * dropped.
+ *
+ * This route used to ship up to 500 events beside the row under a comment
+ * warning that doing so would be pure waste, and nothing read them: the page's
+ * own response type names `run`, `telemetry` and `error`, and `setEvents` is
+ * fed solely by the EventSource. Measured on the live container before they
+ * went — 582,469 bytes of a 591,574-byte response, repeated 20 times a minute
+ * per open tab.
  */
-const EVENT_LIMIT = 500;
-
-export async function GET(req: Request, ctx: Ctx) {
+export async function GET(_req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   const run = getRun(id);
   if (!run) return NextResponse.json({ error: "Not found" }, { status: 404 });
-
-  const after = Number(new URL(req.url).searchParams.get("after") ?? 0);
 
   const { mountId, mountLabel, relPath } = describeFolder(run.folder);
 
@@ -42,7 +46,6 @@ export async function GET(req: Request, ctx: Ctx) {
   // they do. One place to default them, rather than every client defaulting
   // them and one client forgetting.
   const rawBudget = JSON.parse(run.budget) as Record<string, unknown>;
-  const events = runEvents(id, Number.isFinite(after) ? after : 0, EVENT_LIMIT);
 
   return NextResponse.json({
     run: {
@@ -53,7 +56,8 @@ export async function GET(req: Request, ctx: Ctx) {
       },
       // The whole definition is on the row, including the agent's own system
       // prompt; the page needs the name and the description and this route is
-      // polled every three seconds. One reader for both run routes.
+      // polled while the run is live. The only reader left — the runs list
+      // stopped shipping `agent` at all, since nothing on it draws one.
       agent: runAgentDTO(run.agent),
       mountId,
       mountLabel,
@@ -70,8 +74,6 @@ export async function GET(req: Request, ctx: Ctx) {
     // informative — telemetry counts requests the CLI's `result` event
     // never got to report.
     telemetry: telemetryForRun(id),
-    events: events.events,
-    eventsDropped: events.dropped,
   });
 }
 

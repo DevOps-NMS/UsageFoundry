@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import type { BootReconcileDTO, RunDTO } from "@/lib/apiTypes";
+import type { BootReconcileDTO, RunListItemDTO } from "@/lib/apiTypes";
 import {
   fmtCycleInFlight,
   fmtCycles,
@@ -36,7 +36,7 @@ import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
  * operator started and expects to see start, and dropping it into the history
  * table below would file a run that has not happened yet under what has.
  */
-const ACTIVE: ReadonlySet<RunDTO["status"]> = new Set([
+const ACTIVE: ReadonlySet<RunListItemDTO["status"]> = new Set([
   "running",
   "queued",
   "paused",
@@ -74,7 +74,7 @@ const ACTIVE_ORDER: Record<"running" | "paused" | "queued" | "waiting", number> 
  * Duplicated rather than imported from `orchestrator.ts`, which reaches
  * `node:fs` — and it is a different list, so importing would be wrong anyway.
  */
-const REOPENABLE: ReadonlySet<RunDTO["status"]> = new Set(["failed", "stopped"]);
+const REOPENABLE: ReadonlySet<RunListItemDTO["status"]> = new Set(["failed", "stopped"]);
 
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -103,7 +103,7 @@ const FILTERS: readonly SegmentedOption<Filter>[] = [
  * 3.4:1 on the card surface in light mode, and this is a line a person reads
  * rather than a rule they glance past.
  */
-function folderLabel(run: RunDTO): string {
+function folderLabel(run: RunListItemDTO): string {
   if (!run.mountLabel) return shortPath(run.folder, 2);
   return `${run.mountLabel} / ${run.relPath || "."}`;
 }
@@ -119,7 +119,7 @@ function folderLabel(run: RunDTO): string {
  * `exact` is the precise instant behind a relative phrase, for the `title`.
  */
 function waitingDetail(
-  run: RunDTO,
+  run: RunListItemDTO,
   now: number,
 ): { text: string; exact?: string } | null {
   if (run.status === "waiting") {
@@ -238,7 +238,7 @@ function RunList({
   onStop,
   onResume,
 }: {
-  runs: RunDTO[];
+  runs: RunListItemDTO[];
   kind: ListKind;
   caption: string;
   now: number;
@@ -489,7 +489,7 @@ function RunList({
 }
 
 export default function RunsPage() {
-  const [runs, setRuns] = useState<RunDTO[]>([]);
+  const [runs, setRuns] = useState<RunListItemDTO[]>([]);
   const [boot, setBoot] = useState<BootReconcileDTO | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
@@ -499,7 +499,16 @@ export default function RunsPage() {
   // Ticked into state rather than read during render: paused runs show a live
   // countdown, and a Date.now() in the render body differs between the server
   // pass and hydration.
+  //
+  // Two clocks, because two different things ask the time here and only one of
+  // them counts down. `now` is the countdown's, and it runs only while a run is
+  // actually waiting on one — see `counting` below. `readAt` is the instant the
+  // list on screen was read, and it is what everything measuring an *age*
+  // against it uses: the 24-hour bucket boundary and the restart notice's
+  // relative phrase. Those answers cannot change without the rows changing, so
+  // they move once per poll rather than sixty times a minute.
   const [now, setNow] = useState(() => Date.now());
+  const [readAt, setReadAt] = useState(() => Date.now());
 
   /**
    * A failed poll has to say so. This used to drop every non-ok answer on the
@@ -514,7 +523,7 @@ export default function RunsPage() {
       // Parsed before the status check: a 500 carries no JSON, and letting that
       // throw would report a reachable server as an unreachable one.
       const data = (await res.json().catch(() => ({}))) as {
-        runs?: RunDTO[];
+        runs?: RunListItemDTO[];
         lastBootReconcile?: BootReconcileDTO | null;
         error?: string;
       };
@@ -525,6 +534,7 @@ export default function RunsPage() {
       }
       setRuns(data.runs);
       setBoot(data.lastBootReconcile ?? null);
+      setReadAt(Date.now());
       setPollError(null);
     } catch (err) {
       const cause = err instanceof Error ? err.message : String(err);
@@ -537,29 +547,54 @@ export default function RunsPage() {
   useEffect(() => {
     loadRuns();
     const poll = setInterval(loadRuns, 4000);
-    const clock = setInterval(() => setNow(Date.now()), 1000);
-    return () => {
-      clearInterval(poll);
-      clearInterval(clock);
-    };
+    return () => clearInterval(poll);
   }, [loadRuns]);
+
+  /**
+   * Whether anything on the page is actually counting down.
+   *
+   * `waitingDetail` is the only reader of a second-resolution clock here, and
+   * only on its paused branch — everything else measures an age against
+   * `readAt`. Ungated, the tick rebuilt the three buckets and reconciled up to a
+   * hundred rows sixty times a minute on a page whose figures had not moved
+   * since the last four-second poll.
+   */
+  const counting = useMemo(
+    () => runs.some((r) => r.status === "paused" && r.resume_at),
+    [runs],
+  );
+
+  useEffect(() => {
+    if (!counting) return;
+    // Seeded on the way in: `now` is frozen while nothing counts down, so by the
+    // time a run parks it can be hours stale, and waiting a second to correct it
+    // would put a wrong countdown on screen first.
+    setNow(Date.now());
+    const clock = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(clock);
+  }, [counting]);
 
   /**
    * One pass, three buckets, no overlap. The page this replaces rendered the
    * active runs in their own table *and* again in the history table below it,
    * so a running run appeared twice.
+   *
+   * Cut against `readAt` rather than the countdown's clock. The boundary is a
+   * 24-hour one and the rows it sorts arrive with the poll, so asking it at 1 Hz
+   * rebuilt all three arrays — and re-rendered every list below them — to answer
+   * a question that cannot change between two reads of the same list.
    */
   const { active, recent, older } = useMemo(() => {
-    const active: RunDTO[] = [];
-    const recent: RunDTO[] = [];
-    const older: RunDTO[] = [];
+    const active: RunListItemDTO[] = [];
+    const recent: RunListItemDTO[] = [];
+    const older: RunListItemDTO[] = [];
     for (const r of runs) {
       if (ACTIVE.has(r.status)) {
         active.push(r);
         continue;
       }
       const at = r.finished_at ?? r.started_at ?? r.created_at;
-      (now - at < RECENT_WINDOW_MS ? recent : older).push(r);
+      (readAt - at < RECENT_WINDOW_MS ? recent : older).push(r);
     }
     active.sort(
       (a, b) =>
@@ -567,7 +602,7 @@ export default function RunsPage() {
         ACTIVE_ORDER[b.status as keyof typeof ACTIVE_ORDER],
     );
     return { active, recent, older };
-  }, [runs, now]);
+  }, [runs, readAt]);
 
   const olderFiltered = useMemo(
     () => (filter === "all" ? older : older.filter((r) => r.status === filter)),
@@ -648,9 +683,9 @@ export default function RunsPage() {
           is the explanation for what is below it, and after that it is noise
           the status endpoint still carries. `quiet`, because it is context
           rather than something to act on now. */}
-      {boot !== null && boot.closed > 0 && now - boot.at < RECENT_WINDOW_MS && (
+      {boot !== null && boot.closed > 0 && readAt - boot.at < RECENT_WINDOW_MS && (
         <Notice tone="warn" quiet>
-          The server restarted {fmtRelative(boot.at, now)} and closed out{" "}
+          The server restarted {fmtRelative(boot.at, readAt)} and closed out{" "}
           <strong className="font-semibold text-ink">
             {boot.closed} run{boot.closed === 1 ? "" : "s"}
           </strong>{" "}
