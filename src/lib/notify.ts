@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 
 import {
   INSTALL_LABEL,
+  NOTIFY_ON_SUCCESS,
   PUBLIC_URL,
   USER_AGENT,
   WEBHOOK_SECRET,
@@ -90,6 +91,15 @@ export interface NotificationBody {
  * `stopped` is absent here rather than forgotten. It is both an operator's own
  * cancel and a guard trip, and only the second is worth a notification — see
  * `notifiableEvent`.
+ *
+ * `completed` is absent for the reason above and stays absent from *this*
+ * constant even when `UF_NOTIFY_ON_SUCCESS=1` widens the filter. That is not
+ * squeamishness about a one-line edit: a set named "the statuses that always
+ * notify" whose contents depend on the environment is a constant that lies at
+ * every other reader, and the next edit to reach for it would be reading a
+ * fleet-scale default that this install happens not to have. The opt-in is a
+ * branch in `notifiableEvent`, beside the other status whose notifiability is
+ * not a property of the status.
  *
  * Typed `RunStatus` at the literals, so a renamed member is a compile error here
  * rather than a channel that quietly stops firing.
@@ -199,9 +209,17 @@ export interface NotifyDecision {
  * would edit a producer outside this sink, and over-reporting a retry is the
  * safe direction for a channel whose purpose is to say a run is stuck.
  */
+/**
+ * `UF_NOTIFY_ON_SUCCESS=1`, read once. The default of the parameter below rather
+ * than read inside it, so a test pins both settings without touching the
+ * environment — the same reason `state` is a parameter.
+ */
+const notifyOnSuccess = NOTIFY_ON_SUCCESS === "1";
+
 export function notifiableEvent(
   e: PersistedRunEvent,
   s: NotifyState = state,
+  onSuccess: boolean = notifyOnSuccess,
 ): NotifyDecision | null {
   const p = e.payload;
 
@@ -244,8 +262,12 @@ export function notifiableEvent(
   s.rateLimited.delete(e.runId);
 
   if (NOTIFY_STATUSES.has(status)) return { event: eventName(status), status };
-  // The one status whose notifiability is not a property of the status.
+  // The two statuses whose notifiability is not a property of the status: one
+  // decided by how the run got here, one by what the operator asked for. Both
+  // sit below the always-notify set so that widening either can never subtract
+  // from it.
   if (status === "stopped" && guardStopped) return { event: eventName(status), status };
+  if (status === "completed" && onSuccess) return { event: eventName(status), status };
   return null;
 }
 

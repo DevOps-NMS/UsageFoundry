@@ -487,6 +487,23 @@ export const PUBLIC_URL = optionalEnv("UF_PUBLIC_URL");
 /** A name for this install, for an operator who runs more than one. */
 export const INSTALL_LABEL = optionalEnv("UF_INSTALL_LABEL");
 
+/**
+ * Whether a run that simply *worked* is also worth a notification. `"1"` is on.
+ *
+ * Off is the shipped state and the reasoning for that is in `notify.ts`: at a
+ * fleet's scale a POST per success is how a channel stops being read, which
+ * costs the operator the three endings that actually need them. But that is an
+ * argument about scale, not about correctness, and an operator running a handful
+ * of runs a day may reasonably want the "it is done" signal — so it is a
+ * decision the environment makes rather than one this app makes for everybody.
+ *
+ * A fifth variable on that channel and read the same way as the other four:
+ * environment-only, for `WEBHOOK_URL`'s reason. It is not a credential, but a
+ * `settings.json` switch that widens what an install POSTs to a third party is
+ * still one `/api/settings` can reach with the master key.
+ */
+export const NOTIFY_ON_SUCCESS = optionalEnv("UF_NOTIFY_ON_SUCCESS");
+
 /** Path to the Claude Code executable inside the container. */
 export const CLAUDE_BIN = env("CLAUDE_BIN", "claude");
 
@@ -537,6 +554,9 @@ export const BLANK_MEANINGFUL_ENV_VARS = [
   "UF_WEBHOOK_SECRET",
   "UF_PUBLIC_URL",
   "UF_INSTALL_LABEL",
+  // Blank is "only the endings that need a person", which is the shipped
+  // filter; "1" widens it to every run that finished cleanly.
+  "UF_NOTIFY_ON_SUCCESS",
   // Blank is the *success* case, and it is not an operator value at all:
   // compose computes it from the workspace slots it could not mount, so any
   // non-blank value here refuses the boot. There is no `.env` edit that clears

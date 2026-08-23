@@ -253,6 +253,12 @@ services:
       # webhook id is an unauthenticated URL and the signature is the only thing
       # that tells your automation this install's POST from anyone else's.
       UF_WEBHOOK_SECRET: "${UF_WEBHOOK_SECRET:-}"
+      # Optional: "1" also notifies when a run simply finished. Blank is off and
+      # is the shipped state, because at a fleet's scale a POST per success is
+      # how a channel stops being read — and the endings above are the ones it
+      # exists for. Worth turning on if you run a handful of runs a day and want
+      # the "it is done" signal; it widens `completed` and nothing else.
+      UF_NOTIFY_ON_SUCCESS: "${UF_NOTIFY_ON_SUCCESS:-}"
       # Optional: how this install is reached from wherever you read the
       # notification, e.g. https://uf.example.com. It is the only absolute URL
       # this app builds, and it exists for the `url` field of that body. Blank

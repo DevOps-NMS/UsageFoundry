@@ -277,6 +277,7 @@ installed or refused.
 | `UF_WEBHOOK_SECRET` | The HMAC key the receiver verifies (`openssl rand -hex 32`). Required whenever the URL is set: with the URL set and this blank, nothing is delivered and every skipped notification is logged as an error. |
 | `UF_PUBLIC_URL` | Optional. The base URL this install answers on, e.g. `https://uf.example.com`. Only used to build the `url` field in that body; blank sends it empty rather than a link to somebody else's `localhost`. |
 | `UF_INSTALL_LABEL` | Optional. A name for this install, so one receiver can tell two of them apart. Free text, sent verbatim. |
+| `UF_NOTIFY_ON_SUCCESS` | Optional. `1` also notifies when a run finished cleanly. Blank is off, and off is the default — see *Getting told when a run needs you* below for why. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid every spawned agent runs as; must own the mounts. The server itself runs as root and drops to this. Default 1000. |
 | `UF_CHAT_GID` | The group the orchestrator chat runs in, which owns the per-turn MCP capability file that a concurrent agent must not read. Default 65533. **Must differ from `UF_GID`** — the server refuses to boot when they match rather than hand that file to the group it is being kept from. |
 | `UF_BACKUP_DIR` | Host directory mounted at `/backups`, where `scripts/backup-db.mjs` writes. Default `./backups`, which this repository ships. Point it elsewhere and create that directory first: Docker makes a missing bind source root-owned, and the children that write it are `UF_UID`. |
@@ -544,7 +545,17 @@ set, this app POSTs one JSON body per ending that actually wants a person:
 `needs-review`, `blocked`, `failed`, a `stopped` a **guard** caused (never one you
 pressed), and the first rung of a rate-limit wait. A run that finished normally
 sends nothing, and neither does a park's intermediate rungs — only the ending
-they reach. Both variables are required: with the URL set and the secret blank,
+they reach.
+
+That last one is a setting rather than a rule. `UF_NOTIFY_ON_SUCCESS=1` adds
+`completed` to the list, so a clean finish arrives as `run.completed`. It is off
+by default because the filter's job is to stay worth reading: run twenty-five
+agents unattended and a notification per success is twenty-five messages saying
+nothing happened, which is how a channel becomes something you scroll past — and
+the endings above are then the ones you miss. If you run a handful of runs a day
+and want the "it is done" signal, turn it on; it widens `completed` and nothing
+else, so the statuses a run passes through stay silent and so does a run you
+cancelled yourself. Both variables are required: with the URL set and the secret blank,
 nothing is delivered and each skipped notification is logged as an error, because
 an unsigned body is one the receiver cannot tell from anybody else's.
 

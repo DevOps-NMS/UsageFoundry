@@ -62,6 +62,26 @@ describe("which run event is worth telling somebody about", () => {
     assert.equal(notifiableEvent(status("completed"), freshState()), null);
   });
 
+  it("announces a run that finished when UF_NOTIFY_ON_SUCCESS asks it to", () => {
+    assert.deepEqual(notifiableEvent(status("completed"), freshState(), true), {
+      event: "run.completed",
+      status: "completed",
+    });
+  });
+
+  it("widens nothing except `completed` when that opt-in is on", () => {
+    // The direction the opt-in could fail in. Sitting the branch below the
+    // always-notify set makes subtracting from it impossible; what is left to
+    // get wrong is adding to it, and a channel that POSTs on the statuses a run
+    // passes through is a POST per cycle — the noise failure that costs an
+    // operator the three endings this exists for.
+    for (const passing of ["waiting", "queued", "running", "paused"] as RunStatus[]) {
+      assert.equal(notifiableEvent(status(passing), freshState(), true), null);
+    }
+    // Still an operator's own cancel, which no setting about *success* may reach.
+    assert.equal(notifiableEvent(status("stopped"), freshState(), true), null);
+  });
+
   it("says nothing about the states a run passes through", () => {
     for (const s of ["waiting", "queued", "running", "paused"] as RunStatus[]) {
       assert.equal(notifiableEvent(status(s), freshState()), null);
