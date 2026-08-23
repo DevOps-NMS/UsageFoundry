@@ -183,6 +183,17 @@ uv_as_agent() {
   fi
 }
 
+# `--editable` only for a checkout, and never as an empty argument: passed one,
+# uv looks for a package named "" and fails. Same shape as the gh helper above
+# and for the same reason.
+uv_install_tool() {
+  if [ -n "$2" ]; then
+    uv_as_agent tool install --editable "$1"
+  else
+    uv_as_agent tool install "$1"
+  fi
+}
+
 # Best-effort throughout and never fatal, on the same argument as the gh block:
 # a tool that will not install is a degraded install, and refusing the boot over
 # it would take the dashboard and every guard away from an operator whose
@@ -199,23 +210,58 @@ if [ -n "${UF_PY_TOOLS:-}" ]; then
   installed=" $(uv_as_agent tool list 2>/dev/null \
                 | awk '/^[A-Za-z0-9_.-]+ v/ { print $1 }' | tr '\n' ' ') "
   for entry in $(echo "$UF_PY_TOOLS" | tr '|' ' '); do
-    # The entry goes to uv verbatim — it is a PEP 508 requirement, and uv is
-    # what understands `==`, `>=`, an extra or a direct URL. Only the *name* is
-    # parsed out here, and only to ask whether it is already installed.
-    name="${entry%%[=<>!~[@]*}"
-    # Exact-name matching rather than the substring test the gh block uses, and
-    # the difference matters here: `rich` is a substring of `rich-cli`, so a
-    # substring test would silently skip a tool an operator asked for on the
-    # strength of an unrelated one already being there.
-    case "$installed" in
-      *" $name "*) continue ;;
+    # An absolute path is a *checkout* rather than a release, which is the one
+    # thing an operator's own fork of a plugin's tool can be, and it gets the
+    # two things a checkout wants.
+    #
+    # `--editable`, so the environment points at the source and an edit on the
+    # host is live in the container with no reinstall at all — measured:
+    # `cozempic.__file__` resolves to the mounted tree, and a version bumped on
+    # the host reads back changed from the same install.
+    #
+    # And no skip test, so a restart re-runs it. That is not the same as being
+    # unable to skip: an editable install tracks the *source* and fixes the
+    # metadata — the dependencies and the console scripts — at install time, so
+    # a restart is the only thing that picks those up, and it is the moment an
+    # operator already reaches for. It costs under a second, and a source tree
+    # too broken to build leaves the last good install in place rather than
+    # removing it (also measured).
+    #
+    # `name@file:///path` is the other half of the pair and needs nothing here:
+    # it carries a name, so it takes the ordinary path below and is copied once
+    # rather than followed. That is the form for a checkout you want *pinned* to
+    # the state it was installed in.
+    case "$entry" in
+      /*) editable=1 ;;
+      *)  editable="" ;;
     esac
-    if error="$(uv_as_agent tool install "$entry" 2>&1 >/dev/null)"; then
-      # Added to the list read before the loop, so a name written twice is
-      # skipped the second time rather than answered with uv's "already
-      # installed" as though something had gone wrong.
-      installed="$installed$name "
-      echo "[usagefoundry] installed Python tool $entry"
+    if [ -z "$editable" ]; then
+      # The entry goes to uv verbatim — it is a PEP 508 requirement, and uv is
+      # what understands `==`, `>=`, an extra or a direct URL. Only the *name*
+      # is parsed out here, and only to ask whether it is already installed.
+      name="${entry%%[=<>!~[@]*}"
+      # Exact-name matching rather than the substring test the gh block uses,
+      # and the difference matters here: `rich` is a substring of `rich-cli`, so
+      # a substring test would silently skip a tool an operator asked for on the
+      # strength of an unrelated one already being there.
+      case "$installed" in
+        *" $name "*) continue ;;
+      esac
+    fi
+    if error="$(uv_install_tool "$entry" "$editable" 2>&1 >/dev/null)"; then
+      if [ -z "$editable" ]; then
+        # Added to the list read before the loop, so a name written twice is
+        # skipped the second time rather than answered with uv's "already
+        # installed" as though something had gone wrong.
+        installed="$installed$name "
+        echo "[usagefoundry] installed Python tool $entry"
+      else
+        # Said differently on purpose. This line appears on every boot rather
+        # than once, and what it reports is a tool whose code an operator can
+        # change without reinstalling anything — which is worth being able to
+        # see in a log, and worth not reading as the ordinary case.
+        echo "[usagefoundry] installed Python tool (editable) $entry"
+      fi
     else
       echo "[usagefoundry] could not install Python tool $entry:" \
            "$(echo "$error" | tr '\n' ' ')" >&2

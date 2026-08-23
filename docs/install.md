@@ -188,6 +188,39 @@ for the rest of the fleet.
 No token is needed; the container needs outbound network at boot and nothing
 else. Pin the version, for the same reason a dependency is pinned.
 
+#### Your own copy of one
+
+A fork you maintain is a **container** path — a directory under a workspace
+mount, not a host path:
+
+```bash
+UF_PY_TOOLS=/workspace/winnow
+```
+
+That is installed *editable* and re-run on every boot. Editable means the
+container follows the source instead of copying it, so an edit on the host is
+live in the next session with nothing to reinstall — verified: the module
+resolves to the mounted tree, and a value changed on the host reads back changed
+from the same install. The boot-time re-run is what picks up what editable does
+not follow: the dependencies and the console scripts, both fixed at install
+time. A tree too broken to build leaves the last good install alone and says so
+in the log, so a half-finished edit cannot take the tool away.
+
+For a copy pinned to the state it was installed in, name it and give the path as
+a URL. That one is copied once and skipped on later boots, exactly like a
+release:
+
+```bash
+UF_PY_TOOLS=cozempic@file:///workspace/winnow
+```
+
+Worth knowing before choosing the first. The agents can write the mounts, so an
+editable install means code under one of them runs on every session start, as a
+hook, with no restart in between. That is the same reach a plugin directory
+already has — its hooks come from a mount too, and `docs/security.md` covers the
+argument — but it is a second door onto it, and the pinned form does not have
+it.
+
 Then turn off two things in the tool itself, if it has them. Neither goes in
 `.env`: compose reads that file for interpolation only and there is no
 `env_file`, so a name `docker-compose.yml` does not forward never reaches the
