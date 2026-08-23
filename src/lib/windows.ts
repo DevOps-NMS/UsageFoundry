@@ -250,7 +250,10 @@ export interface WindowState {
    * On the provider's own figure the same split still applies, for two further
    * reasons. The weekly meter reports the all-model window it is labelled with,
    * while this takes the worst of that and every model-scoped weekly wall,
-   * because being cut off by the Opus week is being cut off. And the provider's
+   * because being cut off by the Opus week is being cut off. (The one case
+   * where the wall also reaches `fraction` is a payload that named no
+   * all-model figure at all — there is nothing for the meter to report it
+   * instead of, and `planFraction` stays null to say so.) And the provider's
    * percentage is *cached* — five minutes in the ordinary case, up to an hour
    * while requests are being refused — so the derived reading, which is
    * recomputed on every guard, is taken as well and the worst of the three
@@ -707,7 +710,12 @@ export function buildSnapshot(
     costLimit: number | null,
     tokenLimit: number | null,
     planWindow: PlanWindow | null,
-    /** Worst of every wall on this window; defaults to the window's own. */
+    /**
+     * Worst of every wall on this window, or null when the provider named
+     * none. Null rather than 0, because this figure has to be able to stand on
+     * its own below when there is no top-level reading beside it, and a 0
+     * there would report an unread window as an empty one.
+     */
     planGuard: number | null = null,
     /**
      * What this window has spent since the provider's reading was taken — the
@@ -722,7 +730,35 @@ export function buildSnapshot(
     // are what the "your configured ceiling says otherwise" footnote is drawn
     // from, so the provider's figure displaces them at `fraction` without
     // overwriting them.
-    if (planFraction === null) return { label, ...derived, planFraction: null };
+    if (planFraction === null) {
+      // A model-scoped wall stands on its own when the provider named no
+      // top-level figure for this window — `parsePlanUsage` accepts exactly
+      // that payload (`five_hour` and `limits[]`, no `seven_day`). Falling
+      // through to the derived reading here dropped an Opus week at 95% back
+      // to `no-ceiling`, so the weekly guard stopped existing on an account
+      // that has the wall the guard was written for.
+      //
+      // It is already a fraction of a provider allowance — `planUsage.ts`
+      // divides the body's percent — so it goes in as it is, and it is *not*
+      // carried forward: `planFractionCarriedForward` scales a reading by this
+      // window's own spend, and an Opus-only percentage against all-model
+      // spend is the mixed-denominator error one branch down. `planFraction`
+      // stays null, because the provider still named no figure for the window
+      // this meter is labelled with.
+      if (planGuard === null) return { label, ...derived, planFraction: null };
+
+      return {
+        label,
+        ...derived,
+        planFraction: null,
+        fraction: planGuard,
+        fractionMetric: "plan",
+        guardFraction: planGuard,
+        // Nothing to describe: the provider names a percentage, not a ceiling.
+        limit: null,
+        limitMetric: "plan",
+      };
+    }
 
     return {
       label,
@@ -783,6 +819,17 @@ export function buildSnapshot(
       : limits.weeklyAnchor
         ? wkStart + WEEK_MS
         : now;
+  // When this week's consumed figure goes back to zero, or null when it never
+  // does — the horizon the exhaustion projection below is bounded by.
+  //
+  // Not `wkEnd`: in the anchorless "Trailing 7 days" mode that is `now`, and
+  // bounding a projection by `now` would drop every candidate. That mode is
+  // also the one case where a bound would be wrong to apply at all — a
+  // trailing total has no reset instant, it decays turn by turn as the oldest
+  // ones fall out of the window, so there is no moment at which a projection
+  // past it stops describing the window it was computed from.
+  const weeklyResetsAt =
+    planWeeklyReset !== null || limits.weeklyAnchor ? wkStart + WEEK_MS : null;
   const weekEntries = entries.filter((e) => e.ts >= wkStart);
   const weeklyAgg = aggregate(weekEntries);
 
@@ -823,7 +870,9 @@ export function buildSnapshot(
     limits.weeklyCostLimit,
     limits.weeklyTokenLimit,
     plan?.weekly ?? null,
-    plan ? Math.max(0, ...plan.scopedWeekly.map((s) => s.window.utilization)) : null,
+    plan && plan.scopedWeekly.length > 0
+      ? Math.max(...plan.scopedWeekly.map((s) => s.window.utilization))
+      : null,
     weeklySinceFetch,
   );
 
@@ -839,21 +888,48 @@ export function buildSnapshot(
   // metric is projected with its own burn rate — projecting a cost ceiling
   // from a token rate (or vice versa) would be meaningless for a workload
   // whose token/cost ratio moves with cache-read volume.
+  //
+  // Each candidate is bounded by its own window's reset, because past that
+  // instant the window it was computed from no longer exists: the consumed
+  // figure goes to zero and the remaining headroom the arithmetic extrapolated
+  // is replaced by a full allowance. Measured on this install, a 5-hour window
+  // 1.2h from resetting projected 8.8h out and won the `Math.min` against a
+  // weekly candidate 32.6h out — the dashboard named an instant 7.6h after the
+  // window it measures had already reset, and because the earliest candidate
+  // always wins, that understates headroom rather than overstating it. A
+  // candidate past its horizon is dropped rather than clamped to it: the
+  // window is not projected to run out, which is a different statement from
+  // "it runs out exactly at the reset". All four dropped is `null`, which the
+  // dashboard already renders as no projection.
   const etaFor = (
     consumed: number,
     limit: number | null,
     ratePerHour: number,
+    /** When this window zeroes, or null for one that never does. */
+    resetsAt: number | null,
   ): number | null => {
     if (limit === null || limit <= 0 || ratePerHour <= 0) return null;
     const remaining = limit - consumed;
-    return remaining <= 0 ? now : now + (remaining / ratePerHour) * 3_600_000;
+    const at =
+      remaining <= 0 ? now : now + (remaining / ratePerHour) * 3_600_000;
+    return resetsAt !== null && at > resetsAt ? null : at;
   };
 
   const candidates = [
-    etaFor(session.costUSD, limits.sessionCostLimit, burnCostPerHour),
-    etaFor(weekly.costUSD, limits.weeklyCostLimit, burnCostPerHour),
-    etaFor(session.tokens, limits.sessionTokenLimit, burnTokensPerHour),
-    etaFor(weekly.tokens, limits.weeklyTokenLimit, burnTokensPerHour),
+    etaFor(
+      session.costUSD,
+      limits.sessionCostLimit,
+      burnCostPerHour,
+      session.endsAt,
+    ),
+    etaFor(weekly.costUSD, limits.weeklyCostLimit, burnCostPerHour, weeklyResetsAt),
+    etaFor(
+      session.tokens,
+      limits.sessionTokenLimit,
+      burnTokensPerHour,
+      session.endsAt,
+    ),
+    etaFor(weekly.tokens, limits.weeklyTokenLimit, burnTokensPerHour, weeklyResetsAt),
   ].filter((v): v is number => v !== null);
 
   const projectedExhaustionAt = candidates.length ? Math.min(...candidates) : null;

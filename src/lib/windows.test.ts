@@ -440,6 +440,47 @@ describe("provider-reported utilisation", () => {
     assert.equal(snap.weekly.guardFraction, 0.93);
   });
 
+  /**
+   * The same wall, on the payload that carries no all-model weekly figure
+   * beside it — `five_hour` plus `limits[]` and no `seven_day`, which is a
+   * shape `parsePlanUsage` accepts by name. The captured payload the parser is
+   * tested against happens to include `seven_day`, so nothing ever drove this
+   * branch, and it fell straight through to the derived reading: an Opus week
+   * at 95% left every weekly guard on the install reading `no-ceiling`.
+   */
+  it("stands a model-scoped wall up when the week has no top-level reading", () => {
+    const snap = buildSnapshot(spend, CEILINGS, now, null, plan(
+      { utilization: 0.4, resetsAt: null },
+      null,
+      [{ label: "Opus", window: { utilization: 0.95, resetsAt: null } }],
+    ));
+    assert.equal(snap.weekly.guardFraction, 0.95);
+    assert.equal(snap.weekly.fraction, 0.95);
+    assert.equal(snap.weekly.fractionMetric, "plan");
+    // The provider named no all-model figure for this window, and reporting
+    // one it did not give is what `planFraction` exists to keep separable.
+    assert.equal(snap.weekly.planFraction, null);
+    // Nothing to describe: the wall is a percentage, not a ceiling.
+    assert.equal(snap.weekly.limit, null);
+    assert.equal(snap.weekly.limitMetric, "plan");
+    // The window that *was* answered is untouched by any of it.
+    assert.equal(snap.session.fraction, 0.4);
+  });
+
+  it("falls back to the derived reading when there is no wall to stand up", () => {
+    // The empty-wall case has to stay a fallback and never a zero: an account
+    // with no model-scoped week, on a payload with no `seven_day`, is a window
+    // nobody read — not one at 0%, which is the substitution this module
+    // refuses everywhere else.
+    const snap = buildSnapshot(spend, CEILINGS, now, null, plan({
+      utilization: 0.4,
+      resetsAt: null,
+    }));
+    assert.equal(snap.weekly.fractionMetric, "cost");
+    assert.equal(snap.weekly.fraction, 0.01); // $10 of the typed $1,000
+    assert.equal(snap.weekly.planFraction, null);
+  });
+
   it("anchors the 5-hour window on the provider's reset, over a typed one", () => {
     // `sessionResetOverrideAt` exists only because this instant could not be
     // read. A stale typed value must not keep splitting blocks once it can.
@@ -469,6 +510,91 @@ describe("provider-reported utilisation", () => {
     // A trailing total has no reset to wait for; this one does, and the label
     // is what tells the operator which of the two they are looking at.
     assert.equal(snap.weekly.label, "Weekly quota");
+  });
+});
+
+/**
+ * The exhaustion projection, which is arithmetic whose only output is a date on
+ * a card — there is nothing about a wrong one that looks wrong.
+ *
+ * It extrapolates the trailing hour's burn against each configured ceiling and
+ * reports the earliest result, and every window it projects zeroes its consumed
+ * figure at a reset. Measured on this install: a 5-hour window 1.2h from
+ * resetting projected 8.8h out, a weekly candidate sat 32.6h out, and the
+ * earliest-wins rule returned the session one — a stated instant 7.6h after the
+ * window it describes had already reset. Because `Math.min` always takes the
+ * earlier, that error only ever understates remaining headroom.
+ */
+describe("projected exhaustion", () => {
+  // A block opened four hours ago, so the 5-hour window resets in one; $10 of
+  // it landed in the last half hour, which is the whole trailing-hour burn.
+  const burning = [entry(now - 4 * HOUR, 1), entry(now - 30 * 60_000, 10)];
+
+  const planWeek = (resetsAt: number) => ({
+    session: null,
+    weekly: { utilization: 0.25, resetsAt },
+    scopedWeekly: [],
+    fetchedAt: now,
+  });
+
+  it("drops a candidate that lands past the window it was projected from", () => {
+    const snap = buildSnapshot(
+      burning,
+      { ...NO_LIMITS, sessionCostLimit: 100, weeklyCostLimit: 200 },
+      now,
+    );
+    assert.equal(snap.session.endsAt, now + HOUR);
+    assert.equal(snap.burnCostPerHour, 10);
+
+    // Session: $89 of headroom at $10/h is 8.9h out, past a window that resets
+    // in one — so the answer is the weekly candidate, $189 out at the same
+    // rate, and not an instant 7.9h into a window that will have reset empty.
+    assert.equal(snap.projectedExhaustionAt, now + 18.9 * HOUR);
+  });
+
+  it("keeps a session projection that lands inside its own window", () => {
+    // Same shape, a ceiling low enough that the window really does run out
+    // before it resets: $4 of headroom at $10/h, 24 minutes out.
+    const snap = buildSnapshot(
+      burning,
+      { ...NO_LIMITS, sessionCostLimit: 15, weeklyCostLimit: 200 },
+      now,
+    );
+    assert.equal(snap.projectedExhaustionAt, now + 0.4 * HOUR);
+  });
+
+  it("keeps a weekly projection that lands inside the week", () => {
+    const snap = buildSnapshot(
+      burning,
+      { ...NO_LIMITS, weeklyCostLimit: 200 },
+      now,
+      null,
+      planWeek(now + 3 * 24 * HOUR),
+    );
+    assert.equal(snap.projectedExhaustionAt, now + 18.9 * HOUR);
+  });
+
+  it("still projects a trailing 7-day window, which has no reset to drop it at", () => {
+    // With no anchor and no provider reset the weekly window's `endsAt` is
+    // `now`, so bounding this candidate by that would null every projection an
+    // install without a weekly anchor could make. A trailing total has no
+    // instant at which it zeroes — it decays as the oldest turns fall out.
+    const snap = buildSnapshot(burning, { ...NO_LIMITS, weeklyCostLimit: 200 }, now);
+    assert.equal(snap.weekly.label, "Trailing 7 days");
+    assert.equal(snap.projectedExhaustionAt, now + 18.9 * HOUR);
+  });
+
+  it("reports no projection rather than a zero when every candidate is dropped", () => {
+    // Both windows reset before the burn could exhaust either. The card reads
+    // "—" off a null; a 0 or an Infinity here would print a date instead.
+    const snap = buildSnapshot(
+      burning,
+      { ...NO_LIMITS, sessionCostLimit: 100, weeklyCostLimit: 200 },
+      now,
+      null,
+      planWeek(now + 6 * HOUR),
+    );
+    assert.equal(snap.projectedExhaustionAt, null);
   });
 });
 
