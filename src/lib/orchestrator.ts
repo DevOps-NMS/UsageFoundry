@@ -515,6 +515,27 @@ function emit(e: RunEvent) {
 }
 
 /**
+ * The statuses whose stdout line routes at `warn`, and its own constant.
+ *
+ * Deliberately **not** `TERMINAL_STATUSES`: that list carries `completed`,
+ * which is the success nobody should be woken for, and it has five readers
+ * deciding whether a dependency chain may start — a level is not one of them,
+ * and joining the two is how the next person starts paging on success.
+ *
+ * `stopped` is deliberately absent. An operator's own cancel arrives as
+ * `stopped`, and a run a guard took down already has its own `warn` line in
+ * `run.guard_tripped` naming the code and the reason, so levelling this one up
+ * would page a person for a press they had just made. Typed `RunStatus` at the
+ * literal so a renamed member is a compile error here rather than a condition
+ * that quietly stops being routed.
+ */
+const WARN_STATUSES: ReadonlySet<string> = new Set<RunStatus>([
+  "needs-review",
+  "blocked",
+  "failed",
+]);
+
+/**
  * A second sink, after the publish and never before it.
  *
  * Persist-then-publish is what makes an SSE reconnect lossless, so this is an
@@ -541,9 +562,16 @@ function logLifecycle(e: PersistedRunEvent): void {
     typeof p[k] === "string" ? (p[k] as string).slice(0, 300) : null;
 
   switch (e.kind) {
-    case "status":
-      opsLog("info", "run.status", { run_id: e.runId, status: str("status") });
+    case "status": {
+      // Level is a *routing* decision — the field a shipper filters on to
+      // decide whether a person is woken — and one `info` line for all nine
+      // statuses makes an ending that asks for somebody indistinguishable
+      // from an ordinary completion. Field set and event name unchanged.
+      const status = str("status");
+      const level = status !== null && WARN_STATUSES.has(status) ? "warn" : "info";
+      opsLog(level, "run.status", { run_id: e.runId, status });
       return;
+    }
     case "iteration":
       opsLog("info", "run.cycle_started", { run_id: e.runId, cycle: num("n") });
       return;

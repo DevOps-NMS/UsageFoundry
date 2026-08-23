@@ -237,6 +237,8 @@ point; the *conditions* are the ones that have gone wrong here.
 |---|---|---|
 | The queue is backing up | `queue.depth` | `> 10`, or `> maxConcurrentRuns × 2` |
 | A run has been queued and never started | `queue.oldestQueuedAgeSeconds` | `> 3600` |
+| An agent hit a wall and asked for a person | `runs["needs-review"]` | `> 0` — this is the one ending whose whole content is that somebody should look |
+| Work was refused before it ever started | `runs.blocked` | `> 0` — nothing was spent, and nothing will be until it is picked up |
 | Parked runs are not being reconsidered | `sweeper.lastTickAgeSeconds` | `> 180` while `runs.paused > 0` |
 | Every sweep is failing (parked runs never resume) | `sweeper.failures` | any increase |
 | A live guard has stopped reading | `liveGuard.failures` | any increase |
@@ -273,6 +275,12 @@ runs the run page is not where anyone finds that out. Filter it out and a
 sandbox refusing every agent's calls looks like runs that quietly do less work.
 What is on stdout is projected field by field rather
 than dumped, so no prompt text, folder path or credential reaches it.
+
+`level` is a routing decision rather than a decoration. `run.status` is `warn`
+for `needs-review`, `blocked` and `failed` and `info` for the other six, so the
+endings that want a person are filterable without parsing the line — and a
+cancel stays `info`, because it arrives as `stopped` and whoever pressed Stop
+does not need waking.
 
 ### Who started what
 
