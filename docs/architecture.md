@@ -29,6 +29,10 @@ src/lib/
                    refuses a whole re-read and caps one read, delivered on the
                    same `--plugin-dir` list; root-owned code, agent-writable
                    ledger beside it
+  notify.ts        the outbound webhook: one signed, vendor-neutral, six-field
+                   JSON body per ending that needs a person, fire-and-forget
+                   beside `logLifecycle` and never awaited; off unless the
+                   environment names a URL and a secret
   git.ts           the one way this app runs git — argv only, environment scrubbed
   diff.ts          a run's <base>...<branch> as a budgeted file list + patches
   review.ts        the on-demand reviewer (a third, deliberate child process)

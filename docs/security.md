@@ -307,3 +307,13 @@ on may do nothing whatever. `docs/verification.md` carries what would settle it.
   token you name has to be scoped on GitHub's side too. The withholding above is
   by namespace, so `UF_GITHUB_TOKENS` never reaches the reviewer or this app's
   own git either.
+- **With `UF_WEBHOOK_URL` set, the container makes a new outbound connection, to
+  a host you name.** One POST per run ending that needs a person, signed with
+  `UF_WEBHOOK_SECRET`, carrying six fields and no task text, path, branch or run
+  title. Whoever can write `.env` can aim those POSTs at anything the container
+  can reach, `127.0.0.1` included — which adds no privilege over what that
+  person already has (they can also change `UF_AUTH_TOKEN` or mount another
+  folder), but it is the reason the target is an environment variable rather
+  than a setting: `/api/settings` is reachable with the master token, and moving
+  a webhook takes a restart instead. If you run controlled egress, this is the
+  one host list you have to update.

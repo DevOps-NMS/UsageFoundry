@@ -1060,12 +1060,65 @@ Built and exercised against real transcripts:
   and proves nothing about what the body does. 213 sessions were told a guard
   was active with no guard present. `UF_PY_TOOLS` is the answer to that half.
 
+- **The outbound webhook delivers, and the signature it sends verifies against
+  two implementations that are not this one.** Measured on 2026-08-23 with a
+  throwaway `node:http` listener outside the checkout, driving the real
+  `notifyLifecycle` through the compiled module rather than a paraphrase of it.
+  Four events in, two POSTs out — exactly the ones the filter names: a
+  `needs-review` status, and a `stopped` preceded by a `budget` verdict, with a
+  `completed` and an unaccompanied `stopped` (an operator's own cancel) sending
+  nothing. Both requests arrived `POST /api/webhook/uf-proof` with
+  `content-type: application/json`, `user-agent: UsageFoundry/0.1.0` and a
+  `content-length` equal to the bytes read off the socket. The body of the first
+  was 156 bytes:
+
+  ```
+  {"install":"büro","event":"run.needs_review","run_id":"r-proof-1","status":"needs-review","at":1700000000000,"url":"https://uf.example.com/runs/r-proof-1"}
+  ```
+
+  `JSON.parse` of it gives exactly `["install","event","run_id","status","at",
+  "url"]` and nothing else; `ü` arrived as `c3bc`, so the body is UTF-8 on the
+  wire, and the trailing slash on `UF_PUBLIC_URL` was stripped rather than
+  doubled. The header was
+  `sha256=3ec1124f7004e3b8b1d4280bb050e9ec7dee1199429e029c51a66e0fef564b6e`, and
+  the raw bytes were written to a file and re-hashed by `openssl dgst -sha256
+  -hmac` and by Python's `hmac` — both agree with the header, on both bodies. So
+  what a receiver verifies is checked by something other than the code that
+  produced it, which is the whole point of freezing the vectors in
+  `notify.test.ts`.
+
+  Two more things were exercised the same way. A real external POST to
+  `https://httpbin.org/post` returned **200** and was recorded as such, so egress
+  from this environment works and the delivery path is not only a loopback story
+  — though httpbin's echo was discarded by `deliver`, so byte-level fidelity is
+  established over the local listener and not over the internet. And a POST at an
+  unreachable receiver (`http://127.0.0.1:9/uf`) logged
+  `webhook.delivery … http_status: 0, ok: false, message: "fetch failed"` at
+  `warn` and left `webhookHealth()` reading `consecutiveFailures: 1`, which is the
+  path `/api/status`'s alert row depends on.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
 standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
+
+- **A real receiver.** Nothing here has been pointed at a Home Assistant
+  instance, an ntfy topic or anything else an operator would actually run. The
+  automation in `docs/install.md` is written from Home Assistant's documented
+  webhook trigger and has not been loaded, so its field names (`trigger.json.*`,
+  `allowed_methods`, `local_only`) are unconfirmed against a running install; the
+  claim that endpoint accepts arbitrary JSON is the vendor's, not this project's.
+  The Discord/Slack **400** is the same kind of claim — documented body shapes,
+  not a request this project sent. Docker is unavailable in the environment this
+  was built in, so the webhook has also never run inside the container: the four
+  variables are pinned to compose's `environment:` block by
+  `deployment.test.ts` reading the file, which proves the forwarding is *written*
+  and not that a container reads it. And no notification has been produced by an
+  actual run loop — the events driven through `notifyLifecycle` were constructed,
+  so what is unproven is the shape of a real `PersistedRunEvent` at each of those
+  endings, not the filter's answer to it.
 
 - **What `--autocompact` costs to run, and what another window would do.** The
   flag's sign is measured and is in the *Verified* section above; two things it

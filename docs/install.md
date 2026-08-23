@@ -273,6 +273,10 @@ installed or refused.
 | `UF_GITHUB_TOKENS` | Optional. `folder=token` entries separated by `\|`, narrowing the credential to the repository a run is working in. |
 | `UF_GH_EXTENSIONS` | Optional. `gh` extensions to install at boot, `owner/repo` or `owner/repo@tag`, space-separated. Kept in a named volume, so a rebuild does not lose them. Needs `UF_GITHUB_TOKEN`. |
 | `UF_PY_TOOLS` | Optional. Python tools to install at boot, one PEP 508 requirement each, separated by spaces or `\|` (not commas). Kept in a named volume. What a plugin whose hooks shell out to Python needs to work at all. |
+| `UF_WEBHOOK_URL` | Optional. Where to POST one signed JSON body per run ending that needs a person. Blank is off, and off is the default. **Not a Discord or Slack webhook URL** — see *Getting told when a run needs you* below. |
+| `UF_WEBHOOK_SECRET` | The HMAC key the receiver verifies (`openssl rand -hex 32`). Required whenever the URL is set: with the URL set and this blank, nothing is delivered and every skipped notification is logged as an error. |
+| `UF_PUBLIC_URL` | Optional. The base URL this install answers on, e.g. `https://uf.example.com`. Only used to build the `url` field in that body; blank sends it empty rather than a link to somebody else's `localhost`. |
+| `UF_INSTALL_LABEL` | Optional. A name for this install, so one receiver can tell two of them apart. Free text, sent verbatim. |
 | `UF_UID` / `UF_GID` | **Linux only.** The uid every spawned agent runs as; must own the mounts. The server itself runs as root and drops to this. Default 1000. |
 | `UF_CHAT_GID` | The group the orchestrator chat runs in, which owns the per-turn MCP capability file that a concurrent agent must not read. Default 65533. **Must differ from `UF_GID`** — the server refuses to boot when they match rather than hand that file to the group it is being kept from. |
 | `UF_BACKUP_DIR` | Host directory mounted at `/backups`, where `scripts/backup-db.mjs` writes. Default `./backups`, which this repository ships. Point it elsewhere and create that directory first: Docker makes a missing bind source root-owned, and the children that write it are `UF_UID`. |
@@ -532,6 +536,124 @@ LOCK_CLAUDE_HOME` before believing the boundary is there.
 None of this has been run against a real container by this project.
 `docs/verification.md` carries the steps that would settle it, all of them
 unrun.
+
+## Getting told when a run needs you
+
+Unattended runs end quietly. With `UF_WEBHOOK_URL` and `UF_WEBHOOK_SECRET` both
+set, this app POSTs one JSON body per ending that actually wants a person:
+`needs-review`, `blocked`, `failed`, a `stopped` a **guard** caused (never one you
+pressed), and the first rung of a rate-limit wait. A run that finished normally
+sends nothing, and neither does a park's intermediate rungs — only the ending
+they reach. Both variables are required: with the URL set and the secret blank,
+nothing is delivered and each skipped notification is logged as an error, because
+an unsigned body is one the receiver cannot tell from anybody else's.
+
+The body is six fields and never more:
+
+```json
+{
+  "install": "kitchen-nuc",
+  "event": "run.needs_review",
+  "run_id": "r-4f2a9c",
+  "status": "needs-review",
+  "at": 1787519327529,
+  "url": "https://uf.example.com/runs/r-4f2a9c"
+}
+```
+
+`at` is epoch milliseconds. `url` is empty when `UF_PUBLIC_URL` is unset. There
+is deliberately no task text, no folder path, no branch, no repository, no model,
+no cost and **no run title** — a title can be written by a model, and this goes
+to a system with a different audience and a different lifetime. If you want to
+know *what* the run was doing, the link is how you find out.
+
+Every request carries the signature over the exact bytes of that body:
+
+```
+X-UF-Signature: sha256=<hex hmac-sha256 of the raw body, keyed with UF_WEBHOOK_SECRET>
+```
+
+Same shape as GitHub's, so most receivers already know how to check it.
+
+**Do not point this at a Discord or Slack webhook URL.** Both accept only their
+own body shape — Discord wants `{"content": …}`, Slack `{"text": …}` — so a
+generic body gets a **400** and the notification is simply lost. This app does
+not format for a vendor and will not grow a switch that does: choosing a vendor
+in the code is what would turn one signed body into a per-vendor payload nobody
+audits. Point it at something that accepts arbitrary JSON, and let *that* fan out
+to Discord.
+
+### Home Assistant, the reference receiver
+
+`POST /api/webhook/<webhook_id>` takes arbitrary JSON and hands it to an
+automation as `trigger.json`. Set:
+
+```
+UF_WEBHOOK_URL=http://homeassistant.local:8123/api/webhook/usagefoundry-change-this-id
+UF_WEBHOOK_SECRET=<openssl rand -hex 32>
+UF_PUBLIC_URL=https://uf.example.com
+UF_INSTALL_LABEL=kitchen-nuc
+```
+
+and, on the Home Assistant side, one automation:
+
+```yaml
+alias: UsageFoundry needs a person
+triggers:
+  - trigger: webhook
+    webhook_id: usagefoundry-change-this-id
+    allowed_methods: [POST]
+    local_only: true
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: "UsageFoundry {{ trigger.json.install }}: {{ trigger.json.event }}"
+      message: "{{ trigger.json.run_id }} is {{ trigger.json.status }}"
+      data:
+        url: "{{ trigger.json.url }}"
+mode: queued
+max: 25
+```
+
+`mode: queued` with a `max` at least as large as `Runs at the same time` matters:
+twenty-five runs can meet the same wall inside the same minute, and Home
+Assistant's default `single` would drop all but the first. `local_only: true`
+keeps the endpoint off the internet.
+
+One thing to be clear about: Home Assistant's webhook trigger does **not** verify
+`X-UF-Signature`. As far as it is concerned the webhook id in the URL *is* the
+credential, which is why that id should be long and random and the endpoint
+local. The signature is there for a receiver that can check it — a small relay,
+or anything in front of the ntfy or Telegram bridges below — and checking it is
+what stops anyone who learns the URL from inventing endings you never had.
+
+### Two other receivers, in a line each
+
+- **ntfy** takes a POST with an arbitrary body and treats it as the message text,
+  so `https://ntfy.sh/<your-topic>` works immediately and shows the raw JSON on
+  your phone; put a proxy in front if you want the signature verified or the
+  fields formatted.
+- **Telegram** needs a relay — its bot API takes `chat_id` and `text` as its own
+  parameters, so like Discord it cannot be pointed at directly.
+
+### When it stops working
+
+Delivery is fire-and-forget: a receiver that has been refusing every POST since
+Tuesday produces exactly the same silence as a fleet with nothing wrong. Every
+attempt is recorded, and `/api/status` reports the count since the last success:
+
+```json
+"webhook": { "configured": true, "consecutiveFailures": 0, "lastAttemptAgeSeconds": 41 }
+```
+
+Alert on that count — README's **What to alert on** carries the threshold. Each
+attempt is also one line on the container's stdout (`webhook.delivery`), with the
+HTTP status and, on a failure, the message; that line is where the receiver's
+hostname appears, and it deliberately does not appear on `/api/status`.
+
+None of this has been run against a real Home Assistant instance by this
+project. `docs/verification.md` says what *was* measured — a real POST, and its
+signature checked by two other implementations — and what was not.
 
 ## Reaching it from another machine
 
