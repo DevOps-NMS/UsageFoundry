@@ -981,12 +981,17 @@ Built and exercised against real transcripts:
   `VERIFICATION_RE`, `min_bytes` and `keep_newest` in TypeScript against a Python
   module in another repository, which is a large fragile duplication *and* still
   an approximation, because `keep_newest` depends on per-request state the
-  transcript does not record. So the two figures are shown side by side, never
-  summed, under a title that covers both — `ContextControlAside`, replacing
-  `PruneSavingsAside` — with a footnote naming the overlap in as many words. The
-  number is in `apiTypes.ts`'s DTO comment and in `ContextControl.tsx`'s
-  docblock, so nothing on screen is a figure shown here to be wrong without
-  saying so.
+  transcript does not record.
+
+  The card **adds them anyway**, and prints the error. Held apart for one
+  revision, the two figures answered every question except the one the card is
+  for — what context control has been worth — and no reader can add two numbers
+  whose overlap is unstated. Added, the headline is high by a bounded, measured,
+  known-sign amount with that amount named under it, and the split survives as a
+  share beneath each span. The number is in `apiTypes.ts`'s DTO comment,
+  `intakeFilter.ts`'s module docblock and `ContextControl.tsx`'s, and on the card
+  itself, so nothing on screen is a figure shown here to be wrong without saying
+  so.
 
   **The live readout, at 125 ledger lines (2026-08-24T21:12Z).** 125 requests,
   372 drop/defer occurrences, 1,239,748 gross bytes — **15 distinct results,
@@ -1012,6 +1017,15 @@ Built and exercised against real transcripts:
   against the raw ledger counted a second way in Python, and against no
   independent implementation. Nothing here was rendered in a browser and no
   container was started — see the standing entry below.
+
+  The **windowed** halves of the filter figure — `session` and `weekly`, added
+  when the card began leading with a combined weekly total — have unit tests on
+  the slice (`resultsSince`, boundary and undated) and a clean `npm run
+  typecheck`, and nothing more. They have never been read against a real ledger,
+  and the one thing to check when they are is that a 5-hour figure is not
+  permanently `—` on this install: 82 of 125 requests joined no main-thread turn
+  and an unjoined result is excluded from both windows by design, so the window
+  shares are a floor by much more than the total is.
 
 - **`--autocompact`'s sign, and what the flag actually does.** Measured
   2026-08-22 over 1,147 transcripts through this app's own `scanUsage()`,

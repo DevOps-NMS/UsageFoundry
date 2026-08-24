@@ -1,6 +1,10 @@
 "use client";
 
-import type { FilterSavingsDTO, PruneSavingsDTO } from "@/lib/apiTypes";
+import type {
+  FilterSavingsDTO,
+  FilterWindowDTO,
+  PruneSavingsDTO,
+} from "@/lib/apiTypes";
 import { fmtDate, fmtTokens, fmtUSD, signedUSD } from "@/lib/format";
 import { Card, CardTitle, Stat, StatSub } from "@/components/ui/Card";
 import { TBody, Table, Td, Tr } from "@/components/ui/Table";
@@ -35,19 +39,65 @@ function noFigureReason(filter: FilterSavingsDTO): string | null {
   return null;
 }
 
-/** One span's net, as a row under the headline. */
-function SpanRow({ label, savings }: { label: string; savings: PruneSavingsDTO }) {
+/** One span's combined net, as a row under the headline. */
+function SpanRow({ label, usd }: { label: string; usd: number | null }) {
   return (
     <div className="flex items-baseline justify-between gap-3">
       <span className="text-ink-muted">{label}</span>
       <span className="font-medium tabular-nums text-ink">
-        {/* An em dash, never `+$0.00`: a window with no prunes in it and a
-            window where pruning earned nothing are different facts, and the
+        {/* An em dash, never `+$0.00`: a span with nothing in it and a span
+            where context control earned nothing are different facts, and the
             second one has never been observed. */}
-        {savings.prunes === 0 ? "—" : signedUSD(savings.netUSD)}
+        {usd === null ? "—" : signedUSD(usd)}
       </span>
     </div>
   );
+}
+
+/** How much of the row above it the filter is responsible for. */
+function ShareRow({ usd }: { usd: number }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 pl-3 text-xs text-ink-muted">
+      <span>of which intake filter</span>
+      <span className="tabular-nums">{signedUSD(usd)}</span>
+    </div>
+  );
+}
+
+/**
+ * The filter's share of one span, or null when this app cannot say what it is.
+ *
+ * Null in three different situations and deliberately not distinguished here:
+ * the ledger could not be read, nothing was filtered inside the span, or what
+ * was ran on a model with no price here. All three mean the same thing to the
+ * figure above — it is short by an unknown amount — and the headline's own
+ * sentence is where the reason is spelled out, once, rather than three times
+ * down the card.
+ */
+function filterShareUSD(
+  filter: FilterSavingsDTO,
+  span: FilterWindowDTO,
+): number | null {
+  if (filter.ledger !== "read") return null;
+  if (span.results === 0 || span.pricedResults === 0) return null;
+  return span.netUSD;
+}
+
+/**
+ * One span's two halves, added.
+ *
+ * A half that cannot be read contributes nothing rather than making the row
+ * unreadable: every figure on this card is a floor already — unjoined
+ * requests, swept transcripts, unpriced models — and a row that vanished
+ * because one of two mechanisms had no reading would hide the other one's
+ * work. Null only when neither half has anything to say.
+ */
+function combinedUSD(
+  pruning: PruneSavingsDTO,
+  share: number | null,
+): number | null {
+  if (pruning.prunes === 0 && share === null) return null;
+  return (pruning.prunes > 0 ? pruning.netUSD : 0) + (share ?? 0);
 }
 
 /**
@@ -63,7 +113,7 @@ function SpanRow({ label, savings }: { label: string; savings: PruneSavingsDTO }
  * conversation. A card titled for one of them may not carry the other's figure,
  * so the title names the subject both belong to.
  *
- * ## Why the two are never added
+ * ## Why the two are added here, and what that costs
  *
  * They overlap by construction. Winnow's C1, C3 and B2 rules fire in both, and
  * the filter takes that mass first — it sees the request before Claude Code has
@@ -71,23 +121,34 @@ function SpanRow({ label, savings }: { label: string; savings: PruneSavingsDTO }
  * every byte the API never saw, so a prune that removes one of those results
  * counts tokens that were never in the cached prefix and prices re-reads that
  * were never going to happen. Measured across this install's ten largest
- * transcripts that is 4.06% of removed tokens, and the correction needs a
- * `tool_use_id` on each ledger line that winnow does not write yet. Until then
- * a sum is a double count, so the footnote says so rather than letting the
- * adjacency imply otherwise.
+ * transcripts that is 4.06% of pruned tokens, and it is an upper bound; the
+ * correction needs a `tool_use_id` on each ledger line that winnow does not
+ * write yet.
  *
- * ## Why the filter leads
+ * So the sum is wrong by a bounded, measured, known-sign amount, and the choice
+ * is between a figure that is a few per cent high with the overstatement
+ * printed under it and two figures nobody can combine — which is the question
+ * this card exists to answer. It leads with the sum and names the error. The
+ * split stays on the card, as a share under each span, because an operator
+ * deciding whether to leave *either* mechanism on needs the halves.
  *
- * It acts first, so the pruner's figure is the residual of it rather than the
- * other way round, and it runs on every request where the pruner runs at a
- * cycle boundary — the headline is the half that is always current. It is also
- * the half with no negative term: nothing is edited, so no prefix is thrown
- * away and there is no break-even.
+ * ## Why the week leads and the filter's share follows
+ *
+ * The week is the window an operator's allowance is measured in, so it is the
+ * span where "what has this been worth" has an answer they can act on. The
+ * five-hour window is the one they are inside right now. The all-time total is
+ * last because it is history: it answers whether to leave this on, which is
+ * decided once.
+ *
+ * The filter's share hangs off each of those rather than leading, because it
+ * acts first and the pruner's figure is the residual of it — a share is what it
+ * is, and it moves with how tool-heavy the week was rather than with anything
+ * an operator chose.
  *
  * ## What it may not do up here
  *
  * `default` against the meters' `primary`, and the footnote, are the two things
- * keeping this away from the money it sits next to. Neither figure is spend:
+ * keeping this away from the money it sits next to. Neither half is spend:
  * the meters are priced from `usage` frames, which report the request the
  * filter had already rewritten, so both of these are counterfactuals whose
  * value is already absent from every number beside them.
@@ -110,50 +171,53 @@ export function ContextControlAside({
   weekly: PruneSavingsDTO;
 }) {
   const reason = noFigureReason(filter);
+  const weeklyShare = filterShareUSD(filter, filter.weekly);
+  const sessionShare = filterShareUSD(filter, filter.session);
+  const weeklyNet = combinedUSD(weekly, weeklyShare);
+  // `FilterSavingsDTO` is the total span's own `FilterWindowDTO`, which is what
+  // `extends` there is for — the whole reading and one window inside it are the
+  // same arithmetic over different spans.
+  const totalShare = filterShareUSD(filter, filter);
 
   return (
     <Card>
       <CardTitle>Saved by context control</CardTitle>
 
-      {reason ? (
-        <>
-          <Stat>—</Stat>
-          <StatSub>Intake filter — {reason}</StatSub>
-        </>
-      ) : (
-        <>
-          <Stat>{signedUSD(filter.netUSD)}</Stat>
-          <StatSub>
-            <span className="tabular-nums">
-              Intake filter · {spanLabel(filter.totalFrom)} ·{" "}
-              {fmtTokens(filter.tokensRemoved)} tokens
-            </span>
-          </StatSub>
-        </>
-      )}
+      <Stat>{weeklyNet === null ? "—" : signedUSD(weeklyNet)}</Stat>
+      <StatSub>
+        <span className="tabular-nums">
+          This week ·{" "}
+          {weeklyShare !== null ? (
+            <>{signedUSD(weeklyShare)} of it from the intake filter</>
+          ) : (
+            /* Never a share of `+$0.00`. A filter that has not run, one whose
+               ledger cannot be read and one that dropped nothing this week are
+               three different claims, and none of them is that it earned
+               nothing — which has never been observed. */
+            <>intake filter: {reason ?? "nothing filtered this week"}</>
+          )}
+        </span>
+      </StatSub>
 
       {/* The same hairline the window card puts between its two windows, so
           these read as the rest of one subject rather than as another card's
-          worth of figures. The group is labelled because without it "This week"
-          would be read as the headline's week, and the headline is the other
-          mechanism. */}
+          worth of figures. */}
       <div className="mt-3 space-y-1.5 border-t border-line pt-2.5 text-sm">
-        <div className="text-ink-muted text-xs">Pruning</div>
-        {pruning.prunes === 0 ? (
-          <div className="text-ink-muted">Nothing pruned yet</div>
-        ) : (
-          <>
-            <SpanRow label={spanLabel(pruningFrom)} savings={pruning} />
-            <SpanRow label="This 5-hour window" savings={session} />
-            <SpanRow label="This week" savings={weekly} />
-          </>
-        )}
+        <SpanRow
+          label="This 5-hour window"
+          usd={combinedUSD(session, sessionShare)}
+        />
+        {sessionShare !== null && <ShareRow usd={sessionShare} />}
+        <SpanRow
+          label={spanLabel(pruningFrom)}
+          usd={combinedUSD(pruning, totalShare)}
+        />
       </div>
 
       <div className="mt-3 space-y-1 text-xs text-ink-muted">
         <div>
-          Never added: pruning removes from the transcript what the filter had
-          already taken off the wire.
+          Up to 4% high: some of what the pruner removed, the filter had already
+          taken off the wire, and both count it.
         </div>
         <div>Not spend, and added to nothing beside it.</div>
         {/* Only when the adjacency would otherwise mislead. A history read off a

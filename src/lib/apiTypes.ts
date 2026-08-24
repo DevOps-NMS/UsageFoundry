@@ -297,36 +297,11 @@ export interface PruneSavingsDTO {
 }
 
 /**
- * What winnow's intake filter kept off the wire — the second half of context
- * control, and the one that acts first.
- *
- * **Not a cost source and never summed with anything beside it**, on
- * `PruneSavingsDTO`'s rule: the meters are priced from `usage` frames, which are
- * the API's report of the request the filter had already rewritten, so this
- * money is a counterfactual — the same work without the filter — and is already
- * absent from every figure it sits next to.
- *
- * **It may not be added to `PruneSavingsDTO` either.** The two overlap by
- * construction: winnow's C1, C3 and B2 rules fire in both mechanisms, and the
- * filter takes that mass first because it sees the request before the
- * transcript is written. A prune that then removes the same result from the
- * transcript counts tokens the API never held — measured at 4.06% of removed
- * tokens across this install's ten largest transcripts. Until a ledger line
- * carries the `tool_use_id` that would let a receipt exclude them, a sum is a
- * double count and the two figures stay apart.
- *
- * The three money fields are the arithmetic rather than its result: `2.0·D`
- * saved on the cache write, `1.0·D` still paid to send it once uncached, and
- * `0.1·D·T` saved on reads that never happened. There is no invalidation term —
- * nothing is edited, so no prefix is thrown away.
- *
- * `running` and `ledger` are separate because they are separate facts. A filter
- * that is not running still has a history worth reading; a ledger that is there
- * and unreadable is not an empty one; and none of the four states is `$0.00`.
+ * The netted arithmetic over one span — the whole reading, or one of the two
+ * windows inside it. Every field here answers "over this span"; the ones on
+ * `FilterSavingsDTO` describe the reading itself and have no span.
  */
-export interface FilterSavingsDTO {
-  running: boolean;
-  ledger: "missing" | "unreadable" | "empty" | "read";
+export interface FilterWindowDTO {
   /**
    * Distinct results, never ledger lines. The filter is stateless and re-drops
    * the same result on every request that still carries it — summing the lines
@@ -352,6 +327,53 @@ export interface FilterSavingsDTO {
   uncachedSendUSD: number;
   cacheReadAvoidedUSD: number;
   netUSD: number;
+}
+
+/**
+ * What winnow's intake filter kept off the wire — the second half of context
+ * control, and the one that acts first.
+ *
+ * **Not a cost source and never summed with a meter**, on `PruneSavingsDTO`'s
+ * rule: the meters are priced from `usage` frames, which are the API's report
+ * of the request the filter had already rewritten, so this money is a
+ * counterfactual — the same work without the filter — and is already absent
+ * from every figure it sits next to.
+ *
+ * **It is added to `PruneSavingsDTO` in exactly one place**, the
+ * context-control card, where the two are the halves of one intervention and
+ * the question the card answers is what the intervention was worth. The sum
+ * overstates, because the two overlap by construction: winnow's C1, C3 and B2
+ * rules fire in both mechanisms, and the filter takes that mass first because
+ * it sees the request before the transcript is written, so a prune that then
+ * removes the same result counts tokens the API never held. Measured at 4.06%
+ * of pruned tokens across this install's ten largest transcripts, and an upper
+ * bound. Correcting it needs a `tool_use_id` on each ledger line that winnow
+ * does not write yet, so until then the card prints the overlap rather than
+ * implying the halves are disjoint — and nothing else adds them.
+ *
+ * The three money fields are the arithmetic rather than its result: `2.0·D`
+ * saved on the cache write, `1.0·D` still paid to send it once uncached, and
+ * `0.1·D·T` saved on reads that never happened. There is no invalidation term —
+ * nothing is edited, so no prefix is thrown away.
+ *
+ * `running` and `ledger` are separate because they are separate facts. A filter
+ * that is not running still has a history worth reading; a ledger that is there
+ * and unreadable is not an empty one; and none of the four states is `$0.00`.
+ */
+export interface FilterSavingsDTO extends FilterWindowDTO {
+  running: boolean;
+  ledger: "missing" | "unreadable" | "empty" | "read";
+  /**
+   * The same reading over the two windows the meters draw, so a window's
+   * saving can name the share of itself the filter is responsible for.
+   *
+   * A **floor by more than the total is**: the ledger has no clock, so a
+   * result is dated by the transcript turn its request joined to, and one that
+   * joined to nothing is left out of both windows rather than guessed into
+   * one. That is `unjoinedRequests`, which is most of them here.
+   */
+  session: FilterWindowDTO;
+  weekly: FilterWindowDTO;
   requests: number;
   /**
    * Requests whose `request_id` matched no **main-thread** assistant turn: a
@@ -370,8 +392,9 @@ export interface UsageResponse {
   snapshot: SnapshotDTO;
   /**
    * The intake filter's own reading. Its own key beside `pruning` and never
-   * inside it: they are two mechanisms whose figures overlap, so a shape that
-   * invited a sum is the one thing this must not have.
+   * inside it: the card adds the two, but it adds them where it can also print
+   * how much they overlap. A shape that pre-added them on the wire would carry
+   * the overstatement into every later reader with nothing left saying so.
    */
   intakeFilter: FilterSavingsDTO;
   /**

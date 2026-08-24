@@ -146,14 +146,20 @@ export async function GET(req: Request) {
 
     // Bounded at the same horizon the prune total is, and for the same reason:
     // a filtered request whose transcript has been swept can be neither dated
-    // nor priced. One span rather than three — the ledger carries no clock of
-    // its own, so every instant here comes from the transcript join, and a
-    // 5-hour figure whose denominator silently excluded every unjoined request
-    // would be worse than no figure. Read behind its own minute-long TTL: this
-    // route is the dashboard's ten-second heartbeat and the ledger grows with
-    // every request every agent in the fleet makes.
+    // nor priced. The same two window starts the meters and the prune figures
+    // use, so the card's "of which the filter" line describes the same span as
+    // the figure it is a share of — the ledger carries no clock of its own, so
+    // every instant comes from the transcript join and a result that joined to
+    // nothing is left out of both windows rather than guessed into one. Read
+    // behind its own minute-long TTL: this route is the dashboard's ten-second
+    // heartbeat and the ledger grows with every request every agent in the
+    // fleet makes.
     const intakeFilter = await readFilterSavings(
-      pruneFrom > 0 ? pruneFrom : null,
+      {
+        from: pruneFrom > 0 ? pruneFrom : null,
+        sessionFrom: snapshot.session.startsAt,
+        weeklyFrom: snapshot.weekly.startsAt,
+      },
       now,
     );
 
@@ -182,10 +188,12 @@ export async function GET(req: Request) {
       // of an intervention, and a figure that could be added to a window total
       // would be added to one eventually. Nothing here is spend.
       // Beside `pruning` rather than inside it. They are the two halves of
-      // context control and the card says so, but their figures overlap — the
-      // filter takes C1/C3/B2 mass off the wire first, and a prune that later
-      // removes the same result from the transcript prices tokens the API never
-      // held. A nested shape would be an invitation to add them.
+      // context control and the card adds them, but their figures overlap —
+      // the filter takes C1/C3/B2 mass off the wire first, and a prune that
+      // later removes the same result from the transcript prices tokens the
+      // API never held. The sum belongs where the overlap is printed beside
+      // it; pre-adding it here would send the overstatement on with nothing
+      // left saying so.
       intakeFilter,
       pruning: {
         session: prunedWithin(

@@ -361,3 +361,55 @@ describe("netFilterSavings", () => {
     assert.equal(net.results, 2);
   });
 });
+
+describe("resultsSince", () => {
+  const result = (over: Partial<UniqueResult> = {}): UniqueResult => ({
+    key: "id:toolu_1",
+    bytes: 36_000,
+    requestId: "req_1",
+    anchor: anchor(),
+    occurrences: 1,
+    everDropped: true,
+    fallbackKeyed: false,
+    ...over,
+  });
+
+  const START = Date.UTC(2026, 7, 20, 10, 0, 0);
+
+  it("keeps a result anchored on the window's own start", () => {
+    const kept = intakeFilter.resultsSince(
+      [
+        result({ key: "id:before", anchor: anchor({ ts: START - 1 }) }),
+        result({ key: "id:on", anchor: anchor({ ts: START }) }),
+        result({ key: "id:after", anchor: anchor({ ts: START + 1 }) }),
+      ],
+      START,
+    );
+
+    // The window meters are `>= startsAt`, and the card prints this as a share
+    // of one of them. A `>` here would drop the turn a window opened on out of
+    // the share while leaving it in the figure the share is of — a discrepancy
+    // of one result, in a card whose whole job is that the two agree.
+    assert.deepEqual(
+      kept.map((r) => r.key),
+      ["id:on", "id:after"],
+    );
+  });
+
+  it("drops a result no transcript turn could date", () => {
+    const kept = intakeFilter.resultsSince(
+      [result({ key: "id:unjoined", anchor: null }), result({ key: "id:dated" })],
+      START,
+    );
+
+    // An unjoined result is counted in the total, where being undated costs
+    // nothing. Keeping it here would put a sub-agent's saving — most of this
+    // install's ledger — into whichever window happened to be asking, and the
+    // 5-hour figure would then move every time the window rolled over rather
+    // than when anything was filtered.
+    assert.deepEqual(
+      kept.map((r) => r.key),
+      ["id:dated"],
+    );
+  });
+});

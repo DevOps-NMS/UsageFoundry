@@ -1433,17 +1433,17 @@ export default function Dashboard() {
           tile prints has its own block here, the total included — a headline
           with no derivation under it is the thing this band exists to prevent.
 
-          Two cards, never one table: the tile prints two figures under one
-          title and this band is where each one's arithmetic lives. They are
-          not added here for the reason the tile gives — the filter takes the
-          same C1/C3/B2 mass off the wire first, so part of what pruning
-          reports removing was never in the cached prefix at all.
+          Two cards, never one table, and nothing added across them. The tile
+          adds the two mechanisms because that is the question it answers and
+          it prints how much the sum overstates; this band is where each half's
+          own arithmetic lives, and a total here would be the same sum a second
+          time with nothing beside it saying so.
 
           Gated on `hasContextControl`, the same const the tile reads. */}
       {hasContextControl && (
         <SourceRegion
           heading="What context control saved, in detail"
-          statement="The two figures beside the meters are made of: tool results kept out of the request as it was sent, and conversation removed between work cycles."
+          statement="The figure beside the meters is these two added: tool results kept out of the request as it was sent, and conversation removed between work cycles."
         >
           {/* The filter first, matching the tile: it acts before the pruner
               does, so what the pruner reports is the residual of it. */}

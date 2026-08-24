@@ -23,8 +23,15 @@ import { scanUsage, type UsageEntry } from "./transcripts";
  * report of the request it actually received — the filtered one. So this figure
  * is new information rather than a double count, and it is a *counterfactual*
  * in `byAgent.counterfactualUSD`'s sense: the same work without the filter. It
- * reaches no meter, no guard, no window, `buildSnapshot()` or `runs.spent_usd`,
- * and it may not be added to anything printed beside it.
+ * reaches no meter, no guard, no window, `buildSnapshot()` or `runs.spent_usd`.
+ *
+ * The one figure it is added to is the pruner's, on the context-control card,
+ * where the two are the halves of one intervention and a reader asking what it
+ * was worth is asking about both. That sum overstates by the mass the two
+ * mechanisms both remove — measured at 4.06% of pruned tokens across this
+ * install's ten largest transcripts, an upper bound — and the card prints that
+ * rather than implying the halves are disjoint. Nothing else may add it to
+ * anything.
  *
  * ## The arithmetic
  *
@@ -367,6 +374,24 @@ export function netFilterSavings(results: UniqueResult[]): FilterNet {
   return net;
 }
 
+/**
+ * The results whose anchor turn landed at or after `from`.
+ *
+ * A result that joined to no transcript turn is **dropped** here rather than
+ * kept. It stays in the total, where being undated costs nothing, but a window
+ * is a claim about a span and a result nothing can place in one has not been
+ * shown to belong to it. Every window figure is therefore a floor by more than
+ * the total is — short by whatever the unjoined requests saved, which on this
+ * install is most of them, because the filter's B2 rule fires hardest on the
+ * tool-heavy sub-agent turns the main-thread join excludes.
+ */
+export function resultsSince(
+  results: UniqueResult[],
+  from: number,
+): UniqueResult[] {
+  return results.filter((r) => r.anchor !== null && r.anchor.ts >= from);
+}
+
 /** Whether the ledger could be read at all, which is three different facts. */
 export type LedgerState = "missing" | "unreadable" | "empty" | "read";
 
@@ -381,6 +406,26 @@ export interface FilterSavings extends FilterNet {
   unjoinedRequests: number;
   /** Earliest instant the figures cover, or null when nothing bounded them. */
   totalFrom: number | null;
+  /**
+   * The same arithmetic over the two windows the meters draw, so the card can
+   * show what share of a window's saving the filter is responsible for.
+   *
+   * One join, three nets: the anchor instant each result already carries is
+   * what places it, so the windows cost a filter over an array rather than a
+   * second read of the ledger and a second pass over every transcript.
+   */
+  session: FilterNet;
+  weekly: FilterNet;
+}
+
+/** The three spans one reading covers, all measured from the same join. */
+export interface FilterSpans {
+  /** The transcript horizon, or null when nothing bounded it. */
+  from: number | null;
+  /** Start of the snapshot's own 5-hour window. */
+  sessionFrom: number;
+  /** Start of the snapshot's own weekly window. */
+  weeklyFrom: number;
 }
 
 /**
@@ -421,7 +466,8 @@ function countAfter(sorted: number[], ts: number): number {
   return sorted.length - low;
 }
 
-async function measureFilter(from: number | null): Promise<FilterSavings> {
+async function measureFilter(spans: FilterSpans): Promise<FilterSavings> {
+  const from = spans.from;
   const running = filterRunning();
   const base = {
     ...NO_FILTER_NET,
@@ -429,6 +475,8 @@ async function measureFilter(from: number | null): Promise<FilterSavings> {
     requests: 0,
     unjoinedRequests: 0,
     totalFrom: from,
+    session: NO_FILTER_NET,
+    weekly: NO_FILTER_NET,
   };
 
   let text: string;
@@ -487,6 +535,8 @@ async function measureFilter(from: number | null): Promise<FilterSavings> {
 
   return {
     ...netFilterSavings(withinSpan),
+    session: netFilterSavings(resultsSince(withinSpan, spans.sessionFrom)),
+    weekly: netFilterSavings(resultsSince(withinSpan, spans.weeklyFrom)),
     running,
     ledger: "read",
     requests: requests.length,
@@ -502,16 +552,16 @@ async function measureFilter(from: number | null): Promise<FilterSavings> {
  * A new key rather than a reused one, since nothing has held this shape before.
  */
 const ledgerCache = ((globalThis as unknown as {
-  __ufIntakeFilterSavings?: {
+  __ufIntakeFilterSavingsV2?: {
     value: FilterSavings | null;
     measuredAt: number;
-    from: number | null;
+    spans: FilterSpans | null;
     inFlight: Promise<FilterSavings> | null;
   };
-}).__ufIntakeFilterSavings ??= {
+}).__ufIntakeFilterSavingsV2 ??= {
   value: null,
   measuredAt: 0,
-  from: null,
+  spans: null,
   inFlight: null,
 });
 
@@ -519,30 +569,32 @@ const ledgerCache = ((globalThis as unknown as {
  * The reading, at most one read of the ledger a minute and at most one at a
  * time.
  *
- * A different `from` is a miss rather than a hit: the cached figures describe a
- * span, and serving them under another one would silently answer a question
- * nobody asked.
+ * Different spans are a miss rather than a hit: the cached figures describe
+ * three of them, and serving them under others would silently answer a
+ * question nobody asked. The 5-hour window's start moves, so a reading is
+ * discarded when it rolls over rather than a minute later.
  */
 export function readFilterSavings(
-  from: number | null,
+  spans: FilterSpans,
   now: number,
 ): Promise<FilterSavings> {
   const cached = ledgerCache.value;
-  if (
-    cached &&
-    ledgerCache.from === from &&
-    now - ledgerCache.measuredAt < LEDGER_TTL_MS
-  ) {
+  const sameSpans =
+    ledgerCache.spans !== null &&
+    ledgerCache.spans.from === spans.from &&
+    ledgerCache.spans.sessionFrom === spans.sessionFrom &&
+    ledgerCache.spans.weeklyFrom === spans.weeklyFrom;
+  if (cached && sameSpans && now - ledgerCache.measuredAt < LEDGER_TTL_MS) {
     return Promise.resolve(cached);
   }
   // Single-flight, the Storage card's shape: the join runs over every entry in
   // the transcript scan, so two readers arriving together should share one pass
   // rather than each make their own.
-  ledgerCache.inFlight ??= measureFilter(from)
+  ledgerCache.inFlight ??= measureFilter(spans)
     .then((value) => {
       ledgerCache.value = value;
       ledgerCache.measuredAt = now;
-      ledgerCache.from = from;
+      ledgerCache.spans = spans;
       return value;
     })
     .finally(() => {

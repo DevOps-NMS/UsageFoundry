@@ -122,7 +122,11 @@ intakeFilter.ts what winnow's intake filter kept off the wire, read from its own
                 horizon exactly as the prune total is, and it is read behind a
                 minute-long TTL with single-flight because the dashboard polls
                 every ten seconds and the ledger grows with every request the
-                fleet makes
+                fleet makes. That join is also what windows it: session and
+                weekly are three nets off one pass, sliced by resultsSince on
+                the anchor turn's instant, and a result that joined to nothing
+                is left out of both rather than guessed into one — so the two
+                window figures are a floor by much more than the total is
 agents.ts       saved agents — form input, never a run: the role a run itself
                 takes, carried onto a spawn by sessionAgentArgs as an --agents
                 definition *and* an --agent selection, built on the one encoder
