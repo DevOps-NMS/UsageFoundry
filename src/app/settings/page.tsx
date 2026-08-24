@@ -1683,6 +1683,33 @@ export default function SettingsPage() {
     [effective, savedS],
   );
 
+  /**
+   * The one thing standing between an unsaved page and a closed tab.
+   *
+   * Registered only while there is something to lose, and torn down the moment
+   * there is not: a listener that outlives the dirty state prompts on a page
+   * with nothing on it, which teaches the operator to dismiss the dialog
+   * without reading it — and the next one they dismiss is the real one.
+   *
+   * `preventDefault` is the specified way to ask for the dialog and
+   * `returnValue` is what the engines that predate it read; both, because
+   * either alone is silently a no-op in a browser somebody uses. Neither can
+   * choose the wording — the browser writes it — and neither fires on a
+   * *client-side* navigation, so a press on the sidebar still leaves the same
+   * way it always did. The per-field rails and the bar's own unsaved count are
+   * what cover that; blocking the router would mean the shell holding this
+   * page's state, which is a bigger change than the one this closes.
+   */
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
+
   // Rebuilt on every keystroke *and* on every edit, not indexed once: several
   // descriptions interpolate the value beside them, and a handful of rows only
   // exist while the switch above them is on — so a corpus read at mount would
