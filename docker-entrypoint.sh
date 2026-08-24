@@ -97,6 +97,30 @@ if [ -n "${UF_AGENT_UID:-}" ] && [ -d "$PY_TOOLS_VOLUME" ]; then
   fi
 fi
 
+# The Playwright browsers, and the one part of them that is not the image's.
+#
+# `/opt/playwright/browsers` ships with its contents root-owned and the directory
+# itself owned by `node`, so the shipped Chromium is one every agent reads and
+# none can rewrite, while a repository pinning a different Playwright version can
+# still put its own build alongside it. That arrangement is correct exactly while
+# UF_AGENT_UID is 1000 — set it to anything else and that `playwright install`
+# fails on a directory it cannot write, inside a tool call nothing here reads.
+#
+# Not an `-R`, and that is the difference from the three blocks above. This is a
+# gigabyte of read-only browser rather than a cache the agents own, and chowning
+# it recursively would copy that gigabyte into the container's writable layer on
+# the first boot after every rebuild. Only the directory needs to be writable.
+PLAYWRIGHT_BROWSERS_DIR="${PLAYWRIGHT_BROWSERS_PATH:-/opt/playwright/browsers}"
+if [ -n "${UF_AGENT_UID:-}" ] && [ -d "$PLAYWRIGHT_BROWSERS_DIR" ]; then
+  want="${UF_AGENT_UID}:${UF_AGENT_GID:-$UF_AGENT_UID}"
+  have="$(stat -c '%u:%g' "$PLAYWRIGHT_BROWSERS_DIR" 2>/dev/null || echo '')"
+  if [ "$have" != "$want" ] && ! chown "$want" "$PLAYWRIGHT_BROWSERS_DIR" 2>/dev/null; then
+    echo "[usagefoundry] cannot give $PLAYWRIGHT_BROWSERS_DIR to $want — an" \
+         "agent installing a second Playwright browser build will fail on a" \
+         "directory it cannot write. The shipped Chromium still works." >&2
+  fi
+fi
+
 # Every install runs as the uid that will *run* the extension — an extension is
 # an executable an agent invokes, and root-owned files here would leave the
 # agents unable to remove or upgrade what they run. That is root only where

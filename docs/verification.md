@@ -1239,6 +1239,33 @@ Built and exercised against real transcripts:
   relay keeps the URL, runs as root, and `setpriv --reuid=1000` reading its
   `/proc/<pid>/environ` was refused.
 
+- **Playwright renders a real page, as the uid an agent runs as.** 2026-08-24,
+  inside the live `usagefoundry` container on Docker Desktop, arm64.
+
+  `playwright install --with-deps chromium` at 1.62.1 pulled Chrome for Testing
+  151.0.7922.34 (build `chromium-1234`), the matching headless shell and ffmpeg,
+  and the 32 apt packages Playwright's own dependency list names — the X, mesa
+  and font stack, `fonts-noto-color-emoji` and the CJK packs among them. Measured
+  on disk: **641 MB** Chromium, **340 MB** headless shell, 3.3 MB ffmpeg, against
+  a 1.94 GB image. So Debian 12 on arm64 is a platform Playwright ships a
+  Chromium for, which is the thing that could have been false.
+
+  `docker exec -u 1000 … playwright screenshot --viewport-size=1280,800
+  http://127.0.0.1:3000/login /tmp/uf-login.png` then produced a correct 1280×800
+  PNG of this app's own login page — right fonts, right colours, no tofu — run as
+  uid 1000, which is what `UF_AGENT_UID` defaults to and therefore what an agent
+  is. Chromium's own sandbox is unusable here for the reason `bwrap` is (`unshare`
+  is EPERM under Docker's default seccomp profile), and it did not have to be:
+  Playwright defaults `chromiumSandbox` to false, so neither the CLI nor an
+  ordinary `launch()` asks for it.
+
+  What was **not** verified: the `Dockerfile` and `docker-entrypoint.sh` changes
+  that make this survive a rebuild. The install above was done by `docker exec`
+  into a container holding a live run, so it sits in the writable layer at the
+  default `$HOME/.cache/ms-playwright`, while the image build puts it at
+  `/opt/playwright/browsers` behind `PLAYWRIGHT_BROWSERS_PATH`. Both were reasoned
+  about, only the first was run. The build has not been executed.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the

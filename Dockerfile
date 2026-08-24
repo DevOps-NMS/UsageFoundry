@@ -352,6 +352,68 @@ ARG SANDBOX_RUNTIME_VERSION=0.0.71
 RUN npm install -g "@anthropic-ai/sandbox-runtime@${SANDBOX_RUNTIME_VERSION}" \
  && npm cache clean --force
 
+# Playwright and one Chromium, so an agent can look at the page it just built.
+#
+# The gap this closes is that nothing in this image could *render*. An agent
+# working on a web app could read its own JSX and curl its own HTML and still
+# not know that a dialog opens behind its own backdrop or that a chart drew
+# nothing — there was no way to produce a picture, and a picture is a thing the
+# model reads directly. `playwright screenshot <url> shot.png` is one tool call,
+# and the PNG goes straight into the transcript as an image.
+#
+# In the image rather than installed by hand, on exactly the argument the Go and
+# gh blocks above make: a shell `npm install -g` survives `docker restart` and is
+# discarded by the `docker compose up --build` this project is deployed with, so
+# what an agent meets after the next upgrade is `playwright: not found` inside a
+# tool call — which the run loop reads as the agent deciding not to look.
+#
+# This is the most expensive line in the file and the number is worth writing
+# down: ~640 MB Chromium, ~340 MB for the headless shell that comes with it, and
+# ~250 MB of X, mesa and font packages, against a 1.9 GB image. `--only-shell`
+# would drop the first of those, but the shell is reachable only through
+# `--channel=chromium-headless-shell`, so every screenshot command an agent
+# writes from memory would fail — a saving paid for in failed tool calls.
+# Firefox and WebKit are deliberately absent: a second and third engine answers
+# a rendering-*difference* question, and what is wanted here is "does it look
+# right at all". Both are one `playwright install` away for a run that needs them.
+#
+# `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` on the npm install because the package's own
+# postinstall fetches every browser in its manifest, Firefox and WebKit included;
+# the explicit `install` below is what decides what this image carries. The fonts
+# are not optional either — `install-deps` pulls the CJK and emoji packs, and
+# without them a screenshot an agent is asked to judge is full of tofu boxes.
+#
+# Pinned like the CLI beside it, though for a weaker reason: nothing here parses
+# Playwright's output. What the pin buys is that the browser build (`chromium-…`)
+# is a function of this version, so an unpinned rebuild silently changes which
+# engine every screenshot in the fleet was taken with.
+#
+# `/opt/playwright/browsers` rather than the default `$HOME/.cache/ms-playwright`,
+# and that is not cosmetic: `/home/node` is chowned recursively further down, and
+# a recursive chown over a gigabyte of browser writes a second copy of that
+# gigabyte into the image. The directory belongs to `node` while everything in it
+# stays root-owned — so the shipped build is one every agent reads and none can
+# rewrite, and a repository pinning a different Playwright version can still put
+# its own build alongside rather than meeting EACCES inside a tool call.
+#
+# Chromium's own sandbox is not usable here — `unshare` is EPERM under Docker's
+# default seccomp profile, the same measurement the bubblewrap note above rests
+# on — but Playwright defaults `chromiumSandbox` to false, so the CLI and an
+# ordinary `launch()` both work unchanged. A script that asks for it explicitly
+# is the one thing that will not.
+ARG PLAYWRIGHT_VERSION=1.62.1
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright/browsers
+RUN set -eux; \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+      npm install -g "playwright@${PLAYWRIGHT_VERSION}"; \
+    npm cache clean --force; \
+    apt-get update; \
+    playwright install --with-deps chromium; \
+    rm -rf /var/lib/apt/lists/*; \
+    chmod -R a+rX "${PLAYWRIGHT_BROWSERS_PATH}"; \
+    chown node:node "${PLAYWRIGHT_BROWSERS_PATH}"; \
+    playwright --version
+
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
