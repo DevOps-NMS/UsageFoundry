@@ -1585,6 +1585,16 @@ export default function RunDetail({
                 </div>
               </div>
 
+              {/* The log narrows in place and nothing moves focus, so a reader
+                  who cannot see the count in the header above has no signal
+                  that the filter did anything. Same sr-only shape as the runs
+                  history's own filter. */}
+              <p className="sr-only" aria-live="polite">
+                {filtering
+                  ? `${shown.length} of ${lines.length} lines shown`
+                  : ""}
+              </p>
+
               <div className="relative lg:min-h-[18rem] lg:flex-1">
                 <Log
                   ref={logRef}
