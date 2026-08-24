@@ -1539,7 +1539,10 @@ export default function RunDetail({
                   a caller's `mb-0` on a Field is a no-op, since Tailwind emits
                   a numeric utility's values ascending and the component's own
                   `mb-3.5` wins whatever the call site writes. */}
-              <div className="flex flex-wrap items-end gap-3">
+              {/* `items-start`, not `items-end`: the text field grows a hint
+                  when the replay was truncated, and aligned on their bottoms
+                  the picker would drop a line lower the moment it appeared. */}
+              <div className="flex flex-wrap items-start gap-3">
                 <div className="min-w-0 flex-1 basis-56">
                   <Field
                     label="Find in this log"
@@ -1565,8 +1568,10 @@ export default function RunDetail({
                     />
                   </Field>
                 </div>
-                {/* The width is on a wrapper, never on the control. */}
-                <div className="w-56">
+                {/* The width is on a wrapper, never on the control, and it goes
+                    full width once the two have wrapped — a 224px picker on a
+                    390px line reads as a control that failed to stretch. */}
+                <div className="w-56 max-md:w-full">
                   <Field label="Show" htmlFor="log-filter-kind">
                     <Select
                       id="log-filter-kind"
