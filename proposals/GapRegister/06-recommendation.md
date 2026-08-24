@@ -31,6 +31,19 @@ in UsageFoundry.
 [G4](03-growth.md#g4-the-audit-trail-is-20000-rows-deep-evicted-on-every-insert-and-identifies-no-person), [F4](01-frontend.md#f4-a-runs-log-cannot-be-searched-or-filtered), [B5](02-backend-logic.md#b5-the-chat-can-identify-only-the-first-25-repositories-always-the-same-25),
 [F6](01-frontend.md#f6-settings-is-nine-sections-in-a-3502-line-page-with-no-way-to-find-a-field).
 
+> **This survey was never run. Four of its eight rows were patched instead**, on
+> branch `uf/usagefoundry-721638d11c0b-1-41e5e190`: rows 3, 15 and 18 whole and
+> row 4 in half. Row 3 took **option 1** — parameterise that one route the way
+> `/api/branches` was — and row 4's shipped half is quick open reading it. Rows
+> 15 and 18 are neither of the five: a client-side filter over the events a run
+> page already holds, and a client-side walk over `/settings`' own rendered DOM.
+> Rows 9, 11, 13 and 16 and the corpus half of row 4 are untouched, so **the
+> question this section asks is still open**, and the answer taken was never
+> weighed against the other four. Option 2, the one index and one search route,
+> is what would reach a chat, a branch, an agent, a template or a schedule, and
+> nothing shipped moves toward it. Per-row status is in
+> [01-frontend.md](01-frontend.md) and [05-register.md](05-register.md).
+
 **Why it is a survey and not a patch.** There are at least five genuinely
 different answers and they lead to different code:
 

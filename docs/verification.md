@@ -1212,6 +1212,27 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **The four frontend reachability fixes — the paged runs list, quick open's
+> search, the run log's filter and the settings field search — were written on
+> branch `uf/usagefoundry-721638d11c0b-1-41e5e190` by two runs, and a third that
+> only wrote documentation. **Between them they opened no browser, drove nothing
+> at any viewport and started no container.** Everything claimed for them rests on
+> `npm run typecheck` (exit 0), `npm test` (**1,660 tests / 245 suites / 0
+> failures**), `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` (exit 0)
+> and, for the runs query only, SQLite driven directly against throwaway
+> databases. Those commands were re-run on the branch head `a34e56b` and the
+> results above are that run's output, not a repeated claim.
+>
+> **Roughly 900 lines of interactive page code were added and not one of them was
+> rendered by anything** — `+286` `src/app/runs/page.tsx`, `+243`
+> `src/app/settings/page.tsx`, `+185` `src/app/runs/[id]/page.tsx`, `+130`
+> `src/components/shell/QuickOpen.tsx`, from `git diff main...HEAD --stat`. There
+> are still zero page tests, no jsdom and no browser in CI, so the two entries
+> below are the whole of what stands between these controls and an operator, and
+> `proposals/GapRegister/01-frontend.md`'s F5 is the row that says so. The
+> narrow-viewport entries further down this list predate all four controls and
+> cover none of them.
+
 - **The paged runs list and quick open's search, in a browser.** `/api/runs`
   now reads `offset`, `limit`, `status`, `q` and `settledBefore`, the runs page
   drives all five from the Older runs fold, and quick open asks the route for
@@ -1323,7 +1344,9 @@ through before trusting this unattended:
      capped reads as the whole answer.
   7. That the search did not break what the page already did. Edit a field —
      the margin rail and the bar's unsaved count must still appear; `⌘S` must
-     still save; **Revert** must still restore the saved baseline. Then check a
+     still save; **Discard** must still restore the saved baseline (the button
+     is `Discard`, at `src/app/settings/page.tsx:3702`; an earlier draft of this
+     entry called it Revert, which is not a control on that page). Then check a
      field whose description interpolates its own value (any of the ceilings):
      changing the value must change what the search finds, because the corpus
      is the rendered page rather than an index built once.

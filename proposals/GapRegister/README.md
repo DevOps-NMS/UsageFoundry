@@ -4,10 +4,44 @@
 logic, growth limits, and features it is missing — and which of them are worth a
 survey of their own?
 
-**The state:** open. Twenty verified gaps registered, six candidates dropped for
-lack of evidence and seven refuted as documented decisions or by probe. Three questions
+**The state:** the **frontend axis is partially promoted**; everything else is
+open. Twenty verified gaps registered, six candidates dropped for lack of
+evidence and seven refuted as documented decisions or by probe. Three questions
 recommended for a survey, eight things recommended as issues, five refused by
-name. **Nothing here is a decision and no product code changed.**
+name.
+
+**Four rows were implemented**, on branch
+`uf/usagefoundry-721638d11c0b-1-41e5e190`, by two runs after this register was
+written:
+
+- **[F1](01-frontend.md#f1-run-history-stops-at-100-rows-and-cannot-be-paged-filtered-or-searched) shipped** — `/api/runs` reads `offset`, `limit`, `status`,
+  `q` and `settledBefore`, and the runs page pages the whole history
+  (`7405720`, `d77638d`).
+- **[F2](01-frontend.md#f2-quick-open-the-apps-only-search-surface-inherits-that-cap) shipped in half** — quick open asks the route for typed
+  text, so a run past the hundredth is reachable; its corpus is still panes, runs
+  and workflows, so a chat, a branch, an agent, a template and a schedule are
+  still unfindable (`f7617fb`).
+- **[F4](01-frontend.md#f4-a-runs-log-cannot-be-searched-or-filtered) shipped** — a text box and a kind picker over the events the
+  page already holds, with the truncated-replay count stated when a filter is on
+  (`e250524`, `e16fd7f`).
+- **[F6](01-frontend.md#f6-settings-is-nine-sections-in-a-3502-line-page-with-no-way-to-find-a-field) shipped**, and so did the `beforeunload` prompt it filed as
+  an issue rather than a row (`a8f2984`, `bdbdf08`).
+
+**[F3](01-frontend.md#f3-a-chat-turn-renders-nothing-until-it-finishes-the-run-path-streams) and [F5](01-frontend.md#f5-nothing-that-renders-is-checked-by-anything) did not ship, and neither did any of B1–B5,
+G1–G4 or M1–M6.** Sixteen of the twenty rows are exactly as surveyed, which is
+why this directory is not renamed. The invariants behind the four fixes moved to
+`docs/agent/conventions.md` and `docs/agent/testing.md`, the operator's half to
+`docs/runs.md` and `docs/install.md`, and what a person still has to open and
+click to `docs/verification.md`.
+
+**The recommendation below was to survey reachability first, not to implement
+it.** The implementation was taken instead. Nothing about that answers Survey 1's
+actual question — *what should an operator be able to find, and by what
+mechanism, across chats, branches, agents, templates and schedules* — which is
+still unanswered, and four point fixes to the run surface are not an answer to
+it. The falsifier the recommendation named is also still unrun: nobody has
+executed `SELECT COUNT(*) FROM runs` on the live install, so whether reachability
+was the right axis to lead with remains unestablished, before or after the work.
 
 ## The recommendation
 
@@ -43,6 +77,14 @@ UsageFoundry.
 | Rows that violate a documented invariant | **0** |
 | Rows resting on an explicitly assumed premise | 4 |
 | Rows already owned by an open issue, squarely | 1 (#78) |
+| Rows since implemented | **3 whole, 1 in half** — all frontend |
+
+**Every other count above is as surveyed at `175ba57`, not as it stands today.**
+They are what the register said when it was written, and the four implemented
+rows are still counted in them — recounting them would make the file disagree
+with the twenty sections it indexes. The status lines in
+[01-frontend.md](01-frontend.md) and [05-register.md](05-register.md) are the
+current reading.
 
 Full table, ranked, with evidence and confidence per row:
 [05-register.md](05-register.md).
@@ -71,7 +113,11 @@ Full table, ranked, with evidence and confidence per row:
 ## The three biggest things the register says that no single row does
 
 **Nine of twenty rows are reachability.** They would be filed as nine unrelated
-tickets and fixed nine times.
+tickets and fixed nine times. **Four of them then were** — three whole and one in
+half, as four separate changes on one branch — and the four still open include
+[G2](03-growth.md#g2-chat-threads-past-the-newest-30-cannot-be-reached-at-all), chat threads past the newest 30, which has the same
+one-parameter fix as the runs list and did not get it. That is the observation
+being demonstrated rather than refuted.
 
 **The chat surface carries four rows and the run surface carries none of the
 equivalents.** Incremental persistence, publish-after-persist, a mid-flight
@@ -114,3 +160,12 @@ Verification loop on the tree this was written against (`175ba57`):
 `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` exit 0. The tree is
 green, and that is the point — none of these twenty is something a green tree
 tells you.
+
+Re-run on `a34e56b`, the head of the branch carrying the four fixes:
+`npm run typecheck` exit 0; `npm test` **1,660 tests / 245 suites / 0 failures**;
+`env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` exit 0. Also still green,
+and 82 more assertions — none of them about anything that renders, which is
+[F5](01-frontend.md#f5-nothing-that-renders-is-checked-by-anything)'s point after roughly 900 more lines of interactive page
+code. **No browser was opened and no container was started for any of that work,
+at any viewport**; `docs/verification.md`'s "Not yet verified by hand" list is
+where that is recorded and it is the list to work through.
