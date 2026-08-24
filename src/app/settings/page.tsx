@@ -160,6 +160,68 @@ function useSectionHash(): [string, (id: string) => void] {
 }
 
 /**
+ * One field the search found, and where it is.
+ *
+ * `el` is the marked name itself rather than a selector for it: the list is
+ * rebuilt from the DOM on every keystroke and on every edit, so no entry here
+ * outlives the paint it was read from.
+ */
+interface FieldHit {
+  /** The field's name, exactly as the page draws it. */
+  name: string;
+  sectionId: string;
+  sectionLabel: string;
+  /** The control the field's label points at, where it named one. */
+  controlId: string | null;
+  el: HTMLElement;
+}
+
+/**
+ * How many matches are drawn. A one-letter query matches most of the page, and
+ * a result list longer than the nav it sits above is a second problem.
+ *
+ * The count of what was left out is stated beside them — a capped list that
+ * does not say it is capped reads as the whole answer.
+ */
+const MAX_FIELD_HITS = 8;
+
+/**
+ * Every field whose name or help text contains `query`, in page order.
+ *
+ * Reads the rendered page rather than a declared index, for the reason
+ * `SettingName` records. Nine sections are anchors on one long page, so all of
+ * them are in the DOM at once and a walk over it is the whole corpus.
+ */
+function findFields(query: string): FieldHit[] {
+  const hits: FieldHit[] = [];
+  for (const sec of SECTIONS) {
+    const root = document.getElementById(sec.id);
+    if (!root) continue;
+    for (const el of root.querySelectorAll<HTMLElement>("[data-setting-name]")) {
+      const name = (el.textContent ?? "").trim();
+      // The block holding the name *and* whatever explains it — a row's
+      // description, a field's hint, a fold's body. Two levels up from the mark
+      // in all three wrappers, because the name sits inside the `<label>` or
+      // `<summary>` the primitive draws and the help text is that element's
+      // sibling. A change to either primitive's shape costs the help text and
+      // never the name, which is the direction that degrades quietly rather
+      // than wrongly.
+      const block = el.parentElement?.parentElement ?? el;
+      const haystack = `${name}\n${block.textContent ?? ""}`.toLowerCase();
+      if (!haystack.includes(query)) continue;
+      hits.push({
+        name,
+        sectionId: sec.id,
+        sectionLabel: sec.label,
+        controlId: el.closest("label")?.getAttribute("for") ?? null,
+        el,
+      });
+    }
+  }
+  return hits;
+}
+
+/**
  * Least to most permissive, rather than the order the literals happen to be
  * declared in. The list is a scale, so it should read as one.
  *
@@ -605,6 +667,40 @@ function Section({
 }
 
 /**
+ * A field's name, marked so the search can find it without a second list.
+ *
+ * The alternative was an index of every field declared beside `SECTIONS` —
+ * sixty entries duplicating label and help text that is already at the call
+ * site, with nothing keeping the two in step. A search that names a field this
+ * page no longer has is worse than no search: it sends the reader looking for a
+ * control that is not there, and it looks exactly like a search that works.
+ *
+ * So the corpus *is* the page. A field is searchable because it rendered, and
+ * the words it is found by are the words on screen, interpolated values and
+ * all. The three wrappers below are where every stored setting on this page
+ * gets its name, so marking them is complete by construction; the read-only
+ * rows in the storage and knowledge reports go through `ListRow` directly and
+ * are deliberately not settings.
+ *
+ * The unsaved suffix stays outside the mark, so a result reads as the field
+ * rather than as its state.
+ */
+function SettingName({
+  label,
+  edited,
+}: {
+  label: ReactNode;
+  edited: boolean;
+}) {
+  return (
+    <>
+      <span data-setting-name="">{label}</span>
+      {edited && <span className="sr-only"> — edited, not saved</span>}
+    </>
+  );
+}
+
+/**
  * One row of a grouped list, plus the two marks that say it holds something the
  * server has not been told.
  *
@@ -631,12 +727,7 @@ function SettingRow({
   return (
     <ListRow
       htmlFor={htmlFor}
-      label={
-        <>
-          {label}
-          {edited && <span className="sr-only"> — edited, not saved</span>}
-        </>
-      }
+      label={<SettingName label={label} edited={edited} />}
       description={description}
     >
       <EditedRail on={edited} />
@@ -669,10 +760,7 @@ function FormField({
       htmlFor={htmlFor}
       label={
         label === undefined ? undefined : (
-          <>
-            {label}
-            {edited && <span className="sr-only"> — edited, not saved</span>}
-          </>
+          <SettingName label={label} edited={edited} />
         )
       }
     >
@@ -728,12 +816,7 @@ function PromptFold({
     <Disclosure
       className="mb-3.5 last:mb-0"
       summaryClassName={FOLD_SUMMARY}
-      summary={
-        <>
-          {label}
-          {edited && <span className="sr-only"> — edited, not saved</span>}
-        </>
-      }
+      summary={<SettingName label={label} edited={edited} />}
       count={count}
       defaultOpen={defaultOpen}
     >
@@ -1600,6 +1683,56 @@ export default function SettingsPage() {
     [effective, savedS],
   );
 
+  // Rebuilt on every keystroke *and* on every edit, not indexed once: several
+  // descriptions interpolate the value beside them, and a handful of rows only
+  // exist while the switch above them is on — so a corpus read at mount would
+  // answer for a page that has since changed. Sixty `textContent` reads is
+  // nothing beside the fetch this page already does on load.
+  const [fieldQuery, setFieldQuery] = useState("");
+  const [fieldHits, setFieldHits] = useState<FieldHit[]>([]);
+  useEffect(() => {
+    const query = fieldQuery.trim().toLowerCase();
+    if (query === "") {
+      // The same empty array back rather than a fresh one: `effective` changes
+      // on every keystroke in every field on this page, and a new identity here
+      // would re-render the whole of it a second time for a search nobody is
+      // running.
+      setFieldHits((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+    setFieldHits(findFields(query));
+  }, [fieldQuery, effective]);
+
+  /**
+   * Take the reader to the field, which is the whole point of the search.
+   *
+   * Focus first with `preventScroll`, then place it: focusing a control scrolls
+   * it into view by itself, and the two would fight over where it lands. The
+   * ring the focus draws is the app's one focus treatment and so the only
+   * highlight this needs. The chip is set directly rather than by moving the
+   * hash, because navigating to the section anchor would scroll to the section
+   * heading — undoing the scroll that just landed on the field.
+   */
+  const goToField = useCallback(
+    (hit: FieldHit) => {
+      // The four prompts are behind folds, and `textContent` reads a closed one
+      // — so a match can be somewhere the reader cannot see. Set open rather
+      // than leaving them at the summary: `Disclosure` passes `open` only when
+      // a caller controls it, and these four pass `defaultOpen`, so React
+      // writes the attribute when that prop changes and never again. Nothing
+      // reads the DOM back, so this cannot disagree with any state.
+      const fold = hit.el.closest("details");
+      if (fold && !fold.open) fold.open = true;
+      const control = hit.controlId
+        ? document.getElementById(hit.controlId)
+        : null;
+      control?.focus({ preventScroll: true });
+      hit.el.scrollIntoView({ block: "center" });
+      setSectionHash(hit.sectionId);
+    },
+    [setSectionHash],
+  );
+
   function patch(p: Partial<SettingsDTO>) {
     setS((prev) => (prev ? { ...prev, ...p } : prev));
     setSaved(false);
@@ -1863,6 +1996,73 @@ export default function SettingsPage() {
         <ClaudeAccount />
         <FailedSignIns summary={env.signIn} />
       </dl>
+
+      {/* Above the chips because it answers the same question they do — where
+          is the thing I want — and because the chips only answer it for
+          somebody who remembers which of nine sections holds a field. Nothing
+          here collapses, reorders or hides a section: the search is a route to
+          a field, not a second arrangement of the page. */}
+      <div className="mb-4 max-w-[32rem]">
+        <Field
+          label="Find a setting"
+          htmlFor="settings-search"
+          hint="Matches names and descriptions, never the values in them"
+        >
+          <Input
+            id="settings-search"
+            type="search"
+            placeholder="weekly, plugin, retention…"
+            value={fieldQuery}
+            onChange={(e) => setFieldQuery(e.target.value)}
+          />
+        </Field>
+
+        {/* The results appear under the field without anything moving focus,
+            so a reader who cannot see them has no signal that typing did
+            anything. Same sr-only shape as the runs history's own filter. */}
+        <p className="sr-only" aria-live="polite">
+          {fieldQuery.trim() === ""
+            ? ""
+            : `${fieldHits.length} field${fieldHits.length === 1 ? "" : "s"} match`}
+        </p>
+
+        {fieldQuery.trim() !== "" &&
+          (fieldHits.length === 0 ? (
+            <p className="px-1 text-xs text-ink-faint">
+              No field’s name or description matches that.
+            </p>
+          ) : (
+            <ListGroup
+              footnote={
+                fieldHits.length > MAX_FIELD_HITS
+                  ? `${MAX_FIELD_HITS} of ${fieldHits.length} matches — add a word to narrow it`
+                  : undefined
+              }
+            >
+              {fieldHits.slice(0, MAX_FIELD_HITS).map((hit) => (
+                <button
+                  key={`${hit.sectionId}-${hit.name}`}
+                  type="button"
+                  onClick={() => goToField(hit)}
+                  // The row is the control, so it takes the 44px target below
+                  // the breakpoint that every other tappable row in this app
+                  // does. Not a `ListRow`: that one is deliberately inert and
+                  // has no interaction states, and a result that cannot be
+                  // pressed is not a result. Its ends are rounded here rather
+                  // than clipped by the box, because `ListGroup` deliberately
+                  // does not hide its overflow and a pressed row's fill would
+                  // otherwise square off the corner it sits in.
+                  className="ui-transition flex w-full min-h-[var(--control-h-lg)] max-md:min-h-11 items-center justify-between gap-3 px-3.5 py-2 text-left text-sm text-ink first:rounded-t-lg last:rounded-b-lg hover:bg-fill-hover active:bg-fill-active"
+                >
+                  <span className="min-w-0 truncate">{hit.name}</span>
+                  <span className="shrink-0 text-xs text-ink-faint">
+                    {hit.sectionLabel}
+                  </span>
+                </button>
+              ))}
+            </ListGroup>
+          ))}
+      </div>
 
       {/* Plain anchors rather than `ButtonLink`: the pane is its own scroll
           region and the browser's native hash handling is what scrolls it, so
