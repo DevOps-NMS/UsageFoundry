@@ -209,6 +209,63 @@ describe("netReceipt", () => {
     );
   });
 
+  it("prices an early end off the write that actually happened", () => {
+    // The correction this test exists for, and it was found by measurement
+    // rather than by reading the code. `tokensAfter` is an estimate over the
+    // transcript's `message` content; the resume writes the *whole* context,
+    // including the system prompt, the tool definitions, `CLAUDE.md` and the
+    // three appended notices — none of which are in the transcript. Over the
+    // first four prunes on this install the estimate charged against 405,049
+    // tokens where the resumes actually wrote 485,828: 16.6% under, one-sided,
+    // and enough to overstate the net by about 15%.
+    //
+    // One-sided is the part that matters. The removal figure's ±3% is a
+    // difference between two readings of the same file, so the offset cancels;
+    // this is an absolute, so it does not.
+    // Receipt 1 as it actually happened on this install, so the direction below
+    // is the measured one rather than a property of a made-up fixture.
+    const real: PruneReceiptRow = {
+      ...base,
+      trigger: "early-end",
+      tokensBefore: 167_666,
+      tokensAfter: 91_380,
+      tokensRemoved: 76_286,
+    };
+    const observed = netReceipt(real, 30, { cacheWrite5m: 0, cacheWrite1h: 112_113 });
+    const estimated = netReceipt(real, 30);
+    assert.ok(
+      observed.invalidationUSD > estimated.invalidationUSD,
+      "the measured write is larger than the content estimate, so ignoring it flatters the net",
+    );
+    // $5/Mtok input for opus-5, 2.0x for the one-hour write class.
+    assert.equal(
+      Math.round(observed.invalidationUSD * 1e4) / 1e4,
+      Math.round(112_113 * (5 / 1_000_000) * 2.0 * 1e4) / 1e4,
+    );
+  });
+
+  it("charges the two write classes at their own rates", () => {
+    // The row carries both, and an install writing at the five-minute class
+    // would be charged 2x for a 1.25x write if this collapsed them.
+    const fiveMin = netReceipt({ ...base, trigger: "early-end" }, 30, {
+      cacheWrite5m: 100_000,
+      cacheWrite1h: 0,
+    });
+    const oneHour = netReceipt({ ...base, trigger: "early-end" }, 30, {
+      cacheWrite5m: 0,
+      cacheWrite1h: 100_000,
+    });
+    assert.ok(fiveMin.invalidationUSD < oneHour.invalidationUSD);
+  });
+
+  it("still charges a boundary prune nothing, whatever the resume wrote", () => {
+    // The resume after a *boundary* prune writes just as much, and it must not
+    // be charged: that write was happening anyway. Handing the observed figure
+    // to a boundary receipt is the obvious way to break this, so it is pinned.
+    const net = netReceipt(base, 30, { cacheWrite5m: 0, cacheWrite1h: 150_000 });
+    assert.equal(net.invalidationUSD, 0);
+  });
+
   it("saves nothing when no turn has followed it yet", () => {
     // A prune measured the instant it happens has saved exactly nothing, and
     // saying so is the point: this is a measurement over turns that have already

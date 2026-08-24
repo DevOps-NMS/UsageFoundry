@@ -8,6 +8,7 @@ import { BYTES_PER_TOKEN } from "./fileCostNotice";
 import {
   CACHE_READ_MULTIPLIER,
   CACHE_WRITE_1H_MULTIPLIER,
+  CACHE_WRITE_5M_MULTIPLIER,
   resolvePrice,
 } from "./pricing";
 import { scanUsage } from "./transcripts";
@@ -540,6 +541,19 @@ export interface PruneReceiptRow {
   model: string | null;
 }
 
+/**
+ * The cache write the resume after an early end actually performed.
+ *
+ * Read off the first real turn following the prune. "Real" excludes the
+ * all-zero record the CLI writes at a restart — it carries a `usage` block with
+ * every field at zero and a null `service_tier`, and taking it as the first turn
+ * reports the invalidation as $0.00.
+ */
+export interface ResumeWrite {
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+}
+
 /** What a prune actually came to, once both sides are counted. */
 export interface PruneNet {
   /** Turns that have carried the smaller conversation. The saving is over these. */
@@ -589,7 +603,11 @@ export interface PruneNet {
  * error winnow's own `docs/COZEMPIC.md` §3.1 keeps on the record: it understates
  * invalidation by about 40%, which flatters exactly the marginal cuts.
  */
-export function netReceipt(row: PruneReceiptRow, turnsAfter: number): PruneNet {
+export function netReceipt(
+  row: PruneReceiptRow,
+  turnsAfter: number,
+  resumeWrite: ResumeWrite | null = null,
+): PruneNet {
   // Priced at the rate for the run's own model, and `at` is the receipt's own
   // timestamp rather than now — `byAgent.counterfactualUSD`'s rule: a rate
   // looked up at read time prices last week's prune at this week's list.
@@ -607,10 +625,35 @@ export function netReceipt(row: PruneReceiptRow, turnsAfter: number): PruneNet {
 
   const cacheSavedUSD =
     row.tokensRemoved * turnsAfter * perToken * CACHE_READ_MULTIPLIER;
+
+  // **Measured where it can be, modelled only until then.**
+  //
+  // The write an early end causes is not a counterfactual — it is the very next
+  // turn's `cache_creation_input_tokens`, sitting in the transcript. Reading it
+  // is strictly better than estimating it, and the estimate was measurably
+  // wrong: over the first four prunes on this install it charged against 405,049
+  // tokens where the resumes actually wrote 485,828, understating the cost by
+  // 16.6% and so overstating the net by about 15%. The gap is everything in the
+  // context that is not in the transcript's `message` fields — the system
+  // prompt, the tool definitions, `CLAUDE.md`, the three appended notices — and
+  // it is one-sided, so it cannot be dismissed as estimator noise the way the
+  // removal figure's ±3% can. That one is a *difference* between two readings of
+  // the same file, where the offset cancels; this is an absolute.
+  //
+  // Priced per class rather than at one multiplier, because the row carries
+  // both and an install writing at the five-minute class would otherwise be
+  // charged 2× for a 1.25× write.
   const invalidationUSD =
-    row.trigger === "early-end"
-      ? row.tokensAfter * perToken * CACHE_WRITE_1H_MULTIPLIER
-      : 0;
+    row.trigger !== "early-end"
+      ? 0
+      : resumeWrite
+        ? (resumeWrite.cacheWrite5m * CACHE_WRITE_5M_MULTIPLIER +
+            resumeWrite.cacheWrite1h * CACHE_WRITE_1H_MULTIPLIER) *
+          perToken
+        : // No turn has followed yet, so there is nothing to read. The estimate
+          // stands in, and it is the low end: a live run's cost here only ever
+          // revises upward when the next turn lands.
+          row.tokensAfter * perToken * CACHE_WRITE_1H_MULTIPLIER;
 
   return {
     turnsAfter,
@@ -755,10 +798,32 @@ export async function pruneSavings(
 
   const priced = receipts.map((row) => {
     const sessionId = sessions.get(row.runId) ?? null;
-    const turnsAfter = sessionId
-      ? mainThread.filter((e) => e.sessionId === sessionId && e.ts > row.ts).length
-      : 0;
-    return { row, net: netReceipt(row, turnsAfter) };
+    const following = sessionId
+      ? mainThread
+          .filter((e) => e.sessionId === sessionId && e.ts > row.ts)
+          .sort((a, b) => a.ts - b.ts)
+      : [];
+
+    // The resume's own write, for an early end. The **first turn that billed
+    // anything** rather than simply the first: a restart writes a record whose
+    // usage block is present and entirely zero, and taking that one reports the
+    // invalidation as nothing at all — which is how this was wrong before it was
+    // measured.
+    const firstBilled = following.find(
+      (e) =>
+        e.tokens.cacheRead > 0 ||
+        e.tokens.cacheWrite5m > 0 ||
+        e.tokens.cacheWrite1h > 0,
+    );
+    const resumeWrite =
+      row.trigger === "early-end" && firstBilled
+        ? {
+            cacheWrite5m: firstBilled.tokens.cacheWrite5m,
+            cacheWrite1h: firstBilled.tokens.cacheWrite1h,
+          }
+        : null;
+
+    return { row, net: netReceipt(row, following.length, resumeWrite) };
   });
 
   return sumPruneSavings(priced);

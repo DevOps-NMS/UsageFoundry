@@ -890,8 +890,42 @@ Built and exercised against real transcripts:
   bind-mounted `~/.claude`; `removeBackups` deletes it, matched on winnow's own
   naming and filtered by mtime so a backup left by anything else survives.
 
-  **Not yet verified by hand:** no prune has run inside a live work cycle on this
-  install. The subprocess, the token measurement, the tier behaviour and the
+  **Verified against four real prunes, 2026-08-24.** All four fired from the
+  early-end path at `aggressive`, at 167,326-169,283 tokens, removing 29.1-52.8%.
+  The displayed figures were recomputed independently from the transcripts and
+  matched the API to the cent (257 turns, 266,683 tokens, `+$4.39212`), which
+  establishes the plumbing. Against *ground truth* the two sides came out
+  differently, and only one of them was right.
+  
+  **Removal is accurate to about 3%.** Claimed 266,683 tokens against 274,619
+  observed as the drop in resident context across the restart, per-receipt errors
+  +1.2% to −6.5%. That is the estimator working as designed: `BYTES_PER_TOKEN`
+  carries a systematic offset, and a *difference* between two readings of the
+  same file cancels it.
+  
+  **The invalidation was understated by 16.6% and has been corrected.** It was
+  charged against `tokens_after` — 405,049 across the four — where the resumes
+  actually wrote 485,828. The gap is everything the context holds that the
+  transcript's `message` fields do not: system prompt, tool definitions,
+  `CLAUDE.md`, the three appended notices. Being an absolute rather than a
+  difference, no offset cancels, and it overstated the net by roughly 15%
+  (`+$4.39` displayed against `+$3.58` corrected). `netReceipt` now prices the
+  resume off the first *billed* turn's own `cache_creation_input_tokens` instead
+  — a measurement rather than a model — falling back to the estimate only until
+  that turn exists. The all-zero record the CLI writes at a restart has to be
+  skipped explicitly: taken as the first turn it reports the invalidation as
+  $0.00, which is how the first pass at measuring this went wrong.
+  
+  **Also confirmed here:** the dedupe matters. Raw assistant records after the
+  four prunes number 93/129/82/57 against 61/91/58/47 deduped on
+  `messageId:requestId`, and billing is per request, so the deduped figure is the
+  right one and is what `scanUsage` supplies.
+
+  **Not yet verified by hand:** no *boundary* prune has run at all — all four
+  observations are the early-end path, because each run finished within one
+  effective cycle, so the loop broke before reaching the boundary call. The
+  corrected invalidation has unit tests and has not itself been re-observed
+  against a fifth prune. The subprocess, the token measurement, the tier behaviour and the
   backup were all exercised directly against a copied transcript; the boundary
   call site, the early-end interrupt and the KPI arithmetic have unit tests and a
   clean `npm run build`, and nothing more. The netted figures on the dashboard
