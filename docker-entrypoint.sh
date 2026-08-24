@@ -838,6 +838,20 @@ fi
 # agent request failing with a connection refused, inside a tool call, on an
 # unattended run.
 #
+# ## Turning it off
+#
+# Two ways, and they are not equivalent. `WINNOW_FILTER=` blank plus a restart
+# is the full off: no proxy, no ANTHROPIC_BASE_URL, boot identical to before
+# this block existed. Without a restart, what can be turned off is the
+# *rewriting* and not the proxy — `touch /home/node/.winnow/filter-off` and the
+# next request is relayed untouched.
+#
+# Only the second one is safe to do to a running install, and the asymmetry is
+# worth stating: ANTHROPIC_BASE_URL is fixed in an agent's environment when the
+# server spawns it, so a listener that goes away takes every in-flight and
+# future agent request with it. Killing this process does not turn the filter
+# off, it turns the API off.
+#
 # ## Why a failure here is not fatal
 #
 # Same argument as the gh and Python tool blocks: a filter that will not start
@@ -868,7 +882,8 @@ if [ "${WINNOW_FILTER:-}" = "1" ]; then
           uv run --frozen --project "$WINNOW_PATH" \
             python -m winnow filter \
               --port "$WINNOW_PORT" \
-              --ledger /home/node/.winnow/filter.jsonl || true
+              --ledger /home/node/.winnow/filter.jsonl \
+              --off-file /home/node/.winnow/filter-off || true
         echo "[usagefoundry] winnow filter exited; restarting in 5s" >&2
         sleep 5
       done
@@ -891,7 +906,8 @@ if [ "${WINNOW_FILTER:-}" = "1" ]; then
     if [ -n "$winnow_up" ]; then
       export ANTHROPIC_BASE_URL="http://127.0.0.1:$WINNOW_PORT"
       echo "[usagefoundry] winnow intake filter on 127.0.0.1:$WINNOW_PORT;" \
-           "agents routed through it." >&2
+           "agents routed through it. To stop it rewriting without a restart:" \
+           "docker compose exec usagefoundry touch /home/node/.winnow/filter-off" >&2
     else
       echo "[usagefoundry] winnow filter did not open 127.0.0.1:$WINNOW_PORT" \
            "within 90s — agents will talk to the API directly. The supervisor" \
