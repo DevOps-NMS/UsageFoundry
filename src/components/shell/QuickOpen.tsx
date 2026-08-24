@@ -2,7 +2,11 @@
 
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { RunListItemDTO, WorkflowListItemDTO } from "@/lib/apiTypes";
+import type {
+  RunListDTO,
+  RunListItemDTO,
+  WorkflowListItemDTO,
+} from "@/lib/apiTypes";
 import { pollFailureMessage, shortPath } from "@/lib/format";
 import { jsonRequest } from "@/lib/jsonRequest";
 import { Icon } from "@/components/ui/Icon";
@@ -13,6 +17,28 @@ import { PANES } from "@/components/shell/panes";
 
 /** Recent runs offered before anything is typed. Typing searches all of them. */
 const RECENT_RUNS = 6;
+
+/** How long after the last keystroke the route is asked. A keystroke is not a request. */
+const SEARCH_SETTLE_MS = 250;
+
+/**
+ * A run, as one line: which run, then what it was asked to do.
+ *
+ * The id alone is what a row carried before, and it is legible only to somebody
+ * who already knows which run they want. Now that the query reaches task text on
+ * the server, a list of eight-character ids cannot say why a row is in it.
+ *
+ * Not shortened here. The row's own `truncate` cuts it visually while the whole
+ * string stays in the DOM, which is the rule for anything a screen reader
+ * announces — and the prompt on the wire is already clipped to
+ * `MAX_LIST_PROMPT`. The whitespace collapse is only so a multi-line task reads
+ * as one line where it is announced rather than where it is drawn.
+ */
+function runLabel(run: RunListItemDTO): string {
+  const id = run.id.slice(0, 8);
+  const task = run.prompt.replace(/\s+/g, " ").trim();
+  return task ? `${id} · ${task}` : id;
+}
 
 interface QuickItem {
   key: string;
@@ -66,10 +92,20 @@ export function QuickOpen({
   const fieldRef = useRef<HTMLDivElement>(null);
 
   const [query, setQuery] = useState("");
+  // What the route has been asked, as against what is in the field. See the
+  // search effect below.
+  const [settled, setSettled] = useState("");
   const [highlight, setHighlight] = useState(0);
   const [runs, setRuns] = useState<RunListItemDTO[]>([]);
+  const [matches, setMatches] = useState<RunListItemDTO[]>([]);
+  const [searching, setSearching] = useState(false);
   const [workflows, setWorkflows] = useState<WorkflowListItemDTO[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Held apart from `loadError` rather than written over it: a search that
+  // succeeds says nothing about the workflow list that failed to load beside it,
+  // and clearing one message on the other's success is how a failed read comes
+  // to look like an empty one.
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   // Read when the sheet opens rather than on mount: this is a list of things
   // that move, and a shell component polling two routes for the life of every
@@ -79,7 +115,7 @@ export function QuickOpen({
     let live = true;
     void (async () => {
       const [runsResult, workflowsResult] = await Promise.all([
-        jsonRequest<{ runs: RunListItemDTO[] }>("/api/runs"),
+        jsonRequest<RunListDTO>("/api/runs"),
         jsonRequest<{ workflows: WorkflowListItemDTO[] }>("/api/workflows"),
       ]);
       if (!live) return;
@@ -95,10 +131,65 @@ export function QuickOpen({
     };
   }, [open]);
 
-  // Whatever was typed last time is not what you want next time.
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(query.trim()), SEARCH_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  /**
+   * The typed query, answered by the route rather than by the page it cached.
+   *
+   * This is the whole of what quick open could not do. It held the newest
+   * hundred runs and filtered *those*, so a run further back than that produced
+   * an empty list — and an empty list here reads as "no such run exists" rather
+   * than as "that run is on a page nothing could ask for". `?q=` matches the
+   * task, the folder and the id across every row in the table.
+   *
+   * The unfiltered list is deliberately still the one the sheet read when it
+   * opened: the six newest runs are an offer rather than an answer, and asking
+   * the route for them again would be the same request a second time.
+   */
+  useEffect(() => {
+    if (!open || !settled) return;
+    let live = true;
+    setSearching(true);
+    void (async () => {
+      const res = await jsonRequest<RunListDTO>(
+        `/api/runs?q=${encodeURIComponent(settled)}`,
+      );
+      if (!live) return;
+      setSearching(false);
+      if (!res.ok) {
+        setSearchError(pollFailureMessage(res.status, res.error));
+        return;
+      }
+      setMatches(res.data.runs);
+      setSearchError(null);
+    })();
+    return () => {
+      live = false;
+    };
+  }, [open, settled]);
+
+  /**
+   * Whatever was typed last time is not what you want next time.
+   *
+   * Cleared on the way *out* rather than on the way in. React runs a
+   * component's effects in the order they are declared, so a reset that sat
+   * below the search effect above would land after it — and the search would
+   * already have fired once for the previous visit's query, which is a request
+   * for an answer this sheet is about to throw away.
+   */
+  useEffect(() => {
+    if (open) return;
+    setQuery("");
+    setSettled("");
+    setMatches([]);
+    setSearchError(null);
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
-    setQuery("");
     setHighlight(0);
     // After the parent's effect has run `showModal()`, which moves focus to the
     // dialog's own autofocus target. Child effects run first in a commit, so
@@ -121,11 +212,13 @@ export function QuickOpen({
     const needle = query.trim().toLowerCase();
     // The unfiltered list is cut to the newest few, so the heading says so —
     // a shortened list that reads like a whole one is the thing this app
-    // refuses to do with a diff, a run table or a telemetry card.
-    const runItems = runs.map((run) => ({
+    // refuses to do with a diff, a run table or a telemetry card. With
+    // something typed the rows are the route's answer instead, so the heading
+    // stops claiming they are the recent ones.
+    const runItems = (needle ? matches : runs.slice(0, RECENT_RUNS)).map((run) => ({
       key: `run:${run.id}`,
       group: needle ? "Runs" : "Recent runs",
-      label: run.id.slice(0, 8),
+      label: runLabel(run),
       detail: `${run.status} · ${shortPath(run.folder, 2)}`,
       href: `/runs/${run.id}`,
       haystack: `${run.id} ${run.status} ${run.folder}`.toLowerCase(),
@@ -140,12 +233,30 @@ export function QuickOpen({
     }));
 
     if (!needle) {
-      return [...paneItems, ...runItems.slice(0, RECENT_RUNS), ...workflowItems];
+      return [...paneItems, ...runItems, ...workflowItems];
     }
-    return [...paneItems, ...runItems, ...workflowItems].filter((item) =>
-      item.haystack.includes(needle),
-    );
-  }, [query, runs, workflows]);
+    // The runs are the route's answer to this needle and are deliberately not
+    // filtered again: the server matched the whole task text, while the prompt
+    // on the wire is clipped to `MAX_LIST_PROMPT`, so a match further into a
+    // long task would be found there and then dropped here. Panes and workflows
+    // are still matched in the client — both lists are small, whole, and already
+    // in hand.
+    return [
+      ...paneItems.filter((item) => item.haystack.includes(needle)),
+      ...runItems,
+      ...workflowItems.filter((item) => item.haystack.includes(needle)),
+    ];
+  }, [query, runs, matches, workflows]);
+
+  /**
+   * Whether the list on screen is behind the field.
+   *
+   * The 250ms settle means the first keystroke of a search has an empty run list
+   * that is not yet an answer, and "Nothing matches" is the one sentence this
+   * component must not say while it is still asking.
+   */
+  const pending =
+    query.trim() !== "" && (searching || query.trim() !== settled);
 
   // Clamped rather than reset: the list shrinks as the query narrows, and a
   // highlight past the end would make Return open nothing.
@@ -197,7 +308,7 @@ export function QuickOpen({
         <Input
           type="text"
           value={query}
-          placeholder="Pane, run id, folder, workflow"
+          placeholder="Pane, task, run id, folder, workflow"
           aria-label="Search panes, runs and workflows"
           role="combobox"
           aria-expanded
@@ -211,9 +322,12 @@ export function QuickOpen({
         />
       </div>
 
-      {loadError && (
+      {/* The search's own failure first, because it is the one the operator just
+          caused. Both read the same either way: something could not be read, and
+          the panes below are still there. */}
+      {(searchError ?? loadError) && (
         <Notice tone="warn" className="mt-3">
-          {loadError} Panes are still listed.
+          {searchError ?? loadError} Panes are still listed.
         </Notice>
       )}
 
@@ -268,7 +382,7 @@ export function QuickOpen({
         ))}
         {items.length === 0 && (
           <p className="px-2 py-3 text-sm text-ink-faint">
-            Nothing matches “{query.trim()}”
+            {pending ? "Searching…" : `Nothing matches “${query.trim()}”`}
           </p>
         )}
       </div>

@@ -1212,6 +1212,156 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **The four frontend reachability fixes — the paged runs list, quick open's
+> search, the run log's filter and the settings field search — were written on
+> branch `uf/usagefoundry-721638d11c0b-1-41e5e190` by two runs, and a third that
+> only wrote documentation. **Between them they opened no browser, drove nothing
+> at any viewport and started no container.** Everything claimed for them rests on
+> `npm run typecheck` (exit 0), `npm test` (**1,660 tests / 245 suites / 0
+> failures**), `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` (exit 0)
+> and, for the runs query only, SQLite driven directly against throwaway
+> databases. Those commands were re-run on the branch head `a34e56b` and the
+> results above are that run's output, not a repeated claim.
+>
+> **Roughly 900 lines of interactive page code were added and not one of them was
+> rendered by anything** — `+286` `src/app/runs/page.tsx`, `+243`
+> `src/app/settings/page.tsx`, `+185` `src/app/runs/[id]/page.tsx`, `+130`
+> `src/components/shell/QuickOpen.tsx`, from `git diff main...HEAD --stat`. There
+> are still zero page tests, no jsdom and no browser in CI, so the two entries
+> below are the whole of what stands between these controls and an operator, and
+> `proposals/GapRegister/01-frontend.md`'s F5 is the row that says so. The
+> narrow-viewport entries further down this list predate all four controls and
+> cover none of them.
+
+- **The paged runs list and quick open's search, in a browser.** `/api/runs`
+  now reads `offset`, `limit`, `status`, `q` and `settledBefore`, the runs page
+  drives all five from the Older runs fold, and quick open asks the route for
+  typed text 250ms after the last keystroke. What *is* checked: `typecheck`,
+  `npm test` (`normalizeRunListQuery`, `clampRunOffset` and `isRunStatus`, 13
+  cases), the standalone build, and the query itself driven against a throwaway
+  SQLite database with seven planted rows — paging, the offset clamp past the
+  end, the `created_at`/`id` tiebreak holding across a page edge, `?q=50%` and
+  `?q=a_b` matching only the rows that hold those characters literally, and
+  `settledBefore` correctly leaving out a `queued` run created three days ago.
+  None of that needed a browser and none of it is the page.
+
+  The query's cost was measured rather than assumed, because a paged list adds a
+  `COUNT(*)` and an `ORDER BY` tiebreak to the answer a four-second poll already
+  asks for. Against 50,000 planted rows in groups of 25 sharing a millisecond, on
+  this container: unfiltered first page **0.23ms** with the `id DESC` tiebreak
+  and 0.14ms without it, the unfiltered `COUNT(*)` **0.01ms** (a covering index
+  scan), a `status` page at offset 20,000 **7.8ms**, and a `LIKE` over `prompt`
+  **4.1ms**. The tiebreak needs no index of its own — the plan is `SCAN runs
+  USING INDEX idx_runs_created` plus `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`,
+  so SQLite sorts only inside each equal-`created_at` group, and a dedicated
+  `(created_at DESC, id DESC)` index brings 0.23ms to 0.15ms. **No schema change
+  was made**, and neither of the slower shapes is on the poll: the poll is the
+  unfiltered first page. What this does *not* measure is a 50,000-run install's
+  behaviour in a browser, only the SQLite time behind one request.
+
+  What a person has to open and click, in order:
+
+  1. `/runs`, with more than one page of history on the install. Open **Older
+     runs**: the count on the fold is the server's `total` over the whole table
+     rather than what arrived, and `1–100 of n` sits under the list with
+     Previous/Next (100 is the route's default page, unchanged from what the
+     page showed before). Page forward and back and confirm no row appears twice and
+     none is skipped — that is what the `id DESC` tiebreak is for and a fleet
+     admitting several runs inside one millisecond is what tests it.
+  2. The status segments. **Failed** must now show failed runs from the whole
+     history rather than the failed runs among the newest hundred, which is the
+     bug this change exists to fix and the one that looked identical to working.
+     Check the count moves with the segment, and that the sentence claiming the
+     route does not page beyond a hundred is gone.
+  3. The **Search** box in that fold. Type part of a task, a folder name and a
+     run id; each should narrow the list, and the request should land once after
+     typing stops rather than once per keystroke (the network panel is the only
+     place that shows it). Then **Clear filters** from the empty state, which is
+     the one way back out of a filter that matched nothing — the fold holds its
+     own controls, so a fold that vanished with its filter would strand you.
+     With a screen reader on, the count should be announced when the list is
+     replaced: nothing moves focus, so that announcement is the only signal a
+     reader gets that the filter did anything.
+  4. The two sections above the fold. A run that settles must appear under
+     **Finished in the last 24 hours** and, once the boundary steps past it, move
+     into the fold — appearing in exactly one of the two at any moment. This is
+     the shared `boundary` and it is the subtlest thing in the change: if the two
+     sides ever read different instants, a run at the 24-hour mark is drawn twice
+     or drawn nowhere, and neither says anything. The boundary is quantised to
+     the minute, so a run can sit one bucket too high for up to 60 seconds by
+     design — that is the interval at which the fold re-requests, and confirming
+     it is a network panel showing one request a minute rather than one every
+     four seconds.
+  5. `⌘K`, and type the task text of a run older than the newest hundred. That
+     run must come back — it could not before, and the empty list it used to
+     give read as "no such run exists". Each row now reads `id · task`. Confirm
+     the placeholder list still offers the six newest runs with nothing typed,
+     and that a failed read still leaves the panes listed.
+  6. A 400 nobody can reach from the UI but a URL can: `/api/runs?status=nope`
+     answers `{"error":"Unknown run status: nope"}` rather than every run. The
+     opposite choice — falling back to "all" — is what makes a miss read as an
+     absence, which is the whole subject of this entry.
+
+- **The run log's filter, and the settings field search, in a browser.** Both
+  are client-only and neither has been rendered by anything: zero page
+  components in this repository are under test, so nothing catches a visual or
+  interactive regression in either. What *is* checked: `typecheck`, `npm test`
+  (`matchesLogFilter` and `logFilterActive`, six cases — that a `tool_error`
+  stays under **Tool calls** as well as under **Warnings and failures**, that a
+  parked `status` row counts as a problem, that the two halves apply together,
+  and that whitespace is not a query), and the standalone build. The settings
+  search has **no unit test at all**, deliberately: it reads `textContent` off
+  the rendered page, so there is nothing pure to test — which also means every
+  one of its failure modes is a browser away.
+
+  What a person has to open and click, in order:
+
+  1. A run page with a long log — a few hundred lines, ideally one that hit the
+     replay cap. Type into **Find in this log**: the header count becomes
+     `n of m lines`, and with a screen reader on that same count is announced,
+     because the log narrows in place and nothing moves focus.
+  2. The **Show** picker, all five options. **Tool calls** must include the
+     calls that *failed* — that is the one thing the unit test pins and the one
+     an operator would misread as "nothing failed here". **Warnings and
+     failures** must catch a parked run's status line, not only tool errors.
+  3. A run whose replay was truncated (the log carries the `… n earlier events
+     not shown` line). With a filter on, a warning-toned hint must appear under
+     the field naming that count. Without a filter, it must not. This is the
+     one thing on the register that the filter could otherwise imply and must
+     not: that the array it searched is the log.
+  4. Autoscroll, which the filter shares state with. Scroll up in a filtered
+     log, let new lines arrive, and confirm **Jump to live** counts only the
+     lines the filter keeps. Then clear the filter: the badge must **not** jump
+     to the number of lines the filter had been hiding.
+  5. `/settings`, and **Find a setting**. Type `weekly`, `plugin`, `retention`,
+     `prompt`. Each result names its section on the right; pressing one scrolls
+     the field into view, focuses its control (the app's one focus ring is the
+     only highlight) and fills that section's chip. A match inside one of the
+     four **Prompts** folds must open the fold — `textContent` reads a closed
+     one, so a result could otherwise name something invisible.
+  6. A one-letter query, which matches most of the page: at most eight rows,
+     with `8 of n matches` under them. A capped list that does not say it is
+     capped reads as the whole answer.
+  7. That the search did not break what the page already did. Edit a field —
+     the margin rail and the bar's unsaved count must still appear; `⌘S` must
+     still save; **Discard** must still restore the saved baseline (the button
+     is `Discard`, at `src/app/settings/page.tsx:3702`; an earlier draft of this
+     entry called it Revert, which is not a control on that page). Then check a
+     field whose description interpolates its own value (any of the ceilings):
+     changing the value must change what the search finds, because the corpus
+     is the rendered page rather than an index built once.
+  8. The unsaved guard. With an edit pending, reload the page and close the tab
+     — the browser's own dialog must appear both times. Save, then reload: no
+     dialog. This is the half that fails in the direction that trains the
+     operator to dismiss it. A **client-side** navigation (a press on the
+     sidebar) still prompts nothing and cannot, which is stated in the code and
+     is the known gap.
+  9. At **390×844**: the filter's text box and picker wrap onto two lines above
+     the log rather than squeezing it; the settings search box and its results
+     stay inside the viewport with no horizontal scroll; each result row is at
+     least 44px tall. The narrow-viewport entries already on this list predate
+     both controls and cover neither.
+
 - **Context pruning inside a live run.** The whole feature. The winnow
   subprocess, the token measurement, all three prescriptions and the `.bak` it
   leaves were exercised directly against a copied transcript in the running

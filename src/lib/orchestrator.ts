@@ -764,6 +764,233 @@ export function listRuns(limit = 50): RunRow[] {
 }
 
 /**
+ * Every status a run may be in, keyed rather than listed.
+ *
+ * A `Record<RunStatus, true>` because a member added to the union and forgotten
+ * here is then a compile error. That is the trap `TERMINAL_STATUSES` records the
+ * cost of, one constant over and with a milder ending: a status missing from the
+ * set a route narrows against is a filter that refuses a state the app itself
+ * writes, so the list it names looks empty rather than wrong.
+ */
+const RUN_STATUS_KEYS: Record<RunStatus, true> = {
+  waiting: true,
+  queued: true,
+  running: true,
+  paused: true,
+  completed: true,
+  "needs-review": true,
+  stopped: true,
+  failed: true,
+  blocked: true,
+};
+
+const RUN_STATUSES = Object.keys(RUN_STATUS_KEYS) as readonly RunStatus[];
+
+/**
+ * Whether a value off a query string names a status.
+ *
+ * `includes` rather than `in`, which walks the prototype chain and would answer
+ * yes to `constructor`.
+ */
+export function isRunStatus(value: unknown): value is RunStatus {
+  return RUN_STATUSES.includes(value as RunStatus);
+}
+
+/** Rows a run-list request gets when it names no size, or names an unreadable one. */
+const DEFAULT_RUN_PAGE = 100;
+/**
+ * Rows one request may take, whatever it asks for.
+ *
+ * A hundred clipped rows measured at 698,620 bytes before the prompt clip and
+ * 175KB gzipped after it, and this is the response the runs page polls every
+ * four seconds. Twice the default is room for a caller that wants a longer page
+ * on purpose; a ceiling is what stops `?limit=100000` being one request that
+ * serialises the whole table.
+ */
+const MAX_RUN_PAGE = 200;
+/**
+ * Characters of the operator's text a search matches on.
+ *
+ * `LIKE '%…%'` cannot use an index whatever the needle is, so the cost is one
+ * scan either way — what this bounds is the per-row comparison, and a needle
+ * longer than a couple of lines is a paste rather than a search.
+ */
+const MAX_RUN_QUERY = 200;
+
+export interface RunListQuery {
+  /** Rows to skip. Clamped into the list rather than refused. */
+  offset?: number;
+  /** Rows to take. Absent, zero, negative or unreadable is `DEFAULT_RUN_PAGE`. */
+  limit?: number;
+  /** One status, or null for every status. Narrowed by the caller. */
+  status?: RunStatus | null;
+  /** Free text, matched against the task, the folder and the id. */
+  q?: string | null;
+  /**
+   * Settled runs that ended strictly before this instant, in ms.
+   *
+   * "Settled" is `TERMINAL_STATUSES` and is part of the filter rather than
+   * something a caller adds on top: a `queued` run created three days ago has
+   * no end instant at all, and `COALESCE(finished_at, started_at, created_at)`
+   * would answer for it with the moment it was *made* — filing a run that has
+   * not happened yet under what has.
+   */
+  settledBefore?: number | null;
+}
+
+/** A run-list request in the terms the query below is written in. */
+export interface RunListFilters {
+  offset: number;
+  limit: number;
+  status: RunStatus | null;
+  /** A `LIKE` pattern with `\` as its escape, or null for no text filter. */
+  like: string | null;
+  settledBefore: number | null;
+}
+
+export interface RunListPage {
+  rows: RunRow[];
+  /** Runs matching the filter, counted over the table rather than the page. */
+  total: number;
+  /** Where this page starts, after the clamp below. */
+  offset: number;
+  /** The page size actually applied, after the cap above. */
+  limit: number;
+}
+
+/**
+ * The operator's text as a `LIKE` needle.
+ *
+ * The escape is the whole of why this is not an interpolation: `%` and `_` are
+ * wildcards, so a search for `50%` or `a_b` typed into the box would silently
+ * match rows that hold neither. Both are ordinary characters in a task prompt
+ * and in a folder name.
+ */
+function likeNeedle(text: string): string {
+  return `%${text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+}
+
+/**
+ * What a run-list request actually asks for.
+ *
+ * Pure, and separated from the query below for the reason
+ * `selectBranchCandidates` is separated from the git work: the failure mode is
+ * silent. Every value here arrives off a query string, so every one of them can
+ * be missing, blank, a word or a negative number, and each wrong answer is a
+ * list that looks like an answer — a one-row page for a typo'd `limit`, an
+ * unescaped wildcard matching rows that hold no such text, an epoch of 0 read as
+ * a real boundary and hiding every settled run there is.
+ *
+ * A limit that is missing, zero, negative or unreadable is the default page
+ * rather than the smallest legal one, which is `selectBranchCandidates`'
+ * reasoning verbatim: these arrive off a query string and a one-row page is a
+ * far worse answer to a typo than the ordinary one.
+ */
+export function normalizeRunListQuery(query: RunListQuery = {}): RunListFilters {
+  const askedLimit = Math.floor(Number(query.limit));
+  const limit =
+    Number.isFinite(askedLimit) && askedLimit > 0
+      ? Math.min(MAX_RUN_PAGE, askedLimit)
+      : DEFAULT_RUN_PAGE;
+
+  const askedOffset = Math.floor(Number(query.offset));
+  const offset = Number.isFinite(askedOffset) && askedOffset > 0 ? askedOffset : 0;
+
+  const text = (query.q ?? "").trim().slice(0, MAX_RUN_QUERY);
+
+  // A boundary at or before the epoch is nobody's boundary: it is what
+  // `Number(null)`, `Number("")` and a blank parameter all come to, and read as
+  // a real instant it would answer every history request with an empty page.
+  const before = Math.floor(Number(query.settledBefore));
+
+  return {
+    offset,
+    limit,
+    status: query.status ?? null,
+    like: text ? likeNeedle(text) : null,
+    settledBefore: Number.isFinite(before) && before > 0 ? before : null,
+  };
+}
+
+/**
+ * Where a page starts, once the total is known.
+ *
+ * Clamped rather than refused, which is `selectBranchCandidates`' reasoning
+ * again: an offset past the end is what pressing Next on a list that shrank
+ * under you produces, and a short last page with an honest total is a better
+ * answer than a 400 or an empty list that reads as "nothing matches".
+ */
+export function clampRunOffset(offset: number, total: number): number {
+  return Math.min(Math.max(0, Math.floor(offset) || 0), Math.max(0, total - 1));
+}
+
+/**
+ * One page of runs, newest first, with the count the page is a slice of.
+ *
+ * `total` is counted over every matching row rather than over the page, for the
+ * reason `branchInventory` counts over every branch-bearing run: a count that is
+ * itself truncated cannot say a run has fallen out of reach, and the hundred-row
+ * ceiling this replaces was invisible for the first ninety-nine runs.
+ *
+ * `id DESC` behind `created_at DESC` is not decoration. `created_at` is a
+ * millisecond stamp and a fleet admits several runs inside one, so without a
+ * tiebreak two rows with the same stamp may order differently between two
+ * requests — which on a paged list means one of them appears twice and the other
+ * never appears at all.
+ *
+ * It also needs no index of its own, which was measured rather than assumed:
+ * against 50,000 rows in groups of 25 sharing a millisecond, the plan is `SCAN
+ * runs USING INDEX idx_runs_created` plus `USE TEMP B-TREE FOR LAST TERM OF
+ * ORDER BY` — SQLite sorts only within each equal-`created_at` group — and the
+ * unfiltered first page costs 0.23ms against 0.14ms without the tiebreak. A
+ * dedicated `(created_at DESC, id DESC)` index removes the B-tree and brings it
+ * to 0.15ms, which is not worth a migration. The two slower shapes are 7.8ms for
+ * a status page at offset 20,000 and 4.1ms for a `LIKE` over `prompt`, and
+ * neither is on the four-second poll: that one is the unfiltered first page.
+ */
+export function listRunsPage(query: RunListQuery = {}): RunListPage {
+  const filters = normalizeRunListQuery(query);
+
+  const where: string[] = [];
+  const args: unknown[] = [];
+  if (filters.status) {
+    where.push("status = ?");
+    args.push(filters.status);
+  }
+  if (filters.settledBefore !== null) {
+    where.push(
+      `status IN (${TERMINAL_STATUSES.map(() => "?").join(",")})` +
+        " AND COALESCE(finished_at, started_at, created_at) < ?",
+    );
+    args.push(...TERMINAL_STATUSES, filters.settledBefore);
+  }
+  if (filters.like) {
+    where.push(
+      "(prompt LIKE ? ESCAPE '\\' OR folder LIKE ? ESCAPE '\\'" +
+        " OR id LIKE ? ESCAPE '\\')",
+    );
+    args.push(filters.like, filters.like, filters.like);
+  }
+  const clause = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+
+  const total = (
+    db()
+      .prepare(`SELECT COUNT(*) AS n FROM runs${clause}`)
+      .get(...args) as { n: number }
+  ).n;
+  const offset = clampRunOffset(filters.offset, total);
+
+  const rows = db()
+    .prepare(
+      `SELECT * FROM runs${clause}` +
+        " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+    )
+    .all(...args, filters.limit, offset) as RunRow[];
+
+  return { rows, total, offset, limit: filters.limit };
+}
+
+/**
  * Events for a run, oldest first.
  *
  * `limit` keeps the *newest* rows and reports how many were dropped. A run that

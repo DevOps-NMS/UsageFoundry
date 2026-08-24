@@ -5,7 +5,8 @@
 ## Start here
 
 - **[Installation and setup](install.md)** — Docker, signing the container in,
-  required environment, Linux `UF_UID`, multiple workspaces, GitHub access.
+  required environment, Linux `UF_UID`, multiple workspaces, GitHub access, and
+  finding a field on the Settings page without losing an unsaved edit.
 - **[Backup and restore](backup-and-restore.md)** — every run, every cost, every
   workflow and every schedule is one file in one volume with no second copy.
   How to snapshot it while runs are working, how to put it back, and why `cp`
@@ -19,7 +20,8 @@
 
 - **[Runs](runs.md)** — the run loop, the guarantee stated honestly, budget
   policy, the **Needs review** ending an agent asks for when it cannot finish,
-  picking a run back up, and two runs on one project.
+  picking a run back up, finding a run afterwards — the paged history, `⌘K` and
+  the log's filter — and two runs on one project.
 - **[Workflows](workflows.md)** — saved graphs of blocks, orchestrator blocks
   that decide what to run, merge blocks that land it, whole-graph budgets, and
   schedules.

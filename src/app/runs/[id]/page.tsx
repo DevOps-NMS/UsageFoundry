@@ -29,7 +29,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, Stat } from "@/components/ui/Card";
 import { Disclosure } from "@/components/ui/Disclosure";
-import { Field, Input, Textarea } from "@/components/ui/Field";
+import { Field, Input, Select, Textarea } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Log, LogLine, Spinner } from "@/components/ui/Log";
@@ -41,7 +41,13 @@ import {
 } from "@/components/ui/SegmentedControl";
 import { StatusMark } from "@/components/StatusMark";
 import { cycleOutputs } from "@/lib/cycles";
-import { describeEvent } from "@/lib/logLine";
+import {
+  LOG_FILTER_OPTIONS,
+  describeEvent,
+  logFilterActive,
+  matchesLogFilter,
+  type LogFilterKind,
+} from "@/lib/logLine";
 import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { RunAgentCost } from "@/components/RunAgentCost";
 import { RunDiff } from "@/components/RunDiff";
@@ -459,6 +465,10 @@ export default function RunDetail({
   const [reopenMinutes, setReopenMinutes] = useState("");
   const [reopenNote, setReopenNote] = useState("");
   const [tab, setTab] = useState<RunTab>("log");
+  // The log's filter. Over the events already in client state and nowhere near
+  // the route: this narrows what is drawn, it does not ask for more.
+  const [logQuery, setLogQuery] = useState("");
+  const [logKind, setLogKind] = useState<LogFilterKind>("all");
   const logRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
   // Mirrors `pinnedToBottom` into render, because the way back to the live edge
@@ -468,6 +478,9 @@ export default function RunDetail({
   const [atLiveEdge, setAtLiveEdge] = useState(true);
   const [missed, setMissed] = useState(0);
   const seenLines = useRef(0);
+  // Which filter `seenLines` was counted under, so a change to it is told apart
+  // from lines arriving. Both move the same number.
+  const seenFilter = useRef("");
 
   const status = run?.status;
   const active = status !== undefined && ACTIVE_STATUSES.has(status);
@@ -581,8 +594,44 @@ export default function RunDetail({
         const entry = describeEvent(e);
         return entry === null
           ? []
-          : [{ key: e.id ?? `${e.ts}-${i}`, ts: e.ts, entry }];
+          : [{ key: e.id ?? `${e.ts}-${i}`, ts: e.ts, kind: e.kind, entry }];
       }),
+    [events],
+  );
+
+  const logFilter = useMemo(
+    () => ({ query: logQuery, kind: logKind }),
+    [logQuery, logKind],
+  );
+  const filtering = logFilterActive(logFilter);
+  // The kind leads and a space separates: the union has no spaces in it, so no
+  // two filters can produce one key however the query is worded.
+  const filterKey = `${logKind} ${logQuery}`;
+  const shown = useMemo(
+    () =>
+      filtering
+        ? lines.filter((l) => matchesLogFilter(l.kind, l.entry, logFilter))
+        : lines,
+    [lines, logFilter, filtering],
+  );
+
+  /**
+   * How many events the replay never sent, as the stream route counted them.
+   *
+   * Summed rather than taken from the newest notice: a reconnect replays from
+   * the last event this page saw, so each notice is about a different gap, and
+   * every one of them is events the filter below has no way to search.
+   */
+  const droppedEvents = useMemo(
+    () =>
+      events.reduce(
+        (n, e) =>
+          n +
+          (typeof e.payload?.droppedEvents === "number"
+            ? e.payload.droppedEvents
+            : 0),
+        0,
+      ),
     [events],
   );
 
@@ -597,14 +646,25 @@ export default function RunDetail({
   useEffect(() => {
     const el = logRef.current;
     if (!el || tab !== "log") return;
+    // Narrowing the log is a new view of it, so what counts as "arrived while
+    // you were reading" starts again. Without this, clearing a filter reports
+    // every line it had been hiding as new — a "300 new" badge on a button
+    // that jumps to a tail nothing has been added to.
+    if (seenFilter.current !== filterKey) {
+      seenFilter.current = filterKey;
+      seenLines.current = shown.length;
+      setMissed(0);
+      if (pinnedToBottom.current) el.scrollTop = el.scrollHeight;
+      return;
+    }
     if (pinnedToBottom.current) {
       el.scrollTop = el.scrollHeight;
-      seenLines.current = lines.length;
+      seenLines.current = shown.length;
       setMissed(0);
     } else {
-      setMissed(Math.max(0, lines.length - seenLines.current));
+      setMissed(Math.max(0, shown.length - seenLines.current));
     }
-  }, [lines.length, tab]);
+  }, [shown.length, tab, filterKey]);
 
   function onScroll() {
     const el = logRef.current;
@@ -615,7 +675,7 @@ export default function RunDetail({
     // the scrollbar does not re-render the page on every frame.
     setAtLiveEdge((prev) => (prev === pinned ? prev : pinned));
     if (pinned) {
-      seenLines.current = lines.length;
+      seenLines.current = shown.length;
       setMissed(0);
     }
   }
@@ -626,9 +686,9 @@ export default function RunDetail({
     el.scrollTop = el.scrollHeight;
     pinnedToBottom.current = true;
     setAtLiveEdge(true);
-    seenLines.current = lines.length;
+    seenLines.current = shown.length;
     setMissed(0);
-  }, [lines.length]);
+  }, [shown.length]);
 
   /** Coming back to the log lands on the live edge, not where you left it. */
   function selectTab(next: RunTab) {
@@ -1453,6 +1513,11 @@ export default function RunDetail({
             />
             {activeTab === "log" && (
               <div className="flex items-center gap-2 text-xs tabular-nums text-ink-muted">
+                {/* The filter's own readout, because the count is what says a
+                    filter is on: "12 of 431" is the fact, and a bare 12 beside
+                    a box with words in it is the same number as a run that
+                    only wrote twelve lines. */}
+                {filtering && `${shown.length} of `}
                 {lines.length} line{lines.length === 1 ? "" : "s"}
                 {/* Only while the run can still produce output: a finished run
                     whose stream has closed is not "disconnected", it is over. */}
@@ -1467,49 +1532,120 @@ export default function RunDetail({
           </div>
 
           {activeTab === "log" && (
-            <div className="relative lg:min-h-[18rem] lg:flex-1">
-              <Log
-                ref={logRef}
-                onScroll={onScroll}
-                size="pane"
-                label="Run event log"
-              >
-                {lines.length === 0 && (
-                  <div className="font-sans">
-                    <Empty>
-                      {active
-                        ? "Waiting for the first turn…"
-                        : "This run produced no output."}
-                    </Empty>
-                  </div>
-                )}
-                {lines.map((l) => (
-                  <LogLine
-                    key={l.key}
-                    entry={l.entry}
-                    timestamp={fmtClock(l.ts)}
-                  />
-                ))}
-              </Log>
+            <>
+              {/* Over the events already in client state, and that is the whole
+                  of what it is: no route, no query, nothing fetched. The
+                  Field's own bottom margin is the gap to the log below it —
+                  a caller's `mb-0` on a Field is a no-op, since Tailwind emits
+                  a numeric utility's values ascending and the component's own
+                  `mb-3.5` wins whatever the call site writes. */}
+              {/* `items-start`, not `items-end`: the text field grows a hint
+                  when the replay was truncated, and aligned on their bottoms
+                  the picker would drop a line lower the moment it appeared. */}
+              <div className="flex flex-wrap items-start gap-3">
+                <div className="min-w-0 flex-1 basis-56">
+                  <Field
+                    label="Find in this log"
+                    htmlFor="log-filter-text"
+                    // Only while a filter is on, and only when the replay was
+                    // cut: the log's own truncation line already says the log
+                    // is not all of it, and what this adds is that the *filter*
+                    // searched only what is here. A filter that finds nothing
+                    // in a truncated log otherwise reads as proof of absence.
+                    hint={
+                      filtering && droppedEvents > 0
+                        ? `${droppedEvents.toLocaleString()} earlier events were never sent to this page, so nothing in them can match`
+                        : undefined
+                    }
+                    hintTone="warn"
+                  >
+                    <Input
+                      id="log-filter-text"
+                      type="search"
+                      placeholder="Text in a line"
+                      value={logQuery}
+                      onChange={(e) => setLogQuery(e.target.value)}
+                    />
+                  </Field>
+                </div>
+                {/* The width is on a wrapper, never on the control, and it goes
+                    full width once the two have wrapped — a 224px picker on a
+                    390px line reads as a control that failed to stretch. */}
+                <div className="w-56 max-md:w-full">
+                  <Field label="Show" htmlFor="log-filter-kind">
+                    <Select
+                      id="log-filter-kind"
+                      value={logKind}
+                      onChange={(e) =>
+                        setLogKind(e.target.value as LogFilterKind)
+                      }
+                    >
+                      {LOG_FILTER_OPTIONS.map((o) => (
+                        <option key={o.value} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                </div>
+              </div>
 
-              {/* The way back. Autoscroll stops the moment the reader scrolls
-                  up, which is right — but without this the only way to rejoin
-                  the tail of a long log is to drag to the bottom by hand. */}
-              {!atLiveEdge && lines.length > 0 && (
-                <Button
-                  variant="secondary"
-                  className="absolute bottom-3 right-4 shadow-e2"
-                  onClick={jumpToLive}
+              {/* The log narrows in place and nothing moves focus, so a reader
+                  who cannot see the count in the header above has no signal
+                  that the filter did anything. Same sr-only shape as the runs
+                  history's own filter. */}
+              <p className="sr-only" aria-live="polite">
+                {filtering
+                  ? `${shown.length} of ${lines.length} lines shown`
+                  : ""}
+              </p>
+
+              <div className="relative lg:min-h-[18rem] lg:flex-1">
+                <Log
+                  ref={logRef}
+                  onScroll={onScroll}
+                  size="pane"
+                  label="Run event log"
                 >
-                  Jump to live
-                  {missed > 0 && (
-                    <span className="ml-1.5 tabular-nums text-ink-muted">
-                      {missed} new
-                    </span>
+                  {shown.length === 0 && (
+                    <div className="font-sans">
+                      <Empty>
+                        {filtering
+                          ? "No line here matches."
+                          : active
+                            ? "Waiting for the first turn…"
+                            : "This run produced no output."}
+                      </Empty>
+                    </div>
                   )}
-                </Button>
-              )}
-            </div>
+                  {shown.map((l) => (
+                    <LogLine
+                      key={l.key}
+                      entry={l.entry}
+                      timestamp={fmtClock(l.ts)}
+                    />
+                  ))}
+                </Log>
+
+                {/* The way back. Autoscroll stops the moment the reader scrolls
+                    up, which is right — but without this the only way to rejoin
+                    the tail of a long log is to drag to the bottom by hand. */}
+                {!atLiveEdge && shown.length > 0 && (
+                  <Button
+                    variant="secondary"
+                    className="absolute bottom-3 right-4 shadow-e2"
+                    onClick={jumpToLive}
+                  >
+                    Jump to live
+                    {missed > 0 && (
+                      <span className="ml-1.5 tabular-nums text-ink-muted">
+                        {missed} new
+                      </span>
+                    )}
+                  </Button>
+                )}
+              </div>
+            </>
           )}
 
           {activeTab === "report" && <RunOutput cycles={cycles} />}

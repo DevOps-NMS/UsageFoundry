@@ -65,12 +65,15 @@ fs.mkdirSync(process.env.TMPDIR, { recursive: true });
 // above, and the module reads WORKSPACE_ROOTS once at load.
 const {
   buildArgs,
+  clampRunOffset,
   compactionNotice,
   conflictKey,
   contextShapingEnv,
   cycleEnding,
   cycleSilenceMs,
   dependencyCycle,
+  isRunStatus,
+  normalizeRunListQuery,
   duePausedRuns,
   edgeSatisfied,
   injectionFates,
@@ -4464,5 +4467,150 @@ describe("what a lifecycle event says on stdout", () => {
     const line = one(event("error", { message: "Failed to launch /nope: ENOENT" }));
     assert.equal(line.retrying, null);
     assert.equal(line.usage_limit, null);
+  });
+});
+
+/**
+ * What a run-list request asks for, once every value has come off a query
+ * string.
+ *
+ * It earns a test on the same grounds `selectBranchCandidates` does: it is pure
+ * and every way it can be wrong produces a list that looks like an answer.
+ * Nothing throws, nothing fails to typecheck, and the page renders rows. A
+ * `limit` read as one row, a wildcard the operator typed and this did not
+ * escape, an epoch of 0 read as a real boundary — each of them is a page of runs
+ * that is not the page that was asked for, and the failure that matters most
+ * here is the one this route was parameterised to end: a miss that reads as an
+ * absence.
+ */
+describe("normalizeRunListQuery", () => {
+  it("answers an unreadable page size with the ordinary page, not the smallest one", () => {
+    // `selectBranchCandidates`' reasoning verbatim: these arrive off a query
+    // string, and a one-row page is a far worse answer to a typo than 100 rows.
+    assert.equal(normalizeRunListQuery().limit, 100);
+    assert.equal(normalizeRunListQuery({ limit: 0 }).limit, 100);
+    assert.equal(normalizeRunListQuery({ limit: -3 }).limit, 100);
+    assert.equal(normalizeRunListQuery({ limit: Number("nope") }).limit, 100);
+    // Infinity is not a page size either, and lands where every other
+    // unreadable value lands rather than on the ceiling. `Number.isFinite` is
+    // the same guard `selectBranchCandidates` applies to the same parameter.
+    assert.equal(normalizeRunListQuery({ limit: Infinity }).limit, 100);
+  });
+
+  it("caps a page at the ceiling and honours anything under it", () => {
+    assert.equal(normalizeRunListQuery({ limit: 25 }).limit, 25);
+    assert.equal(normalizeRunListQuery({ limit: 5000 }).limit, 200);
+    // A fractional page size is a page size, floored — `Number("25.7")` is what
+    // `?limit=25.7` comes to and 25.7 rows is not a LIMIT SQLite will take.
+    assert.equal(normalizeRunListQuery({ limit: 25.7 }).limit, 25);
+  });
+
+  it("reads a missing, negative or unreadable offset as the first page", () => {
+    assert.equal(normalizeRunListQuery().offset, 0);
+    assert.equal(normalizeRunListQuery({ offset: -40 }).offset, 0);
+    assert.equal(normalizeRunListQuery({ offset: Number("") }).offset, 0);
+    assert.equal(normalizeRunListQuery({ offset: 120 }).offset, 120);
+    assert.equal(normalizeRunListQuery({ offset: 120.9 }).offset, 120);
+  });
+
+  it("escapes the wildcards a task or a folder may legitimately hold", () => {
+    // The whole reason the needle is built here rather than interpolated at the
+    // query: `%` and `_` are LIKE wildcards, and both are ordinary characters in
+    // a prompt. Unescaped, a search for `50%` matches every run there is.
+    assert.equal(normalizeRunListQuery({ q: "50%" }).like, "%50\\%%");
+    assert.equal(normalizeRunListQuery({ q: "a_b" }).like, "%a\\_b%");
+    // And the escape character itself, or the escape stops meaning anything.
+    assert.equal(normalizeRunListQuery({ q: "a\\b" }).like, "%a\\\\b%");
+  });
+
+  it("reads a blank query as no text filter at all", () => {
+    // Not as a needle that matches everything and not as one that matches
+    // nothing: absent, so the clause is never added.
+    assert.equal(normalizeRunListQuery().like, null);
+    assert.equal(normalizeRunListQuery({ q: "" }).like, null);
+    assert.equal(normalizeRunListQuery({ q: "   " }).like, null);
+    assert.equal(normalizeRunListQuery({ q: null }).like, null);
+    assert.equal(normalizeRunListQuery({ q: " fix the cache " }).like, "%fix the cache%");
+  });
+
+  it("bounds the needle rather than comparing a paste against every row", () => {
+    const like = normalizeRunListQuery({ q: "x".repeat(5000) }).like;
+    // 200 characters plus the two wildcards this wraps them in.
+    assert.equal(like?.length, 202);
+  });
+
+  it("reads a boundary at or before the epoch as no boundary", () => {
+    // `Number(null)`, `Number("")` and a blank `?settledBefore=` all come to 0
+    // or NaN. Read as a real instant, every one of them would answer a history
+    // request with an empty page — which on that page reads as "no older runs".
+    assert.equal(normalizeRunListQuery().settledBefore, null);
+    assert.equal(normalizeRunListQuery({ settledBefore: 0 }).settledBefore, null);
+    assert.equal(normalizeRunListQuery({ settledBefore: -1 }).settledBefore, null);
+    assert.equal(
+      normalizeRunListQuery({ settledBefore: Number("yesterday") }).settledBefore,
+      null,
+    );
+    assert.equal(
+      normalizeRunListQuery({ settledBefore: 1_750_000_000_000 }).settledBefore,
+      1_750_000_000_000,
+    );
+  });
+
+  it("carries no status when none was named", () => {
+    // Null rather than undefined, because the query below tests `!== null` to
+    // decide whether the clause exists at all.
+    assert.equal(normalizeRunListQuery().status, null);
+    assert.equal(normalizeRunListQuery({ status: "failed" }).status, "failed");
+  });
+});
+
+describe("clampRunOffset", () => {
+  it("lands a page past the end on the last rows rather than on nothing", () => {
+    // Pressing Next on a list that shrank under you is how an offset gets past
+    // the end, and an empty page reads as "nothing matches".
+    assert.equal(clampRunOffset(400, 10), 9);
+    assert.equal(clampRunOffset(10, 10), 9);
+    assert.equal(clampRunOffset(9, 10), 9);
+  });
+
+  it("stays at zero on an empty list", () => {
+    // `total - 1` is -1 here, and a negative OFFSET is an error SQLite raises.
+    assert.equal(clampRunOffset(0, 0), 0);
+    assert.equal(clampRunOffset(500, 0), 0);
+  });
+
+  it("refuses to walk backwards off the front", () => {
+    assert.equal(clampRunOffset(-40, 100), 0);
+    assert.equal(clampRunOffset(Number.NaN, 100), 0);
+  });
+});
+
+describe("isRunStatus", () => {
+  it("admits every status the app writes", () => {
+    for (const status of [
+      "waiting",
+      "queued",
+      "running",
+      "paused",
+      "completed",
+      "needs-review",
+      "stopped",
+      "failed",
+      "blocked",
+    ]) {
+      assert.equal(isRunStatus(status), true, status);
+    }
+  });
+
+  it("refuses what is not one, including what a prototype would answer for", () => {
+    // The reason this is `includes` and not `in`: `in` walks the prototype
+    // chain, so `?status=constructor` would pass the narrow at the route's door
+    // and reach the query as a status no row can hold.
+    assert.equal(isRunStatus("constructor"), false);
+    assert.equal(isRunStatus("toString"), false);
+    assert.equal(isRunStatus(""), false);
+    assert.equal(isRunStatus("Failed"), false);
+    assert.equal(isRunStatus(null), false);
+    assert.equal(isRunStatus(7), false);
   });
 });

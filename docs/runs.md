@@ -364,6 +364,57 @@ already started — a run copies every value it needs the moment it is created.
 
 ---
 
+## Finding a run you have already done
+
+**Runs** is three lists, and only the third one reaches the whole history.
+
+The two at the top are what is happening now: runs in flight, then runs that
+finished in the **last 24 hours**. Both are the four-second poll and neither is
+filtered — they are the page's answer to "what is the fleet doing", and they stop
+at that boundary.
+
+**Older runs** is the fold underneath, and it asks the server. It carries its own
+**Search** box — matching the task text, the folder and the run id — and segments
+for how a run ended: All, Completed, Needs review, Stopped, Failed, Blocked. Both
+narrow **every** matching row rather than the newest page of them, which is the
+distinction worth knowing: *Failed* means the failed runs, not the failed runs
+among the newest hundred. The count on the fold and the `1–100 of n` under the
+list are counted over the whole table, so the list can say what it is a slice of,
+and **Previous** / **Next** walk it a hundred rows at a time.
+
+A run sits in exactly one of the three at any moment. The 24-hour boundary is
+rounded down to the minute, so a run can stay one list too high for up to a
+minute after it crosses — that is by design, and it is why the fold does not
+re-request every four seconds.
+
+If a search matches nothing the fold stays open with a **Clear filters** button
+in it. A fold that vanished with its own filter would take away the only way back
+out.
+
+**`⌘K` reaches a run the list has not got to.** Type part of a task, a folder or
+an id and quick open asks the server, so a run further back than the newest
+hundred comes back — it could not before, and the empty list it used to give read
+as "no such run exists". Each result reads `id · task`. With nothing typed it
+offers the six newest runs, the panes and your workflows. It navigates and
+nothing else: no run starts, nothing is approved and nothing is stopped from
+there, because a keystroke away from spending money is what every approval gate
+in this app exists to prevent.
+
+**A run's own log has a filter.** On the run page, **Find in this log** narrows
+by text and **Show** narrows by kind — everything, what the agent said, tool
+calls, this app's notices, or warnings and failures. Two things about it are
+worth trusting rather than checking: *Tool calls* includes the calls that
+**failed**, and *Warnings and failures* catches a parked or blocked status line
+and not only tool errors. The header count reads `n of m lines` while a filter is
+on.
+
+The one limit: it searches the log **on the page**, and a long run's log is
+replayed with a cap. If the replay was cut, the field says so underneath while a
+filter is on, naming how many earlier events were never sent — nothing in them
+can match. The whole log is in the database either way.
+
+---
+
 ## Two runs, one project
 
 Several runs can be in flight at once. What happens when two of them want the

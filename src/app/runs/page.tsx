@@ -1,8 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import type { BootReconcileDTO, RunListItemDTO } from "@/lib/apiTypes";
+import type {
+  BootReconcileDTO,
+  RunListDTO,
+  RunListItemDTO,
+} from "@/lib/apiTypes";
 import {
   fmtCycleInFlight,
   fmtCycles,
@@ -14,13 +18,15 @@ import {
   pollFailureMessage,
   shortPath,
 } from "@/lib/format";
+import { jsonRequest } from "@/lib/jsonRequest";
 import { FleetControls } from "@/components/FleetControls";
 import { RestartClosed } from "@/components/RestartClosed";
 import { StatusMark } from "@/components/StatusMark";
 import { Badge } from "@/components/ui/Badge";
-import { Button, ButtonLink } from "@/components/ui/Button";
+import { Button, ButtonLink, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Disclosure } from "@/components/ui/Disclosure";
+import { Field, Input } from "@/components/ui/Field";
 import { ListView, STICKY_HEAD } from "@/components/ui/ListView";
 import { Notice } from "@/components/ui/Notice";
 import {
@@ -78,9 +84,33 @@ const REOPENABLE: ReadonlySet<RunListItemDTO["status"]> = new Set(["failed", "st
 
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-/** The list route returns this many; anything older is simply not on the wire. */
-const SERVER_LIMIT = 100;
+/**
+ * The instant dividing "finished in the last 24 hours" from "older", to the
+ * minute.
+ *
+ * Quantised because it is read in two places that must agree — the bucket pass
+ * over the poll's rows, and the `settledBefore` the older-runs fold asks the
+ * route for — and the fold re-requests whenever it moves. At millisecond
+ * resolution that is a request per poll for an answer that cannot have changed;
+ * pinned, the heading drifts on a tab left open overnight and eventually claims
+ * a run finished in the last 24 hours that finished the day before. A minute is
+ * the coarsest step nobody can see against a 24-hour window, and it bounds how
+ * long a run can sit one bucket too high at 60 seconds — under the slack the
+ * four-second poll already has.
+ */
+function bucketBoundary(at: number): number {
+  return Math.floor((at - RECENT_WINDOW_MS) / 60_000) * 60_000;
+}
 
+/**
+ * How the fold below narrows the history, and every value but `all` is a
+ * `status` on the wire.
+ *
+ * These used to be a filter over the rows that had already arrived, which meant
+ * "Failed" showed the failed runs among the hundred newest — the same shape of
+ * answer as the question asked, and wrong. The server does it now, so the fold
+ * pages the whole table.
+ */
 type Filter = "all" | "completed" | "needs-review" | "stopped" | "failed" | "blocked";
 
 const FILTERS: readonly SegmentedOption<Filter>[] = [
@@ -492,21 +522,47 @@ export default function RunsPage() {
   const [runs, setRuns] = useState<RunListItemDTO[]>([]);
   const [boot, setBoot] = useState<BootReconcileDTO | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [filter, setFilter] = useState<Filter>("all");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
+
+  // What the fold at the bottom is asking the server for. Held here rather than
+  // read back off the answer so pressing Next twice in a row is two pages
+  // forward and not two requests for the same one — the branches page's own
+  // note, and the same reason its offset lives beside its repository.
+  const [filter, setFilter] = useState<Filter>("all");
+  const [query, setQuery] = useState("");
+  const [settledQuery, setSettledQuery] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [history, setHistory] = useState<RunListDTO | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  /** Which history request is allowed to write; see `loadHistory`. */
+  const historyRequest = useRef(0);
+
+  /**
+   * The instant that divides "finished in the last 24 hours" from "older".
+   *
+   * One value, read by both sides, which is the whole point: the poll's rows are
+   * bucketed against it here and the fold asks the route for the settled runs
+   * from *before* it. Two clocks a few seconds apart would leave a run sitting
+   * on the boundary in neither list — on this page a run that has simply
+   * vanished — or in both, which is the duplication the bucket pass below was
+   * written to end. Advanced by the poll and quantised by `bucketBoundary`, so
+   * the fold reloads when it steps rather than on every poll.
+   */
+  const [boundary, setBoundary] = useState(() => bucketBoundary(Date.now()));
   // Ticked into state rather than read during render: paused runs show a live
   // countdown, and a Date.now() in the render body differs between the server
   // pass and hydration.
   //
-  // Two clocks, because two different things ask the time here and only one of
-  // them counts down. `now` is the countdown's, and it runs only while a run is
-  // actually waiting on one — see `counting` below. `readAt` is the instant the
-  // list on screen was read, and it is what everything measuring an *age*
-  // against it uses: the 24-hour bucket boundary and the restart notice's
-  // relative phrase. Those answers cannot change without the rows changing, so
-  // they move once per poll rather than sixty times a minute.
+  // Three clocks, because three different things ask the time here and only one
+  // of them counts down. `now` is the countdown's, and it runs only while a run
+  // is actually waiting on one — see `counting` below. `readAt` is the instant
+  // the list on screen was read, and it is what the restart notice's relative
+  // phrase measures its age against: that answer cannot change without the rows
+  // changing, so it moves once per poll rather than sixty times a minute.
+  // `boundary` above is the third and is the one shared with the server.
   const [now, setNow] = useState(() => Date.now());
   const [readAt, setReadAt] = useState(() => Date.now());
 
@@ -522,19 +578,22 @@ export default function RunsPage() {
       const res = await fetch("/api/runs", { cache: "no-store" });
       // Parsed before the status check: a 500 carries no JSON, and letting that
       // throw would report a reachable server as an unreachable one.
-      const data = (await res.json().catch(() => ({}))) as {
-        runs?: RunListItemDTO[];
-        lastBootReconcile?: BootReconcileDTO | null;
-        error?: string;
-      };
+      const data = (await res.json().catch(() => ({}))) as Partial<
+        RunListDTO & { error: string }
+      >;
       if (!res.ok || !data.runs) {
         const detail = data.error ?? (res.ok ? "no runs in the response" : null);
         setPollError(pollFailureMessage(res.status, detail));
         return;
       }
+      const at = Date.now();
       setRuns(data.runs);
       setBoot(data.lastBootReconcile ?? null);
-      setReadAt(Date.now());
+      setReadAt(at);
+      // The bucket boundary rides the poll rather than a clock of its own, and
+      // steps once a minute: React discards an identical number, so the fourteen
+      // polls in between are not fourteen reloads of the fold below.
+      setBoundary(bucketBoundary(at));
       setPollError(null);
     } catch (err) {
       const cause = err instanceof Error ? err.message : String(err);
@@ -551,11 +610,73 @@ export default function RunsPage() {
   }, [loadRuns]);
 
   /**
+   * The fold's own page of history, filtered and paged by the server.
+   *
+   * A second request rather than a slice of the first, because the two ask
+   * different questions of the same table. The poll above is "what is happening
+   * now": the newest page, unfiltered, every four seconds, and it is what the
+   * two sections above are drawn from. This is "what happened": one page of the
+   * runs that settled before the boundary, narrowed by whatever the fold's own
+   * controls say, over every row there is rather than over the newest hundred.
+   *
+   * Not on the four-second poll. A run that settled more than a day ago does not
+   * move on its own, so this reloads on what actually changes it: one of the
+   * fold's own controls, the boundary stepping to the next minute, or an
+   * operator picking a run up through `reload` below.
+   */
+  const loadHistory = useCallback(async () => {
+    // Only the newest request may write. The search settles into one request
+    // and each press of Next fires another, so two can be in flight at once —
+    // and a slow earlier answer landing last would put a page nobody asked for
+    // on screen, with the controls above it describing a different one and
+    // nothing saying so.
+    const ticket = ++historyRequest.current;
+    setHistoryLoading(true);
+    // The same value the bucket pass below cuts on, never a second reading of
+    // the clock. See `boundary`.
+    const params = new URLSearchParams({ settledBefore: String(boundary) });
+    if (filter !== "all") params.set("status", filter);
+    if (settledQuery) params.set("q", settledQuery);
+    if (offset > 0) params.set("offset", String(offset));
+
+    const res = await jsonRequest<RunListDTO>(`/api/runs?${params}`);
+    if (ticket !== historyRequest.current) return;
+    setHistoryLoading(false);
+    if (!res.ok) {
+      setHistoryError(pollFailureMessage(res.status, res.error));
+      return;
+    }
+    setHistory(res.data);
+    setHistoryError(null);
+  }, [filter, settledQuery, offset, boundary]);
+
+  useEffect(() => {
+    void loadHistory();
+  }, [loadHistory]);
+
+  // A keystroke is not a request: the box is read 250ms after the last one, the
+  // figure the vault's own search box settles on. The offset goes with it,
+  // because keeping a page-three offset across a narrower search answers it with
+  // an empty page, which reads as "nothing matches".
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSettledQuery(query.trim());
+      setOffset(0);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [query]);
+
+  /** Both lists, after something on the page changed a run. */
+  const reload = useCallback(async () => {
+    await Promise.all([loadRuns(), loadHistory()]);
+  }, [loadRuns, loadHistory]);
+
+  /**
    * Whether anything on the page is actually counting down.
    *
    * `waitingDetail` is the only reader of a second-resolution clock here, and
    * only on its paused branch — everything else measures an age against
-   * `readAt`. Ungated, the tick rebuilt the three buckets and reconciled up to a
+   * `readAt`. Ungated, the tick rebuilt the buckets and reconciled up to a
    * hundred rows sixty times a minute on a page whose figures had not moved
    * since the last four-second poll.
    */
@@ -575,39 +696,60 @@ export default function RunsPage() {
   }, [counting]);
 
   /**
-   * One pass, three buckets, no overlap. The page this replaces rendered the
-   * active runs in their own table *and* again in the history table below it,
-   * so a running run appeared twice.
+   * One pass, two buckets, no overlap — and the third bucket is the server's.
    *
-   * Cut against `readAt` rather than the countdown's clock. The boundary is a
-   * 24-hour one and the rows it sorts arrive with the poll, so asking it at 1 Hz
-   * rebuilt all three arrays — and re-rendered every list below them — to answer
-   * a question that cannot change between two reads of the same list.
+   * This used to sort the same rows into three, the last of them being the
+   * hundred-newest window's leftovers. The fold at the bottom asks the route for
+   * that bucket directly now, filtered and paged over the whole table, so a row
+   * older than the boundary is dropped here rather than rendered in both places
+   * — which is the duplication this pass replaced in the first place, when the
+   * active runs appeared in their own table *and* again in the history table.
+   *
+   * Cut against `boundary` rather than the countdown's clock, for two reasons.
+   * It is the same value the fold's request carried, and it has to be, or a run
+   * on the boundary lands in neither list; and the rows it sorts arrive with the
+   * poll, so asking at 1 Hz rebuilt both arrays — and re-rendered every list
+   * below them — to answer a question that cannot change between two reads of
+   * the same list.
    */
-  const { active, recent, older } = useMemo(() => {
+  const { active, recent } = useMemo(() => {
     const active: RunListItemDTO[] = [];
     const recent: RunListItemDTO[] = [];
-    const older: RunListItemDTO[] = [];
     for (const r of runs) {
       if (ACTIVE.has(r.status)) {
         active.push(r);
         continue;
       }
       const at = r.finished_at ?? r.started_at ?? r.created_at;
-      (readAt - at < RECENT_WINDOW_MS ? recent : older).push(r);
+      if (at < boundary) continue;
+      recent.push(r);
     }
     active.sort(
       (a, b) =>
         ACTIVE_ORDER[a.status as keyof typeof ACTIVE_ORDER] -
         ACTIVE_ORDER[b.status as keyof typeof ACTIVE_ORDER],
     );
-    return { active, recent, older };
-  }, [runs, readAt]);
+    return { active, recent };
+  }, [runs, boundary]);
 
-  const olderFiltered = useMemo(
-    () => (filter === "all" ? older : older.filter((r) => r.status === filter)),
-    [older, filter],
-  );
+  /**
+   * Whether the fold is narrowed, which is what tells an empty one apart from an
+   * empty history.
+   *
+   * It also keeps the fold on screen when nothing matches: the controls live
+   * inside it, so a fold that disappeared because its own filter matched nothing
+   * would take away the only way back out of that filter.
+   */
+  const filtering = filter !== "all" || settledQuery !== "";
+
+  function clearFilters() {
+    setFilter("all");
+    setQuery("");
+    // Written here as well as through the debounce, so the press reloads once
+    // rather than reloading and then reloading again 250ms later.
+    setSettledQuery("");
+    setOffset(0);
+  }
 
   async function act(id: string, path: string, method: string) {
     setBusyId(id);
@@ -618,7 +760,7 @@ export default function RunsPage() {
         const json = await res.json().catch(() => ({}));
         throw new Error(json.error ?? `Request failed (${res.status})`);
       }
-      await loadRuns();
+      await reload();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -633,8 +775,15 @@ export default function RunsPage() {
   const blank = runs.length === 0 && pollError !== null;
 
   /**
-   * The finished runs a bulk pick-up would act on: exactly the ones this page
-   * is displaying, in the order it displays them.
+   * The finished runs a bulk pick-up would act on: the ones the poll's own page
+   * holds, in the order it read them.
+   *
+   * Read from the poll rather than from what is rendered, and that is a decision
+   * now that the fold below is paged. A list built from the rendered rows would
+   * make the button's count a function of which page of history somebody
+   * happened to be on — press it on page five and it picks up page five — while
+   * the poll's page is the same hundred newest runs it has always been, so the
+   * count does not move under the operator.
    *
    * Derived here and handed down rather than read inside the control, because
    * the rule is about *what somebody looked at* — a run that failed between the
@@ -674,6 +823,10 @@ export default function RunsPage() {
       <div role="alert">
         {pollError && <Notice tone="danger">{pollError}</Notice>}
         {actionError && <Notice tone="danger">{actionError}</Notice>}
+        {/* Up here with the others rather than inside the fold it belongs to:
+            the fold is drawn from the answer that failed, so a message inside it
+            would be a message inside something that is not on screen. */}
+        {historyError && <Notice tone="danger">{historyError}</Notice>}
       </div>
 
       {/* A restart ends every run it finds and each one needs picking up by
@@ -707,9 +860,9 @@ export default function RunsPage() {
           tables rather than in them, because what it is about is a set of rows
           spread across both, and the operator's question is "did a restart just
           eat my afternoon", not "which run is this". */}
-      <RestartClosed onReopened={() => void loadRuns()} />
+      <RestartClosed onReopened={() => void reload()} />
 
-      <FleetControls reopenable={reopenable} onChanged={loadRuns} />
+      <FleetControls reopenable={reopenable} onChanged={reload} />
 
       <div className="mb-8">
         <CardTitle>
@@ -802,46 +955,117 @@ export default function RunsPage() {
       {/* The kit's fold, so the 44px target and the reason a `<summary>` cannot
           buy it with `max-md:min-h-11` are stated once in `ui/Disclosure`
           rather than here. What stays the caller's is the desktop box —
-          `mb-3 py-2` is this page's own rhythm — and the count, which renders
-          as `Older runs (n)` exactly as before. */}
-      {older.length > 0 && (
+          `mb-3 py-2` is this page's own rhythm — and the count, which still
+          renders as `Older runs (n)`. The `n` is the server's `total` over
+          every matching row now rather than a count of what arrived, which is
+          the difference between a fold that stops at a hundred and a fold that
+          has stopped counting. */}
+      {history !== null && (history.total > 0 || filtering) && (
         <Disclosure
           summary="Older runs"
-          count={older.length}
+          count={history.total}
           summaryClassName="mb-3 py-2 text-sm font-semibold text-ink-muted"
         >
-          <div className="mb-3">
-            <SegmentedControl
-              label="Show older runs by how they ended"
-              options={FILTERS}
-              value={filter}
-              onChange={setFilter}
-            />
+          {/* Each `Field`'s own `mb-3.5` is this row's vertical gap, so the row
+              states only the horizontal one — a `mb-0` here would be a silent
+              no-op, because two margin utilities on one element resolve by
+              stylesheet order rather than by what the caller wrote. The
+              segmented control takes the same margin by hand. */}
+          <div className="mb-1 flex flex-wrap items-end gap-x-4">
+            {/* The width is on the wrapper, never on the control: `Input`
+                already carries `w-full`, and the same stylesheet-order rule
+                applies one property over. */}
+            <Field label="Search" htmlFor="runs-q">
+              <div className="w-[30ch] max-w-full">
+                <Input
+                  id="runs-q"
+                  type="search"
+                  value={query}
+                  placeholder="Task, folder or run id"
+                  onChange={(e) => setQuery(e.target.value)}
+                />
+              </div>
+            </Field>
+
+            <div className="mb-3.5">
+              <SegmentedControl
+                label="Show older runs by how they ended"
+                options={FILTERS}
+                value={filter}
+                onChange={(next) => {
+                  setFilter(next);
+                  // A narrower filter lands on the first page. Keeping the
+                  // offset would answer it with an empty page, which reads as
+                  // "nothing matches".
+                  setOffset(0);
+                }}
+              />
+            </div>
           </div>
-          {olderFiltered.length === 0 ? (
+          {/* The same shape as the "In flight" count above, and for the reason
+              a search box needs one at all: the list under it is replaced
+              without anything moving focus, so a reader who cannot see it has
+              no signal that the filter did anything. Announced while a request
+              is out too — "searching" rather than a stale count, which would
+              read as the answer. */}
+          <p className="sr-only" aria-live="polite" aria-busy={historyLoading}>
+            {historyLoading
+              ? "Searching older runs…"
+              : `${history.total} older run${history.total === 1 ? "" : "s"}`}
+          </p>
+          {history.runs.length === 0 ? (
             <Card emphasis="quiet">
               <Empty>
-                <div className="text-ink-muted">No older run ended that way.</div>
+                <div className="text-ink-muted">
+                  No older run matches those filters.
+                </div>
                 <div className="mt-2">
-                  <Button variant="secondary" onClick={() => setFilter("all")}>
-                    Show all {older.length}
+                  <Button variant="secondary" onClick={clearFilters}>
+                    Clear filters
                   </Button>
                 </div>
               </Empty>
             </Card>
           ) : (
             <RunList
-              runs={olderFiltered}
+              runs={history.runs}
               kind="history"
               now={now}
               caption="Older runs, newest first"
             />
           )}
-          {runs.length >= SERVER_LIMIT && (
-            <p className="mt-3 text-xs text-ink-muted">
-              Showing the {SERVER_LIMIT} most recent runs — the list route does
-              not page beyond that yet.
-            </p>
+          {/* What this page is a slice of, and the way to the rest of it. The
+              count is the server's, over every matching row rather than over
+              what arrived — the sentence that used to sit here instead said the
+              route did not page beyond a hundred, which is what it now does. */}
+          {history.total > 0 && (
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <span className="text-sm tabular-nums text-ink-muted">
+                {history.offset + 1}–{history.offset + history.runs.length} of{" "}
+                {history.total}
+              </span>
+              <ButtonRow className="ml-auto">
+                <Button
+                  variant="secondary"
+                  disabled={historyLoading || history.offset === 0}
+                  onClick={() =>
+                    setOffset(Math.max(0, history.offset - history.limit))
+                  }
+                >
+                  Previous
+                </Button>
+                <Button
+                  variant="secondary"
+                  disabled={
+                    historyLoading ||
+                    history.offset + history.limit >= history.total
+                  }
+                  onClick={() => setOffset(history.offset + history.limit)}
+                >
+                  Next
+                </Button>
+              </ButtonRow>
+            </div>
           )}
         </Disclosure>
       )}

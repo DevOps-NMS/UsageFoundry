@@ -601,3 +601,106 @@ export function describeEvent(e: RunEventDTO): LogEntry | null {
       return null;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Narrowing a log that is already in the browser                      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Which lines a reader has asked to see.
+ *
+ * `problem` is the odd one and deliberately so: the other four name a *kind* of
+ * event and this one names a *tone*, because "what went wrong" crosses every
+ * kind — a sandbox refusal, a tripped guard, a failed tool call and a parked
+ * status are four kinds and one question.
+ */
+export type LogFilterKind = "all" | "agent" | "tool" | "app" | "problem";
+
+export interface LogFilter {
+  /** Matched against a line's label and its body, case-insensitively. */
+  query: string;
+  kind: LogFilterKind;
+}
+
+/** The words the picker offers, beside the union they set. */
+export const LOG_FILTER_OPTIONS: readonly {
+  value: LogFilterKind;
+  label: string;
+}[] = [
+  { value: "all", label: "Everything" },
+  { value: "agent", label: "What the agent said" },
+  { value: "tool", label: "Tool calls" },
+  { value: "app", label: "This app's notices" },
+  { value: "problem", label: "Warnings and failures" },
+];
+
+/**
+ * Which group an event belongs to, by name and exhaustively.
+ *
+ * A `Record` over the kind union rather than a switch with a default, for
+ * `describeEvent`'s reason one step further: a kind added to `RunEventDTO` is a
+ * compile error here rather than an event that silently belongs to no group and
+ * so disappears from every narrowed view of the log.
+ *
+ * **A failed tool call is filed under `tool`, and that is the whole reason this
+ * reads the event rather than the rendered line.** `describeEvent` sets
+ * `tool_error` and `sandbox` as *system* rows — the tool voice is a chip and a
+ * muted line, which is what a call that worked looks like — so grouping by the
+ * rendered voice would answer "show me the tool calls" with every call except
+ * the ones that failed. An operator who narrowed to tool calls and concluded
+ * nothing had failed would be reading a filter's artefact as a fact about the
+ * run.
+ */
+const EVENT_GROUP: Record<RunEventDTO["kind"], "agent" | "tool" | "app"> = {
+  assistant: "agent",
+  subagent: "agent",
+  tool: "tool",
+  tool_error: "tool",
+  sandbox: "tool",
+  iteration: "app",
+  status: "app",
+  budget: "app",
+  result: "app",
+  error: "app",
+  handoff: "app",
+  land: "app",
+  review: "app",
+  log: "app",
+  // Never a line — `describeEvent` returns null for it — so which group it
+  // would be in is moot. Named anyway, because the point of the map is that
+  // adding a kind is a compile error.
+  "replay-complete": "app",
+};
+
+/** Whether a filter narrows anything, which is what decides the copy around it. */
+export function logFilterActive(filter: LogFilter): boolean {
+  return filter.kind !== "all" || filter.query.trim() !== "";
+}
+
+/**
+ * Whether one line survives the filter.
+ *
+ * Takes the event's kind *and* the line it rendered as, because the two answer
+ * different halves: the kind is what the line is, and the entry is what it says
+ * (and how loudly). Pure, and here rather than on the page, so the grouping
+ * above has a test beside it — a group that quietly drops a kind hides lines
+ * that exist, and a log that hides a line is indistinguishable from a run that
+ * never wrote one.
+ */
+export function matchesLogFilter(
+  kind: RunEventDTO["kind"],
+  entry: LogEntry,
+  filter: LogFilter,
+): boolean {
+  if (filter.kind === "problem") {
+    if (entry.tone !== "warn" && entry.tone !== "danger") return false;
+  } else if (filter.kind !== "all" && EVENT_GROUP[kind] !== filter.kind) {
+    return false;
+  }
+  const query = filter.query.trim().toLowerCase();
+  if (query === "") return true;
+  return (
+    (entry.label !== null && entry.label.toLowerCase().includes(query)) ||
+    entry.text.toLowerCase().includes(query)
+  );
+}

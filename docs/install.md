@@ -259,6 +259,29 @@ Then restart. `docker compose down -v` discards them with the volume. What
 happened at boot is in `docker compose logs`, one `[usagefoundry]` line per tool
 installed or refused.
 
+## Finding a setting, and not losing an edit
+
+Everything above says **Settings → something**. The page is nine sections on one
+long scroll, and there are two things on it worth knowing before you go looking.
+
+**Find a setting**, above the section chips, matches a field's **name and its
+description** — never the values in them. Type `weekly`, `plugin`, `retention`;
+each result names the section it is in, and pressing one scrolls that field into
+view and focuses its control. A match inside one of the four **Prompts** folds
+opens the fold. A one-letter query matches most of the page, so the list stops at
+eight results and says how many it left out. It is a route to a field and nothing
+more: no section is collapsed, reordered or hidden, and the chips still work
+exactly as they did.
+
+**One Save commits the whole page**, and while anything is unsaved the changed
+fields carry a rail in the margin and the sticky bar at the foot says how many
+("*3 unsaved changes, marked in the margin*"). Closing the tab or reloading now
+raises the browser's own "leave site?" dialog — its wording is the browser's and
+cannot be changed. **A press on the sidebar does not raise it**: that is a
+navigation inside the app rather than a page unload, and the rails and the
+unsaved count are what tell you there. Press **Save**, or **Discard** to go back
+to what is stored.
+
 ## Required environment
 
 | Variable | Purpose |

@@ -133,6 +133,12 @@ export async function GET(req: Request, ctx: Ctx) {
           ts: Date.now(),
           payload: {
             message: `… ${dropped.toLocaleString()} earlier events not shown. The full log is in the database.`,
+            // The same fact as a number, because one reader needs to act on it
+            // rather than read it: the log's filter searches the array this
+            // page holds, and a filter that finds nothing in a *truncated* log
+            // must be able to say so. Parsing the sentence above for the figure
+            // would break the first time it is reworded.
+            droppedEvents: dropped,
           },
         });
       }
