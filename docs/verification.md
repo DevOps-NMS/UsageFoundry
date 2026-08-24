@@ -1218,7 +1218,14 @@ through before trusting this unattended:
   container, and those numbers are recorded above. What has **not** run is any of
   the wiring: no boundary prune has fired at the end of a real work cycle, no
   cycle has been ended by the context ceiling, and no netted figure on the
-  dashboard or a run page has been read against a real run. The Docker build that
+  dashboard or a run page has been read against a real run. That now includes
+  the `PruneSavingsAside` tile beside the window meters: its five states (both
+  windows priced, either window empty, partially priced, a negative net) were
+  rendered through `renderToStaticMarkup` and read as markup, and the grid rule
+  behind the two-column split is present in the emitted production CSS, but no
+  browser has displayed either — this container has no headless browser — and
+  the money on it came from hand-written DTOs rather than a real
+  `prune_receipts` table. The Docker build that
   bundles winnow has also never completed — the repository was private when this
   was written, so the `git fetch` in the image fails and the feature reports
   itself unavailable. Two things to watch first: whether the transcript reader's

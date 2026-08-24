@@ -6,7 +6,7 @@ import Link from "next/link";
 import { LiveTelemetry } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
 import { RepoSpendCard } from "@/components/RepoSpendCard";
-import { PruneSavingsRows } from "@/components/PruneSavings";
+import { PruneSavingsAside, PruneSavingsRows } from "@/components/PruneSavings";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
@@ -480,6 +480,10 @@ export default function Dashboard() {
 
   const { snapshot: s, meta, periods, telemetry, install, pruning } = data;
   const noCeilings = !meta.hasSessionCeiling && !meta.hasWeeklyCeiling;
+  // Gates both pruning surfaces, and they have to agree: an empty tile beside
+  // the meters is a standing invitation to read $0.00 as "pruning saves
+  // nothing" when it means "pruning has not run".
+  const hasPrunes = pruning.session.prunes > 0 || pruning.weekly.prunes > 0;
   // Read off the windows rather than off the setting: the setting says we
   // asked, this says we were answered.
   const planPercentages =
@@ -569,234 +573,256 @@ export default function Dashboard() {
       {header}
       {banner}
 
-      {/* The one `primary` card on the screen, and the only thing on it sized
-          to be read from across a room. Both windows live in it because they
-          are one subject — what may be spent — and two co-equal cards side by
-          side said neither of them leads. Inside it the session leads: it is
-          the allowance that refills on its own, so it is the one an operator
-          can act on in the next few minutes, and the week sits under the same
-          hairline a grouped list uses. */}
-      <Card emphasis="primary" className="mb-4">
-        <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
-          <div>
-            <CardTitle>
-              5-hour session window
-              {s.session.agg.entryCount > 0 && (
-                <Badge tone="accent">active</Badge>
-              )}
-            </CardTitle>
-            <Stat size="large">{fmtUSD(s.session.costUSD)}</Stat>
-            <StatSub>
-              <span className="tabular-nums">
-                {fmtTokens(s.session.tokens)} tokens ·{" "}
-                {s.session.agg.entryCount.toLocaleString()} turns
-              </span>
-            </StatSub>
-          </div>
-          {/* Relative first because that is the decision — whether to start
-              something now or wait. The clock time is the confirmation, and
-              the exact instant is on the title for anyone reconciling with
-              `/usage`. */}
-          <div
-            className="text-right"
-            title={new Date(s.session.endsAt).toLocaleString()}
-          >
-            <div className="text-sm font-medium tabular-nums text-ink">
-              Resets {fmtRelative(s.session.endsAt, s.now)}
-            </div>
-            <div className="mt-0.5 text-xs tabular-nums text-ink-muted">
-              {fmtDateTime(s.session.endsAt)}
-            </div>
-          </div>
-        </div>
+      {/* The pruning tile is a column beside the meters rather than a card
+          under them, and the asymmetry is the point: `minmax(0,1fr)` against a
+          fixed 16rem, `primary` against `default`, a hero meter against a
+          `text-xl` figure. Two co-equal cards side by side would say neither
+          leads, which is the objection the comment below records — a quarter
+          of the width and one elevation down is not co-equal, so the window
+          card still leads and the conclusion pruning reaches is no longer
+          only at the bottom of the page.
 
-        <Meter
-          size="hero"
-          label="Session consumed"
-          fraction={s.session.fraction}
-          upperFraction={s.session.guardFraction}
-          detail={ceilingDetail(
-            s.session,
-            s.session.fractionMetric === "tokens"
-              ? meta.configuredCeilings.sessionTokens
-              : meta.configuredCeilings.sessionCost,
-            meta.reservedHeadroomFraction,
-            s.plan,
-            s.now,
-          )}
-        />
-
-        {/* One block, so the footnotes read as a group belonging to the meter
-            rather than as three unrelated remarks stacked under it. */}
-        <div className="mt-3 max-w-[68ch] space-y-1 text-xs text-ink-muted">
-          {s.session.tokenFraction !== null &&
-            s.session.fractionMetric === "cost" && (
-              <div className="tabular-nums">
-                Against the raw-token ceiling: {fmtPct(s.session.tokenFraction)}
-              </div>
-            )}
-          {/* Three different provenances for one clock, and they are worth
-              telling apart: the provider's own instant, a pinned one, and a
-              derived one that can sit minutes off `/usage`. Saying nothing
-              makes the third read as a bug rather than as the estimate it
-              is — and makes the first read as an estimate when it is not. */}
-          {s.plan?.session?.resetsAt ? (
-            <div>
-              Reset instant reported by Anthropic, so it matches{" "}
-              <span className="mono">/usage</span> exactly.
-            </div>
-          ) : meta.sessionResetOverrideAt !== null &&
-            meta.sessionResetOverrideAt > s.now ? (
-            <div>
-              Window start taken from a{" "}
-              <Link href="/settings">manual reset</Link>, not from the
-              transcripts — usage before{" "}
-              <span className="tabular-nums">
-                {new Date(s.session.startsAt).toLocaleString()}
-              </span>{" "}
-              is excluded from this card and from the budget guard.
-            </div>
-          ) : (
-            <div>
-              Reset time derived from your own turns, so it can sit minutes off
-              what <span className="mono">/usage</span> reports.{" "}
-              <Link href="/settings">Pin it</Link> if they disagree.
-            </div>
-          )}
-        </div>
-
-        <div className="mt-5 border-t border-line pt-4">
+          `items-start` so the tile keeps its own height; stretching it would
+          pad a three-line card out to the meters' and make the empty space
+          look like something failed to load. Below `lg` it is one column and
+          the tile follows the meters, which is the same reading order. */}
+      <div className="mb-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,16rem)] lg:items-start">
+        {/* The one `primary` card on the screen, and the only thing on it sized
+            to be read from across a room. Both windows live in it because they
+            are one subject — what may be spent — and two co-equal cards side by
+            side said neither of them leads. Inside it the session leads: it is
+            the allowance that refills on its own, so it is the one an operator
+            can act on in the next few minutes, and the week sits under the same
+            hairline a grouped list uses. */}
+        <Card emphasis="primary">
           <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
             <div>
-              <CardTitle>{s.weekly.label}</CardTitle>
-              <Stat>{fmtUSD(s.weekly.costUSD)}</Stat>
+              <CardTitle>
+                5-hour session window
+                {s.session.agg.entryCount > 0 && (
+                  <Badge tone="accent">active</Badge>
+                )}
+              </CardTitle>
+              <Stat size="large">{fmtUSD(s.session.costUSD)}</Stat>
               <StatSub>
                 <span className="tabular-nums">
-                  {fmtTokens(s.weekly.tokens)} tokens ·{" "}
-                  {s.weekly.agg.entryCount.toLocaleString()} turns
+                  {fmtTokens(s.session.tokens)} tokens ·{" "}
+                  {s.session.agg.entryCount.toLocaleString()} turns
                 </span>
               </StatSub>
             </div>
-            {/* Where the session card puts its reset, so the eye finds both in
-                one place. Without an anchor this window has no reset instant at
-                all, and the sentence under the meter is what explains that —
-                the rail only says which of the two kinds of window it is. */}
-            <div className="text-right">
-              {weeklyResets ? (
-                // Days out, so the absolute date rather than `fmtRelative`,
-                // which would render this as "in 137h 12m".
-                <div
-                  className="text-sm font-medium tabular-nums text-ink"
-                  title={new Date(s.weekly.endsAt).toLocaleString()}
-                >
-                  Resets {fmtDateTime(s.weekly.endsAt)}
-                </div>
-              ) : (
-                <div className="text-sm font-medium text-ink">
-                  Trailing total
-                </div>
-              )}
+            {/* Relative first because that is the decision — whether to start
+                something now or wait. The clock time is the confirmation, and
+                the exact instant is on the title for anyone reconciling with
+                `/usage`. */}
+            <div
+              className="text-right"
+              title={new Date(s.session.endsAt).toLocaleString()}
+            >
+              <div className="text-sm font-medium tabular-nums text-ink">
+                Resets {fmtRelative(s.session.endsAt, s.now)}
+              </div>
+              <div className="mt-0.5 text-xs tabular-nums text-ink-muted">
+                {fmtDateTime(s.session.endsAt)}
+              </div>
             </div>
           </div>
 
           <Meter
-            label="Weekly consumed"
-            fraction={s.weekly.fraction}
-            upperFraction={s.weekly.guardFraction}
+            size="hero"
+            label="Session consumed"
+            fraction={s.session.fraction}
+            upperFraction={s.session.guardFraction}
             detail={ceilingDetail(
-              s.weekly,
-              s.weekly.fractionMetric === "tokens"
-                ? meta.configuredCeilings.weeklyTokens
-                : meta.configuredCeilings.weeklyCost,
+              s.session,
+              s.session.fractionMetric === "tokens"
+                ? meta.configuredCeilings.sessionTokens
+                : meta.configuredCeilings.sessionCost,
               meta.reservedHeadroomFraction,
               s.plan,
               s.now,
             )}
           />
 
+          {/* One block, so the footnotes read as a group belonging to the meter
+              rather than as three unrelated remarks stacked under it. */}
           <div className="mt-3 max-w-[68ch] space-y-1 text-xs text-ink-muted">
-            {s.weekly.tokenFraction !== null &&
-              s.weekly.fractionMetric === "cost" && (
+            {s.session.tokenFraction !== null &&
+              s.session.fractionMetric === "cost" && (
                 <div className="tabular-nums">
-                  Against the raw-token ceiling: {fmtPct(s.weekly.tokenFraction)}
+                  Against the raw-token ceiling: {fmtPct(s.session.tokenFraction)}
                 </div>
               )}
-            {/* An operator waiting for this one to clear the way the 5-hour one
-                does is waiting for nothing, so say what it is instead. */}
-            {!weeklyResets && (
+            {/* Three different provenances for one clock, and they are worth
+                telling apart: the provider's own instant, a pinned one, and a
+                derived one that can sit minutes off `/usage`. Saying nothing
+                makes the third read as a bug rather than as the estimate it
+                is — and makes the first read as an estimate when it is not. */}
+            {s.plan?.session?.resetsAt ? (
               <div>
-                It falls as old turns age out rather than resetting. Pick a{" "}
-                <Link href="/settings">weekly reset</Link> day to measure against
-                a fixed week instead.
+                Reset instant reported by Anthropic, so it matches{" "}
+                <span className="mono">/usage</span> exactly.
+              </div>
+            ) : meta.sessionResetOverrideAt !== null &&
+              meta.sessionResetOverrideAt > s.now ? (
+              <div>
+                Window start taken from a{" "}
+                <Link href="/settings">manual reset</Link>, not from the
+                transcripts — usage before{" "}
+                <span className="tabular-nums">
+                  {new Date(s.session.startsAt).toLocaleString()}
+                </span>{" "}
+                is excluded from this card and from the budget guard.
+              </div>
+            ) : (
+              <div>
+                Reset time derived from your own turns, so it can sit minutes off
+                what <span className="mono">/usage</span> reports.{" "}
+                <Link href="/settings">Pin it</Link> if they disagree.
               </div>
             )}
-            {/* A wall that binds without ever reaching this meter: the weekly
-                allowance is split per model family on some plans, so Opus can
-                be full while the all-model window reads a quarter. The guard
-                stops on the worst of them, so name them rather than letting a
-                refusal arrive with nothing on screen behind it. */}
-            {s.plan && s.plan.scopedWeekly.length > 0 && (
-              <div className="tabular-nums">
-                Per-model weekly:{" "}
-                {s.plan.scopedWeekly
-                  .map((x) => `${x.label} ${fmtPct(x.window.utilization)}`)
-                  .join(" · ")}
-                . The bar above is the all-model window; a guard stops on
-                whichever is highest.
-              </div>
-            )}
+          </div>
 
-            {/* The last line of the card it is about, and it renders always.
-                It spent a year as the fifth of five stacked notices, four of
-                which appear only when something is wrong — so the one standing
-                fact on the page was read as a fourth exception and skipped
-                with them. It is a caveat about these two meters and about
-                nothing else on the page, and this is where they are. */}
-            <div>
-              <strong className="font-medium text-ink">
-                Costs and volumes here cover Claude Code only.
-              </strong>{" "}
-              Your 5-hour and weekly limits are shared with{" "}
-              <strong className="font-medium text-ink">Cowork</strong>, Claude
-              Desktop, web and mobile, none of which write anything locally — so
-              treat every dollar and token figure on this page as a{" "}
-              <em>floor</em> on your real consumption.
-              {/* Whether that blind spot also reaches the percentages is the
-                  whole difference this reading makes, and it decides which of
-                  the two pieces of advice below is the right one — reserving
-                  headroom against a figure that already counts every surface
-                  would subtract the same allowance twice. */}
-              {planPercentages ? (
-                <>
-                  {" "}
-                  The <em>percentages</em> do not have that gap: they are
-                  Anthropic&rsquo;s own, for the whole account. Reserved
-                  headroom no longer applies to them and is not being
-                  subtracted.
-                </>
-              ) : meta.reservedHeadroomFraction > 0 ? (
-                <>
-                  {" "}
-                  The percentages have the same gap. You have reserved{" "}
-                  <strong className="font-medium text-ink">
-                    {fmtPct(meta.reservedHeadroomFraction)}
-                  </strong>{" "}
-                  of each window for it, so the ceilings above are reduced
-                  accordingly.
-                </>
-              ) : (
-                <>
-                  {" "}
-                  So do the percentages.{" "}
-                  <Link href="/settings">Reserve headroom</Link> if you use
-                  those too — otherwise a guard can permit a run while your real
-                  window is already close to full.
-                </>
+          <div className="mt-5 border-t border-line pt-4">
+            <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-2">
+              <div>
+                <CardTitle>{s.weekly.label}</CardTitle>
+                <Stat>{fmtUSD(s.weekly.costUSD)}</Stat>
+                <StatSub>
+                  <span className="tabular-nums">
+                    {fmtTokens(s.weekly.tokens)} tokens ·{" "}
+                    {s.weekly.agg.entryCount.toLocaleString()} turns
+                  </span>
+                </StatSub>
+              </div>
+              {/* Where the session card puts its reset, so the eye finds both in
+                  one place. Without an anchor this window has no reset instant at
+                  all, and the sentence under the meter is what explains that —
+                  the rail only says which of the two kinds of window it is. */}
+              <div className="text-right">
+                {weeklyResets ? (
+                  // Days out, so the absolute date rather than `fmtRelative`,
+                  // which would render this as "in 137h 12m".
+                  <div
+                    className="text-sm font-medium tabular-nums text-ink"
+                    title={new Date(s.weekly.endsAt).toLocaleString()}
+                  >
+                    Resets {fmtDateTime(s.weekly.endsAt)}
+                  </div>
+                ) : (
+                  <div className="text-sm font-medium text-ink">
+                    Trailing total
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <Meter
+              label="Weekly consumed"
+              fraction={s.weekly.fraction}
+              upperFraction={s.weekly.guardFraction}
+              detail={ceilingDetail(
+                s.weekly,
+                s.weekly.fractionMetric === "tokens"
+                  ? meta.configuredCeilings.weeklyTokens
+                  : meta.configuredCeilings.weeklyCost,
+                meta.reservedHeadroomFraction,
+                s.plan,
+                s.now,
               )}
+            />
+
+            <div className="mt-3 max-w-[68ch] space-y-1 text-xs text-ink-muted">
+              {s.weekly.tokenFraction !== null &&
+                s.weekly.fractionMetric === "cost" && (
+                  <div className="tabular-nums">
+                    Against the raw-token ceiling: {fmtPct(s.weekly.tokenFraction)}
+                  </div>
+                )}
+              {/* An operator waiting for this one to clear the way the 5-hour one
+                  does is waiting for nothing, so say what it is instead. */}
+              {!weeklyResets && (
+                <div>
+                  It falls as old turns age out rather than resetting. Pick a{" "}
+                  <Link href="/settings">weekly reset</Link> day to measure against
+                  a fixed week instead.
+                </div>
+              )}
+              {/* A wall that binds without ever reaching this meter: the weekly
+                  allowance is split per model family on some plans, so Opus can
+                  be full while the all-model window reads a quarter. The guard
+                  stops on the worst of them, so name them rather than letting a
+                  refusal arrive with nothing on screen behind it. */}
+              {s.plan && s.plan.scopedWeekly.length > 0 && (
+                <div className="tabular-nums">
+                  Per-model weekly:{" "}
+                  {s.plan.scopedWeekly
+                    .map((x) => `${x.label} ${fmtPct(x.window.utilization)}`)
+                    .join(" · ")}
+                  . The bar above is the all-model window; a guard stops on
+                  whichever is highest.
+                </div>
+              )}
+
+              {/* The last line of the card it is about, and it renders always.
+                  It spent a year as the fifth of five stacked notices, four of
+                  which appear only when something is wrong — so the one standing
+                  fact on the page was read as a fourth exception and skipped
+                  with them. It is a caveat about these two meters and about
+                  nothing else on the page, and this is where they are. */}
+              <div>
+                <strong className="font-medium text-ink">
+                  Costs and volumes here cover Claude Code only.
+                </strong>{" "}
+                Your 5-hour and weekly limits are shared with{" "}
+                <strong className="font-medium text-ink">Cowork</strong>, Claude
+                Desktop, web and mobile, none of which write anything locally — so
+                treat every dollar and token figure on this page as a{" "}
+                <em>floor</em> on your real consumption.
+                {/* Whether that blind spot also reaches the percentages is the
+                    whole difference this reading makes, and it decides which of
+                    the two pieces of advice below is the right one — reserving
+                    headroom against a figure that already counts every surface
+                    would subtract the same allowance twice. */}
+                {planPercentages ? (
+                  <>
+                    {" "}
+                    The <em>percentages</em> do not have that gap: they are
+                    Anthropic&rsquo;s own, for the whole account. Reserved
+                    headroom no longer applies to them and is not being
+                    subtracted.
+                  </>
+                ) : meta.reservedHeadroomFraction > 0 ? (
+                  <>
+                    {" "}
+                    The percentages have the same gap. You have reserved{" "}
+                    <strong className="font-medium text-ink">
+                      {fmtPct(meta.reservedHeadroomFraction)}
+                    </strong>{" "}
+                    of each window for it, so the ceilings above are reduced
+                    accordingly.
+                  </>
+                ) : (
+                  <>
+                    {" "}
+                    So do the percentages.{" "}
+                    <Link href="/settings">Reserve headroom</Link> if you use
+                    those too — otherwise a guard can permit a run while your real
+                    window is already close to full.
+                  </>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      </Card>
+        </Card>
+
+        {hasPrunes && (
+          <PruneSavingsAside
+            session={pruning.session}
+            weekly={pruning.weekly}
+          />
+        )}
+      </div>
 
       {/* Under the meters, not above them: each of these explains something the
           reader has just looked at — a hatched bar, a span past the fill, a
@@ -1369,17 +1395,22 @@ export default function Dashboard() {
         <RepoSpendCard />
       </SourceRegion>
 
-      {/* Not a fourth cost source, and the heading has to carry that: these are
-          re-reads that did not happen, netted against what buying them cost.
-          Nothing here may be added to a meter above — see `PruneSavingsDTO`.
+      {/* Not a fourth cost source, and the heading has to carry that — the word
+          is "saved", never "spent": these are re-reads that did not happen,
+          netted against what buying them cost. Nothing here may be added to a
+          meter above — see `PruneSavingsDTO`.
 
-          Absent entirely when nothing has been pruned, the `telemetry` block's
-          gate below: an empty card would be a standing invitation to read $0.00
-          as "pruning saves nothing" when it means "pruning has not run". */}
-      {(pruning.session.prunes > 0 || pruning.weekly.prunes > 0) && (
+          The net moved up beside the meters, so what is left here is the
+          derivation, and the heading says so. It is not redundant with the
+          tile and must not be folded into it: a net is four figures netted,
+          and an operator deciding whether to leave pruning on is deciding on
+          which way each of the four went, not on their sum.
+
+          Gated on `hasPrunes`, the same const the tile reads. */}
+      {hasPrunes && (
         <SourceRegion
-          heading="What pruning saved"
-          statement="Conversation removed between work cycles, and what not re-reading it came to."
+          heading="What pruning saved, in detail"
+          statement="The four figures the net beside the meters is made of: conversation removed between work cycles, and what not re-reading it came to."
         >
           <Card className="mb-4">
             <CardTitle>Context pruning</CardTitle>
