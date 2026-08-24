@@ -1212,6 +1212,72 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+- **The paged runs list and quick open's search, in a browser.** `/api/runs`
+  now reads `offset`, `limit`, `status`, `q` and `settledBefore`, the runs page
+  drives all five from the Older runs fold, and quick open asks the route for
+  typed text 250ms after the last keystroke. What *is* checked: `typecheck`,
+  `npm test` (`normalizeRunListQuery`, `clampRunOffset` and `isRunStatus`, 13
+  cases), the standalone build, and the query itself driven against a throwaway
+  SQLite database with seven planted rows — paging, the offset clamp past the
+  end, the `created_at`/`id` tiebreak holding across a page edge, `?q=50%` and
+  `?q=a_b` matching only the rows that hold those characters literally, and
+  `settledBefore` correctly leaving out a `queued` run created three days ago.
+  None of that needed a browser and none of it is the page.
+
+  The query's cost was measured rather than assumed, because a paged list adds a
+  `COUNT(*)` and an `ORDER BY` tiebreak to the answer a four-second poll already
+  asks for. Against 50,000 planted rows in groups of 25 sharing a millisecond, on
+  this container: unfiltered first page **0.23ms** with the `id DESC` tiebreak
+  and 0.14ms without it, the unfiltered `COUNT(*)` **0.01ms** (a covering index
+  scan), a `status` page at offset 20,000 **7.8ms**, and a `LIKE` over `prompt`
+  **4.1ms**. The tiebreak needs no index of its own — the plan is `SCAN runs
+  USING INDEX idx_runs_created` plus `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`,
+  so SQLite sorts only inside each equal-`created_at` group, and a dedicated
+  `(created_at DESC, id DESC)` index brings 0.23ms to 0.15ms. **No schema change
+  was made**, and neither of the slower shapes is on the poll: the poll is the
+  unfiltered first page. What this does *not* measure is a 50,000-run install's
+  behaviour in a browser, only the SQLite time behind one request.
+
+  What a person has to open and click, in order:
+
+  1. `/runs`, with more than one page of history on the install. Open **Older
+     runs**: the count on the fold is the server's `total` over the whole table
+     rather than what arrived, and `1–100 of n` sits under the list with
+     Previous/Next (100 is the route's default page, unchanged from what the
+     page showed before). Page forward and back and confirm no row appears twice and
+     none is skipped — that is what the `id DESC` tiebreak is for and a fleet
+     admitting several runs inside one millisecond is what tests it.
+  2. The status segments. **Failed** must now show failed runs from the whole
+     history rather than the failed runs among the newest hundred, which is the
+     bug this change exists to fix and the one that looked identical to working.
+     Check the count moves with the segment, and that the sentence claiming the
+     route does not page beyond a hundred is gone.
+  3. The **Search** box in that fold. Type part of a task, a folder name and a
+     run id; each should narrow the list, and the request should land once after
+     typing stops rather than once per keystroke (the network panel is the only
+     place that shows it). Then **Clear filters** from the empty state, which is
+     the one way back out of a filter that matched nothing — the fold holds its
+     own controls, so a fold that vanished with its filter would strand you.
+  4. The two sections above the fold. A run that settles must appear under
+     **Finished in the last 24 hours** and, once the boundary steps past it, move
+     into the fold — appearing in exactly one of the two at any moment. This is
+     the shared `boundary` and it is the subtlest thing in the change: if the two
+     sides ever read different instants, a run at the 24-hour mark is drawn twice
+     or drawn nowhere, and neither says anything. The boundary is quantised to
+     the minute, so a run can sit one bucket too high for up to 60 seconds by
+     design — that is the interval at which the fold re-requests, and confirming
+     it is a network panel showing one request a minute rather than one every
+     four seconds.
+  5. `⌘K`, and type the task text of a run older than the newest hundred. That
+     run must come back — it could not before, and the empty list it used to
+     give read as "no such run exists". Each row now reads `id · task`. Confirm
+     the placeholder list still offers the six newest runs with nothing typed,
+     and that a failed read still leaves the panes listed.
+  6. A 400 nobody can reach from the UI but a URL can: `/api/runs?status=nope`
+     answers `{"error":"Unknown run status: nope"}` rather than every run. The
+     opposite choice — falling back to "all" — is what makes a miss read as an
+     absence, which is the whole subject of this entry.
+
 - **Context pruning inside a live run.** The whole feature. The winnow
   subprocess, the token measurement, all three prescriptions and the `.bak` it
   leaves were exercised directly against a copied transcript in the running
