@@ -174,6 +174,24 @@ export function fmtDateTime(ts: number): string {
   });
 }
 
+/**
+ * "12 Aug" — a date with no clock on it, for a span measured in weeks.
+ *
+ * The year appears only when it is not the current one, on `fmtPeriodLabel`'s
+ * rule: a horizon inside the last few weeks stamped with a year reads as a
+ * different kind of date than it is.
+ */
+export function fmtDate(ts: number, now = Date.now()): string {
+  const d = new Date(ts);
+  return d.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    ...(d.getFullYear() === new Date(now).getFullYear()
+      ? {}
+      : { year: "numeric" }),
+  });
+}
+
 /** "in 2h 14m" / "3m ago" — relative to now, with direction. */
 export function fmtRelative(ts: number, now = Date.now()): string {
   const delta = ts - now;

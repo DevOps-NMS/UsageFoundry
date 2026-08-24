@@ -14,7 +14,11 @@ import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
 import { retentionCutoff } from "@/lib/retention";
 import { installSpendReport } from "@/lib/installBudget";
-import { pruneSavings } from "../../../lib/contextPruning";
+import {
+  priceReceipts,
+  readReceipts,
+  sumPruneSavings,
+} from "../../../lib/contextPruning";
 import { PROJECTS_DIR } from "@/lib/config";
 import { configProblems } from "@/lib/configCheck";
 import { jsonMaybeGzipped } from "@/lib/http";
@@ -116,6 +120,29 @@ export async function GET(req: Request) {
       ? telemetryWindow(snapshot.session.startsAt)
       : null;
 
+    // Pruning's value over three spans that nest, read and priced **once**:
+    // pricing counts the turns after each receipt out of the transcript scan,
+    // and asking for the three separately re-counted the same tail three times
+    // on a ten-second poll.
+    //
+    // The span is bounded rather than run over the whole table, and at the
+    // transcript horizon specifically — the same one `completeFrom` carries
+    // above. A receipt whose transcript has been swept cannot be priced, and it
+    // does not merely fall silent: its saving reads zero while an early end's
+    // invalidation is still charged, so an unbounded total would sink towards
+    // negative as it aged. Dropping those receipts whole makes the total a
+    // floor, which is the direction every other figure here errs in. Clamped to
+    // the weekly window's own start as well, so the total can never span less
+    // than a figure printed beside it on an install with a short retention.
+    const pruneFrom = Math.min(completeFrom ?? 0, snapshot.weekly.startsAt);
+    const pricedReceipts = await priceReceipts(
+      readReceipts({ from: pruneFrom, to: now }),
+    );
+    const prunedWithin = (from: number, to: number) =>
+      sumPruneSavings(
+        pricedReceipts.filter((p) => p.row.ts >= from && p.row.ts <= to),
+      );
+
     // Gzipped: 51,984 bytes to 9,785, measured — three granularities of
     // calendar bucket over the same entries repeat their keys on every one, and
     // this is the dashboard's ten-second heartbeat. The error branch below is
@@ -130,23 +157,27 @@ export async function GET(req: Request) {
       // key rather than a field on `snapshot`, because it is a fourth reading
       // over a different span and must never be summed with the meters.
       install: installSpendReport(now),
-      // What context pruning has been worth, over exactly the two windows the
-      // meters above already draw — so a reader comparing the two is comparing
-      // the same span, not this app's idea of "recently".
+      // What context pruning has been worth: the two windows the meters above
+      // already draw — so a reader comparing them is comparing the same span,
+      // not this app's idea of "recently" — and the whole of what can still be
+      // priced, which is what the tile leads with. Whether to leave pruning on
+      // is not a question about this week.
       //
       // Its own key and never folded into `snapshot`, on `install`'s rule and
       // one more: these are not a *third cost source*, they are the netted value
       // of an intervention, and a figure that could be added to a window total
       // would be added to one eventually. Nothing here is spend.
       pruning: {
-        session: await pruneSavings({
-          from: snapshot.session.startsAt,
-          to: snapshot.session.endsAt,
-        }),
-        weekly: await pruneSavings({
-          from: snapshot.weekly.startsAt,
-          to: snapshot.weekly.endsAt,
-        }),
+        session: prunedWithin(
+          snapshot.session.startsAt,
+          snapshot.session.endsAt,
+        ),
+        weekly: prunedWithin(snapshot.weekly.startsAt, snapshot.weekly.endsAt),
+        total: sumPruneSavings(pricedReceipts),
+        // Null is "nothing bounded it", which is a real state — an install with
+        // transcript retention off keeps every receipt priceable. The client
+        // must not print a date it invented for that case.
+        totalFrom: pruneFrom > 0 ? pruneFrom : null,
       },
       meta: {
         transcriptDir: PROJECTS_DIR,

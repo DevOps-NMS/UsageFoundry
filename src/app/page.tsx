@@ -25,6 +25,7 @@ import type {
 import {
   agentOriginBadge,
   type BadgeTone,
+  fmtDate,
   fmtDateTime,
   fmtDuration,
   fmtPct,
@@ -483,7 +484,11 @@ export default function Dashboard() {
   // Gates both pruning surfaces, and they have to agree: an empty tile beside
   // the meters is a standing invitation to read $0.00 as "pruning saves
   // nothing" when it means "pruning has not run".
-  const hasPrunes = pruning.session.prunes > 0 || pruning.weekly.prunes > 0;
+  //
+  // The total alone is the gate because it is a superset of both windows by
+  // construction — the route starts its span at or before the weekly window's
+  // own start, whatever the retention is set to.
+  const hasPrunes = pruning.total.prunes > 0;
   // Read off the windows rather than off the setting: the setting says we
   // asked, this says we were answered.
   const planPercentages =
@@ -818,6 +823,8 @@ export default function Dashboard() {
 
         {hasPrunes && (
           <PruneSavingsAside
+            total={pruning.total}
+            totalFrom={pruning.totalFrom}
             session={pruning.session}
             weekly={pruning.weekly}
           />
@@ -1404,16 +1411,29 @@ export default function Dashboard() {
           derivation, and the heading says so. It is not redundant with the
           tile and must not be folded into it: a net is four figures netted,
           and an operator deciding whether to leave pruning on is deciding on
-          which way each of the four went, not on their sum.
+          which way each of the four went, not on their sum. Every span the
+          tile prints has its own block here, the total included — a headline
+          with no derivation under it is the thing this band exists to prevent.
 
           Gated on `hasPrunes`, the same const the tile reads. */}
       {hasPrunes && (
         <SourceRegion
           heading="What pruning saved, in detail"
-          statement="The four figures the net beside the meters is made of: conversation removed between work cycles, and what not re-reading it came to."
+          statement="The four figures each net beside the meters is made of: conversation removed between work cycles, and what not re-reading it came to."
         >
           <Card className="mb-4">
             <CardTitle>Context pruning</CardTitle>
+            {/* The total first, because it is what the tile leads with and this
+                band is that figure's derivation. The two windows under it are
+                the same arithmetic over shorter spans. */}
+            <PruneSavingsRows
+              label={
+                pruning.totalFrom === null
+                  ? "All time"
+                  : `Since ${fmtDate(pruning.totalFrom)}`
+              }
+              savings={pruning.total}
+            />
             <PruneSavingsRows label="This 5-hour window" savings={pruning.session} />
             <PruneSavingsRows label="This week" savings={pruning.weekly} />
             <Hint>
@@ -1423,6 +1443,23 @@ export default function Dashboard() {
               two work cycles pays nothing, because the next cycle was going to
               rewrite that conversation anyway. One that ended a cycle early pays
               for the restart it caused. Both are counted here.
+              {/* Why the first block stops where it does. It belongs here rather
+                  than on the tile: it is the one line that explains a span, and
+                  a reader who wants to know why the total starts on a date has
+                  already come looking for the arithmetic. */}
+              {pruning.totalFrom !== null && (
+                <>
+                  {" "}
+                  It stops at{" "}
+                  <span className="tabular-nums">
+                    {fmtDate(pruning.totalFrom)}
+                  </span>{" "}
+                  because a saving is measured over the turns that followed it,
+                  and transcripts older than your{" "}
+                  <Link href="/settings">retention</Link> have been deleted —
+                  what those prunes saved is unknown rather than nothing.
+                </>
+              )}
             </Hint>
           </Card>
         </SourceRegion>

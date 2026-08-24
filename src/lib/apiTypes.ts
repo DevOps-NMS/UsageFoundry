@@ -299,11 +299,24 @@ export interface PruneSavingsDTO {
 export interface UsageResponse {
   snapshot: SnapshotDTO;
   /**
-   * Pruning's value over the same two windows the meters draw, so the two are
-   * comparable. Its own key for `install`'s reason and one more: it is not
-   * spend, and a field on `snapshot` is one somebody eventually adds up.
+   * Pruning's value over the same two windows the meters draw, so the three are
+   * comparable, plus `total` — every receipt still priceable, which is the
+   * figure the tile leads with. Its own key for `install`'s reason and one more:
+   * it is not spend, and a field on `snapshot` is one somebody eventually adds
+   * up.
+   *
+   * `total` is a superset of both windows and a **floor**: it starts at
+   * `totalFrom`, the transcript horizon, because a receipt whose transcript has
+   * been swept prices at zero saving with its invalidation still charged and
+   * would drag the total below what pruning really earned. `totalFrom` is null
+   * when nothing bounded it — render "all time" for that and never a date.
    */
-  pruning: { session: PruneSavingsDTO; weekly: PruneSavingsDTO };
+  pruning: {
+    session: PruneSavingsDTO;
+    weekly: PruneSavingsDTO;
+    total: PruneSavingsDTO;
+    totalFrom: number | null;
+  };
   /**
    * Spend cut into calendar buckets, all three granularities at once so the
    * toggle switches without a refetch.

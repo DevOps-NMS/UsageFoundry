@@ -649,15 +649,19 @@ export const NO_PRUNE_SAVINGS: PruneSavings = {
   netUSD: 0,
 };
 
+/** One receipt beside what it turned out to be worth. */
+export interface PricedReceipt {
+  row: PruneReceiptRow;
+  net: PruneNet;
+}
+
 /**
  * Add up a set of already-priced receipts.
  *
  * Pure and separate from the reading so that the arithmetic is testable without
  * a database and a transcript scan behind it.
  */
-export function sumPruneSavings(
-  priced: readonly { row: PruneReceiptRow; net: PruneNet }[],
-): PruneSavings {
+export function sumPruneSavings(priced: readonly PricedReceipt[]): PruneSavings {
   return priced.reduce<PruneSavings>(
     (acc, { row, net }) => ({
       prunes: acc.prunes + 1,
@@ -715,7 +719,13 @@ export function readReceipts(
 }
 
 /**
- * What pruning has been worth, over a window or over one run.
+ * Price a set of receipts against the transcripts behind them.
+ *
+ * Split out of `pruneSavings` so that several spans can be summed off **one**
+ * read. The dashboard draws three that nest — a total, the week inside it, the
+ * five hours inside that — and asking for each separately would scan the same
+ * transcripts and re-count the same tail of turns once per span, on a ten-second
+ * heartbeat.
  *
  * Async because the turn count comes from the transcript scan rather than from
  * the database — a turn is not a row here, and inventing a counter that
@@ -727,12 +737,17 @@ export function readReceipts(
  * receipts counted against turns of the later session, which under-counts rather
  * than over-counts: the earlier session's turns are simply not found. Stated
  * because a saving that reads low is the kind of wrong nobody investigates.
+ *
+ * The same under-count with a harder edge is a receipt whose transcript has been
+ * swept: no turns are found, so its saving reads zero while an early end's
+ * invalidation still counts, and its net goes *negative*. That is why the span
+ * a caller asks about is its own decision rather than "everything in the table"
+ * — see the dashboard route, which bounds it at the transcript horizon.
  */
-export async function pruneSavings(
-  filter: { from: number; to: number } | { runId: string },
-): Promise<PruneSavings> {
-  const receipts = readReceipts(filter);
-  if (receipts.length === 0) return NO_PRUNE_SAVINGS;
+export async function priceReceipts(
+  receipts: readonly PruneReceiptRow[],
+): Promise<PricedReceipt[]> {
+  if (receipts.length === 0) return [];
 
   // One lookup per distinct run rather than per receipt: a long run can hold
   // several.
@@ -753,13 +768,18 @@ export async function pruneSavings(
   // never touched. Same split `transcripts.ts` makes everywhere else.
   const mainThread = entries.filter((e) => !e.isSidechain);
 
-  const priced = receipts.map((row) => {
+  return receipts.map((row) => {
     const sessionId = sessions.get(row.runId) ?? null;
     const turnsAfter = sessionId
       ? mainThread.filter((e) => e.sessionId === sessionId && e.ts > row.ts).length
       : 0;
     return { row, net: netReceipt(row, turnsAfter) };
   });
+}
 
-  return sumPruneSavings(priced);
+/** What pruning has been worth, over a window or over one run. */
+export async function pruneSavings(
+  filter: { from: number; to: number } | { runId: string },
+): Promise<PruneSavings> {
+  return sumPruneSavings(await priceReceipts(readReceipts(filter)));
 }
