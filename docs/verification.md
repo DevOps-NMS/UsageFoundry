@@ -1258,6 +1258,9 @@ through before trusting this unattended:
      place that shows it). Then **Clear filters** from the empty state, which is
      the one way back out of a filter that matched nothing — the fold holds its
      own controls, so a fold that vanished with its filter would strand you.
+     With a screen reader on, the count should be announced when the list is
+     replaced: nothing moves focus, so that announcement is the only signal a
+     reader gets that the filter did anything.
   4. The two sections above the fold. A run that settles must appear under
      **Finished in the last 24 hours** and, once the boundary steps past it, move
      into the fold — appearing in exactly one of the two at any moment. This is

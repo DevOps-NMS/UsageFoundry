@@ -955,8 +955,11 @@ export default function RunsPage() {
       {/* The kit's fold, so the 44px target and the reason a `<summary>` cannot
           buy it with `max-md:min-h-11` are stated once in `ui/Disclosure`
           rather than here. What stays the caller's is the desktop box —
-          `mb-3 py-2` is this page's own rhythm — and the count, which renders
-          as `Older runs (n)` exactly as before. */}
+          `mb-3 py-2` is this page's own rhythm — and the count, which still
+          renders as `Older runs (n)`. The `n` is the server's `total` over
+          every matching row now rather than a count of what arrived, which is
+          the difference between a fold that stops at a hundred and a fold that
+          has stopped counting. */}
       {history !== null && (history.total > 0 || filtering) && (
         <Disclosure
           summary="Older runs"
@@ -999,6 +1002,17 @@ export default function RunsPage() {
               />
             </div>
           </div>
+          {/* The same shape as the "In flight" count above, and for the reason
+              a search box needs one at all: the list under it is replaced
+              without anything moving focus, so a reader who cannot see it has
+              no signal that the filter did anything. Announced while a request
+              is out too — "searching" rather than a stale count, which would
+              read as the answer. */}
+          <p className="sr-only" aria-live="polite" aria-busy={historyLoading}>
+            {historyLoading
+              ? "Searching older runs…"
+              : `${history.total} older run${history.total === 1 ? "" : "s"}`}
+          </p>
           {history.runs.length === 0 ? (
             <Card emphasis="quiet">
               <Empty>
