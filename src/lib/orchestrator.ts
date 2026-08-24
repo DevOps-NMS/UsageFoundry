@@ -5262,11 +5262,28 @@ const SELF_HOSTING_NOTICE =
  * way `transcripts.ts` splits it. A tool call inside a sub-agent costs **5.0
  * cents against 13.6** on a main thread, and most of the gap is cache re-read —
  * **3.0 cents against 8.2**. The mechanism is that nothing shrinks a main
- * thread's context, so every file read there is re-read at every later turn of
- * the run: the same tool call costs 8.4 cents over turns 11-25, 15.7 over turns
- * 101-200 and 20.4 past turn 200. The previous reading, over 1,011 transcripts,
- * was 6.5 against 13.9 with 2.7 against 8.3 — the same claim, and the sub-agent
- * side has if anything got cheaper.
+ * thread's context while the agent is in it, so every file read there is
+ * re-read at every later turn of the same work cycle: the same tool call costs
+ * 8.4 cents over turns 11-25, 15.7 over turns 101-200 and 20.4 past turn 200.
+ * The previous reading, over 1,011 transcripts, was 6.5 against 13.9 with 2.7
+ * against 8.3 — the same claim, and the sub-agent side has if anything got
+ * cheaper.
+ *
+ * **Why the text says "while you are in it" rather than "once it has grown".**
+ * Winnow is bundled now and does shrink the conversation — `verification.md`
+ * measures 28% and 38.4% of API-visible content on two real transcripts at
+ * `standard`, and 29.1-52.8% across four real prunes at `aggressive`. What it
+ * cannot shrink is the conversation the agent is reading: orchestrator-safe
+ * mode refuses a mutating prune while a Claude process is live, so the prune
+ * lands at the cycle boundary, after the gradient above has been climbed in
+ * full. That is also why pruning composes with this argument rather than
+ * replacing it — it stops those bytes costing anything in the NEXT cycle and
+ * refunds nothing from this one, where delegation avoids the cost from the
+ * first turn.
+ *
+ * It does mean the 5.0-against-13.6 split wants re-reading at some point: it
+ * spans the period when `--autocompact` bounded a cycle and winnow now does,
+ * and the main-thread side is the one that could have moved.
  *
  * **One thing the split does not separate, and the claim is weaker for it.**
  * Sub-agents are handed the self-contained errands — find where this lives, read
@@ -5295,11 +5312,12 @@ const DELEGATION_NOTICE =
   "doing it on this thread: anything where you want the conclusion and not the " +
   "files it was read out of — finding where something is implemented, reading " +
   "across several modules to answer one question, checking whether a pattern " +
-  "holds everywhere. Nothing shrinks this conversation once it has grown, so " +
-  "every file you read here is read again on every later turn of this run, " +
-  "while a sub-agent's context is discarded when it answers. Delegate work you " +
-  "expect to take more than a handful of steps; below that a sub-agent's own " +
-  "start-up costs more than the thread saves, so do short lookups yourself.";
+  "holds everywhere. Nothing shrinks this conversation while you are in it, so " +
+  "every file you read here is read again on every later turn of this work " +
+  "cycle, while a sub-agent's context is discarded when it answers. Delegate " +
+  "work you expect to take more than a handful of steps; below that a " +
+  "sub-agent's own start-up costs more than the thread saves, so do short " +
+  "lookups yourself.";
 
 export function buildArgs(opts: {
   prompt: string;
