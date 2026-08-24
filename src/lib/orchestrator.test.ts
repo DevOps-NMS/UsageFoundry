@@ -102,6 +102,7 @@ const {
   reopenRun,
   sandboxArgs,
   sandboxSettings,
+  contextAfterPrune,
   startsFresh,
   SEARCH_TOOLS,
   selectPromotable,
@@ -1161,6 +1162,52 @@ describe("starting a work cycle fresh instead of resuming", () => {
     justRetriggered: false,
     followUp: null as string | null,
   };
+
+  it("sees the conversation a prune just shrank, not the size it was billed at", () => {
+    // The two features are independent switches and this is the one place they
+    // touch. `startsFresh` reads the last cycle's *billed* window, which was
+    // recorded before the boundary prune ran and cannot know about it — so
+    // without `contextAfterPrune` a prune that took a 200k conversation down to
+    // 124k would be followed immediately by a fresh start fired on the 200k
+    // reading, and the run would pay to re-derive a conversation something had
+    // just finished shrinking to fit under the threshold.
+    //
+    // That is `IterationResult.contextTokens`' own "Last, not largest" warning
+    // reached from a direction that did not exist when it was written. Silent in
+    // the usual way: the run restarts, works, and costs more, and every page
+    // shows an ordinary cycle.
+    const outcome = {
+      tier: "standard" as const,
+      tokensBefore: 250_000,
+      tokensAfter: 155_000,
+      tokensRemoved: 95_000,
+      elapsedMs: 1_000,
+    };
+    const corrected = contextAfterPrune(200_000, outcome);
+    assert.equal(corrected, 124_000);
+    assert.equal(startsFresh({ ...base, contextTokens: 200_000 }), true);
+    assert.equal(startsFresh({ ...base, contextTokens: corrected }), false);
+  });
+
+  it("leaves the billed figure alone when nothing was pruned", () => {
+    // Null is every cycle on an install with pruning off, and the great majority
+    // of cycles on one with it on. Scaling by a ratio that does not exist would
+    // silently suppress fresh starts fleet-wide.
+    assert.equal(contextAfterPrune(200_000, null), 200_000);
+    // And a zero `tokensBefore` must not divide: an unreadable transcript
+    // reports one, and NaN here would compare false against every threshold,
+    // which is the same suppression by another route.
+    assert.equal(
+      contextAfterPrune(200_000, {
+        tier: "standard",
+        tokensBefore: 0,
+        tokensAfter: 0,
+        tokensRemoved: 0,
+        elapsedMs: 1,
+      }),
+      200_000,
+    );
+  });
 
   it("is off unless the operator set a threshold", () => {
     // Null is the shipped value and has to mean today's behaviour exactly: the

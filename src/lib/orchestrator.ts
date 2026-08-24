@@ -68,6 +68,7 @@ import {
   pruneTranscript,
   pruningEnabled,
   recordPrune,
+  type PruneOutcome,
   type PruneTrigger,
 } from "./contextPruning";
 import { fileCostNotice } from "./fileCostNotice";
@@ -6456,7 +6457,7 @@ async function prune(
   id: string,
   sessionId: string | null,
   trigger: PruneTrigger,
-): Promise<void> {
+): Promise<PruneOutcome | null> {
   const settings = getSettings();
   // The switch and the tool are tested apart, deliberately. Off is silent — that
   // is an operator's decision and needs no line every cycle. On with no tool is
@@ -6464,13 +6465,13 @@ async function prune(
   // switch below says so. Collapsing the two into `pruningEnabled` here is what
   // made that branch unreachable, which is the exact silence this whole path is
   // written against.
-  if (!settings.contextPruning) return;
-  if (!sessionId) return;
+  if (!settings.contextPruning) return null;
+  if (!sessionId) return null;
 
   const transcript = await resolveSessionTranscript(sessionId);
   if (!transcript) {
     log(id, `Could not find this run's transcript, so its context was not pruned.`);
-    return;
+    return null;
   }
 
   const result = await pruneTranscript(transcript, settings.contextPruningStrictness);
@@ -6484,7 +6485,7 @@ async function prune(
         `Pruned ${fmtTokens(tokensRemoved)} tokens from this run's conversation ` +
           `(${pct}% of ${fmtTokens(tokensBefore)}), leaving ${fmtTokens(tokensAfter)}.`,
       );
-      break;
+      return result.outcome;
     }
     case "nothing":
       // A result and not an absence, winnow's own rule for its hook lines: a
@@ -6499,11 +6500,47 @@ async function prune(
       log(id, `This run's context could not be pruned: ${result.reason}.`);
       break;
   }
+  return null;
 }
 
 /** The boundary case, named so the call site inside the loop reads as one line. */
-async function pruneAtBoundary(id: string, sessionId: string | null): Promise<void> {
-  await prune(id, sessionId, "boundary");
+async function pruneAtBoundary(
+  id: string,
+  sessionId: string | null,
+): Promise<PruneOutcome | null> {
+  return prune(id, sessionId, "boundary");
+}
+
+/**
+ * `lastContextTokens`, corrected for a prune that has just happened.
+ *
+ * `startsFresh` reads that figure to decide whether the next cycle should drop
+ * the conversation, and it comes from the **usage frames of the cycle that just
+ * ended** — which were billed before the prune ran and cannot know about it. So
+ * with both features on, a prune that shrank a 200k conversation to 124k would
+ * be followed immediately by a fresh start triggered on the 200k reading, and
+ * the run would pay for the re-discovery of a conversation something had just
+ * finished shrinking to fit.
+ *
+ * That is precisely the failure `IterationResult.contextTokens` documents in its
+ * "**Last, not largest**" paragraph, arriving from a direction that did not
+ * exist when it was written: there, a compaction is what shrinks the tail and
+ * reading a high-water mark is what would get it backwards.
+ *
+ * Scaled rather than replaced, and that is the careful part. The two figures are
+ * not the same measurement — one is exact from `usage`, the other is
+ * `contextTokens`' estimate over content — so substituting the estimate would
+ * put a different basis into a threshold the operator set against the first. The
+ * *ratio* is basis-independent, being an estimate over the same file twice
+ * seconds apart, so applying it keeps the billed figure and moves it by the
+ * proportion actually removed.
+ */
+export function contextAfterPrune(
+  before: number,
+  outcome: PruneOutcome | null,
+): number {
+  if (!outcome || outcome.tokensBefore <= 0) return before;
+  return Math.round(before * (outcome.tokensAfter / outcome.tokensBefore));
 }
 
 /** How much of a refused command is kept. Long enough to name it, not to log it. */
@@ -8022,7 +8059,10 @@ export async function startRun(id: string): Promise<void> {
           iterations -= 1;
         }
 
-        await prune(id, sessionId, "early-end");
+        lastContextTokens = contextAfterPrune(
+          lastContextTokens,
+          await prune(id, sessionId, "early-end"),
+        );
         continue;
       }
       if (postCycle) {
@@ -8362,7 +8402,10 @@ export async function startRun(id: string): Promise<void> {
       // Awaited rather than left floating. It is seconds of subprocess against a
       // cycle measured in minutes, and the next spawn must not read the file
       // while winnow is rewriting it.
-      await pruneAtBoundary(id, sessionId);
+      lastContextTokens = contextAfterPrune(
+        lastContextTokens,
+        await pruneAtBoundary(id, sessionId),
+      );
     }
   } catch (err) {
     stopReason = err instanceof Error ? err.message : String(err);
