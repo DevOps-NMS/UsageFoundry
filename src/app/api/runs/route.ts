@@ -8,7 +8,8 @@ import {
   currentSnapshot,
   dependenciesOf,
   describeFolder,
-  listRuns,
+  isRunStatus,
+  listRunsPage,
   queuePosition,
   type DependencyEdge,
   type RunDependencyInput,
@@ -18,6 +19,7 @@ import { jsonMaybeGzipped } from "../../../lib/http";
 import {
   MAX_LIST_PROMPT,
   type BootReconcileDTO,
+  type RunListDTO,
   type RunListItemDTO,
 } from "../../../lib/apiTypes";
 import { PERMISSION_MODES, type PermissionMode } from "../../../lib/settings";
@@ -46,8 +48,50 @@ function clipPrompt(prompt: string): string {
     : `${prompt.slice(0, MAX_LIST_PROMPT - 1)}…`;
 }
 
+/**
+ * One page of runs: `?offset=`, `?limit=`, `?status=`, `?q=`, `?settledBefore=`.
+ *
+ * These are what make the whole set reachable rather than only its newest page,
+ * which is the principle `/api/branches` states at `:19-23` and this route did
+ * not follow: it read no `searchParams` at all, answered with the hundred newest
+ * runs, and the page that consumed it filtered *those* — so asking for the
+ * failed runs showed the failed runs among the hundred newest, which looks
+ * identical to the question actually asked.
+ *
+ * `total` is beside the rows for the reason `branchInventory` carries one: it is
+ * counted over every matching row, so the page can say what it is a slice of. A
+ * list that stops counting cannot say a run has fallen out of reach.
+ *
+ * An unknown `status` is refused rather than dropped, which is the opposite of
+ * what `/api/knowledge/notes` does with an unknown `sort` — and the difference
+ * is what the parameter decides. A sort it does not know is presentation with no
+ * correctness behind it, so falling back beats failing to load. A status it does
+ * not know changes *which rows exist*, and quietly answering "every run" to
+ * "show me the failed ones" is exactly the miss-that-reads-as-an-absence this
+ * route was parameterised to end.
+ */
 export async function GET(req: Request) {
-  const rows = listRuns(100);
+  const params = new URL(req.url).searchParams;
+
+  // A blank `status=` is every status, not a status named "". The segmented
+  // control's own "All" submits exactly that.
+  const askedStatus = params.get("status");
+  const status = askedStatus && isRunStatus(askedStatus) ? askedStatus : null;
+  if (askedStatus && status === null) {
+    return NextResponse.json(
+      { error: `Unknown run status: ${askedStatus}` },
+      { status: 400 },
+    );
+  }
+
+  const page = listRunsPage({
+    offset: Number(params.get("offset") ?? 0),
+    limit: Number(params.get("limit") ?? 0),
+    status,
+    q: params.get("q"),
+    settledBefore: Number(params.get("settledBefore") ?? 0),
+  });
+  const rows = page.rows;
   const deps = dependenciesOf(rows.map((r) => r.id));
   const runs: RunListItemDTO[] = rows.map((r) => {
     const { mountId, mountLabel, relPath } = describeFolder(r.folder);
@@ -97,7 +141,14 @@ export async function GET(req: Request) {
   // Gzipped: a hundred rows of clipped prompts is the largest thing this app
   // polls, and it is polled every four seconds. 698,620 bytes to 174,268 on
   // this install, measured before the prompt clip above landed.
-  return jsonMaybeGzipped(req, { runs, lastBootReconcile });
+  const body: RunListDTO = {
+    runs,
+    lastBootReconcile,
+    total: page.total,
+    offset: page.offset,
+    limit: page.limit,
+  };
+  return jsonMaybeGzipped(req, body);
 }
 
 /**

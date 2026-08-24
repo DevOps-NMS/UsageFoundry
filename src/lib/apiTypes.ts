@@ -827,6 +827,27 @@ export type RunListItemDTO = Omit<
   prompt: string;
 };
 
+/**
+ * One page of the runs list, as `/api/runs` answers it.
+ *
+ * The three figures beside the rows are the whole of what makes the history
+ * reachable: `total` is counted over every run matching the filter rather than
+ * over this page, so a page can say what it is a slice of, and `offset`/`limit`
+ * are the applied ones rather than the asked-for ones — both are clamped, so a
+ * caller that pages off the end is told where it actually landed.
+ *
+ * `lastBootReconcile` rides along for the runs page's poll and is ignored by
+ * every other reader. It is the explanation for the rows in the list, and this
+ * is the request that already carries them.
+ */
+export interface RunListDTO {
+  runs: RunListItemDTO[];
+  lastBootReconcile: BootReconcileDTO | null;
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 /** Mirrors `RunOrigin` in `orchestrator.ts`; see the column note in `db.ts`. */
 export type RunOriginDTO =
   | "form"
