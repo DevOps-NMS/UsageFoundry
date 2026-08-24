@@ -1281,6 +1281,64 @@ through before trusting this unattended:
      opposite choice — falling back to "all" — is what makes a miss read as an
      absence, which is the whole subject of this entry.
 
+- **The run log's filter, and the settings field search, in a browser.** Both
+  are client-only and neither has been rendered by anything: zero page
+  components in this repository are under test, so nothing catches a visual or
+  interactive regression in either. What *is* checked: `typecheck`, `npm test`
+  (`matchesLogFilter` and `logFilterActive`, six cases — that a `tool_error`
+  stays under **Tool calls** as well as under **Warnings and failures**, that a
+  parked `status` row counts as a problem, that the two halves apply together,
+  and that whitespace is not a query), and the standalone build. The settings
+  search has **no unit test at all**, deliberately: it reads `textContent` off
+  the rendered page, so there is nothing pure to test — which also means every
+  one of its failure modes is a browser away.
+
+  What a person has to open and click, in order:
+
+  1. A run page with a long log — a few hundred lines, ideally one that hit the
+     replay cap. Type into **Find in this log**: the header count becomes
+     `n of m lines`, and with a screen reader on that same count is announced,
+     because the log narrows in place and nothing moves focus.
+  2. The **Show** picker, all five options. **Tool calls** must include the
+     calls that *failed* — that is the one thing the unit test pins and the one
+     an operator would misread as "nothing failed here". **Warnings and
+     failures** must catch a parked run's status line, not only tool errors.
+  3. A run whose replay was truncated (the log carries the `… n earlier events
+     not shown` line). With a filter on, a warning-toned hint must appear under
+     the field naming that count. Without a filter, it must not. This is the
+     one thing on the register that the filter could otherwise imply and must
+     not: that the array it searched is the log.
+  4. Autoscroll, which the filter shares state with. Scroll up in a filtered
+     log, let new lines arrive, and confirm **Jump to live** counts only the
+     lines the filter keeps. Then clear the filter: the badge must **not** jump
+     to the number of lines the filter had been hiding.
+  5. `/settings`, and **Find a setting**. Type `weekly`, `plugin`, `retention`,
+     `prompt`. Each result names its section on the right; pressing one scrolls
+     the field into view, focuses its control (the app's one focus ring is the
+     only highlight) and fills that section's chip. A match inside one of the
+     four **Prompts** folds must open the fold — `textContent` reads a closed
+     one, so a result could otherwise name something invisible.
+  6. A one-letter query, which matches most of the page: at most eight rows,
+     with `8 of n matches` under them. A capped list that does not say it is
+     capped reads as the whole answer.
+  7. That the search did not break what the page already did. Edit a field —
+     the margin rail and the bar's unsaved count must still appear; `⌘S` must
+     still save; **Revert** must still restore the saved baseline. Then check a
+     field whose description interpolates its own value (any of the ceilings):
+     changing the value must change what the search finds, because the corpus
+     is the rendered page rather than an index built once.
+  8. The unsaved guard. With an edit pending, reload the page and close the tab
+     — the browser's own dialog must appear both times. Save, then reload: no
+     dialog. This is the half that fails in the direction that trains the
+     operator to dismiss it. A **client-side** navigation (a press on the
+     sidebar) still prompts nothing and cannot, which is stated in the code and
+     is the known gap.
+  9. At **390×844**: the filter's text box and picker wrap onto two lines above
+     the log rather than squeezing it; the settings search box and its results
+     stay inside the viewport with no horizontal scroll; each result row is at
+     least 44px tall. The narrow-viewport entries already on this list predate
+     both controls and cover neither.
+
 - **Context pruning inside a live run.** The whole feature. The winnow
   subprocess, the token measurement, all three prescriptions and the `.bak` it
   leaves were exercised directly against a copied transcript in the running
