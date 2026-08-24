@@ -8057,6 +8057,18 @@ export async function startRun(id: string): Promise<void> {
         if (earlyEnds < MAX_EARLY_ENDS_PER_RUN) {
           earlyEnds += 1;
           iterations -= 1;
+          // Written straight back to the row, which the pause path above does
+          // not need to do and this one does. The UPDATE a few lines up has
+          // already stored the *un*-refunded count, and a paused run is picked
+          // up later by a different path that writes its own; this one carries
+          // on inside the same loop, so nothing else would correct the row until
+          // the next cycle ends — and by then the counter has been re-incremented
+          // to the same number, so it never corrects at all. The visible effect
+          // is a "Work cycles" bar that advances the moment the ceiling fires,
+          // while the run is still working on the cycle it was refunded for.
+          db()
+            .prepare("UPDATE runs SET iterations = ? WHERE id = ?")
+            .run(iterations, id);
         }
 
         lastContextTokens = contextAfterPrune(
