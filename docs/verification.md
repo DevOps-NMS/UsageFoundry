@@ -1403,13 +1403,28 @@ through before trusting this unattended:
   the wiring: no boundary prune has fired at the end of a real work cycle, no
   cycle has been ended by the context ceiling, and no netted figure on the
   dashboard or a run page has been read against a real run. That now includes
-  the `PruneSavingsAside` tile beside the window meters: its five states (both
-  windows priced, either window empty, partially priced, a negative net) were
-  rendered through `renderToStaticMarkup` and read as markup, and the grid rule
-  behind the two-column split is present in the emitted production CSS, but no
-  browser has displayed either — this container has no headless browser — and
-  the money on it came from hand-written DTOs rather than a real
-  `prune_receipts` table. The Docker build that
+  the `PruneSavingsAside` tile beside the window meters: its six states (a
+  bounded span, an unbounded one, either window empty, partially priced, nothing
+  priced at all, a negative net) were rendered through `renderToStaticMarkup` and
+  read as markup, and the grid rule behind the two-column split is present in the
+  emitted production CSS, but no browser has displayed either — this container
+  has no headless browser — and the money on it came from hand-written DTOs
+  rather than a real `prune_receipts` table.
+
+  **The tile's headline is now the total rather than the 5-hour window, and
+  nothing about that span has been measured.** `/api/usage` reads one span
+  bounded at the transcript horizon, prices it once and sums three nested spans
+  out of it — so what a real install shows depends on receipts older than a
+  window, which no run here has produced: every prune receipt on this machine
+  was written inside one session. Unverified specifically: that the `total`
+  really is a superset of both windows on an install whose
+  `transcriptRetentionDays` is shorter than a week (the `Math.min` clamp against
+  `snapshot.weekly.startsAt` is the only thing holding it, and it has been read,
+  not run); that a receipt whose transcript has been swept is excluded rather
+  than priced at zero saving with its invalidation still charged; and that the
+  single-read-three-sums path is faster than the two `pruneSavings` calls it
+  replaced — it does strictly less work by inspection, and nothing was timed. The
+  Docker build that
   bundles winnow has also never completed — the repository was private when this
   was written, so the `git fetch` in the image fails and the feature reports
   itself unavailable. Two things to watch first: whether the transcript reader's

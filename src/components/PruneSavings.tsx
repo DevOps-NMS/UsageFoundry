@@ -1,7 +1,7 @@
 "use client";
 
 import type { PruneSavingsDTO } from "@/lib/apiTypes";
-import { fmtTokens, fmtUSD } from "@/lib/format";
+import { fmtDate, fmtTokens, fmtUSD } from "@/lib/format";
 import { Card, CardTitle, Stat, StatSub } from "@/components/ui/Card";
 import { TBody, Table, Td, Tr } from "@/components/ui/Table";
 
@@ -124,9 +124,24 @@ export function PruneSavingsRows({
   );
 }
 
+/** One span's net, as a row under the headline. */
+function SpanRow({ label, savings }: { label: string; savings: PruneSavingsDTO }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="text-ink-muted">{label}</span>
+      <span className="font-medium tabular-nums text-ink">
+        {/* An em dash, never `+$0.00`: a window with no prunes in it and a
+            window where pruning earned nothing are different facts, and the
+            second one has never been observed. */}
+        {savings.prunes === 0 ? "—" : signedUSD(savings.netUSD)}
+      </span>
+    </div>
+  );
+}
+
 /**
- * The same two windows as a tile, for the top of the dashboard beside the
- * window meters.
+ * Everything pruning has been worth, as a tile for the top of the dashboard
+ * beside the window meters.
  *
  * ## Why this is a second surface and not a move
  *
@@ -145,54 +160,68 @@ export function PruneSavingsRows({
  * and hence the footnote, which is not decoration: it is the only thing on the
  * tile saying this number belongs to no meter beside it.
  *
- * ## Why the 5-hour window is the headline
+ * ## Why the total is the headline and the windows are rows
  *
- * The card to its left leads with the session, for the same reason: it is the
- * allowance that refills on its own. When nothing was pruned in that window the
- * headline says so rather than reading `+$0.00`, which is the same trap the
- * band's own gate exists to avoid — `$0.00` means "pruning has not run", and
- * a reader has no way to tell that from "pruning saves nothing".
+ * The card to its left leads with the 5-hour window because that is the
+ * allowance that refills on its own — a *window* is the subject there. Here it
+ * is not. "Is pruning worth leaving on" is not a question about this week, and
+ * an install that pruned hard a fortnight ago and idled since would have
+ * answered it with a dash. So the headline is every receipt still priceable and
+ * the two windows stay underneath, where they say whether it is still earning.
+ *
+ * The total is a **floor** and `totalFrom` is where it starts: past the
+ * transcript horizon a receipt cannot be priced at all — see the route. Null
+ * means nothing bounded it, and the label says "all time" rather than a date
+ * this component invented.
+ *
+ * Money it could not price at all reads as an em dash, on `SpanRow`'s rule and
+ * for a second reason: `+$0.00` under a caption naming a few hundred thousand
+ * removed tokens reads as a bug in the arithmetic rather than as a missing
+ * price list.
  */
 export function PruneSavingsAside({
+  total,
+  totalFrom,
   session,
   weekly,
 }: {
+  total: PruneSavingsDTO;
+  totalFrom: number | null;
   session: PruneSavingsDTO;
   weekly: PruneSavingsDTO;
 }) {
-  const someUnpriced =
-    session.pricedPrunes < session.prunes ||
-    weekly.pricedPrunes < weekly.prunes;
+  const span = totalFrom === null ? "All time" : `Since ${fmtDate(totalFrom)}`;
+  const removed = `${fmtTokens(total.tokensRemoved)} tokens removed`;
 
   return (
     <Card>
       <CardTitle>Saved by pruning</CardTitle>
 
-      {session.prunes === 0 ? (
+      {total.pricedPrunes === 0 ? (
         <>
           <Stat>—</Stat>
-          <StatSub>Nothing pruned this 5-hour window</StatSub>
+          <StatSub>
+            <span className="tabular-nums">{removed}</span>, on a model with no
+            price here
+          </StatSub>
         </>
       ) : (
         <>
-          <Stat>{signedUSD(session.netUSD)}</Stat>
+          <Stat>{signedUSD(total.netUSD)}</Stat>
           <StatSub>
             <span className="tabular-nums">
-              This 5-hour window · {fmtTokens(session.tokensRemoved)} tokens
-              removed
+              {span} · {removed}
             </span>
           </StatSub>
         </>
       )}
 
-      {/* The same hairline the window card puts between its two windows, so the
-          week reads as the second half of one subject rather than as another
-          card's worth of figures. */}
-      <div className="mt-3 flex items-baseline justify-between gap-3 border-t border-line pt-2.5 text-sm">
-        <span className="text-ink-muted">This week</span>
-        <span className="font-medium tabular-nums text-ink">
-          {weekly.prunes === 0 ? "—" : signedUSD(weekly.netUSD)}
-        </span>
+      {/* The same hairline the window card puts between its two windows, so
+          these read as the rest of one subject rather than as another card's
+          worth of figures. */}
+      <div className="mt-3 space-y-1.5 border-t border-line pt-2.5 text-sm">
+        <SpanRow label="This 5-hour window" savings={session} />
+        <SpanRow label="This week" savings={weekly} />
       </div>
 
       <div className="mt-3 space-y-1 text-xs text-ink-muted">
@@ -200,7 +229,7 @@ export function PruneSavingsAside({
         <div>Not spend, and added to nothing beside it.</div>
         {/* Shortened deliberately: the band carries the counts. What a reader
             needs here is only that the figure is a floor. */}
-        {someUnpriced && (
+        {total.pricedPrunes > 0 && total.pricedPrunes < total.prunes && (
           <div>
             Some prunes ran on a model with no price here, so this is a floor.
           </div>
