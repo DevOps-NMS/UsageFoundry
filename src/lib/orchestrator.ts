@@ -43,6 +43,7 @@ import { installBudgetRefusal, installBudgetVerdict } from "./installBudget";
 import {
   lastScanReadFailures,
   readCompactions,
+  resolveSessionTranscript,
   scanUsage,
   type CompactionBoundary,
   type UsageEntry,
@@ -58,6 +59,17 @@ import {
 } from "./otlp";
 import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
 import { enabledPluginDirs, pluginDirArgs } from "./plugins";
+import { BYTES_PER_TOKEN } from "./fileCostNotice";
+import {
+  contextTokens,
+  CYCLE_CONTEXT_CEILING_TOKENS,
+  PAYBACK_HORIZON_TURNS,
+  paybackTurns,
+  pruneTranscript,
+  pruningEnabled,
+  recordPrune,
+  type PruneTrigger,
+} from "./contextPruning";
 import { fileCostNotice } from "./fileCostNotice";
 import { prepareReadGuard } from "./readGuard";
 import { prepareVaultSkill } from "./vaultSkill";
@@ -80,7 +92,7 @@ import { notifyLifecycle } from "./notify";
 import { clipToolInput, MAX_LOG_CHARS, toolArgs } from "./logLine";
 // Same direction, same reason: the cycle deadline says how long it waited in
 // the words the run page already uses for every other span.
-import { fmtDuration } from "./format";
+import { fmtDuration, fmtTokens } from "./format";
 import type { RunDependencyDTO, SandboxStateDTO } from "./apiTypes";
 
 /**
@@ -385,7 +397,16 @@ const procs = ((globalThis as unknown as {
  * what lets the whole set be picked up together afterwards.
  */
 export interface Interrupt {
-  kind: "operator" | "guard" | "deadline" | "shutdown";
+  /**
+   * `prune` is the one kind that does not end the run.
+   *
+   * It ends the *cycle*, so that the transcript can be rewritten at a moment no
+   * Claude process is holding it, and then the loop carries on. Every other kind
+   * here is terminal or a pause, which is why the loop's post-cycle checkpoint
+   * has to test for it before it reaches `applyInterrupt` — `interruptOutcome`
+   * has no status that means "carry on" and should never be asked for one.
+   */
+  kind: "operator" | "guard" | "deadline" | "shutdown" | "prune";
   reason: string;
   code?: BudgetStopCode;
   /** True only for a live-resume step-aside; the run parks rather than ends. */
@@ -425,6 +446,13 @@ export function interruptOutcome(it: Interrupt): {
   if (it.pause) {
     return { status: "paused", reason: it.reason, resumeAt: it.resumeAt ?? null };
   }
+  // `prune` is deliberately not given a case, and this is the safe direction
+  // rather than an omission. The run loop consumes that kind before it reaches
+  // here — it is the one interrupt that means "carry on" — so arriving with one
+  // means the loop ended some other way first, most often a shutdown, and the
+  // run really has stopped. A `status` invented for it here would be a run
+  // reported as still going by a function whose whole job is to say how it
+  // ended.
   return {
     status: it.kind === "deadline" ? "failed" : "stopped",
     reason: it.reason,
@@ -450,6 +478,48 @@ interface LiveGuard {
 const liveGuards = ((globalThis as unknown as {
   __ufLiveGuards?: Map<string, LiveGuard>;
 }).__ufLiveGuards ??= new Map<string, LiveGuard>());
+
+/**
+ * Runs whose in-flight cycle is being watched for the context ceiling.
+ *
+ * Separate from `liveGuards` and not a field on it, because the two answer to
+ * different things. That map is registered only when `enforcement` is not
+ * `between-cycles` — an opt-in the operator makes about *budgets* — and the
+ * ceiling replaced `--autocompact`, which rode every cycle's argv on every run.
+ * Folding this into that map would have made the thing bounding a cycle's
+ * context an opt-in nobody knew they were declining.
+ *
+ * Its own `globalThis` key rather than a wider `liveGuards` value, on the rule
+ * `__ufInterrupts` records: `??=` only initialises when absent, so a dev hot
+ * reload would keep a pre-change value at the old key and every read of the new
+ * field would be undefined.
+ *
+ * `sessionId` is read through a closure rather than stored, because
+ * `adoptSession` can move it while the child is running.
+ */
+interface ContextWatch {
+  sessionId: () => string | null;
+}
+
+const contextWatches = ((globalThis as unknown as {
+  __ufContextWatches?: Map<string, ContextWatch>;
+}).__ufContextWatches ??= new Map<string, ContextWatch>());
+
+/**
+ * How many times one run may have a cycle ended early and refunded.
+ *
+ * The refund is what keeps this honest against what it replaced: a compaction
+ * never cost a work cycle, so a ceiling crossing that consumed one would make
+ * `maxIterations` mean something different than it did before. But an unbounded
+ * refund breaks the terminus `budgets-and-guards.md` requires — a run whose
+ * every cycle crossed the ceiling would loop forever, always ending, always
+ * refunded, never finishing.
+ *
+ * So it is bounded, `MAX_PAUSES_PER_RUN`'s arrangement and its number. Past
+ * this, a crossing still prunes and still ends the cycle; it simply counts,
+ * and `iterations` climbs monotonically again.
+ */
+export const MAX_EARLY_ENDS_PER_RUN = 3;
 
 /** Shared empty reading, for a policy whose guards do not need telemetry. */
 const NO_TELEMETRY_SPEND: TelemetrySpend = { requests: 0, costUSD: 0, tokens: 0 };
@@ -4946,45 +5016,6 @@ const SELF_HOSTING_NOTICE =
   "title is `next-server`, which is also the title your own dev server takes, so " +
   "a match on it cannot tell the two apart.";
 
-/**
- * The context size the CLI compacts a work cycle's conversation at.
- *
- * A module constant rather than a setting, and the precedent is
- * `--max-budget-usd`'s: a fact about how this app spawns agents, not an
- * operator preference. `metering.md`'s rule against numeric ceilings in
- * `DEFAULTS` points the same way — an operator has no way to pick this number,
- * because the thing it trades is invisible to them.
- *
- * 200k of the 1M the CLI accepts. The floor it will take is 100k, which is also
- * where its own thrash breaker becomes reachable, so this leaves that far off
- * while still sitting below the 100-turn mark where the re-read bill
- * concentrates.
- *
- * **It fires at 167,000, not at 200,000 and not at the 180,000 `effectiveWindow`
- * alone predicts.** Read off the pinned 2.1.226 bundle, the threshold is
- * `min(asked, window) − min(maxOutput, 20,000) − 13,000`, and the measurement
- * agrees: 30 of 42 observed boundaries land within ±3,000 of 167,000 against 2
- * of 42 within ±3,000 of 180,000. That is also why the issue's "consider
- * 150,000" is declined — 150,000 would fire at 117,000, and with a firing
- * spread of roughly ±12,000 the lower tail reaches the 100,000 floor where the
- * CLI's own thrash breaker lives.
- *
- * **The sign is measured and it is positive**, between the two arms of a
- * natural experiment over 1,147 transcripts split at the commit that added the
- * flag: turns past the cap cost **0.45× per turn and 0.50× per 1,000 output
- * tokens**. Do not re-derive that from a within-session before/after reading —
- * per-turn cost is monotone in position within a compaction cycle, so such a
- * reading measures the down edge of a saw-tooth and a placebo over an
- * *uncompacted* ramp reproduces about 87% of it.
- *
- * Two terms stay open and are in `docs/verification.md` rather than here: the
- * summariser's own call carries no usage block in any of the 42 boundaries, so
- * roughly 168,000 in and 6,300 out per compaction is billed and invisible to
- * `scanUsage()` — the largest unmeasured term — and only one window value has
- * ever run, so nothing measures what another would do. Read that section before
- * moving the constant.
- */
-const AUTOCOMPACT_WINDOW_TOKENS = 200_000;
 
 /**
  * Why a run should hand self-contained work to a sub-agent.
@@ -5237,25 +5268,28 @@ export function buildArgs(opts: {
   // another directory, so it is safe here in the middle of the argv.
   if (opts.vaultSkill) args.push("--add-dir", opts.vaultSkill.vaultPath);
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
-  // A ceiling on the conversation the CLI carries forward. Not a guard: it
-  // produces no `BudgetVerdict`, ends nothing, and sits in none of the check
-  // orders `budget.ts` maintains — what it does is let the CLI compact a run's
-  // own context instead of carrying every token to the end of the run.
+  // **`--autocompact` used to be emitted here and deliberately is not any
+  // more.** `contextPruning.ts` is what bounds a cycle's context now: it prunes
+  // the transcript at each cycle boundary and ends a cycle early once its
+  // context passes `CYCLE_CONTEXT_CEILING_TOKENS`, which is the same 167,000
+  // the flag fired at.
   //
-  // This flag does not lower a threshold the CLI already had — it creates the
-  // only one there is. The pinned bundle gates the check on the window not
-  // resolving to `source:"auto"` at or above 1e6, and this install's model
-  // resolves exactly that, so the CLI refuses to auto-compact here on its own:
-  // before the flag, 604 container sessions — 246 of them past 167,000 tokens,
-  // one request reaching 752,172 — produced zero `compact_boundary` records.
-  // That is what makes cache re-read 59% of this workload: nothing ever resets
-  // a prefix, and 11% of sessions — the ones past 100 turns — carry 58% of the
-  // re-read bill. Remove the flag and nothing in this app compacts at all.
+  // What that swap gave up is on the record rather than in a commit message,
+  // because it is the strongest measurement this repository has and a later
+  // reading must be able to tell a decision from a regression. The flag created
+  // the only compaction threshold there was — the pinned bundle refuses to
+  // auto-compact a window resolving to `source:"auto"` at or above 1e6, and this
+  // install's model resolves exactly that, so before it 604 container sessions,
+  // 246 of them past 167,000 tokens and one request reaching 752,172, produced
+  // zero `compact_boundary` records. With it, a natural experiment over 1,147
+  // transcripts split at the commit that added it put turns past the cap at
+  // 0.45× per turn and 0.50× per 1,000 output tokens.
   //
-  // Per cycle for the same reason `--plugin-dir` is: `--resume` does not
-  // restore it, and a later cycle running under the default window behaves
-  // exactly like one that was never given a ceiling.
-  args.push("--autocompact", String(AUTOCOMPACT_WINDOW_TOKENS));
+  // The two are not the same operation and that is the case for the swap:
+  // compaction replaces the conversation with a summary and the detail is gone,
+  // where a prune removes tool output and keeps the conversation. It is also no
+  // longer true that nothing resets a prefix — a boundary prune does, at the one
+  // moment it is free. `docs/verification.md` carries both halves.
   // A hard stop inside the CLI, the same mechanism a chat turn and an
   // orchestrator block already carry — and the only one that can bound the
   // cycle that crosses the threshold rather than the one after it. Per
@@ -5355,6 +5389,12 @@ const CARRIES_NO_CONTEXT = new Set([
   "--add-dir",
   // The conversation itself, which is the thing being summarised rather than
   // something injected into it, and the threshold that decides when.
+  //
+  // `--autocompact` is no longer emitted — `contextPruning.ts` replaced it — but
+  // it stays in both this set and `ARGV_ARITY`, because these two describe how
+  // to *read* an argv and every cycle spawned before that change stored one
+  // carrying the flag. Dropping it here would make those historical rows report
+  // an unclassified flag and a stray `200000`.
   "--resume",
   "--autocompact",
   "--max-budget-usd",
@@ -6396,6 +6436,76 @@ export function runIteration(
   });
 }
 
+/**
+ * Prune this run's transcript, and say on the run's log what it took out.
+ *
+ * Shared by the two moments a prune can happen, so that they cannot drift into
+ * reporting the same operation two different ways. What differs between them is
+ * `trigger`, and that difference is priced rather than cosmetic —
+ * `contextPruning.ts` and the `prune_receipts` schema both turn on it.
+ *
+ * **Every failure here is a log line and nothing else.** A prune is an
+ * optimisation running between two cycles of a run that is otherwise fine, and
+ * there is no outcome — a missing tool, an unreadable transcript, a winnow that
+ * exited non-zero — where ending the run is a better answer than carrying on
+ * with a larger context. The one thing that must not happen quietly is nothing
+ * at all: this is now what bounds a cycle, so a prune that could not run says so
+ * in the pane the operator is watching.
+ */
+async function prune(
+  id: string,
+  sessionId: string | null,
+  trigger: PruneTrigger,
+): Promise<void> {
+  const settings = getSettings();
+  // The switch and the tool are tested apart, deliberately. Off is silent — that
+  // is an operator's decision and needs no line every cycle. On with no tool is
+  // the case that must speak: `pruneTranscript` answers `unavailable` and the
+  // switch below says so. Collapsing the two into `pruningEnabled` here is what
+  // made that branch unreachable, which is the exact silence this whole path is
+  // written against.
+  if (!settings.contextPruning) return;
+  if (!sessionId) return;
+
+  const transcript = await resolveSessionTranscript(sessionId);
+  if (!transcript) {
+    log(id, `Could not find this run's transcript, so its context was not pruned.`);
+    return;
+  }
+
+  const result = await pruneTranscript(transcript, settings.contextPruningStrictness);
+  switch (result.kind) {
+    case "pruned": {
+      const { tokensRemoved, tokensBefore, tokensAfter } = result.outcome;
+      recordPrune(id, trigger, result.outcome, getRun(id)?.model ?? null);
+      const pct = Math.round((tokensRemoved / tokensBefore) * 100);
+      log(
+        id,
+        `Pruned ${fmtTokens(tokensRemoved)} tokens from this run's conversation ` +
+          `(${pct}% of ${fmtTokens(tokensBefore)}), leaving ${fmtTokens(tokensAfter)}.`,
+      );
+      break;
+    }
+    case "nothing":
+      // A result and not an absence, winnow's own rule for its hook lines: a
+      // cycle whose conversation held nothing worth removing has to be
+      // distinguishable from one where the tool never ran.
+      log(id, `Nothing worth removing from this run's conversation.`);
+      break;
+    case "unavailable":
+      log(id, `Context pruning is switched on but ${result.reason}.`);
+      break;
+    case "failed":
+      log(id, `This run's context could not be pruned: ${result.reason}.`);
+      break;
+  }
+}
+
+/** The boundary case, named so the call site inside the loop reads as one line. */
+async function pruneAtBoundary(id: string, sessionId: string | null): Promise<void> {
+  await prune(id, sessionId, "boundary");
+}
+
 /** How much of a refused command is kept. Long enough to name it, not to log it. */
 const DENIAL_COMMAND_CHARS = 60;
 
@@ -7119,6 +7229,9 @@ export async function startRun(id: string): Promise<void> {
    */
   let reportedDone = run.reported_done !== 0;
   let sessionId: string | null = run.session_id;
+  // How many cycles the context ceiling has ended and refunded. See
+  // `MAX_EARLY_ENDS_PER_RUN`.
+  let earlyEnds = 0;
   /** The operator's message for the first cycle of this segment, if any. */
   let followUp: string | null = run.follow_up ?? null;
   let stopReason = "";
@@ -7712,6 +7825,13 @@ export async function startRun(id: string): Promise<void> {
         startLiveTicker();
       }
 
+      // Unconditional, unlike the block above. This is the ceiling that replaced
+      // `--autocompact`, and that flag did not ask about `enforcement`.
+      // `pruningEnabled` is re-read on the tick rather than tested here, so an
+      // operator switching the feature off reaches a cycle already in flight.
+      contextWatches.set(id, { sessionId: () => sessionId });
+      startLiveTicker();
+
       let res: IterationResult;
       try {
         res = await runIteration(
@@ -7743,6 +7863,7 @@ export async function startRun(id: string): Promise<void> {
         );
       } finally {
         liveGuards.delete(id);
+        contextWatches.delete(id);
       }
 
       cyclesThisSegment += 1;
@@ -7879,6 +8000,31 @@ export async function startRun(id: string): Promise<void> {
       // code that reads as -1. Judging that as a crash would file every stop —
       // operator or guard — as a red `failed` run.
       const postCycle = interrupts.get(id);
+      if (postCycle?.kind === "prune") {
+        // The one interrupt that does not end the run, so it is taken off the
+        // map here rather than passed to `applyInterrupt` — which has no status
+        // meaning "carry on" and would file this as a `stopped` run.
+        //
+        // Ordered ahead of every test below for the reason the general interrupt
+        // check is: the child was killed, so it closed with a null code that
+        // reads as -1 and reported no `result`. Judging that as a crash, or as a
+        // refusal, would end a run that is working exactly as configured.
+        interrupts.delete(id);
+        log(id, postCycle.reason);
+
+        // Refunded, bounded. A compaction never cost a work cycle, so a ceiling
+        // crossing that consumed one would quietly change what `maxIterations`
+        // buys; but an unbounded refund is a run with no terminus, which
+        // `budgets-and-guards.md` forbids. Past the cap the crossing still
+        // prunes and simply counts.
+        if (earlyEnds < MAX_EARLY_ENDS_PER_RUN) {
+          earlyEnds += 1;
+          iterations -= 1;
+        }
+
+        await prune(id, sessionId, "early-end");
+        continue;
+      }
       if (postCycle) {
         applyInterrupt(postCycle);
         // A cycle the live guard cut short is refunded to the counter: the
@@ -8200,6 +8346,23 @@ export async function startRun(id: string): Promise<void> {
         finalStatus = "completed";
         break;
       }
+
+      // The boundary prune, and its position in this loop is the whole of why
+      // it is free.
+      //
+      // Every `break` above has been passed, so another cycle is going to run
+      // and it is going to `--resume` this session — which rewrites the cached
+      // prefix whatever we do here. That is the `2·D` term in
+      // `contextPruning.ts`'s arithmetic being refunded: the edit costs nothing
+      // it was not about to cost anyway, and every turn of the next cycle then
+      // carries less. Moved above any of those breaks and it would prune a
+      // transcript nothing resumes, paying a rewrite for a conversation that has
+      // ended.
+      //
+      // Awaited rather than left floating. It is seconds of subprocess against a
+      // cycle measured in minutes, and the next spawn must not read the file
+      // while winnow is rewriting it.
+      await pruneAtBoundary(id, sessionId);
     }
   } catch (err) {
     stopReason = err instanceof Error ? err.message : String(err);
@@ -8214,6 +8377,8 @@ export async function startRun(id: string): Promise<void> {
     procs.delete(id);
     interrupts.delete(id);
     liveGuards.delete(id);
+    contextWatches.delete(id);
+    earlyEndDeclined.delete(id);
     // The exporter's credential dies with the run's loop, the way the chat's
     // dies with its turn — on a short grace, because the exporter batches on a
     // one-second timer and revoking on the instant would drop the tail of the
@@ -8513,10 +8678,17 @@ async function liveGuardTick(): Promise<void> {
   if (timers.ticking) return;
   timers.ticking = true;
   try {
-    if (liveGuards.size === 0) {
+    if (liveGuards.size === 0 && contextWatches.size === 0) {
       stopLiveTicker();
       return;
     }
+
+    // Before the budget scan, and cheap enough to run first: it stats one file
+    // per run and parses only the ones large enough to be near the ceiling. A
+    // run that crosses it is interrupted here and then skipped by the budget
+    // loop below on the `interrupts.has(id)` test every branch already makes.
+    await checkContextCeilings();
+
     const pending = [...liveGuards].filter(([id]) => !interrupts.has(id));
     if (pending.length === 0) return;
 
@@ -8550,6 +8722,129 @@ async function liveGuardTick(): Promise<void> {
     timers.ticking = false;
   }
 }
+
+/**
+ * End any cycle whose conversation has passed the ceiling, so it can be pruned.
+ *
+ * This is what replaced `--autocompact`, and the shape of the replacement is the
+ * part worth reading. The CLI compacted *in place*: it summarised the
+ * conversation and the same cycle carried on. Nothing here can do that — a
+ * transcript rewritten under a live session races the CLI's own appends, and the
+ * CLI is sending its in-memory context to the API regardless, so an edit to the
+ * file would not shrink what this turn costs anyway. What this app can do that
+ * the CLI cannot is end the cycle, which puts the transcript back in nobody's
+ * hands, and that is the whole mechanism.
+ *
+ * ## The cheap gate
+ *
+ * `contextTokens` parses a whole transcript, and this runs once a minute per
+ * live run. So the file's *size* is tested first: message content is a subset of
+ * the file, so a file smaller than the ceiling's worth of bytes cannot hold a
+ * conversation past the ceiling. That is a sound one-sided test — it can defer a
+ * crossing to the next tick on a file that has just grown, never miss one.
+ *
+ * ## Why the payback test uses the last receipt
+ *
+ * Ending a cycle manufactures a boundary, so unlike the one at the end of a
+ * cycle it pays the invalidation in full and only pays back over later turns.
+ * The test for that is `paybackTurns`, which needs to know how much a prune will
+ * remove — and the only honest way to know is to have pruned this run before.
+ * So the first crossing on a run always acts, and every crossing after it is
+ * predicted from what the last one actually took out. A run whose prunes are not
+ * paying stops having its cycles ended, which is the correct direction: the
+ * alternative is a dry run per tick, and winnow's dry run parses the same whole
+ * file for a token figure that is measured here to be unusable.
+ */
+async function checkContextCeilings(): Promise<void> {
+  if (contextWatches.size === 0) return;
+  if (!pruningEnabled()) return;
+
+  for (const [id, watch] of contextWatches) {
+    if (interrupts.has(id)) continue;
+    const sessionId = watch.sessionId();
+    if (!sessionId) continue;
+
+    let tokens: number;
+    try {
+      const transcript = await resolveSessionTranscript(sessionId);
+      if (!transcript) continue;
+      // The one-sided gate. `BYTES_PER_TOKEN` is the same constant
+      // `contextTokens` divides by, so this is exactly "could the message
+      // content alone be this large".
+      if (fs.statSync(transcript).size < CYCLE_CONTEXT_CEILING_TOKENS * BYTES_PER_TOKEN) {
+        continue;
+      }
+      tokens = contextTokens(transcript);
+    } catch {
+      // A transcript that cannot be read is not a run to end. The budget guards
+      // below are unaffected and the next tick tries again.
+      continue;
+    }
+    if (tokens < CYCLE_CONTEXT_CEILING_TOKENS) continue;
+
+    const predicted = predictedPayback(id);
+    if (predicted !== null && predicted > PAYBACK_HORIZON_TURNS) {
+      // Said once per run rather than once per tick: `earlyEndDeclined` latches,
+      // because a run sitting above the ceiling would otherwise repeat this
+      // every minute for hours.
+      if (!earlyEndDeclined.has(id)) {
+        earlyEndDeclined.add(id);
+        log(
+          id,
+          `This run's conversation has passed ${fmtTokens(CYCLE_CONTEXT_CEILING_TOKENS)} tokens, ` +
+            `but the last prune here removed too little to pay for another one ` +
+            `(it would need ${predicted} more turns to break even). Letting the cycle run on.`,
+        );
+      }
+      continue;
+    }
+
+    interruptRun(id, {
+      kind: "prune",
+      reason:
+        `This work cycle's conversation reached ${fmtTokens(tokens)} tokens, so it was ` +
+        `ended here to be pruned. The next cycle carries on from a smaller conversation.`,
+      pause: false,
+      at: Date.now(),
+    });
+  }
+}
+
+/**
+ * What a further prune on this run would cost, in turns, or null for no history.
+ *
+ * Read from the run's last receipt: `tokens_after` is the suffix an edit would
+ * invalidate and `tokens_removed` is what came out, which is exactly the `S` and
+ * `D` of `paybackTurns`. Null on the first crossing, which is the case the
+ * caller treats as "act, and find out".
+ */
+function predictedPayback(runId: string): number | null {
+  try {
+    const row = db()
+      .prepare(
+        `SELECT tokens_before, tokens_removed FROM prune_receipts
+          WHERE run_id = ? ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(runId) as { tokens_before: number; tokens_removed: number } | undefined;
+    if (!row) return null;
+    // `tokens_before`, never `tokens_after`. See `paybackTurns`: S is the suffix
+    // as it stood before the cut, and the after figure is short by exactly the
+    // amount removed — which flatters the small cuts this test exists to refuse.
+    return paybackTurns(row.tokens_before, row.tokens_removed);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Runs already told their prunes are not paying.
+ *
+ * A `Set` on `globalThis` for `__ufInterrupts`' reason, and cleared with the
+ * run's other per-run state when its loop ends.
+ */
+const earlyEndDeclined = ((globalThis as unknown as {
+  __ufEarlyEndDeclined?: Set<string>;
+}).__ufEarlyEndDeclined ??= new Set<string>());
 
 function startSweeper(): void {
   if (timers.sweep) return;

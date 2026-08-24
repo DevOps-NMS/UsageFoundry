@@ -1220,6 +1220,51 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_ok ON webhook_deliveries(ok, id);
   `);
 
+  // What a context prune took out, per prune.
+  //
+  // Its own table rather than a `run_events` row, and the reason is retention:
+  // events expire on their own horizon (`retention.ts`), and the KPI these rows
+  // answer is a weekly one. A figure that silently stopped covering the whole
+  // week because the evidence behind its first days had been swept is worse than
+  // no figure — it would read as pruning having got less effective.
+  //
+  // **Tokens, never bytes.** Measured on this install, winnow frees 3.4× more
+  // file than it removes from what is actually sent, because most of what it
+  // takes out is the `toolUseResult` envelope the CLI writes and never
+  // transmits. `contextPruning.ts` computes both readings from `message` content
+  // alone and only those land here.
+  //
+  // `tokens_after` is stored rather than derived from the other two because it
+  // is what the next cycle actually carries, and a later change to how removal
+  // is counted must not silently move a figure already written. It is *not* what
+  // the payback test reads — that one wants `tokens_before`, the suffix as it
+  // stood before the cut (contextPruning.ts's `paybackTurns`).
+  //
+  // `model` so a receipt can be priced at the rate that actually applied, on
+  // `byAgent.counterfactualUSD`'s rule: a rate looked up at read time prices
+  // last week's prune at this week's list.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS prune_receipts (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts             INTEGER NOT NULL,
+      -- A plain column, on webhook_deliveries.run_id's reasoning: nothing
+      -- deletes a runs row, so a cascade would describe a deletion that never
+      -- happens.
+      run_id         TEXT NOT NULL,
+      -- 'boundary' or 'early-end'. Load-bearing rather than descriptive: only
+      -- the second one pays an invalidation, because the first rides a rewrite
+      -- that was going to happen anyway.
+      trigger        TEXT NOT NULL,
+      tier           TEXT NOT NULL,
+      tokens_before  INTEGER NOT NULL,
+      tokens_after   INTEGER NOT NULL,
+      tokens_removed INTEGER NOT NULL,
+      model          TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_prune_receipts_ts ON prune_receipts(ts);
+    CREATE INDEX IF NOT EXISTS idx_prune_receipts_run ON prune_receipts(run_id, ts);
+  `);
+
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as
   // one it left behind.

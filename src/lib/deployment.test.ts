@@ -856,6 +856,105 @@ describe("Python tools survive the rebuild that installs them by hand does not",
  * covers every `UF_` name the entrypoint reads, because the one that went
  * missing was the one no prefix had been written for.
  */
+describe("winnow is in the image, because nothing else bounds a cycle now", () => {
+  /**
+   * The three-file agreement behind context pruning, and it earns a group of
+   * its own for a reason `UF_PY_TOOLS`' does not have.
+   *
+   * That mechanism installs at boot and is best-effort: a tool that fails to
+   * arrive costs the operator a plugin. This one replaced `--autocompact`, so an
+   * install where it is absent has **nothing at all** bounding a work cycle's
+   * context — a long cycle runs to the model's whole window, no error, no failed
+   * run, just a bill. So the paths `contextPruning.ts` executes and the paths the
+   * Dockerfile builds have to be the same paths, and a rename in either file
+   * alone produces exactly that silence.
+   */
+  const module = fs.readFileSync(path.join(root, "src/lib/contextPruning.ts"), "utf8");
+
+  /** The interpreter path the run loop actually spawns, off the module itself. */
+  function winnowRoot(): string {
+    const match = /^export const WINNOW_ROOT = "([^"]+)";$/m.exec(module);
+    assert.ok(match, "contextPruning.ts no longer names a winnow root");
+    return match[1];
+  }
+
+  it("builds winnow into the directory the run loop runs it from", () => {
+    const target = winnowRoot();
+    assert.ok(
+      dockerfile.includes(`${target}/venv`),
+      `The Dockerfile does not build a virtualenv under ${target}, which is ` +
+        `where contextPruning.ts spawns \`${target}/venv/bin/python\`. A run ` +
+        `would report pruning unavailable on every cycle, and with --autocompact ` +
+        `gone nothing would bound the context at all.`,
+    );
+  });
+
+  it("keeps that directory off every named volume", () => {
+    // The trap this exists for, and it has already caught one design: a volume
+    // takes its contents from the image exactly once, at creation, so a
+    // build-time install underneath a mount point is masked by whatever the
+    // existing volume holds. Installing winnow into `/home/node/pytools` would
+    // build correctly, pass every other test here, and be invisible at runtime
+    // on any machine that had already created that volume.
+    const target = winnowRoot();
+    const mounts = [...compose.matchAll(/^\s*-\s*[A-Za-z0-9][\w.-]*:(\/\S+?)(?::\w+)?\s*$/gm)]
+      .map((m) => m[1]);
+    for (const mount of mounts) {
+      assert.ok(
+        target !== mount && !target.startsWith(`${mount}/`),
+        `${target} is under the named volume mounted at ${mount}. A volume ` +
+          `takes the image's contents only when it is first created, so on any ` +
+          `machine whose volume already exists the build would be masked and ` +
+          `winnow would silently not be there.`,
+      );
+    }
+  });
+
+  it("pins the checkout to a commit, not a branch", () => {
+    // `CLAUDE_CLI_VERSION`'s argument. The run loop measures what this tool
+    // removes and prices it, so an unpinned rebuild moves that contract with
+    // nothing announcing it — and a tier that started removing more or less
+    // would show up only as a KPI that had quietly changed shape.
+    const match = /^ARG WINNOW_REF=(\S*)$/m.exec(dockerfile);
+    assert.ok(match, "the Dockerfile no longer takes a WINNOW_REF");
+    assert.match(
+      match[1],
+      /^[0-9a-f]{40}$/,
+      `WINNOW_REF defaults to "${match[1]}", which is not a full commit sha.`,
+    );
+  });
+
+  it("lets an operator build without it, rather than only by editing the image", () => {
+    // The escape hatch for a build host that cannot reach GitHub. `${VAR-default}`
+    // and deliberately not `${VAR:-default}`: the whole point is that an
+    // explicitly empty WINNOW_REF stays empty, and the colon form would
+    // substitute the default right back over it.
+    assert.match(
+      compose,
+      /WINNOW_REF:\s*"\$\{WINNOW_REF-[^}]*\}"/,
+      "docker-compose.yml must pass WINNOW_REF through with ${VAR-default}, " +
+        "or `WINNOW_REF=` in .env cannot switch the bundling off.",
+    );
+  });
+
+  it("no longer sends --autocompact, which pruning replaced", () => {
+    // Read off `buildArgs` in the source rather than from its output, because
+    // this is the deployment group's own question: the image and the argv have
+    // to agree that exactly one mechanism bounds a cycle. Both running means the
+    // CLI summarises a conversation moments before this app ends the cycle to
+    // prune it, and the run pays for both.
+    const orchestrator = fs.readFileSync(
+      path.join(root, "src/lib/orchestrator.ts"),
+      "utf8",
+    );
+    assert.ok(
+      !/args\.push\("--autocompact"/.test(orchestrator),
+      "buildArgs emits --autocompact again. contextPruning.ts owns the ceiling; " +
+        "running both is worse than either.",
+    );
+  });
+});
+
 describe("the sandbox ships off, and its switch reaches the container", () => {
   const entrypoint = fs.readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8");
 

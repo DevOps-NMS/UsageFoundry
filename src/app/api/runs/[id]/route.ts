@@ -9,6 +9,7 @@ import {
   stopRun,
 } from "@/lib/orchestrator";
 import { telemetryForRun } from "@/lib/otlp";
+import { pruneSavings } from "@/lib/contextPruning";
 import { runAgentDTO } from "@/lib/agents";
 import { normalizePolicy } from "@/lib/budget";
 import { auditMutation } from "../../../../lib/requestLog";
@@ -48,6 +49,12 @@ export async function GET(req: Request, ctx: Ctx) {
   // them and one client forgetting.
   const rawBudget = JSON.parse(run.budget) as Record<string, unknown>;
 
+  // Awaited before the response is assembled rather than inside it: it reads the
+  // transcript scan to count the turns a saving is measured over, and that scan
+  // is coalesced across callers, so a poll on an open run page joins the one the
+  // dashboard is already running rather than starting a second.
+  const pruned = await pruneSavings({ runId: id });
+
   // Gzipped: 14,170 bytes to 3,717, measured — the row carries the agent's
   // whole system prompt and the normalised policy, and this is the three-second
   // poll every open run page runs. The 404 above stays plain.
@@ -78,6 +85,12 @@ export async function GET(req: Request, ctx: Ctx) {
     // informative — telemetry counts requests the CLI's `result` event
     // never got to report.
     telemetry: telemetryForRun(id),
+    // A third independent reading, and like `telemetry` it is never merged into
+    // the row's spend: this is the value of an intervention, not money that
+    // moved. Undefined when this run has never been pruned, so the page can drop
+    // the section rather than render a row of zeroes — which would read as
+    // "pruning saved nothing here" when it means "pruning did not run".
+    pruning: pruned.prunes > 0 ? pruned : undefined,
   });
 }
 

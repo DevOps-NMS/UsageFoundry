@@ -265,6 +265,60 @@ ENV PATH="/home/node/pytools/bin:${PATH}" \
     UV_PYTHON_INSTALL_DIR=/home/node/pytools/python \
     UV_PYTHON_PREFERENCE=system
 
+# winnow, bundled rather than installed at boot.
+#
+# The reason this is in the image and not behind `UF_PY_TOOLS` is that it is no
+# longer a third-party plugin an operator might want: with `--autocompact` gone
+# it is the *only* thing bounding a work cycle's context, so an install where it
+# failed to arrive is an install whose long cycles run to the model's whole
+# window. `UF_PY_TOOLS` installs best-effort at boot and says so in a log line
+# nobody reads; a `RUN` that fails fails the build, which is the right direction
+# for something the run loop now depends on.
+#
+# Pinned to a commit rather than a branch on the `CLAUDE_CLI_VERSION` argument:
+# the run loop parses this tool's `--json` receipt and prices it, so an
+# unpinned rebuild would move that contract with no announcement. Set
+# `WINNOW_REF=` (empty) to build without it — `contextPruning.ts` then reports
+# the feature unavailable rather than silently pruning nothing.
+#
+# Its own virtualenv under /opt rather than a `uv tool install` into
+# `/home/node/pytools`, and that is the whole reason it survives: that path is a
+# named volume, and a volume takes its contents from the image exactly once, at
+# creation. An install written there during a build is masked by whatever the
+# existing volume already holds — which is precisely the "installed by hand,
+# lost on rebuild" failure this is meant to end. /opt is in the image layer, so
+# a rebuild is the only thing that can change it.
+#
+# Root-owned and 0755: every agent uid reads it, none writes it. A tool the run
+# loop shells out to on every cycle boundary, sitting in a directory a sibling
+# agent could rewrite, would be a way for one run to put its own code on every
+# other run's transcript.
+ARG WINNOW_REPO=https://github.com/Xapicc/winnow.git
+ARG WINNOW_REF=b49fceb0a021faea97c53dcbc93403b0aec4d626
+RUN set -eux; \
+    if [ -z "${WINNOW_REF}" ]; then \
+      echo "WINNOW_REF empty — building without winnow; context pruning will report unavailable"; \
+    else \
+      git init -q /opt/winnow/src; \
+      git -C /opt/winnow/src remote add origin "${WINNOW_REPO}"; \
+      if ! GIT_TERMINAL_PROMPT=0 git -C /opt/winnow/src fetch -q --depth 1 origin "${WINNOW_REF}"; then \
+        echo "" >&2; \
+        echo "Could not fetch ${WINNOW_REF} from ${WINNOW_REPO}." >&2; \
+        echo "This build has no credentials, so the repository must be public." >&2; \
+        echo "To build without winnow, set WINNOW_REF to an empty value:" >&2; \
+        echo "    WINNOW_REF= docker compose up --build" >&2; \
+        echo "Context pruning then reports itself unavailable, and note that it" >&2; \
+        echo "is the only thing bounding a work cycle's context." >&2; \
+        exit 1; \
+      fi; \
+      git -C /opt/winnow/src checkout --detach FETCH_HEAD; \
+      rm -rf /opt/winnow/src/.git; \
+      uv venv --python 3.11 /opt/winnow/venv; \
+      VIRTUAL_ENV=/opt/winnow/venv uv pip install --python /opt/winnow/venv/bin/python /opt/winnow/src; \
+      chmod -R a+rX /opt/winnow; \
+      /opt/winnow/venv/bin/python -m winnow safe env >/dev/null; \
+    fi
+
 # The agent runs inside this container, so Claude Code has to be in the image.
 #
 # Pinned because the run loop parses this CLI's `stream-json` output and its

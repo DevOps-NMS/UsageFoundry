@@ -2141,25 +2141,26 @@ describe("buildArgs", () => {
     assert.ok(args.includes("--resume"));
   });
 
-  it("carries the compaction ceiling on a resumed cycle, not only the first", () => {
-    // Same invariant as `--plugin-dir` above and the same silence if it breaks:
-    // `--resume` does not restore `--autocompact`, and a later cycle running
-    // under the CLI's default million-token window behaves exactly like one
-    // that was never given a ceiling. Nothing fails; the run simply goes back
-    // to carrying every token it has read to the end of the run.
+  it("emits no compaction ceiling, because pruning replaced it", () => {
+    // The inverse of the test this replaced, and it is worth a test rather than
+    // a deletion. `contextPruning.ts` bounds a cycle's context now, at the same
+    // 167,000 `--autocompact 200000` fired at, and it does it by ending the
+    // cycle rather than by summarising it. Both mechanisms running would be
+    // worse than either: the CLI would summarise a conversation moments before
+    // this app ended the cycle to prune it, so the prune would be measuring what
+    // the summariser had already thrown away and the run would pay for both.
+    //
+    // Silent in exactly the way the removed test guarded the other direction —
+    // a reinstated flag fails nothing and looks like an ordinary cycle.
     const args = buildArgs({
       ...base,
       isolated: false,
       resumeSessionId: "sess-1",
     });
-    const at = args.indexOf("--autocompact");
-    assert.notEqual(at, -1, "a resumed cycle must still be given a ceiling");
-    // The CLI accepts 100k-1M and rejects the argv outside it, which would fail
-    // every spawn of every run rather than one.
-    const window = Number(args[at + 1]);
-    assert.ok(
-      Number.isInteger(window) && window >= 100_000 && window <= 1_000_000,
-      `--autocompact ${args[at + 1]} is outside the range the CLI accepts`,
+    assert.equal(
+      args.indexOf("--autocompact"),
+      -1,
+      "context pruning owns the ceiling; --autocompact must not also be sent",
     );
     assert.ok(args.includes("--resume"));
   });

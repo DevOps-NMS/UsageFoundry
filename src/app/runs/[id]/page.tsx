@@ -7,6 +7,7 @@ import type {
   EnforcementModeDTO,
   RunDTO,
   RunEventDTO,
+  PruneSavingsDTO,
   RunTelemetryDTO,
 } from "@/lib/apiTypes";
 import {
@@ -439,6 +440,7 @@ export default function RunDetail({
   const { id } = use(params);
   const [run, setRun] = useState<RunDTO | null>(null);
   const [telemetry, setTelemetry] = useState<RunTelemetryDTO | null>(null);
+  const [pruning, setPruning] = useState<PruneSavingsDTO | null>(null);
   const [events, setEvents] = useState<RunEventDTO[]>([]);
   const [connected, setConnected] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
@@ -514,6 +516,7 @@ export default function RunDetail({
         const json = (await res.json().catch(() => ({}))) as {
           run?: RunDTO;
           telemetry?: RunTelemetryDTO | null;
+          pruning?: PruneSavingsDTO | null;
           error?: string;
         };
         if (!alive) return;
@@ -527,6 +530,7 @@ export default function RunDetail({
         }
         setRun(json.run);
         setTelemetry(json.telemetry ?? null);
+        setPruning(json.pruning ?? null);
         setPollError(null);
       } catch (err) {
         if (!alive) return;
@@ -1345,6 +1349,30 @@ export default function RunDetail({
                 <p className="mt-2 text-xs leading-snug text-ink-muted">
                   Claude Code&rsquo;s own per-request cost, never added to the
                   figures above.
+                </p>
+              </Section>
+            )}
+
+            {/* A fourth reading in this region, and the only one that is not
+                money that moved: it is what the run did *not* pay because its
+                conversation was pruned between cycles. Never added to the three
+                above — the copy says so, on the same grounds the telemetry line
+                does. */}
+            {pruning && (
+              <Section title="Context pruning">
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                  <Stat>
+                    {pruning.netUSD >= 0 ? "+" : "−"}
+                    {fmtUSD(Math.abs(pruning.netUSD))}
+                  </Stat>
+                  <div className="text-xs tabular-nums text-ink-muted">
+                    {fmtTokens(pruning.tokensRemoved)} tokens removed over{" "}
+                    {pruning.prunes} {pruning.prunes === 1 ? "prune" : "prunes"}
+                  </div>
+                </div>
+                <p className="mt-2 text-xs leading-snug text-ink-muted">
+                  What later turns did not have to re-read, less what the edits
+                  cost. Not spend, and never added to the figures above.
                 </p>
               </Section>
             )}

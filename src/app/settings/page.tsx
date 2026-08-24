@@ -15,6 +15,7 @@ import type {
   ClaudeAuthStateDTO,
   KnowledgeStatusDTO,
   PluginsReportDTO,
+  PruneTier,
   RunGuardsDTO,
   SandboxDTO,
   SandboxStateDTO,
@@ -195,6 +196,22 @@ const LAND_OPTIONS: readonly SegmentedOption<LandStrategy>[] = [
   { value: "squash", label: "Squash" },
 ];
 
+const PRUNE_TIER_OPTIONS: readonly SegmentedOption<PruneTier>[] = [
+  { value: "standard", label: "Standard" },
+  { value: "aggressive", label: "Aggressive" },
+];
+
+/**
+ * Measured on one real 2.0 MB transcript on this install, so the figures are an
+ * example rather than a promise — which is what the copy says.
+ */
+const PRUNE_TIER_CONSEQUENCE: Record<PruneTier, string> = {
+  standard:
+    "Trims long tool output, old file reads superseded by later edits, thinking blocks and repeated system reminders. On one real transcript this removed 28% of what the agent was carrying",
+  aggressive:
+    "Everything Standard does, plus collapsing repeated errors and polling, deduplicating large documents, trimming any block over 32KB and dropping older images. Removes more, and more of what it removes is content the agent might have re-read",
+};
+
 const LAND_CONSEQUENCE: Record<LandStrategy, string> = {
   merge:
     "The run’s own commits go onto your branch, which is what keeps the diff on its page meaningful afterwards",
@@ -249,6 +266,8 @@ const EDITABLE_PATHS = [
   "telemetryForRuns",
   "readGuard",
   "readGuardMaxTokens",
+  "contextPruning",
+  "contextPruningStrictness",
   "freshStartContextTokens",
   "knowledgeBaseMountId",
   "knowledgeBaseSubpath",
@@ -2992,17 +3011,45 @@ export default function SettingsPage() {
         </ListGroup>
       </Section>
 
-      {/* Two ways of spending fewer tokens on the same work, both of which
-          change what an agent *does* rather than what it is told, and neither
-          of which has been measured on this install. So both ship off and the
-          copy says which is which: what is measured is where the money goes,
-          not that either of these moves it. */}
+      {/* Three ways of spending fewer tokens on the same work, all of which
+          change what an agent *does* rather than what it is told. Two of them
+          are unmeasured optimisations and ship off on that ground. The first is
+          not in that category and its copy has to say so: it replaced
+          `--autocompact`, so it is the only thing bounding a long cycle, and an
+          operator reading this row as "an optimisation I can ignore" would be
+          leaving a cycle able to run to the model's whole window. */}
       <Section
         id="tokens"
         title="Token use"
-        lede="Most of what a run costs is carrying what it has already read, not writing anything new. These two try to carry less. Both are off, because neither has been measured here — switch one on for a job you can compare against a job you have already done."
+        lede="Most of what a run costs is carrying what it has already read, not writing anything new. These three try to carry less — the first also decides what happens when a single work cycle gets long, so read that one before leaving it off."
       >
         <ListGroup>
+          <SettingRow
+            htmlFor="ctxprune"
+            edited={isEdited("contextPruning")}
+            label="Prune the conversation between work cycles"
+            description="Each work cycle carries the last one's whole conversation, and most of that is tool output nobody will read again. This removes it at the moment between cycles, where it is free — the next cycle was going to re-send everything anyway. It also ends a cycle early once its conversation gets long, prunes it, and carries on. That early ending is now the only thing stopping a single long cycle from growing without limit, so switching this off leaves nothing doing that job"
+          >
+            <Switch
+              id="ctxprune"
+              checked={effective.contextPruning}
+              onChange={(v) => patch({ contextPruning: v })}
+            />
+          </SettingRow>
+
+          <SettingRow
+            edited={isEdited("contextPruningStrictness")}
+            label="How much it takes out"
+            description={PRUNE_TIER_CONSEQUENCE[effective.contextPruningStrictness]}
+          >
+            <SegmentedControl
+              options={PRUNE_TIER_OPTIONS}
+              value={effective.contextPruningStrictness}
+              onChange={(v) => patch({ contextPruningStrictness: v })}
+              label="How much it takes out"
+            />
+          </SettingRow>
+
           <SettingRow
             htmlFor="readguard"
             edited={isEdited("readGuard")}

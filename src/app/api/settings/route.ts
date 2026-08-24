@@ -29,6 +29,7 @@ import { loginFailureSummary } from "../../../lib/loginAttempts";
 import { activeSessionCount } from "../../../lib/sessions";
 import { FIVE_HOURS_MS } from "../../../lib/windows";
 import { invalidatePlanUsage } from "../../../lib/planUsage";
+import { isPruneTier, PRUNE_TIERS } from "../../../lib/contextPruning";
 import { CLI_MAX_READ_TOKENS } from "../../../lib/readGuard";
 import { auditMutation } from "../../../lib/requestLog";
 
@@ -298,6 +299,25 @@ async function putHandler(req: Request) {
 
   if ("readGuard" in body) {
     patch.readGuard = Boolean(body.readGuard);
+  }
+
+  if ("contextPruning" in body) {
+    patch.contextPruning = Boolean(body.contextPruning);
+  }
+
+  if ("contextPruningStrictness" in body) {
+    // Refused rather than coerced, and unlike most of this file that matters:
+    // the value reaches `winnow ... -rx <tier>` on a child's argv, and a tier
+    // the tool does not know makes it fall back to a lighter prescription
+    // silently rather than fail. A typo would then read as configured and prune
+    // less than the operator asked for, every cycle, with nothing saying so.
+    if (!isPruneTier(body.contextPruningStrictness)) {
+      return NextResponse.json(
+        { error: `contextPruningStrictness must be one of ${PRUNE_TIERS.join(", ")}` },
+        { status: 400 },
+      );
+    }
+    patch.contextPruningStrictness = body.contextPruningStrictness;
   }
 
   if ("readGuardMaxTokens" in body) {

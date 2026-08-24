@@ -824,6 +824,79 @@ Built and exercised against real transcripts:
 
   What it does not settle is every pixel, which is on the list below.
 
+- **What removing `--autocompact` gave up, and what replaced it.** The flag was
+  removed on 2026-08-24 and `contextPruning.ts` stands in its place, at the same
+  167,000 it fired at, ending the cycle and pruning rather than summarising in
+  place. **The entry below stays on this page unchanged and is now a record of
+  the cost of that decision rather than a reason for the flag**: turns past the
+  cap cost 0.45× per turn and 0.50× per 1,000 output tokens, between the two arms
+  of a natural experiment over 1,147 transcripts. Nothing about that measurement
+  has been retracted or re-derived; what changed is that an operator chose the
+  other mechanism knowing it. A later reading must be able to tell a decision
+  from a regression, which is the whole reason this paragraph sits above rather
+  than replacing it.
+
+  The two open terms below are unchanged and one of them now cuts the other way:
+  a compaction's own summariser call — roughly 168,000 in and 6,300 out, billed
+  and invisible to `scanUsage()` — is a cost the replacement does not pay, and it
+  was never counted against the flag.
+
+- **What winnow actually removes, measured against a real transcript.** Measured
+  2026-08-24 against one 2.0 MB transcript from this container
+  (`f2de6d64-…jsonl`, 716 messages) with winnow at `b49fceb`, installed into
+  `/opt/winnow` and run as `winnow safe run -- treat … -rx standard`. Four
+  findings, and three of them changed what was built.
+
+  **Its own token figure is unusable.** The report said `Saved 0 tokens (0.0%)`
+  for a prune that removed 28% of what is actually sent. The figure comes from
+  the transcript's historical `usage` frames, which record what was billed and
+  cannot change when content is edited, so it structurally cannot express a
+  delta. `contextPruning.ts` recomputes from `message` content instead, before
+  and after, and that difference is the only figure this app reports.
+
+  **Bytes freed overstate the saving by 3.4×.** 970 KB of file freed against
+  290 KB of API-visible content — 1,018,946 bytes of `message` before, 729,376
+  after, ≈254,736 → 182,344 tokens at `BYTES_PER_TOKEN`, so **72,392 removed**.
+  The gap is `tool-use-result-strip`, whose own description says it removes an
+  envelope field "never sent to API". Bytes freed is what every other pruner
+  reports and it is the figure this app refuses to render.
+
+  **`gentle` removes nothing.** 0 bytes on the same transcript. Its one strategy
+  that fires on an ordinary session is `metadata-strip`, which orchestrator-safe
+  mode excludes by name. So the settings control offers two positions rather than
+  three.
+
+  **A second transcript, same shapes.** `06510dfb-…jsonl`, 2.4 MB, same tier and
+  same argv: 1,448,627 bytes of `message` before against 892,033 after, so
+  ≈402,396 → 247,787 tokens and **154,609 removed — 38.4% of the context**. The
+  file-bytes overstatement here is 2.0× rather than 3.4×, which is the useful
+  part of the second sample: the ratio is a property of how much `toolUseResult`
+  a particular session accumulated, not a constant, so no fixed correction factor
+  could be applied to the byte figure. Measuring `message` content is the only
+  reading that holds.
+
+  **The prune runs as the server, not as the agent uid, and it has to.** Caught
+  by running the exact argv under `setpriv`: on this install the transcripts are
+  `0600 root` and `DATA_DIR` is `0700 root`, so a child at `UF_AGENT_UID` raises
+  `PermissionError` on `WINNOW_DATA_DIR` before it ever reaches the file it was
+  meant to prune. `spawnPrune` therefore omits `childCredentials()` — the only
+  spawn in this app that does — and says why at the call site.
+
+  **Two smaller ones.** No receipts were written anywhere even with
+  `WINNOW_NO_RECEIPTS` cleared, so this app measures before and after itself
+  rather than reading the tool's own ledger. And every prune writes a full-size
+  `.bak` beside the transcript — `create_backup=True` is hardcoded at all three
+  of winnow's call sites with no flag in front of it — which lands inside the
+  bind-mounted `~/.claude`; `removeBackups` deletes it, matched on winnow's own
+  naming and filtered by mtime so a backup left by anything else survives.
+
+  **Not yet verified by hand:** no prune has run inside a live work cycle on this
+  install. The subprocess, the token measurement, the tier behaviour and the
+  backup were all exercised directly against a copied transcript; the boundary
+  call site, the early-end interrupt and the KPI arithmetic have unit tests and a
+  clean `npm run build`, and nothing more. The netted figures on the dashboard
+  have never been read against a real run.
+
 - **`--autocompact`'s sign, and what the flag actually does.** Measured
   2026-08-22 over 1,147 transcripts through this app's own `scanUsage()`,
   `parseCompactionBoundary()` and `pricing.ts`, and settles issue #156. Read the
@@ -1138,6 +1211,24 @@ The live-enforcement and pause/resume paths typecheck, build (including the
 standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
+
+- **Context pruning inside a live run.** The whole feature. The winnow
+  subprocess, the token measurement, all three prescriptions and the `.bak` it
+  leaves were exercised directly against a copied transcript in the running
+  container, and those numbers are recorded above. What has **not** run is any of
+  the wiring: no boundary prune has fired at the end of a real work cycle, no
+  cycle has been ended by the context ceiling, and no netted figure on the
+  dashboard or a run page has been read against a real run. The Docker build that
+  bundles winnow has also never completed — the repository was private when this
+  was written, so the `git fetch` in the image fails and the feature reports
+  itself unavailable. Two things to watch first: whether the transcript reader's
+  shrink detection (`transcripts.ts:396`) picks up the rewrite as intended, and
+  whether the loop's `continue` after a `prune` interrupt re-enters cleanly with
+  the session still resumable.
+
+  **This is also the only thing bounding a work cycle now**, since
+  `--autocompact` was removed in the same change, so an install where it silently
+  does not run has nothing stopping a long cycle at all.
 
 - **A real receiver.** Nothing here has been pointed at a Home Assistant
   instance, an ntfy topic or anything else an operator would actually run. The

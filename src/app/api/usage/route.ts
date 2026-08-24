@@ -14,6 +14,7 @@ import { planUsage } from "@/lib/planUsage";
 import { telemetryWindow } from "@/lib/otlp";
 import { retentionCutoff } from "@/lib/retention";
 import { installSpendReport } from "@/lib/installBudget";
+import { pruneSavings } from "../../../lib/contextPruning";
 import { PROJECTS_DIR } from "@/lib/config";
 import { configProblems } from "@/lib/configCheck";
 import { jsonMaybeGzipped } from "@/lib/http";
@@ -129,6 +130,24 @@ export async function GET(req: Request) {
       // key rather than a field on `snapshot`, because it is a fourth reading
       // over a different span and must never be summed with the meters.
       install: installSpendReport(now),
+      // What context pruning has been worth, over exactly the two windows the
+      // meters above already draw — so a reader comparing the two is comparing
+      // the same span, not this app's idea of "recently".
+      //
+      // Its own key and never folded into `snapshot`, on `install`'s rule and
+      // one more: these are not a *third cost source*, they are the netted value
+      // of an intervention, and a figure that could be added to a window total
+      // would be added to one eventually. Nothing here is spend.
+      pruning: {
+        session: await pruneSavings({
+          from: snapshot.session.startsAt,
+          to: snapshot.session.endsAt,
+        }),
+        weekly: await pruneSavings({
+          from: snapshot.weekly.startsAt,
+          to: snapshot.weekly.endsAt,
+        }),
+      },
       meta: {
         transcriptDir: PROJECTS_DIR,
         fileCount: scan.fileCount,

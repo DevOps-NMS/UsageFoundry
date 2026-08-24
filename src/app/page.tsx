@@ -6,6 +6,7 @@ import Link from "next/link";
 import { LiveTelemetry } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
 import { RepoSpendCard } from "@/components/RepoSpendCard";
+import { PruneSavingsRows } from "@/components/PruneSavings";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
@@ -477,7 +478,7 @@ export default function Dashboard() {
     );
   }
 
-  const { snapshot: s, meta, periods, telemetry, install } = data;
+  const { snapshot: s, meta, periods, telemetry, install, pruning } = data;
   const noCeilings = !meta.hasSessionCeiling && !meta.hasWeeklyCeiling;
   // Read off the windows rather than off the setting: the setting says we
   // asked, this says we were answered.
@@ -1367,6 +1368,34 @@ export default function Dashboard() {
             added — see the card. */}
         <RepoSpendCard />
       </SourceRegion>
+
+      {/* Not a fourth cost source, and the heading has to carry that: these are
+          re-reads that did not happen, netted against what buying them cost.
+          Nothing here may be added to a meter above — see `PruneSavingsDTO`.
+
+          Absent entirely when nothing has been pruned, the `telemetry` block's
+          gate below: an empty card would be a standing invitation to read $0.00
+          as "pruning saves nothing" when it means "pruning has not run". */}
+      {(pruning.session.prunes > 0 || pruning.weekly.prunes > 0) && (
+        <SourceRegion
+          heading="What pruning saved"
+          statement="Conversation removed between work cycles, and what not re-reading it came to."
+        >
+          <Card className="mb-4">
+            <CardTitle>Context pruning</CardTitle>
+            <PruneSavingsRows label="This 5-hour window" savings={pruning.session} />
+            <PruneSavingsRows label="This week" savings={pruning.weekly} />
+            <Hint>
+              Removing conversation does not simply make a run cheaper: an edit
+              invalidates the cached prefix, so the saving is what later turns did
+              not have to re-read, less what the edit itself cost. A prune between
+              two work cycles pays nothing, because the next cycle was going to
+              rewrite that conversation anyway. One that ended a cycle early pays
+              for the restart it caused. Both are counted here.
+            </Hint>
+          </Card>
+        </SourceRegion>
+      )}
 
       {/* A third reading, and the only one that moves *during* a work cycle:
           a run reports its own spend when its cycle ends, so a run in flight

@@ -1,6 +1,21 @@
 services:
   usagefoundry:
-    build: .
+    build:
+      context: .
+      args:
+        # Which winnow the image bundles. Build arguments rather than
+        # environment: they are consumed by the Dockerfile and nothing in the
+        # container reads them, so putting them under `environment:` would be a
+        # variable every child carries and nothing consumes.
+        #
+        # Both default in the Dockerfile, so `docker compose up --build` is
+        # unchanged for anyone who sets neither. `WINNOW_REF=` (empty) builds
+        # without winnow, and context pruning then reports itself unavailable
+        # instead of quietly pruning nothing — which is the escape hatch for a
+        # build host that cannot reach GitHub, and the reason this is reachable
+        # from `.env` at all rather than only by editing the Dockerfile.
+        WINNOW_REPO: "${WINNOW_REPO:-https://github.com/Xapicc/winnow.git}"
+        WINNOW_REF: "${WINNOW_REF-b49fceb0a021faea97c53dcbc93403b0aec4d626}"
     # All three default to today's values, so `docker compose up` is unchanged.
     # Overriding them lets a second instance run alongside the first — to
     # compare two branches against the same transcripts, for example. Pair them

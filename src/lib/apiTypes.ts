@@ -261,8 +261,49 @@ export interface SandboxDTO {
   failIfUnavailable: boolean | null;
 }
 
+/**
+ * What context pruning was worth over a span — netted, never gross.
+ *
+ * **Not a cost source and never summed with a window's spend.** It is the value
+ * of an intervention: `cacheSavedUSD` is re-reads that demonstrably did not
+ * happen, and `invalidationUSD` is what buying that cost. Adding either to a
+ * meter would be adding a counterfactual to a measurement.
+ *
+ * `tokensRemoved` counts only what was actually being sent — `message` content,
+ * never the transcript's bytes. The two differ by about 3.4× here, because most
+ * of what the tool removes is an envelope the CLI writes and never transmits.
+ *
+ * `pricedPrunes` below `prunes` means the money covers only part of what is
+ * described: a run on a model with no price here contributes tokens and no
+ * dollars, and rendering that gap is the difference between an incomplete total
+ * and a wrong one.
+ */
+export interface PruneSavingsDTO {
+  prunes: number;
+  pricedPrunes: number;
+  tokensRemoved: number;
+  /**
+   * Total turns the savings are measured over, summed across prunes.
+   *
+   * A total of turn-savings rather than a count of distinct turns — two prunes
+   * on one run each earned over their own tail, and the second's tail is inside
+   * the first's. Render it beside the money as what the measurement spans, never
+   * as "the run took this many turns".
+   */
+  turnsAfter: number;
+  cacheSavedUSD: number;
+  invalidationUSD: number;
+  netUSD: number;
+}
+
 export interface UsageResponse {
   snapshot: SnapshotDTO;
+  /**
+   * Pruning's value over the same two windows the meters draw, so the two are
+   * comparable. Its own key for `install`'s reason and one more: it is not
+   * spend, and a field on `snapshot` is one somebody eventually adds up.
+   */
+  pruning: { session: PruneSavingsDTO; weekly: PruneSavingsDTO };
   /**
    * Spend cut into calendar buckets, all three granularities at once so the
    * toggle switches without a refetch.
@@ -1824,6 +1865,16 @@ export interface AccountResponse {
   usage?: { buckets: Array<{ starting_at: string; results: Array<Record<string, unknown>> }> };
 }
 
+/**
+ * How much a context prune takes out.
+ *
+ * Winnow ships a third, `gentle`, which is deliberately not offered: its only
+ * strategy that fires on an ordinary session is `metadata-strip`, and that one
+ * deletes the `usage` frames every window and every budget guard here is
+ * computed from. `contextPruning.ts`'s `PRUNE_TIERS` carries the full reason.
+ */
+export type PruneTier = "standard" | "aggressive";
+
 export interface SettingsDTO {
   sessionCostLimit: number | null;
   weeklyCostLimit: number | null;
@@ -1857,6 +1908,15 @@ export interface SettingsDTO {
    * whole field is inert while `readGuard` is off.
    */
   readGuardMaxTokens: number | null;
+  /**
+   * Prune the transcript at each cycle boundary, and end a cycle early once its
+   * context passes the ceiling. Off by default — and note that it is what
+   * replaced `--autocompact`, so an install with it off has nothing bounding a
+   * long cycle. See `settings.contextPruning`.
+   */
+  contextPruning: boolean;
+  /** How much a prune takes out. Inert while `contextPruning` is off. */
+  contextPruningStrictness: PruneTier;
   /**
    * Open the next work cycle without `--resume` once the last one's context
    * passed this many tokens. Null is off, which is what every install does

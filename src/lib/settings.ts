@@ -1,6 +1,7 @@
 import { getJSON, setJSON } from "./db";
 import { normalizePolicy, type BudgetPolicy } from "./budget";
 import type { LimitConfig, WeeklyAnchor } from "./windows";
+import type { PruneTier } from "./apiTypes";
 
 /**
  * User-editable preferences.
@@ -181,6 +182,33 @@ export interface Settings {
    * as on and does nothing.
    */
   readGuardMaxTokens: number | null;
+  /**
+   * Prune a work cycle's transcript at each cycle boundary, and end a cycle
+   * early once its context passes `CYCLE_CONTEXT_CEILING_TOKENS`.
+   *
+   * **This is the only thing bounding a cycle's context.** It replaced
+   * `--autocompact 200000`, which is no longer on any cycle's argv, so an
+   * install with this off runs a long cycle to the model's whole window. That is
+   * a deliberate swap and not an accident of defaults — `contextPruning.ts`
+   * carries what it cost, and `docs/verification.md` records the measurement
+   * that was given up.
+   *
+   * It ships **off** all the same, on the rule its two neighbours ship off
+   * under: what is measured here is where the money goes, not that any of these
+   * three moves it. The difference is that switching this one on also changes
+   * what stops a runaway cycle, so the settings copy says so rather than
+   * offering it as a third way of spending less.
+   */
+  contextPruning: boolean;
+  /**
+   * How much a prune takes out. Inert while `contextPruning` is off.
+   *
+   * Two positions, not winnow's three: `gentle` is excluded here because it
+   * provably removes nothing under any configuration this app would accept.
+   * `contextPruning.ts`'s `PRUNE_TIERS` carries the reason, which is a fact
+   * about the tool rather than a preference.
+   */
+  contextPruningStrictness: PruneTier;
   /**
    * Start the next work cycle fresh, rather than resuming, once the last one's
    * context passed this many tokens. Null is off and is today's behaviour.
@@ -707,6 +735,8 @@ export const DEFAULTS: Settings = {
   forwardSubAgentText: true,
   readGuard: false,
   readGuardMaxTokens: null,
+  contextPruning: false,
+  contextPruningStrictness: "standard",
   freshStartContextTokens: null,
   maxConcurrentRuns: 4,
   maxConcurrentAssists: 2,

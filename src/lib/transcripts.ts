@@ -966,6 +966,29 @@ export async function readCompactions(
 }
 
 /**
+ * Where a session's transcript is, or null.
+ *
+ * Resolved by walking the projects tree rather than by building
+ * `<PROJECTS_DIR>/<slug>/<id>.jsonl` from the working directory, because the
+ * slug is the CLI's encoding of a path and this app does not own the rule that
+ * produces it — an isolated run's checkout, a worktree and a plain folder each
+ * slugify differently, and a mapping that was wrong would silently prune
+ * nothing rather than fail.
+ *
+ * A session id is a uuid and a basename match on it is exact, so the ambiguity
+ * `readCompactions` handles by filtering entries does not arise: if two projects
+ * somehow hold the same id, neither is safe to rewrite and this answers null.
+ */
+export async function resolveSessionTranscript(
+  sessionId: string,
+): Promise<string | null> {
+  const { files } = await listTranscriptFiles(PROJECTS_DIR);
+  const name = `${sessionId}.jsonl`;
+  const mine = files.filter((f) => path.basename(f) === name);
+  return mine.length === 1 ? mine[0] : null;
+}
+
+/**
  * Forget files that are no longer on disk, without touching the rest.
  *
  * The retention sweep's counterpart, and deliberately not a whole-cache clear:
