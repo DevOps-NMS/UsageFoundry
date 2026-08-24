@@ -128,6 +128,29 @@ services:
       # hooks shell out to a Python command work: the image has no pip, and a
       # hook whose command is missing exits 0 having done nothing.
       UF_PY_TOOLS: "${UF_PY_TOOLS:-}"
+      # Optional: winnow's intake filter. "1" makes docker-entrypoint.sh start a
+      # loopback proxy inside this container and point every agent at it with
+      # ANTHROPIC_BASE_URL, so a tool result a rule marks as spent is dropped
+      # before the API ever writes it to the prompt cache. Blank is off and is
+      # the shipped state.
+      #
+      # One variable rather than two on purpose: ANTHROPIC_BASE_URL is exported
+      # by the entrypoint, not set here, so an operator cannot end up with the
+      # URL pointed at a proxy that was never started — which fails every agent
+      # request with a connection refused inside a tool call.
+      #
+      # Read by the entrypoint and by nothing in the app, the same arrangement
+      # UF_GH_EXTENSIONS and UF_SANDBOX_ENFORCEMENT have.
+      WINNOW_FILTER: "${WINNOW_FILTER:-}"
+      # Where the winnow checkout is, as this container sees it. Only consulted
+      # when the switch above is on. Defaulted to the conventional location
+      # under the first workspace mount, so an operator who cloned it beside
+      # their other projects sets nothing.
+      WINNOW_FILTER_PATH: "${WINNOW_FILTER_PATH:-/workspace/winnow}"
+      # Loopback port for the filter. Not 8787: the Discord relay binds that
+      # inside this same container, and the second process to want a port gets
+      # nothing rather than a degraded service.
+      WINNOW_FILTER_PORT: "${WINNOW_FILTER_PORT:-8789}"
       # The CLI's own sandbox around the commands an agent runs. Blank is off
       # and is the shipped state: nothing is written, nothing is confined, and
       # this install behaves exactly as it did before the switch existed. "1"

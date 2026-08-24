@@ -813,4 +813,91 @@ if [ -n "${DISCORD_WEBHOOK_URL:-}" ]; then
   unset DISCORD_WEBHOOK_URL DISCORD_MENTION_USER_ID
 fi
 
+# winnow's intake filter, when WINNOW_FILTER is on.
+#
+# ## What it is
+#
+# A loopback proxy in front of api.anthropic.com. A tool result that a rule
+# marks as spent — a `Glob`, an `ls`, a passing `npm test` — is sent in full on
+# the one request where the agent acts on it, placed *after* the last
+# cache_control breakpoint so the API never writes it to the prompt cache, and
+# dropped from the next request. The bytes cost 1.0x once instead of a 2.0x
+# cache write plus a 0.1x read on every later turn.
+#
+# It has to be a proxy rather than a hook because the decision it makes is where
+# the cache breakpoint goes, and no hook sees the request body. It has to run
+# *inside* this container because that is where the agents run: a proxy on the
+# operator's own machine is not reachable from here.
+#
+# ## Why ANTHROPIC_BASE_URL is exported here and not set in compose
+#
+# `orchestrator.ts`'s childEnv passes it through untouched — its own comment
+# says proxy settings are the operator's decision to make — so an export before
+# the exec below reaches every agent. Setting it in compose instead would let an
+# operator point the URL at a proxy that never started, and the symptom is every
+# agent request failing with a connection refused, inside a tool call, on an
+# unattended run.
+#
+# ## Why a failure here is not fatal
+#
+# Same argument as the gh and Python tool blocks: a filter that will not start
+# is a *degraded* install, not a broken one, and the degradation is that runs
+# cost what they cost today. So this waits for the port, and if nothing is
+# listening it says so and leaves ANTHROPIC_BASE_URL unset — every agent then
+# talks to the API directly, exactly as it does with the switch off. The one
+# outcome that must not happen is a boot that exports the URL and no listener.
+if [ "${WINNOW_FILTER:-}" = "1" ]; then
+  WINNOW_PATH="${WINNOW_FILTER_PATH:-/workspace/winnow}"
+  WINNOW_PORT="${WINNOW_FILTER_PORT:-8789}"
+
+  if [ ! -f "$WINNOW_PATH/pyproject.toml" ]; then
+    echo "[usagefoundry] WINNOW_FILTER=1 but no checkout at $WINNOW_PATH —" \
+         "agents will talk to the API directly. Clone winnow under the" \
+         "workspace this container mounts, or set WINNOW_FILTER_PATH." >&2
+  else
+    # UV_PROJECT_ENVIRONMENT is load-bearing, not tidiness. The checkout is a
+    # bind mount shared with the operator's own machine, and `uv run` in a
+    # project whose .venv was built by a different OS *deletes and rebuilds it*
+    # — so without this, starting the filter destroys the virtualenv the
+    # operator works in, on every boot.
+    (
+      while :; do
+        env HOME=/home/node \
+            UV_PROJECT_ENVIRONMENT=/home/node/.winnow-venv \
+            WINNOW_FILTER=1 \
+          uv run --frozen --project "$WINNOW_PATH" \
+            python -m winnow filter \
+              --port "$WINNOW_PORT" \
+              --ledger /home/node/.winnow/filter.jsonl || true
+        echo "[usagefoundry] winnow filter exited; restarting in 5s" >&2
+        sleep 5
+      done
+    ) &
+
+    # Up to 90s, because the first boot after a checkout builds a virtualenv and
+    # every boot after it does not. Polled with the interpreter that is already
+    # required to be here rather than a netcat the image does not ship.
+    winnow_up=""
+    i=0
+    while [ "$i" -lt 90 ]; do
+      if python3 -c "import socket,sys; s=socket.socket(); s.settimeout(1); sys.exit(s.connect_ex(('127.0.0.1', $WINNOW_PORT)))" 2>/dev/null; then
+        winnow_up=1
+        break
+      fi
+      i=$((i + 1))
+      sleep 1
+    done
+
+    if [ -n "$winnow_up" ]; then
+      export ANTHROPIC_BASE_URL="http://127.0.0.1:$WINNOW_PORT"
+      echo "[usagefoundry] winnow intake filter on 127.0.0.1:$WINNOW_PORT;" \
+           "agents routed through it." >&2
+    else
+      echo "[usagefoundry] winnow filter did not open 127.0.0.1:$WINNOW_PORT" \
+           "within 90s — agents will talk to the API directly. The supervisor" \
+           "is still retrying; its output is above." >&2
+    fi
+  fi
+fi
+
 exec "$@"
