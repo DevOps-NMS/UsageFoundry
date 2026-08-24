@@ -296,8 +296,84 @@ export interface PruneSavingsDTO {
   netUSD: number;
 }
 
+/**
+ * What winnow's intake filter kept off the wire — the second half of context
+ * control, and the one that acts first.
+ *
+ * **Not a cost source and never summed with anything beside it**, on
+ * `PruneSavingsDTO`'s rule: the meters are priced from `usage` frames, which are
+ * the API's report of the request the filter had already rewritten, so this
+ * money is a counterfactual — the same work without the filter — and is already
+ * absent from every figure it sits next to.
+ *
+ * **It may not be added to `PruneSavingsDTO` either.** The two overlap by
+ * construction: winnow's C1, C3 and B2 rules fire in both mechanisms, and the
+ * filter takes that mass first because it sees the request before the
+ * transcript is written. A prune that then removes the same result from the
+ * transcript counts tokens the API never held — measured at 4.06% of removed
+ * tokens across this install's ten largest transcripts. Until a ledger line
+ * carries the `tool_use_id` that would let a receipt exclude them, a sum is a
+ * double count and the two figures stay apart.
+ *
+ * The three money fields are the arithmetic rather than its result: `2.0·D`
+ * saved on the cache write, `1.0·D` still paid to send it once uncached, and
+ * `0.1·D·T` saved on reads that never happened. There is no invalidation term —
+ * nothing is edited, so no prefix is thrown away.
+ *
+ * `running` and `ledger` are separate because they are separate facts. A filter
+ * that is not running still has a history worth reading; a ledger that is there
+ * and unreadable is not an empty one; and none of the four states is `$0.00`.
+ */
+export interface FilterSavingsDTO {
+  running: boolean;
+  ledger: "missing" | "unreadable" | "empty" | "read";
+  /**
+   * Distinct results, never ledger lines. The filter is stateless and re-drops
+   * the same result on every request that still carries it — summing the lines
+   * overstated this install by 24.8×.
+   */
+  results: number;
+  /** How many of those the money covers; the rest ran on a model with no price here. */
+  pricedResults: number;
+  /**
+   * Results seen only as `deferred` and therefore excluded from every figure
+   * above. The filter moves the cache breakpoint in front of the newest match
+   * instead of replacing it, and that move fails silently when the request
+   * already holds the maximum number of breakpoints — so these are results this
+   * app cannot prove escaped the cache, which makes the total a floor.
+   */
+  deferredOnly: number;
+  /** How many were identified by `(session, tool, rule, bytes)` for want of a `tool_use_id`. */
+  fallbackKeyed: number;
+  tokensRemoved: number;
+  /** Turns the read saving is measured over, summed across results. */
+  turnsAfter: number;
+  cacheWriteAvoidedUSD: number;
+  uncachedSendUSD: number;
+  cacheReadAvoidedUSD: number;
+  netUSD: number;
+  requests: number;
+  /**
+   * Requests whose `request_id` matched no **main-thread** assistant turn: a
+   * sub-agent's, or one whose transcript has been swept. What they saved is
+   * missing from every figure here rather than counted as nothing, so the whole
+   * DTO is a floor while this is non-zero — 82 of 125 when this was written,
+   * because the filter's B2 rule fires hardest on exactly the tool-heavy
+   * sub-agent turns the join excludes.
+   */
+  unjoinedRequests: number;
+  /** Earliest instant the figures cover, or null when nothing bounded them. */
+  totalFrom: number | null;
+}
+
 export interface UsageResponse {
   snapshot: SnapshotDTO;
+  /**
+   * The intake filter's own reading. Its own key beside `pruning` and never
+   * inside it: they are two mechanisms whose figures overlap, so a shape that
+   * invited a sum is the one thing this must not have.
+   */
+  intakeFilter: FilterSavingsDTO;
   /**
    * Pruning's value over the same two windows the meters draw, so the three are
    * comparable, plus `total` — every receipt still priceable, which is the

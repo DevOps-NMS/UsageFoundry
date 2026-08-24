@@ -7,7 +7,7 @@
 
 ## Architecture
 
-**Three** data sources now, still **never summed or mixed in the UI**. The third is Claude Code's own OTLP export (`otlp.ts` → `otlp_requests`), gated on `settings.telemetryForRuns` with one exception below, covering only runs this app spawns. It is first-party per-request cost — no price table, no dedupe key, no file polling — and it is the only way to account for a work cycle killed before the CLI's `result` event. It renders as its own card on the run page and its own card on the dashboard, and must never reach `buildSnapshot()` or `runs.spent_usd`. It reaches a budget decision through exactly one door — `telemetrySpendSince` → a `*Guard*` figure — and that door is narrow on purpose: one run, one cycle, the guard half of a split whose display half stays transcript- and `result`-derived. Two callers go through it and no more: a live run's own spending limit via `RunProgress.spentGuardUSD`, described under the enforcement modes below, and a workflow instance's own budget via `instanceSpend` → `InstanceProgress.spentGuardUSD`, which reads each `running` member's current cycle bounded by `runs.active_started_at`. Same bound, same destination, and neither ever reaches `runs.spent_usd`. It cannot replace transcripts: no backfill, no `cwd`, and `cache_creation_tokens` collapses the 5m/1h split. Wire details were captured from a live CLI, not read from the docs — the docs' `claude_code.api_request` is the record *body*, while `event.name` is the bare `api_request`, and `OTEL_RESOURCE_ATTRIBUTES` lands on both the resource and each record. The payload carries `user.email` and account UUIDs; the parser drops them and the schema has no column for them. `request_id` is the primary key because OTLP delivery is at-least-once, and the ingest route always answers 200 — a batch exporter retries failures, so rejecting a malformed record would cost that batch on a loop.
+**Three** data sources now, still **never summed or mixed in the UI**. The third is Claude Code's own OTLP export (`otlp.ts` → `otlp_requests`), gated on `settings.telemetryForRuns` with one exception below, covering only runs this app spawns. It is first-party per-request cost — no price table, no dedupe key, no file polling — and it is the only way to account for a work cycle killed before the CLI's `result` event. It renders as its own card on the run page and its own card on the dashboard, and must never reach `buildSnapshot()` or `runs.spent_usd`. It reaches a budget decision through exactly one door — `telemetrySpendSince` → a `*Guard*` figure — and that door is narrow on purpose: one run, one cycle, the guard half of a split whose display half stays transcript- and `result`-derived. Two callers go through it and no more: a live run's own spending limit via `RunProgress.spentGuardUSD`, described under the enforcement modes below, and a workflow instance's own budget via `instanceSpend` → `InstanceProgress.spentGuardUSD`, which reads each `running` member's current cycle bounded by `runs.active_started_at`. Same bound, same destination, and neither ever reaches `runs.spent_usd`. It cannot replace transcripts: no backfill, no `cwd`, and `cache_creation_tokens` collapses the 5m/1h split. Wire details were captured from a live CLI, not read from the docs — the docs' `claude_code.api_request` is the record *body*, while `event.name` is the bare `api_request`, and `OTEL_RESOURCE_ATTRIBUTES` lands on both the resource and each record. The payload carries `user.email` and account UUIDs; the parser drops them and the schema has no column for them. `request_id` is the primary key because OTLP delivery is at-least-once, and the ingest route always answers 200 — a batch exporter retries failures, so rejecting a malformed record would cost that batch on a loop. A **fourth file** is now read and it is deliberately **not** a fourth source: `/home/node/.winnow/filter.jsonl`, the intake filter's own ledger, read by `intakeFilter.ts`. Every agent this container spawns talks to `ANTHROPIC_BASE_URL`, which the entrypoint points at winnow's loopback proxy, and the proxy appends one line per request it rewrote. What the ledger describes is money that was **never spent**, so it is a counterfactual in `byAgent.counterfactualUSD`'s sense rather than a reading of spend — the windows are priced from `usage` frames, and a `usage` frame reports the *filtered* request, so the filter's saving is already absent from every meter. It reaches no meter, no guard, no window, `buildSnapshot()` or `runs.spent_usd`. The path is a literal in `docker-entrypoint.sh` and is under neither `DATA_DIR` nor `WINNOW_DATA_DIR`; missing, unreadable and empty are three separate states on the DTO because they call for three different actions, and none of them renders as `$0.00`.
 
 The two original sources:
 
@@ -105,6 +105,24 @@ toolComposition.ts
                 it reconciles to itself and never to a window total, and its type
                 is an object of rows so nothing written for the five compiles
                 against it
+intakeFilter.ts what winnow's intake filter kept off the wire, read from its own
+                ledger at /home/node/.winnow/filter.jsonl — the one file here
+                that no part of this app writes. A counterfactual, never a
+                fourth cost source: the meters are priced from usage frames and
+                a usage frame reports the request the filter had already
+                rewritten, so this money is already absent from every figure
+                beside it. The filter is stateless and re-drops the same result
+                on every later request still carrying it, so a ledger line is a
+                *request* and not a removal — de-duplicating on tool_use_id, or
+                on (session, tool, rule, bytes) for lines written before winnow
+                carried one, is what separates 14 results from 334 and is the
+                whole of why this is a module rather than a SUM. It joins
+                request_id to UsageEntry.requestId for the clock, the model and
+                the turns that followed, so it is bounded by the transcript
+                horizon exactly as the prune total is, and it is read behind a
+                minute-long TTL with single-flight because the dashboard polls
+                every ten seconds and the ledger grows with every request the
+                fleet makes
 agents.ts       saved agents — form input, never a run: the role a run itself
                 takes, carried onto a spawn by sessionAgentArgs as an --agents
                 definition *and* an --agent selection, built on the one encoder

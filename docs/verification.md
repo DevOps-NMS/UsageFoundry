@@ -931,6 +931,88 @@ Built and exercised against real transcripts:
   clean `npm run build`, and nothing more. The netted figures on the dashboard
   have never been read against a real run.
 
+- **What winnow's intake filter is worth, and how far it contaminates the prune
+  figure.** Measured 2026-08-24 against the real ledger at
+  `/home/node/.winnow/filter.jsonl` and this install's real transcripts. Two
+  questions, and the second is the one that decided a line of code.
+
+  **The filter's saving was not already in the meters, and is not a double
+  count.** Every window here is priced from `usage` frames, and a `usage` frame
+  is the API's report of the request it *received* — which is the filtered one.
+  The money the filter saved is therefore already absent from every meter, so a
+  figure beside them is new information. Nothing in this app read the ledger
+  before this change; `contextPruning.ts`'s receipts come from a different
+  mechanism and carry nothing from it. This is an argument from where the
+  numbers come from rather than a measurement, and it needed none.
+
+  **The prune figure is contaminated in the opposite direction, by 4.06% of
+  removed tokens.** `contextTokens()` measures the transcript on disk; the
+  filter never touches the transcript. So when the pruner removes a result the
+  filter had already replaced with a pointer on the wire, `tokensRemoved` counts
+  tokens that were never in the cached prefix and `cacheSavedUSD` prices
+  re-reads that were never going to happen. Winnow's own
+  `docs/COZEMPIC.md` §3.5 records this as the one hard conflict. Measured by running the real
+  `winnow treat -rx standard --execute` over this install's ten largest
+  transcripts and classifying every removed block by whether the filter's rules
+  would already have taken it: per-file phantom share **0.46%, 9.92%, 0.01%,
+  0.00%, 0.13%, 2.35%, 1.56%, 5.62%, 9.09%, 1.54%** — unweighted mean 3.07%,
+  corpus-weighted **4.06%** (305,292 phantom bytes ≈ 84,803 tokens against
+  2,086,369 tokens removed), range 0.00%–9.92%.
+
+  It is an **upper bound**, twice over: the reconstruction ignores
+  `keep_newest`, so the newest match of each rule is counted as phantom when the
+  filter would have deferred rather than dropped it, and it counts blocks the
+  filter may never have seen at all. Four structural reasons keep it small, each
+  checked against the corpus: `tool-use-result-strip` dominates and removes
+  `toolUseResult`, an envelope `contextTokens()` already excludes;
+  `thinking-blocks` is next-largest and is not tool results at all;
+  `tool-output-trim` needs >8 KB or >100 lines where the filter takes from 2,048
+  bytes up; `tool-result-age` counts **user prompts**, and a UsageFoundry work
+  cycle is one user prompt (median 1, p90 3, max 28 across 1,343 transcripts,
+  with only 6 reaching the mid-age threshold of 15); `mega-block-trim` (>32 KB)
+  matched zero blocks in the whole corpus.
+
+  **The arithmetic was left alone, deliberately, and the card says why.** Not
+  because 4.06% is small — because the correction is *not available today*.
+  Identifying which transcript blocks the API never saw needs a `tool_use_id` on
+  each ledger line, and **every line this install has written carries none**
+  (15 of 15 results on the `(session, tool, rule, bytes)` fallback key). The only
+  alternative is reimplementing winnow's `rule_for`, `LOCATOR_TOOLS`,
+  `VERIFICATION_RE`, `min_bytes` and `keep_newest` in TypeScript against a Python
+  module in another repository, which is a large fragile duplication *and* still
+  an approximation, because `keep_newest` depends on per-request state the
+  transcript does not record. So the two figures are shown side by side, never
+  summed, under a title that covers both — `ContextControlAside`, replacing
+  `PruneSavingsAside` — with a footnote naming the overlap in as many words. The
+  number is in `apiTypes.ts`'s DTO comment and in `ContextControl.tsx`'s
+  docblock, so nothing on screen is a figure shown here to be wrong without
+  saying so.
+
+  **The live readout, at 125 ledger lines (2026-08-24T21:12Z).** 125 requests,
+  372 drop/defer occurrences, 1,239,748 gross bytes — **15 distinct results,
+  15,144 tokens, a 24.8× overstatement had the file been summed**. That factor
+  is not a constant: it is roughly how many requests a result survives, so it
+  grows with session length, which is why the de-dupe is a module and not a SUM.
+  Netted: cache write avoided `+$0.05627`, the one uncached send `−$0.028135`,
+  re-reads avoided over 84 later turns `+$0.0379325`, **net `+$0.0660675`**.
+  Every figure is a **floor**: 82 of the 125 requests joined no main-thread
+  turn — the filter's B2 rule fires hardest on exactly the tool-heavy sub-agent
+  turns the join excludes — 6 of 15 results were priced, and 3 were deferred and
+  never dropped, which the ledger cannot prove escaped the cache because it does
+  not record `breakpoint_moved`. All three counts are on the wire and on the
+  card.
+
+  **Not yet verified by hand:** the cross-check against `winnow savings --json`
+  **could not be run — that subcommand does not exist in this container.**
+  `/workspace/winnow` at `f9f8e4b` offers `list, current, diagnose, treat,
+  strategy, reload, team, guard, init, uninstall, doctor, guard-watchdog,
+  formulary, completions, remind, nudge, digest, dashboard, safe` and argparse
+  rejects `savings` outright; `src/winnow/cli.py` has only `safe`, `inspect` and
+  `filter`. So this reading has been checked against its own unit tests and
+  against the raw ledger counted a second way in Python, and against no
+  independent implementation. Nothing here was rendered in a browser and no
+  container was started — see the standing entry below.
+
 - **`--autocompact`'s sign, and what the flag actually does.** Measured
   2026-08-22 over 1,147 transcripts through this app's own `scanUsage()`,
   `parseCompactionBoundary()` and `pricing.ts`, and settles issue #156. Read the
@@ -1430,13 +1512,39 @@ through before trusting this unattended:
   the wiring: no boundary prune has fired at the end of a real work cycle, no
   cycle has been ended by the context ceiling, and no netted figure on the
   dashboard or a run page has been read against a real run. That now includes
-  the `PruneSavingsAside` tile beside the window meters: its six states (a
-  bounded span, an unbounded one, either window empty, partially priced, nothing
-  priced at all, a negative net) were rendered through `renderToStaticMarkup` and
-  read as markup, and the grid rule behind the two-column split is present in the
-  emitted production CSS, but no browser has displayed either — this container
-  has no headless browser — and the money on it came from hand-written DTOs
-  rather than a real `prune_receipts` table.
+  the tile beside the window meters — now `ContextControlAside`, carrying both
+  mechanisms: its six pruning states (a bounded span, an unbounded one, either
+  window empty, partially priced, nothing priced at all, a negative net) were
+  rendered through `renderToStaticMarkup` and read as markup, and the grid rule
+  behind the two-column split is present in the emitted production CSS, but no
+  browser has displayed either — this container has no headless browser — and
+  the money on it came from hand-written DTOs rather than a real
+  `prune_receipts` table.
+
+  **The intake-filter half was rendered as markup and it caught a defect.**
+  Eight filter states — read, ledger missing with the filter off, ledger missing
+  with it on, unreadable, empty, nothing priced, a read ledger nothing is
+  appending to, and a bounded span — were put through `renderToStaticMarkup`
+  against both components and both pruning states, 24 cases, each asserted to
+  name the card and to contain no `$0.00`. Twenty-three passed first time. The
+  twenty-fourth did not: with `pricedResults` at 0, `FilterSavingsRows` guarded
+  only on `ledger !== "read" || results === 0`, so a fully-unpriced read fell
+  past `noFigureReason` into the money table and printed `Net +$0.00` — the one
+  claim the reading has never observed, under a real token count that makes it
+  look measured. The four money rows are now omitted whole in that state and
+  replaced by a sentence saying what is unknown; the token row, which *is* a
+  measurement, stays. Nothing but a typechecking branch would have shown this,
+  and the type checker had already passed on it. The harness was a throwaway and
+  is not in the tree: it needed a `Module._resolveFilename` shim for `@/`, which
+  `.test-build` has no path mapping for, so it cannot run under `npm test`.
+
+  Rendering is not display. No browser has shown any of it, this container has
+  no headless one, and every DTO in those 24 cases was hand-written rather than
+  read off a real `/api/usage` response. What *has* been exercised against real
+  data is the reader behind it — the real ledger, the real transcripts — and its
+  arithmetic through 13 unit tests. `readFilterSavings`' TTL and single-flight
+  are read, not raced: no two concurrent callers have been observed sharing one
+  pass, and no cache miss on a changed `from` has been observed either.
 
   **The tile's headline is now the total rather than the 5-hour window, and
   nothing about that span has been measured.** `/api/usage` reads one span

@@ -13,6 +13,12 @@ src/lib/
                    size of the result that answered them, denominated in
                    characters because a `tool_result` carries no usage block;
                    its own dedupe key and rollup, never a cost source
+  intakeFilter.ts  what winnow's intake filter kept off the wire, read from its
+                   own ledger — the one file here nothing in this app writes.
+                   A counterfactual, never a cost source: the meters are priced
+                   from `usage` frames, which report the request the filter had
+                   already rewritten, so this money is already absent from every
+                   figure beside it
   pricing.ts       per-model rates, cache-TTL multipliers, fast mode
   adminApi.ts      Admin API client (rate limits, usage, cost) w/ pagination
   budget.ts        policy evaluation

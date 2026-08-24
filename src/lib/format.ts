@@ -122,6 +122,17 @@ export function fmtUSD(n: number): string {
   return `$${n.toFixed(2)}`;
 }
 
+/**
+ * A netted figure, signed.
+ *
+ * U+2212 rather than a hyphen so the minus is the same width as the plus and a
+ * column of these does not shift by a pixel as a figure crosses zero. Here
+ * rather than in a component because both context-control surfaces print one.
+ */
+export function signedUSD(n: number): string {
+  return `${n >= 0 ? "+" : "−"}${fmtUSD(Math.abs(n))}`;
+}
+
 export function fmtPct(f: number | null): string {
   if (f === null || !Number.isFinite(f)) return "—";
   return `${(f * 100).toFixed(1)}%`;

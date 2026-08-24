@@ -44,6 +44,17 @@ import { type ToolCall, parseToolRecord } from "./toolComposition";
 export interface UsageEntry {
   /** Dedupe key: `${messageId}:${requestId}`. */
   key: string;
+  /**
+   * The API request this turn answered, or `""` when the record carried none.
+   *
+   * Half of `key` already, and exposed on its own because it is the only
+   * identifier shared with anything outside these files: winnow's intake filter
+   * writes one ledger line per request it rewrote, keyed on exactly this, and
+   * `intakeFilter.ts` joins on it to learn when a filtered request ran, what
+   * model answered it and how many turns followed. Splitting `key` on a colon
+   * at the join would work until a message id contained one.
+   */
+  requestId: string;
   /** Epoch milliseconds. */
   ts: number;
   model: string;
@@ -354,6 +365,7 @@ function parseLine(line: string, cwdRef: { value: string }): UsageEntry | null {
 
   return {
     key,
+    requestId,
     ts,
     model: model || "unknown",
     tokens,

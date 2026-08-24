@@ -202,6 +202,31 @@ export function winnowAvailable(): boolean {
  * readings of the *same* transcript taken seconds apart. A constant that is
  * slightly wrong cancels almost entirely in the difference.
  *
+ * ## What it still overcounts, measured, and why that is left alone
+ *
+ * This reads the transcript on disk, and winnow's **intake filter** never
+ * touches the transcript — it rewrites the request on its way to the API. So a
+ * result the filter had already replaced with a pointer is still here in full,
+ * and a prune that removes it counts tokens the API never held and prices
+ * re-reads that were never going to happen. Measured 2026-08-24 by running the
+ * real `winnow treat -rx standard --execute` over this install's ten largest
+ * transcripts and classifying each removed block against the filter's own
+ * rules: **4.06% of removed tokens corpus-weighted**, 3.07% unweighted, range
+ * 0.00%–9.92%, and an upper bound — the reconstruction ignores `keep_newest`,
+ * so it calls a block phantom that the filter would have deferred rather than
+ * dropped.
+ *
+ * Not corrected, because the correction is not available: telling those blocks
+ * apart needs a `tool_use_id` on each ledger line and winnow writes none yet
+ * (`intakeFilter.ts` puts every result on its fallback key today). The only
+ * alternative is reimplementing `rule_for`/`LOCATOR_TOOLS`/`VERIFICATION_RE`/
+ * `min_bytes`/`keep_newest` here and keeping them in step with a Python module
+ * in another repository — a duplication that would still approximate, since
+ * `keep_newest` turns on per-request state no transcript records. So the figure
+ * carries a known 4% overstatement rather than a guessed correction, and the
+ * dashboard never adds it to the filter's own: `docs/verification.md` and
+ * `ContextControlAside` both say so on the page.
+ *
  * Returns 0 for a file it cannot read, never throws: every caller is on the run
  * loop's path and none of them should end a cycle over a stat.
  */

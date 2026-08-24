@@ -19,6 +19,7 @@ import {
   readReceipts,
   sumPruneSavings,
 } from "../../../lib/contextPruning";
+import { readFilterSavings } from "@/lib/intakeFilter";
 import { PROJECTS_DIR } from "@/lib/config";
 import { configProblems } from "@/lib/configCheck";
 import { jsonMaybeGzipped } from "@/lib/http";
@@ -143,6 +144,19 @@ export async function GET(req: Request) {
         pricedReceipts.filter((p) => p.row.ts >= from && p.row.ts <= to),
       );
 
+    // Bounded at the same horizon the prune total is, and for the same reason:
+    // a filtered request whose transcript has been swept can be neither dated
+    // nor priced. One span rather than three — the ledger carries no clock of
+    // its own, so every instant here comes from the transcript join, and a
+    // 5-hour figure whose denominator silently excluded every unjoined request
+    // would be worse than no figure. Read behind its own minute-long TTL: this
+    // route is the dashboard's ten-second heartbeat and the ledger grows with
+    // every request every agent in the fleet makes.
+    const intakeFilter = await readFilterSavings(
+      pruneFrom > 0 ? pruneFrom : null,
+      now,
+    );
+
     // Gzipped: 51,984 bytes to 9,785, measured — three granularities of
     // calendar bucket over the same entries repeat their keys on every one, and
     // this is the dashboard's ten-second heartbeat. The error branch below is
@@ -167,6 +181,12 @@ export async function GET(req: Request) {
       // one more: these are not a *third cost source*, they are the netted value
       // of an intervention, and a figure that could be added to a window total
       // would be added to one eventually. Nothing here is spend.
+      // Beside `pruning` rather than inside it. They are the two halves of
+      // context control and the card says so, but their figures overlap — the
+      // filter takes C1/C3/B2 mass off the wire first, and a prune that later
+      // removes the same result from the transcript prices tokens the API never
+      // held. A nested shape would be an invitation to add them.
+      intakeFilter,
       pruning: {
         session: prunedWithin(
           snapshot.session.startsAt,

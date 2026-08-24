@@ -33,6 +33,7 @@ const HOUR = 3_600_000;
 
 const entry = (ts: number, costUSD = 1): UsageEntry => ({
   key: `k${ts}`,
+  requestId: `req${ts}`,
   ts,
   model: "claude-opus-5",
   tokens: { ...ZERO_TOKENS, input: 100 },

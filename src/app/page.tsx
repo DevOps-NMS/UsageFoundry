@@ -6,7 +6,11 @@ import Link from "next/link";
 import { LiveTelemetry } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
 import { RepoSpendCard } from "@/components/RepoSpendCard";
-import { PruneSavingsAside, PruneSavingsRows } from "@/components/PruneSavings";
+import { PruneSavingsRows } from "@/components/PruneSavings";
+import {
+  ContextControlAside,
+  FilterSavingsRows,
+} from "@/components/ContextControl";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardTitle, Empty, Stat, StatSub } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
@@ -479,16 +483,29 @@ export default function Dashboard() {
     );
   }
 
-  const { snapshot: s, meta, periods, telemetry, install, pruning } = data;
+  const {
+    snapshot: s,
+    meta,
+    periods,
+    telemetry,
+    install,
+    pruning,
+    intakeFilter,
+  } = data;
   const noCeilings = !meta.hasSessionCeiling && !meta.hasWeeklyCeiling;
-  // Gates both pruning surfaces, and they have to agree: an empty tile beside
-  // the meters is a standing invitation to read $0.00 as "pruning saves
-  // nothing" when it means "pruning has not run".
+  // Gates both context-control surfaces, and they have to agree: an empty tile
+  // beside the meters is a standing invitation to read $0.00 as "this saves
+  // nothing" when it means "this has not run".
   //
-  // The total alone is the gate because it is a superset of both windows by
-  // construction — the route starts its span at or before the weekly window's
-  // own start, whatever the retention is set to.
-  const hasPrunes = pruning.total.prunes > 0;
+  // Either half is enough, because either half alone is a real reading and the
+  // card names both. The prune total is the pruning half's gate because it is a
+  // superset of both windows by construction — the route starts its span at or
+  // before the weekly window's own start, whatever the retention is set to.
+  // The filter's is `running` rather than a figure: an operator who has it
+  // switched on is owed the reason it has no number yet.
+  const hasContextControl =
+    pruning.total.prunes > 0 || intakeFilter.running ||
+    intakeFilter.ledger === "read";
   // Read off the windows rather than off the setting: the setting says we
   // asked, this says we were answered.
   const planPercentages =
@@ -578,8 +595,8 @@ export default function Dashboard() {
       {header}
       {banner}
 
-      {/* The pruning tile is a column beside the meters rather than a card
-          under them, and the asymmetry is the point: `minmax(0,1fr)` against a
+      {/* The context-control tile is a column beside the meters rather than a
+          card under them, and the asymmetry is the point: `minmax(0,1fr)` against a
           fixed 16rem, `primary` against `default`, a hero meter against a
           `text-xl` figure. Two co-equal cards side by side would say neither
           leads, which is the objection the comment below records — a quarter
@@ -821,10 +838,11 @@ export default function Dashboard() {
           </div>
         </Card>
 
-        {hasPrunes && (
-          <PruneSavingsAside
-            total={pruning.total}
-            totalFrom={pruning.totalFrom}
+        {hasContextControl && (
+          <ContextControlAside
+            filter={intakeFilter}
+            pruning={pruning.total}
+            pruningFrom={pruning.totalFrom}
             session={pruning.session}
             weekly={pruning.weekly}
           />
@@ -1415,12 +1433,49 @@ export default function Dashboard() {
           tile prints has its own block here, the total included — a headline
           with no derivation under it is the thing this band exists to prevent.
 
-          Gated on `hasPrunes`, the same const the tile reads. */}
-      {hasPrunes && (
+          Two cards, never one table: the tile prints two figures under one
+          title and this band is where each one's arithmetic lives. They are
+          not added here for the reason the tile gives — the filter takes the
+          same C1/C3/B2 mass off the wire first, so part of what pruning
+          reports removing was never in the cached prefix at all.
+
+          Gated on `hasContextControl`, the same const the tile reads. */}
+      {hasContextControl && (
         <SourceRegion
-          heading="What pruning saved, in detail"
-          statement="The four figures each net beside the meters is made of: conversation removed between work cycles, and what not re-reading it came to."
+          heading="What context control saved, in detail"
+          statement="The two figures beside the meters are made of: tool results kept out of the request as it was sent, and conversation removed between work cycles."
         >
+          {/* The filter first, matching the tile: it acts before the pruner
+              does, so what the pruner reports is the residual of it. */}
+          <Card className="mb-4">
+            <CardTitle>Intake filter</CardTitle>
+            <FilterSavingsRows filter={intakeFilter} />
+            <Hint>
+              A tool result the filter recognises is replaced with a pointer past
+              the last cache breakpoint, so the API never writes it and no later
+              turn re-reads it. Nothing is edited, so unlike a prune there is no
+              invalidation to pay and no break-even — it earns on the first
+              request. What it still costs is sending the result once, uncached,
+              which is the middle row.{" "}
+              {intakeFilter.ledger === "read" && (
+                <>
+                  Measured over {intakeFilter.requests} rewritten{" "}
+                  {intakeFilter.requests === 1 ? "request" : "requests"}
+                  {intakeFilter.unjoinedRequests > 0 && (
+                    <>
+                      , {intakeFilter.unjoinedRequests} of which matched no
+                      main-thread turn this install still holds — a sub-agent&rsquo;s
+                      request, or one whose transcript has been swept. What they
+                      saved is missing from the figure rather than counted as
+                      nothing
+                    </>
+                  )}
+                  .
+                </>
+              )}
+            </Hint>
+          </Card>
+
           <Card className="mb-4">
             <CardTitle>Context pruning</CardTitle>
             {/* The total first, because it is what the tile leads with and this
