@@ -15,7 +15,7 @@ services:
         # build host that cannot reach GitHub, and the reason this is reachable
         # from `.env` at all rather than only by editing the Dockerfile.
         WINNOW_REPO: "${WINNOW_REPO:-https://github.com/Xapicc/winnow.git}"
-        WINNOW_REF: "${WINNOW_REF-b49fceb0a021faea97c53dcbc93403b0aec4d626}"
+        WINNOW_REF: "${WINNOW_REF-79dd165529caff9228e5da61a0245ddbad06ddf8}"
     # All three default to today's values, so `docker compose up` is unchanged.
     # Overriding them lets a second instance run alongside the first — to
     # compare two branches against the same transcripts, for example. Pair them

@@ -294,7 +294,7 @@ ENV PATH="/home/node/pytools/bin:${PATH}" \
 # agent could rewrite, would be a way for one run to put its own code on every
 # other run's transcript.
 ARG WINNOW_REPO=https://github.com/Xapicc/winnow.git
-ARG WINNOW_REF=b49fceb0a021faea97c53dcbc93403b0aec4d626
+ARG WINNOW_REF=79dd165529caff9228e5da61a0245ddbad06ddf8
 RUN set -eux; \
     if [ -z "${WINNOW_REF}" ]; then \
       echo "WINNOW_REF empty — building without winnow; context pruning will report unavailable"; \
