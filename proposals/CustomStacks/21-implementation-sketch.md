@@ -6,8 +6,15 @@ test.
 
 **The test bar is `CLAUDE.md`'s and not a general convention**: a pure function
 whose failure mode is silent gets a unit test, and `docs/agent/testing.md`
-records what each of the 76 existing ones earned. **Three functions in this whole
-plan meet it.** Everything else is I/O, and this repository does not test I/O.
+records what each of the 92 existing ones earned. **Three functions in this whole
+plan meet it.**
+
+The bar is not "no I/O tests" — sixteen of the 92 are over routes and
+components, and `src/app/api/health/route.test.ts` says why one of them earned
+it: the healthcheck *"answers falsely when this server cannot do its job"*, and
+*"a route that always answers 200 is indistinguishable from a working one until
+the day the database goes read-only."* **Nothing in this plan is that shape.**
+Its routes are reads whose failure is a visibly empty card.
 
 ---
 

@@ -198,8 +198,9 @@ earns it a test rather than a convention), one `addColumn` in `migrate()`, one
 check in the run loop, one `RefusalCause`, one template-form field.
 
 **Which of those earns a test, precisely**: the mapping and the state
-resolution. Not the run-loop check — it is I/O and this repository does not test
-I/O. Two functions, not a suite (`docs/agent/testing.md`).
+resolution. Not the run-loop check: this repository does test a route when the
+defect is one only a payload can show (`src/app/api/health/route.test.ts`), and
+a `stat` before a spawn is not that shape. Two functions, not a suite (`docs/agent/testing.md`).
 
 **No `docs/agent/` invariant moves.** `docs/agent/run-lifecycle.md` gains a
 sentence naming a new `RefusalCause`; `docs/agent/agents-and-templates.md` gains

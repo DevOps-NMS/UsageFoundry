@@ -252,8 +252,10 @@ and nothing catches it), the field validators (a regex that accepts one
 character too many is a silent widening of the safety argument), and the
 disk-side diff (wrong in the safe direction is a re-install, wrong in the unsafe
 direction is a page that lies). **Three functions, not a suite.** The route, the
-page and the reconciler get none — they are I/O, and this repository does not
-test I/O.
+page and the reconciler get none. This repository does test a route when the
+defect is one only a payload can show — `src/app/api/health/route.test.ts` earns
+its place because the healthcheck *"answers falsely when this server cannot do
+its job"* — but nothing here is that shape.
 
 Invariants that move: `docs/agent/architecture.md` (a module, a route, and a
 fourth kind of non-`claude` child), `docs/agent/security.md` (that child, and
