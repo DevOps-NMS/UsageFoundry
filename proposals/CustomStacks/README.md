@@ -28,8 +28,9 @@ documented twenty times, and what is genuinely missing is that **nothing in this
 app can see what is installed** — so a tool that is absent fails inside a tool
 call the run loop does not read, silently, 213 sessions at a time.
 
-Six to nine days, against `16-`'s and `18-`'s week to two weeks and `09-`'s
-open-ended estimate. Full case in [20-recommendation.md](20-recommendation.md);
+Four to seven days plus one work cycle, against `16-`'s and `18-`'s week to two
+weeks and `09-`'s open-ended estimate. Full case in
+[20-recommendation.md](20-recommendation.md);
 phases in [21-implementation-sketch.md](21-implementation-sketch.md).
 
 ## What would overturn it

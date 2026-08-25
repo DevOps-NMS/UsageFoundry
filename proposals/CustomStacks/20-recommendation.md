@@ -16,9 +16,9 @@ install, unnoticed (`.env.example:222-226`). `14-` §8 is the asymmetry that
 decides where the effort goes: an install that fails costs a boot log line an
 operator is watching, and a tool that is absent costs billed tokens on every
 cycle of every run that needed it, discovered by nobody. So the recommendation
-spends everything on the second and nothing on the first, and it comes to **six
-to nine days** against `16-`'s and `18-`'s week to two weeks and `09-`'s
-open-ended estimate.
+spends everything on the second and nothing on the first, and it comes to **four
+to seven days plus one work cycle** — against `16-`'s and `18-`'s week to two
+weeks and `09-`'s open-ended estimate.
 
 ## What to build, in order
 
