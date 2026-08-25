@@ -54,6 +54,7 @@ import { RunDiff } from "@/components/RunDiff";
 import { RunLand } from "@/components/RunLand";
 import { RunOutput } from "@/components/RunOutput";
 import { RunReview } from "@/components/RunReview";
+import { RunTasks } from "@/components/RunTasks";
 
 /* ------------------------------------------------------------------ */
 /* What state the run is in, said once                                 */
@@ -1533,6 +1534,18 @@ export default function RunDetail({
 
           {activeTab === "log" && (
             <>
+              {/* Above the filter and outside the log's scroll container, both
+                  deliberately: the tasks are the log's header rather than lines
+                  in it, so Find/Show narrows the feed below and leaves this
+                  alone, and it stays put while the feed scrolls. Renders
+                  nothing on a run that backgrounded nothing. */}
+              <RunTasks
+                events={events}
+                droppedEvents={droppedEvents}
+                active={active}
+                now={nowTick}
+              />
+
               {/* Over the events already in client state, and that is the whole
                   of what it is: no route, no query, nothing fetched. The
                   Field's own bottom margin is the gap to the log below it —

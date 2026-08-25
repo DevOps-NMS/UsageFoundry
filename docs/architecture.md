@@ -28,6 +28,12 @@ src/lib/
                    `compactionNotice` say what a compaction took — read off the
                    cycle's own argv, quoting the vendor's table, acting on
                    nothing
+  runTasks.ts      the background tasks a run started, reduced from the
+                   `system:task_*` events the loop above already stores — the
+                   log feed drops every `system:` line on purpose, so this is
+                   their only reader. Pure and client-safe, over the events the
+                   run page already holds: no route, no poll, no new column.
+                   Never a sub-agent delegation, which is its own event kind
   fileCostNotice.ts  what a `Read` of this repository's largest files costs,
                    generated once at `createRun` and frozen on the row, because
                    the appended prompt is part of the cached prefix

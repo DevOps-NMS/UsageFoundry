@@ -1668,6 +1668,42 @@ through before trusting this unattended:
      least 44px tall. The narrow-viewport entries already on this list predate
      both controls and cover neither.
 
+- **The background-task panel on the run page's log tab, in a browser.**
+  `src/components/RunTasks.tsx` renders `runTasks.ts`'s rows over the events
+  already in the page's client state — no route, no poll, no schema change — and
+  **nothing rendered it**. Docker is not available in the container it was
+  written in, and an attempt to boot `npm run dev` against a seeded throwaway
+  database was refused before it started, so not one of these rows has been drawn
+  by a browser at any viewport. What *is* checked: `npm run typecheck` (exit 0),
+  `npm test` (**1,705 tests / 251 suites / 0 failures**, of which 18 cases are
+  `runTasks.test.ts`), and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
+  build` (exit 0). The reducer is therefore well covered and the component is
+  not covered at all — there are still zero page tests and no jsdom.
+
+  Run `eadfe9f2-ac96-4c44-b59a-fbb3c9341871` has real `system:task_*` events in
+  it and is the run to open. What a person has to look at, in order:
+
+  1. `/runs/eadfe9f2-ac96-4c44-b59a-fbb3c9341871`, **log** tab. A
+     `Background tasks (n)` fold must appear above the Find/Show row, with one
+     row per task, each naming the task, its `task_type`, a state badge and how
+     long it ran.
+  2. Any run that backgrounded nothing — most runs. The panel must render
+     **nothing at all**: no empty box, no heading, no fold.
+  3. Type into **Find** and change **Show**. The rows above must not narrow —
+     the filter owns the feed below and nothing else. Scroll the log: the panel
+     must stay put rather than scrolling away with it.
+  4. A run whose replay was cut (`droppedEvents > 0`, the same condition the
+     log's own truncation line reads). A warning must sit above the fold saying
+     a task that started in the dropped events is missing here. This is the one
+     that cannot be checked without such a run, and a partial list presented as
+     complete is the failure the entry exists for.
+  5. A run with a task still going — the badge reads `running` and the fold is
+     open by default. On a **stopped** run with a task that never reported an
+     ending, the duration must read `—` rather than a clock still counting up,
+     and the line under the table must say no ending reached the log.
+  6. At **390×844**: the table stacks (it is a `Table stack` and every `Td`
+     carries a `label`), each value is named, and nothing scrolls sideways.
+
 - **Context pruning inside a live run.** The whole feature. The winnow
   subprocess, the token measurement, all three prescriptions and the `.bak` it
   leaves were exercised directly against a copied transcript in the running
