@@ -11,7 +11,7 @@ import {
   CACHE_WRITE_5M_MULTIPLIER,
   resolvePrice,
 } from "./pricing";
-import { scanUsage } from "./transcripts";
+import { scanUsage, type UsageEntry } from "./transcripts";
 import type { PruneTier } from "./apiTypes";
 import { getSettings, type Settings } from "./settings";
 
@@ -772,14 +772,21 @@ export interface PruneReceiptRow {
 }
 
 /**
- * The cache write the resume after an early end actually performed.
+ * The cache write the resume after a prune actually performed.
  *
  * Read off the first real turn following the prune. "Real" excludes the
  * all-zero record the CLI writes at a restart — it carries a `usage` block with
  * every field at zero and a null `service_tier`, and taking it as the first turn
  * reports the invalidation as $0.00.
+ *
+ * `cacheRead` arrived with the boundary accounting below and is the reason the
+ * shape changed. It is the field that separates a resume which *rewrote* its
+ * prefix from one which *re-read* it, and without it on the row the two are
+ * indistinguishable — which is precisely the ambiguity the boundary zero was
+ * resting on.
  */
 export interface ResumeWrite {
+  cacheRead: number;
   cacheWrite5m: number;
   cacheWrite1h: number;
 }
@@ -800,24 +807,296 @@ export interface PruneNet {
   priced: boolean;
   /** What not re-reading the removed tokens saved, at the cache-read rate. */
   cacheSavedUSD: number;
-  /** What the edit cost, which is nothing at a boundary. */
+  /**
+   * What the edit cost — **$0 only when that has been observed**, never merely
+   * assumed.
+   *
+   * Read alongside `invalidationKnown`. When that is false this is 0 and means
+   * *not yet measured*, the same contract `priced` already carries for the model
+   * table. The distinction is the whole point of the field: a boundary prune's
+   * cost used to be hard-zeroed on an argument, which made a loss unrepresentable
+   * rather than absent.
+   */
   invalidationUSD: number;
+  /**
+   * Whether `invalidationUSD` is a measurement.
+   *
+   * True when a turn has followed the prune and its billed usage settled the
+   * question, or when the receipt is an early end (whose write the prune plainly
+   * caused). False for a boundary prune whose resume has not been observed yet —
+   * and for one on an install that has never produced a clean control resume to
+   * compare against, because the counterfactual is not derivable from the pruned
+   * run alone. See `classifyResume`.
+   */
+  invalidationKnown: boolean;
   /** The only figure worth leading with. */
   netUSD: number;
 }
 
 /**
+ * Share of a resume's billed prefix that came back as a cache *read* rather than
+ * a write, above which that resume is called warm.
+ *
+ * A cold resume re-writes its whole conversation and reads only the static head
+ * — the system prompt and the tool definitions, which on this install measure
+ * about 15,900 tokens and are the same on every turn. A warm one reads the
+ * conversation too. The gap between the two is wide, so the threshold does not
+ * have to be delicate: measured over 1,316 transcripts in `~/.claude/projects`,
+ * full-context rewrites read a near-constant 15.9k against conversations of
+ * 50k–750k, which puts every observed cold resume under 0.30 and leaves nothing
+ * sitting near the line.
+ */
+export const WARM_RESUME_READ_SHARE = 0.5;
+
+/** Whether a resume re-read its prefix or paid to write it again. */
+export type ResumeKind = "warm" | "cold";
+
+/**
+ * Declines in a row before one boundary is pruned anyway, to retake the reading.
+ *
+ * Four is a judgement, not a measurement, chosen from what it costs to be wrong
+ * each way. Too high and a run that could be pruning again carries a
+ * conversation it does not need; too low and the gate barely gates. One refresh
+ * cut every four boundaries caps the cost of a stale decline at a quarter of the
+ * prunes the ungated path would have taken, while keeping the prediction the
+ * gate acts on no more than four cycles old.
+ */
+export const BOUNDARY_RECHECK_AFTER = 4;
+
+/** What to do at a cycle boundary. */
+export type BoundaryAction =
+  | /** The payback test had no objection, or none it is still entitled to. */ "prune"
+  | /** Over the horizon, but on a reading too old to keep trusting. */ "refresh"
+  | /** Over the horizon, on a reading recent enough to act on. */ "decline";
+
+/**
+ * Whether to prune at this cycle boundary.
+ *
+ * Pure and separate from the spawning, on `sumPruneSavings`' reasoning: this is
+ * the arithmetic, and it should be testable without a database, a transcript
+ * scan and a subprocess behind it.
+ *
+ * `predicted` is `predictedPayback` — turns this run's *last* cut still needs to
+ * break even, or null when it has not cut yet. Null is not a small number: it
+ * means unmeasured, and it resolves to **prune**, because the repo's own corpus
+ * has always-prune netting +$214.46 over 175 sessions. Refusing too readily
+ * costs more in aggregate than allowing too readily, so every unknown here goes
+ * the permissive way.
+ *
+ * `declinesSoFar` is what makes this a gate rather than a switch. A decline
+ * writes no receipt, so the next boundary re-reads the same prediction and would
+ * decline again for ever on one measurement. See `BOUNDARY_RECHECK_AFTER`.
+ */
+export function boundaryAction(
+  predicted: number | null,
+  declinesSoFar: number,
+): BoundaryAction {
+  if (predicted === null || predicted <= PAYBACK_HORIZON_TURNS) return "prune";
+  return declinesSoFar >= BOUNDARY_RECHECK_AFTER ? "refresh" : "decline";
+}
+
+/**
+ * Did this resume re-read the conversation, or rewrite it?
+ *
+ * This is the observation the boundary zero always needed and never had. The
+ * argument for charging a boundary prune nothing is that `--resume` rewrites the
+ * cached prefix regardless, so the write was committed before the prune ran. If
+ * that is true the resume is **cold** and the zero is right. If a plain resume
+ * comes back **warm**, the prefix was still cached, the prune broke it, and the
+ * zero is hiding a real cost.
+ *
+ * Note what this can and cannot settle on its own. Run on the turn after a
+ * *pruned* resume it is nearly always cold, because the edit itself broke the
+ * cache — that reading is evidence of nothing. It is decisive only on a resume
+ * with **no prune before it**, which is why `resumeControl` exists and why the
+ * boundary gate below is worth having twice over: every prune it declines leaves
+ * a clean resume behind, and clean resumes are the control group.
+ */
+export function classifyResume(write: ResumeWrite): ResumeKind {
+  const billed = write.cacheRead + write.cacheWrite5m + write.cacheWrite1h;
+  if (billed <= 0) return "cold";
+  return write.cacheRead / billed >= WARM_RESUME_READ_SHARE ? "warm" : "cold";
+}
+
+/**
+ * What resumes that had **no prune before them** did on this install.
+ *
+ * The control group, and the only thing that can settle what a boundary prune
+ * costs. Everything else in this file measures the treated population.
+ */
+export interface ResumeControl {
+  /** Clean boundaries whose next billed turn has been observed. */
+  cleanResumes: number;
+  /** Of those, the share that came back warm. 0 when `cleanResumes` is 0. */
+  warmShare: number;
+}
+
+/**
+ * Clean resumes needed before the control is allowed to decide anything.
+ *
+ * Small on purpose. This is not an attempt at significance — it is a floor under
+ * "one observation is not a rate", and the effect it is reading is close to
+ * binary: on the 1,316-transcript corpus a cold resume reads about 15.9k against
+ * conversations of 50k–750k, so a handful of clean boundaries separates the two
+ * hypotheses cleanly. Raising it costs nothing but delay; the honest failure
+ * here is deciding on one probe, not deciding on five.
+ */
+export const MIN_CONTROL_RESUMES = 5;
+
+/** No control yet — every boundary invalidation stays indeterminate. */
+export const NO_RESUME_CONTROL: ResumeControl = {
+  cleanResumes: 0,
+  warmShare: 0,
+};
+
+/**
+ * Note that a cycle boundary happened, and whether anything was cut at it.
+ *
+ * Best-effort and never thrown from, on `recordPrune`'s reasoning: the cycle has
+ * already turned by the time this is called, and a failed insert must not end a
+ * run that worked. What is lost is one point of a control group.
+ */
+export function recordResumeProbe(
+  runId: string,
+  sessionId: string | null,
+  pruned: boolean,
+  tokensBefore: number,
+): void {
+  try {
+    db()
+      .prepare(
+        `INSERT INTO resume_probes (ts, run_id, session_id, pruned, tokens_before)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(Date.now(), runId, sessionId, pruned ? 1 : 0, tokensBefore);
+  } catch {
+    // See above.
+  }
+}
+
+/**
+ * Read the control group out of the probes and the transcripts behind them.
+ *
+ * Takes the already-scanned main-thread entries rather than scanning again:
+ * `priceReceipts` has them in hand and the dashboard draws three nested spans
+ * off one read.
+ *
+ * A probe with no billed turn after it yet is skipped rather than counted cold.
+ * The boundary that has not resumed is the ordinary state of the newest row in
+ * the table, and letting it vote would drag `warmShare` toward zero — which is
+ * the direction that quietly restores the assumption this exists to replace.
+ */
+export function resumeControl(
+  probes: readonly CleanProbe[],
+  mainThread: readonly UsageEntry[],
+): ResumeControl {
+  let observed = 0;
+  let warm = 0;
+  for (const probe of probes) {
+    if (!probe.sessionId) continue;
+    const firstBilled = firstBilledTurn(mainThread, probe.sessionId, probe.ts);
+    if (!firstBilled) continue;
+    observed += 1;
+    if (classifyResume(firstBilled) === "warm") warm += 1;
+  }
+  return {
+    cleanResumes: observed,
+    warmShare: observed === 0 ? 0 : warm / observed,
+  };
+}
+
+/** One boundary at which no prune ran. */
+export interface CleanProbe {
+  ts: number;
+  sessionId: string | null;
+}
+
+/**
+ * The first turn after `after` in this session that billed anything.
+ *
+ * "Billed anything" rather than simply "first": a restart writes a record whose
+ * usage block is present and entirely zero, and taking that one reports the
+ * invalidation as $0.00 — which is how this was wrong before it was measured.
+ *
+ * For the control, which has a probe timestamp and no pre-filtered turn list.
+ * `priceReceipts` does the same read off the `following` array it has already
+ * built, and the two must not come to disagree about which turn a resume is —
+ * the zero-usage skip is the part that would drift.
+ */
+function firstBilledTurn(
+  mainThread: readonly UsageEntry[],
+  sessionId: string,
+  after: number,
+): ResumeWrite | null {
+  let best: UsageEntry | null = null;
+  for (const e of mainThread) {
+    if (e.sessionId !== sessionId || e.ts <= after) continue;
+    const billed =
+      e.tokens.cacheRead + e.tokens.cacheWrite5m + e.tokens.cacheWrite1h;
+    if (billed <= 0) continue;
+    if (!best || e.ts < best.ts) best = e;
+  }
+  return best
+    ? {
+        cacheRead: best.tokens.cacheRead,
+        cacheWrite5m: best.tokens.cacheWrite5m,
+        cacheWrite1h: best.tokens.cacheWrite1h,
+      }
+    : null;
+}
+
+/** The clean boundaries in a window, newest last. */
+export function readCleanProbes(span: {
+  from: number;
+  to: number;
+}): CleanProbe[] {
+  try {
+    const rows = db()
+      .prepare(
+        `SELECT ts, session_id FROM resume_probes
+         WHERE pruned = 0 AND ts >= ? AND ts <= ? ORDER BY ts`,
+      )
+      .all(span.from, span.to) as { ts: number; session_id: string | null }[];
+    return rows.map((r) => ({ ts: r.ts, sessionId: r.session_id }));
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Price one receipt.
  *
- * ## Why a boundary prune pays no invalidation
+ * ## What a boundary prune pays, and why that stopped being a constant
  *
  * Editing a cached prefix normally forces a full-price rewrite of everything
- * after the cut. A boundary prune does not, and this is not an approximation:
- * the next cycle opens with `--resume`, which rewrites that prefix whether or
- * not anything was removed from it. The rewrite is the resume's cost, already
- * committed before the prune ran, so charging it here would be charging twice
- * for one write. An early end is the opposite case — it *created* the resume —
- * so it pays for the context the resume then writes.
+ * after the cut. The standing argument was that a boundary prune does not, and
+ * that this is not an approximation: the next cycle opens with `--resume`, which
+ * rewrites that prefix whether or not anything was removed from it. The rewrite
+ * is the resume's cost, already committed before the prune ran, so charging it
+ * here would be charging twice for one write. An early end is the opposite case
+ * — it *created* the resume — so it pays for the context the resume then writes.
+ *
+ * **That argument is still the most likely one to be right, and it was never
+ * measured.** It was implemented as `row.trigger !== "early-end" ? 0 : …`, which
+ * made a boundary prune's net a product of non-negative terms with a floor of
+ * exactly $0.00 — so the page built to show whether pruning earns its keep could
+ * not express the answer "no". A claim that cannot fail is not evidence, however
+ * plausible it is, and this feature's whole pitch is that everyone else reports
+ * bytes removed and calls it a saving.
+ *
+ * So the zero stayed and the certainty went. `invalidationUSD` is now $0 for a
+ * boundary prune only where that has been **observed**, and carries
+ * `invalidationKnown: false` otherwise — the same indeterminate-not-zero
+ * contract `priced` already holds for the model table, and for the same reason.
+ *
+ * The observation is `classifyResume`. A cold resume rewrote its prefix and the
+ * zero is correct. A warm one re-read it, meaning the prefix outlived the cycle
+ * boundary and a prune that broke it destroyed something worth 0.1×. The catch
+ * is that reading this off the *pruned* run proves nothing — the edit breaks the
+ * cache itself, so the resume after a prune is cold either way. Only a resume
+ * with no prune before it can settle it, which is what `control` carries and
+ * what the boundary gate in `orchestrator.ts` quietly manufactures every time it
+ * declines a cut.
  *
  * ## Why the saving is measured and not projected
  *
@@ -837,6 +1116,7 @@ export function netReceipt(
   row: PruneReceiptRow,
   turnsAfter: number,
   resumeWrite: ResumeWrite | null = null,
+  control: ResumeControl | null = null,
 ): PruneNet {
   // Priced at the rate for the run's own model, and `at` is the receipt's own
   // timestamp rather than now — `byAgent.counterfactualUSD`'s rule: a rate
@@ -848,6 +1128,7 @@ export function netReceipt(
       priced: false,
       cacheSavedUSD: 0,
       invalidationUSD: 0,
+      invalidationKnown: false,
       netUSD: 0,
     };
   }
@@ -873,24 +1154,92 @@ export function netReceipt(
   // Priced per class rather than at one multiplier, because the row carries
   // both and an install writing at the five-minute class would otherwise be
   // charged 2× for a 1.25× write.
-  const invalidationUSD =
-    row.trigger !== "early-end"
-      ? 0
-      : resumeWrite
-        ? (resumeWrite.cacheWrite5m * CACHE_WRITE_5M_MULTIPLIER +
-            resumeWrite.cacheWrite1h * CACHE_WRITE_1H_MULTIPLIER) *
-          perToken
-        : // No turn has followed yet, so there is nothing to read. The estimate
-          // stands in, and it is the low end: a live run's cost here only ever
+  const observedWriteUSD = resumeWrite
+    ? (resumeWrite.cacheWrite5m * CACHE_WRITE_5M_MULTIPLIER +
+        resumeWrite.cacheWrite1h * CACHE_WRITE_1H_MULTIPLIER) *
+      perToken
+    : null;
+
+  const { invalidationUSD, invalidationKnown } =
+    row.trigger === "early-end"
+      ? {
+          // Unchanged, and deliberately so. This boundary was not going to
+          // happen, so the write it causes is genuinely new cost. Measured off
+          // the resume where a turn has followed; estimated from `tokensAfter`
+          // until then, which is the low end — a live run's cost here only ever
           // revises upward when the next turn lands.
-          row.tokensAfter * perToken * CACHE_WRITE_1H_MULTIPLIER;
+          invalidationUSD:
+            observedWriteUSD ??
+            row.tokensAfter * perToken * CACHE_WRITE_1H_MULTIPLIER,
+          invalidationKnown: true,
+        }
+      : boundaryInvalidation(row, resumeWrite, observedWriteUSD, perToken, control);
 
   return {
     turnsAfter,
     priced: true,
     cacheSavedUSD,
     invalidationUSD,
+    invalidationKnown,
     netUSD: cacheSavedUSD - invalidationUSD,
+  };
+}
+
+/**
+ * What a boundary prune's edit cost, or an admission that nobody knows yet.
+ *
+ * Split out because the branching is the argument, and inlining it put five
+ * outcomes behind one ternary where only two were visible.
+ *
+ * The four cases, in the order they resolve:
+ *
+ * 1. **No turn has followed.** Nothing has been billed since the edit, so there
+ *    is nothing to read. Unknown, not zero — the receipt of a prune that ran a
+ *    second ago should not read as one that has been settled.
+ * 2. **The resume came back warm.** The prefix survived the edit, so the edit
+ *    invalidated nothing. $0, and this time observed.
+ * 3. **The resume came back cold, and clean resumes on this install are cold
+ *    too.** The rewrite was happening regardless. $0, and the standing argument
+ *    is now carrying a measurement instead of an assumption.
+ * 4. **The resume came back cold, and clean resumes are warm.** The prefix does
+ *    normally outlive a cycle boundary here, so the edit is what forced this
+ *    write. Charged the difference between what the resume paid and what the
+ *    unpruned one would have — a read of the *pre*-prune conversation at 0.1×.
+ *
+ * With no control, case 3 and case 4 are indistinguishable and the answer is
+ * unknown. That is the honest floor: the counterfactual is not recoverable from
+ * a pruned run, because the edit breaks the cache whether or not the boundary
+ * would have.
+ */
+function boundaryInvalidation(
+  row: PruneReceiptRow,
+  resumeWrite: ResumeWrite | null,
+  observedWriteUSD: number | null,
+  perToken: number,
+  control: ResumeControl | null,
+): { invalidationUSD: number; invalidationKnown: boolean } {
+  if (!resumeWrite || observedWriteUSD === null) {
+    return { invalidationUSD: 0, invalidationKnown: false };
+  }
+  if (classifyResume(resumeWrite) === "warm") {
+    return { invalidationUSD: 0, invalidationKnown: true };
+  }
+  if (!control || control.cleanResumes < MIN_CONTROL_RESUMES) {
+    return { invalidationUSD: 0, invalidationKnown: false };
+  }
+  if (control.warmShare < WARM_RESUME_READ_SHARE) {
+    return { invalidationUSD: 0, invalidationKnown: true };
+  }
+  // The counterfactual: the same resume without the edit, re-reading the
+  // conversation as it stood *before* the cut. Floored at zero rather than
+  // allowed to go negative — a resume that wrote less than the read it replaced
+  // is a saving the `cacheSavedUSD` side already counts, and crediting it twice
+  // here is the double-count this whole function exists to avoid.
+  const avoidedReadUSD =
+    row.tokensBefore * perToken * CACHE_READ_MULTIPLIER;
+  return {
+    invalidationUSD: Math.max(0, observedWriteUSD - avoidedReadUSD),
+    invalidationKnown: true,
   };
 }
 
@@ -905,6 +1254,15 @@ export interface PruneSavings {
    * own subject.
    */
   pricedPrunes: number;
+  /**
+   * Priced prunes whose invalidation has **not** been settled.
+   *
+   * Rendered rather than folded away. These contribute $0 to `invalidationUSD`
+   * and therefore their full gross to `netUSD`, so a total with a high count
+   * here is an upper bound on the saving and not a measurement of it. Saying so
+   * is the difference between this and the version that could not report a loss.
+   */
+  unsettledPrunes: number;
   tokensRemoved: number;
   turnsAfter: number;
   cacheSavedUSD: number;
@@ -915,6 +1273,7 @@ export interface PruneSavings {
 export const NO_PRUNE_SAVINGS: PruneSavings = {
   prunes: 0,
   pricedPrunes: 0,
+  unsettledPrunes: 0,
   tokensRemoved: 0,
   turnsAfter: 0,
   cacheSavedUSD: 0,
@@ -939,6 +1298,11 @@ export function sumPruneSavings(priced: readonly PricedReceipt[]): PruneSavings 
     (acc, { row, net }) => ({
       prunes: acc.prunes + 1,
       pricedPrunes: acc.pricedPrunes + (net.priced ? 1 : 0),
+      // Only among the priced. An unpriced receipt is already reported as
+      // uncovered by `pricedPrunes`, and counting it here as well would say the
+      // same omission twice in two different words.
+      unsettledPrunes:
+        acc.unsettledPrunes + (net.priced && !net.invalidationKnown ? 1 : 0),
       tokensRemoved: acc.tokensRemoved + row.tokensRemoved,
       // Summed rather than maxed: two prunes on one run each saved their own
       // tokens over their own turns, and the second one's turns are a subset of
@@ -1054,6 +1418,21 @@ export async function priceReceipts(
   // never touched. Same split `transcripts.ts` makes everywhere else.
   const mainThread = entries.filter((e) => !e.isSidechain);
 
+  // The control, from the earliest receipt in hand to now.
+  //
+  // Bounded below rather than reading the whole table, because what a plain
+  // resume does is a property of an install's configuration and a period before
+  // this one may have been running a different one. Open above, because a clean
+  // boundary that happened *after* the last prune is still evidence about the
+  // same install, and the gate in `orchestrator.ts` produces its controls by
+  // declining prunes — so the newest rows are exactly the ones that make an
+  // indeterminate receipt determinable.
+  const from = receipts.reduce((min, r) => Math.min(min, r.ts), receipts[0].ts);
+  const control = resumeControl(
+    readCleanProbes({ from, to: Date.now() }),
+    mainThread,
+  );
+
   return receipts.map((row) => {
     const sessionId = sessions.get(row.runId) ?? null;
     const following = sessionId
@@ -1062,26 +1441,33 @@ export async function priceReceipts(
           .sort((a, b) => a.ts - b.ts)
       : [];
 
-    // The resume's own write, for an early end. The **first turn that billed
-    // anything** rather than simply the first: a restart writes a record whose
-    // usage block is present and entirely zero, and taking that one reports the
-    // invalidation as nothing at all — which is how this was wrong before it was
-    // measured.
+    // Read for **every** trigger now, not only for an early end. The reading was
+    // always available for a boundary prune and was deliberately discarded,
+    // which is what made its $0 unfalsifiable rather than merely likely.
+    //
+    // Taken off `following`, which is already this session's turns after this
+    // receipt in time order, rather than re-scanning the whole main thread per
+    // receipt. The **first turn that billed anything** rather than simply the
+    // first: a restart writes a record whose usage block is present and entirely
+    // zero, and taking that one reports the invalidation as nothing at all.
     const firstBilled = following.find(
       (e) =>
         e.tokens.cacheRead > 0 ||
         e.tokens.cacheWrite5m > 0 ||
         e.tokens.cacheWrite1h > 0,
     );
-    const resumeWrite =
-      row.trigger === "early-end" && firstBilled
-        ? {
-            cacheWrite5m: firstBilled.tokens.cacheWrite5m,
-            cacheWrite1h: firstBilled.tokens.cacheWrite1h,
-          }
-        : null;
+    const resumeWrite: ResumeWrite | null = firstBilled
+      ? {
+          cacheRead: firstBilled.tokens.cacheRead,
+          cacheWrite5m: firstBilled.tokens.cacheWrite5m,
+          cacheWrite1h: firstBilled.tokens.cacheWrite1h,
+        }
+      : null;
 
-    return { row, net: netReceipt(row, following.length, resumeWrite) };
+    return {
+      row,
+      net: netReceipt(row, following.length, resumeWrite, control),
+    };
   });
 }
 

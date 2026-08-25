@@ -65,9 +65,11 @@ import {
   CYCLE_CONTEXT_CEILING_TOKENS,
   PAYBACK_HORIZON_TURNS,
   paybackTurns,
+  boundaryAction,
   pruneTranscript,
   pruningEnabled,
   recordPrune,
+  recordResumeProbe,
   type PruneOutcome,
   type PruneTrigger,
 } from "./contextPruning";
@@ -6828,11 +6830,80 @@ async function prune(
   return null;
 }
 
-/** The boundary case, named so the call site inside the loop reads as one line. */
+/**
+ * The boundary case, named so the call site inside the loop reads as one line.
+ *
+ * ## Why this is gated at all
+ *
+ * A cut pays `1.9·S − 2·D` once and earns `0.1·D` a turn back, so it needs
+ * `19·(S/D) − 20` further turns to pay for itself — `paybackTurns`, which this
+ * app already computes and already acts on, but only on the early-end path
+ * (`declineOrEndEarly`). The boundary path ran unconditionally on the argument
+ * that its edit is free because `--resume` was going to rewrite the prefix
+ * anyway.
+ *
+ * That argument is about the *cost* side and it may well be right. It says
+ * nothing about the *earning* side, and the earning side is where a boundary
+ * prune actually fails: `S` grows every cycle while `D` is only the newest
+ * cycle's strippable results, so `S/D` drifts up and the payback horizon with
+ * it. Measured with `winnow inspect` on real orchestrated transcripts from this
+ * install, `T*` at tier CB runs from 68 to 598 turns — against runs that billed
+ * 113 to 520. A cut needing 598 turns to break even, taken at a boundary with
+ * perhaps one cycle left, is not free even if the write was.
+ *
+ * ## One-sided, on purpose
+ *
+ * Every unknown resolves to **prune**. `predictedPayback` returns null on a
+ * run's first cut, and null means go: the repo's own corpus has always-prune
+ * netting +$214.46 over 175 sessions, so refusing too readily costs more in
+ * aggregate than allowing too readily does. This gate is here to catch the tail
+ * where the arithmetic has already said no once, not to second-guess the median.
+ *
+ * ## The side effect that is worth as much as the gate
+ *
+ * Every decline leaves a cycle boundary with no prune at it — a **clean resume**,
+ * which is the only observation that can settle what a boundary prune's edit
+ * actually costs (`contextPruning.ts`'s `classifyResume`). The probe is recorded
+ * either way, so the control group grows whichever branch is taken.
+ */
 async function pruneAtBoundary(
   id: string,
   sessionId: string | null,
+  contextTokensNow: number,
 ): Promise<PruneOutcome | null> {
+  const predicted = predictedPayback(id);
+  const declinesSoFar = boundaryDeclines.get(id) ?? 0;
+  const action = boundaryAction(predicted, declinesSoFar);
+  const declined = action === "decline";
+
+  boundaryDeclines.set(id, declined ? declinesSoFar + 1 : 0);
+  recordResumeProbe(id, sessionId, !declined, contextTokensNow);
+
+  if (declined) {
+    // Said plainly, and not as a failure. `prune`'s own error path writes "This
+    // run's context could not be pruned", and a policy decision arriving in that
+    // wording would send an operator looking for a broken install every cycle.
+    //
+    // Said every time rather than once per run, unlike `earlyEndDeclined`. That
+    // one latches because it fires on a minute timer and would otherwise repeat
+    // for hours; this fires once per work cycle, and a cycle that silently did
+    // not prune is exactly the thing an operator reading the pane needs told.
+    log(
+      id,
+      `Left this run's conversation alone at the cycle boundary: the last prune ` +
+        `here removed too little to pay for another one (it would need ` +
+        `${predicted} more turns to break even, and the limit is ` +
+        `${PAYBACK_HORIZON_TURNS}).`,
+    );
+    return null;
+  }
+  if (action === "refresh") {
+    log(
+      id,
+      `Pruning this run's conversation once despite the payback test, to retake ` +
+        `the measurement — the figure it refused on is ${declinesSoFar} cycles old.`,
+    );
+  }
   return prune(id, sessionId, "boundary");
 }
 
@@ -8766,7 +8837,7 @@ export async function startRun(id: string): Promise<void> {
       // while winnow is rewriting it.
       lastContextTokens = contextAfterPrune(
         lastContextTokens,
-        await pruneAtBoundary(id, sessionId),
+        await pruneAtBoundary(id, sessionId, lastContextTokens),
       );
     }
   } catch (err) {
@@ -8784,6 +8855,7 @@ export async function startRun(id: string): Promise<void> {
     liveGuards.delete(id);
     contextWatches.delete(id);
     earlyEndDeclined.delete(id);
+    boundaryDeclines.delete(id);
     // The exporter's credential dies with the run's loop, the way the chat's
     // dies with its turn — on a short grace, because the exporter batches on a
     // one-second timer and revoking on the instant would drop the tail of the
@@ -9263,6 +9335,29 @@ function predictedPayback(runId: string): number | null {
 const earlyEndDeclined = ((globalThis as unknown as {
   __ufEarlyEndDeclined?: Set<string>;
 }).__ufEarlyEndDeclined ??= new Set<string>());
+
+/**
+ * Consecutive boundaries this run's payback test has declined.
+ *
+ * Counted rather than latched, and that is the whole reason it exists.
+ * `predictedPayback` reads the run's **last receipt**, so a decline writes no
+ * new one and the next boundary re-reads the same figure: without a counter the
+ * first refusal is permanent for the rest of the run, on one measurement, and an
+ * operator sees pruning quietly stop.
+ *
+ * A latch would even be defensible on the arithmetic — `S` grows every cycle
+ * while `D` does not, so a cut that failed to pay is likely to keep failing. But
+ * `D` is whatever the newest cycle happened to produce, and one cycle that greps
+ * a large tree or runs a long build can make it large again. That case is
+ * invisible to a stale prediction, and this gate's standing instruction is that
+ * every unknown resolves to *prune*.
+ *
+ * Cleared with the run's other per-run state when its loop ends.
+ */
+const boundaryDeclines = ((globalThis as unknown as {
+  __ufBoundaryDeclines?: Map<string, number>;
+}).__ufBoundaryDeclines ??= new Map<string, number>());
+
 
 function startSweeper(): void {
   if (timers.sweep) return;

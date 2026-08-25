@@ -6,9 +6,13 @@ import { after, describe, it } from "node:test";
 
 import {
   apiContextTokens,
+  boundaryAction,
+  BOUNDARY_RECHECK_AFTER,
+  classifyResume,
   contextTokens,
   groupPruneSavingsByRun,
   isPruneTier,
+  MIN_CONTROL_RESUMES,
   netReceipt,
   paybackTurns,
   PAYBACK_HORIZON_TURNS,
@@ -306,6 +310,93 @@ describe("PRUNE_TIERS", () => {
   });
 });
 
+describe("boundaryAction", () => {
+  /**
+   * The gate that decides whether a cycle boundary prunes at all.
+   *
+   * Both ways of being wrong are silent, which is why this is pinned rather than
+   * left to the call site. Too eager and a run pays `1.9·S` a cycle for cuts
+   * that never earn it back — measured with `winnow inspect` on real
+   * orchestrated transcripts from this install, `T*` at tier CB runs 68 to 598
+   * turns against runs that billed 113 to 520. Too shy and pruning quietly stops
+   * for the rest of a run, which looks exactly like the feature being switched
+   * off.
+   */
+  it("prunes when nothing has measured this run yet", () => {
+    // The first cut on a run, and the case that decides the gate's character.
+    // `predictedPayback` returns null because there is no receipt to read, and
+    // null is unmeasured rather than large. The repo's own corpus has
+    // always-prune netting +$214.46 over 175 sessions, so an unknown that
+    // refused would cost more in aggregate than one that allows.
+    assert.equal(boundaryAction(null, 0), "prune");
+    assert.equal(boundaryAction(null, 99), "prune");
+  });
+
+  it("prunes when the last cut is inside the horizon", () => {
+    assert.equal(boundaryAction(PAYBACK_HORIZON_TURNS, 0), "prune");
+    assert.equal(boundaryAction(0, 0), "prune");
+  });
+
+  it("declines the cut the ungated path would have taken", () => {
+    // A tenth-of-the-suffix cut needs 170 further turns. This is the whole
+    // point: it is an ordinary-looking prune that removes real tokens and
+    // cannot pay for itself, and the boundary path used to wave it through.
+    assert.equal(boundaryAction(170, 0), "decline");
+    assert.equal(boundaryAction(PAYBACK_HORIZON_TURNS + 1, 0), "decline");
+  });
+
+  it("prunes once anyway when the reading it refused on has gone stale", () => {
+    // Without this the first decline is permanent: a decline writes no receipt,
+    // so the next boundary re-reads the same prediction for ever. `D` is
+    // whatever the newest cycle produced, and one cycle that greps a large tree
+    // can make it large again — invisible to a stale figure.
+    assert.equal(boundaryAction(170, BOUNDARY_RECHECK_AFTER - 1), "decline");
+    assert.equal(boundaryAction(170, BOUNDARY_RECHECK_AFTER), "refresh");
+  });
+
+  it("refreshes rather than declining for ever, at any age past the limit", () => {
+    assert.equal(boundaryAction(5_000, BOUNDARY_RECHECK_AFTER + 10), "refresh");
+  });
+});
+
+describe("classifyResume", () => {
+  /**
+   * The observation the boundary accounting turns on, and the one thing in this
+   * feature that is a measurement rather than an argument.
+   *
+   * A cold resume reads only the static head — system prompt and tool
+   * definitions, about 15,900 tokens on this install and the same on every turn
+   * — and writes the conversation again. A warm one reads the conversation too.
+   * Across 1,316 transcripts in `~/.claude/projects` the cold case read a
+   * near-constant 15.9k against conversations of 50k–750k, so nothing real sits
+   * near the threshold and it does not have to be delicate.
+   */
+  it("calls a resume cold when it re-wrote the conversation", () => {
+    assert.equal(
+      classifyResume({ cacheRead: 15_900, cacheWrite5m: 0, cacheWrite1h: 150_000 }),
+      "cold",
+    );
+  });
+
+  it("calls a resume warm when it re-read the conversation", () => {
+    assert.equal(
+      classifyResume({ cacheRead: 240_000, cacheWrite5m: 0, cacheWrite1h: 4_000 }),
+      "warm",
+    );
+  });
+
+  it("calls a turn that billed nothing cold rather than dividing by zero", () => {
+    // The all-zero record the CLI writes at a restart. `firstBilledTurn` filters
+    // these out before they reach here, so this is the belt to that braces — but
+    // NaN/0 would propagate into `warmShare` and quietly move an install's
+    // verdict, which is worse than a wrong answer that is at least a number.
+    assert.equal(
+      classifyResume({ cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 }),
+      "cold",
+    );
+  });
+});
+
 describe("netReceipt", () => {
   const base: PruneReceiptRow = {
     ts: Date.UTC(2026, 7, 20),
@@ -318,17 +409,23 @@ describe("netReceipt", () => {
     model: "claude-opus-5",
   };
 
-  it("charges a boundary prune nothing, because the resume was paying anyway", () => {
-    // The single most consequential line in this feature. `--resume` rewrites
-    // the cached prefix on the next cycle whether or not anything was removed
-    // from it, so the rewrite is the resume's cost and was committed before the
-    // prune ran. Charging it here would charge twice for one write — and it
-    // would do so at the 2× class against a saving at 0.1×, which is a factor of
-    // twenty. Every boundary prune would then report a loss, and the feature
-    // would look like it was costing money on the very page built to show
-    // whether it earns any.
+  it("charges an unobserved boundary prune nothing, and says it has not checked", () => {
+    // The single most consequential line in this feature, and it used to be
+    // stronger than the evidence behind it. `--resume` rewrites the cached
+    // prefix on the next cycle whether or not anything was removed from it, so
+    // the rewrite is the resume's cost and was committed before the prune ran.
+    // Charging it here would charge twice for one write — at the 2× class
+    // against a saving at 0.1×, a factor of twenty — and every boundary prune
+    // would report a loss on the very page built to show whether it earns any.
+    //
+    // All of that still stands. What changed is that it was implemented as a
+    // certainty: `trigger !== "early-end" ? 0`, which put a floor of exactly
+    // $0.00 under every boundary net and made "pruning lost money here" a
+    // sentence the schema could not express. The $0 stays; the claim to have
+    // measured it does not.
     const net = netReceipt(base, 30);
     assert.equal(net.invalidationUSD, 0);
+    assert.equal(net.invalidationKnown, false);
     assert.ok(net.netUSD > 0);
     assert.equal(net.netUSD, net.cacheSavedUSD);
   });
@@ -368,7 +465,11 @@ describe("netReceipt", () => {
       tokensAfter: 91_380,
       tokensRemoved: 76_286,
     };
-    const observed = netReceipt(real, 30, { cacheWrite5m: 0, cacheWrite1h: 112_113 });
+    const observed = netReceipt(real, 30, {
+      cacheRead: 15_900,
+      cacheWrite5m: 0,
+      cacheWrite1h: 112_113,
+    });
     const estimated = netReceipt(real, 30);
     assert.ok(
       observed.invalidationUSD > estimated.invalidationUSD,
@@ -385,22 +486,112 @@ describe("netReceipt", () => {
     // The row carries both, and an install writing at the five-minute class
     // would be charged 2x for a 1.25x write if this collapsed them.
     const fiveMin = netReceipt({ ...base, trigger: "early-end" }, 30, {
+      cacheRead: 0,
       cacheWrite5m: 100_000,
       cacheWrite1h: 0,
     });
     const oneHour = netReceipt({ ...base, trigger: "early-end" }, 30, {
+      cacheRead: 0,
       cacheWrite5m: 0,
       cacheWrite1h: 100_000,
     });
     assert.ok(fiveMin.invalidationUSD < oneHour.invalidationUSD);
   });
 
-  it("still charges a boundary prune nothing, whatever the resume wrote", () => {
-    // The resume after a *boundary* prune writes just as much, and it must not
-    // be charged: that write was happening anyway. Handing the observed figure
-    // to a boundary receipt is the obvious way to break this, so it is pinned.
-    const net = netReceipt(base, 30, { cacheWrite5m: 0, cacheWrite1h: 150_000 });
+  it("still charges a boundary prune nothing when the resume wrote, with no control", () => {
+    // The resume after a *boundary* prune writes just as much, and handing that
+    // observed figure straight to the receipt is the obvious way to break this.
+    // It must not be charged on sight: the write may well have been happening
+    // anyway, and that is what the whole boundary argument turns on.
+    //
+    // But the reading is now taken rather than discarded, and with nothing to
+    // compare it against the honest answer is that nobody knows — the edit
+    // breaks the cache itself, so a cold resume after a prune is equally
+    // consistent with "it would have been cold anyway" and "the prune made it
+    // cold".
+    const net = netReceipt(base, 30, {
+      cacheRead: 15_900,
+      cacheWrite5m: 0,
+      cacheWrite1h: 150_000,
+    });
     assert.equal(net.invalidationUSD, 0);
+    assert.equal(net.invalidationKnown, false);
+  });
+
+  it("settles a boundary prune at nothing once clean resumes show they run cold", () => {
+    // The case the standing argument predicts. Plain resumes on this install
+    // rewrite their prefix, so the write was committed before the prune ran and
+    // the $0 is right — this time as an observation rather than an assertion.
+    const net = netReceipt(
+      base,
+      30,
+      { cacheRead: 15_900, cacheWrite5m: 0, cacheWrite1h: 150_000 },
+      { cleanResumes: 12, warmShare: 0 },
+    );
+    assert.equal(net.invalidationUSD, 0);
+    assert.equal(net.invalidationKnown, true);
+  });
+
+  it("charges a boundary prune when clean resumes show the prefix survives", () => {
+    // The case that was unrepresentable before, and the only reason any of this
+    // changed. If a plain resume comes back warm on this install, the cached
+    // prefix outlives a cycle boundary; a prune that broke it destroyed
+    // something that would have been re-read at 0.1×, and the difference is a
+    // real cost. Charged against the *pre*-cut conversation, because that is
+    // what the unpruned resume would have carried.
+    const net = netReceipt(
+      base,
+      30,
+      { cacheRead: 15_900, cacheWrite5m: 0, cacheWrite1h: 150_000 },
+      { cleanResumes: 12, warmShare: 0.9 },
+    );
+    // $5/Mtok for opus-5: 150,000 written at 2.0x, less 250,000 read at 0.1x.
+    const perToken = 5 / 1_000_000;
+    assert.equal(
+      Math.round(net.invalidationUSD * 1e6) / 1e6,
+      Math.round((150_000 * perToken * 2.0 - 250_000 * perToken * 0.1) * 1e6) / 1e6,
+    );
+    assert.equal(net.invalidationKnown, true);
+  });
+
+  it("never lets the boundary charge go negative", () => {
+    // A resume that wrote less than the read it replaced is a saving, and
+    // `cacheSavedUSD` already counts it. Letting the charge go negative would
+    // add it a second time — the double-count this function exists to avoid,
+    // arriving from the other side.
+    const net = netReceipt(
+      base,
+      30,
+      { cacheRead: 15_900, cacheWrite5m: 0, cacheWrite1h: 1_000 },
+      { cleanResumes: 12, warmShare: 0.9 },
+    );
+    assert.equal(net.invalidationUSD, 0);
+  });
+
+  it("takes a thin control as no control at all", () => {
+    // One clean resume is not a rate. The floor is deliberately low — the effect
+    // is close to binary — but it is not one.
+    const thin = netReceipt(
+      base,
+      30,
+      { cacheRead: 15_900, cacheWrite5m: 0, cacheWrite1h: 150_000 },
+      { cleanResumes: MIN_CONTROL_RESUMES - 1, warmShare: 1 },
+    );
+    assert.equal(thin.invalidationUSD, 0);
+    assert.equal(thin.invalidationKnown, false);
+  });
+
+  it("settles a warm resume at nothing, whatever the control says", () => {
+    // If the prefix survived this very prune, the edit invalidated nothing —
+    // there is no counterfactual to reason about and the control is irrelevant.
+    const net = netReceipt(
+      base,
+      30,
+      { cacheRead: 240_000, cacheWrite5m: 0, cacheWrite1h: 4_000 },
+      { cleanResumes: 12, warmShare: 0.9 },
+    );
+    assert.equal(net.invalidationUSD, 0);
+    assert.equal(net.invalidationKnown, true);
   });
 
   it("saves nothing when no turn has followed it yet", () => {

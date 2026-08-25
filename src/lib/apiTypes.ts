@@ -281,6 +281,16 @@ export interface SandboxDTO {
 export interface PruneSavingsDTO {
   prunes: number;
   pricedPrunes: number;
+  /**
+   * Priced prunes whose invalidation cost has not been settled yet.
+   *
+   * These contribute $0 to `invalidationUSD`, so a total carrying them is an
+   * **upper bound** on the net rather than a measurement of it. Render the count
+   * whenever it is non-zero: the alternative is a page reporting a saving it has
+   * not finished checking, which is exactly the failure the panel's own docblock
+   * accuses every other tool of.
+   */
+  unsettledPrunes: number;
   tokensRemoved: number;
   /**
    * Total turns the savings are measured over, summed across prunes.

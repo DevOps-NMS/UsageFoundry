@@ -1265,6 +1265,43 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_prune_receipts_run ON prune_receipts(run_id, ts);
   `);
 
+  // Every cycle boundary, pruned or not — and the `not` is the point.
+  //
+  // A prune receipt records what was cut. It cannot record what a resume would
+  // have cost had nothing been cut, because the cut breaks the cache itself: the
+  // turn after a pruned resume is cold whether or not the boundary would have
+  // been. The counterfactual only exists on a boundary where no prune ran, so
+  // those have to be written down at the time. Nothing about them is derivable
+  // afterwards — a boundary that pruned nothing leaves no trace in either the
+  // transcript or `prune_receipts`.
+  //
+  // `session_id` is stored rather than joined from `runs`, unlike the receipt
+  // table: a run that adopts a new session mid-flight (`adoptSession`) would
+  // otherwise have its earlier probes matched against a transcript that never
+  // carried them, and this row's whole value is that it points at one specific
+  // resume.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS resume_probes (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts            INTEGER NOT NULL,
+      run_id        TEXT NOT NULL,
+      session_id    TEXT,
+      -- 1 when a prune ran at this boundary, 0 when one did not. Only the 0 rows
+      -- are the control; the 1 rows are kept so the mix is legible and so a
+      -- period with no controls at all is visibly that rather than empty.
+      pruned        INTEGER NOT NULL,
+      -- The context as it stood at the boundary, in the API-visible currency
+      -- (apiContextTokens), which is what the loop has in hand there. Not the
+      -- same basis as prune_receipts.tokens_before, which is the transcript's
+      -- own turns through contextTokens — the two are tens of thousands of
+      -- tokens apart in either direction. Recorded for context on a probe, and
+      -- deliberately not used in any arithmetic that also touches a receipt.
+      tokens_before INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_resume_probes_ts ON resume_probes(ts);
+    CREATE INDEX IF NOT EXISTS idx_resume_probes_clean ON resume_probes(pruned, ts);
+  `);
+
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as
   // one it left behind.

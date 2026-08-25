@@ -41,6 +41,7 @@ export function PruneSavingsRows({
   const {
     prunes,
     pricedPrunes,
+    unsettledPrunes,
     tokensRemoved,
     turnsAfter,
     cacheSavedUSD,
@@ -81,19 +82,44 @@ export function PruneSavingsRows({
           <Tr>
             <Td>Restarts it paid for</Td>
             <Td className="tabular-nums text-right">
-              {invalidationUSD === 0 ? (
-                <span className="text-ink-muted">nothing — all at cycle boundaries</span>
-              ) : (
+              {invalidationUSD > 0 ? (
                 <>&minus;{fmtUSD(invalidationUSD)}</>
+              ) : unsettledPrunes > 0 ? (
+                /* The zero that used to say "nothing — all at cycle
+                   boundaries". It asserted a cause the value does not carry:
+                   the same 0 is produced by a boundary prune nobody has
+                   measured yet, and stating it as an observed nothing is what
+                   made a loss unrepresentable on this panel. */
+                <span className="text-ink-muted">not settled yet</span>
+              ) : (
+                <span className="text-ink-muted">nothing — measured</span>
               )}
             </Td>
           </Tr>
           <Tr>
-            <Td className="font-medium">Net</Td>
+            <Td className="font-medium">
+              {unsettledPrunes > 0 ? "Net, at most" : "Net"}
+            </Td>
             <Td className="tabular-nums text-right font-medium">
               {signedUSD(netUSD)}
             </Td>
           </Tr>
+          {/* An upper bound wearing a net's clothes is the one way this panel
+              could mislead in the direction it was built to prevent, so it says
+              so on the row and again underneath. */}
+          {unsettledPrunes > 0 && (
+            <Tr>
+              <Td className="text-ink-muted" colSpan={2}>
+                {unsettledPrunes} of {pricedPrunes}{" "}
+                {pricedPrunes === 1 ? "prune has" : "prunes have"} an
+                invalidation cost that has not been settled — a boundary prune
+                pays nothing only if a plain resume would have rewritten its
+                prefix anyway, and that is decided by resumes with no prune
+                before them. Until enough of those have been seen, the net above
+                is a ceiling.
+              </Td>
+            </Tr>
+          )}
           {/* Only when it would otherwise mislead. The money above covers the
               priced prunes alone, and a reader has no way to know some were left
               out — a total that silently omits part of its own subject is worse
