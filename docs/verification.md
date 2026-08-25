@@ -1521,6 +1521,37 @@ Built and exercised against real transcripts:
   remove it" — so a root-owned one would break the fallback rather than repair
   it, and an agent-owned one would sit there unread.
 
+- **The runs list's `Pruning` column, rendered at two viewports.** Measured
+  2026-08-25 against a production build served on a throwaway `DATA_DIR` with
+  `CLAUDE_HOME` pointed at synthetic transcripts, so nothing here touched the
+  real `~/.claude` or the install's database. Four seeded runs covering the
+  three states the column can be in: two priced positive (`+$0.77`), one whose
+  early end removed 5,000 tokens with two turns behind it and therefore nets
+  **negative** (`−$0.07`, the invalidation outrunning the re-reads), and one
+  with no receipts at all, which renders `—`. The wire agreed with the render in
+  every case, and `prunedNetUSD` was **absent** rather than 0 on the run that
+  never pruned.
+
+  Both shapes were opened. At 1440px the column sits right of `Spent` in both
+  the in-flight and the finished-in-24-hours tables and no column edge moved;
+  below `md` the table stacks and each figure came out under a `Pruning` label,
+  which is the whole of what names it there.
+
+  **Two things this does not establish.** The figures came from seeded receipts
+  against seeded transcripts, so what is verified is the plumbing and the
+  rendering — not that pruning is worth what the column says on a real install,
+  which is the prune entry above's open question. And the per-run figure is
+  deliberately **unbounded in time**, unlike the dashboard's spans: a run old
+  enough for its transcripts to have been swept prices at zero saving with any
+  early-end invalidation still charged, so its column will drift towards a small
+  negative. That is the same number its own page prints — the two must not
+  disagree about one run — but it has not been observed on an aged run.
+
+  Dev mode could not be used for this and is worth recording: `next dev` answers
+  500 to every request here, `EvalError: Code generation from strings disallowed
+  for this context` out of `edge-instrumentation`, before any of this change was
+  involved. A production build and `next start` were the way in.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the

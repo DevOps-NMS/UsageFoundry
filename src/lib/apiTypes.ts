@@ -937,6 +937,23 @@ export type RunListItemDTO = Omit<
    * one. The hover `title` on the list is therefore a prefix on a long task.
    */
   prompt: string;
+  /**
+   * What context pruning netted this run, in dollars.
+   *
+   * One number rather than the `PruneSavingsDTO` the run's own page is given,
+   * on the rule the three absent fields above were dropped for: seven fields a
+   * row over a hundred rows is not a figure this list carries. The breakdown —
+   * how many prunes, how many of them priced, over how many turns — stays on
+   * the route that answers about one run.
+   *
+   * **Absent means pruning never ran here**, which is why it is optional rather
+   * than 0: `/api/runs/[id]` drops its whole section on the same distinction.
+   * Signed, because an early end's invalidation can exceed what it saved.
+   *
+   * **Not spend, and never summed with `spent_usd`** — see `PruneSavingsDTO`
+   * for why adding it to a meter is adding a counterfactual to a measurement.
+   */
+  prunedNetUSD?: number;
 };
 
 /**

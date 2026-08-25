@@ -954,17 +954,30 @@ export function sumPruneSavings(priced: readonly PricedReceipt[]): PruneSavings 
   );
 }
 
-/** Read receipts in a window, or for one run. */
+/** Read receipts in a window, for one run, or for a page of runs. */
 export function readReceipts(
-  filter: { from: number; to: number } | { runId: string },
+  filter:
+    | { from: number; to: number }
+    | { runId: string }
+    | { runIds: readonly string[] },
 ): PruneReceiptRow[] {
-  const sql =
+  // `IN ()` is a syntax error in SQLite rather than an empty result, and a page
+  // of runs none of which ever pruned is the ordinary case on a stock install.
+  if ("runIds" in filter && filter.runIds.length === 0) return [];
+  const where =
     "runId" in filter
-      ? `SELECT ts, run_id, trigger, tier, tokens_before, tokens_after, tokens_removed, model
-           FROM prune_receipts WHERE run_id = ? ORDER BY ts`
-      : `SELECT ts, run_id, trigger, tier, tokens_before, tokens_after, tokens_removed, model
-           FROM prune_receipts WHERE ts >= ? AND ts <= ? ORDER BY ts`;
-  const args = "runId" in filter ? [filter.runId] : [filter.from, filter.to];
+      ? "run_id = ?"
+      : "runIds" in filter
+        ? `run_id IN (${filter.runIds.map(() => "?").join(",")})`
+        : "ts >= ? AND ts <= ?";
+  const sql = `SELECT ts, run_id, trigger, tier, tokens_before, tokens_after, tokens_removed, model
+           FROM prune_receipts WHERE ${where} ORDER BY ts`;
+  const args: (string | number)[] =
+    "runId" in filter
+      ? [filter.runId]
+      : "runIds" in filter
+        ? [...filter.runIds]
+        : [filter.from, filter.to];
   try {
     const rows = db().prepare(sql).all(...args) as {
       ts: number;
@@ -1077,4 +1090,42 @@ export async function pruneSavings(
   filter: { from: number; to: number } | { runId: string },
 ): Promise<PruneSavings> {
   return sumPruneSavings(await priceReceipts(readReceipts(filter)));
+}
+
+/**
+ * Priced receipts summed per run.
+ *
+ * Pure and separate from the read on `sumPruneSavings`'s grounds, and it earns
+ * that separately: a receipt filed against the wrong run puts one run's money on
+ * another's row, which is wrong in a way nothing downstream can detect.
+ *
+ * A run with no receipts is **absent** rather than present at zero, so a caller
+ * can tell "pruning saved nothing here" from "pruning did not run".
+ */
+export function groupPruneSavingsByRun(
+  priced: readonly PricedReceipt[],
+): Map<string, PruneSavings> {
+  const byRun = new Map<string, PricedReceipt[]>();
+  for (const p of priced) {
+    const bucket = byRun.get(p.row.runId);
+    if (bucket) bucket.push(p);
+    else byRun.set(p.row.runId, [p]);
+  }
+  return new Map([...byRun].map(([runId, rs]) => [runId, sumPruneSavings(rs)]));
+}
+
+/**
+ * What pruning has been worth to each of a page of runs.
+ *
+ * One read and **one** pricing pass for the whole page rather than
+ * `pruneSavings({ runId })` per row: pricing counts the turns after each receipt
+ * out of a transcript scan, and a hundred separate calls would scan the same
+ * transcripts a hundred times on a four-second poll. `priceReceipts` returns
+ * before the scan when nothing came back, so a page whose runs never pruned
+ * costs one indexed query.
+ */
+export async function pruneSavingsByRun(
+  runIds: readonly string[],
+): Promise<Map<string, PruneSavings>> {
+  return groupPruneSavingsByRun(await priceReceipts(readReceipts({ runIds })));
 }

@@ -7,6 +7,7 @@ import { after, describe, it } from "node:test";
 import {
   apiContextTokens,
   contextTokens,
+  groupPruneSavingsByRun,
   isPruneTier,
   netReceipt,
   paybackTurns,
@@ -468,5 +469,50 @@ describe("sumPruneSavings", () => {
   it("is zero for no receipts rather than NaN", () => {
     assert.deepEqual(sumPruneSavings([]).netUSD, 0);
     assert.deepEqual(sumPruneSavings([]).prunes, 0);
+  });
+});
+
+describe("groupPruneSavingsByRun", () => {
+  const receipt = (runId: string, tokensRemoved: number): PruneReceiptRow => ({
+    ts: Date.UTC(2026, 7, 20),
+    runId,
+    trigger: "boundary",
+    tier: "standard",
+    tokensBefore: 100_000,
+    tokensAfter: 100_000 - tokensRemoved,
+    tokensRemoved,
+    model: "claude-opus-5",
+  });
+
+  it("keeps each run's money on its own row", () => {
+    // The failure this exists for: one page of the runs list is priced in a
+    // single pass, so a receipt filed against the wrong run puts one run's
+    // saving on another's row — money that is wrong on two rows at once and
+    // still sums to the right total, which is what makes it undetectable
+    // downstream.
+    const rows = [receipt("r1", 40_000), receipt("r2", 10_000), receipt("r1", 20_000)];
+    const grouped = groupPruneSavingsByRun(
+      rows.map((row) => ({ row, net: netReceipt(row, 10) })),
+    );
+
+    assert.equal(grouped.get("r1")?.prunes, 2);
+    assert.equal(grouped.get("r1")?.tokensRemoved, 60_000);
+    assert.equal(grouped.get("r2")?.prunes, 1);
+    assert.equal(grouped.get("r2")?.tokensRemoved, 10_000);
+    // Twice the tokens over the same turns at the same rate, so the money has
+    // to divide the same way the tokens do.
+    const r1 = grouped.get("r1")?.netUSD ?? 0;
+    const r2 = grouped.get("r2")?.netUSD ?? 0;
+    assert.ok(r2 > 0);
+    assert.ok(Math.abs(r1 / r2 - 6) < 1e-9);
+  });
+
+  it("omits a run with no receipts rather than reporting it at zero", () => {
+    // The list renders a dash for absent and a signed figure for present, and
+    // those are different claims: pruning did not run here, against pruning ran
+    // and earned nothing.
+    const grouped = groupPruneSavingsByRun([]);
+    assert.equal(grouped.size, 0);
+    assert.equal(grouped.has("r1"), false);
   });
 });

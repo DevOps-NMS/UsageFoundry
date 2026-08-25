@@ -17,6 +17,7 @@ import {
   fmtWaitingFor,
   pollFailureMessage,
   shortPath,
+  signedUSD,
 } from "@/lib/format";
 import { jsonRequest } from "@/lib/jsonRequest";
 import { FleetControls } from "@/components/FleetControls";
@@ -217,9 +218,9 @@ function SkeletonRows() {
   return (
     <>
       {["a", "b", "c"].map((key) => (
-        // Six cells, which is what both shapes have: a placeholder row one cell
-        // short of its header is a column that jumps sideways when the poll
-        // answers, which is the thing this exists to prevent.
+        // Seven cells, which is what both shapes have: a placeholder row one
+        // cell short of its header is a column that jumps sideways when the
+        // poll answers, which is the thing this exists to prevent.
         <Tr key={key}>
           <Td aria-hidden="true">
             <SkeletonBar className="w-16" />
@@ -240,6 +241,9 @@ function SkeletonRows() {
           </Td>
           <Td aria-hidden="true">
             <SkeletonBar className="ml-auto w-10" />
+          </Td>
+          <Td aria-hidden="true">
+            <SkeletonBar className="ml-auto w-12" />
           </Td>
           <Td aria-hidden="true">
             <SkeletonBar className="ml-auto w-16" />
@@ -338,6 +342,13 @@ function RunList({
             )}
             <Th scope="col" num className={`w-[92px] ${STICKY_HEAD}`}>
               Spent
+            </Th>
+            {/* Beside `Spent` because that is where it is read — the two are
+                the same units on the same run — and never folded into it. What
+                this column holds is money that did not move, and a table that
+                netted the two would be reporting a counterfactual as spend. */}
+            <Th scope="col" num className={`w-[92px] ${STICKY_HEAD}`}>
+              Pruning
             </Th>
             {kind === "history" && (
               <Th scope="col" num className={`w-[128px] ${STICKY_HEAD}`}>
@@ -471,6 +482,21 @@ function RunList({
                   )}
                   <Td num label="Spent" className="whitespace-nowrap align-top">
                     {fmtUSD(r.spent_usd)}
+                  </Td>
+                  {/* Signed, via the helper that prints a U+2212 rather than a
+                      hyphen: an early end's invalidation can outrun what it
+                      saved, and this column has to cross zero without shifting
+                      by a pixel. A dash is "this run never pruned", which is
+                      not the same reading as `+$0.00` and is why the field is
+                      absent rather than zero on the wire. */}
+                  <Td
+                    num
+                    label="Pruning"
+                    className="whitespace-nowrap align-top text-ink-muted"
+                  >
+                    {r.prunedNetUSD === undefined
+                      ? "—"
+                      : signedUSD(r.prunedNetUSD)}
                   </Td>
                   {kind === "history" && (
                     <Td
