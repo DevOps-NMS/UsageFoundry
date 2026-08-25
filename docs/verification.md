@@ -1362,6 +1362,58 @@ Built and exercised against real transcripts:
   `/opt/playwright/browsers` behind `PLAYWRIGHT_BROWSERS_PATH`. Both were reasoned
   about, only the first was run. The build has not been executed.
 
+- **`playwright install` fails inside the container, in two different ways, and
+  rendering does not.** 2026-08-25, live `usagefoundry` container, arm64. The
+  image has since been built from the block above — `chromium-1234`,
+  `chromium_headless_shell-1234` and `ffmpeg-1011` are at
+  `/opt/playwright/browsers` and `playwright --version` is 1.62.1 — which closes
+  the "the build has not been executed" note above.
+
+  With the sandbox off (`docker exec -u 1000`), `npx playwright install chromium`
+  exits `Failed to install browsers / Error: EACCES: permission denied, open
+  '/opt/playwright/browsers/.links/4aea…'`. Nothing was downloaded and nothing
+  needed to be: `npx --no -- playwright --version` reports 1.62.1, so npx
+  resolves the global install rather than fetching from the registry. What the
+  command cannot do is rewrite the 67-byte link file naming
+  `/usr/local/lib/node_modules/playwright/node_modules/playwright-core`, which
+  was root-owned because the image chowned the directory and not its contents.
+  That is what this commit's two `.links` chowns close. It matters because
+  `playwright install` is also what an agent runs to *check* whether a browser is
+  there, and the words it prints say the opposite of the truth.
+
+  With `UF_SANDBOX=1` the ownership decides nothing. Measured through `srt` at
+  0.0.71 with `enableWeakerNestedSandbox: true` and `allowWrite: ["/tmp"]`, a
+  write under `/opt/playwright/browsers` is refused with **`Read-only file
+  system`**: the sandbox's write model is allow-only and bubblewrap binds
+  everything outside the allow list read-only. Adding `/opt/playwright/browsers`
+  to `allowWrite` does reopen it — also measured — so a managed-settings change
+  could make the install work under the sandbox. What was **not** measured is
+  whether the CLI's own `filesystem.allowWrite` merges with or *replaces* the
+  working-directory and `/tmp` defaults it adds, and a replacement would leave
+  every agent unable to write its own worktree. Do not add that key on reasoning
+  alone.
+
+  Rendering is unaffected in both modes. `playwright screenshot` against a
+  `data:` URL produced a correct PNG as uid 1000 unsandboxed, and again inside
+  `srt` under the same policy.
+
+  That second run failed first with `ENOENT: mkdtemp
+  '/tmp/claude/playwright-artifacts-…'`, which looked like a fleet-wide problem
+  and is **not** one — it is an artifact of driving `srt` by hand.
+  `sandbox-utils.js` sets `TMPDIR` inside the sandbox to `CLAUDE_CODE_TMPDIR ??
+  CLAUDE_TMPDIR ?? /tmp/claude`, creates none of the three, and says so in its
+  own comment; a bare `srt` invocation carries none of those variables, so it
+  lands on the fallback. The CLI sets one: `/tmp/claude-1000` exists in the
+  running container, owned by `node`, holding `tsx-1000`, a `node-compile-cache`
+  and one directory per project path — all written by real agent work under the
+  sandbox. So the path nothing creates is the path nothing uses.
+
+  **Do not create `/tmp/claude` in the entrypoint to "fix" this.** The CLI
+  refuses a temp directory it does not own — `tempdir_owner_mismatch`, "Set
+  CLAUDE_CODE_TMPDIR to a directory you control, or ask an administrator to
+  remove it" — so a root-owned one would break the fallback rather than repair
+  it, and an agent-owned one would sit there unread.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the

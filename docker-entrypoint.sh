@@ -119,6 +119,22 @@ if [ -n "${UF_AGENT_UID:-}" ] && [ -d "$PLAYWRIGHT_BROWSERS_DIR" ]; then
          "agent installing a second Playwright browser build will fail on a" \
          "directory it cannot write. The shipped Chromium still works." >&2
   fi
+
+  # `.links` is the exception to the line above, and the `-R` is affordable
+  # because it is one 67-byte file per installed package. `playwright install`
+  # rewrites that file even when it downloads nothing — and an agent runs the
+  # command to *check* that a browser is there, not only to fetch one. Left
+  # root-owned, that check fails with EACCES under the words "Failed to install
+  # browsers", which reads as "there is no Playwright here" and sends the run
+  # off to download a second Chromium somewhere it can write.
+  PLAYWRIGHT_LINKS_DIR="$PLAYWRIGHT_BROWSERS_DIR/.links"
+  have="$(stat -c '%u:%g' "$PLAYWRIGHT_LINKS_DIR" 2>/dev/null || echo '')"
+  if [ -d "$PLAYWRIGHT_LINKS_DIR" ] && [ "$have" != "$want" ] &&
+     ! chown -R "$want" "$PLAYWRIGHT_LINKS_DIR" 2>/dev/null; then
+    echo "[usagefoundry] cannot give $PLAYWRIGHT_LINKS_DIR to $want —" \
+         "\`playwright install\` will fail with EACCES even though the browser" \
+         "it would install is already installed. Rendering still works." >&2
+  fi
 fi
 
 # Every install runs as the uid that will *run* the extension — an extension is

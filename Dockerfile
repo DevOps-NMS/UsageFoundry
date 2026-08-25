@@ -396,6 +396,22 @@ RUN npm install -g "@anthropic-ai/sandbox-runtime@${SANDBOX_RUNTIME_VERSION}" \
 # rewrite, and a repository pinning a different Playwright version can still put
 # its own build alongside rather than meeting EACCES inside a tool call.
 #
+# `.links` is chowned too, and it is a separate line because it answers a
+# different failure. `playwright install` is not only how a browser arrives —
+# it is what an agent runs to *check* that one is there, and it rewrites its own
+# link file (the path of the package claiming the build) even on a re-install
+# that downloads nothing. Root-owned, that no-op dies with EACCES under the
+# words "Failed to install browsers", which reads as "there is no Playwright
+# here" and sends the run off to fetch a second Chromium into a path it can
+# write. An `-R` is affordable here and nowhere else on this path: one 67-byte
+# file per installed package, not the gigabyte the line above is avoiding.
+#
+# This closes the case with the sandbox off, which is how the image ships. With
+# UF_SANDBOX=1 the same command still fails — bubblewrap binds everything
+# outside the working directory read-only, so `playwright install` reports "Read-
+# only file system" whoever owns the file, and no ownership here can change that.
+# Running the browser is unaffected in both modes; only installing is refused.
+#
 # Chromium's own sandbox is not usable here — `unshare` is EPERM under Docker's
 # default seccomp profile, the same measurement the bubblewrap note above rests
 # on — but Playwright defaults `chromiumSandbox` to false, so the CLI and an
@@ -412,6 +428,7 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     chmod -R a+rX "${PLAYWRIGHT_BROWSERS_PATH}"; \
     chown node:node "${PLAYWRIGHT_BROWSERS_PATH}"; \
+    chown -R node:node "${PLAYWRIGHT_BROWSERS_PATH}/.links"; \
     playwright --version
 
 COPY --from=builder /app/public ./public

@@ -5251,7 +5251,7 @@ const SELF_HOSTING_NOTICE =
  *
  * Appended to the same flag rather than sent as a second
  * `--append-system-prompt`, which the CLI would read as a replacement the way
- * it reads a second `--allowedTools`. There are three notices on that flag now
+ * it reads a second `--allowedTools`. There are four notices on that flag now
  * and any of them arriving alone is silent — the one that would go missing is
  * whichever the last edit did not think about, and one of the three is the
  * process-safety one.
@@ -5319,6 +5319,52 @@ const DELEGATION_NOTICE =
   "work you expect to take more than a handful of steps; below that a " +
   "sub-agent's own start-up costs more than the thread saves, so do short " +
   "lookups yourself.";
+
+/**
+ * That a browser is already here, so the run does not go looking for one.
+ *
+ * The gap this closes is not that rendering is unavailable — the image ships
+ * Playwright and a Chromium, on the argument in `docs/agent/environment.md` —
+ * but that nothing told the agents, and the command they reach for from memory
+ * is `playwright install`. That command is the one thing about the arrangement
+ * that does *not* work: `/opt/playwright/browsers` is writable by nobody at
+ * runtime under the sandbox, where bubblewrap binds it read-only, and its
+ * failure text is "Failed to install browsers", which reads as *there is no
+ * Playwright here* and sends the run off to fetch a second Chromium into a path
+ * it can write, or to give up on looking at the page it just changed. Both were
+ * measured; `docs/verification.md` carries the two error strings.
+ *
+ * So the notice says two things and the second is the load-bearing one: how to
+ * take a screenshot, and that a refusal from `playwright install` is not
+ * evidence about whether rendering works.
+ *
+ * It names a command, which `fileCostNotice.ts` deliberately does not, and the
+ * rule it inherits from `SELF_HOSTING_NOTICE` is the reason to say why that is
+ * safe here rather than to assume it. `playwright` is now a literal on every
+ * sibling's argv, so it would match the whole fleet if it were offered as a
+ * *selection pattern*. It is not: the only verb near it is "run", the command
+ * is synchronous and leaves no process behind to clean up, and nothing here
+ * suggests finding a process by name. That is the same property the file price
+ * list rests on. The same rule is why this notice carries **no viewport size**,
+ * which is the natural thing to put in a worked screenshot command: the digits
+ * test in `orchestrator.test.ts` refused `--viewport-size=1280,800` on the
+ * argument that killed two siblings — `1280` reads as a port, and the recipe
+ * three paragraphs above it says to select a process by the port it chose.
+ *
+ * Adding it cost every run in flight one cold prefix on its next cycle, once,
+ * at the deploy — the appended prompt is part of the cached prefix. That is
+ * paid and done; do not reword this for style, because every edit charges it
+ * again across the whole fleet.
+ */
+const RENDERING_NOTICE =
+  "Playwright and a Chromium build are already installed in this container and " +
+  "on your PATH, so you can look at a page you have changed rather than " +
+  "reasoning about its source: `playwright screenshot <url> shot.png` renders " +
+  "it in one tool call, and the PNG is an image you can then read back " +
+  "directly. There is no browser to install and you should not " +
+  "try — `playwright install` is refused here because the directory holding the " +
+  "browser is not writable by you, and that refusal says nothing about whether " +
+  "you can render. Take a screenshot to find out.";
 
 export function buildArgs(opts: {
   prompt: string;
@@ -5486,16 +5532,21 @@ export function buildArgs(opts: {
   // a run in the operator's own checkout is inside the same process as one in a
   // worktree, and the kill does not care which.
   args.push("--disallowedTools", ...PROCESS_KILLERS);
-  // One flag carrying all three notices, for the reason `--allowedTools`
-  // carries both its lists: a second `--append-system-prompt` is a replacement,
-  // not an addition, and losing one of them would be silent. The third is
-  // per-run and may be absent, so it is filtered rather than interpolated — an
-  // empty one must leave this string exactly as it was before the feature
-  // existed, trailing blank lines included, or every run predating the column
-  // pays a cold prefix on its next cycle for a notice it did not get.
+  // One flag carrying all four notices, for the reason `--allowedTools` carries
+  // both its lists: a second `--append-system-prompt` is a replacement, not an
+  // addition, and losing one of them would be silent. The last is per-run and
+  // may be absent, so it is filtered rather than interpolated — an empty one
+  // must leave this string exactly as it was before the feature existed,
+  // trailing blank lines included, or every run predating the column pays a
+  // cold prefix on its next cycle for a notice it did not get.
   args.push(
     "--append-system-prompt",
-    [SELF_HOSTING_NOTICE, DELEGATION_NOTICE, opts.fileCostNotice?.trim()]
+    [
+      SELF_HOSTING_NOTICE,
+      DELEGATION_NOTICE,
+      RENDERING_NOTICE,
+      opts.fileCostNotice?.trim(),
+    ]
       .filter((notice): notice is string => Boolean(notice))
       .join("\n\n"),
   );

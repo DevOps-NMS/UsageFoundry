@@ -2215,22 +2215,24 @@ describe("buildArgs", () => {
     assert.ok(args.includes("--resume"));
   });
 
-  it("sends both system-prompt notices under one flag", () => {
+  it("sends every unconditional system-prompt notice under one flag", () => {
     // A second `--append-system-prompt` is a replacement rather than an
-    // addition, exactly as a second `--allowedTools` is, so the two notices
-    // have to travel together. Losing one is silent in both directions: an
-    // agent that never saw the process-safety half has not been told why
-    // `pkill` is denied, and one that never saw the delegation half simply
-    // costs more.
+    // addition, exactly as a second `--allowedTools` is, so the notices have to
+    // travel together. Losing one is silent in every direction: an agent that
+    // never saw the process-safety half has not been told why `pkill` is
+    // denied, one that never saw the delegation half simply costs more, and one
+    // that never saw the rendering half goes looking for a browser that is
+    // already installed and reads the refusal as "there is none".
     const args = buildArgs({ ...base, isolated: false });
     assert.equal(args.filter((a) => a === "--append-system-prompt").length, 1);
     const notice = args[args.indexOf("--append-system-prompt") + 1];
     assert.ok(notice.includes("pgrep -af"), "the process-safety notice is missing");
     assert.ok(notice.includes("sub-agent"), "the delegation notice is missing");
+    assert.ok(notice.includes("playwright screenshot"), "the rendering notice is missing");
   });
 
   it("adds the file price list to that same flag rather than a second one", () => {
-    // The third notice is per-run and the trap is the same one `--allowedTools`
+    // The last notice is per-run and the trap is the same one `--allowedTools`
     // carries: a second `--append-system-prompt` is a replacement, so a version
     // of this that pushed its own flag would silently drop the process-safety
     // and delegation notices from every run that had a price list — which is
@@ -2244,6 +2246,7 @@ describe("buildArgs", () => {
     const notice = args[args.indexOf("--append-system-prompt") + 1];
     assert.ok(notice.includes("pgrep -af"), "the process-safety notice is missing");
     assert.ok(notice.includes("sub-agent"), "the delegation notice is missing");
+    assert.ok(notice.includes("playwright screenshot"), "the rendering notice is missing");
     assert.ok(notice.includes("116k"), "the file price list is missing");
   });
 
