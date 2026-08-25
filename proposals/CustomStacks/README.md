@@ -137,6 +137,10 @@ existed to avoid, one correction that was itself wrong, and one stale provenance
 line. None was unresolvable — every cited file, symbol, line range and test name
 exists.
 
+**And six more in this run's own files**, in `22-validation.md` §3 — including
+the recommendation overstating its own cost, one sensitivity row's arithmetic,
+and a claim that this repository does not test I/O, which it does.
+
 ## What could not be reached
 
 **This container has no Docker.** No rebuild, no volume creation, no volume

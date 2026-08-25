@@ -10,7 +10,8 @@ found fifty broken references and eight substantive errors doing exactly this.
 **Result: roughly 390 checkable citations across `00-` to `13-`. 39 were wrong
 and are fixed in place. Six of the 39 changed an argument rather than a
 reference; five of those six made the recommendation easier and one made it
-harder.**
+harder. A further six errors in this run's own files (`14-` to `21-`) are in §3,
+including one in the recommendation's arithmetic and one in the comparison's.**
 
 No citation was unresolvable. Every cited file, symbol, line range and test name
 exists.
@@ -206,11 +207,27 @@ re-resolution.
 
 ## 3. `14-` through `21-`
 
-Written this run, and audited on the same basis as `00-` to `13-` rather than
-exempted from it. The audit's findings are folded in above where they overlap and
-recorded here where they do not.
+Written this run, and held to the same standard rather than exempted from it.
+**Six errors were found in them and fixed**, and they are listed here for the
+same reason the other 39 are: a validation file that audits everything except its
+own author's work is a validation file with a hole in it.
 
-Three facts these files rest on were measured directly in this container rather
+| | What was wrong | Direction |
+|---|---|---|
+| `16-`, `17-`, `21-` | *"this repository does not test I/O"* — **false.** Sixteen of its 92 tests are over routes and components, and `src/app/api/health/route.test.ts` gives the grounds: the healthcheck *"answers falsely when this server cannot do its job"*, and *"a route that always answers 200 is indistinguishable from a working one until the day the database goes read-only."* The true bar is narrower and the sketch's routes still fail it, so the conclusion stands on a better reason | neutral |
+| `20-`, `README` | the recommendation's own arithmetic: three phases at 1-2, 2-3 and 1-2 days is **four to seven**, not six to nine. It was overstating its own cost | easier |
+| `19-` §6 | one sensitivity row's figures were wrong — weighting Asked at 5 and Cheap at 2 gives `L` 93, `N` 89, `C/M` 70, not the numbers printed. **The conclusion it supports is unchanged, which is why it survived a read** | neutral |
+| `21-` | *"the 76 existing ones"* — 76 is `src/lib/` only; the tree has **92** | neutral |
+| `14-`, `21-` | the hatched-meter rule was quoted in `CLAUDE.md`'s paraphrase rather than `docs/agent/metering.md:8`'s own words | neutral |
+| `16-` §2 | *"the five that are already there"* did not say which five. Now named with line numbers | neutral |
+
+Counts in these files that were checked rather than asserted: **eighteen** route
+answers through `jsonMaybeGzipped` (`docs/agent/conventions.md:18`), **seven**
+boot reconcilers in `instrumentation.ts:101-164`, **92** test files under `src/`,
+and **twenty** `docker compose exec` occurrences across the four operator-facing
+pages (10 + 4 + 3 + 3).
+
+Four facts these files rest on were measured directly in this container rather
 than reasoned, and each is stated at the point it is used:
 
 1. **`docker-entrypoint.sh` is 972 lines and `exec "$@"` is the last one.** Both
@@ -224,6 +241,12 @@ than reasoned, and each is stated at the point it is used:
    the two `deployment.test.ts` references to `docker-entrypoint.sh` read it as a
    *text fixture* at build time, not at runtime. An operator's only channel for
    an install failure is container stderr. (`14-` §4, §5.)
+4. **The server holds `UF_PY_TOOLS` and `UF_GH_EXTENSIONS`**, which is the one
+   fact `20-`'s phase 2 is cheap because of. Compose forwards both
+   (`docker-compose.yml:123`, `:130`), and `grep -n "unset" docker-entrypoint.sh`
+   shows the only two variables removed before `exec` are `DISCORD_WEBHOOK_URL`
+   and `DISCORD_MENTION_USER_ID` (`:853`). `childEnv`'s strip is a **child-side**
+   rule and does not reach the server. (`15-` §2, `21-` phase 2.)
 
 The one claim in these files that is **reasoned and not observed** is
 `14-` §3's persistence table, for the same reason every other persistence claim
