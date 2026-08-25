@@ -42,9 +42,9 @@ operator will type. This is what you build when you have read their sentence.
   "--clear-groups", ...argv], { env: terminalEnv(), cwd, stdio: ["ignore",
   "pipe", "pipe"] })` — the entrypoint's own idiom (`docker-entrypoint.sh:145-153`),
   `stdio` matching every other spawn site here (`docs/agent/security.md:14`).
-- **`terminalEnv()`** stripping `UF_*`, `ANTHROPIC_*`, `OTEL_*`,
-  `CLAUDE_CODE_ENABLE_TELEMETRY`, `DATA_DIR`, beside the four that exist
-  (`01-constraints.md` §3).
+- **`terminalEnv()`** stripping the same six: `UF_*`, `OTEL_*`,
+  `ANTHROPIC_ADMIN_KEY`, `CLAUDE_CODE_ENABLE_TELEMETRY`, `DATA_DIR` and
+  `NODE_OPTIONS`, beside the four that exist (`01-constraints.md` §3).
 - **`cwd`** through `resolveInMount()` — containment on the resolved path **and
   again after `realpathSync`**, both load-bearing (`docs/agent/security.md:11`).
 - **Output**: an SSE stream on the existing pattern, with an **explicit byte cap**

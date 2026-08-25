@@ -55,7 +55,7 @@ Roughly 30 lines of `src/`, one settings field, one test.
 `stackTools` is a setting, so it is in the SQLite database in
 `usagefoundry-data` — survives `restart` and `up --build`, destroyed by
 `down -v`, restored by `scripts/backup-db.mjs` like every other setting
-(`docs/backup-and-restore.md:14-31`). It joins workflows and schedules on the
+(`docs/backup-and-restore.md:33-72`). It joins workflows and schedules on the
 list of things that exist nowhere else (`:139-142`).
 
 **It persists nothing about the tool itself**, which is the point: whichever of

@@ -45,9 +45,11 @@ mechanism the codebase already argues for at length, already tests
 The URL table is the design decision. Two honest sub-shapes: a **closed table**
 of a dozen known tools (safe, and every unlisted tool is a feature request), or
 **`UF_BIN_TOOLS=name|url|sha256`** (open, and the operator owns the checksum).
-The closed table is the one that matches this repository's temperament — every
-existing pinned download in the Dockerfile carries a checksum the *repository*
-chose (`Dockerfile:172`, `:203`, `:259`).
+Neither inherits a precedent. Every existing pinned download in the Dockerfile
+verifies against the publisher's own published digest, fetched at build time
+rather than pinned here (`Dockerfile:172-173`, `:204-205`, `:259-260`). So a
+closed table would be the first place this repository chose a digest itself, and
+that is a cost of the closed sub-shape rather than an argument for it.
 
 ## 3. What persists it, and what discards it
 
@@ -155,7 +157,7 @@ They asked for a button. This is a text file and a restart.
 - **A tool installed but not invokable** under `acceptEdits` fails inside a tool
   call the run loop does not read (§4). The run finishes `completed`.
 - **Loud, at least:** a checksum mismatch, a 404 on a release URL, and a
-  non-numeric `UF_AGENT_UID` (`privsep.ts:105`, pinned by `privsep.test.ts:69`).
+  non-numeric `UF_AGENT_UID` (`privsep.ts:105`, pinned by `privsep.test.ts:68`).
 
 ## 9. What it costs to build
 

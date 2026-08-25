@@ -31,7 +31,7 @@ matter.
   (`Dockerfile:508-513`).
 - **A chown in `docker-entrypoint.sh`**, beside the four at `:44`, `:70`, `:91`,
   `:114`, for the case `UF_AGENT_UID` is not 1000 — *"the ownership a volume is
-  created with is never revisited"* (`Dockerfile:496-499`).
+  created with is never revisited"* (`Dockerfile:498-499`).
 - **Nothing else.** No env var, no loop, no route, no `src/` change.
 
 `/opt` rather than `/home/node/stacks` is deliberate and matches
@@ -181,6 +181,6 @@ than a defect, and this becomes the cheapest honest answer in the directory.
 
 **Kills it:** that anything in `src/`, now or later, resolves an executable by
 bare name on the server's `PATH`. Check with
-`grep -rn "spawn(\"" src/lib/` and read each argv[0]: today they are
+`grep -rn "spawn(" src/lib/` and read each argv[0]: today they are
 `CLAUDE_BIN`, `GIT_BIN` and one absolute interpreter, so the answer is no — but
 this option makes that a rule someone must keep rather than an accident.

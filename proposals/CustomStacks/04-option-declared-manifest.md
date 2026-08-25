@@ -35,7 +35,13 @@ it does so without giving anyone a shell.
 - **`/api/stacks`** — `runtime = "nodejs"`, `dynamic = "force-dynamic"`,
   answering through `jsonMaybeGzipped` like the other eighteen
   (`docs/agent/conventions.md`). Its own list DTO, per the list-DTO rule.
-- **A pane**, tenth in `src/components/shell/panes.ts:27-38`, shortcut `0`.
+- **A pane**, tenth in `src/components/shell/panes.ts:27-38` — and it has no
+  shortcut, because there is no digit left: *"Nine is the ceiling and Knowledge
+  is the ninth — a tenth destination has no digit, and a row without one is a row
+  two of the four readers cannot describe"* (`panes.ts:14-16`). That is a cost
+  this option carries rather than a detail of it, and `08-terminal-problem.md` §6
+  and `docs/agent/ui-density-audit.md:159` later refuse a tenth pane outright —
+  the one thing in this option a later file overturns.
 - **The reconciler** — and this is the design's one hard question, §"Where the
   reconcile runs" below.
 - **The volume and the `PATH` entry** from Option B (`03-`) §2, unchanged. This
@@ -48,7 +54,7 @@ Three candidates, and only the third is clean.
 
 **In `docker-entrypoint.sh`.** Matches the existing loops. But the entrypoint
 runs before the server and would have to read SQLite itself — the image ships
-`sqlite3` (`Dockerfile:129`), so it is possible — and `/data` is root-owned 0700,
+`sqlite3` (`Dockerfile:130`), so it is possible — and `/data` is root-owned 0700,
 which the entrypoint is (`Dockerfile:517-519`). Workable, and it puts the
 manifest's reader outside the app that owns the schema, which is the sort of
 split that goes stale.
@@ -142,8 +148,8 @@ cleanly.**
   not become the second. **Any route added here must be excluded from the MCP
   tool surface by name.**
 - **`auditMutation`** wraps 33 exports and every mutation should be one
-  (`docs/agent/chat.md`), so an install is an audit row — which is a genuine
-  improvement over both A and B, where an install is a log line at most.
+  (`docs/agent/run-lifecycle.md:11`), so an install is an audit row — which is a
+  genuine improvement over both A and B, where an install is a log line at most.
 - **The `createRun` no-`await` rule** — nothing in this option may be consulted
   during admission (`docs/agent/concurrency-and-ownership.md`).
 - **`saveSettings` stores only what differs from `DEFAULTS`** — if any part of

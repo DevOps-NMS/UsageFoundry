@@ -17,7 +17,7 @@ arrays only, at every spawn site"` is a rule this option *obeys* rather than one
 it argues its way around: the argv is a constant template, the operator's input
 lands in a validated field, and `08-` §4's test is passed without a paragraph of
 justification. It is also the only option that already exists twice in this
-codebase and works. `docker-entrypoint.sh:169-190` and `:241-310` are exactly
+codebase and works. `docker-entrypoint.sh:169-211` and `:241-310` are exactly
 this — a declared list, a fixed install command per kind, `setpriv` to the uid
 that will run it — and `.env.example` documents them across 110 lines. What is
 missing is not the mechanism, it is that the declaration lives in `.env` and the
@@ -35,7 +35,7 @@ The verbs, and the closed list is the design:
 | Verb | Composed argv | Precedent |
 |---|---|---|
 | `uv-tool` | `uv tool install <name>` under `setpriv` | `docker-entrypoint.sh:216-224`, `:241-310` |
-| `gh-extension` | `gh extension install <owner/repo>` under `setpriv` | `:145-153`, `:169-190` |
+| `gh-extension` | `gh extension install <owner/repo>` under `setpriv` | `:145-153`, `:169-211` |
 | `release-tarball` | `curl -fsSL <url>` → verify sha256 → extract one named member → `chmod +x` into a fixed directory | **new**, and it is the gap `02-` names |
 | `remove` | the inverse of whichever kind | `docs/install.md:150-151`, `:254-255` |
 
@@ -54,8 +54,9 @@ The verbs, and the closed list is the design:
   match. Nothing else in this survey has integrity checking at all, and a release
   tarball over `https` from a host nobody pinned is the one place it is cheap.
 - **The spawn**: `setpriv --reuid --regid --clear-groups`, `terminalEnv()`
-  stripping `UF_*` and the rest (`01-constraints.md` §3), `stdio: ["ignore",
-  "pipe", "pipe"]`.
+  stripping the same six — `UF_*`, `OTEL_*`, `ANTHROPIC_ADMIN_KEY`,
+  `CLAUDE_CODE_ENABLE_TELEMETRY`, `DATA_DIR` and `NODE_OPTIONS`
+  (`01-constraints.md` §3) — and `stdio: ["ignore", "pipe", "pipe"]`.
 - **A table** — and here this option and `04-` converge. If the rows are just a
   log, this is `10-` without the command line; if they are a *manifest reapplied
   at boot*, this **is** `04-option-declared-manifest.md` with a typed form on the

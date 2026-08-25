@@ -12,9 +12,9 @@ and it is stronger, because the substrate question at least had a gap
 ## 1. The strongest case
 
 The shell is already shipped. It is `docker compose exec`, and **this repository
-documents it twenty-one times across its four operator-facing pages** —
-`install.md` 10, `security.md` 4, `README.md` 4, `backup-and-restore.md` 3, and 55
-times across the whole tree — including for the exact class of
+documents it twenty times across its four operator-facing pages** —
+`install.md` 10, `security.md` 4, `README.md` 3, `backup-and-restore.md` 3, and
+over a hundred times across the whole tree — including for the exact class of
 task the terminal was requested for: `docker compose exec usagefoundry uv tool
 list` and `uv tool uninstall` (`docs/install.md:254-255`), `gh extension list` and
 `remove` (`:150-151`), a database backup (`README.md:157`), the sandbox probes
@@ -173,11 +173,13 @@ whose cost is entirely in the writing.
 
 **Promotes it:** that the operator, or anybody else, ever deploys this on anything
 but loopback. `docker-compose.yml:76-77` binds `127.0.0.1` by default and the file
-warns at length about moving it; `.env.example` calls `UF_ALLOW_NO_AUTH` *"only
-ever right for a loopback-bound install on a machine you alone use"*. **On a
-`UF_ALLOW_NO_AUTH=1` install — sanctioned, documented, and probably common — a
-terminal pane is an unauthenticated root shell for any local process that can open
-a TCP connection to port 3000** (`08-` §2). That configuration exists today and
+warns at length about moving it; `.env.example:7-9` says to set
+`UF_ALLOW_NO_AUTH` *"ONLY if the port is bound to loopback and you are the only
+user of the machine"*, and `docker-compose.yml:71-72` calls it *"only ever right
+for loopback"*. **On a `UF_ALLOW_NO_AUTH=1` install — sanctioned, documented, and
+probably common — a terminal pane is an unauthenticated root shell for any local
+process that can open a TCP connection to port 3000** (`08-` §2). That
+configuration exists today and
 the terminal options each have to answer for it. This one does not.
 
 **Kills it:** the operator not having host access to the container in the first

@@ -33,18 +33,26 @@ Four documentation changes and zero code:
    `:348-349`, `:439-451`), what `UF_PY_TOOLS` and `UF_GH_EXTENSIONS` add, and
    the `docker-compose.override.yml` route for anything else
    (`.env.example:263-273`, `05-option-image-is-the-stack.md` §2).
-2. **A correction to `src/lib/orchestrator.ts:5983-5984`.** Its docblock says the
-   two `BUILD_CACHE_DIRS` are pointed *"at a named volume so it survives a
-   container it is meant to outlive"*. That is true of `$GOPATH` and **false of
-   `$HOME/.npm`**, which is on no volume (`docker-compose.yml:330-423`) and is
-   discarded by every `up --build`. Two words in a comment, and it is a comment
-   somebody will otherwise reason from.
-3. **A correction to `CLAUDE.md`** — "four kinds of agent child process, from
-   four modules" is three modules (`orchestrator.ts`, `chat.ts`, `review.ts`);
-   `chat.ts` has one `spawn(` serving two kinds. And to
-   `src/lib/privsep.ts:238-240`, whose *"both of `chat.ts`'s"* is one, and whose
-   *"Every spawn site in the app takes this"* is contradicted 300 lines away by
-   `contextPruning.ts:626-627` — *"the one spawn in this app that deliberately
+2. **A clarification to `src/lib/orchestrator.ts:5983-5984`.** The docblock is
+   correct as written — *"which the image points at a named volume so it
+   survives a container it is meant to outlive"* attaches to `GOPATH`, the
+   clause immediately before it — but it reads on a fast pass as covering both
+   caches, and three files in this directory read it that way. **`$HOME/.npm` is
+   on no volume** (`docker-compose.yml:330-423`) and is discarded by every
+   `up --build`. One clause in a comment, and it is a comment somebody will
+   otherwise reason from.
+3. **A correction to `CLAUDE.md:35` and to `docs/agent/architecture.md:203`,
+   which carries the same wording** — "four kinds of agent child process, from
+   four modules" is three modules (`orchestrator.ts`, `chat.ts`, `review.ts`).
+   `chat.ts` has one `spawn(` (`:1709`) serving *one* kind through two callers,
+   on `architecture.md:203`'s own reading — a workflow's orchestrator block is
+   *"not a fifth kind: it is the fourth one invoked without a thread"* — and it
+   is `review.ts`'s one `spawn(` (`:660`) that serves two of the four. That
+   paragraph already contradicts its own opening with *"Three modules, four
+   callers"*, so this is two files rather than one. And to
+   `src/lib/privsep.ts:236-238`, whose *"both of `chat.ts`'s"* is one, and whose
+   *"Every spawn site in the app takes this"* is contradicted in another module
+   by `contextPruning.ts:626-627` — *"the one spawn in this app that deliberately
    does not drop to the agent uid"*.
 4. **A `docs/verification.md` entry recording that the three tool volumes have
    never been observed surviving a rebuild** — `grep -n

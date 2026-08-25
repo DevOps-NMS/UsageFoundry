@@ -33,7 +33,9 @@ RUN set -eux; \
     echo "<sha256>  /tmp/tf.zip" | sha256sum --check; \
     unzip -d /usr/local/bin /tmp/tf.zip; rm /tmp/tf.zip; \
     terraform version
-ENV TF_PLUGIN_CACHE_DIR=/home/node/go/../tf-cache
+# Inside the usagefoundry-gocache volume: a state path anywhere else under
+# /home/node is the writable layer and goes with the next rebuild.
+ENV TF_PLUGIN_CACHE_DIR=/home/node/go/tf-cache
 ```
 
 ```yaml
@@ -44,17 +46,21 @@ services:
       dockerfile: Dockerfile.stack
 ```
 
-Supported form — one `ARG` in the shipped Dockerfile, in the shape of the six
+Supported form — one `ARG` in the shipped Dockerfile, in the shape of the eight
 that already exist (`GH_CLI_VERSION` at `:162`, `GO_VERSION` at `:194`,
 `UV_VERSION` at `:249`, `WINNOW_REPO`/`WINNOW_REF` at `:315-316`,
-`CLAUDE_CLI_VERSION`): a `UF_STACK_SCRIPT` build arg naming a shell script in the
-build context, run after the toolchains and before the app. Plus a
+`CLAUDE_CLI_VERSION` at `:348`, `SANDBOX_RUNTIME_VERSION` at `:370`,
+`PLAYWRIGHT_VERSION` at `:439`): a `UF_STACK_SCRIPT` build arg naming a shell
+script in the build context, run after the toolchains and before the app. Plus a
 `.dockerignore` entry, plus a documented example.
 
-Either form needs one thing the repository does not currently ship: the image is
-built from source by `docker compose up --build` rather than pulled, so
-`FROM usagefoundry:latest` requires the operator to have tagged a build. The
-supported form avoids that by keeping one Dockerfile.
+Both forms work out of the box. `docker-compose.yml:37` is
+`image: usagefoundry:${UF_IMAGE_TAG:-latest}` alongside the `build:` block at
+`:3-18`, so compose tags what it builds and `usagefoundry:latest` exists after
+any stock `docker compose up --build` — there is nothing to tag by hand. What the
+minimal form does need is care with `UF_IMAGE_TAG`: an operator running a second
+instance under a distinct tag has to `FROM` that one instead. The supported form
+avoids the question by keeping one Dockerfile.
 
 ## 3. What persists it, and what discards it
 

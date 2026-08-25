@@ -51,10 +51,13 @@ surface this app already ships behind the same cookie.*
   idiom, three uses (`docker-entrypoint.sh:145-153`, `:216-224`, `:547-552`). No
   operator byte is on that argv — `08-` §4's test, passed.
 - **`terminalEnv()`** — a new function beside `childEnv`/`chatEnv`/`gitEnv`,
-  stripping the same list: `UF_*`, `ANTHROPIC_*`, `OTEL_*`,
-  `CLAUDE_CODE_ENABLE_TELEMETRY`, `DATA_DIR` (`01-constraints.md` §3). Without it
-  the terminal is the one child that can read `UF_AUTH_TOKEN` out of its own
-  environment and the credential strip stops being true.
+  stripping the same six: `UF_*`, `OTEL_*`, `ANTHROPIC_ADMIN_KEY`,
+  `CLAUDE_CODE_ENABLE_TELEMETRY`, `DATA_DIR` and `NODE_OPTIONS`
+  (`01-constraints.md` §3). Without it the terminal is the one child that can
+  read `UF_AUTH_TOKEN` out of its own environment and the credential strip stops
+  being true — and the last name earns its place as much as the first, because an
+  inherited `NODE_OPTIONS` is code execution into every Node child the terminal
+  starts.
 - **Transport**: a WebSocket if §9's probe says the standalone server can carry
   one; otherwise SSE down plus `POST /api/terminal/[id]/input` up
   (`08-` §5). The option survives either answer at different costs.

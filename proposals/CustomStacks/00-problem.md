@@ -27,8 +27,8 @@ reach each of the kinds of child process this app spawns. Files `00-` to `07-`.
 container that runs as root (`docker-compose.yml:64`), holds the operator's
 `~/.claude` credential as a bind mount (`:339`), and mounts up to four of their
 repositories read-write. `middleware.ts`'s auth is a single shared bearer token
-(`docs/agent/environment.md:14`). That is run 2's problem and it is a bigger one
-than it looks; nothing in this file pre-empts it.
+(`src/middleware.ts:41`, `:128-129`). That is run 2's problem and it is a bigger
+one than it looks; nothing in this file pre-empts it.
 
 **3. Stack object model, deploy and lifecycle.** *Run 3.* What a "stack" is as a
 stored, redeployable thing — a named set of tools with a version, a state, a
@@ -53,7 +53,7 @@ each one out at length (`docker-compose.yml:370-409`, top-level declarations at
 | `usagefoundry-pytools` | `/home/node/pytools` | uv-installed Python tools, their bin dir, and a fetched interpreter | `:409` |
 
 Two of the three have a **declarative, boot-time install loop** behind them
-(`docker-entrypoint.sh:169-190` for `UF_GH_EXTENSIONS`, `:241-310` for
+(`docker-entrypoint.sh:169-211` for `UF_GH_EXTENSIONS`, `:241-310` for
 `UF_PY_TOOLS`). So an operator can already write
 
 ```
@@ -104,12 +104,14 @@ installs a statically-linked binary from a release tarball, which is what
 Terraform, `kubectl`, `helm`, `mise`, `terragrunt` and most of the tools an
 operator means by "a stack" actually are.**
 
-The container has the pieces to do it — `curl`, `jq`, `git`, `tar` via busybox,
-`sha256sum`, and `install` are all in the runtime image (`Dockerfile:127-132`) —
-and `Dockerfile:162-177` is a worked example of the pattern for `gh` itself:
-download a pinned release, verify a checksum, `install -m 0755` it into
-`/usr/local/bin`. What is missing is a version of that loop whose target is a
-**volume** rather than an image layer, and whose input is an operator's list.
+The container has the pieces to do it — `curl`, `jq` and `git` from the runtime
+image's own apt line (`Dockerfile:127-132`), and `tar`, `sha256sum` and `install`
+from the Debian base beneath it, all three already used by the image's own
+installers (`Dockerfile:173-175`) — and `Dockerfile:162-177` is a worked example
+of the pattern for `gh` itself: download a pinned release, verify a checksum,
+`install -m 0755` it into `/usr/local/bin`. What is missing is a version of that
+loop whose target is a **volume** rather than an image layer, and whose input is
+an operator's list.
 
 ### Missing 2 — the fourth persistence problem: the tool's own state
 
@@ -123,11 +125,13 @@ the table.
 
 The tree already contains the shape of this bug and a half-fix for it.
 `BUILD_CACHE_DIRS` (`src/lib/orchestrator.ts:5996-5999`) names `$HOME/.npm` and
-`$GOPATH` as the two caches a build touches, and its own docblock says they are
-pointed *"at a named volume so it survives a container it is meant to outlive"*
-— which is true of `$GOPATH` and **false of `$HOME/.npm`**, which is on no
-volume and is discarded by every rebuild. Every image-level answer here relocates
-state out of `$HOME` onto something durable: `GOCACHE` explicitly rather than
+`$GOPATH` as the two caches a build touches, and its own docblock is correct as
+written — *"which the image points at a named volume so it survives a container
+it is meant to outlive"* attaches to `GOPATH`, the clause immediately before it
+— but reads on a fast pass as covering both. **`$HOME/.npm` is on no volume**
+(`docker-compose.yml:330-423`) and is discarded by every rebuild. Every
+image-level answer here relocates state out of `$HOME` onto something durable:
+`GOCACHE` explicitly rather than
 `$HOME/.cache/go-build` (`Dockerfile:224-225`), `UV_TOOL_DIR` under
 `/home/node/pytools` (`:282-284`), Playwright browsers to `/opt/playwright/browsers`
 (`:440`), winnow's state forced out of `$HOME` (`src/lib/contextPruning.ts:86`).
@@ -203,9 +207,10 @@ whether it worked by reading the container's boot log for
 ## Which children have to see it
 
 Five kinds of `claude` child, from three modules — the "four modules" in
-`CLAUDE.md` is off by one, and `src/lib/privsep.ts:238-240`'s "both of
+`CLAUDE.md` is off by one, and `src/lib/privsep.ts:237`'s "both of
 `chat.ts`'s" is off by one in the other direction; `chat.ts` has a single
-`spawn(` serving two kinds. Plus three non-agent children. Every one of them
+`spawn(`, and it is `review.ts`'s single one that serves two of the kinds.
+Plus three non-agent children. Every one of them
 gets the image's `PATH` unchanged.
 
 | # | Child | Spawn site | env fn | Drops to `UF_AGENT_UID`? | Mode |
@@ -250,9 +255,10 @@ proposal and four do not.
    (`src/lib/orchestrator.ts:1919-2030`), `ensureWorktree` (`:2438`). Two modes
    only, `"worktree" | "none"` (`:1867`). The worktree lands at
    `<mount>/.uf-worktrees/<slug>-<n>` (`:2171`, `:3146`), **inside** the mount by
-   refusal (`:2249`). **On by default** (`src/lib/settings.ts:697`). It changes
-   cwd and nothing else — not `PATH`, not `$HOME`, not the uid. *No effect on
-   this proposal.*
+   refusal (`:2249`). **On by default** (`src/app/runs/new/page.tsx:171`, and an
+   omitted field reads as on too — `src/lib/settings.ts:934`). It changes cwd and
+   nothing else — not `PATH`, not `$HOME`, not the uid. *No effect on this
+   proposal.*
 2. **Permission modes** — always in force, and per §"Missing 3" the one thing
    that actually decides whether a tool can be run. *Decisive.*
 3. **The uid split** — server root, children at `UF_AGENT_UID`

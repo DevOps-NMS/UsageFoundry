@@ -70,7 +70,7 @@ New code beyond `04-`: one streaming route, one `emit`-shaped persist, and the
 `04-` §3's, unchanged, and it is the best answer in the survey: the manifest is a
 row in the SQLite database in `usagefoundry-data`, so it survives `restart` and
 `up --build`, is destroyed by `down -v` **and reinstated by the reconcile on the
-next boot from `scripts/backup-db.mjs`'s restore** (`docs/backup-and-restore.md:14-31`),
+next boot from `scripts/backup-db.mjs`'s restore** (`docs/backup-and-restore.md:33-72`),
 and reaches a fresh host with the database. The volume is a cache; the
 declaration is the truth. Four events, and it is the only shape in this directory
 that survives the fourth.

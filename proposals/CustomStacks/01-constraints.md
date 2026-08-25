@@ -91,8 +91,9 @@ child never sees it. The variable can be read by `docker-entrypoint.sh` (which
 runs before `exec` and is not subject to the strip) or by the server, and the
 result has to reach the child as `PATH`, as some non-`UF_` variable, or as a file
 on disk. This is the same rule `UF_GH_EXTENSIONS`, `UF_PY_TOOLS`, `UF_SANDBOX*`
-and `UF_LOCK_CLAUDE_HOME` already live under — all five are consumed entirely by
-the entrypoint and read by nothing in `src/` (`docs/agent/environment.md:26-31`).
+and `UF_LOCK_CLAUDE_HOME` already live under — the wildcard is three names, so
+all six are consumed entirely by the entrypoint and read by nothing in `src/`
+(`docs/agent/environment.md:26-31`).
 
 It is also the rule that keeps them off the blank-by-default warning surface: a
 variable `config.ts` reads through `env()` and compose renders as `${VAR:-}`
@@ -182,6 +183,7 @@ pass, 2026-08-25):
 | `execve`, `execveat`, `fork`, `vfork` | **allowed, ungated** |
 | `statx`, `openat2`, `faccessat2`, `memfd_create` | allowed, ungated |
 | `clone`, `clone3`, `unshare`, `mount`, `umount2` | present **twice** — once behind Docker's capability gate, once ungated (the appended pair) |
+| `pivot_root` | present **once**, ungated — the sixth appended name, in no gated rule |
 | `userfaultfd`, `keyctl` | **absent from the list**, so `defaultAction` denies them |
 
 So an operator-installed binary runs. Nothing in this profile is a barrier to
@@ -220,7 +222,13 @@ const BUILD_CACHE_DIRS = [
 ```
 — `src/lib/orchestrator.ts:5996-5999`
 
-`GOPATH` is `/home/node/go`, which is the `usagefoundry-gocache` volume. **`$HOME/.npm` is not a volume and not a bind mount** — it is the writable layer, so npm's cache is discarded by every `docker compose up --build`, and the docblock's own sentence *"which the image points at a named volume so it survives a container it is meant to outlive"* is true of Go and not of npm.
+`GOPATH` is `/home/node/go`, which is the `usagefoundry-gocache` volume.
+**`$HOME/.npm` is not a volume and not a bind mount** — it is the writable layer,
+so npm's cache is discarded by every `docker compose up --build`. The docblock's
+own sentence is correct as written: *"which the image points at a named volume so
+it survives a container it is meant to outlive"* attaches to `GOPATH`, the clause
+immediately before it, and claims nothing about npm. But it reads on a fast pass
+as covering both, which is the misreading to avoid.
 
 That is the shape of the fourth persistence problem, in the tree already: **a
 tool's own state directory is a separate question from its binary**, it lands in
@@ -270,10 +278,10 @@ Each of these fails with nothing thrown and nothing failing to typecheck.
 - **`saveSettings` stores only what differs from `DEFAULTS`.** If any part of a
   stack becomes a setting rather than an environment variable, it inherits that.
 
-## 10. The three existing loops are pinned by a test that reads three files
+## 10. The two existing loops are pinned by a test that reads three files
 
-`src/lib/deployment.test.ts` carries two suites that are precisely the pin any
-new persistence mechanism would have to extend:
+`src/lib/deployment.test.ts` carries two suites and two further assertions that
+are precisely the pin any new persistence mechanism would have to extend:
 
 - `describe("gh extensions survive the rebuild that installs them by hand does not")` — `:664`
 - `describe("Python tools survive the rebuild that installs them by hand does not")` — `:733`

@@ -5,9 +5,10 @@ the analogue of `00-problem.md` and `01-constraints.md` for the surface half, an
 like them it **does not answer the ten headings** — the option files `09-` to
 `13-` do. Run 3's comparison table skips this file and reads those.
 
-Everything below was checked against the tree at `86debce`. Two claims were
-measured **inside this container** and say so; everything else is code, and
-everything that could not be reached is in §9 with the command that reaches it.
+Everything below was checked against the tree at `86debce` and re-resolved
+against `7c2c295`. Two claims were measured **inside this container** and say so;
+everything else is code, and everything that could not be reached is in §9 with
+the command that reaches it.
 
 ## 1. The request, and the one word in it that decides everything
 
@@ -38,7 +39,7 @@ What the credential buys today:
 |---|---|---|---|
 | `POST /api/runs` (`src/app/api/runs/route.ts:358`) | a `claude` child with `Bash`, prompt from the wire | `UF_AGENT_UID` | permission mode, budget guards, `run_events` |
 | `POST /api/chat/[id]/message` (`route.ts:33`) | a `claude` child at **`bypassPermissions`**, `--add-dir` on every mount, `UF_GITHUB_TOKEN` in env (`src/lib/chat.ts:1652-1653`, `:1667-1670`) | `UF_AGENT_UID`, `UF_CHAT_GID` | `--max-budget-usd`, a 10-minute timeout, and *"the system prompt is the boundary"* (`docs/agent/chat.md:24`) |
-| `POST /api/plugins` | registers a directory *"whose hooks the container runs"* (`docs/agent/architecture.md`) | `UF_AGENT_UID`, inside a `claude` child | containment re-proved at use time |
+| `POST /api/plugins` | registers a directory *"whose hooks the container runs"* (`CLAUDE.md:95`) | `UF_AGENT_UID`, inside a `claude` child | containment re-proved at use time |
 
 So arbitrary execution is not new, the agent uid is not new, and write access to
 every mount is not new. **Four things are new, and only four.** They are what an
@@ -63,10 +64,12 @@ consequences of the idea:
 **And one thing that is *not* a delta, which is worth stating because it is the
 first objection anyone will raise.** The credential does not reach the agents:
 `childEnv`, `chatEnv`, `reviewEnv`, `authEnv` and `gitEnv` all strip `UF_*`
-(`01-constraints.md` §3), so `UF_AUTH_TOKEN` is not in any child's environment
-and a work-cycle agent cannot POST to a terminal route to escape its own uid.
-That strip is load-bearing for this feature specifically, and any option that
-introduces a *second* credential for the terminal must inherit the same rule.
+(`01-constraints.md` §3 for the first two; `docs/agent/security.md:14` and
+`review.ts:760-770` / `claudeAuth.ts:258-268` / `git.ts:51-61` for the rest), so
+`UF_AUTH_TOKEN` is not in any child's environment and a work-cycle agent cannot
+POST to a terminal route to escape its own uid. That strip is load-bearing for
+this feature specifically, and any option that introduces a *second* credential
+for the terminal must inherit the same rule.
 
 ### Where the delta is largest, and it is not where people look
 
@@ -76,14 +79,16 @@ supports and documents:
 - **`UF_ALLOW_NO_AUTH=1`.** A blank `UF_AUTH_TOKEN` makes the container refuse to
   boot *unless* this is set (`src/lib/authGuard.ts:68-77`), and then
   `src/middleware.ts:42` is `if (!token) return NextResponse.next();` — every
-  route open. `.env.example` calls it *"only ever right for a loopback-bound
-  install on a machine you alone use"*, and `docker-compose.yml:76-77` binds
-  loopback by default, so this is a normal, sanctioned install. On it, a terminal
-  pane is a root shell for **any local process that can open a TCP connection to
+  route open. `.env.example:7-9` says to set it *"ONLY if the port is bound to
+  loopback and you are the only user of the machine"*, `docker-compose.yml:71-72`
+  calls it *"only ever right for loopback"*, and `:76-77` binds loopback by
+  default, so this is a normal, sanctioned install. On it, a terminal pane is a
+  root shell for **any local process that can open a TCP connection to
   127.0.0.1:3000**, with no credential of any kind.
-- **`UF_BIND_ADDRESS` moved, TLS absent.** The compose comment already warns that
-  the token is *"a shared secret over plain HTTP: anyone able to watch the network
-  sees the token"*. Today that buys a billed agent. With a terminal it buys uid 0.
+- **`UF_BIND_ADDRESS` moved, TLS absent.** `.env.example:136-137` already warns
+  that the token is *"a shared secret over plain HTTP: anyone able to watch the
+  network sees the token"*. Today that buys a billed agent. With a terminal it
+  buys uid 0.
 
 Neither is an argument that the terminal must not exist. Both are arguments that
 **an option must state which of the two it is safe under**, and that the answer
@@ -198,7 +203,7 @@ measured here rather than reasoned.** `/proc/<pid>/cmdline` is world-readable an
 as `/usr/bin/tini -- /usr/local/bin/uf-entrypoint node server.js`; `/proc/1/environ`
 is `-r-------` and returned `Permission denied`. The repository already depends on
 this asymmetry twice — `src/lib/privsep.ts:41-55` invents `UF_CHAT_GID` precisely
-because *"`--mcp-config <path>` is an argv element and `/proc/<pid>/cmdline` is
+because *"`--mcp-config <path>` is an argv element, `/proc/<pid>/cmdline` is
 world-readable"*, and `docs/agent/chat.md:22` puts the capability *"in a 0600 file
 rather than into argv (where `ps` would show it)"*.
 
@@ -279,8 +284,8 @@ that `AppShell.tsx:248` dispatches with `PANES.find(p => p.shortcut === e.key)` 
 a single-character match — and that `Sidebar.tsx:176` announces as
 `aria-keyshortcuts={\`Meta+${pane.shortcut}\`}`. A tenth row announces a chord
 nothing can send. `docs/agent/ui-density-audit.md:159` puts *"A tenth pane"* on
-the may-never-be-used list, `:166` says *"Ten is where it stops, and there it
-stops for the reason it always gave"*, and `:161` gives the prescribed
+the may-never-be-used list, `:166-167` says *"Ten is where it stops, and there it
+stops for the reason it always gave"*, and `:160-161` gives the prescribed
 alternative: **"New destinations are sub-routes under an existing pane."**
 
 So the surface, if it is built, is `/settings/terminal` or `/account/terminal` or
@@ -308,7 +313,7 @@ for a stated reason (`:43-54`: an in-flow box reports its *content* as intrinsic
 height, and a log is thousands of lines), `tabIndex={0}`, `role="log"`,
 `aria-live="off"`, monospace. **The transcript pane every option below needs is
 already built and shipped.** What `Log` does not have is an input, and `/chat`'s
-scroller-above-composer layout (`src/app/chat/page.tsx:721-731`, `:977-1066`) is
+scroller-above-composer layout (`src/app/chat/page.tsx:721-731`, `:789-793`) is
 the shipped pattern for that.
 
 Three things a terminal adds that the vocabulary genuinely does not cover, and
@@ -331,7 +336,7 @@ each is a real cost rather than a formality:
    probed off a real element and **re-probed on a theme change**. That is the
    single largest piece of UI work in the PTY option and it is invisible until
    somebody switches theme.
-3. **`QuickOpen`'s rule, which a terminal contradicts head-on.** `QuickOpen.tsx:72-77`:
+3. **`QuickOpen`'s rule, which a terminal contradicts head-on.** `QuickOpen.tsx:73-77`:
    *"Navigation and nothing else. It cannot start a run, approve a proposal or stop
    anything, and that is a rule about what this component is allowed to be rather
    than a feature not yet written: **a keystroke away from spending money is the
