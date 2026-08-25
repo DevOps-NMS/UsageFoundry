@@ -139,7 +139,7 @@ work cycle.
 |---|---|
 | **Reach turns out not to be broken** (`07-` §10, outcome 3) | `F` drops from 84 to ~40 and leaves the recommendation. Nothing else moves — every other row scores 0-3 there. |
 | **"Asked" is weighted 5 instead of 3** | `C/M` rises to 72 and `G` to 40. **The ranking does not change.** `L` and `N` still lead. |
-| **"Asked" is weighted 5 *and* "Cheap" 2** | `C/M` 64, `L` 91, `N` 89. Still no change. **There is no reasonable reweighting under which the terminal or the table wins**, which is the strongest statement this table supports. |
+| **"Asked" is weighted 5 *and* "Cheap" 2** | `L` 93, `N` 89, `D` 80, `C/M` 70, `G` 40. Still no change. **There is no reasonable reweighting under which the terminal or the table wins**, which is the strongest statement this table supports. |
 | **"Loud" is weighted 2** | `L` 84, `N` 82, `D` 75, `F` 78, `I` 63. `F` closes on `L`. The bundle survives; the ordering inside it shifts. |
 | **The operator has four repositories needing four toolchains** | `O` gains on Asked and Durable but its Cheap and Safe scores are what hold it down, and neither moves. It stays mid-table — but it becomes the *only* option expressing that shape (`18-` §10). |
 | **The operator has no host access to the container** | `E/K` collapses entirely (`13-` §10) and `G`/`H` become the only doors. This is the one scenario that overturns the whole table and **nobody has asked** (`13-` §10, `14-` §9). |
