@@ -896,7 +896,7 @@ fi
 # Two ways, and they are not equivalent. `WINNOW_FILTER=` blank plus a restart
 # is the full off: no proxy, no ANTHROPIC_BASE_URL, boot identical to before
 # this block existed. Without a restart, what can be turned off is the
-# *rewriting* and not the proxy — `touch /home/node/.winnow/filter-off` and the
+# *rewriting* and not the proxy — `touch /data/winnow/filter-off` and the
 # next request is relayed untouched.
 #
 # Only the second one is safe to do to a running install, and the asymmetry is

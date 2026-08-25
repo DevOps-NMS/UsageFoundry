@@ -85,14 +85,20 @@ import { scanUsage, type UsageEntry } from "./transcripts";
 /**
  * Where the entrypoint tells winnow to write, as a literal.
  *
- * `docker-entrypoint.sh` passes `--ledger /home/node/.winnow/filter.jsonl` —
- * not under `DATA_DIR`, not under `WINNOW_DATA_DIR`. Copying the literal is
- * what keeps the two agreeing: deriving it from `os.homedir()` would silently
- * point somewhere else the moment this process's `HOME` differs from what the
- * entrypoint passed, and the failure would read as an empty ledger rather than
- * as a wrong path.
+ * `docker-entrypoint.sh` passes `--ledger /data/winnow/filter.jsonl` — the
+ * named volume, hardcoded there, and *not* read from `DATA_DIR`. Copying the
+ * literal is what keeps the two agreeing: deriving it from `DATA_DIR` or
+ * `os.homedir()` would silently point somewhere else the moment either differs
+ * from what the entrypoint passed.
+ *
+ * The two disagreeing is not hypothetical. The ledger moved here from
+ * `/home/node/.winnow`, which a restart discards, and this constant did not
+ * move with it: the reading fell to `ledger: "missing"` on an install whose
+ * filter was rewriting every request, because a path that is not there is a
+ * legitimate state rather than an error. Change one of the two and the other
+ * says nothing — so when this literal changes, `grep` the entrypoint.
  */
-const LEDGER_PATH = "/home/node/.winnow/filter.jsonl";
+const LEDGER_PATH = "/data/winnow/filter.jsonl";
 
 /**
  * The switch that stops the filter rewriting without stopping the proxy.
@@ -101,8 +107,10 @@ const LEDGER_PATH = "/home/node/.winnow/filter.jsonl";
  * off on a live container, which leaves `ANTHROPIC_BASE_URL` still pointing at
  * a proxy that now passes everything through. Both halves are checked, because
  * either one alone reports a filter that is not filtering as one that is.
+ *
+ * Beside the ledger, and on the same literal-copying rule: `--off-file`.
  */
-const OFF_FILE = "/home/node/.winnow/filter-off";
+const OFF_FILE = "/data/winnow/filter-off";
 
 /**
  * How long a reading is reused.

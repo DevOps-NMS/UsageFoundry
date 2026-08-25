@@ -933,7 +933,8 @@ Built and exercised against real transcripts:
 
 - **What winnow's intake filter is worth, and how far it contaminates the prune
   figure.** Measured 2026-08-24 against the real ledger at
-  `/home/node/.winnow/filter.jsonl` and this install's real transcripts. Two
+  `/home/node/.winnow/filter.jsonl`, the ledger's path at the time, and this
+  install's real transcripts. Two
   questions, and the second is the one that decided a line of code.
 
   **The filter's saving was not already in the meters, and is not a double
