@@ -587,6 +587,19 @@ Built and exercised against real transcripts:
   the profile, the weaker exits 0 as uid 1000. That is what
   `docker-entrypoint.sh` now writes the key for — and it is a measurement of
   `bwrap`, not of the CLI choosing a shape, which nothing has watched.
+- **`jq` in the image, and reachable from inside a bubblewrap namespace.** The
+  runner stage installs it — 1.6, Debian bookworm's pin, ~1.2 MB with `libjq1`
+  and `libonig5`. Measured on 2026-08-25 in a throwaway container off the
+  rebuilt image, as uid 1000 and with `--security-opt seccomp=./uf-seccomp.json`:
+  `jq` parses stdin and exits 0 unwrapped, and inside **both** bubblewrap shapes
+  the entry above names — `--dev-bind / / --unshare-user --bind /proc /proc
+  --new-session --die-with-parent`, which is the weaker-nested shape the managed
+  policy asks for, and `--ro-bind / / --dev /dev --unshare-user`. Nothing had to
+  be configured for the sandboxed case: bubblewrap binds the root filesystem,
+  and the managed policy's `denyRead` names only `/data` and `/backups`, so
+  nothing on `/usr/bin` is confined away. Same limit as the entry above — this
+  is a measurement of `bwrap`, not of the CLI wrapping a real `Bash` call, which
+  nothing here has ever watched succeed.
 - **That this install's agents have never had `Grep` or `Glob`.** The pinned CLI
   (2.1.226) drops both from the tool list whenever `Bash` is present — the gate
   read out of the binary is `searchToolsOptIn` false and `CLAUDE_CODE_ENTRYPOINT`

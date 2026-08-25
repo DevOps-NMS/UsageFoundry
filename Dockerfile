@@ -68,6 +68,25 @@ ENV NODE_ENV=production \
 #                       same reason; this is that gap closed on the runtime side.
 #   curl              — the universal "is the server I just started answering?"
 #                       and the form every README writes a smoke test in.
+#   jq                — what an agent reaches for the moment a command answers in
+#                       JSON, and the container had none: `gh … --json`, this
+#                       app's own API and the CLI's JSONL transcripts are all
+#                       read that way from memory. Absent, the failure is
+#                       `jq: command not found` *inside a tool call*, which no
+#                       part of the run loop reads — the cycle ends looking like
+#                       the agent chose not to answer the question it was asked.
+#                       It belongs in the image rather than in an agent's first
+#                       Bash call for the reason the Go block below gives: apt is
+#                       root's and the agents are UF_AGENT_UID, and a package
+#                       installed into the writable layer is discarded by the
+#                       next `up --build`. It is reachable under UF_SANDBOX for
+#                       the same reason `git` is — bubblewrap binds the root
+#                       filesystem read-only and the managed policy's `denyRead`
+#                       names only DATA_DIR and /backups, so nothing on
+#                       /usr/bin is confined away. Roughly 1 MB with libjq1 and
+#                       libonig5. Debian pins 1.6, so 1.7's additions (`pick`,
+#                       `abs`, `toarray`) come back as `is not defined` rather
+#                       than as a feature that silently does nothing.
 #   procps            — `ps`/`pkill`. Debian slim omits it, so an agent that
 #                       backgrounds a dev server cannot check whether it lives.
 #   less              — git's pager. Absent, `git log` still works but prints a
@@ -108,7 +127,7 @@ ENV NODE_ENV=production \
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git ripgrep ca-certificates tini \
-      python3 make g++ curl procps less sqlite3 \
+      python3 make g++ curl jq procps less sqlite3 \
       bubblewrap socat \
  && rm -rf /var/lib/apt/lists/*
 
