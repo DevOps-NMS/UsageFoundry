@@ -1099,14 +1099,24 @@ Built and exercised against real transcripts:
 
   **What moved on the back of this measurement.** `contextAfterPrune` now
   subtracts rather than scaling, on the arithmetic above. `CYCLE_CONTEXT_CEILING_TOKENS`
-  went from 167,000 to **300,000**: at the old value the ~55,000 of fixed prompt
-  left ~112,000 tokens of prunable conversation, and the run measured here was
-  back over the ceiling **five minutes** after its own prune, stopped from
-  cutting again only by `PAYBACK_HORIZON_TURNS`. Nothing in the models bounds
-  300,000 here — the same transcript sweep that produced the figures above found
-  a single request of **752,172 tokens** on `claude-opus-5`, the largest of 678
-  transcript files, with `claude-haiku-4-5` peaking at 32,846 and
-  `claude-sonnet-5` at 26,016.
+  went from 167,000 to 300,000 and then, the same day, to **200,000**: at the
+  old value the ~55,000 of fixed prompt left ~112,000 tokens of prunable
+  conversation, and the run measured here was back over the ceiling **five
+  minutes** after its own prune, stopped from cutting again only by
+  `PAYBACK_HORIZON_TURNS`. Nothing in the models bounds either figure here — the
+  same transcript sweep that produced the figures above found a single request
+  of **752,172 tokens** on `claude-opus-5`, the largest of 678 transcript files,
+  with `claude-haiku-4-5` peaking at 32,846 and `claude-sonnet-5` at 26,016.
+
+  **The 300,000 lasted hours and is not measured.** It was lowered to 200,000
+  on the operator's reading that the runs carried at that ceiling showed the
+  cost — every turn carrying the whole prompt at the cache-read rate, roughly
+  1.8× per turn against 167,000 — and no return. No `prune_receipts` or
+  `netReceipt` comparison was taken across the two settings, so this entry
+  records a judgement and not a result. 200,000 keeps the part of the raise that
+  *was* measured: ~145,000 tokens of prunable conversation under the fixed
+  ~55,000, against the ~112,000 that put a run back over the ceiling five
+  minutes after its own prune.
 
   The `statSync` gate in front of the ceiling check was removed in the same
   change. It skipped any transcript under `ceiling x BYTES_PER_TOKEN` bytes on
@@ -1115,14 +1125,14 @@ Built and exercised against real transcripts:
   prompt are in no transcript at all. It had held because a transcript's
   envelopes run **1.74x** its message bytes here (663 KB of file against 380 KB
   of `message`), but that is a property of how tool-heavy a run is, not a bound,
-  and doubling the ceiling doubled the blind spot.
+  and raising the ceiling widened the blind spot with it.
 
   **Not yet verified by hand:** none of this has been read in the running app —
   the container was carrying a live billed run when it was written, and a rebuild
-  would have killed it. Specifically unobserved: a crossing at the new ceiling,
-  the new log line, and the per-tick cost of reading every live run's transcript
-  with no size gate in front of it (bounded by a read and a `split` per run per
-  minute, not measured).
+  would have killed it. Specifically unobserved: a crossing at the ceiling as it
+  now stands, the new log line, and the per-tick cost of reading every live run's
+  transcript with no size gate in front of it (bounded by a read and a `split`
+  per run per minute, not measured).
 
 - **`--autocompact`'s sign, and what the flag actually does.** Measured
   2026-08-22 over 1,147 transcripts through this app's own `scanUsage()`,

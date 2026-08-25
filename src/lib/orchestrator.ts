@@ -5570,7 +5570,8 @@ export function buildArgs(opts: {
   // the transcript at each cycle boundary and ends a cycle early once its
   // context passes `CYCLE_CONTEXT_CEILING_TOKENS`. That constant *was* the same
   // 167,000 the flag fired at, which is what made the swap comparable; it is
-  // 300,000 since 2026-08-25, and `contextPruning.ts` carries why.
+  // 200,000 since 2026-08-25, and `contextPruning.ts` carries why — including
+  // why it is not the 300,000 it briefly stood at on that same day.
   //
   // What that swap gave up is on the record rather than in a commit message,
   // because it is the strongest measurement this repository has and a later

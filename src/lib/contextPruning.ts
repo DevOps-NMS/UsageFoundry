@@ -120,46 +120,52 @@ export type { PruneTier };
 /**
  * The context size at which a cycle is ended early so it can be pruned.
  *
- * **300,000 since 2026-08-25, and it was 167,000 before that.** The old number
- * was the one `--autocompact 200000` fired at, and matching it was the right
- * discipline for the change that removed the flag: that change swapped the
- * *mechanism* bounding a long cycle, and moving the trigger point in the same
- * commit would have left nothing able to tell which half a later reading was
- * seeing. That comparison has been made and is in `docs/verification.md`, so
- * the number is now free to be chosen on its own merits.
+ * **200,000 since 2026-08-25.** It was 167,000 — the number `--autocompact
+ * 200000` fired at — and was raised to 300,000 and lowered again on the same
+ * day. Matching the flag's number was the right discipline for the change that
+ * removed it: that change swapped the *mechanism* bounding a long cycle, and
+ * moving the trigger point in the same commit would have left nothing able to
+ * tell which half a later reading was seeing. That comparison has been made and
+ * is in `docs/verification.md`, so the number is now free to be chosen on its
+ * own merits.
  *
- * Raised because what this bounds turned out not to be the quantity the old
- * number described. The ceiling reads the **whole prompt**, and ~55,000 tokens
- * of it are a fixed system prompt, tool list, `CLAUDE.md` and appended notices
- * that no prune can reach — measured on this install, where a cycle's first
- * request carried 57,819 tokens against 2,759 tokens of conversation. At
- * 167,000 that left ~112,000 tokens of prunable conversation, and a run on this
- * repository crossed the ceiling again within five minutes of its own prune;
- * what stopped the loop from repeating was `PAYBACK_HORIZON_TURNS` refusing the
- * second cut, not the ceiling doing its job.
+ * It is above 167,000 because what this bounds turned out not to be the
+ * quantity that number described. The ceiling reads the **whole prompt**, and
+ * ~55,000 tokens of it are a fixed system prompt, tool list, `CLAUDE.md` and
+ * appended notices that no prune can reach — measured on this install, where a
+ * cycle's first request carried 57,819 tokens against 2,759 tokens of
+ * conversation. At 167,000 that left ~112,000 tokens of prunable conversation,
+ * and a run on this repository crossed the ceiling again within five minutes of
+ * its own prune; what stopped the loop from repeating was
+ * `PAYBACK_HORIZON_TURNS` refusing the second cut, not the ceiling doing its
+ * job. 200,000 leaves ~145,000, which is roughly the width the old number was
+ * believed to be giving.
  *
- * What it costs is real and is the reason this is not higher still: every turn
- * carries the whole prompt at the cache-read rate, so a cycle that runs to
- * 300,000 pays roughly 1.8× per turn what one stopping at 167,000 does, and the
- * saving is the manufactured boundaries it does not pay for. Nothing here
- * measures which side wins on a given run; `prune_receipts` and `netReceipt`
- * are where that shows up.
+ * **It is not 300,000, and that is a judgement rather than a measurement.**
+ * Every turn carries the whole prompt at the cache-read rate, so a cycle that
+ * runs to 300,000 pays roughly 1.8× per turn what one stopping at 167,000 does,
+ * against a saving that is only the manufactured boundaries it does not pay
+ * for. On the runs this install saw at 300,000 the operator read that trade as
+ * cost with no return, and the ceiling came back down. Nothing here prices the
+ * two sides — `prune_receipts` and `netReceipt` are where that would show up,
+ * and no reading off them has been recorded either way.
  *
  * **What it is not bounded by is the model's window.** The CLI resolves a
  * window near 1M for the model this fleet runs and refuses to auto-compact one
  * that large (`docs/agent/run-lifecycle.md`), and this install's own
  * transcripts carry a single request of **752,172 tokens** on
- * `claude-opus-5` — so 300,000 is not near any limit that would turn a cycle
+ * `claude-opus-5` — so 200,000 is nowhere near a limit that would turn a cycle
  * into an API error. A fleet running a 200,000-token model would need this
- * lower, and nothing here checks that: there is no per-model window in this
- * app, and inventing a table of them for a case no run on this install has hit
- * would be a second thing to keep in step with the provider.
+ * lower — the ceiling would stand at that model's entire window — and nothing
+ * here checks it: there is no per-model window in this app, and inventing a
+ * table of them for a case no run on this install has hit would be a second
+ * thing to keep in step with the provider.
  *
  * A module constant rather than a setting, on `AUTOCOMPACT_WINDOW_TOKENS`'
  * argument, which this inherits along with its job: it trades context against
  * re-derivation, and an operator has no way to see the thing being traded.
  */
-export const CYCLE_CONTEXT_CEILING_TOKENS = 300_000;
+export const CYCLE_CONTEXT_CEILING_TOKENS = 200_000;
 
 /**
  * How many further turns a manufactured boundary is allowed to need.
