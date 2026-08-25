@@ -574,6 +574,40 @@ const ledgerCache = ((globalThis as unknown as {
 });
 
 /**
+ * The grain the transcript horizon is read at, and why it is not read exactly.
+ *
+ * `spans.from` is the retention cutoff, which the route computes as `now` minus
+ * the retention — a different millisecond on every request. The cache below
+ * keys on the spans it measured, correctly, so those two together made every
+ * reading a miss: the dashboard's ten-second heartbeat re-read the ledger and
+ * re-ran the join over every transcript entry six times a minute, which is the
+ * exact cost `LEDGER_TTL_MS` exists to avoid. Nothing looked wrong — the
+ * figures were right, and a cache that never hits is only ever visible as load.
+ *
+ * So the horizon is floored to the same minute the reading is reused for. What
+ * that costs is up to a minute of extra history at the far edge of a span
+ * measured in weeks, on a bound that is approximate in the same direction
+ * anyway: what makes it true is a sweep that runs on its own schedule, so a
+ * result just inside it is as likely to still have its transcript as one just
+ * outside. Floored rather than rounded, so the horizon only ever moves outward
+ * within a grain and a result cannot leave a reading and come back on the next
+ * poll.
+ *
+ * The two window starts are not touched. They move when their windows roll
+ * over, which is a real change of subject and must miss.
+ */
+const HORIZON_GRAIN_MS = LEDGER_TTL_MS;
+
+/** `spans` with its horizon floored to `HORIZON_GRAIN_MS`. */
+function alignSpans(spans: FilterSpans): FilterSpans {
+  if (spans.from === null) return spans;
+  return {
+    ...spans,
+    from: Math.floor(spans.from / HORIZON_GRAIN_MS) * HORIZON_GRAIN_MS,
+  };
+}
+
+/**
  * The reading, at most one read of the ledger a minute and at most one at a
  * time.
  *
@@ -581,11 +615,17 @@ const ledgerCache = ((globalThis as unknown as {
  * three of them, and serving them under others would silently answer a
  * question nobody asked. The 5-hour window's start moves, so a reading is
  * discarded when it rolls over rather than a minute later.
+ *
+ * The horizon is aligned before any of that, `HORIZON_GRAIN_MS`' reason, and
+ * the aligned value is what is measured as well as what is compared — a cache
+ * key that described a span other than the one the figures cover is the thing
+ * the paragraph above refuses.
  */
 export function readFilterSavings(
-  spans: FilterSpans,
+  requested: FilterSpans,
   now: number,
 ): Promise<FilterSavings> {
+  const spans = alignSpans(requested);
   const cached = ledgerCache.value;
   const sameSpans =
     ledgerCache.spans !== null &&

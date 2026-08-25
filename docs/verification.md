@@ -1028,6 +1028,31 @@ Built and exercised against real transcripts:
   and an unjoined result is excluded from both windows by design, so the window
   shares are a floor by much more than the total is.
 
+  **The card had been reading a path nothing writes since 2026-08-25, and read
+  as `missing` the whole time.** The ledger moved to `/data/winnow/filter.jsonl`
+  when the entrypoint stopped writing it to the container's writable layer, and
+  `intakeFilter.ts`'s literal did not move with it. Observed on the live
+  container: `GET /api/usage` returned `intakeFilter.ledger: "missing"` with
+  every figure zero — total, 5-hour and weekly alike — while
+  `/data/winnow/filter.jsonl` held 212 lines. A missing path is a legitimate
+  state on that DTO and renders as a sentence rather than as an error, so
+  nothing anywhere said the reading had stopped.
+
+  Measured against the ledger at its real path on 2026-08-25, by replaying the
+  join in Python over the same 1,366 transcript files: **215 of 217 request ids
+  joined, every one of them on the main thread**, all `claude-opus-5`, all
+  within the day. That is the opposite of the 82-of-125 unjoined reading above
+  and it moves the caveat rather than removing it — this ledger's lines were
+  written by main-thread requests, so the two window shares have real figures
+  here rather than a permanent `—`, and how much of a ledger joins is a property
+  of what the fleet was doing rather than a constant.
+
+  **Not yet verified by hand:** the corrected path has typecheck and the suite
+  behind it and has **not** been read in the running app — the container was
+  carrying a live billed run when the fix was written and a rebuild would have
+  killed it. What to check on the next rebuild is what has never been seen at
+  all: the card's own figures against a real ledger, in a browser.
+
 - **`--autocompact`'s sign, and what the flag actually does.** Measured
   2026-08-22 over 1,147 transcripts through this app's own `scanUsage()`,
   `parseCompactionBoundary()` and `pricing.ts`, and settles issue #156. Read the

@@ -413,3 +413,48 @@ describe("resultsSince", () => {
     );
   });
 });
+describe("readFilterSavings", () => {
+  /** A minute boundary, since the horizon is floored to `LEDGER_TTL_MS`. */
+  const GRAIN = Date.UTC(2026, 7, 20, 10, 0, 0);
+
+  function spans(from: number, weeklyFrom: number) {
+    return { from, sessionFrom: weeklyFrom + 1, weeklyFrom };
+  }
+
+  it("serves one reading across the polls a moving horizon spans", async () => {
+    // The route derives `from` from `now`, so every poll asks for a horizon a
+    // few seconds later than the last one. Comparing it exactly made every one
+    // of them a miss, and the ledger read plus the join over every transcript
+    // entry ran six times a minute instead of once — the whole of what
+    // `LEDGER_TTL_MS` exists to prevent, and invisible on the page, because the
+    // figures a cache that never hits returns are correct.
+    const weekly = GRAIN - 7 * 24 * 3_600_000;
+    const first = await intakeFilter.readFilterSavings(
+      spans(GRAIN + 5_000, weekly),
+      GRAIN,
+    );
+    const second = await intakeFilter.readFilterSavings(
+      spans(GRAIN + 15_000, weekly),
+      GRAIN + 10_000,
+    );
+
+    assert.equal(second, first, "the second poll re-measured the ledger");
+  });
+
+  it("measures again once the horizon leaves the grain", async () => {
+    // The alignment may not become a second TTL. A horizon in the next grain is
+    // a different span, and the figures describe the one they were measured
+    // over — which is the same rule the window starts are compared under.
+    const weekly = GRAIN - 14 * 24 * 3_600_000;
+    const inside = await intakeFilter.readFilterSavings(
+      spans(GRAIN + 55_000, weekly),
+      GRAIN,
+    );
+    const outside = await intakeFilter.readFilterSavings(
+      spans(GRAIN + 65_000, weekly),
+      GRAIN + 10_000,
+    );
+
+    assert.notEqual(outside, inside, "the grain rollover was served from cache");
+  });
+});
