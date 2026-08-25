@@ -10,8 +10,9 @@ found fifty broken references and eight substantive errors doing exactly this.
 **Result: roughly 390 checkable citations across `00-` to `13-`. 39 were wrong
 and are fixed in place. Six of the 39 changed an argument rather than a
 reference; five of those six made the recommendation easier and one made it
-harder. A further six errors in this run's own files (`14-` to `21-`) are in §3,
-including one in the recommendation's arithmetic and one in the comparison's.**
+harder. A further fifteen errors in this run's own files (`14-` to `21-`) are in
+§3 — three of which made the recommendation harder, all by finding it had
+overstated a margin in its own favour.**
 
 No citation was unresolvable. Every cited file, symbol, line range and test name
 exists.
@@ -207,19 +208,46 @@ re-resolution.
 
 ## 3. `14-` through `21-`
 
-Written this run, and held to the same standard rather than exempted from it.
-**Six errors were found in them and fixed**, and they are listed here for the
-same reason the other 39 are: a validation file that audits everything except its
-own author's work is a validation file with a hole in it.
+Written this run, and held to the same standard rather than exempted from it —
+including a second, independent pass over all eight of them, which is the only
+reason half the table below exists. **Fifteen errors were found and fixed**,
+listed here for the same reason the other 39 are: a validation file that audits
+everything except its own author's work is a validation file with a hole in it.
 
 | | What was wrong | Direction |
 |---|---|---|
 | `16-`, `17-`, `21-` | *"this repository does not test I/O"* — **false.** Sixteen of its 92 tests are over routes and components, and `src/app/api/health/route.test.ts` gives the grounds: the healthcheck *"answers falsely when this server cannot do its job"*, and *"a route that always answers 200 is indistinguishable from a working one until the day the database goes read-only."* The true bar is narrower and the sketch's routes still fail it, so the conclusion stands on a better reason | neutral |
 | `20-`, `README` | the recommendation's own arithmetic: three phases at 1-2, 2-3 and 1-2 days is **four to seven**, not six to nine. It was overstating its own cost | easier |
-| `19-` §6 | one sensitivity row's figures were wrong — weighting Asked at 5 and Cheap at 2 gives `L` 93, `N` 89, `C/M` 70, not the numbers printed. **The conclusion it supports is unchanged, which is why it survived a read** | neutral |
-| `21-` | *"the 76 existing ones"* — 76 is `src/lib/` only; the tree has **92** | neutral |
-| `14-`, `21-` | the hatched-meter rule was quoted in `CLAUDE.md`'s paraphrase rather than `docs/agent/metering.md:8`'s own words | neutral |
+| `19-` §6 | the Asked×5 / Cheap×2 row's figures were wrong — the right ones are `L` 93, `N` 89, `C/M` 70. **The conclusion it supports is unchanged, which is why it survived a read** | neutral |
+| `19-` §6 | *"`F` drops from 84 to ~40"* — zeroing a 5 at weight 5 gives **59** | neutral |
+| `19-` §6 | *"the ranking does not change"* under Asked×5 — the **lead** does not; `C/M` rises three places below it | neutral |
+| `19-` §5 | *"`B` … worse on five of seven criteria, better only on cost"* — it is worse on **four**, tied on a fifth, and better on **two** (Cheap and Asked). The domination claim is weaker than written and still holds | **harder** |
+| `20-` | *"phase 2 is that feedback at a twentieth of the cost"* — `16-`+`12-` is 7-12 days against phase 2's 2-3. **A third, not a twentieth** | **harder** |
+| `20-` | *"three `docs/agent/` files moved"* for `16-` — its own §9 lists three and says `conventions.md` gains **nothing**, so it is **two** | **harder** |
+| `14-` §5, §7 | three `docs/agent/` quotes were **`CLAUDE.md`'s paraphrases wearing the doc's name**. `agents-and-templates.md:18` says *"never falls back to none"*, `:10` says *"refused at save"*, and `workflows-and-schedules.md:47` says *"no permission mode, no isolation choice, no model and no budget blob"* | neutral |
+| `14-` §6 | `.env.example:288-290` called a *repeat* of `:204-207` — it is near-identical, ending *"an executable a hook runs"* | neutral |
+| `21-` phase 1 | `.env.example:263-273` cited for the `Dockerfile.stack` route — that range covers the override half only, and **`Dockerfile.stack` appears nowhere in the tree** | neutral |
+| `21-` | *"the 92 existing ones"* — `docs/agent/testing.md` covers both counts; 76 under `src/lib/`, 92 across `src/` | neutral |
+| `14-`, `21-` | the hatched-meter rule quoted in `CLAUDE.md`'s paraphrase rather than `docs/agent/metering.md:8`'s own words | neutral |
 | `16-` §2 | *"the five that are already there"* did not say which five. Now named with line numbers | neutral |
+| `21-` | two off-by-ones: `settings.ts:300-303` → `:300-302`, `docs/install.md:52-56` → `:53-57` | neutral |
+
+**Three of the fifteen made the recommendation harder**, all in the same
+direction: `19-` and `20-` were each overstating a margin in their own favour —
+a domination that is four criteria rather than five, a cost ratio of three
+rather than twenty, and one fewer invariant moved by the option being rejected.
+None of the three reverses anything; all three make the case narrower than it
+was written to be.
+
+**And the second pass found a bug in the tree rather than in this directory.**
+`docs/agent/conventions.md:50` says the pane list *"is closed at eight, because
+⌘1…⌘8 has eight digits"* and bans *"a ninth pane"* — where
+`src/components/shell/panes.ts:14-16` says *"Nine is the ceiling and Knowledge is
+the ninth — a tenth destination has no digit"* and `ui-density-audit.md:159`
+counts nine rows bound to ⌘1–⌘9. **The proposals cite `panes.ts` and the audit
+and are right; `conventions.md` is stale by one** — and it is stale on the same
+line four files here quote *"seven affordances"* from. `21-` phase 1 item 6
+collects it.
 
 Counts in these files that were checked rather than asserted: **eighteen** route
 answers through `jsonMaybeGzipped` (`docs/agent/conventions.md:18`), **seven**

@@ -115,8 +115,9 @@ only, all four events, root-owned, loudest failure mode in the directory, and it
 scores 90 while costing half a day. **Its zero is entirely in one column.**
 
 **`B` is dominated by `A` and should not be built alone.** Same substrate, one
-fewer property, worse on five of seven criteria, better only on cost — and its
-own §8 calls it *"the option with the worst failure profile in the directory."*
+fewer property, worse on four of seven criteria, tied on a fifth, and better only
+on cost and on the operator's sentence — and its own §8 calls it *"the option
+with the worst failure profile in the directory."*
 If a general-purpose volume is wanted, it is `A`'s volume with the loop left
 unbuilt, which is a decision to make later rather than a different option.
 
@@ -137,8 +138,8 @@ work cycle.
 
 | If | Then |
 |---|---|
-| **Reach turns out not to be broken** (`07-` §10, outcome 3) | `F` drops from 84 to ~40 and leaves the recommendation. Nothing else moves — every other row scores 0-3 there. |
-| **"Asked" is weighted 5 instead of 3** | `C/M` rises to 72 and `G` to 40. **The ranking does not change.** `L` and `N` still lead. |
+| **Reach turns out not to be broken** (`07-` §10, outcome 3) | `F` drops from 84 to **59** and leaves the recommendation. Nothing else moves — every other row scores 0-3 there. |
+| **"Asked" is weighted 5 instead of 3** | `C/M` rises to 72 and `G` to 40. **`L` (101) and `N` (97) still lead**; below them `C/M` rises three places, above `E/K`, `O` and `A`. |
 | **"Asked" is weighted 5 *and* "Cheap" 2** | `L` 93, `N` 89, `D` 80, `C/M` 70, `G` 40. Still no change. **There is no reasonable reweighting under which the terminal or the table wins**, which is the strongest statement this table supports. |
 | **"Loud" is weighted 2** | `L` 84, `N` 82, `D` 75, `F` 78, `I` 63. `F` closes on `L`. The bundle survives; the ordering inside it shifts. |
 | **The operator has four repositories needing four toolchains** | `O` gains on Asked and Durable but its Cheap and Safe scores are what hold it down, and neither moves. It stays mid-table — but it becomes the *only* option expressing that shape (`18-` §10). |

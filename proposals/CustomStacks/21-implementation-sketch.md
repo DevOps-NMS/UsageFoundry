@@ -6,8 +6,8 @@ test.
 
 **The test bar is `CLAUDE.md`'s and not a general convention**: a pure function
 whose failure mode is silent gets a unit test, and `docs/agent/testing.md`
-records what each of the 92 existing ones earned. **Three functions in this whole
-plan meet it.**
+records what each earned — 76 under `src/lib/`, 92 across `src/`. **Three
+functions in this whole plan meet it.**
 
 The bar is not "no I/O tests" — sixteen of the 92 are over routes and
 components, and `src/app/api/health/route.test.ts` says why one of them earned
@@ -50,12 +50,14 @@ at any time in the last year:
 1. **`docs/install.md` — "Tools your agents can use."** What is in the image,
    what `UF_PY_TOOLS` and `UF_GH_EXTENSIONS` add, and the
    `docker-compose.override.yml` + `Dockerfile.stack` route for anything without
-   a package manager — which is Terraform, the operator's own example
-   (`05-` §2, `.env.example:263-273`).
+   a package manager — which is Terraform, the operator's own example. The
+   override-file half has a precedent (`.env.example:263-273`); the
+   `Dockerfile.stack` half is written out in `05-` §2 and appears nowhere in the
+   tree, so this section is the first place it exists.
 2. **`docs/install.md` — "Running commands in the container."** The
    `docker compose exec` recipe with the uid read out of the container, not out
    of the operator's shell. That page already records making the opposite mistake
-   (`docs/install.md:52-56`) and the correct pair is at `:49-50`.
+   (`docs/install.md:53-57`) and the correct pair is at `:49-50`.
 3. **A `Field` hint on the Settings page** naming that recipe, so an operator
    looking for a Terminal entry finds the answer where they looked. **This is the
    only `src/` change in phase 1** and it is the difference between the
@@ -75,6 +77,13 @@ at any time in the last year:
    installs all three in the runner; `privsep.ts:236-238`'s two overcounts; and
    `CLAUDE.md:35`'s "four modules", which `docs/agent/architecture.md:203`
    repeats and then contradicts in the same paragraph.
+   **Plus a fourth this survey's own validation pass turned up:**
+   `docs/agent/conventions.md:50` says the pane list *"is closed at eight,
+   because ⌘1…⌘8 has eight digits"* and bans *"a ninth pane"*, where
+   `panes.ts:14-16` says *"Nine is the ceiling and Knowledge is the ninth — a
+   tenth destination has no digit"* and `ui-density-audit.md:159` counts nine
+   rows bound to ⌘1–⌘9. It is stale by one, and it is stale on the same line
+   four files in this directory quote *"seven affordances"* from.
 
 **Invariant not to break:** `docs/README.md` is the index and a list elsewhere is
 what drifted last time (`CLAUDE.md`, Docs). New sections go in existing operator
@@ -195,7 +204,7 @@ outcome comes back.**
   `resolveVerifyTools` (`settings.ts:314`, `:743`) — the existing operator-owned
   tool-pattern list, which ships empty for a reason worth copying verbatim:
   *"This app runs against whatever repository is mounted, so there is no command
-  it could ship that is right for one"* (`settings.ts:300-303`).
+  it could ship that is right for one"* (`settings.ts:300-302`).
 - **Validation at save**, against the CLI's `Bash(cmd:*)` pattern form. An entry
   an operator gets wrong is silent otherwise.
 - **Pushed onto the existing `--allowedTools` flag** at

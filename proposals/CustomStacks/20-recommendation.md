@@ -136,14 +136,15 @@ central refusal. It answers the operator's sentence exactly, scores 5 on
 "Asked", and is rejected anyway, because identity is the only thing it buys over
 phase 2 and `14-` §7 finds nothing in this app that selects between two stacks.
 A week to two weeks, a migration, a route, a page, a boot reconciler, a fourth
-kind of root-spawned child and three `docs/agent/` files moved — **for a list
+kind of root-spawned child and two `docs/agent/` files moved — **for a list
 that today fits on one `.env` line**, and which `down -v` destroys where `.env`
 survives it (`16-` §3).
 
 **`12-` — the manifest transcript. Rejected with `16-`**, since it is a two-day
 layer over a rejected week. Its own insight survives and is worth keeping: what
 the operator wanted from a terminal was *feedback*, and phase 2 is that feedback
-at a twentieth of the cost.
+at a third of the cost — two to three days against `16-`'s week to two weeks plus
+`12-`'s two.
 
 **`18-` — the repository manifest. Rejected, and it is the one rejection that
 may not last.** Strongest persistence in the directory — the only option

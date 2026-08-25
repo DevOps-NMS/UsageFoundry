@@ -183,9 +183,9 @@ fourth silent failure.
    treats that as a *hazard* to be avoided, which means the surface is known to
    work. A stack that declared four tools and found three belongs on it.
 2. **A refusal at the door.** This app refuses by name rather than degrading:
-   a deleted agent is *"refused by name at every door, never dropped to none"*
-   (`docs/agent/agents-and-templates.md`), and `no_ceiling` is refused at the
-   door and never acted on afterwards (`docs/agent/budgets-and-guards.md`). A run
+   a deleted agent is *"refused by name at every door and never falls back to
+   none"* (`docs/agent/agents-and-templates.md:18`), and `no_ceiling` is refused
+   at the door and never acted on afterwards (`CLAUDE.md`). A run
    whose template names a stack that is not present can be refused the same way,
    before a token is spent.
 3. **A terminal status that is not a success.** `needs-review` is terminal and is
@@ -220,8 +220,9 @@ reconciliation actually fixes.
 - **After an image upgrade brings a newer version.** The shipped policy is
   already *"never upgrade in place"*: both loops skip an already-installed entry
   deliberately, because *"a restart is not a good moment to silently swap out an
-  executable that holds a token"* (`.env.example:204-207`, repeated at
-  `:288-290`). **A stack that upgrades on drift contradicts a decision this
+  executable that holds a token"* (`.env.example:204-207`, and near-identically
+  at `:288-290`, where it is *"an executable a hook runs"*). **A stack that
+  upgrades on drift contradicts a decision this
   repository made in writing, twice.**
 - **After a `down -v`.** The volume is empty and the declaration is intact. This
   is the one drift reconciliation handles perfectly, and it is the entire reason
@@ -239,12 +240,14 @@ A stack is a **capability**. It is not a role, not a guard and not a budget. Thi
 app has an explicit position on where capabilities attach, and it is stated three
 times in three places:
 
-- **Not on an agent.** *"An agent carries a role, never a capability: no `tools`,
-  no permission mode, no folder. A `tools` field is refused by name at save"*
-  (`docs/agent/agents-and-templates.md`).
-- **Not on a workflow node.** *"A node holds no permission mode, no budget and no
-  model — guards come from its template"*
-  (`docs/agent/workflows-and-schedules.md`).
+- **Not on an agent.** *"A saved agent … carries a role rather than a
+  capability"*, and *"a `tools` field is refused at save, and the refusal is the
+  decision"* (`docs/agent/agents-and-templates.md:10`). The schema mirrors it:
+  no `tools` column, no `permission_mode` column, no budget — *"the absence of a
+  column is the strongest form of it"* (`src/lib/db.ts:269-274`).
+- **Not on a workflow node.** *"A node holds no permission mode, no isolation
+  choice, no model and no budget blob"*
+  (`docs/agent/workflows-and-schedules.md:47`).
 - **Not chosen at admission.** `createRun` entry-to-INSERT with no `await`
   (§4 above).
 
@@ -264,7 +267,8 @@ guards already are.
 ### The frozen-copy question, which has a different answer here than for agents
 
 `runs.agent` is a frozen copy and `run_templates.agent_id` is a reference
-(`docs/agent/agents-and-templates.md`). The reason freezing is right for an agent
+(`docs/agent/agents-and-templates.md:18`; the column is
+`src/lib/db.ts:778`). The reason freezing is right for an agent
 is that the agent's text *is* what the run was given, so the frozen copy makes
 the run legible after the agent changes.
 

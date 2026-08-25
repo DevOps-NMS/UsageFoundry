@@ -3,7 +3,8 @@
 **Closed.** Three questions surveyed across three runs — where a tool persists,
 what surface installs it, and what a "stack" is as a stored object — fifteen
 options, one comparison, one recommendation, and a validation pass that resolved
-every citation in the directory and fixed 39.
+every citation in the directory and fixed 54, fifteen of them in the closing
+run's own files.
 
 **The question:** an operator wants to install a tool — Terraform is their
 example — from the web interface, have it reach every run, and have it survive
@@ -137,9 +138,18 @@ existed to avoid, one correction that was itself wrong, and one stale provenance
 line. None was unresolvable — every cited file, symbol, line range and test name
 exists.
 
-**And six more in this run's own files**, in `22-validation.md` §3 — including
-the recommendation overstating its own cost, one sensitivity row's arithmetic,
-and a claim that this repository does not test I/O, which it does.
+**And fifteen more in this run's own files**, in `22-validation.md` §3. Three of
+those made the recommendation **harder**, all by finding it had overstated a
+margin in its own favour: `B` is dominated on four criteria rather than five,
+phase 2 is a third of `16-`+`12-`'s cost rather than a twentieth, and rejecting
+`16-` moves two `docs/agent/` files rather than three. The rest are references,
+counts and three `docs/agent/` quotes that turned out to be `CLAUDE.md`'s
+paraphrases wearing the doc's name.
+
+The second pass also found a bug in the tree: **`docs/agent/conventions.md:50` is
+stale by one pane** — it closes the list at eight and bans a ninth, where
+`panes.ts:14-16` says nine is the ceiling and a *tenth* has no digit.
+`21-` phase 1 item 6 collects it.
 
 ## What could not be reached
 
