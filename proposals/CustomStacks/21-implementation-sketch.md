@@ -139,9 +139,12 @@ never a raw environment**, and the DTO's type is what enforces that.
 
 Note that the variables *are* readable here even though `childEnv` strips `UF_*`:
 the strip is a child-side rule and the server is `exec`'d by the entrypoint
-holding them (`docker-entrypoint.sh:972`). That asymmetry is what makes this
-phase cheap and it should be written down in a comment, because it looks like a
-bug to anyone who knows the strip and not the reason for it.
+holding them (`docker-entrypoint.sh:972`). Checked rather than assumed — compose
+forwards both at `docker-compose.yml:123` and `:130`, and the only two variables
+the entrypoint unsets before `exec` are `DISCORD_WEBHOOK_URL` and
+`DISCORD_MENTION_USER_ID` (`:853`). That asymmetry is what makes this phase cheap
+and it should be written down in a comment, because it looks like a bug to anyone
+who knows the strip and not the reason for it.
 
 ### The card
 

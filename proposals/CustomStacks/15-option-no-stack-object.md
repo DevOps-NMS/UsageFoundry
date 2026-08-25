@@ -50,13 +50,17 @@ and legibility is the whole of what the operator was missing.
   `exec`'d by the entrypoint (`docker-entrypoint.sh:972`) and holds them. So the
   read is `process.env.UF_PY_TOOLS` in a Node-runtime route, which is legal
   precisely because the strip is a child-side rule. **This is the one non-obvious
-  fact the option depends on** and it is the reason the option is cheap.
+  fact the option depends on** and it is the reason the option is cheap. Checked
+  rather than assumed: compose forwards both at `docker-compose.yml:123` and
+  `:130`, and the only variables the entrypoint unsets before `exec` are
+  `DISCORD_WEBHOOK_URL` and `DISCORD_MENTION_USER_ID`
+  (`docker-entrypoint.sh:853`, and the reasoning above it at `:808`).
 - **`GET /api/tools`** — `runtime = "nodejs"`, `dynamic = "force-dynamic"`,
   through `jsonMaybeGzipped` like the other eighteen, with its own list DTO
   (`docs/agent/conventions.md`).
 - **A card on the Settings page**, not a pane — `14-` needs no destination and
   `08-` §6 already refused a tenth one (`panes.ts:12-16`,
-  `ui-density-audit.md:159`, `:161`). A `ListGroup` of entries with a state
+  `ui-density-audit.md:159`, `:160-161`). A `ListGroup` of entries with a state
   badge, inside the seven affordances.
 - **Optional, and it is the tier-2 half of `14-` §5:** a `requiredTools: string[]`
   on `Settings` and on `run_templates`, checked **before the spawn and never at
