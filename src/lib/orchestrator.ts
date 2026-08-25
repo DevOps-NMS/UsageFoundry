@@ -61,6 +61,7 @@ import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents"
 import { enabledPluginDirs, pluginDirArgs } from "./plugins";
 import { BYTES_PER_TOKEN } from "./fileCostNotice";
 import {
+  apiContextTokens,
   contextTokens,
   CYCLE_CONTEXT_CEILING_TOKENS,
   PAYBACK_HORIZON_TURNS,
@@ -9068,13 +9069,18 @@ async function checkContextCeilings(): Promise<void> {
     try {
       const transcript = await resolveSessionTranscript(sessionId);
       if (!transcript) continue;
-      // The one-sided gate. `BYTES_PER_TOKEN` is the same constant
-      // `contextTokens` divides by, so this is exactly "could the message
-      // content alone be this large".
+      // The one-sided gate, and it stays one-sided under `apiContextTokens`:
+      // what the API carries is never more than the transcript holds, so a file
+      // too small to reach the ceiling by bytes cannot reach it by usage either.
       if (fs.statSync(transcript).size < CYCLE_CONTEXT_CEILING_TOKENS * BYTES_PER_TOKEN) {
         continue;
       }
-      tokens = contextTokens(transcript);
+      // Read off `usage` rather than estimated from bytes. The two diverge by
+      // ~69,000 tokens on this install now that the intake filter drops tool
+      // results on the wire while the transcript keeps them — see
+      // `apiContextTokens`. Ending a cycle against a conversation the API was
+      // never asked to carry is a prune that pays `1.9·S` for nothing.
+      tokens = apiContextTokens(transcript);
     } catch {
       // A transcript that cannot be read is not a run to end. The budget guards
       // below are unaffected and the next tick tries again.

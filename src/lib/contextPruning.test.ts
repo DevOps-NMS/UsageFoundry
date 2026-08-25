@@ -5,6 +5,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 
 import {
+  apiContextTokens,
   contextTokens,
   isPruneTier,
   netReceipt,
@@ -87,6 +88,114 @@ describe("paybackTurns", () => {
     // for — and it is what the caller distinguishes "no history" by.
     assert.equal(paybackTurns(50_000, 0), null);
     assert.equal(paybackTurns(50_000, -5), null);
+  });
+});
+
+describe("apiContextTokens", () => {
+  const usageRecord = (
+    prompt: { input: number; create: number; read: number; output: number },
+    extra: Record<string, unknown> = {},
+  ) => ({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      model: "claude-opus-5",
+      content: "hi",
+      usage: {
+        input_tokens: prompt.input,
+        cache_creation_input_tokens: prompt.create,
+        cache_read_input_tokens: prompt.read,
+        output_tokens: prompt.output,
+      },
+    },
+    ...extra,
+  });
+
+  it("reads the whole prompt however it was billed, plus that turn's output", () => {
+    // A cached token is still a token the model reads, so the ceiling has to
+    // count it. Splitting the same prompt across the three fields must not
+    // change the answer.
+    const file = transcript("usage.jsonl", [
+      usageRecord({ input: 100, create: 900, read: 99_000, output: 500 }),
+    ]);
+    assert.equal(apiContextTokens(file), 100_500);
+  });
+
+  it("takes the last turn, not the first", () => {
+    const file = transcript("last.jsonl", [
+      usageRecord({ input: 10, create: 0, read: 1_000, output: 5 }),
+      usageRecord({ input: 10, create: 0, read: 50_000, output: 5 }),
+    ]);
+    assert.equal(apiContextTokens(file), 50_015);
+  });
+
+  it("ignores a sub-agent's turns", () => {
+    // A sidechain is its own conversation. Counting it would end a cycle for
+    // context this run never carried.
+    const file = transcript("sidechain.jsonl", [
+      usageRecord({ input: 10, create: 0, read: 1_000, output: 5 }),
+      usageRecord({ input: 10, create: 0, read: 90_000, output: 5 }, { isSidechain: true }),
+    ]);
+    assert.equal(apiContextTokens(file), 1_015);
+  });
+
+  it("ignores a <synthetic> frame, whose usage is all zeros", () => {
+    const file = transcript("synthetic.jsonl", [
+      usageRecord({ input: 10, create: 0, read: 1_000, output: 5 }),
+      {
+        type: "assistant",
+        message: {
+          role: "assistant",
+          model: "<synthetic>",
+          content: "",
+          usage: { input_tokens: 0, cache_read_input_tokens: 0 },
+        },
+      },
+    ]);
+    assert.equal(apiContextTokens(file), 1_015);
+  });
+
+  it("is unmoved by message content the API never received", () => {
+    // The whole point of the split, in the shape it actually takes here. A tool
+    // result winnow's intake filter drops on the wire stays in `message.content`
+    // on disk, so `contextTokens` counts it and the ceiling fires against a
+    // conversation that was never sent. `usage` reports what was billed, so this
+    // reads the same either way.
+    //
+    // Note this is *not* the `toolUseResult` case — `contextTokens` already
+    // ignores that envelope, and the test above holds it to that.
+    const plain = transcript("plain.jsonl", [
+      { type: "user", message: { role: "user", content: [{ type: "text", text: "go" }] } },
+      usageRecord({ input: 10, create: 0, read: 1_000, output: 5 }),
+    ]);
+    const fat = transcript("fat.jsonl", [
+      {
+        type: "user",
+        message: {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "a", content: "x".repeat(400_000) },
+          ],
+        },
+      },
+      usageRecord({ input: 10, create: 0, read: 1_000, output: 5 }),
+    ]);
+    assert.equal(apiContextTokens(plain), apiContextTokens(fat));
+    assert.ok(contextTokens(fat) > contextTokens(plain) + 90_000);
+  });
+
+  it("falls back to the byte estimate when no usage frame exists", () => {
+    // Zero would read as "this run is empty" and silently disable the ceiling,
+    // which is the one failure this must not have.
+    const file = transcript("nousage.jsonl", [
+      { type: "assistant", message: { role: "assistant", content: "x".repeat(40_000) } },
+    ]);
+    assert.equal(apiContextTokens(file), contextTokens(file));
+    assert.ok(apiContextTokens(file) > 0);
+  });
+
+  it("returns 0 for a transcript it cannot read", () => {
+    assert.equal(apiContextTokens("/nonexistent/nope.jsonl"), 0);
   });
 });
 

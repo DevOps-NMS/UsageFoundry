@@ -255,6 +255,87 @@ export function contextTokens(transcriptPath: string): number {
 }
 
 /**
+ * The context the **API actually saw**, read off the transcript's own `usage`.
+ *
+ * ## Why this is not `contextTokens`, and why both have to exist
+ *
+ * `contextTokens` sums the transcript's message envelopes and divides by
+ * `BYTES_PER_TOKEN`. That is the right measure for the prune delta — historical
+ * `usage` frames record what was billed and cannot change when content is
+ * edited, so they structurally cannot express a before/after difference — and it
+ * is the wrong measure for the ceiling, because the transcript is not what the
+ * API receives.
+ *
+ * Two things separate them, and the gap is not small. `bytes / 4` is a crude
+ * estimator that runs high on structured tool output; and winnow's intake filter
+ * drops tool results *on the wire* while Claude Code keeps writing the full
+ * bytes to disk, so every byte the filter removes is still counted by a
+ * transcript-derived measure. Measured on this install on 2026-08-25, two runs
+ * that `contextTokens` put at 183,803 and 192,241 tokens had API-visible peaks
+ * of 114,485 and 123,524 — the ceiling was firing roughly 69,000 tokens early,
+ * against a conversation that was never that large.
+ *
+ * ## What it returns
+ *
+ * The prompt the last completed request carried, plus that turn's output, which
+ * together are what the *next* request will carry before it adds anything new.
+ * `input + cache_creation + cache_read` is the whole prompt however it was
+ * billed — a cached token is still a token the model reads.
+ *
+ * It lags by one turn by construction, because it reports a request that has
+ * finished. That is the right direction to be wrong in for a ceiling: it never
+ * ends a cycle for context the API has not actually been asked to carry.
+ *
+ * Falls back to `contextTokens` rather than to zero when no usage frame exists —
+ * a fresh session, or one whose only assistant turns are `<synthetic>`. Zero
+ * would read as "this run is empty" and silently disable the ceiling, which is
+ * the one failure this must not have.
+ */
+export function apiContextTokens(transcriptPath: string): number {
+  let text: string;
+  try {
+    text = fs.readFileSync(transcriptPath, "utf8");
+  } catch {
+    return 0;
+  }
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) continue;
+    let record: {
+      type?: unknown;
+      isSidechain?: unknown;
+      message?: { model?: unknown; usage?: Record<string, unknown> };
+    };
+    try {
+      record = JSON.parse(trimmed);
+    } catch {
+      // A torn trailing line is normal on a transcript being appended to.
+      continue;
+    }
+    if (record?.type !== "assistant") continue;
+    // A sub-agent's turns are not this conversation's context, and
+    // `<synthetic>` frames carry an all-zero usage block that would read as an
+    // empty run.
+    if (record.isSidechain === true) continue;
+    const message = record.message;
+    if (!message || typeof message !== "object") continue;
+    if (message.model === "<synthetic>") continue;
+    const usage = message.usage;
+    if (!usage || typeof usage !== "object") continue;
+    const num = (key: string): number => {
+      const v = usage[key];
+      return typeof v === "number" && Number.isFinite(v) ? v : 0;
+    };
+    const prompt =
+      num("input_tokens") + num("cache_creation_input_tokens") + num("cache_read_input_tokens");
+    if (prompt <= 0) continue;
+    return prompt + num("output_tokens");
+  }
+  return contextTokens(transcriptPath);
+}
+
+/**
  * Further turns before an edit that removed `removedTokens` pays for itself.
  *
  * `19·(S/D) − 20`, where **`S` is the suffix as it stood before the cut** — the
