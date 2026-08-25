@@ -194,6 +194,33 @@ describe("apiContextTokens", () => {
     assert.ok(apiContextTokens(file) > 0);
   });
 
+  it("finds the last turn without reading the whole of a large transcript", () => {
+    // The ceiling runs once a minute per live run and no longer has a size gate
+    // in front of it, so this reads the tail rather than the file. Silent if it
+    // is wrong in this direction: a miss reports the byte estimate instead, the
+    // ceiling stops matching what the API carries, and cycles quietly stop being
+    // ended. 1.5 MB is past `TAIL_SCAN_BYTES` with the frame inside the window.
+    const file = transcript("big-tail.jsonl", [
+      { type: "user", message: { role: "user", content: "x".repeat(1_500_000) } },
+      usageRecord({ input: 10, create: 0, read: 90_000, output: 5 }),
+    ]);
+    assert.ok(fs.statSync(file).size > 1_048_576);
+    assert.equal(apiContextTokens(file), 90_015);
+  });
+
+  it("pays for the whole file when the tail holds no turn at all", () => {
+    // One tool result can be larger than the window — the largest transcript on
+    // this install is 9.1 MB over 789 lines — so the last frame can sit outside
+    // it. Reporting the byte estimate here would be the same silent failure as
+    // above, arriving from the one shape the window cannot cover.
+    const file = transcript("frame-outside-tail.jsonl", [
+      usageRecord({ input: 10, create: 0, read: 90_000, output: 5 }),
+      { type: "user", message: { role: "user", content: "x".repeat(1_500_000) } },
+    ]);
+    assert.equal(apiContextTokens(file), 90_015);
+    assert.notEqual(apiContextTokens(file), contextTokens(file));
+  });
+
   it("returns 0 for a transcript it cannot read", () => {
     assert.equal(apiContextTokens("/nonexistent/nope.jsonl"), 0);
   });

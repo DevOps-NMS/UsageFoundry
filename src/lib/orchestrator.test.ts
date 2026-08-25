@@ -1170,8 +1170,8 @@ describe("starting a work cycle fresh instead of resuming", () => {
     // The two features are independent switches and this is the one place they
     // touch. `startsFresh` reads the last cycle's *billed* window, which was
     // recorded before the boundary prune ran and cannot know about it — so
-    // without `contextAfterPrune` a prune that took a 200k conversation down to
-    // 124k would be followed immediately by a fresh start fired on the 200k
+    // without `contextAfterPrune` a prune that took 95k of turns out of a 200k
+    // context would be followed immediately by a fresh start fired on the 200k
     // reading, and the run would pay to re-derive a conversation something had
     // just finished shrinking to fit under the threshold.
     //
@@ -1184,10 +1184,17 @@ describe("starting a work cycle fresh instead of resuming", () => {
       tokensBefore: 250_000,
       tokensAfter: 155_000,
       tokensRemoved: 95_000,
+      // Not read here — `contextAfterPrune` is handed the billed figure and
+      // subtracts what came out of it. It is on the outcome for the log line,
+      // which reports the prune in the ceiling's units.
+      apiTokensBefore: 310_000,
       elapsedMs: 1_000,
     };
     const corrected = contextAfterPrune(200_000, outcome);
-    assert.equal(corrected, 124_000);
+    // 200,000 - 95,000, not 200,000 x (155/250). The ratio would say 124,000,
+    // which shrinks the fixed system prompt and tool list along with the turns
+    // — see `contextAfterPrune`, which carries the measurement.
+    assert.equal(corrected, 105_000);
     assert.equal(startsFresh({ ...base, contextTokens: 200_000 }), true);
     assert.equal(startsFresh({ ...base, contextTokens: corrected }), false);
   });
@@ -1206,6 +1213,7 @@ describe("starting a work cycle fresh instead of resuming", () => {
         tokensBefore: 0,
         tokensAfter: 0,
         tokensRemoved: 0,
+        apiTokensBefore: 0,
         elapsedMs: 1,
       }),
       200_000,
@@ -2193,9 +2201,10 @@ describe("buildArgs", () => {
 
   it("emits no compaction ceiling, because pruning replaced it", () => {
     // The inverse of the test this replaced, and it is worth a test rather than
-    // a deletion. `contextPruning.ts` bounds a cycle's context now, at the same
-    // 167,000 `--autocompact 200000` fired at, and it does it by ending the
-    // cycle rather than by summarising it. Both mechanisms running would be
+    // a deletion. `contextPruning.ts` bounds a cycle's context now — at the
+    // 167,000 `--autocompact 200000` fired at when the flag was removed, and at
+    // `CYCLE_CONTEXT_CEILING_TOKENS` wherever that constant stands since — and
+    // it does it by ending the cycle rather than by summarising it. Both mechanisms running would be
     // worse than either: the CLI would summarise a conversation moments before
     // this app ended the cycle to prune it, so the prune would be measuring what
     // the summariser had already thrown away and the run would pay for both.

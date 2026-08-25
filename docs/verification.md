@@ -1066,6 +1066,64 @@ Built and exercised against real transcripts:
   killed it. What to check on the next rebuild is what has never been seen at
   all: the card's own figures against a real ledger, in a browser.
 
+- **The two context measures, and the 65,000 tokens between them.** Measured on
+  the live container on 2026-08-25 by replaying `contextTokens` and
+  `apiContextTokens` over every frame of run `a75a7cb7`'s session
+  (`4b47c32c-…jsonl`), around the crossing the cycle ceiling acted on. The last
+  request before the prune carried **183,214 prompt tokens** plus 501 of output
+  — 183,715, which is the `183.7k` the run log printed — while the transcript's
+  own turns came to **118,776**, the receipt's `tokens_before`. The prune took
+  50,319 off that, and the **first request after it carried 120,595**: a real
+  reduction of 62,619 against the 50.3k reported, and a remainder 52,138 above
+  the "leaving 68.5k" the same log line printed.
+
+  Both readings are honest and neither bounds the other. The fixed part was read
+  off that session's own first request, which carried **57,819 tokens against
+  2,759 tokens of conversation** — the system prompt, the tool list, this
+  repository's `CLAUDE.md`, the appended notices and the skills, none of which is
+  in a transcript and none of which a prune can reach. The intake filter was live
+  throughout (`WINNOW_FILTER=1`; 43,604 bytes dropped on that cycle's last
+  request) and pushes the other way, which is why `apiContextTokens`' own note
+  records the same two measures ~69,000 apart in the **opposite** direction on
+  two other runs the same day.
+
+  So the ceiling was reading correctly and the prune line was reporting a
+  different quantity in the same units, one line below it. The line now reports
+  the prune in the ceiling's currency — `apiContextTokens` at the prune, minus
+  what came out. **What that derivation is worth, on this crossing:** it gives
+  132.9k against a real 120.6k, high by 12.3k, because `contextTokens`
+  understates what was removed; high is the direction that never claims more was
+  freed than was. `contextAfterPrune`'s ratio applied to the same numbers gives
+  105.6k, low by 15.0k, because it scales the fixed ~55,000 down along with the
+  conversation.
+
+  **What moved on the back of this measurement.** `contextAfterPrune` now
+  subtracts rather than scaling, on the arithmetic above. `CYCLE_CONTEXT_CEILING_TOKENS`
+  went from 167,000 to **300,000**: at the old value the ~55,000 of fixed prompt
+  left ~112,000 tokens of prunable conversation, and the run measured here was
+  back over the ceiling **five minutes** after its own prune, stopped from
+  cutting again only by `PAYBACK_HORIZON_TURNS`. Nothing in the models bounds
+  300,000 here — the same transcript sweep that produced the figures above found
+  a single request of **752,172 tokens** on `claude-opus-5`, the largest of 678
+  transcript files, with `claude-haiku-4-5` peaking at 32,846 and
+  `claude-sonnet-5` at 26,016.
+
+  The `statSync` gate in front of the ceiling check was removed in the same
+  change. It skipped any transcript under `ceiling x BYTES_PER_TOKEN` bytes on
+  the argument that message content is a subset of the file — sound under
+  `contextTokens`, unsound under `apiContextTokens`, since ~55,000 tokens of the
+  prompt are in no transcript at all. It had held because a transcript's
+  envelopes run **1.74x** its message bytes here (663 KB of file against 380 KB
+  of `message`), but that is a property of how tool-heavy a run is, not a bound,
+  and doubling the ceiling doubled the blind spot.
+
+  **Not yet verified by hand:** none of this has been read in the running app —
+  the container was carrying a live billed run when it was written, and a rebuild
+  would have killed it. Specifically unobserved: a crossing at the new ceiling,
+  the new log line, and the per-tick cost of reading every live run's transcript
+  with no size gate in front of it (bounded by a read and a `split` per run per
+  minute, not measured).
+
 - **`--autocompact`'s sign, and what the flag actually does.** Measured
   2026-08-22 over 1,147 transcripts through this app's own `scanUsage()`,
   `parseCompactionBoundary()` and `pricing.ts`, and settles issue #156. Read the

@@ -120,18 +120,46 @@ export type { PruneTier };
 /**
  * The context size at which a cycle is ended early so it can be pruned.
  *
- * 167,000 because that is exactly where `--autocompact 200000` fired, and
- * matching it is the discipline rather than a coincidence: this change swaps the
- * *mechanism* that bounds a long cycle, and moving the trigger point in the same
- * change would leave nothing able to tell which half a later reading is seeing.
- * 30 of 42 observed compaction boundaries landed within ±3,000 of it, which is
- * more evidence than any number picked here would have.
+ * **300,000 since 2026-08-25, and it was 167,000 before that.** The old number
+ * was the one `--autocompact 200000` fired at, and matching it was the right
+ * discipline for the change that removed the flag: that change swapped the
+ * *mechanism* bounding a long cycle, and moving the trigger point in the same
+ * commit would have left nothing able to tell which half a later reading was
+ * seeing. That comparison has been made and is in `docs/verification.md`, so
+ * the number is now free to be chosen on its own merits.
+ *
+ * Raised because what this bounds turned out not to be the quantity the old
+ * number described. The ceiling reads the **whole prompt**, and ~55,000 tokens
+ * of it are a fixed system prompt, tool list, `CLAUDE.md` and appended notices
+ * that no prune can reach — measured on this install, where a cycle's first
+ * request carried 57,819 tokens against 2,759 tokens of conversation. At
+ * 167,000 that left ~112,000 tokens of prunable conversation, and a run on this
+ * repository crossed the ceiling again within five minutes of its own prune;
+ * what stopped the loop from repeating was `PAYBACK_HORIZON_TURNS` refusing the
+ * second cut, not the ceiling doing its job.
+ *
+ * What it costs is real and is the reason this is not higher still: every turn
+ * carries the whole prompt at the cache-read rate, so a cycle that runs to
+ * 300,000 pays roughly 1.8× per turn what one stopping at 167,000 does, and the
+ * saving is the manufactured boundaries it does not pay for. Nothing here
+ * measures which side wins on a given run; `prune_receipts` and `netReceipt`
+ * are where that shows up.
+ *
+ * **What it is not bounded by is the model's window.** The CLI resolves a
+ * window near 1M for the model this fleet runs and refuses to auto-compact one
+ * that large (`docs/agent/run-lifecycle.md`), and this install's own
+ * transcripts carry a single request of **752,172 tokens** on
+ * `claude-opus-5` — so 300,000 is not near any limit that would turn a cycle
+ * into an API error. A fleet running a 200,000-token model would need this
+ * lower, and nothing here checks that: there is no per-model window in this
+ * app, and inventing a table of them for a case no run on this install has hit
+ * would be a second thing to keep in step with the provider.
  *
  * A module constant rather than a setting, on `AUTOCOMPACT_WINDOW_TOKENS`'
  * argument, which this inherits along with its job: it trades context against
  * re-derivation, and an operator has no way to see the thing being traded.
  */
-export const CYCLE_CONTEXT_CEILING_TOKENS = 167_000;
+export const CYCLE_CONTEXT_CEILING_TOKENS = 300_000;
 
 /**
  * How many further turns a manufactured boundary is allowed to need.
@@ -156,12 +184,40 @@ const PRUNE_TIMEOUT_MS = 120_000;
 /** What a prune did, in the only units worth reporting. */
 export interface PruneOutcome {
   tier: PruneTier;
-  /** API-visible tokens the transcript carried before the prune. */
+  /**
+   * What the transcript's own turns came to before the prune, through
+   * `contextTokens`. The conversation and nothing else: it is the one measure
+   * that can express a before-and-after, and it holds none of the system
+   * prompt, tool definitions or project instructions a request also carries.
+   */
   tokensBefore: number;
   /** And after. */
   tokensAfter: number;
   /** `tokensBefore - tokensAfter`, never negative. */
   tokensRemoved: number;
+  /**
+   * What the API was carrying before the prune, through `apiContextTokens` —
+   * the same reading the cycle ceiling acts on.
+   *
+   * Here so that the two lines an operator reads about one prune are in one
+   * currency. The ceiling names the whole prompt and the three figures above
+   * name the conversation inside it, and those are tens of thousands of tokens
+   * apart **in either direction**, which is why neither can be derived from the
+   * other by a constant. Measured on this install on 2026-08-25, a cycle the
+   * ceiling ended at 183,214 tokens had a transcript `contextTokens` put at
+   * 118,776: the system prompt, tool list, `CLAUDE.md` and the appended notices
+   * are ~55,000 tokens the transcript never holds and no prune reaches, read
+   * straight off that cycle's first request, which carried 57,819 tokens
+   * against 2,759 of conversation. `apiContextTokens`' own note records the
+   * opposite case from the same day — transcripts of 183,803 and 192,241
+   * against API peaks of 114,485 and 123,524 — where the intake filter was
+   * dropping more on the wire than the overhead was adding.
+   *
+   * Two numbers that far apart for one operation, one line under the other,
+   * read as a bug in whichever of them the reader trusts less, which is what
+   * they were reported as.
+   */
+  apiTokensBefore: number;
   /** Wall time the subprocess took, for the log line. */
   elapsedMs: number;
 }
@@ -292,12 +348,70 @@ export function contextTokens(transcriptPath: string): number {
  * the one failure this must not have.
  */
 export function apiContextTokens(transcriptPath: string): number {
-  let text: string;
+  let tail: { text: string; whole: boolean };
   try {
-    text = fs.readFileSync(transcriptPath, "utf8");
+    tail = readTail(transcriptPath, TAIL_SCAN_BYTES);
   } catch {
     return 0;
   }
+  const fromTail = lastPromptTokens(tail.text);
+  if (fromTail !== null) return fromTail;
+  if (!tail.whole) {
+    // Nothing usable in the last megabyte, which is possible rather than
+    // theoretical: the largest transcript on this install is 9.1 MB over 789
+    // lines, so one tool result can be bigger than the window. Pay for the whole
+    // file rather than report a conversation as empty.
+    try {
+      const fromWhole = lastPromptTokens(fs.readFileSync(transcriptPath, "utf8"));
+      if (fromWhole !== null) return fromWhole;
+    } catch {
+      return 0;
+    }
+  }
+  return contextTokens(transcriptPath);
+}
+
+/**
+ * How much of a transcript's end is read looking for the last `usage` frame.
+ *
+ * A whole-file read used to be gated by a `statSync` in `checkContextCeilings`,
+ * and that gate had to go — the prompt carries tens of thousands of tokens no
+ * transcript holds, so a file under any byte threshold can be a cycle over the
+ * ceiling. This is what replaces it, and it bounds the work rather than
+ * guessing at it: the ceiling runs once a minute per live run, and the median
+ * transcript here is 771 KB against a 9.1 MB largest, where a whole-file read
+ * and split measured 23 ms.
+ *
+ * A megabyte because a line is a turn and a turn can be a tool result. The
+ * largest file here averages 11.6 KB per line, so this covers roughly 90 turns
+ * of the worst case measured; the fallback above covers the rest rather than
+ * this being sized for it.
+ */
+const TAIL_SCAN_BYTES = 1_048_576;
+
+/**
+ * The last `bytes` of a file, or all of it when it is smaller.
+ *
+ * `whole` is what tells the caller whether a miss is final. A window that
+ * starts mid-line leaves a torn first line, which the scan below drops the same
+ * way it drops the torn *last* line of a transcript being appended to — and a
+ * window that starts mid-character leaves a replacement char in that same line.
+ */
+function readTail(file: string, bytes: number): { text: string; whole: boolean } {
+  const fd = fs.openSync(file, "r");
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size <= bytes) return { text: fs.readFileSync(fd, "utf8"), whole: true };
+    const buffer = Buffer.allocUnsafe(bytes);
+    const read = fs.readSync(fd, buffer, 0, bytes, size - bytes);
+    return { text: buffer.subarray(0, read).toString("utf8"), whole: false };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** The prompt-plus-output of the last main-thread turn in `text`, or null. */
+function lastPromptTokens(text: string): number | null {
   const lines = text.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     const trimmed = lines[i].trim();
@@ -332,7 +446,7 @@ export function apiContextTokens(transcriptPath: string): number {
     if (prompt <= 0) continue;
     return prompt + num("output_tokens");
   }
-  return contextTokens(transcriptPath);
+  return null;
 }
 
 /**
@@ -434,6 +548,9 @@ export async function pruneTranscript(
   if (tokensBefore === 0) {
     return { kind: "failed", reason: `could not read ${path.basename(transcriptPath)}` };
   }
+  // Before the edit, and it has to be: winnow removes whole records, so the
+  // `usage` frame this reads is one of the things a prune can take away.
+  const apiTokensBefore = apiContextTokens(transcriptPath);
 
   const startedAt = Date.now();
   const run = await spawnPrune(transcriptPath, tier);
@@ -460,6 +577,7 @@ export async function pruneTranscript(
       tokensBefore,
       tokensAfter,
       tokensRemoved,
+      apiTokensBefore,
       elapsedMs: Date.now() - startedAt,
     },
   };

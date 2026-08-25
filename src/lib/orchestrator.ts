@@ -59,7 +59,6 @@ import {
 } from "./otlp";
 import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
 import { enabledPluginDirs, pluginDirArgs } from "./plugins";
-import { BYTES_PER_TOKEN } from "./fileCostNotice";
 import {
   apiContextTokens,
   contextTokens,
@@ -5569,8 +5568,9 @@ export function buildArgs(opts: {
   // **`--autocompact` used to be emitted here and deliberately is not any
   // more.** `contextPruning.ts` is what bounds a cycle's context now: it prunes
   // the transcript at each cycle boundary and ends a cycle early once its
-  // context passes `CYCLE_CONTEXT_CEILING_TOKENS`, which is the same 167,000
-  // the flag fired at.
+  // context passes `CYCLE_CONTEXT_CEILING_TOKENS`. That constant *was* the same
+  // 167,000 the flag fired at, which is what made the swap comparable; it is
+  // 300,000 since 2026-08-25, and `contextPruning.ts` carries why.
   //
   // What that swap gave up is on the record rather than in a commit message,
   // because it is the strongest measurement this repository has and a later
@@ -6774,13 +6774,40 @@ async function prune(
   const result = await pruneTranscript(transcript, settings.contextPruningStrictness);
   switch (result.kind) {
     case "pruned": {
-      const { tokensRemoved, tokensBefore, tokensAfter } = result.outcome;
+      const { tokensRemoved, tokensBefore, apiTokensBefore } = result.outcome;
       recordPrune(id, trigger, result.outcome, getRun(id)?.model ?? null);
       const pct = Math.round((tokensRemoved / tokensBefore) * 100);
+      // Reported in the ceiling's currency, because the two lines sit one under
+      // the other in the pane the operator is watching. The ceiling names the
+      // whole prompt and the transcript figures name the conversation inside it
+      // — tens of thousands of tokens apart, either way round — so a line
+      // ending "leaving 68.5k" under one saying "reached 183.7k" describes a
+      // context the next request will never carry, and was read as the ceiling
+      // miscounting.
+      //
+      // The after is derived rather than measured, and there is no alternative:
+      // no request has been made against the smaller conversation yet, so no
+      // `usage` frame exists for it. It errs high, because `contextTokens`
+      // understates what came out — the one crossing measured by hand took
+      // 62.6k off the API's prompt against the 50.3k reported here — and high
+      // is the direction to be wrong in, since it never claims more was freed
+      // than was. `max` because the intake filter can leave the API carrying
+      // less than the transcript holds.
+      //
+      // Subtracted rather than scaled by `contextAfterPrune`'s ratio, and the
+      // difference is the reason that function's basis-independence argument
+      // does not reach here: most of the gap between the two measures is a
+      // *fixed* system prompt and tool list, which a proportion shrinks along
+      // with the conversation. On the crossing measured by hand the ratio gave
+      // 105.6k against a real 120.6k, which is a line telling an operator the
+      // context is smaller than the next request will find it.
+      const apiTokensAfter = Math.max(0, apiTokensBefore - tokensRemoved);
       log(
         id,
-        `Pruned ${fmtTokens(tokensRemoved)} tokens from this run's conversation ` +
-          `(${pct}% of ${fmtTokens(tokensBefore)}), leaving ${fmtTokens(tokensAfter)}.`,
+        `Pruned ${fmtTokens(tokensRemoved)} tokens of conversation ` +
+          `(${pct}% of the ${fmtTokens(tokensBefore)} of turns on this run's transcript), ` +
+          `taking the context from ${fmtTokens(apiTokensBefore)} to about ` +
+          `${fmtTokens(apiTokensAfter)}.`,
       );
       return result.outcome;
     }
@@ -6824,20 +6851,40 @@ async function pruneAtBoundary(
  * exist when it was written: there, a compaction is what shrinks the tail and
  * reading a high-water mark is what would get it backwards.
  *
- * Scaled rather than replaced, and that is the careful part. The two figures are
- * not the same measurement — one is exact from `usage`, the other is
+ * Corrected rather than replaced, and that is the careful part. The two figures
+ * are not the same measurement — one is exact from `usage`, the other is
  * `contextTokens`' estimate over content — so substituting the estimate would
- * put a different basis into a threshold the operator set against the first. The
- * *ratio* is basis-independent, being an estimate over the same file twice
- * seconds apart, so applying it keeps the billed figure and moves it by the
- * proportion actually removed.
+ * put a different basis into a threshold the operator set against the first.
+ * What is carried across is the **amount removed**, which is a quantity of
+ * conversation and belongs to neither basis.
+ *
+ * ## Why the amount and not the ratio
+ *
+ * This scaled the billed figure by `tokensAfter / tokensBefore` until
+ * 2026-08-25, on the argument that a ratio taken over one file twice seconds
+ * apart is basis-independent. It is — but the figure it is applied to is not a
+ * conversation. Most of the gap between the two measures is a **fixed** system
+ * prompt, tool list and set of project instructions, and a proportion shrinks
+ * those along with the turns, crediting a prune with freeing context that was
+ * never removable. Measured on the crossing in `docs/verification.md`: the
+ * ratio put a real 120,595-token remainder at 105,600, low by 15,000, where
+ * subtracting what came out puts it at 132,900, high by 12,300. The part a
+ * ratio cannot see is ~55,000 tokens wide.
+ *
+ * High is the direction to be wrong in here for the same reason it is on the
+ * log line: `contextTokens` understates what a prune removed, so a subtraction
+ * can only ever claim *less* was freed than was, and the failure mode of this
+ * function is a fresh start that did not need to happen.
  */
 export function contextAfterPrune(
   before: number,
   outcome: PruneOutcome | null,
 ): number {
-  if (!outcome || outcome.tokensBefore <= 0) return before;
-  return Math.round(before * (outcome.tokensAfter / outcome.tokensBefore));
+  if (!outcome) return before;
+  // `max` for the case the intake filter creates: it drops tool results on the
+  // wire while the transcript keeps them, so a prune can report removing more
+  // conversation than the API was carrying in the first place.
+  return Math.max(0, before - outcome.tokensRemoved);
 }
 
 /** How much of a refused command is kept. Long enough to name it, not to log it. */
@@ -9035,10 +9082,11 @@ async function liveGuardTick(): Promise<void> {
       return;
     }
 
-    // Before the budget scan, and cheap enough to run first: it stats one file
-    // per run and parses only the ones large enough to be near the ceiling. A
-    // run that crosses it is interrupted here and then skipped by the budget
-    // loop below on the `interrupts.has(id)` test every branch already makes.
+    // Before the budget scan, and cheap enough to run first: it reads one file
+    // per run and parses backwards from its end until it finds a usage frame. A
+    // run that crosses the ceiling is interrupted here and then skipped by the
+    // budget loop below on the `interrupts.has(id)` test every branch already
+    // makes.
     await checkContextCeilings();
 
     const pending = [...liveGuards].filter(([id]) => !interrupts.has(id));
@@ -9076,7 +9124,7 @@ async function liveGuardTick(): Promise<void> {
 }
 
 /**
- * End any cycle whose conversation has passed the ceiling, so it can be pruned.
+ * End any cycle whose context has passed the ceiling, so it can be pruned.
  *
  * This is what replaced `--autocompact`, and the shape of the replacement is the
  * part worth reading. The CLI compacted *in place*: it summarised the
@@ -9087,13 +9135,24 @@ async function liveGuardTick(): Promise<void> {
  * the CLI cannot is end the cycle, which puts the transcript back in nobody's
  * hands, and that is the whole mechanism.
  *
- * ## The cheap gate
+ * ## Why there is no size gate any more
  *
- * `contextTokens` parses a whole transcript, and this runs once a minute per
- * live run. So the file's *size* is tested first: message content is a subset of
- * the file, so a file smaller than the ceiling's worth of bytes cannot hold a
- * conversation past the ceiling. That is a sound one-sided test — it can defer a
- * crossing to the next tick on a file that has just grown, never miss one.
+ * A `statSync` used to stand in front of this, skipping any transcript smaller
+ * than the ceiling's worth of bytes on the argument that message content is a
+ * subset of the file, so a file that small cannot hold a conversation past the
+ * ceiling. That was sound while the measure was `contextTokens`, and it stopped
+ * being sound the moment this started reading `apiContextTokens`: the prompt
+ * carries ~55,000 tokens of system prompt, tool list and project instructions
+ * that are in no transcript at all, so a file **under** the gate can be a cycle
+ * over the ceiling. It held anyway because a transcript's envelopes outweigh
+ * that — measured at 1.74× the message bytes on this install — but that is a
+ * property of how tool-heavy a run happens to be, not a bound, and what it
+ * hides is silent: a cycle that never gets ended and never gets pruned.
+ *
+ * What it bought is also smaller than it was. `contextTokens` JSON-parses every
+ * line; `apiContextTokens` reads the file and parses backwards from the end,
+ * stopping at the first `usage` frame — a read and a split for a file of a few
+ * megabytes, once a minute per live run.
  *
  * ## Why the payback test uses the last receipt
  *
@@ -9120,17 +9179,13 @@ async function checkContextCeilings(): Promise<void> {
     try {
       const transcript = await resolveSessionTranscript(sessionId);
       if (!transcript) continue;
-      // The one-sided gate, and it stays one-sided under `apiContextTokens`:
-      // what the API carries is never more than the transcript holds, so a file
-      // too small to reach the ceiling by bytes cannot reach it by usage either.
-      if (fs.statSync(transcript).size < CYCLE_CONTEXT_CEILING_TOKENS * BYTES_PER_TOKEN) {
-        continue;
-      }
       // Read off `usage` rather than estimated from bytes. The two diverge by
-      // ~69,000 tokens on this install now that the intake filter drops tool
-      // results on the wire while the transcript keeps them — see
-      // `apiContextTokens`. Ending a cycle against a conversation the API was
-      // never asked to carry is a prune that pays `1.9·S` for nothing.
+      // tens of thousands of tokens in both directions on this install — the
+      // intake filter drops tool results on the wire while the transcript keeps
+      // them, and the prompt carries a system prompt and tool list the
+      // transcript never held. See `apiContextTokens`. Ending a cycle against a
+      // conversation the API was never asked to carry is a prune that pays
+      // `1.9·S` for nothing.
       tokens = apiContextTokens(transcript);
     } catch {
       // A transcript that cannot be read is not a run to end. The budget guards
@@ -9148,7 +9203,7 @@ async function checkContextCeilings(): Promise<void> {
         earlyEndDeclined.add(id);
         log(
           id,
-          `This run's conversation has passed ${fmtTokens(CYCLE_CONTEXT_CEILING_TOKENS)} tokens, ` +
+          `This run's context has passed ${fmtTokens(CYCLE_CONTEXT_CEILING_TOKENS)} tokens, ` +
             `but the last prune here removed too little to pay for another one ` +
             `(it would need ${predicted} more turns to break even). Letting the cycle run on.`,
         );
@@ -9159,7 +9214,7 @@ async function checkContextCeilings(): Promise<void> {
     interruptRun(id, {
       kind: "prune",
       reason:
-        `This work cycle's conversation reached ${fmtTokens(tokens)} tokens, so it was ` +
+        `This work cycle's context reached ${fmtTokens(tokens)} tokens, so it was ` +
         `ended here to be pruned. The next cycle carries on from a smaller conversation.`,
       pause: false,
       at: Date.now(),
