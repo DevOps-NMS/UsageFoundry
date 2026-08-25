@@ -155,8 +155,8 @@ section is the precedent for an operator-declared list living in Settings
 
 - A `ListGroup` of entries, each with a state badge.
 - **`unverified`, never `installed`.** The app does not assert what it has not
-  checked (`14-` §5), and the shape is the metering rule's: unknown renders as a
-  hatched indeterminate meter, never a 0% bar (`docs/agent/metering.md`).
+  checked (`14-` §5), and the shape is the metering rule's — *"Unknown must not
+  render as zero"* (`docs/agent/metering.md:8`).
 - A footnote in the shape of the plugins one (`:3390`): an installed tool is on
   every agent's `PATH`, and the app has not checked that a work cycle may invoke
   it.

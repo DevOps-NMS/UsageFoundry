@@ -33,7 +33,9 @@ that shape with a different payload, and the shape is known to work.
 - **Schema — one table, `stacks`, plus one child table.** Idempotent
   `CREATE TABLE IF NOT EXISTS` inside the big `db.exec()` in `migrate()`
   (`src/lib/db.ts:136-688`), per `CLAUDE.md`'s rule and in the company of the
-  five that are already there. Columns: `id`, `name`, `created_at`,
+  five operator-declared lists already there — `settings` (`:137`),
+  `run_templates` (`:242`), `agents` (`:281`), `workflows` (`:371`) and
+  `workflow_schedules` (`:512`). Columns: `id`, `name`, `created_at`,
   `updated_at`, `enabled`. Entries in `stack_entries`: `stack_id`, `position`,
   `ecosystem`, `name`, `version`, `source`, `last_result`, `last_error`,
   `last_seen_at`.

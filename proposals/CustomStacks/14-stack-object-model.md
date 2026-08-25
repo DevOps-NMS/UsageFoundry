@@ -168,8 +168,9 @@ And nothing anywhere proves `invokable` without spending money.
 
 **Every option in this directory that puts `installed` on a page asserts state 2
 and implies state 3.** The honest rendering is the one the metering rules already
-require of every meter in this app: *unknown renders as a hatched indeterminate
-meter, never a 0% bar* (`docs/agent/metering.md`). Applied here that is one word:
+require of every meter in this app: *"Unknown must not render as zero… a hatched
+indeterminate meter ('no ceiling set'), never an empty 0% bar"*
+(`docs/agent/metering.md:8`). Applied here that is one word:
 a tool whose invocation has never been observed reads **`unverified`**, never
 `installed`. It is the difference between the read-back being true and being the
 fourth silent failure.
