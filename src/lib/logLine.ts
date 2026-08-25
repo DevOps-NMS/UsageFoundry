@@ -300,7 +300,13 @@ function statusTone(status: unknown): LogTone {
 
 /**
  * Null for an event with nothing to show — a blank content block, or the CLI's
- * own `system:` chatter, which is noise once a run is underway.
+ * own `system:` chatter, which is noise *in a feed* once a run is underway.
+ *
+ * Noise here is not noise everywhere, and the drop below is not a statement
+ * that the rows are worthless: `runTasks.ts` reduces the `system:task_*` ones
+ * into the run page's background-task panel. A task's five state changes are a
+ * header somebody keeps, not five more lines to scroll past — which is the
+ * whole reason they leave by this door and arrive by that one.
  *
  * The switch has no `default`, on purpose: every kind is handled by name, so
  * adding one to `RunEventDTO` is a compile error here rather than a line that

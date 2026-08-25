@@ -7325,6 +7325,11 @@ function handleStreamLine(
     // and `task_progress` is three orders of magnitude rarer. A rule broad
     // enough to cover a future content-free subtype would be broad enough to
     // lose those, silently, the way a deny list fails open.
+    //
+    // `task_started`, `background_tasks_changed`, `task_updated` and
+    // `task_notification` are now the source `runTasks.ts` reduces into the run
+    // page's background-task panel, and these rows are the only record of them.
+    // That the log feed drops the line is not evidence the row is unread.
     if (ev.subtype !== "thinking_tokens") {
       emit({
         runId,
