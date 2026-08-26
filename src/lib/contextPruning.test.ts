@@ -15,6 +15,7 @@ import {
   isPruneTier,
   MIN_CONTROL_RESUMES,
   netReceipt,
+  BOUNDARY_BREAK_EVEN_BUDGET,
   parseFork,
   parsePlan,
   paybackTurns,
@@ -881,6 +882,72 @@ describe("parseFork", () => {
     assert.equal(fork.refusedBy, null);
     assert.equal(fork.netBytes, 22725);
     assert.equal(fork.breakEvenTurns, 82.8);
+  });
+
+  /**
+   * winnow 1.9.0's own gate, refusing. Produced by running the real command
+   * against a real transcript on this install: 2.6 KB of strippable results
+   * sitting behind a 686 KB suffix, which needs 5,063 further turns before the
+   * 0.1·D it earns each turn covers the 1.9·S it cost once.
+   *
+   * This app does not arm that gate — `BOUNDARY_BREAK_EVEN_BUDGET` says why —
+   * so the body is here to prove the reader keeps working if anyone ever does,
+   * and that a refusal on arithmetic reads as a refusal rather than a breakage.
+   */
+  const REFUSED_BREAK_EVEN = JSON.stringify({
+      "written": false,
+      "new_session_id": "91ef4603-ef53-56c4-bbf8-af9b8a4b1f1a",
+      "out": "/data/projects/91ef4603-ef53-56c4-bbf8-af9b8a4b1f1a.jsonl",
+      "refusals": [
+          {
+              "guard": "break-even",
+              "forceable": true,
+              "reason": "this cut needs 5,063 further turns to pay for the cache invalidation it causes, and --max-break-even says the session has 60. It removes 2,625 bytes net from behind a 702,323-byte suffix, so S/D is 267.6 and T* = 19·(S/D) − 20 (SPEC §7): the edit costs 1.9·S once and earns back 0.1·D on each later turn. Nothing was written; --force writes it anyway."
+          }
+      ],
+      "cold_age": {
+          "seconds": 1209258.407,
+          "threshold": 3600,
+          "measured_from": "the newest record timestamp"
+      },
+      "break_even": {
+          "turns": 5063.5,
+          "budget": 60,
+          "pays": false
+      },
+      "plan": {
+          "bytes": {
+              "removed": 2787,
+              "pointer_overhead": 162,
+              "net": 2625
+          },
+          "arithmetic": {
+              "suffix_bytes": 702323,
+              "break_even_turns": 5063.5,
+              "max_break_even": 60,
+              "pays_within_budget": false
+          }
+      }
+  });
+
+  it("reads the break-even guard the same way as any other refusal", () => {
+    const fork = parseFork(REFUSED_BREAK_EVEN);
+    assert.ok(fork);
+    assert.equal(fork.written, false);
+    assert.equal(fork.newSessionId, null);
+    assert.equal(fork.refusedBy, "break-even");
+    assert.equal(fork.breakEvenTurns, 5063.5);
+    assert.match(fork.reason ?? "", /--max-break-even/);
+  });
+
+  it("does not arm winnow's break-even gate at a cycle boundary", () => {
+    // A decision, locked. The boundary is the one moment the invalidation is
+    // refunded — `--resume` rewrites the prefix regardless — so a gate priced
+    // on `1.9·S` refuses cuts that are free. The `WRITTEN` body above is the
+    // proof by example: a real fork of this install at 82.8 break-even turns,
+    // which winnow's default budget of 60 would now refuse.
+    assert.equal(BOUNDARY_BREAK_EVEN_BUDGET, null);
+    assert.ok((parseFork(WRITTEN)?.breakEvenTurns ?? 0) > 60);
   });
 
   it("returns null on a body that is not JSON, so stderr can be tried next", () => {

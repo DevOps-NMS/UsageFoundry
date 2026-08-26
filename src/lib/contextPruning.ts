@@ -929,6 +929,41 @@ export function recordPlanObservation(
 /* ------------------------------------------------------------------ */
 
 /**
+ * The break-even budget this app asks winnow for, and why it is `null`.
+ *
+ * winnow 1.9.0 refuses a fork whose `T* = 19·(S/D) − 20` is above a budget of
+ * further turns, defaulting to 60. That gate is right for what it was measured
+ * on — an operator forking a session they are about to go on using, where the
+ * invalidation is real and comes out of that session's remaining turns. Over
+ * 396 of this install's transcripts, forking on every rule hit came to −$10.85
+ * and the gate turned it into +$56.06.
+ *
+ * It is the wrong question **here**, and inheriting it would be a silent
+ * regression. This app forks only at a cycle boundary, and the argument in this
+ * module's header is that `--resume` was going to rewrite the prefix regardless,
+ * so the cut rides a write already committed and the `1.9·S` term is not the
+ * fork's to pay. A gate priced on that term refuses cuts that are free: the
+ * `WRITTEN` fixture in `contextPruning.test.ts` is a real fork of this install
+ * carrying `break_even_turns: 82.8`, written before the gate existed and refused
+ * by its default afterwards.
+ *
+ * `null` is sent as `--max-break-even none` — winnow's spelling for "the
+ * question does not arise", which is deliberately not `0`. It is passed
+ * explicitly on every argv rather than left to the default, so that a later
+ * winnow release changing its own mind cannot move this app without a diff.
+ *
+ * **What would overturn it.** `resumeControl` is the experiment already built
+ * for this: it reads clean boundaries — resumes with no prune before them — and
+ * reports the share that came back warm. A warm clean resume means the prefix
+ * *was* still cached, the boundary refund is not real, and the honest value here
+ * becomes `PAYBACK_HORIZON_TURNS` — along with every figure in this file that
+ * prices a boundary invalidation at zero. Until that control has
+ * `MIN_CONTROL_RESUMES` behind it, the value that changes nothing is the honest
+ * one.
+ */
+export const BOUNDARY_BREAK_EVEN_BUDGET: number | null = null;
+
+/**
  * `winnow fork --write --json`, for one transcript.
  *
  * The other engine. `treat` edits the transcript in place and the run keeps its
@@ -944,7 +979,9 @@ export function recordPlanObservation(
  * one is `cold-age`: winnow will not cut a conversation whose last request is
  * younger than `--min-cold-age` because the prefix may still be cached and the
  * cut is then not free. The body carries `refusals[]` with a `guard` name, so a
- * caller can tell "the guard stood" from "the tool broke" and say so.
+ * caller can tell "the guard stood" from "the tool broke" and say so. Since
+ * winnow 1.9.0 there is a second guard a boundary can meet, `break-even`, and
+ * `BOUNDARY_BREAK_EVEN_BUDGET` is why this app does not arm it.
  *
  * **Exit 2 is nothing to do** — no result met a rule at this tier — and its
  * body is success-shaped with `written: false`.
@@ -972,6 +1009,7 @@ export interface ForkResult {
 export function forkTranscript(
   transcriptPath: string,
   minColdAgeSeconds: number | null,
+  maxBreakEven: number | null = BOUNDARY_BREAK_EVEN_BUDGET,
 ): Promise<ForkResult | null> {
   return new Promise((resolve) => {
     if (!winnowAvailable()) {
@@ -1009,6 +1047,14 @@ export function forkTranscript(
     if (minColdAgeSeconds !== null) {
       argv.push("--min-cold-age", String(Math.floor(minColdAgeSeconds)));
     }
+    // Always passed, unlike --min-cold-age above: this app has a position on the
+    // break-even question at a boundary and the argv should carry it, so that a
+    // winnow release moving its own default cannot move this app silently.
+    // See BOUNDARY_BREAK_EVEN_BUDGET.
+    argv.push(
+      "--max-break-even",
+      maxBreakEven === null ? "none" : String(Math.floor(maxBreakEven)),
+    );
 
     try {
       const child = spawn(WINNOW_PYTHON, argv, {

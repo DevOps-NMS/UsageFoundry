@@ -326,7 +326,7 @@ ENV PATH="/home/node/pytools/bin:${PATH}" \
 # command this repository added fell through `refusal_for` as unclassified and
 # therefore allowed.
 ARG WINNOW_REPO=https://github.com/Xapicc/winnow.git
-ARG WINNOW_REF=4512a0cc135404f1fa0d0ddf7a04133aab65ee93
+ARG WINNOW_REF=fb498020c955f092016685d2d4231af2c3bbb16c
 RUN set -eux; \
     if [ -z "${WINNOW_REF}" ]; then \
       echo "WINNOW_REF empty — building without winnow; context pruning will report unavailable"; \

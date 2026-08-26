@@ -7011,6 +7011,19 @@ async function forkAtBoundary(
           `and the cut would not be free. Raise or lower ` +
           `contextPruningForkMinColdAge to change that, deliberately.`,
       );
+    } else if (result.refusedBy === "break-even") {
+      // Reachable only if someone armed the gate: `forkAtBoundary` asks for
+      // `--max-break-even none` because a boundary cut rides a rewrite that was
+      // going to happen (contextPruning's BOUNDARY_BREAK_EVEN_BUDGET). Kept
+      // anyway, because a refusal that surprises this app should read as the
+      // arithmetic it is rather than as a broken install.
+      log(
+        id,
+        `Left this run's conversation alone: winnow priced the cut at ` +
+          `${result.breakEvenTurns ?? "?"} further turns before it would pay for ` +
+          `the cache invalidation, which is more than it was told this run has ` +
+          `left. Nothing was written.`,
+      );
     } else if (result.refusedBy) {
       log(id, `Winnow refused to fork this run's conversation (${result.refusedBy}): ${result.reason ?? "no reason given"}.`);
     } else if (result.reason) {
