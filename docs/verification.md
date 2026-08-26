@@ -1779,6 +1779,37 @@ through before trusting this unattended:
   sweeps none of it) but no sweep has removed a real sample, and no run has
   reached `CONTEXT_SAMPLES_PER_RUN`.
 
+  **The occupancy panel that draws that series was rendered by a browser, and
+  the run page it sits on was not.** Correcting the entry two above: this
+  container *does* carry a headless Chromium on `PATH`, and it was used here.
+  `ContextOccupancy` was compiled by `tsconfig.test.json`, put through
+  `renderToStaticMarkup` in four states — a 64-point run with two cuts, an
+  18-point run with one, a single reading, and a run with a prune and no
+  readings at all — and each was laid out in a 336px box (the inspector
+  column's `21rem` less `Card`'s padding) against **the production CSS the
+  build emitted**, in light and again under `:root[data-theme="dark"]`.
+  Screenshots were read back. What that establishes: every token class the
+  panel uses resolves in both schemes, including `fill-surface` on the
+  fallback-basis markers, which have to be opaque against the card to read as
+  hollow; the sawtooth is legible at that width with the prune rules landing on
+  the cliffs rather than beside them; the ceiling rule and the baseline are both
+  distinguishable from the series; and the hatched no-reading state is visibly
+  not a zero fill. The legend's worst case — all three items, ceiling and prunes
+  and a fallback count — fits on one line at that width without wrapping.
+
+  What it does not establish. The series was **synthetic** — a generated
+  sawtooth, not `context_samples` rows a run wrote — so this says nothing the
+  entry above does not already withdraw about the data. The panel was rendered
+  **in isolation**, never inside `runs/[id]`: its placement in the `Against its
+  limits` region, its spacing under the `Guards` block, and the way it behaves
+  when the poll replaces the DTO every three seconds have not been seen. And
+  nothing was driven at a narrow viewport, where the inspector stacks above the
+  pane. A human opening a real run should look at those four things: the block's
+  position and spacing in the inspector, the figure and the fill moving together
+  as the poll lands, the panel at one column, and whether the caption's length
+  is right beside the blocks around it — it is the longest paragraph in that
+  region and only the isolated card has been looked at.
+
   **The intake-filter half was rendered as markup and it caught a defect.**
   Eight filter states — read, ledger missing with the filter off, ledger missing
   with it on, unreadable, empty, nothing priced, a read ledger nothing is

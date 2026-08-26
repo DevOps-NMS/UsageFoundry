@@ -4,6 +4,7 @@ import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
 import type {
+  ContextOccupancyDTO,
   EnforcementModeDTO,
   RunDTO,
   RunEventDTO,
@@ -40,6 +41,7 @@ import {
   type SegmentedOption,
 } from "@/components/ui/SegmentedControl";
 import { StatusMark } from "@/components/StatusMark";
+import { ContextOccupancy } from "@/components/ContextOccupancy";
 import { cycleOutputs } from "@/lib/cycles";
 import {
   LOG_FILTER_OPTIONS,
@@ -448,6 +450,10 @@ export default function RunDetail({
   const [run, setRun] = useState<RunDTO | null>(null);
   const [telemetry, setTelemetry] = useState<RunTelemetryDTO | null>(null);
   const [pruning, setPruning] = useState<PruneSavingsDTO | null>(null);
+  // Rides the run poll below rather than a route of its own: this is the row's
+  // own state and arrives with the rest of it, so a second timer would only add
+  // a way for the indicator and the run header to disagree about the same run.
+  const [context, setContext] = useState<ContextOccupancyDTO | null>(null);
   const [events, setEvents] = useState<RunEventDTO[]>([]);
   const [connected, setConnected] = useState(false);
   const [pollError, setPollError] = useState<string | null>(null);
@@ -531,6 +537,7 @@ export default function RunDetail({
           run?: RunDTO;
           telemetry?: RunTelemetryDTO | null;
           pruning?: PruneSavingsDTO | null;
+          context?: ContextOccupancyDTO | null;
           error?: string;
         };
         if (!alive) return;
@@ -545,6 +552,7 @@ export default function RunDetail({
         setRun(json.run);
         setTelemetry(json.telemetry ?? null);
         setPruning(json.pruning ?? null);
+        setContext(json.context ?? null);
         setPollError(null);
       } catch (err) {
         if (!alive) return;
@@ -1296,6 +1304,23 @@ export default function RunDetail({
                 </ListRow>
               </ListGroup>
             </Section>
+
+            {/* Here rather than beside the pruning figures, and the region is
+                the reason: this is a reading against a limit that acts on the
+                run — the size at which a work cycle is ended early — and it is
+                not money. In `What it has spent` its token count would sit
+                under a heading that says every figure below it is spend, one
+                block away from a prune's `tokensRemoved`, which is the exact
+                subtraction the component's caption exists to refuse. */}
+            {context && (
+              <Section title="Context">
+                <ContextOccupancy
+                  context={context}
+                  now={nowTick}
+                  live={active}
+                />
+              </Section>
+            )}
           </Region>
 
           {/* Three readings of overlapping money, and the region is what says
