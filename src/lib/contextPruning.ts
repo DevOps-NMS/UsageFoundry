@@ -497,6 +497,52 @@ export function paybackTurns(suffixBeforeCut: number, removedTokens: number): nu
   return Math.max(0, Math.round(turns));
 }
 
+/**
+ * One record of a past cut: when it was made, and the `S` and `D` it had.
+ *
+ * The units are whatever the row that produced it used — `prune_receipts` counts
+ * tokens and `fork_attempts` counts bytes — and that is safe because
+ * `paybackTurns` reads `S/D` as a ratio and a reading never mixes two rows.
+ * Nothing may combine `s` from one reading with `d` from another.
+ */
+export interface PaybackReading {
+  ts: number;
+  /** `S`: the suffix as it stood **before** the cut. Never the after figure. */
+  s: number;
+  /** `D`: what came out, net of anything written in its place. */
+  d: number;
+}
+
+/**
+ * What a further cut on this run would cost, from whichever engine cut last.
+ *
+ * The two engines leave different records — `treat` writes a `prune_receipts`
+ * row, `fork` writes a `fork_attempts` row — and the gates that consult this
+ * (`boundaryAction`, and the ceiling watcher deciding whether to end a cycle
+ * early) resolve `null` to *act*. So reading one table alone does not degrade
+ * gracefully under the other engine: it leaves both gates permanently open on
+ * exactly the engine this app is moving to, while looking like a run that had
+ * simply never pruned.
+ *
+ * Newest wins. A refusal is still a reading — it removed nothing, but its plan
+ * measured the cut that was on offer, which is what a prediction wants — and
+ * under the default cold age a refusal is the common outcome, so dropping them
+ * would empty the evidence for most runs.
+ *
+ * Pure, and separate from the two SELECTs behind it, on `boundaryAction`'s
+ * reasoning: this is the arithmetic, and the arithmetic should be testable
+ * without a database under it.
+ */
+export function freshestPayback(
+  receipt: PaybackReading | null | undefined,
+  fork: PaybackReading | null | undefined,
+): number | null {
+  const latest = [receipt, fork]
+    .filter((r): r is PaybackReading => Boolean(r))
+    .sort((a, b) => b.ts - a.ts)[0];
+  return latest ? paybackTurns(latest.s, latest.d) : null;
+}
+
 /** Is the feature on, and is the tool here to do it? */
 export function pruningEnabled(s: Settings = getSettings()): boolean {
   return s.contextPruning && winnowAvailable();
@@ -939,13 +985,27 @@ export function recordPlanObservation(
  * and the gate turned it into +$56.06.
  *
  * It is the wrong question **here**, and inheriting it would be a silent
- * regression. This app forks only at a cycle boundary, and the argument in this
- * module's header is that `--resume` was going to rewrite the prefix regardless,
- * so the cut rides a write already committed and the `1.9·S` term is not the
- * fork's to pay. A gate priced on that term refuses cuts that are free: the
+ * regression. This app forks only where a resume is already committed, and the
+ * argument in this module's header is that `--resume` rewrites the prefix
+ * regardless — so the cut rides a write already paid for and the `1.9·S` term is
+ * not the fork's. A gate priced on that term refuses cuts that are free: the
  * `WRITTEN` fixture in `contextPruning.test.ts` is a real fork of this install
  * carrying `break_even_turns: 82.8`, written before the gate existed and refused
  * by its default afterwards.
+ *
+ * **Both moments, and the second one is the counter-intuitive half.** A natural
+ * boundary was going to resume anyway. A manufactured one — the early-end path,
+ * where the ceiling watcher interrupts a cycle *in order* to prune — pays for
+ * the rewrite by ending the cycle, and that is spent at the moment of the
+ * interrupt whether or not anything is then cut. So by the time the fork runs,
+ * the invalidation is sunk in both cases and the arithmetic is the same. Gating
+ * the fork would only mean paying for a manufactured boundary and then declining
+ * to use it.
+ *
+ * The gate that does belong on the early-end path is the one already there, and
+ * it is `PAYBACK_HORIZON_TURNS` deciding whether to interrupt at all
+ * (`orchestrator.ts`, the ceiling watcher). That is the decision with a real
+ * cost behind it.
  *
  * `null` is sent as `--max-break-even none` — winnow's spelling for "the
  * question does not arise", which is deliberately not `0`. It is passed

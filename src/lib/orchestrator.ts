@@ -61,10 +61,13 @@ import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents"
 import { enabledPluginDirs, pluginDirArgs } from "./plugins";
 import {
   apiContextTokens,
+  BOUNDARY_BREAK_EVEN_BUDGET,
   contextTokens,
   CYCLE_CONTEXT_CEILING_TOKENS,
+  freshestPayback,
   PAYBACK_HORIZON_TURNS,
   paybackTurns,
+  type PaybackReading,
   boundaryAction,
   forkTranscript,
   pendingForkFor,
@@ -6926,7 +6929,13 @@ async function pruneAtBoundary(
   }
   const outcome =
     settings.contextPruningEngine === "winnow"
-      ? await forkAtBoundary(id, sessionId, settings.contextPruningForkMinColdAge, adopt)
+      ? await forkAndAdopt(
+          id,
+          sessionId,
+          settings.contextPruningForkMinColdAge,
+          BOUNDARY_BREAK_EVEN_BUDGET,
+          adopt,
+        )
       : await prune(id, sessionId, "boundary");
   // `sessionId` and not whatever the fork adopted: the probe is a statement
   // about the conversation that was standing at this boundary, and the control
@@ -6962,8 +6971,59 @@ async function settleBoundary(
 }
 
 /**
- * The fork engine's boundary: cut into a new transcript and switch the run onto
- * it, provisionally.
+ * Cut at the boundary this app just manufactured by ending a cycle early.
+ *
+ * The sibling of `pruneAtBoundary`, and it exists because the engine switch did
+ * not: `contextPruningEngine: "winnow"` forked at the natural boundary and then
+ * ran the **legacy in-place pruner** here, so a run crossing the ceiling was cut
+ * by whichever engine the moment happened to reach, not by the one the operator
+ * chose. Two engines with different rules, different guards and different
+ * receipts, selected by timing.
+ *
+ * There is no payback gate here and that is deliberate. The ceiling watcher has
+ * already made the only decision with a cost behind it — whether to spend a work
+ * cycle manufacturing this boundary, which it takes against
+ * `PAYBACK_HORIZON_TURNS`. That cycle is spent by the time this runs, cut or no
+ * cut, so a second gate on the same arithmetic could only decline to use a
+ * boundary already paid for. `BOUNDARY_BREAK_EVEN_BUDGET` carries the argument.
+ *
+ * What still stands is `--min-cold-age`, and on this path it stands hard: the
+ * session was live seconds ago, so winnow refuses unless the operator has
+ * lowered `contextPruningForkMinColdAge` deliberately. That refusal is the tool
+ * working — a prefix that may still be cached is a cut that is not free — and it
+ * reads as one in the log rather than as a breakage.
+ */
+async function pruneAtEarlyEnd(
+  id: string,
+  sessionId: string | null,
+  adopt: (sid: string) => void,
+): Promise<PruneOutcome | null> {
+  const settings = getSettings();
+  // Checked here as well as inside `prune`, on `pruneAtBoundary`'s reasoning:
+  // the fork path does not go through `prune` and would otherwise spawn winnow
+  // against an install that has context pruning switched off.
+  if (!settings.contextPruning) return null;
+  return settings.contextPruningEngine === "winnow"
+    ? await forkAndAdopt(
+        id,
+        sessionId,
+        settings.contextPruningForkMinColdAge,
+        BOUNDARY_BREAK_EVEN_BUDGET,
+        adopt,
+      )
+    : await prune(id, sessionId, "early-end");
+}
+
+/**
+ * The fork engine: cut into a new transcript and switch the run onto it,
+ * provisionally.
+ *
+ * Called from both moments a resume is already committed — the natural cycle
+ * boundary and the manufactured one the ceiling watcher makes by ending a cycle
+ * early. Nothing here distinguishes them, because by the time this runs there is
+ * nothing to distinguish: the rewrite is spent either way and the cut rides it.
+ * `maxBreakEven` carries the caller's position on that; see
+ * `BOUNDARY_BREAK_EVEN_BUDGET`.
  *
  * Returns null always, and that is not a stub. `PruneOutcome` describes an
  * in-place edit — a before and an after of one file — and a fork has neither,
@@ -6975,10 +7035,11 @@ async function settleBoundary(
  * only thing that proves a fork resumes is a resume. `pendingFork` carries the
  * way back, and the resume-failure branch in the run loop takes it.
  */
-async function forkAtBoundary(
+async function forkAndAdopt(
   id: string,
   sessionId: string | null,
   minColdAge: number | null,
+  maxBreakEven: number | null,
   adopt: (sid: string) => void,
 ): Promise<PruneOutcome | null> {
   if (!sessionId) return null;
@@ -6988,7 +7049,7 @@ async function forkAtBoundary(
     return null;
   }
 
-  const result = await forkTranscript(transcript, minColdAge);
+  const result = await forkTranscript(transcript, minColdAge, maxBreakEven);
   if (!result) {
     log(id, `Context pruning is switched on but winnow is not installed.`);
     return null;
@@ -7012,7 +7073,7 @@ async function forkAtBoundary(
           `contextPruningForkMinColdAge to change that, deliberately.`,
       );
     } else if (result.refusedBy === "break-even") {
-      // Reachable only if someone armed the gate: `forkAtBoundary` asks for
+      // Reachable only if someone armed the gate: both callers ask for
       // `--max-break-even none` because a boundary cut rides a rewrite that was
       // going to happen (contextPruning's BOUNDARY_BREAK_EVEN_BUDGET). Kept
       // anyway, because a refusal that surprises this app should read as the
@@ -8745,7 +8806,10 @@ export async function startRun(id: string): Promise<void> {
 
         lastContextTokens = contextAfterPrune(
           lastContextTokens,
-          await prune(id, sessionId, "early-end"),
+          // `adoptSession` and not `prune` directly: under the fork engine this
+          // writes a new transcript and the run has to move onto it, exactly as
+          // at a natural boundary. Passing the closure is what lets it.
+          await pruneAtEarlyEnd(id, sessionId, adoptSession),
         );
         continue;
       }
@@ -9596,17 +9660,27 @@ async function checkContextCeilings(): Promise<void> {
  */
 function predictedPayback(runId: string): number | null {
   try {
-    const row = db()
-      .prepare(
-        `SELECT tokens_before, tokens_removed FROM prune_receipts
-          WHERE run_id = ? ORDER BY ts DESC LIMIT 1`,
-      )
-      .get(runId) as { tokens_before: number; tokens_removed: number } | undefined;
-    if (!row) return null;
     // `tokens_before`, never `tokens_after`. See `paybackTurns`: S is the suffix
     // as it stood before the cut, and the after figure is short by exactly the
     // amount removed — which flatters the small cuts this test exists to refuse.
-    return paybackTurns(row.tokens_before, row.tokens_removed);
+    const receipt = db()
+      .prepare(
+        `SELECT ts, tokens_before AS s, tokens_removed AS d FROM prune_receipts
+          WHERE run_id = ? ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(runId) as PaybackReading | undefined;
+    // The other engine's record of the same two quantities: S is the suffix
+    // standing after the cut line and D is what came out net of the pointers
+    // that replaced it. Reading receipts alone left a run under the fork engine
+    // with no prediction at all — see `freshestPayback`, which also holds the
+    // note about the two tables' units.
+    const fork = db()
+      .prepare(
+        `SELECT ts, suffix_bytes AS s, net_bytes AS d FROM fork_attempts
+          WHERE run_id = ? AND net_bytes > 0 ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(runId) as PaybackReading | undefined;
+    return freshestPayback(receipt, fork);
   } catch {
     return null;
   }

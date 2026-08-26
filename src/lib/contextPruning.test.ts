@@ -16,6 +16,7 @@ import {
   MIN_CONTROL_RESUMES,
   netReceipt,
   BOUNDARY_BREAK_EVEN_BUDGET,
+  freshestPayback,
   parseFork,
   parsePlan,
   paybackTurns,
@@ -805,6 +806,41 @@ describe("parsePlan", () => {
   });
 });
 
+describe("freshestPayback — which engine's record the gates read", () => {
+  it("has no prediction when neither engine has cut yet", () => {
+    // Null is not a small number, and both callers resolve it to *act*. This is
+    // the first-crossing case they are entitled to.
+    assert.equal(freshestPayback(null, null), null);
+    assert.equal(freshestPayback(undefined, undefined), null);
+  });
+
+  it("reads the fork engine's row when that is all there is", () => {
+    // The regression this function exists to stop. `prune_receipts` stays empty
+    // for a run under the fork engine, so a reader that only knew that table
+    // returned null for ever — leaving the boundary gate and the ceiling
+    // watcher both permanently open on the engine the app is moving to.
+    assert.equal(freshestPayback(null, { ts: 10, s: 702_323, d: 2_625 }), 5063);
+  });
+
+  it("takes the newer of the two, whichever engine wrote it", () => {
+    const receipt = { ts: 100, s: 100_000, d: 50_000 };
+    const fork = { ts: 200, s: 700_000, d: 2_600 };
+    assert.equal(freshestPayback(receipt, fork), 5095);
+    assert.equal(freshestPayback(receipt, { ...fork, ts: 50 }), 18);
+  });
+
+  it("reads S/D as a ratio, so a row in bytes and a row in tokens both work", () => {
+    // The two tables count different things and are never combined within a
+    // reading. Halving the suffix is 18 turns in either unit.
+    assert.equal(freshestPayback(null, { ts: 1, s: 2, d: 1 }), 18);
+    assert.equal(freshestPayback(null, { ts: 1, s: 2_000_000, d: 1_000_000 }), 18);
+  });
+
+  it("says nothing when the last cut removed nothing", () => {
+    assert.equal(freshestPayback({ ts: 1, s: 100, d: 0 }, null), null);
+  });
+});
+
 describe("parseFork", () => {
   /**
    * The reader for `winnow fork --json`.
@@ -940,14 +976,19 @@ describe("parseFork", () => {
     assert.match(fork.reason ?? "", /--max-break-even/);
   });
 
-  it("does not arm winnow's break-even gate at a cycle boundary", () => {
-    // A decision, locked. The boundary is the one moment the invalidation is
-    // refunded — `--resume` rewrites the prefix regardless — so a gate priced
-    // on `1.9·S` refuses cuts that are free. The `WRITTEN` body above is the
-    // proof by example: a real fork of this install at 82.8 break-even turns,
-    // which winnow's default budget of 60 would now refuse.
+  it("does not arm winnow's break-even gate at either moment it forks", () => {
+    // A decision, locked, and it covers both callers. A cut only ever happens
+    // here where a resume is already committed — the natural boundary, or the
+    // one the ceiling watcher manufactures by ending a cycle early — so the
+    // `1.9·S` the gate prices is spent whether or not anything is cut. The
+    // `WRITTEN` body above is the proof by example: a real fork of this install
+    // at 82.8 break-even turns, which winnow's default budget of 60 now refuses.
+    //
+    // The gate that does belong on the early-end path is the one deciding
+    // whether to interrupt at all, and it is already there and is not this.
     assert.equal(BOUNDARY_BREAK_EVEN_BUDGET, null);
     assert.ok((parseFork(WRITTEN)?.breakEvenTurns ?? 0) > 60);
+    assert.ok(PAYBACK_HORIZON_TURNS > 0);
   });
 
   it("returns null on a body that is not JSON, so stderr can be tried next", () => {
