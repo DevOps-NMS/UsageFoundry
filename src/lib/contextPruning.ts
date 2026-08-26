@@ -184,6 +184,17 @@ export const CYCLE_CONTEXT_CEILING_TOKENS = 200_000;
  */
 export const PAYBACK_HORIZON_TURNS = 18;
 
+/**
+ * The tier `plan` is asked at, for the read-only observation beside each prune.
+ *
+ * Fixed rather than derived from `contextPruningStrictness`, because the two
+ * vocabularies do not map: `gentle`/`standard`/`aggressive` name bundles of
+ * inherited strategies and `C`/`CB`/`CBA` name SPEC §4 rule tiers, and there is
+ * no correspondence to translate. CB is the tier every published figure in that
+ * project is quoted at, so an observation taken here can be read against them.
+ */
+export const PLAN_TIER = "CB";
+
 /** How long a prune may take before it is killed and the cycle carries on. */
 const PRUNE_TIMEOUT_MS = 120_000;
 
@@ -672,6 +683,195 @@ function spawnPrune(
       finish({ ok: false, reason: err instanceof Error ? err.message : String(err) });
     }
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* What the new rule engine would have done — read-only, every cycle   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `winnow plan --json`, for one transcript.
+ *
+ * ## Why this runs at all, given nothing acts on it
+ *
+ * The prune this app performs is `winnow treat -rx <tier>`, the **inherited**
+ * pruner: about twenty strategies in `src/winnow/legacy/strategies/`, none of
+ * which import `winnow.rules`. Winnow's newer work — `inspect`, `plan`, `fork`,
+ * and the intake filter — runs a different classifier entirely, SPEC §4's six
+ * rules at a tier. The two overlap in intent and agree almost nowhere in
+ * detail: legacy `stale-reads` fires on any later edit, ignores read ranges and
+ * hardcodes 500 bytes, where A1 requires an intervening-read test, honours
+ * ranges and leaves a sha256 pointer.
+ *
+ * So "is the new engine better than the one we run" is an open question that no
+ * amount of running the old one answers, and the blind-label measurement that
+ * bears on it scored the *new* rules — not these. `plan` writes nothing and
+ * refuses nothing, so it can be asked at every boundary for the price of one
+ * subprocess, and its answer recorded beside what the pruner actually did. That
+ * is the comparison, on production data, at no risk.
+ *
+ * ## Why its verdict does not reach the gate
+ *
+ * It is tempting to feed `arithmetic.break_even_turns` straight into the
+ * boundary gate, since it describes the cut *about to happen* rather than the
+ * last one `predictedPayback` reads. It describes a different cut. `T*` is
+ * `19·(S/D) − 20` and `D` here is what the **new** rules would remove, which is
+ * not what `treat` is about to remove. Gating one engine's action on the
+ * other's arithmetic would be a category error that produced plausible numbers,
+ * which is the worst kind. The gate keeps its own basis; this is recorded next
+ * to it and nothing else.
+ *
+ * Tier CB regardless of the prescription in force, because the two vocabularies
+ * do not map — `gentle`/`standard`/`aggressive` name strategy bundles and
+ * `C`/`CB`/`CBA` name rule tiers — and CB is the tier every published figure in
+ * that project is quoted at.
+ *
+ * Failure is silence. A missing winnow, a malformed body, a timeout or a
+ * non-zero exit all return null: this is an observation, and an observation
+ * that could end a cycle would be worth less than not taking it.
+ */
+export interface PlannedCut {
+  tier: string;
+  toolCalls: number;
+  stripped: number;
+  removedBytes: number;
+  pointerOverhead: number;
+  netBytes: number;
+  suffixBytes: number;
+  breakEvenTurns: number | null;
+}
+
+export function planCut(transcriptPath: string): Promise<PlannedCut | null> {
+  return new Promise((resolve) => {
+    if (!winnowAvailable()) {
+      resolve(null);
+      return;
+    }
+    let stdout = "";
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const finish = (result: PlannedCut | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+
+    try {
+      const child = spawn(
+        WINNOW_PYTHON,
+        [
+          "-m",
+          "winnow",
+          "safe",
+          "run",
+          "--",
+          "plan",
+          transcriptPath,
+          "--tier",
+          PLAN_TIER,
+          "--json",
+        ],
+        // Same credential argument as `spawnPrune`: this is the app's own
+        // maintenance on the app's own data, and the transcripts are root-owned.
+        { env: pruneEnv(), stdio: ["ignore", "pipe", "ignore"] },
+      );
+
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        // Bounded like the stderr read in `spawnPrune`, and for a stronger
+        // reason: `plan --json` carries a `pointers` array with one entry per
+        // stripped result, so a large session's body is large by design.
+        if (stdout.length < 4_000_000) stdout += chunk;
+      });
+
+      timer = setTimeout(() => child.kill("SIGKILL"), PRUNE_TIMEOUT_MS);
+      timer.unref?.();
+
+      child.on("error", () => finish(null));
+      child.on("close", (code) => {
+        // Exit 2 is "nothing met a rule at this tier" and still carries a full
+        // body — a real answer, and one worth recording: it is the new engine
+        // saying it would have left this conversation alone.
+        if (code !== 0 && code !== 2) {
+          finish(null);
+          return;
+        }
+        finish(parsePlan(stdout));
+      });
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+/** The three objects of `plan --json` this app reads, or null if it cannot. */
+export function parsePlan(body: string): PlannedCut | null {
+  try {
+    const raw = JSON.parse(body) as {
+      selection?: { tier?: unknown };
+      results?: { tool_calls?: unknown; stripped?: unknown };
+      bytes?: { removed?: unknown; pointer_overhead?: unknown; net?: unknown };
+      arithmetic?: { suffix_bytes?: unknown; break_even_turns?: unknown };
+    };
+    const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    return {
+      tier: typeof raw.selection?.tier === "string" ? raw.selection.tier : PLAN_TIER,
+      toolCalls: num(raw.results?.tool_calls),
+      stripped: num(raw.results?.stripped),
+      removedBytes: num(raw.bytes?.removed),
+      pointerOverhead: num(raw.bytes?.pointer_overhead),
+      netBytes: num(raw.bytes?.net),
+      suffixBytes: num(raw.arithmetic?.suffix_bytes),
+      // Absent when nothing fires — there is no cut, so no break-even. Null
+      // rather than 0, which would read as "pays immediately".
+      breakEvenTurns:
+        typeof raw.arithmetic?.break_even_turns === "number"
+          ? raw.arithmetic.break_even_turns
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record what the new engine would have done at this boundary.
+ *
+ * Best-effort and never thrown from, on `recordPrune`'s reasoning.
+ */
+export function recordPlanObservation(
+  runId: string,
+  sessionId: string | null,
+  plan: PlannedCut,
+  pruned: boolean,
+): void {
+  try {
+    db()
+      .prepare(
+        `INSERT INTO plan_observations
+           (ts, run_id, session_id, tier, tool_calls, stripped, removed_bytes,
+            pointer_overhead, net_bytes, suffix_bytes, break_even_turns, pruned)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        Date.now(),
+        runId,
+        sessionId,
+        plan.tier,
+        plan.toolCalls,
+        plan.stripped,
+        plan.removedBytes,
+        plan.pointerOverhead,
+        plan.netBytes,
+        plan.suffixBytes,
+        plan.breakEvenTurns,
+        pruned ? 1 : 0,
+      );
+  } catch {
+    // See above.
+  }
 }
 
 /**

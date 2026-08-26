@@ -14,7 +14,9 @@ import {
   isPruneTier,
   MIN_CONTROL_RESUMES,
   netReceipt,
+  parsePlan,
   paybackTurns,
+  PLAN_TIER,
   PAYBACK_HORIZON_TURNS,
   PRUNE_TIERS,
   sumPruneSavings,
@@ -705,5 +707,96 @@ describe("groupPruneSavingsByRun", () => {
     const grouped = groupPruneSavingsByRun([]);
     assert.equal(grouped.size, 0);
     assert.equal(grouped.has("r1"), false);
+  });
+});
+
+describe("parsePlan", () => {
+  /**
+   * The reader for `winnow plan --json`.
+   *
+   * Pinned because every way it can be wrong is silent. This body is produced
+   * by another program in another language, on a schedule nobody here controls,
+   * and its output is written straight into a table an operator will later use
+   * to decide between two rule engines. A field that quietly reads 0 because a
+   * key moved is a comparison that says the new engine removes nothing.
+   */
+  const real = JSON.stringify({
+    session_id: "abc",
+    selection: { tier: "CB", rules: ["B1", "B2", "C1", "C2", "C3"] },
+    results: { tool_calls: 60, stripped: 8, refused_by_g4: 0 },
+    bytes: { removed: 24029, pointer_overhead: 1304, net: 22725 },
+    arithmetic: { suffix_bytes: 122902, break_even_turns: 82.8 },
+  });
+
+  it("reads a real body", () => {
+    // The figures are from an actual `winnow safe run -- plan <path> --tier CB
+    // --json` over a transcript on this install, not invented.
+    const plan = parsePlan(real);
+    assert.ok(plan);
+    assert.equal(plan.tier, "CB");
+    assert.equal(plan.toolCalls, 60);
+    assert.equal(plan.stripped, 8);
+    assert.equal(plan.removedBytes, 24029);
+    assert.equal(plan.pointerOverhead, 1304);
+    assert.equal(plan.netBytes, 22725);
+    assert.equal(plan.suffixBytes, 122902);
+    assert.equal(plan.breakEvenTurns, 82.8);
+  });
+
+  it("keeps a missing break-even as null rather than zero", () => {
+    // `plan` omits the field when nothing fires — there is no cut, so there is
+    // no break-even. Zero would read as "pays immediately", which is the
+    // opposite of what happened, and it is the value that would make the new
+    // engine look unambiguously better than the one being compared against.
+    const plan = parsePlan(
+      JSON.stringify({
+        selection: { tier: "CB" },
+        results: { tool_calls: 12, stripped: 0 },
+        bytes: { removed: 0, pointer_overhead: 0, net: 0 },
+        arithmetic: { suffix_bytes: 40000 },
+      }),
+    );
+    assert.ok(plan);
+    assert.equal(plan.breakEvenTurns, null);
+    assert.equal(plan.stripped, 0);
+  });
+
+  it("returns null on a body that is not JSON", () => {
+    assert.equal(parsePlan("winnow: no such session"), null);
+    assert.equal(parsePlan(""), null);
+  });
+
+  it("survives a body whose shape moved, without inventing figures", () => {
+    // A future winnow that renames `bytes.net` should make this column read 0
+    // and be noticed, not read a neighbouring field. Zero is the honest answer
+    // for a number that is genuinely absent; the guard is that it never picks
+    // up a different one.
+    const plan = parsePlan(JSON.stringify({ selection: { tier: "CB" } }));
+    assert.ok(plan);
+    assert.equal(plan.netBytes, 0);
+    assert.equal(plan.removedBytes, 0);
+    assert.equal(plan.breakEvenTurns, null);
+  });
+
+  it("refuses a non-numeric figure rather than coercing it", () => {
+    // `"24029"` is the shape a JSON serialiser change would produce, and
+    // Number("24029") would swallow it silently.
+    const plan = parsePlan(
+      JSON.stringify({
+        selection: { tier: "CB" },
+        bytes: { removed: "24029", net: null },
+        arithmetic: { break_even_turns: "82.8" },
+      }),
+    );
+    assert.ok(plan);
+    assert.equal(plan.removedBytes, 0);
+    assert.equal(plan.netBytes, 0);
+    assert.equal(plan.breakEvenTurns, null);
+  });
+
+  it("falls back to the tier it asked for when the body does not name one", () => {
+    const plan = parsePlan(JSON.stringify({ results: { tool_calls: 1 } }));
+    assert.ok(plan);
+    assert.equal(plan.tier, PLAN_TIER);
   });
 });

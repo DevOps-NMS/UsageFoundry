@@ -66,9 +66,11 @@ import {
   PAYBACK_HORIZON_TURNS,
   paybackTurns,
   boundaryAction,
+  planCut,
   pruneTranscript,
   pruningEnabled,
   recordPrune,
+  recordPlanObservation,
   recordResumeProbe,
   type PruneOutcome,
   type PruneTrigger,
@@ -6878,6 +6880,11 @@ async function pruneAtBoundary(
 
   boundaryDeclines.set(id, declined ? declinesSoFar + 1 : 0);
   recordResumeProbe(id, sessionId, !declined, contextTokensNow);
+  // Read-only, and asked whichever way the gate went — a boundary where nothing
+  // was pruned is exactly as interesting a comparison as one where something
+  // was. Awaited rather than left floating for `pruneAtBoundary`'s own reason:
+  // the next spawn must not read the transcript while a subprocess is on it.
+  await observePlan(id, sessionId, !declined);
 
   if (declined) {
     // Said plainly, and not as a failure. `prune`'s own error path writes "This
@@ -6905,6 +6912,48 @@ async function pruneAtBoundary(
     );
   }
   return prune(id, sessionId, "boundary");
+}
+
+/**
+ * Ask winnow's newer rule engine what it would have removed here, and write the
+ * answer down. Acts on nothing.
+ *
+ * This is the only place in the app where SPEC section 4's rules run at all.
+ * The pruner is `winnow treat`, the inherited engine, and the two classifiers
+ * share no code — so no amount of pruning produces evidence about which of them
+ * is right. `plan` writes nothing and is allowed while a session is live, so it
+ * costs one subprocess and cannot affect the run.
+ *
+ * Silent on every failure. An observation that could end a cycle would be worth
+ * less than not taking it.
+ */
+async function observePlan(
+  id: string,
+  sessionId: string | null,
+  pruned: boolean,
+): Promise<void> {
+  try {
+    const transcript = sessionId ? await resolveSessionTranscript(sessionId) : null;
+    if (!transcript) return;
+    const plan = await planCut(transcript);
+    if (!plan) return;
+    recordPlanObservation(id, sessionId, plan, pruned);
+    // Logged rather than only stored, because a comparison nobody sees is one
+    // nobody acts on — and the whole point of the row is to be argued with.
+    const breakEven =
+      plan.breakEvenTurns === null
+        ? "nothing would fire"
+        : `it would need ${Math.round(plan.breakEvenTurns)} further turns to pay for itself`;
+    log(
+      id,
+      `winnow's rule engine, asked about this conversation at tier ${plan.tier}: ` +
+        `${plan.stripped} of ${plan.toolCalls} tool results, ` +
+        `${fmtTokens(Math.round(plan.netBytes / 4))} tokens net — ${breakEven}. ` +
+        `Recorded for comparison; nothing acted on it.`,
+    );
+  } catch {
+    // See above.
+  }
 }
 
 /**

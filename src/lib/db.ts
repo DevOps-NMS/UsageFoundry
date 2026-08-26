@@ -1302,6 +1302,47 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_resume_probes_clean ON resume_probes(pruned, ts);
   `);
 
+  // What winnow's *newer* rule engine would have removed at each boundary, from
+  // `winnow plan --json`. Nothing acts on these rows.
+  //
+  // The pruner this app runs is `winnow treat`, the inherited one: about twenty
+  // strategies that never import winnow.rules. `plan` runs SPEC section 4's six
+  // rules instead, and the two agree almost nowhere in detail. Which is better
+  // is an open question that running the old one cannot answer, and the blind
+  // label that bears on it scored the new rules rather than these.
+  //
+  // So the new engine is asked at every boundary and its answer written down
+  // beside what the old one did. `pruned` is what actually happened, which is
+  // what makes a row a comparison rather than a note.
+  //
+  // Sizes are bytes, not tokens, because that is what plan reports and SPEC
+  // section 6 measures: len() of the content string. Dividing by four here
+  // would put an estimate in a column whose whole value is being exact.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS plan_observations (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts               INTEGER NOT NULL,
+      run_id           TEXT NOT NULL,
+      session_id       TEXT,
+      tier             TEXT NOT NULL,
+      tool_calls       INTEGER NOT NULL,
+      stripped         INTEGER NOT NULL,
+      removed_bytes    INTEGER NOT NULL,
+      pointer_overhead INTEGER NOT NULL,
+      net_bytes        INTEGER NOT NULL,
+      suffix_bytes     INTEGER NOT NULL,
+      -- Null when nothing fired: there is no cut, so there is no break-even. A
+      -- 0 here would read as 'pays immediately', which is the opposite.
+      break_even_turns REAL,
+      -- Whether the inherited pruner actually ran at this boundary, so a row
+      -- can be read as 'what the other engine would have done instead' or 'what
+      -- both engines declined'.
+      pruned           INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_plan_observations_ts ON plan_observations(ts);
+    CREATE INDEX IF NOT EXISTS idx_plan_observations_run ON plan_observations(run_id, ts);
+  `);
+
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as
   // one it left behind.
