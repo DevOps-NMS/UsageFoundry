@@ -7,7 +7,8 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import type Database from "better-sqlite3";
 
 /**
- * Covers one thing: what an *interrupted* migration leaves behind.
+ * Covers what a migration leaves behind: an *interrupted* one, and a column
+ * added to a `CREATE TABLE IF NOT EXISTS` after the table had already shipped.
  *
  * The rebuild that drops the NOT NULL from `chat_proposals.template_id` ran as
  * four autocommitted statements. A crash, an OOM kill or a `docker compose
@@ -18,6 +19,12 @@ import type Database from "better-sqlite3";
  * what made the loss permanent. The app started cleanly, reported nothing, and
  * the record of every proposal the operator ever approved was on disk and
  * unreachable.
+ *
+ * The second case is the quieter one and has the same shape as the first: a
+ * guard that makes a migration idempotent is also what stops it running. `IF
+ * NOT EXISTS` skips the whole statement, so a column added to it later never
+ * reaches an install that already has the table, and the only symptom is a
+ * write failing somewhere that catches its own errors.
  *
  * It earns its own file for `bootBlocks.test.ts`'s two reasons. `DATA_DIR` and
  * `CLAUDE_HOME` are set before the first import because `config.ts` reads them
@@ -380,5 +387,81 @@ describe("migrate and the data-directory claim", () => {
       fs.rmSync(lockFile, { force: true });
       reboot();
     }
+  });
+});
+
+const FORK_ATTEMPTS_PRE_SUFFIX = `
+  CREATE TABLE fork_attempts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                INTEGER NOT NULL,
+    run_id            TEXT NOT NULL,
+    source_session_id TEXT,
+    new_session_id    TEXT,
+    written           INTEGER NOT NULL,
+    refused_by        TEXT,
+    reason            TEXT,
+    removed_bytes     INTEGER NOT NULL,
+    net_bytes         INTEGER NOT NULL,
+    break_even_turns  REAL,
+    cold_age_seconds  REAL,
+    min_cold_age      INTEGER,
+    resumed           INTEGER
+  );`;
+
+/** `recordForkAttempt`'s own INSERT, which is what has to prepare. */
+const FORK_ATTEMPT_INSERT = `
+  INSERT INTO fork_attempts
+    (ts, run_id, source_session_id, new_session_id, written, refused_by,
+     reason, removed_bytes, net_bytes, suffix_bytes, break_even_turns,
+     cold_age_seconds, min_cold_age)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
+function hasColumn(db: Database.Database, table: string, col: string): boolean {
+  return (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[])
+    .some((c) => c.name === col);
+}
+
+describe("a fork_attempts table created before suffix_bytes existed", () => {
+  it("gains the column on the next boot, keeping the rows already in it", () => {
+    let db = dbMod.db();
+    db.exec("DROP TABLE IF EXISTS fork_attempts");
+    db.exec(FORK_ATTEMPTS_PRE_SUFFIX);
+    db.prepare(
+      `INSERT INTO fork_attempts
+         (ts, run_id, written, removed_bytes, net_bytes, refused_by)
+       VALUES (1, 'r1', 0, 0, 0, 'cold-age')`,
+    ).run();
+    assert.equal(hasColumn(db, "fork_attempts", "suffix_bytes"), false);
+
+    db = reboot();
+
+    assert.equal(hasColumn(db, "fork_attempts", "suffix_bytes"), true);
+    assert.equal(rows(db, "fork_attempts"), 1);
+    // NOT NULL with a default, so the row that predates the column reads as 0
+    // rather than null — which is what `forkCutFromRow` expects to arithmetic on.
+    assert.equal(
+      (db.prepare("SELECT suffix_bytes s FROM fork_attempts").get() as { s: number }).s,
+      0,
+    );
+  });
+
+  it("lets recordForkAttempt's insert prepare, which it could not before", () => {
+    const db = dbMod.db();
+    db.exec("DROP TABLE IF EXISTS fork_attempts");
+    db.exec(FORK_ATTEMPTS_PRE_SUFFIX);
+    // The failure the fix is for: the statement names a column the table does
+    // not have, and `recordForkAttempt` catches this and returns null, so the
+    // engine reports nothing and the operator sees an empty table.
+    assert.throws(
+      () => db.prepare(FORK_ATTEMPT_INSERT),
+      /suffix_bytes/,
+    );
+
+    const migrated = reboot();
+
+    migrated.prepare(FORK_ATTEMPT_INSERT).run(
+      2, "r2", "s-old", "s-new", 1, null, null, 4096, 3072, 81920, 18.5, 4.2, 0,
+    );
+    assert.equal(rows(migrated, "fork_attempts"), 1);
   });
 });

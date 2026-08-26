@@ -1394,6 +1394,15 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_fork_attempts_run ON fork_attempts(run_id, ts);
   `);
 
+  // `suffix_bytes` arrived one commit after the table did, and it arrived inside
+  // the CREATE above — which is a no-op against an install that already has the
+  // table, so the column never appeared on any database created in between.
+  // Both the INSERT and the SELECT name it, and `recordForkAttempt` swallows its
+  // own failures, so the symptom is silence: the engine's first fork writes no
+  // row, `markForkResumed` has no id to update and `pendingForkFor` finds
+  // nothing to recover a restarted run with.
+  addColumn(db, "fork_attempts", "suffix_bytes", "INTEGER NOT NULL DEFAULT 0");
+
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as
   // one it left behind.

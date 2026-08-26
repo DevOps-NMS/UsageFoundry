@@ -5,6 +5,7 @@ import path from "node:path";
 import { DATA_DIR } from "./config";
 import { db } from "./db";
 import { BYTES_PER_TOKEN } from "./fileCostNotice";
+import { opsLog, recordOpsEvent } from "./ops";
 import {
   CACHE_READ_MULTIPLIER,
   CACHE_WRITE_1H_MULTIPLIER,
@@ -843,6 +844,48 @@ export function parsePlan(body: string): PlannedCut | null {
   }
 }
 
+/** How many distinct faults get a durable row before the rest are stdout only. */
+const MAX_REPORTED_FAULTS = 32;
+
+const reportedFailures = new Set<string>();
+
+/**
+ * A bookkeeping read or write that failed, reported rather than swallowed.
+ *
+ * Every catch that calls this is right to be non-fatal: a receipt that will not
+ * write must not fail the run it describes, and a panel query that throws must
+ * not take the page down with it. All of them were also **silent**, and that is
+ * a different property that nothing chose. `fork_attempts` shipped without the
+ * `suffix_bytes` column that both its INSERT and its SELECT name; the write
+ * threw at every fork and the read threw at every page load, and the whole of it
+ * was indistinguishable from a fork engine that had had nothing to say. An
+ * operator cannot tell "no forks happened" from "forks cannot be recorded", and
+ * that is the one distinction this table exists to make.
+ *
+ * `ops.ts` was written for the same shape of bug on the sweep timer, and says
+ * so: the catch is right, the silence is not.
+ *
+ * The first occurrence of each distinct fault gets a durable `ops_events` row
+ * and every repeat goes to stdout alone. These sit in the cycle loop and on a
+ * polled route, so a schema fault recurs at every boundary and every refresh,
+ * and `ops_events` keeps 500 rows — one repeating fault would evict everything
+ * else the operator might have needed to read beside it.
+ */
+function noteBookkeepingFailure(site: string, err: unknown): void {
+  const message = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+  const key = `${site}:${message}`;
+  const fields = { site, message };
+  // Bounded, because the key carries a message and a message can carry a value
+  // that varies per call. Past the cap a genuinely new fault loses its durable
+  // row and keeps its stdout line, which is the right way round.
+  if (reportedFailures.has(key) || reportedFailures.size >= MAX_REPORTED_FAULTS) {
+    opsLog("error", "context_pruning.record_failed", fields);
+    return;
+  }
+  reportedFailures.add(key);
+  recordOpsEvent("error", "context_pruning.record_failed", fields);
+}
+
 /**
  * Record what the new engine would have done at this boundary.
  *
@@ -876,8 +919,8 @@ export function recordPlanObservation(
         plan.breakEvenTurns,
         pruned ? 1 : 0,
       );
-  } catch {
-    // See above.
+  } catch (err) {
+    noteBookkeepingFailure("recordPlanObservation", err);
   }
 }
 
@@ -1119,7 +1162,8 @@ export function recordForkAttempt(
         minColdAgeSeconds,
       );
     return Number(info.lastInsertRowid);
-  } catch {
+  } catch (err) {
+    noteBookkeepingFailure("recordForkAttempt", err);
     return null;
   }
 }
@@ -1158,7 +1202,8 @@ export function pendingForkFor(
       forkSessionId: row.new_session_id,
       rowId: row.id,
     };
-  } catch {
+  } catch (err) {
+    noteBookkeepingFailure("pendingForkFor", err);
     return null;
   }
 }
@@ -1177,8 +1222,8 @@ export function markForkResumed(rowId: number, resumed: boolean): void {
     db()
       .prepare("UPDATE fork_attempts SET resumed = ? WHERE id = ?")
       .run(resumed ? 1 : 0, rowId);
-  } catch {
-    // See above.
+  } catch (err) {
+    noteBookkeepingFailure("markForkResumed", err);
   }
 }
 
@@ -1252,8 +1297,9 @@ export function recordPrune(
         outcome.tokensRemoved,
         model,
       );
-  } catch {
-    // See above. A receipt is evidence, not the thing itself.
+  } catch (err) {
+    // A receipt is evidence, not the thing itself — so this does not throw.
+    noteBookkeepingFailure("recordPrune", err);
   }
 }
 
@@ -1495,8 +1541,8 @@ export function recordResumeProbe(
          VALUES (?, ?, ?, ?, ?)`,
       )
       .run(Date.now(), runId, sessionId, pruned ? 1 : 0, tokensBefore);
-  } catch {
-    // See above.
+  } catch (err) {
+    noteBookkeepingFailure("recordResumeProbe", err);
   }
 }
 
@@ -1584,7 +1630,8 @@ export function readCleanProbes(span: {
       )
       .all(span.from, span.to) as { ts: number; session_id: string | null }[];
     return rows.map((r) => ({ ts: r.ts, sessionId: r.session_id }));
-  } catch {
+  } catch (err) {
+    noteBookkeepingFailure("readCleanProbes", err);
     return [];
   }
 }
@@ -1889,7 +1936,8 @@ export function readReceipts(
       tokensRemoved: r.tokens_removed,
       model: r.model,
     }));
-  } catch {
+  } catch (err) {
+    noteBookkeepingFailure("readReceipts", err);
     return [];
   }
 }
@@ -2135,7 +2183,8 @@ function readForkCuts(
         }),
       };
     });
-  } catch {
+  } catch (err) {
+    noteBookkeepingFailure("readForkCuts", err);
     return [];
   }
 }
