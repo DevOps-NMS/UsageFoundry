@@ -10,6 +10,7 @@ import {
   BOUNDARY_RECHECK_AFTER,
   classifyResume,
   contextTokens,
+  forkCutFromRow,
   groupPruneSavingsByRun,
   isPruneTier,
   MIN_CONTROL_RESUMES,
@@ -23,6 +24,7 @@ import {
   sumPruneSavings,
   type PruneReceiptRow,
 } from "./contextPruning";
+import { BYTES_PER_TOKEN } from "./fileCostNotice";
 
 /**
  * The two decisions behind context pruning that are arithmetic rather than
@@ -904,5 +906,98 @@ describe("parseFork", () => {
     const fork = parseFork(JSON.stringify({ written: true, new_session_id: 12345 }));
     assert.ok(fork);
     assert.equal(fork.newSessionId, null);
+  });
+});
+
+describe("forkCutFromRow", () => {
+  /**
+   * A fork, converted into the terms the netting prices.
+   *
+   * Both conversions here are silent when wrong. The basis change turns bytes
+   * — what `winnow plan`/`fork` report, because SPEC section 6 measures `len()`
+   * of the content string — into the tokens the price table is denominated in.
+   * And `suffix_bytes` feeds the counterfactual read that decides whether a
+   * fork taken over a warm cache shows a loss, which is the one thing this
+   * whole panel exists to be able to say.
+   *
+   * The figures are from a real `winnow fork --write --json` over a transcript
+   * on this install: 24,029 bytes out, 22,725 net after pointers, against a
+   * 122,902-byte suffix.
+   */
+  const REAL = {
+    ts: 1_000,
+    runId: "r",
+    removedBytes: 24_029,
+    netBytes: 22_725,
+    suffixBytes: 122_902,
+    model: "claude-opus-5",
+  };
+
+  it("counts the net of the cut, not the gross", () => {
+    // The pointers winnow writes back are really in the fork. Counting the
+    // gross would claim a saving on bytes the conversation still carries.
+    const cut = forkCutFromRow(REAL);
+    assert.equal(cut.tokensRemoved, Math.round(22_725 / BYTES_PER_TOKEN));
+    assert.notEqual(cut.tokensRemoved, Math.round(24_029 / BYTES_PER_TOKEN));
+  });
+
+  it("puts a fork on the same basis a prune is already on", () => {
+    // `BYTES_PER_TOKEN` rather than winnow's own ÷4, deliberately: a fork and a
+    // prune are added together in one figure, and the comparison is only
+    // meaningful if both carry the same estimate. Neither is better; they have
+    // to match.
+    assert.equal(forkCutFromRow(REAL).tokensRemoved, 6_313);
+  });
+
+  it("reconstructs the pre-cut suffix, because that is what the read would have covered", () => {
+    // `suffix_bytes` is S — what stands *after* the cut line. The counterfactual
+    // is a resume that never cut, so it would have re-read the suffix plus what
+    // the fork took out.
+    const cut = forkCutFromRow(REAL);
+    assert.equal(
+      cut.tokensBefore,
+      Math.round(122_902 / BYTES_PER_TOKEN) + cut.tokensRemoved,
+    );
+    assert.equal(cut.tokensAfter, cut.tokensBefore - cut.tokensRemoved);
+  });
+
+  it("falls back conservatively for a row written before the column existed", () => {
+    // Understating the suffix understates the avoided read, which overstates
+    // the invalidation and understates the net. That is the direction to be
+    // wrong in on a number that decides whether to keep a feature switched on.
+    const old = forkCutFromRow({ ...REAL, suffixBytes: 0 });
+    const now = forkCutFromRow(REAL);
+    assert.equal(old.tokensBefore, old.tokensRemoved);
+    assert.ok(old.tokensBefore < now.tokensBefore);
+  });
+
+  it("is a boundary cut, so it inherits the unanswered invalidation question", () => {
+    // A fork rides the resume the next cycle was going to make anyway — the
+    // same claim, unproven in the same way, as the boundary prune's. It must
+    // not be filed as an early end, which is charged its write in full.
+    assert.equal(forkCutFromRow(REAL).trigger, "boundary");
+    const net = netReceipt(forkCutFromRow(REAL), 10);
+    assert.equal(net.invalidationKnown, false);
+    assert.equal(net.invalidationUSD, 0);
+  });
+
+  it("charges a fork when the control says clean resumes run warm", () => {
+    // The row the old accounting could not produce at all. 90,000 tokens
+    // written at the one-hour class, less what re-reading the pre-cut
+    // conversation would have cost at 0.1x.
+    const cut = forkCutFromRow(REAL);
+    const net = netReceipt(
+      cut,
+      4,
+      { cacheRead: 15_900, cacheWrite5m: 0, cacheWrite1h: 90_000 },
+      { cleanResumes: 5, warmShare: 1 },
+    );
+    const perToken = 5 / 1_000_000;
+    assert.equal(net.invalidationKnown, true);
+    assert.equal(
+      Math.round(net.invalidationUSD * 1e4) / 1e4,
+      Math.round((90_000 * perToken * 2.0 - cut.tokensBefore * perToken * 0.1) * 1e4) / 1e4,
+    );
+    assert.ok(net.netUSD < 0, "a fork over a warm cache must be able to report a loss");
   });
 });

@@ -1376,6 +1376,13 @@ function migrate(db: Database.Database) {
       reason            TEXT,
       removed_bytes     INTEGER NOT NULL,
       net_bytes         INTEGER NOT NULL,
+      -- S in the break-even formula T* = 19*(S/D) - 20: the suffix standing
+      -- after the cut line, from the fork's own plan. Stored because the netting
+      -- needs it and it cannot be recovered later -- it is a property of where
+      -- the cut fell, not of the file. Without it tokens_before has to be
+      -- guessed, and that guess feeds the counterfactual read which decides
+      -- whether a fork over a warm cache shows a loss.
+      suffix_bytes      INTEGER NOT NULL DEFAULT 0,
       break_even_turns  REAL,
       cold_age_seconds  REAL,
       min_cold_age      INTEGER,

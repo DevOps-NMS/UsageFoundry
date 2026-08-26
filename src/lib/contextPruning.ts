@@ -914,6 +914,7 @@ export interface ForkResult {
   reason: string | null;
   removedBytes: number;
   netBytes: number;
+  suffixBytes: number;
   breakEvenTurns: number | null;
   coldAgeSeconds: number | null;
 }
@@ -1005,6 +1006,7 @@ export function forkTranscript(
           reason: stderr.trim() || `winnow fork exited with code ${code ?? -1}`,
           removedBytes: 0,
           netBytes: 0,
+          suffixBytes: 0,
           breakEvenTurns: null,
           coldAgeSeconds: null,
         });
@@ -1018,6 +1020,7 @@ export function forkTranscript(
         reason: err instanceof Error ? err.message : String(err),
         removedBytes: 0,
         netBytes: 0,
+        suffixBytes: 0,
         breakEvenTurns: null,
         coldAgeSeconds: null,
       });
@@ -1054,6 +1057,7 @@ export function parseFork(body: string): ForkResult | null {
       reason: typeof first.reason === "string" ? first.reason : null,
       removedBytes: num(bytes.removed),
       netBytes: num(bytes.net),
+      suffixBytes: num(arithmetic.suffix_bytes),
       breakEvenTurns:
         typeof arithmetic.break_even_turns === "number"
           ? arithmetic.break_even_turns
@@ -1102,6 +1106,7 @@ export function recordForkAttempt(
         result.reason,
         result.removedBytes,
         result.netBytes,
+        result.suffixBytes,
         result.breakEvenTurns,
         result.coldAgeSeconds,
         minColdAgeSeconds,
@@ -1217,11 +1222,29 @@ export function recordPrune(
  * entries this app already scans, because it goes on growing for as long as the
  * run does. A figure written at prune time would be zero for every receipt.
  */
-export interface PruneReceiptRow {
+export interface PruneReceiptRow extends NettableCut {
+  tier: PruneTier;
+}
+
+/**
+ * A cut, in the terms the netting arithmetic actually uses.
+ *
+ * Separated from `PruneReceiptRow` because the fork engine produces cuts that
+ * are not prune receipts and must be priced by the same rules. A fork has no
+ * `tier` in this vocabulary — it runs SPEC section 4 rule tiers, `C`/`CB`/`CBA`,
+ * where a prescription is `gentle`/`standard`/`aggressive` — and inventing a
+ * value to satisfy a field `netReceipt` never reads would put a wrong answer in
+ * a column for the sake of a type.
+ *
+ * Everything here is load-bearing. `trigger` decides whether the invalidation is
+ * charged, `tokensBefore` is the suffix the counterfactual read would have
+ * covered, `tokensAfter` is what a resume writes, `model` and `ts` price it at
+ * the rate that applied then.
+ */
+export interface NettableCut {
   ts: number;
   runId: string;
   trigger: PruneTrigger;
-  tier: PruneTier;
   tokensBefore: number;
   tokensAfter: number;
   tokensRemoved: number;
@@ -1570,7 +1593,7 @@ export function readCleanProbes(span: {
  * invalidation by about 40%, which flatters exactly the marginal cuts.
  */
 export function netReceipt(
-  row: PruneReceiptRow,
+  row: NettableCut,
   turnsAfter: number,
   resumeWrite: ResumeWrite | null = null,
   control: ResumeControl | null = null,
@@ -1669,7 +1692,7 @@ export function netReceipt(
  * would have.
  */
 function boundaryInvalidation(
-  row: PruneReceiptRow,
+  row: NettableCut,
   resumeWrite: ResumeWrite | null,
   observedWriteUSD: number | null,
   perToken: number,
@@ -1740,7 +1763,7 @@ export const NO_PRUNE_SAVINGS: PruneSavings = {
 
 /** One receipt beside what it turned out to be worth. */
 export interface PricedReceipt {
-  row: PruneReceiptRow;
+  row: NettableCut;
   net: PruneNet;
 }
 
@@ -1928,11 +1951,206 @@ export async function priceReceipts(
   });
 }
 
+/**
+ * The fork engine's cuts, priced by exactly the rules the pruner's are.
+ *
+ * ## Why these are not prune receipts
+ *
+ * A fork writes a new transcript rather than editing one, so `pruneTranscript`
+ * never runs and `recordPrune` is never called. Without this, switching
+ * `contextPruningEngine` to `"winnow"` makes the savings panel go silent — the
+ * work still happens and the money still moves, and the one page built to say
+ * whether context control earns its keep reports nothing at all. That is worse
+ * than a wrong number, because a zero reads as "it did nothing".
+ *
+ * ## The unit change, and why it is a division and not a fudge
+ *
+ * `fork_attempts` stores **bytes**, because `winnow plan`/`fork` report bytes:
+ * SPEC section 6 measures `len()` of the content string. `prune_receipts`
+ * stores tokens, because `contextTokens` already divided by
+ * `BYTES_PER_TOKEN`. The two have to meet, and they meet on the token side
+ * because that is where the price table is. Dividing by the same constant
+ * `contextTokens` uses puts a fork on precisely the basis a prune is already
+ * on — not on a better one. Both carry that estimate; neither pretends not to.
+ *
+ * ## The invalidation is the same open question, arriving unchanged
+ *
+ * A fork at a cycle boundary is a `boundary` cut, so it goes through
+ * `boundaryInvalidation` and inherits the whole indeterminate-until-a-control
+ * treatment. That is right rather than convenient: the counterfactual is
+ * identical — would the resume have rewritten this prefix anyway — and a fork
+ * does not answer it any better than an in-place edit does. If anything the
+ * question is sharper here, because the fork's prefix is genuinely new content
+ * that was never cached under any key.
+ *
+ * `tokensAfter` is `tokensBefore - tokensRemoved` rather than a second reading,
+ * and cannot be otherwise: there is no post-cut measurement of a file that was
+ * written rather than edited. It errs the same way the pruner's does.
+ */
+export async function forkSavings(
+  filter: { from: number; to: number } | { runId: string },
+): Promise<PruneSavings> {
+  return sumPruneSavings(await priceForks(readForkCuts(filter)));
+}
+
+/**
+ * One `fork_attempts` row as a cut the netting can price.
+ *
+ * Pure and exported so the two conversions in it can be tested without a
+ * database: the byte-to-token change of basis, and what happens to a row
+ * written before `suffix_bytes` existed.
+ */
+export function forkCutFromRow(row: {
+  ts: number;
+  runId: string;
+  removedBytes: number;
+  netBytes: number;
+  suffixBytes: number;
+  model: string | null;
+}): NettableCut {
+  // The **net** of the cut, not the gross. `removedBytes` is what came out;
+  // `netBytes` is that less the pointers winnow put back in, and the pointers
+  // are really there — a saving counted on the gross would be claiming bytes
+  // the fork still carries.
+  const removed = Math.max(0, Math.round(row.netBytes / BYTES_PER_TOKEN));
+  // `suffixBytes` is winnow's own S: the conversation standing after the cut
+  // line. `tokensBefore` is that suffix as it stood *before* the cut, so the
+  // removed tokens go back on — which is what the counterfactual read in
+  // `boundaryInvalidation` has to cover, and the only reason the column exists.
+  //
+  // A row written before that column existed reads 0 and falls back to the
+  // removed tokens alone. That understates the suffix, which overstates the
+  // invalidation and understates the net — the conservative direction, and the
+  // one to be wrong in on a figure that decides whether to keep a feature on.
+  const suffix = Math.max(0, Math.round(row.suffixBytes / BYTES_PER_TOKEN));
+  const before = suffix > 0 ? suffix + removed : removed;
+  return {
+    ts: row.ts,
+    runId: row.runId,
+    // A fork happens at a cycle boundary. It rides the same resume the boundary
+    // prune does and inherits the same unanswered question about whether that
+    // resume was paying anyway.
+    trigger: "boundary",
+    tokensBefore: before,
+    tokensAfter: Math.max(0, before - removed),
+    tokensRemoved: removed,
+    model: row.model,
+  };
+}
+
+/** One written fork, in the terms the netting uses. */
+function readForkCuts(
+  filter: { from: number; to: number } | { runId: string },
+): { cut: NettableCut; sessionId: string | null }[] {
+  const where = "runId" in filter ? "run_id = ?" : "ts >= ? AND ts <= ?";
+  const args: (string | number)[] =
+    "runId" in filter ? [filter.runId] : [filter.from, filter.to];
+  try {
+    const rows = db()
+      .prepare(
+        `SELECT ts, run_id, new_session_id, removed_bytes, net_bytes, suffix_bytes
+           FROM fork_attempts
+          WHERE written = 1 AND ${where}
+          ORDER BY ts`,
+      )
+      .all(...args) as {
+      ts: number;
+      run_id: string;
+      new_session_id: string | null;
+      removed_bytes: number;
+      net_bytes: number;
+      suffix_bytes: number;
+    }[];
+
+    // One lookup per run, as `priceReceipts` does, and for the model rather
+    // than the session: a fork's session is on its own row precisely because
+    // the run's current one may have moved on since.
+    const models = new Map<string, string | null>();
+    return rows.map((r) => {
+      if (!models.has(r.run_id)) {
+        const row = db()
+          .prepare("SELECT model FROM runs WHERE id = ?")
+          .get(r.run_id) as { model: string | null } | undefined;
+        models.set(r.run_id, row?.model ?? null);
+      }
+      return {
+        sessionId: r.new_session_id,
+        cut: forkCutFromRow({
+          ts: r.ts,
+          runId: r.run_id,
+          removedBytes: r.removed_bytes,
+          netBytes: r.net_bytes,
+          suffixBytes: r.suffix_bytes,
+          model: models.get(r.run_id) ?? null,
+        }),
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Price a set of forks against the transcripts they produced.
+ *
+ * The turn count comes from the **fork's own** session id rather than the run's
+ * current one. That is the fix for the mis-attribution `priceReceipts`
+ * documents and cannot avoid: a run that forks twice has two sessions, and
+ * counting both cuts' turns against whichever id the run ended on would credit
+ * the first fork with the second's tail.
+ */
+async function priceForks(
+  forks: readonly { cut: NettableCut; sessionId: string | null }[],
+): Promise<PricedReceipt[]> {
+  if (forks.length === 0) return [];
+  const { entries } = await scanUsage();
+  const mainThread = entries.filter((e) => !e.isSidechain);
+
+  const from = forks.reduce((min, f) => Math.min(min, f.cut.ts), forks[0].cut.ts);
+  const control = resumeControl(
+    readCleanProbes({ from, to: Date.now() }),
+    mainThread,
+  );
+
+  return forks.map(({ cut, sessionId }) => {
+    const following = sessionId
+      ? mainThread.filter((e) => e.sessionId === sessionId && e.ts > cut.ts)
+      : [];
+    const resumeWrite = sessionId
+      ? firstBilledTurn(mainThread, sessionId, cut.ts)
+      : null;
+    return { row: cut, net: netReceipt(cut, following.length, resumeWrite, control) };
+  });
+}
+
+/** Two engines' figures, added. */
+export function addSavings(a: PruneSavings, b: PruneSavings): PruneSavings {
+  return {
+    prunes: a.prunes + b.prunes,
+    pricedPrunes: a.pricedPrunes + b.pricedPrunes,
+    unsettledPrunes: a.unsettledPrunes + b.unsettledPrunes,
+    tokensRemoved: a.tokensRemoved + b.tokensRemoved,
+    turnsAfter: a.turnsAfter + b.turnsAfter,
+    cacheSavedUSD: a.cacheSavedUSD + b.cacheSavedUSD,
+    invalidationUSD: a.invalidationUSD + b.invalidationUSD,
+    netUSD: a.netUSD + b.netUSD,
+  };
+}
+
 /** What pruning has been worth, over a window or over one run. */
 export async function pruneSavings(
   filter: { from: number; to: number } | { runId: string },
 ): Promise<PruneSavings> {
-  return sumPruneSavings(await priceReceipts(readReceipts(filter)));
+  // Both engines, added. An install that switched from one to the other has
+  // cuts of both kinds in any window wide enough to matter, and a figure that
+  // covered only the engine currently configured would drop the other's work
+  // out of the total the moment the setting changed — which reads as pruning
+  // having suddenly stopped earning anything.
+  const [pruned, forked] = await Promise.all([
+    sumPruneSavings(await priceReceipts(readReceipts(filter))),
+    forkSavings(filter),
+  ]);
+  return addSavings(pruned, forked);
 }
 
 /**
@@ -1970,5 +2188,16 @@ export function groupPruneSavingsByRun(
 export async function pruneSavingsByRun(
   runIds: readonly string[],
 ): Promise<Map<string, PruneSavings>> {
-  return groupPruneSavingsByRun(await priceReceipts(readReceipts({ runIds })));
+  const byRun = groupPruneSavingsByRun(
+    await priceReceipts(readReceipts({ runIds })),
+  );
+  // The runs list reads this per row, so a forked run showing nothing in the
+  // Pruning column while its own page showed a figure would be the two views
+  // disagreeing about the same run.
+  for (const runId of runIds) {
+    const forked = await forkSavings({ runId });
+    if (forked.prunes === 0) continue;
+    byRun.set(runId, addSavings(byRun.get(runId) ?? NO_PRUNE_SAVINGS, forked));
+  }
+  return byRun;
 }
