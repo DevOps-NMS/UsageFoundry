@@ -256,14 +256,20 @@ export function priceFiles(
 export function renderFileCostNotice(files: readonly PricedFile[]): string {
   if (files.length === 0) return "";
 
+  // One clause for the mechanism rather than two sentences, because
+  // `DELEGATION_NOTICE` states the same thing immediately above this in the
+  // joined `--append-system-prompt` — and it is stated here at all, rather than
+  // leaned on there, because a cross-reference would break silently if that
+  // join order ever changed. What may not go is the *claim*: an agent told only
+  // that a file is large avoids it, where one told the read is paid for again
+  // on every later turn reaches for Grep instead.
   const head =
-    "Before you read a file whole, know what it costs. Nothing shrinks this " +
-    "conversation, so a file you read is carried again on every later turn of " +
-    "this run — a large one is not a one-off charge but a tax on the rest of " +
-    "the work cycle. These are the largest files in this repository and roughly " +
-    "what a full read of each adds, in tokens. Figures are estimates from file " +
-    "size, taken when this run was created, and go stale as the work changes " +
-    "them. Files smaller than " +
+    "Before you read a file whole, know what it costs: a read here is re-read " +
+    "on every later turn of the cycle, so a large file is a tax on the rest of " +
+    "it rather than a one-off charge. These are the largest files in this " +
+    "repository and roughly what a full read of each adds, in tokens. Figures " +
+    "are estimates from file size, taken when this run was created, and go " +
+    "stale as the work changes them. Files smaller than " +
     `${MIN_LISTED_TOKENS / 1_000}k are not listed.`;
 
   const tail =
