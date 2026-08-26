@@ -9,7 +9,7 @@ import {
   stopRun,
 } from "@/lib/orchestrator";
 import { telemetryForRun } from "@/lib/otlp";
-import { pruneSavings } from "@/lib/contextPruning";
+import { contextOccupancy, pruneSavings } from "@/lib/contextPruning";
 import { runAgentDTO } from "@/lib/agents";
 import { normalizePolicy } from "@/lib/budget";
 import { auditMutation } from "../../../../lib/requestLog";
@@ -91,6 +91,18 @@ export async function GET(req: Request, ctx: Ctx) {
     // the section rather than render a row of zeroes — which would read as
     // "pruning saved nothing here" when it means "pruning did not run".
     pruning: pruned.prunes > 0 ? pruned : undefined,
+    // How full this run's context has been, on the poll the page already runs
+    // rather than an endpoint of its own — this is the row's own state and it
+    // arrives with the rest of it. Two indexed reads bounded by
+    // `CONTEXT_SERIES_MAX_POINTS`, and undefined for a run that has neither
+    // samples nor prunes, so nothing is added to the payload of a run that
+    // predates the series or never went live.
+    //
+    // **Not spend, and never summed with anything above.** It is an occupancy
+    // reading in the API-visible currency; `pruning` beside it counts the
+    // transcript's own turns, and the two bases are tens of thousands of tokens
+    // apart in either direction.
+    context: contextOccupancy(id),
   });
 }
 

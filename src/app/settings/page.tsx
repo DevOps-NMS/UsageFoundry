@@ -921,6 +921,12 @@ function StorageFigures({
             <>
               . Last swept {ago(lastSweep.at)} — {lastSweep.events.toLocaleString()}{" "}
               log rows, {lastSweep.telemetry.toLocaleString()} telemetry rows,{" "}
+              {/* Conditional rather than defaulted to 0: a sweep recorded
+                  before this store was swept knew nothing about it, which is
+                  not the same claim as having found none. */}
+              {lastSweep.samples !== undefined && (
+                <>{lastSweep.samples.toLocaleString()} context samples, </>
+              )}
               {lastSweep.checkouts} checkout
               {lastSweep.checkouts === 1 ? "" : "s"} and{" "}
               {lastSweep.transcripts.toLocaleString()} transcript
