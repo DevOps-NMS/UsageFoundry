@@ -312,8 +312,21 @@ ENV PATH="/home/node/pytools/bin:${PATH}" \
 # loop shells out to on every cycle boundary, sitting in a directory a sibling
 # agent could rewrite, would be a way for one run to put its own code on every
 # other run's transcript.
+# Moved 2026-08-26 from 79dd165. That commit predates `winnow safe run`'s
+# ability to dispatch this repository's own commands at all: `run_under_mode`
+# handed argv to the inherited CLI, where `plan` and `fork` are not
+# subcommands, so the two commands the argv gate deliberately allows mid-cycle
+# were the two the dispatcher could not run. `contextPruning.ts`'s `planCut`
+# and `forkTranscript` both need them, and on 79dd165 both fail as unknown
+# commands — the observation table stays empty and the fork engine never fires,
+# with nothing saying why.
+#
+# It also predates `fork --write` being classified by that gate: before
+# `WINNOW_SUBCOMMANDS`, `subcommand_of` matched only inherited names, so every
+# command this repository added fell through `refusal_for` as unclassified and
+# therefore allowed.
 ARG WINNOW_REPO=https://github.com/Xapicc/winnow.git
-ARG WINNOW_REF=79dd165529caff9228e5da61a0245ddbad06ddf8
+ARG WINNOW_REF=4512a0cc135404f1fa0d0ddf7a04133aab65ee93
 RUN set -eux; \
     if [ -z "${WINNOW_REF}" ]; then \
       echo "WINNOW_REF empty — building without winnow; context pruning will report unavailable"; \
