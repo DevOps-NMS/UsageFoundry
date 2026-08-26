@@ -5665,6 +5665,15 @@ export function emitBlockRuns(
  * left to a prompt an operator can edit, for the reason `continuedWorkNotice`'s
  * facts are: a placeholder that can be deleted is a notice that can silently
  * stop saying the true thing.
+ *
+ * Which is also the test for what belongs here at all. `emit_runs`' schema in
+ * `src/app/api/mcp/route.ts` reaches this turn in the same request, and it
+ * already says what a title, a task, a folder, an `agent` and a `dependsOn`
+ * edge are — so restating them here bought a second copy per turn, maintained
+ * by hand, of the text the model reads at the moment it makes the call. What
+ * stays is what no schema can hold: the numbers and names above, which are
+ * facts about *this* block, and the consequences of emitting nothing, which are
+ * facts about the graph the tool knows nothing about.
  */
 function blockSystemPrompt(
   node: WorkflowNode,
@@ -5737,8 +5746,7 @@ function blockSystemPrompt(
     "  set when the workflow was saved.",
     ...folderBounds,
     `- Every run gets its guards — budget, work-cycle limit, permission mode,`,
-    `  whether it works in a checkout of its own — from ${guards}. There is no`,
-    "  argument on emit_runs that touches any of them, deliberately.",
+    `  whether it works in a checkout of its own — from ${guards}.`,
     ...(own
       ? [
           `- You are the “${own.name}” agent: the operator gave this block that`,
@@ -5748,18 +5756,13 @@ function blockSystemPrompt(
       : []),
     ...agentChoices,
     "",
-    "Emitting:",
-    "- One run per unit of work, with a short specific title.",
-    "- The task text is the whole brief the agent gets. Include the file, the",
-    "  issue number, the URL and what done looks like. It is read by an agent",
-    "  that cannot ask you a follow-up question.",
-    "- dependsOn orders the runs you are emitting against each other, and only",
-    "  against each other. Use it when two of them would edit the same files;",
-    "  runs with no link between them start in parallel.",
-    "- Call emit_runs once, with the whole list. Emitting nothing is a real",
-    "  answer when there is nothing worth doing — say so plainly, and know that",
-    "  any block set to start after this one will be stopped rather than run",
-    "  with nothing to work on.",
+    "Emitting — emit_runs' own field descriptions say the rest:",
+    "- One run per unit of work. Name the file, the issue number and the URL in",
+    "  each task.",
+    "- Runs with no dependsOn link between them start in parallel.",
+    "- Emitting nothing is a real answer when there is nothing worth doing — say",
+    "  so plainly, and know that any block set to start after this one will be",
+    "  stopped rather than run with nothing to work on.",
     "",
     "Before you emit, look. You have every tool the CLI offers and you are",
     "trusted with them because your job is to decide, not to build: read files,",
