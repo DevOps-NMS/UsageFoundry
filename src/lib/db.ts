@@ -1343,6 +1343,50 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_plan_observations_run ON plan_observations(run_id, ts);
   `);
 
+  // Every attempt by the fork engine, refusals included.
+  //
+  // `resumed` is the column this table exists for. Winnow's milestone 2 asks
+  // that a forked session resume — 100 forks, 0 failures — and that guardrail
+  // has never been run. Switching this engine on collects it a production cycle
+  // at a time, because the orchestrator's next `--resume` IS the test: if it
+  // fails, the run rolls back to the original session and 0 goes in this column.
+  // A 0 here is winnow's own kill condition, arriving from a real resume the
+  // run actually needed rather than from a harness.
+  //
+  // Refusals are rows too. The expected outcome at a cycle boundary is
+  // `cold-age`, and an operator who switched the engine on and saw nothing
+  // happen has to be able to read why rather than find the table empty.
+  //
+  // `min_cold_age` is stored per row rather than read from settings later,
+  // because it is the one number that decides whether a fork was economically
+  // defensible and settings move.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS fork_attempts (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts                INTEGER NOT NULL,
+      run_id            TEXT NOT NULL,
+      source_session_id TEXT,
+      -- Null when nothing was written, which is every refusal.
+      new_session_id    TEXT,
+      written           INTEGER NOT NULL,
+      -- The guard that stood: 'cold-age', 'compacted', 'G4', 'parse', or a G5
+      -- pairing failure. Null when the fork was written, or when winnow broke
+      -- rather than refused -- those carry a reason and no guard.
+      refused_by        TEXT,
+      reason            TEXT,
+      removed_bytes     INTEGER NOT NULL,
+      net_bytes         INTEGER NOT NULL,
+      break_even_turns  REAL,
+      cold_age_seconds  REAL,
+      min_cold_age      INTEGER,
+      -- Null until a cycle has tried to resume the fork: 1 it did, 0 it could
+      -- not and the run rolled back.
+      resumed           INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_fork_attempts_ts ON fork_attempts(ts);
+    CREATE INDEX IF NOT EXISTS idx_fork_attempts_run ON fork_attempts(run_id, ts);
+  `);
+
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as
   // one it left behind.

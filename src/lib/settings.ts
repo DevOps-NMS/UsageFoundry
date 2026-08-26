@@ -210,6 +210,52 @@ export interface Settings {
    */
   contextPruningStrictness: PruneTier;
   /**
+   * Which of winnow's two rule engines does the pruning.
+   *
+   * `"legacy"` is `winnow treat`, the inherited pruner: about twenty strategies
+   * under `src/winnow/legacy/`, editing the transcript in place and keeping the
+   * session id. It is what this app has always run and stays the default.
+   *
+   * `"winnow"` is `winnow fork`, SPEC section 4's six rules at tier CB. It does
+   * not edit anything — it writes a **new** transcript under a new session id
+   * and the run switches onto it, with the original left untouched as the
+   * recovery path.
+   *
+   * **Off by default and meant to be switched on deliberately, for a while, to
+   * find something out.** Three things are true of the fork path that are not
+   * true of the pruner, and an operator turning it on should know all three.
+   * Its 100-fork resume guardrail has not been run, so no fork has been proven
+   * resumable against a real `claude --resume` — this app verifies each one and
+   * rolls back, which contains the risk and is also how the evidence gets
+   * collected. Its own cold-age guard refuses at every cycle boundary, so
+   * `contextPruningForkMinColdAge` has to be lowered for it to fire at all.
+   * And while both transcripts are on disk they carry the same message ids, so
+   * session-scoped attribution downstream picks one of the two.
+   */
+  contextPruningEngine: "legacy" | "winnow";
+  /**
+   * Seconds of quiet a transcript needs before the fork engine will cut it.
+   *
+   * Winnow's own default is 3,600 and its reason is the whole economic argument
+   * for the tool: a resume past the cache TTL pays a write it was going to pay
+   * anyway, so the deletion is free in the only sense that matters. A cycle
+   * boundary is ~5 seconds after the child exits, so at the default the fork
+   * engine refuses every time and switching it on does nothing.
+   *
+   * That refusal is correct at face value and is *arguably* a proxy misfiring:
+   * SPEC section 7 derives the hour from a more general claim — that there is
+   * one moment where the edit is free, the work-cycle handover, where the
+   * suffix is rewritten anyway — and a boundary here is literally that moment,
+   * which `orchestrator.ts` asserts in its own comment. Arguably, because that
+   * assertion is unmeasured on this install: `resume_probes` exists to settle
+   * it and has not yet.
+   *
+   * So this is a number an operator sets on purpose, with the value recorded on
+   * every fork attempt, rather than a `--force` this app passes quietly.
+   * Null uses winnow's own default, which means the engine never fires.
+   */
+  contextPruningForkMinColdAge: number | null;
+  /**
    * Start the next work cycle fresh, rather than resuming, once the last one's
    * context passed this many tokens. Null is off and is today's behaviour.
    *
@@ -737,6 +783,8 @@ export const DEFAULTS: Settings = {
   readGuardMaxTokens: null,
   contextPruning: false,
   contextPruningStrictness: "standard",
+  contextPruningEngine: "legacy",
+  contextPruningForkMinColdAge: null,
   freshStartContextTokens: null,
   maxConcurrentRuns: 4,
   maxConcurrentAssists: 2,

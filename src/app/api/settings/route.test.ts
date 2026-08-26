@@ -84,6 +84,8 @@ const PROBES: Record<keyof Settings, Probe> = {
   readGuard: { send: true },
   contextPruning: { send: true },
   contextPruningStrictness: { send: "aggressive" },
+  contextPruningEngine: { send: "winnow" },
+  contextPruningForkMinColdAge: { send: 30 },
   // Sent above the CLI's own 25,000-token refusal and stored just under it: a
   // cap at or past that is a number nothing would ever act on, so the route
   // clamps rather than storing what was typed.

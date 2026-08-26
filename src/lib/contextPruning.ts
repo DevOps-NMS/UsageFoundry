@@ -874,6 +874,263 @@ export function recordPlanObservation(
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* The fork engine — a new transcript, a new session id                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `winnow fork --write --json`, for one transcript.
+ *
+ * The other engine. `treat` edits the transcript in place and the run keeps its
+ * session id; `fork` opens the original read-only and writes a **new**
+ * transcript under a new UUIDv5, which the run then has to switch onto. The
+ * original is never modified and never removed — it is the recovery path, and
+ * `winnow recover <session> <pointer-id>` prints any stripped result back out
+ * of it.
+ *
+ * ## What a caller has to handle that `spawnPrune` does not
+ *
+ * **Exit 3 is a refusal, not a failure**, and at a cycle boundary the expected
+ * one is `cold-age`: winnow will not cut a conversation whose last request is
+ * younger than `--min-cold-age` because the prefix may still be cached and the
+ * cut is then not free. The body carries `refusals[]` with a `guard` name, so a
+ * caller can tell "the guard stood" from "the tool broke" and say so.
+ *
+ * **Exit 2 is nothing to do** — no result met a rule at this tier — and its
+ * body is success-shaped with `written: false`.
+ *
+ * **A successful fork is not yet a usable one.** Nothing here has proved the
+ * new transcript resumes; winnow's own 100-fork guardrail is unrun. The caller
+ * adopts the id, and rolls back to the original if the next cycle cannot resume
+ * it. That containment is also the measurement: `fork_attempts.resumed` is the
+ * guardrail being collected a fork at a time, in production.
+ */
+export interface ForkResult {
+  written: boolean;
+  newSessionId: string | null;
+  out: string | null;
+  /** The guard that stood, when nothing was written. `cold-age` is the usual one. */
+  refusedBy: string | null;
+  reason: string | null;
+  removedBytes: number;
+  netBytes: number;
+  breakEvenTurns: number | null;
+  coldAgeSeconds: number | null;
+}
+
+export function forkTranscript(
+  transcriptPath: string,
+  minColdAgeSeconds: number | null,
+): Promise<ForkResult | null> {
+  return new Promise((resolve) => {
+    if (!winnowAvailable()) {
+      resolve(null);
+      return;
+    }
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const finish = (result: ForkResult | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+
+    const argv = [
+      "-m",
+      "winnow",
+      "safe",
+      "run",
+      "--",
+      "fork",
+      transcriptPath,
+      "--tier",
+      PLAN_TIER,
+      "--write",
+      "--json",
+    ];
+    // Passed only when the operator set one. Absent, winnow uses its own 3,600
+    // and refuses at every boundary — which is the honest default and is why
+    // the setting exists rather than a constant here.
+    if (minColdAgeSeconds !== null) {
+      argv.push("--min-cold-age", String(Math.floor(minColdAgeSeconds)));
+    }
+
+    try {
+      const child = spawn(WINNOW_PYTHON, argv, {
+        env: pruneEnv(),
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        if (stdout.length < 4_000_000) stdout += chunk;
+      });
+      // Read as large as stdout, and that is not symmetry for its own sake.
+      // `cmd_fork` prints its JSON body to **stdout** on exit 0 and 2 and to
+      // **stderr** on exit 3 — and exit 3 is the refusal, the one outcome this
+      // caller most needs to read structurally. A 4 KB cap here would truncate
+      // the body of every cold-age refusal into unparseable JSON, and every
+      // refusal would then be filed as "winnow broke".
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => {
+        if (stderr.length < 4_000_000) stderr += chunk;
+      });
+
+      timer = setTimeout(() => child.kill("SIGKILL"), PRUNE_TIMEOUT_MS);
+      timer.unref?.();
+
+      child.on("error", () => finish(null));
+      child.on("close", (code) => {
+        // stdout first, then stderr, for the split above. A safe-mode refusal
+        // puts a plain sentence on stderr rather than a body, which parses to
+        // null and falls through to the reason branch — correctly, because a
+        // mode refusal is not one of winnow's own guards standing.
+        const parsed = parseFork(stdout) ?? parseFork(stderr);
+        if (parsed) {
+          finish(parsed);
+          return;
+        }
+        // No body to read. Exit 1 is a usage error and anything else is the
+        // tool breaking; either way this is not a refusal and must not be
+        // filed as one.
+        finish({
+          written: false,
+          newSessionId: null,
+          out: null,
+          refusedBy: null,
+          reason: stderr.trim() || `winnow fork exited with code ${code ?? -1}`,
+          removedBytes: 0,
+          netBytes: 0,
+          breakEvenTurns: null,
+          coldAgeSeconds: null,
+        });
+      });
+    } catch (err) {
+      finish({
+        written: false,
+        newSessionId: null,
+        out: null,
+        refusedBy: null,
+        reason: err instanceof Error ? err.message : String(err),
+        removedBytes: 0,
+        netBytes: 0,
+        breakEvenTurns: null,
+        coldAgeSeconds: null,
+      });
+    }
+  });
+}
+
+/** The fields of `fork --json` this app reads, or null if the body is unusable. */
+export function parseFork(body: string): ForkResult | null {
+  try {
+    const raw = JSON.parse(body) as Record<string, unknown>;
+    const num = (v: unknown): number =>
+      typeof v === "number" && Number.isFinite(v) ? v : 0;
+    const obj = (v: unknown): Record<string, unknown> =>
+      v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+
+    const plan = obj(raw.plan);
+    const bytes = obj(plan.bytes);
+    const arithmetic = obj(plan.arithmetic);
+    const coldAge = obj(raw.cold_age);
+    const refusals = Array.isArray(raw.refusals) ? raw.refusals : [];
+    const first = obj(refusals[0]);
+
+    // `written` is set only after the file is on disk, so it is the one field
+    // that separates a fork from a plan. A `new_session_id` without it is the
+    // name a fork *would* have had.
+    const written = raw.written === true;
+    return {
+      written,
+      newSessionId:
+        written && typeof raw.new_session_id === "string" ? raw.new_session_id : null,
+      out: written && typeof raw.out === "string" ? raw.out : null,
+      refusedBy: typeof first.guard === "string" ? first.guard : null,
+      reason: typeof first.reason === "string" ? first.reason : null,
+      removedBytes: num(bytes.removed),
+      netBytes: num(bytes.net),
+      breakEvenTurns:
+        typeof arithmetic.break_even_turns === "number"
+          ? arithmetic.break_even_turns
+          : null,
+      coldAgeSeconds:
+        typeof coldAge.seconds === "number" ? coldAge.seconds : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Record one fork attempt, refusal included.
+ *
+ * Refusals are rows too, and the reason is not bookkeeping. The expected
+ * outcome at a boundary is `cold-age`, and an operator who switched the engine
+ * on and saw nothing happen needs the table to say "it refused 40 times because
+ * the conversation was 5 seconds old" rather than to be empty.
+ *
+ * Returns the row id so a later resume can be written back against it, or null
+ * if the insert failed — best-effort here as everywhere in this file.
+ */
+export function recordForkAttempt(
+  runId: string,
+  sourceSessionId: string | null,
+  result: ForkResult,
+  minColdAgeSeconds: number | null,
+): number | null {
+  try {
+    const info = db()
+      .prepare(
+        `INSERT INTO fork_attempts
+           (ts, run_id, source_session_id, new_session_id, written, refused_by,
+            reason, removed_bytes, net_bytes, break_even_turns, cold_age_seconds,
+            min_cold_age)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        Date.now(),
+        runId,
+        sourceSessionId,
+        result.newSessionId,
+        result.written ? 1 : 0,
+        result.refusedBy,
+        result.reason,
+        result.removedBytes,
+        result.netBytes,
+        result.breakEvenTurns,
+        result.coldAgeSeconds,
+        minColdAgeSeconds,
+      );
+    return Number(info.lastInsertRowid);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write back whether the fork this row records actually resumed.
+ *
+ * This column **is** milestone 2's first criterion — "given a forked session,
+ * when `claude --resume <new-id>` runs, then it exits 0; 100 forks, 0 failures"
+ * — collected one production cycle at a time instead of in a dedicated run. A 0
+ * here is the kill condition that guardrail names, and it is worth more than
+ * the same 0 from a harness because the resume was a real one the run needed.
+ */
+export function markForkResumed(rowId: number, resumed: boolean): void {
+  try {
+    db()
+      .prepare("UPDATE fork_attempts SET resumed = ? WHERE id = ?")
+      .run(resumed ? 1 : 0, rowId);
+  } catch {
+    // See above.
+  }
+}
+
 /**
  * Remove the `.bak` winnow just wrote beside the transcript.
  *

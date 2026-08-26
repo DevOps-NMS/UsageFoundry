@@ -66,9 +66,12 @@ import {
   PAYBACK_HORIZON_TURNS,
   paybackTurns,
   boundaryAction,
+  forkTranscript,
+  markForkResumed,
   planCut,
   pruneTranscript,
   pruningEnabled,
+  recordForkAttempt,
   recordPrune,
   recordPlanObservation,
   recordResumeProbe,
@@ -6872,6 +6875,7 @@ async function pruneAtBoundary(
   id: string,
   sessionId: string | null,
   contextTokensNow: number,
+  adopt: (sid: string) => void,
 ): Promise<PruneOutcome | null> {
   const predicted = predictedPayback(id);
   const declinesSoFar = boundaryDeclines.get(id) ?? 0;
@@ -6911,7 +6915,90 @@ async function pruneAtBoundary(
         `the measurement — the figure it refused on is ${declinesSoFar} cycles old.`,
     );
   }
+
+  const settings = getSettings();
+  if (settings.contextPruningEngine === "winnow") {
+    return forkAtBoundary(id, sessionId, settings.contextPruningForkMinColdAge, adopt);
+  }
   return prune(id, sessionId, "boundary");
+}
+
+/**
+ * The fork engine's boundary: cut into a new transcript and switch the run onto
+ * it, provisionally.
+ *
+ * Returns null always, and that is not a stub. `PruneOutcome` describes an
+ * in-place edit — a before and an after of one file — and a fork has neither,
+ * so `contextAfterPrune` has nothing to correct with. The next cycle's own
+ * usage frames will report what the forked conversation costs, which is the
+ * measurement that matters and the one this app already trusts everywhere else.
+ *
+ * The adoption is deliberately not verified here, because it cannot be: the
+ * only thing that proves a fork resumes is a resume. `pendingFork` carries the
+ * way back, and the resume-failure branch in the run loop takes it.
+ */
+async function forkAtBoundary(
+  id: string,
+  sessionId: string | null,
+  minColdAge: number | null,
+  adopt: (sid: string) => void,
+): Promise<PruneOutcome | null> {
+  if (!sessionId) return null;
+  const transcript = await resolveSessionTranscript(sessionId);
+  if (!transcript) {
+    log(id, `Could not find this run's transcript, so its context was not forked.`);
+    return null;
+  }
+
+  const result = await forkTranscript(transcript, minColdAge);
+  if (!result) {
+    log(id, `Context pruning is switched on but winnow is not installed.`);
+    return null;
+  }
+
+  const rowId = recordForkAttempt(id, sessionId, result, minColdAge);
+
+  if (!result.written || !result.newSessionId) {
+    // A refusal is a result, not a failure, and the two must not read alike:
+    // `cold-age` at a boundary is the expected outcome and says the cut would
+    // not have paid for itself, which is the tool working.
+    if (result.refusedBy === "cold-age") {
+      const age = result.coldAgeSeconds === null
+        ? "younger than the threshold"
+        : `${Math.round(result.coldAgeSeconds)}s old`;
+      log(
+        id,
+        `Left this run's conversation alone: winnow will not fork it while the ` +
+          `last request is ${age}, because the cached prefix may still be live ` +
+          `and the cut would not be free. Raise or lower ` +
+          `contextPruningForkMinColdAge to change that, deliberately.`,
+      );
+    } else if (result.refusedBy) {
+      log(id, `Winnow refused to fork this run's conversation (${result.refusedBy}): ${result.reason ?? "no reason given"}.`);
+    } else if (result.reason) {
+      log(id, `This run's context could not be forked: ${result.reason}.`);
+    } else {
+      log(id, `Nothing worth removing from this run's conversation.`);
+    }
+    return null;
+  }
+
+  const breakEven = result.breakEvenTurns === null
+    ? ""
+    : `, needing ${Math.round(result.breakEvenTurns)} further turns to pay for itself`;
+  log(
+    id,
+    `Forked this run's conversation: ${fmtTokens(Math.round(result.netBytes / 4))} ` +
+      `tokens net removed${breakEven}. The original is untouched and stays the ` +
+      `recovery path; this run continues in session ${result.newSessionId}.`,
+  );
+  pendingFork.set(id, { fallbackSessionId: sessionId, rowId });
+  // `adoptSession` is a closure over the run loop's own `sessionId` local, and
+  // moving that local is the entire point — it is what the next cycle's
+  // `--resume` and the live context watch both read. Passed in rather than
+  // reached for, because a module-level function could not touch it.
+  adopt(result.newSessionId);
+  return null;
 }
 
 /**
@@ -8778,6 +8865,31 @@ export async function startRun(id: string): Promise<void> {
           cyclesThisSegment === 1 &&
           !res.sawResult &&
           res.finalText === "";
+        // A fork that will not resume, caught on the one cycle that can catch
+        // it. Taken before the ordinary retry, because retrying the same
+        // unresumable id would burn the single retry the run gets and then fail
+        // for a reason that names the fork rather than the cause.
+        //
+        // The verdict goes on the row either way. This column is milestone 2's
+        // first criterion — "given a forked session, when `claude --resume` runs,
+        // then it exits 0" — and a 0 in it is that guardrail's kill condition,
+        // reached by a resume the run actually needed.
+        const fork = pendingFork.get(id);
+        if (looksLikeResumeFailure && fork && fork.fallbackSessionId) {
+          pendingFork.delete(id);
+          if (fork.rowId !== null) markForkResumed(fork.rowId, false);
+          iterations -= 1;
+          cyclesThisSegment = 0;
+          adoptSession(fork.fallbackSessionId);
+          log(
+            id,
+            `The forked conversation would not resume, so this run is back on the ` +
+              `one it had before the fork (${fork.fallbackSessionId}). The fork is ` +
+              `still on disk and nothing was lost. Winnow's own guardrail counts ` +
+              `this as a failure and it is recorded as one.`,
+          );
+          continue;
+        }
         if (looksLikeResumeFailure && !resumeRetried) {
           resumeRetried = true;
           iterations -= 1;
@@ -8798,6 +8910,16 @@ export async function startRun(id: string): Promise<void> {
           : `Claude Code exited with code ${res.exitCode}.`;
         finalStatus = "failed";
         break;
+      }
+
+      // The cycle exited 0 and did work, so if the last boundary forked, the
+      // fork resumed. Recorded here rather than at the fork, because a fork is
+      // only proven by the resume that follows it — which is the whole of
+      // milestone 2's first criterion and the reason this run collects it.
+      const resumedFork = pendingFork.get(id);
+      if (resumedFork) {
+        pendingFork.delete(id);
+        if (resumedFork.rowId !== null) markForkResumed(resumedFork.rowId, true);
       }
 
       // What this cycle's last turn said about the task, if anything. The
@@ -8886,7 +9008,7 @@ export async function startRun(id: string): Promise<void> {
       // while winnow is rewriting it.
       lastContextTokens = contextAfterPrune(
         lastContextTokens,
-        await pruneAtBoundary(id, sessionId, lastContextTokens),
+        await pruneAtBoundary(id, sessionId, lastContextTokens, adoptSession),
       );
     }
   } catch (err) {
@@ -8905,6 +9027,7 @@ export async function startRun(id: string): Promise<void> {
     contextWatches.delete(id);
     earlyEndDeclined.delete(id);
     boundaryDeclines.delete(id);
+    pendingFork.delete(id);
     // The exporter's credential dies with the run's loop, the way the chat's
     // dies with its turn — on a short grace, because the exporter batches on a
     // one-second timer and revoking on the instant would drop the tail of the
@@ -9406,6 +9529,25 @@ const earlyEndDeclined = ((globalThis as unknown as {
 const boundaryDeclines = ((globalThis as unknown as {
   __ufBoundaryDeclines?: Map<string, number>;
 }).__ufBoundaryDeclines ??= new Map<string, number>());
+
+/**
+ * For a run whose last boundary forked: the session to go back to, and the row
+ * to write the verdict into.
+ *
+ * The fork engine writes a new transcript and the run switches onto it, but
+ * nothing has proved that transcript resumes — winnow's 100-fork guardrail is
+ * unrun, and one unresumable fork is its stated kill condition. So the switch is
+ * provisional: if the next cycle cannot resume the fork, the run goes back to
+ * the conversation it had and carries on.
+ *
+ * That is what makes turning the engine on survivable, and it is also the
+ * measurement. `fork_attempts.resumed` is milestone 2's first criterion being
+ * collected one production cycle at a time, from resumes the run actually
+ * needed rather than from a harness.
+ */
+const pendingFork = ((globalThis as unknown as {
+  __ufPendingFork?: Map<string, { fallbackSessionId: string | null; rowId: number | null }>;
+}).__ufPendingFork ??= new Map<string, { fallbackSessionId: string | null; rowId: number | null }>());
 
 
 function startSweeper(): void {

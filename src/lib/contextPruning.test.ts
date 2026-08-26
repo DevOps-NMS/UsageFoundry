@@ -14,6 +14,7 @@ import {
   isPruneTier,
   MIN_CONTROL_RESUMES,
   netReceipt,
+  parseFork,
   parsePlan,
   paybackTurns,
   PLAN_TIER,
@@ -798,5 +799,110 @@ describe("parsePlan", () => {
     const plan = parsePlan(JSON.stringify({ results: { tool_calls: 1 } }));
     assert.ok(plan);
     assert.equal(plan.tier, PLAN_TIER);
+  });
+});
+
+describe("parseFork", () => {
+  /**
+   * The reader for `winnow fork --json`.
+   *
+   * Both bodies below were produced by running the real command against a real
+   * transcript on this install, not written by hand. That matters more here
+   * than for `parsePlan`, because this reader decides whether a run switches
+   * onto a new conversation, and because the field it depends on most —
+   * `written` — is the one a plausible-looking body carries as `false` while
+   * still naming a `new_session_id`.
+   */
+  const REFUSED = JSON.stringify({
+    written: false,
+    // Present even on a refusal: it is the name the fork *would* have had.
+    // Adopting it would point the run's --resume at a file nobody wrote.
+    new_session_id: "4356069f-3111-569c-842e-a766dbbfbeab",
+    out: "/tmp/warm/4356069f-3111-569c-842e-a766dbbfbeab.jsonl",
+    refusals: [
+      {
+        guard: "cold-age",
+        forceable: true,
+        reason:
+          "this session's last request finished 0s ago, inside the 60m --min-cold-age window, so its prefix may still be cached and the cut is not free (SPEC §7).",
+      },
+    ],
+    cold_age: { seconds: 0.1, threshold: 3600, measured_from: "the newest record timestamp" },
+    plan: {
+      bytes: { removed: 24029, pointer_overhead: 1304, net: 22725 },
+      arithmetic: { suffix_bytes: 122902, break_even_turns: 82.8 },
+    },
+  });
+
+  const WRITTEN = JSON.stringify({
+    written: true,
+    new_session_id: "4356069f-3111-569c-842e-a766dbbfbeab",
+    out: "/tmp/warm/4356069f-3111-569c-842e-a766dbbfbeab.jsonl",
+    refusals: [],
+    cold_age: { seconds: 0.1, threshold: 0, measured_from: "the newest record timestamp" },
+    plan: {
+      bytes: { removed: 24029, pointer_overhead: 1304, net: 22725 },
+      arithmetic: { suffix_bytes: 122902, break_even_turns: 82.8 },
+    },
+  });
+
+  it("never reports a session id for a fork that was not written", () => {
+    // The single most consequential assertion in this file. `new_session_id` is
+    // present on a refusal because it is derived from the source rather than
+    // minted at write time — so a reader that took it on sight would adopt the
+    // name of a file that does not exist, and the run's next --resume would
+    // fail into a conversation it never had.
+    const fork = parseFork(REFUSED);
+    assert.ok(fork);
+    assert.equal(fork.written, false);
+    assert.equal(fork.newSessionId, null);
+    assert.equal(fork.out, null);
+  });
+
+  it("names the guard that stood, so a refusal does not read as a breakage", () => {
+    // `cold-age` at a cycle boundary is the expected outcome and means the cut
+    // would not have paid for itself. Reporting it the way a crash is reported
+    // would send an operator looking for a broken install every cycle.
+    const fork = parseFork(REFUSED);
+    assert.ok(fork);
+    assert.equal(fork.refusedBy, "cold-age");
+    assert.match(fork.reason ?? "", /--min-cold-age/);
+    assert.equal(fork.coldAgeSeconds, 0.1);
+  });
+
+  it("reads a written fork's id and path", () => {
+    const fork = parseFork(WRITTEN);
+    assert.ok(fork);
+    assert.equal(fork.written, true);
+    assert.equal(fork.newSessionId, "4356069f-3111-569c-842e-a766dbbfbeab");
+    assert.equal(fork.out, "/tmp/warm/4356069f-3111-569c-842e-a766dbbfbeab.jsonl");
+    assert.equal(fork.refusedBy, null);
+    assert.equal(fork.netBytes, 22725);
+    assert.equal(fork.breakEvenTurns, 82.8);
+  });
+
+  it("returns null on a body that is not JSON, so stderr can be tried next", () => {
+    // `cmd_fork` prints its body to stdout on exit 0 and 2 and to stderr on
+    // exit 3. The caller parses stdout then stderr, which only works if a
+    // non-body parses to null rather than to an empty result.
+    assert.equal(parseFork(""), null);
+    assert.equal(
+      parseFork("winnow: `winnow fork --write` is refused right now: a live Claude process"),
+      null,
+    );
+  });
+
+  it("does not invent a session id when the body has no fields it knows", () => {
+    const fork = parseFork(JSON.stringify({ something: "else" }));
+    assert.ok(fork);
+    assert.equal(fork.written, false);
+    assert.equal(fork.newSessionId, null);
+    assert.equal(fork.refusedBy, null);
+  });
+
+  it("refuses a non-string session id rather than coercing it", () => {
+    const fork = parseFork(JSON.stringify({ written: true, new_session_id: 12345 }));
+    assert.ok(fork);
+    assert.equal(fork.newSessionId, null);
   });
 });

@@ -320,6 +320,35 @@ async function putHandler(req: Request) {
     patch.contextPruningStrictness = body.contextPruningStrictness;
   }
 
+  if ("contextPruningEngine" in body) {
+    // Refused rather than coerced, for the same reason as the tier above and
+    // one more: an unrecognised value falling back to "legacy" would leave an
+    // operator who typed it believing the fork engine was on, watching a run
+    // that never forks and concluding the feature does not work.
+    if (body.contextPruningEngine !== "legacy" && body.contextPruningEngine !== "winnow") {
+      return NextResponse.json(
+        { error: "contextPruningEngine must be one of legacy, winnow" },
+        { status: 400 },
+      );
+    }
+    patch.contextPruningEngine = body.contextPruningEngine;
+  }
+
+  if ("contextPruningForkMinColdAge" in body) {
+    const n = optionalNumber(body.contextPruningForkMinColdAge);
+    if (n !== null && (!Number.isFinite(n) || n < 0)) {
+      return NextResponse.json(
+        { error: "contextPruningForkMinColdAge must be a non-negative number of seconds, or blank" },
+        { status: 400 },
+      );
+    }
+    // Stored as given, including 0. Zero means "cut whatever the age", which is
+    // the whole of winnow's economic guard switched off — a thing an operator
+    // may legitimately want for an experiment and must never arrive at by
+    // accident, so it is neither clamped away nor defaulted to.
+    patch.contextPruningForkMinColdAge = n === null ? null : Math.floor(n);
+  }
+
   if ("readGuardMaxTokens" in body) {
     const n = optionalNumber(body.readGuardMaxTokens);
     // Blank means no cap, which is the rule every switchable limit here
