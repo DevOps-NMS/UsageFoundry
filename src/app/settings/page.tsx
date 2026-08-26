@@ -274,6 +274,30 @@ const PRUNE_TIER_CONSEQUENCE: Record<PruneTier, string> = {
     "Everything Standard does, plus collapsing repeated errors and polling, deduplicating large documents, trimming any block over 32KB and dropping older images. Removes more, and more of what it removes is content the agent might have re-read",
 };
 
+type PruneEngine = "legacy" | "winnow";
+
+const PRUNE_ENGINE_OPTIONS: readonly SegmentedOption<PruneEngine>[] = [
+  { value: "legacy", label: "Edit in place" },
+  { value: "winnow", label: "Fork" },
+];
+
+/**
+ * The two engines, described by what they do to the conversation rather than by
+ * their names — an operator choosing here does not care which module runs.
+ *
+ * The Fork row says three things it would be dishonest to leave to a tooltip:
+ * that nothing has proved a forked session resumes, that the app rolls back if
+ * one does not, and that it does nothing at all until the setting below it is
+ * lowered. The last is the one that would otherwise read as the feature being
+ * broken.
+ */
+const PRUNE_ENGINE_CONSEQUENCE: Record<PruneEngine, string> = {
+  legacy:
+    "Rewrites the conversation where it stands, keeping the same session. This is what this app has always done and what every figure on the savings card was measured against",
+  winnow:
+    "Writes a new conversation with the removed output replaced by recoverable pointers, and moves the run onto it. The original is never touched and stays the way back. Nothing has yet proved a forked conversation resumes, so if one does not, the run returns to the conversation it had and the failure is recorded — that check is also how the evidence gets collected. Does nothing until you lower the quiet period below",
+};
+
 const LAND_CONSEQUENCE: Record<LandStrategy, string> = {
   merge:
     "The run’s own commits go onto your branch, which is what keeps the diff on its page meaningful afterwards",
@@ -330,6 +354,8 @@ const EDITABLE_PATHS = [
   "readGuardMaxTokens",
   "contextPruning",
   "contextPruningStrictness",
+  "contextPruningEngine",
+  "contextPruningForkMinColdAge",
   "freshStartContextTokens",
   "knowledgeBaseMountId",
   "knowledgeBaseSubpath",
@@ -3276,6 +3302,63 @@ export default function SettingsPage() {
               label="How much it takes out"
             />
           </SettingRow>
+
+          <SettingRow
+            edited={isEdited("contextPruningEngine")}
+            label="How it takes it out"
+            description={PRUNE_ENGINE_CONSEQUENCE[effective.contextPruningEngine]}
+          >
+            <SegmentedControl
+              options={PRUNE_ENGINE_OPTIONS}
+              value={effective.contextPruningEngine}
+              onChange={(v) => patch({ contextPruningEngine: v })}
+              label="How it takes it out"
+            />
+          </SettingRow>
+
+          {/* Only under Fork. The number is meaningless to the other engine,
+              and a control that does nothing where it sits is worse than one
+              that is not there — an operator would set it and wait. */}
+          {effective.contextPruningEngine === "winnow" && (
+            <SettingRow
+              htmlFor="forkcoldage"
+              edited={isEdited("contextPruningForkMinColdAge")}
+              label="Quiet period a conversation needs before forking it"
+              description={
+                <>
+                  The tool will not cut a conversation whose last request is
+                  newer than this, because the answer may still be cached and
+                  the cut would then cost more than it saves. Its own default is
+                  an hour, and the moment between two work cycles is seconds
+                  old — so left blank, <strong>this never fires and nothing is
+                  ever forked</strong>. Lowering it is a deliberate bet that a
+                  cycle boundary is the one moment where the edit is free, which
+                  is argued but not yet measured on this install. Whatever you
+                  set is recorded against every fork, so the bet is on the
+                  record rather than in someone&rsquo;s memory
+                </>
+              }
+            >
+              <div className="w-36">
+                <Input
+                  id="forkcoldage"
+                  type="number"
+                  min={0}
+                  className="tabular-nums"
+                  unit="seconds"
+                  placeholder="3600"
+                  value={effective.contextPruningForkMinColdAge ?? ""}
+                  onChange={(e) =>
+                    patch({
+                      contextPruningForkMinColdAge: e.target.value
+                        ? Number(e.target.value)
+                        : null,
+                    })
+                  }
+                />
+              </div>
+            </SettingRow>
+          )}
 
           <SettingRow
             htmlFor="readguard"

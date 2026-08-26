@@ -2078,6 +2078,24 @@ export interface SettingsDTO {
   /** How much a prune takes out. Inert while `contextPruning` is off. */
   contextPruningStrictness: PruneTier;
   /**
+   * Which of winnow's two engines does the cutting.
+   *
+   * `"legacy"` rewrites the conversation in place and keeps the session id;
+   * `"winnow"` writes a new conversation with the removed output replaced by
+   * recoverable pointers and moves the run onto it, leaving the original as the
+   * way back. Ships `"legacy"`.
+   */
+  contextPruningEngine: "legacy" | "winnow";
+  /**
+   * Seconds of quiet a conversation needs before the fork engine will cut it.
+   *
+   * Null uses winnow's own default of an hour — and a work-cycle boundary is
+   * seconds old, so at that value the fork engine never fires. Lowering it is a
+   * deliberate call, which is why it is a number an operator sets rather than a
+   * flag the app passes: the value is recorded against every fork attempt.
+   */
+  contextPruningForkMinColdAge: number | null;
+  /**
    * Open the next work cycle without `--resume` once the last one's context
    * passed this many tokens. Null is off, which is what every install does
    * today.
