@@ -698,14 +698,13 @@ export const DEFAULT_CONTINUATION_PROMPT =
  * cannot satisfy produces the same churn, hence the last sentence.
  */
 export const DEFAULT_DONE_PUSHBACK_PROMPT =
-  "You reported the task complete, but this run still has budget left and is " +
-  "set to spend it on the same task. Do not start new features and do not " +
-  "refactor working code for its own sake. Instead: re-read the original task " +
-  "and check every part of it is met; run the tests and fix what fails; look " +
-  "for edge cases, error handling and missing tests; and correct any " +
-  "documentation your changes made wrong. This run ends when it reaches a " +
-  "limit, not when you report it done, so if you truly find nothing worth " +
-  "doing, say so and make no changes.";
+  "You reported the task complete, but this run has budget left and ends when " +
+  "it reaches a limit, not when you report it done. Do not start new features " +
+  "and do not refactor working code for its own sake. Instead: re-read the " +
+  "original task and check every part of it is met; run the tests and fix what " +
+  "fails; look for edge cases, error handling and missing tests; and correct " +
+  "any documentation your changes made wrong. If you find nothing worth doing, " +
+  "say so and make no changes.";
 
 /**
  * Read first, then extend — and do not undo.
