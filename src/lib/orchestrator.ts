@@ -6987,11 +6987,12 @@ async function settleBoundary(
  * cut, so a second gate on the same arithmetic could only decline to use a
  * boundary already paid for. `BOUNDARY_BREAK_EVEN_BUDGET` carries the argument.
  *
- * What still stands is `--min-cold-age`, and on this path it stands hard: the
- * session was live seconds ago, so winnow refuses unless the operator has
- * lowered `contextPruningForkMinColdAge` deliberately. That refusal is the tool
- * working — a prefix that may still be cached is a cut that is not free — and it
- * reads as one in the log rather than as a breakage.
+ * `--min-cold-age` does not stand here either, and for the third time it is the
+ * same argument: the session was live seconds ago because a fork can only happen
+ * seconds after a child exits, so the guard's pass condition is unreachable on
+ * this path rather than merely strict. `contextPruningForkMinColdAge` ships at 0
+ * and carries the reasoning. An operator who raises it gets the refusal back,
+ * and it reads in the log as the guard standing rather than as a breakage.
  */
 async function pruneAtEarlyEnd(
   id: string,

@@ -1101,9 +1101,11 @@ export function forkTranscript(
       "--write",
       "--json",
     ];
-    // Passed only when the operator set one. Absent, winnow uses its own 3,600
-    // and refuses at every boundary — which is the honest default and is why
-    // the setting exists rather than a constant here.
+    // Passed whenever the caller has a figure, which since the default moved to
+    // 0 is always unless an operator blanked it. Absent, winnow applies its own
+    // 3,600 — and at a cycle boundary the transcript's last request is ~0s old
+    // by construction, so that is not a stricter setting but an engine that
+    // cannot fire. See `contextPruningForkMinColdAge`.
     if (minColdAgeSeconds !== null) {
       argv.push("--min-cold-age", String(Math.floor(minColdAgeSeconds)));
     }

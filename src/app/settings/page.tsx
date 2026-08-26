@@ -3328,14 +3328,16 @@ export default function SettingsPage() {
                 <>
                   The tool will not cut a conversation whose last request is
                   newer than this, because the answer may still be cached and
-                  the cut would then cost more than it saves. Its own default is
-                  an hour, and the moment between two work cycles is seconds
-                  old — so left blank, <strong>this never fires and nothing is
-                  ever forked</strong>. Lowering it is a deliberate bet that a
-                  cycle boundary is the one moment where the edit is free, which
-                  is argued but not yet measured on this install. Whatever you
-                  set is recorded against every fork, so the bet is on the
-                  record rather than in someone&rsquo;s memory
+                  the cut would then cost more than it saves. A fork can only
+                  happen in the moment between two work cycles, which is always
+                  seconds old — so this ships at <strong>0</strong>, on the
+                  argument that the handover is the one moment the edit is free
+                  because the next cycle rewrites the conversation anyway. That
+                  is argued and not yet measured here, and raising it is how you
+                  disagree; left blank it falls back to the tool&rsquo;s own
+                  hour, at which <strong>nothing is ever forked</strong>.
+                  Whatever is in force is recorded against every fork, so the
+                  bet is on the record rather than in someone&rsquo;s memory
                 </>
               }
             >

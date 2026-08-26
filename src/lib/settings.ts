@@ -227,32 +227,48 @@ export interface Settings {
    * Its 100-fork resume guardrail has not been run, so no fork has been proven
    * resumable against a real `claude --resume` — this app verifies each one and
    * rolls back, which contains the risk and is also how the evidence gets
-   * collected. Its own cold-age guard refuses at every cycle boundary, so
-   * `contextPruningForkMinColdAge` has to be lowered for it to fire at all.
+   * collected. Its own cold-age guard cannot be satisfied at a cycle boundary
+   * at all, so `contextPruningForkMinColdAge` ships at 0 and the reasoning for
+   * that is on the setting itself.
    * And while both transcripts are on disk they carry the same message ids, so
    * session-scoped attribution downstream picks one of the two.
    */
   contextPruningEngine: "legacy" | "winnow";
   /**
    * Seconds of quiet a transcript needs before the fork engine will cut it.
+   * **Zero, and that is the decision this docblock exists to record.**
    *
    * Winnow's own default is 3,600 and its reason is the whole economic argument
    * for the tool: a resume past the cache TTL pays a write it was going to pay
-   * anyway, so the deletion is free in the only sense that matters. A cycle
-   * boundary is ~5 seconds after the child exits, so at the default the fork
-   * engine refuses every time and switching it on does nothing.
+   * anyway, so the deletion is free in the only sense that matters.
    *
-   * That refusal is correct at face value and is *arguably* a proxy misfiring:
-   * SPEC section 7 derives the hour from a more general claim — that there is
-   * one moment where the edit is free, the work-cycle handover, where the
-   * suffix is rewritten anyway — and a boundary here is literally that moment,
-   * which `orchestrator.ts` asserts in its own comment. Arguably, because that
-   * assertion is unmeasured on this install: `resume_probes` exists to settle
-   * it and has not yet.
+   * The proxy does not survive contact with an orchestrator. This app forks
+   * seconds after a child exits — that is the *design*, not a race: the cut has
+   * to land before the next `--resume` reads the file. So the transcript's last
+   * request is always ~0s old at the only moment a fork can happen, the guard
+   * can never be satisfied here however long anyone waits, and at 3,600 the
+   * engine does not misfire — it never fires at all. A guard whose pass
+   * condition is unreachable is not a safety property, it is an off switch.
    *
-   * So this is a number an operator sets on purpose, with the value recorded on
-   * every fork attempt, rather than a `--force` this app passes quietly.
-   * Null uses winnow's own default, which means the engine never fires.
+   * What the hour is a proxy *for* is the general claim in SPEC section 7: that
+   * there is one moment where the edit is free, the work-cycle handover, where
+   * the suffix is rewritten anyway. A boundary here is literally that moment.
+   * This is the same reasoning that turns off the break-even gate at the same
+   * two call sites (`BOUNDARY_BREAK_EVEN_BUDGET`), and it stands or falls with
+   * it — one hypothesis, applied consistently, rather than armed in one guard
+   * and disarmed in the other.
+   *
+   * **What would overturn it**, and it is measured rather than argued:
+   * `resume_probes` and `classifyResume` are reading whether a *clean* boundary
+   * resume — one with no prune before it — comes back warm. Warm means the
+   * prefix was still cached, the handover is not free, and this number should go
+   * back up along with every figure that prices a boundary invalidation at zero.
+   * Until then the honest value is the one that lets the engine run, because an
+   * engine that cannot fire collects no evidence either way.
+   *
+   * Set on purpose by an operator who disagrees; the effective value is recorded
+   * on every fork attempt, so what was in force is always readable off the row.
+   * Null defers to winnow's own default, which in this app means never firing.
    */
   contextPruningForkMinColdAge: number | null;
   /**
@@ -783,7 +799,7 @@ export const DEFAULTS: Settings = {
   contextPruning: false,
   contextPruningStrictness: "standard",
   contextPruningEngine: "legacy",
-  contextPruningForkMinColdAge: null,
+  contextPruningForkMinColdAge: 0,
   freshStartContextTokens: null,
   maxConcurrentRuns: 4,
   maxConcurrentAssists: 2,
