@@ -949,14 +949,18 @@ describe("forkCutFromRow", () => {
     assert.equal(forkCutFromRow(REAL).tokensRemoved, 6_313);
   });
 
-  it("reconstructs the pre-cut suffix, because that is what the read would have covered", () => {
-    // `suffix_bytes` is S — what stands *after* the cut line. The counterfactual
-    // is a resume that never cut, so it would have re-read the suffix plus what
-    // the fork took out.
+  it("takes the suffix as it stands, because S is already the pre-cut figure", () => {
+    // This assertion used to add the removed tokens back on, and was wrong in
+    // the way that is hardest to see: both versions produce a plausible number.
+    // `winnow plan` computes `suffix_bytes` over the **source** transcript —
+    // the file before anything was removed — so the removed bytes are already
+    // inside it. Adding them counted them twice, inflating the counterfactual
+    // read by 18% on this real fork and understating the invalidation with it.
     const cut = forkCutFromRow(REAL);
-    assert.equal(
-      cut.tokensBefore,
-      Math.round(122_902 / BYTES_PER_TOKEN) + cut.tokensRemoved,
+    assert.equal(cut.tokensBefore, Math.round(122_902 / BYTES_PER_TOKEN));
+    assert.ok(
+      cut.tokensBefore > cut.tokensRemoved,
+      "the suffix contains the cut, so it cannot be smaller than it",
     );
     assert.equal(cut.tokensAfter, cut.tokensBefore - cut.tokensRemoved);
   });

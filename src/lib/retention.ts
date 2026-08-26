@@ -612,6 +612,39 @@ function resumableSessions(): Set<string> {
       .all() as Array<{ session_id: string | null }>,
   );
 
+  // A fork's source, for as long as the fork itself is being kept.
+  //
+  // `winnow fork` writes a new transcript whose stripped tool results are
+  // replaced by pointers, each carrying a `winnow recover <session> <id>`
+  // command that reads the original bytes back out of the **source** file. The
+  // source is never referenced by any run row once the run has adopted the
+  // fork, so it ages out on its own — and the day it does, every pointer in the
+  // live conversation silently stops being recoverable. Reversibility is the
+  // whole argument for replacing a result with a pointer rather than deleting
+  // it; a swept source turns a reversible loss into an irreversible one, with
+  // nothing anywhere saying so.
+  //
+  // One hop, not transitive closure: a fork of a fork would need its own edge,
+  // and nothing writes one today. Bounded deliberately rather than looped,
+  // because an unbounded walk over a table an operator can grow is a way to
+  // make a sweep hang.
+  try {
+    const forks = db()
+      .prepare(
+        `SELECT source_session_id, new_session_id FROM fork_attempts
+          WHERE written = 1 AND source_session_id IS NOT NULL`,
+      )
+      .all() as Array<{ source_session_id: string; new_session_id: string | null }>;
+    for (const f of forks) {
+      if (f.new_session_id && keep.has(f.new_session_id)) {
+        keep.add(f.source_session_id);
+      }
+    }
+  } catch {
+    // An install that has never forked has no such table on an older schema.
+    // Keeping fewer files is the sweep's ordinary job; failing it is not.
+  }
+
   return keep;
 }
 

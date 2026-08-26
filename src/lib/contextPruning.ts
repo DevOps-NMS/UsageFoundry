@@ -809,7 +809,14 @@ export function planCut(transcriptPath: string): Promise<PlannedCut | null> {
 /** The three objects of `plan --json` this app reads, or null if it cannot. */
 export function parsePlan(body: string): PlannedCut | null {
   try {
-    const raw = JSON.parse(body) as {
+    // Exit 2 — "no result met a rule at this tier" — prints the body and then
+    // appends a sentence of prose to it, in the `--json` path as well as the
+    // human one. `JSON.parse` of the whole thing throws, so every observation
+    // of the new engine declining to cut anything was being dropped: exactly
+    // the observations that would show it is more conservative than the
+    // pruner, and the ones whose absence looks like the feature never running.
+    const end = body.lastIndexOf("}");
+    const raw = JSON.parse(end === -1 ? body : body.slice(0, end + 1)) as {
       selection?: { tier?: unknown };
       results?: { tool_calls?: unknown; stripped?: unknown };
       bytes?: { removed?: unknown; pointer_overhead?: unknown; net?: unknown };
@@ -1092,9 +1099,9 @@ export function recordForkAttempt(
       .prepare(
         `INSERT INTO fork_attempts
            (ts, run_id, source_session_id, new_session_id, written, refused_by,
-            reason, removed_bytes, net_bytes, break_even_turns, cold_age_seconds,
-            min_cold_age)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            reason, removed_bytes, net_bytes, suffix_bytes, break_even_turns,
+            cold_age_seconds, min_cold_age)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         Date.now(),
@@ -1112,6 +1119,45 @@ export function recordForkAttempt(
         minColdAgeSeconds,
       );
     return Number(info.lastInsertRowid);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The fork a run adopted but has no verdict for yet, if the run is sitting on it.
+ *
+ * `pendingFork` lives in memory and dies with the run's loop, so a run that
+ * forked and was then parked — by a rate limit, a guard, or a restart — came
+ * back with no way home and no row to settle. It would resume the fork on trust,
+ * and if the fork would not resume the run failed outright instead of rolling
+ * back onto the conversation it had.
+ *
+ * Recovered from the table rather than kept in memory across the gap, because
+ * the table is the thing that survives a restart. Matched on the session the run
+ * is actually holding, so a fork the run has already moved off is not revived.
+ */
+export function pendingForkFor(
+  runId: string,
+  sessionId: string | null,
+): { fallbackSessionId: string | null; forkSessionId: string; rowId: number } | null {
+  if (!sessionId) return null;
+  try {
+    const row = db()
+      .prepare(
+        `SELECT id, source_session_id, new_session_id FROM fork_attempts
+          WHERE run_id = ? AND new_session_id = ? AND written = 1 AND resumed IS NULL
+          ORDER BY ts DESC LIMIT 1`,
+      )
+      .get(runId, sessionId) as
+      | { id: number; source_session_id: string | null; new_session_id: string }
+      | undefined;
+    if (!row) return null;
+    return {
+      fallbackSessionId: row.source_session_id,
+      forkSessionId: row.new_session_id,
+      rowId: row.id,
+    };
   } catch {
     return null;
   }
@@ -2023,7 +2069,11 @@ export function forkCutFromRow(row: {
   // invalidation and understates the net — the conservative direction, and the
   // one to be wrong in on a figure that decides whether to keep a feature on.
   const suffix = Math.max(0, Math.round(row.suffixBytes / BYTES_PER_TOKEN));
-  const before = suffix > 0 ? suffix + removed : removed;
+  // `suffix_bytes` is already the **pre-cut** suffix. `winnow plan` computes it
+  // as the bytes standing from the cut line to the end of the source
+  // transcript, which is the file before anything was removed — so the removed
+  // tokens are inside it, and adding them back counted them twice.
+  const before = suffix > 0 ? suffix : removed;
   return {
     ts: row.ts,
     runId: row.runId,

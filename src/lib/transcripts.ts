@@ -789,6 +789,8 @@ async function runScan(): Promise<ScanResult> {
   // 75% on 2.1.238 — silently, and worse with each release.
   const indexOfKey = new Map<string, number>();
   const entries: UsageEntry[] = [];
+  /** Which file each kept entry came from — `toolCallFile`'s reason, verbatim. */
+  const entryFile: number[] = [];
   const unpriced = new Set<string>();
 
   // The composition reading's own dedupe, over its own key and in its own
@@ -800,28 +802,94 @@ async function runScan(): Promise<ScanResult> {
   // report a call with no result whenever a session was resumed across it.
   const indexOfToolId = new Map<string, number>();
   const toolCalls: ToolCall[] = [];
+  // Which file each kept tool call came from, so the recency rule above can
+  // compare them. A parallel array rather than a field on `ToolCall`, because
+  // this is scan-local bookkeeping and every consumer of that type would
+  // otherwise carry an index into an array it cannot see.
+  const toolCallFile: number[] = [];
+  const lastTsOfFile: number[] = results.map((r) =>
+    r ? r.entries.reduce((m, e) => (e.ts > m ? e.ts : m), 0) : 0,
+  );
 
-  for (const r of results) {
+  for (let fileIndex = 0; fileIndex < results.length; fileIndex++) {
+    const r = results[fileIndex];
     if (!r) continue;
+    const fileLastTs = lastTsOfFile[fileIndex];
     for (const e of r.entries) {
       const kept = indexOfKey.get(e.key);
       if (kept !== undefined) {
-        if (e.tokens.output > entries[kept].tokens.output) entries[kept] = e;
+        if (e.tokens.output > entries[kept].tokens.output) {
+          entries[kept] = e;
+          entryFile[kept] = fileIndex;
+        } else if (
+          e.tokens.output === entries[kept].tokens.output &&
+          fileLastTs > (lastTsOfFile[entryFile[kept]] ?? 0)
+        ) {
+          // A tie used to keep whichever file the filesystem listed first, and
+          // for a resumed session that is harmless — both copies carry the same
+          // numbers *and* the same `sessionId`. A **fork** breaks the second
+          // half of that: `winnow fork` rewrites `sessionId` on every copied
+          // line, so the two records are identical except for the one field
+          // every session-scoped reader keys on. Measured on this operator's
+          // corpus: 6,657 keys appear in more than one file, all 6,657 carry
+          // more than one session id, and all 6,657 tie on output — so readdir
+          // order alone decided which half of a forked run the agent-cost card
+          // counted, and which turns the intake filter could see following a
+          // request.
+          //
+          // Recency breaks the tie the same way it does for tool calls below:
+          // the transcript still being appended to is the conversation the run
+          // is carrying. Cost is identical either way — the copies are verbatim
+          // — so this moves attribution and never a total.
+          entries[kept] = e;
+          entryFile[kept] = fileIndex;
+        }
         continue;
       }
       indexOfKey.set(e.key, entries.length);
+      entryFile.push(fileIndex);
       entries.push(e);
       if (e.unpriced) unpriced.add(e.model);
     }
     for (const c of r.toolCalls) {
       const kept = indexOfToolId.get(c.id);
       if (kept !== undefined) {
-        if ((c.resultChars ?? -1) > (toolCalls[kept].resultChars ?? -1)) {
+        // Which copy is the *live* one, before which copy saw the most.
+        //
+        // The rule below — most characters wins — reads two copies of a call as
+        // one complete and one unfinished, which is what a streaming write
+        // produces. A **fork** produces something else: `winnow fork` writes a
+        // second transcript whose tool results are deliberately replaced by
+        // short pointers, and there the shorter record is the newer truth. Most
+        // characters would always pick the original's full result and report the
+        // fork as having removed nothing, for as long as the original is on
+        // disk — which is for ever, since winnow never deletes it. Measured on
+        // one real fork: 92,498 characters against the fork's own 69,773, a gap
+        // of exactly the 22,725 bytes it removed.
+        //
+        // A transcript that is still being appended to is the conversation the
+        // run is actually carrying. That is true after a fork is adopted (new
+        // turns land in the fork), true after a fork is rolled back (they land
+        // back in the original), and true of an ordinary resume — where both
+        // copies hold the same full result anyway, so this changes nothing.
+        // Equal recency falls through to the rule below, which is the state
+        // before a fork has done any work: nothing has happened yet, and the
+        // original is the honest answer.
+        const keptAt = lastTsOfFile[toolCallFile[kept]] ?? 0;
+        if (fileLastTs > keptAt) {
           toolCalls[kept] = c;
+          toolCallFile[kept] = fileIndex;
+        } else if (
+          fileLastTs === keptAt &&
+          (c.resultChars ?? -1) > (toolCalls[kept].resultChars ?? -1)
+        ) {
+          toolCalls[kept] = c;
+          toolCallFile[kept] = fileIndex;
         }
         continue;
       }
       indexOfToolId.set(c.id, toolCalls.length);
+      toolCallFile.push(fileIndex);
       toolCalls.push(c);
     }
   }

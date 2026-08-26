@@ -67,6 +67,8 @@ import {
   paybackTurns,
   boundaryAction,
   forkTranscript,
+  pendingForkFor,
+  PLAN_TIER,
   markForkResumed,
   planCut,
   pruneTranscript,
@@ -78,7 +80,7 @@ import {
   type PruneOutcome,
   type PruneTrigger,
 } from "./contextPruning";
-import { fileCostNotice } from "./fileCostNotice";
+import { BYTES_PER_TOKEN, fileCostNotice } from "./fileCostNotice";
 import { prepareReadGuard } from "./readGuard";
 import { prepareVaultSkill } from "./vaultSkill";
 import {
@@ -6883,12 +6885,6 @@ async function pruneAtBoundary(
   const declined = action === "decline";
 
   boundaryDeclines.set(id, declined ? declinesSoFar + 1 : 0);
-  recordResumeProbe(id, sessionId, !declined, contextTokensNow);
-  // Read-only, and asked whichever way the gate went — a boundary where nothing
-  // was pruned is exactly as interesting a comparison as one where something
-  // was. Awaited rather than left floating for `pruneAtBoundary`'s own reason:
-  // the next spawn must not read the transcript while a subprocess is on it.
-  await observePlan(id, sessionId, !declined);
 
   if (declined) {
     // Said plainly, and not as a failure. `prune`'s own error path writes "This
@@ -6906,6 +6902,7 @@ async function pruneAtBoundary(
         `${predicted} more turns to break even, and the limit is ` +
         `${PAYBACK_HORIZON_TURNS}).`,
     );
+    await settleBoundary(id, sessionId, false, contextTokensNow);
     return null;
   }
   if (action === "refresh") {
@@ -6917,10 +6914,51 @@ async function pruneAtBoundary(
   }
 
   const settings = getSettings();
-  if (settings.contextPruningEngine === "winnow") {
-    return forkAtBoundary(id, sessionId, settings.contextPruningForkMinColdAge, adopt);
+  // `prune()` opens by checking this itself, so the legacy path was covered and
+  // the two new ones were not: the fork engine spawned winnow and rewrote a
+  // conversation, and the plan observation spawned winnow every cycle, on an
+  // install that had context pruning switched off. The switch's own docstring
+  // calls it "the only thing bounding a cycle's context", and an operator who
+  // turned it off is entitled to a tool that does nothing.
+  if (!settings.contextPruning) {
+    await settleBoundary(id, sessionId, false, contextTokensNow);
+    return null;
   }
-  return prune(id, sessionId, "boundary");
+  const outcome =
+    settings.contextPruningEngine === "winnow"
+      ? await forkAtBoundary(id, sessionId, settings.contextPruningForkMinColdAge, adopt)
+      : await prune(id, sessionId, "boundary");
+  // `sessionId` and not whatever the fork adopted: the probe is a statement
+  // about the conversation that was standing at this boundary, and the control
+  // group is read by looking for the first billed turn after it.
+  await settleBoundary(id, sessionId, outcome !== null, contextTokensNow);
+  return outcome;
+}
+
+/**
+ * Write down what this boundary actually did, once it has done it.
+ *
+ * Both records used to be written from the gate's *intent* — `!declined` —
+ * before the engine had run. That is not the same fact. A boundary the gate
+ * allowed but where the pruner found nothing worth removing, or where the fork
+ * engine refused on cold-age, left no cut behind and is therefore a **clean**
+ * resume: exactly the observation `resumeControl` needs, and the one the label
+ * was throwing away. Under the fork engine at its default cold age that is
+ * every boundary, so the control group would have stayed empty for ever while
+ * appearing to fill up.
+ */
+async function settleBoundary(
+  id: string,
+  sessionId: string | null,
+  cut: boolean,
+  contextTokensNow: number,
+): Promise<void> {
+  recordResumeProbe(id, sessionId, cut, contextTokensNow);
+  // Read-only, and asked whichever way the boundary went — one where nothing
+  // was removed is exactly as interesting a comparison as one where something
+  // was. Awaited rather than left floating for `pruneAtBoundary`'s own reason:
+  // the next spawn must not read the transcript while a subprocess is on it.
+  await observePlan(id, sessionId, cut);
 }
 
 /**
@@ -6988,17 +7026,47 @@ async function forkAtBoundary(
     : `, needing ${Math.round(result.breakEvenTurns)} further turns to pay for itself`;
   log(
     id,
-    `Forked this run's conversation: ${fmtTokens(Math.round(result.netBytes / 4))} ` +
+    `Forked this run's conversation: ${fmtTokens(Math.round(result.netBytes / BYTES_PER_TOKEN))} ` +
       `tokens net removed${breakEven}. The original is untouched and stays the ` +
       `recovery path; this run continues in session ${result.newSessionId}.`,
   );
-  pendingFork.set(id, { fallbackSessionId: sessionId, rowId });
+  pendingFork.set(id, {
+    fallbackSessionId: sessionId,
+    forkSessionId: result.newSessionId,
+    rowId,
+  });
   // `adoptSession` is a closure over the run loop's own `sessionId` local, and
   // moving that local is the entire point — it is what the next cycle's
   // `--resume` and the live context watch both read. Passed in rather than
   // reached for, because a module-level function could not touch it.
   adopt(result.newSessionId);
-  return null;
+
+  // Report what came out, so `contextAfterPrune` can correct the loop's running
+  // figure. Returning null here — which this did — left `lastContextTokens`
+  // describing the transcript the run had just stopped using, and
+  // `startsFresh` reads that figure to decide whether the next cycle should
+  // drop the conversation entirely. A fork that shrank a conversation past the
+  // fresh-start threshold would therefore be discarded on the *pre*-fork
+  // reading: the run pays for the cut and then throws away the result, on the
+  // very cycle the cut was made for.
+  //
+  // `tier` and the api figures are what `PruneOutcome` carries for a prune and
+  // has no counterpart here; only `tokensRemoved` is read by
+  // `contextAfterPrune`, and the rest is filled from what the fork reported so
+  // nothing downstream sees an invented number.
+  const removedTokens = Math.max(0, Math.round(result.netBytes / BYTES_PER_TOKEN));
+  const before = Math.max(
+    removedTokens,
+    Math.round(result.suffixBytes / BYTES_PER_TOKEN),
+  );
+  return {
+    tier: PLAN_TIER as PruneOutcome["tier"],
+    tokensBefore: before,
+    tokensAfter: Math.max(0, before - removedTokens),
+    tokensRemoved: removedTokens,
+    apiTokensBefore: 0,
+    elapsedMs: 0,
+  };
 }
 
 /**
@@ -7035,7 +7103,7 @@ async function observePlan(
       id,
       `winnow's rule engine, asked about this conversation at tier ${plan.tier}: ` +
         `${plan.stripped} of ${plan.toolCalls} tool results, ` +
-        `${fmtTokens(Math.round(plan.netBytes / 4))} tokens net — ${breakEven}. ` +
+        `${fmtTokens(Math.round(plan.netBytes / BYTES_PER_TOKEN))} tokens net — ${breakEven}. ` +
         `Recorded for comparison; nothing acted on it.`,
     );
   } catch {
@@ -7823,6 +7891,15 @@ export async function startRun(id: string): Promise<void> {
    */
   let reportedDone = run.reported_done !== 0;
   let sessionId: string | null = run.session_id;
+  // A fork this run adopted and never got a verdict for. `pendingFork` is
+  // in-memory and dies with the loop, so a run parked or restarted between the
+  // fork and its first resume came back holding a session nothing could roll
+  // back from — and would fail outright rather than returning to the
+  // conversation it had. Recovered from the table, which survives the gap.
+  {
+    const carried = pendingForkFor(id, sessionId);
+    if (carried && !pendingFork.has(id)) pendingFork.set(id, carried);
+  }
   // How many cycles the context ceiling has ended and refunded. See
   // `MAX_EARLY_ENDS_PER_RUN`.
   let earlyEnds = 0;
@@ -8463,6 +8540,31 @@ export async function startRun(id: string): Promise<void> {
       cyclesThisSegment += 1;
       lastExit = res.exitCode;
 
+      // Settle the last boundary's fork here, where both facts are known: which
+      // session this cycle was asked to resume, and whether it did any work.
+      //
+      // It used to be settled further down, past the exit-code branch, so a
+      // cycle that ended by any route other than a clean exit left the row at
+      // NULL for ever — the evidence was collected only from runs that finished
+      // tidily, which is the population least likely to contain a bad fork. The
+      // failure branch below takes over when the resume is the thing that
+      // failed; this covers every other ending.
+      const settling = pendingFork.get(id);
+      if (settling && resumeTarget === settling.forkSessionId) {
+        const worked = res.sawResult || res.finalText !== "";
+        if (worked) {
+          pendingFork.delete(id);
+          if (settling.rowId !== null) markForkResumed(settling.rowId, true);
+        }
+        // Not `worked` falls through: that is the resume-failure shape, and the
+        // branch below owns it, including the rollback.
+      } else if (settling) {
+        // The cycle resumed something else — `startsFresh` dropped the
+        // conversation, or an operator intervened. The fork was never tried, so
+        // it is neither a pass nor a failure and the row stays NULL.
+        pendingFork.delete(id);
+      }
+
       // Say so when the live spend guard was blind. Exporting is configured by
       // `telemetryEnv`, but nothing guarantees the records arrive — an ingest
       // that fails leaves `telemetrySpendSince` returning zero, and a guard
@@ -8860,11 +8962,20 @@ export async function startRun(id: string): Promise<void> {
         // whether a guard parked the run or a crash ended it, and a run picked
         // up by hand has `pause_count === 0`, so that condition excluded the
         // one case an operator is watching.
+        // "This cycle did no work at all", split out because two callers need
+        // it and only one of them wants the segment-position term.
+        const didNoWork = !res.sawResult && res.finalText === "";
         const looksLikeResumeFailure =
-          usedResume &&
-          cyclesThisSegment === 1 &&
-          !res.sawResult &&
-          res.finalText === "";
+          usedResume && cyclesThisSegment === 1 && didNoWork;
+        // A fork's resume failure is not the same shape. `cyclesThisSegment === 1`
+        // means "this segment opened on a session an earlier one left behind",
+        // which is a statement about how the *segment* started — and a fork is
+        // adopted at a cycle boundary in the middle of a segment, so the counter
+        // is already 2 or more by the time the fork's first resume is attempted.
+        // Inheriting that term made the rollback below unreachable, and with it
+        // the only writer of `fork_attempts.resumed = 0`: the column that is
+        // milestone 2's kill condition could never hold the value that trips it.
+        const forkWouldNotResume = usedResume && didNoWork;
         // A fork that will not resume, caught on the one cycle that can catch
         // it. Taken before the ordinary retry, because retrying the same
         // unresumable id would burn the single retry the run gets and then fail
@@ -8875,7 +8986,7 @@ export async function startRun(id: string): Promise<void> {
         // then it exits 0" — and a 0 in it is that guardrail's kill condition,
         // reached by a resume the run actually needed.
         const fork = pendingFork.get(id);
-        if (looksLikeResumeFailure && fork && fork.fallbackSessionId) {
+        if (forkWouldNotResume && fork && fork.fallbackSessionId) {
           pendingFork.delete(id);
           if (fork.rowId !== null) markForkResumed(fork.rowId, false);
           iterations -= 1;
@@ -8910,16 +9021,6 @@ export async function startRun(id: string): Promise<void> {
           : `Claude Code exited with code ${res.exitCode}.`;
         finalStatus = "failed";
         break;
-      }
-
-      // The cycle exited 0 and did work, so if the last boundary forked, the
-      // fork resumed. Recorded here rather than at the fork, because a fork is
-      // only proven by the resume that follows it — which is the whole of
-      // milestone 2's first criterion and the reason this run collects it.
-      const resumedFork = pendingFork.get(id);
-      if (resumedFork) {
-        pendingFork.delete(id);
-        if (resumedFork.rowId !== null) markForkResumed(resumedFork.rowId, true);
       }
 
       // What this cycle's last turn said about the task, if anything. The
@@ -9546,8 +9647,25 @@ const boundaryDeclines = ((globalThis as unknown as {
  * needed rather than from a harness.
  */
 const pendingFork = ((globalThis as unknown as {
-  __ufPendingFork?: Map<string, { fallbackSessionId: string | null; rowId: number | null }>;
-}).__ufPendingFork ??= new Map<string, { fallbackSessionId: string | null; rowId: number | null }>());
+  __ufPendingFork?: Map<string, PendingFork>;
+}).__ufPendingFork ??= new Map<string, PendingFork>());
+
+/** A fork adopted at the last boundary, and the way back if it will not resume. */
+interface PendingFork {
+  /** The session to return to. */
+  fallbackSessionId: string | null;
+  /**
+   * The fork's own session id.
+   *
+   * Checked before a success is recorded. Without it, any cycle that ended
+   * cleanly counted as "the fork resumed" — including one that never touched
+   * the fork, because `startsFresh` had dropped the conversation and opened a
+   * new session in between. That would write a pass into the column milestone 2
+   * reads as its acceptance criterion, on a resume that did not happen.
+   */
+  forkSessionId: string;
+  rowId: number | null;
+}
 
 
 function startSweeper(): void {
