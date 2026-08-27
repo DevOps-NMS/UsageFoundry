@@ -1606,6 +1606,51 @@ Built and exercised against real transcripts:
   for this context` out of `edge-instrumentation`, before any of this change was
   involved. A production build and `next start` were the way in.
 
+- **The orchestrator page bounded to the pane at `lg`, rendered at seven
+  viewports.** Measured 2026-08-27 against `next dev` on a throwaway `DATA_DIR`
+  with `CLAUDE_HOME` pointed at an empty directory, driven by Playwright's
+  bundled Chromium, so nothing here read the real `~/.claude`, touched the
+  install's database or started a `claude` process. The database was seeded
+  directly: three chat sessions — so the side card shows its tab strip rather
+  than the `CardTitle` a fresh install opens on — forty messages, twelve pending
+  proposals and six decided.
+
+  At 1440×1080, 1440×700 and 1024×700 the pane's own overflow
+  (`main.scrollHeight − main.clientHeight`) is **0** in every combination tried:
+  the notice's disclosure closed and open, with and without two error banners
+  above the grid, and on each of the side card's three tabs. The thread reports
+  3,079–3,653px of internal scroll and the proposals list 1,401–1,950px, which
+  is where the length went. The composer's textarea ends at y=966 of 1,080 and
+  y=586–621 of 700; the approve row at 1,011 and 631–692. The same script
+  against the parent commit reads **3,180–5,024px** of pane overflow with the
+  thread not scrolling at all — at `lg` the card dropped its cap and grew to the
+  whole transcript, putting the composer at y=4,146 of a 1,080px window.
+
+  Below `lg` the change is a **no-op, measured rather than argued**: at
+  1023×700, 1023×1080, 900×900 and 500×900 this commit and its parent produce
+  identical numbers — the same pane overflow (715 / 335 / 515 / 551), the same
+  column height, the same 544px (34rem) cards, the same thread height and
+  internal scroll, the same proposals scroll. The page still scrolls there,
+  which is what the stacked layout is for.
+
+  **Three things this does not establish.** No container was started — Docker is
+  unavailable in the environment this was measured in, so the image's own
+  stylesheet rests on `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build`
+  (exit 0) plus a grep proving `lg:absolute`, `lg:inset-0`, `lg:min-h-0` and
+  `lg:flex-1` are all in the emitted CSS, which is the failure Tailwind's
+  `source(none)` exists to prevent and not the same as having seen it.
+  `docker compose up --build` is still the run to make. The error banners were
+  **injected into the live DOM** rather than produced by a failing poll, so what
+  is measured is the height they take rather than the state that puts them
+  there. And there is one case at `lg` where a scrollbar remains, which is
+  arithmetic rather than a defect: the row's incompressible furniture is about
+  186px — the composer, the approve row and the two cards' padding, none of
+  which may shrink — so a 700px window carrying the read-only banner *and* the
+  disclosure open *and* two error banners at once runs 71px short and the pane
+  scrolls by exactly that, with the composer 22px under the fold. All four
+  together is the only combination found that does it, and shortening any one of
+  them fits.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
