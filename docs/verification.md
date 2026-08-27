@@ -1716,6 +1716,171 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **The `canvasView.ts` extraction was not looked at.** The world/screen
+> transform, hit testing, device-pixel sizing, the pan/zoom gestures, the
+> `ResizeObserver` and the colour probe were moved out of
+> `KnowledgeGraphCanvas.tsx` into `src/lib/canvasView.ts` by a run with **no
+> Docker and no browser it could drive**. It is a refactor and behaviour is
+> meant to be identical, and the one thing that would demonstrate that — that
+> the graph still pans and zooms — is the thing that run could not check.
+> Everything claimed for it rests on `npm run typecheck` (exit 0), `npm test`
+> (**1,834 tests / 267 suites / 0 failures**, of which 22 are the new
+> `canvasView.test.ts`) and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
+> build` (exit 0). The unit tests cover the arithmetic and cover *none* of the
+> DOM wiring: `observeCanvasSize`, `observeTheme`, `probeTokens` and
+> `sizeCanvasToHost` have no assertions anywhere and are only known to compile.
+>
+> The click-list, at **Knowledge → the graph pane** (the vault must be mounted
+> and a graph showing; the pane is the canvas beside the settings panel):
+>
+> 1. **Pan.** Drag from empty space. The graph must follow the pointer 1:1 and
+>    stay where it is let go. Nothing may spring back.
+> 2. **Zoom about the pointer.** Put the cursor on a *named* node away from the
+>    centre and wheel both ways. That node must stay under the cursor at every
+>    step — this is the assertion most likely to have been broken, because
+>    `zoomAt` now returns a new view where the old code mutated one in place.
+> 3. **Both clamps.** Keep wheeling in past the ceiling and out past the floor.
+>    The zoom must stop and the graph must **not creep** while it is stopped.
+> 4. **Hit targets.** Click a node: the note opens. Click two overlapping nodes
+>    at low zoom: the one whose centre is nearer the cursor opens, not the other.
+>    Click empty space 5–10px off a node's edge: nothing opens.
+> 5. **Drag a node.** It must stay under the pointer, stay where dropped, and
+>    still be there after changing a filter.
+> 6. **Click versus drag.** Press on a node, move ~2px, release — the note opens.
+>    Press, move ~20px, release — it does not.
+> 7. **Device pixel ratio.** Load at dpr 1 and at dpr 2 (a HiDPI display, or
+>    Chrome DevTools' device toolbar at 2×). Labels and node edges must be
+>    crisp at both, and the graph must fill the pane rather than a quarter of it.
+> 8. **Resize.** Drag the window narrow and wide, and collapse/expand the panel
+>    beside the pane. The canvas must track the host's box and — the fault this
+>    one is for — must **not ratchet**: made tall then narrow, it must come back
+>    down rather than keeping the taller height.
+> 9. **Theme.** Flip the theme toggle, then flip the OS scheme while the app is
+>    on "Match system". The graph's colours must change on both without a
+>    reload; the second is the one that has no React render behind it.
+> 10. **The loop still stops.** Leave a settled graph alone and watch the CPU:
+>    it must go to idle. Then touch anything — a slider, a drag — and it must
+>    wake.
+>
+> Firefox is worth one pass for step 2 alone: `wheelZoomFactor`'s `deltaMode`
+> handling is the one branch no other engine takes, and its own docblock says
+> the 16px line height is an estimate nobody has held against a real mouse.
+
+> **The map at `/runs/[id]/touched` has never been seen.** It was built and
+> shipped without a browser: Docker is unavailable in the environment it was
+> written in and no browser could be driven there, so every statement about it
+> below is a statement about the code. It typechecks, `next build` registers the
+> route, its reduction, its fold rule and its three empty states are unit-tested
+> in `touchedMap.test.ts`, and every Tailwind class it uses was grepped out of
+> the emitted stylesheet rather than assumed — which catches a spelling Tailwind
+> would drop silently and catches nothing at all about whether the picture is
+> legible. Nobody has looked at it.
+>
+> What *is* measured: the layout was run headlessly against the compiled
+> modules — no DOM, no canvas, just `buildTouchTree` → `planTouchedMap` →
+> `createSimulation`/`step` to settlement — over five shapes. It is not a
+> substitute for looking, because it says nothing about colour, label
+> collision or whether any of it is readable, but it does settle the two
+> things that are arithmetic rather than taste.
+>
+> **The loop stops.** Every shape reached `step() === false` at 250 frames
+> against a 2,000-frame cap, which is the cooling curve doing what
+> `ALPHA_DECAY` says and is the failure that otherwise looks identical to
+> success.
+>
+> **The clusters separate.** Mean directory-anchor-to-directory-anchor
+> distance against mean file-to-its-own-anchor distance: **3.6×** on a
+> reconstruction of the measured run (39 named files plus one changed-never-
+> named, 15 directories, 55 nodes, 708×642 world units, nothing folded);
+> **7.4×** at 400 files in ten directories; **1.8×** for 60 files that are
+> all in one directory, which is the degenerate case and is right — there is
+> only one cluster to separate. Closest two nodes edge to edge: 11.7 world
+> units at 39 files, 7.1 at the 60-in-one-directory case, and **−1.1** at
+> 400, so at that size one pair just touches. One file draws two nodes and
+> does not divide by zero.
+>
+> **The fold is coarse at the bottom of its range.** 400 files against the
+> shipped budget of 300 folds three directories, hides 120 files and draws
+> 280 — the intended behaviour. Forced to a budget of 100 the cutoff falls
+> to 0 and it draws *no* files at all, six nodes standing for four hundred:
+> honest, announced, and one click from opening, but a step rather than a
+> ramp. Nothing on this install is near enough to 300 for it to fire; if a
+> real run ever lands between the two, that is the thing to look at.
+>
+> Open a settled run that changed something, take the **Files** tab, and press
+> **Lay it out** on the "What it touched" card. At 1440×900:
+>
+> 1. **The shell.** Runs is still the lit row in the sidebar and the toolbar
+>    reads "What it touched" — both were verified by running `activePane` and
+>    `toolbarTitle` over `/runs/<id>/touched`, but only the functions were, not
+>    the rendering. ⌘3 should still come back here.
+> 2. **The first frame.** The map settles and *stops*. Watch a CPU meter for ten
+>    seconds after it comes to rest: a canvas that keeps asking for frames is the
+>    failure `forceLayout`'s cooling exists to prevent, and it looks identical to
+>    one that has stopped. Then turn on "Reduce motion" at the OS level and
+>    reload: the layout should arrive already settled, in one step, with no
+>    visible animation at all.
+> 3. **The arrangement.** Files should sit in clusters around a small ringed
+>    directory node carrying the directory's name, and the clusters should be
+>    separated rather than one mass. This is the whole deliverable and the thing
+>    least likely to be right first time: `FORCES` in `RunTouchedMap.tsx` is the
+>    graph panel's defaults with `linkDistance` dropped from 90 to 70, chosen by
+>    reasoning about a rosette rather than by looking at one. If files crowd
+>    their directory or clusters overlap, that constant is the dial.
+> 4. **What a node says.** Against the legend beside the canvas: a read-only file
+>    is grey, a written one is accent blue, one that is both is accent with a grey
+>    core, and a file that changed with no tool call behind it is hollow with a red
+>    edge. A ring in the foreground colour means the branch diff lists it; a dashed
+>    amber ring means outside the checkout. Check the accent-and-grey core is
+>    actually distinguishable from plain accent at the smallest node on screen — it
+>    is a disc at half radius and nobody has seen it below about 5px.
+> 5. **Labels.** Directory names are always drawn; file names ramp in above about
+>    0.75 scale, and appear immediately on whatever the pointer is over. Zoom out
+>    far: the file names should go, the directory names should stay.
+> 6. **The gestures.** Drag the background to pan, wheel to zoom — the point under
+>    the cursor should stay under it — drag a node and it should stay where it was
+>    dropped. Click a file: the inspector on the right fills in with its path,
+>    counts, tools and callers, and the node takes a `--tint` halo well clear of
+>    its own edge — check that halo actually reads as *selected*, since the ring
+>    it has to be told apart from is the foreground-coloured one meaning "in the
+>    diff". Click empty space: it clears. Then repeat this whole step with "Reduce
+>    motion" on: the integrator never runs there, so the drag writes the position
+>    itself, and a drag that appears to do nothing — or a node that jumps
+>    somewhere later — is that path being wrong.
+> 7. **A run with one work cycle.** This is the common case on this install and
+>    the map is deliberately built without a time axis, so it must not look broken
+>    or half-empty: the header says "… across 1 work cycle" and nothing else on the
+>    page mentions cycles at all. Confirm there is no empty column, axis or legend
+>    entry waiting for a second one.
+> 8. **A run whose events were swept.** Find or make a run older than
+>    `eventRetentionDays` whose branch still exists. The card on the Files tab
+>    offers no "Lay it out" button at all — the link is only drawn over a report —
+>    so the route has to be typed. It must say the events were removed on the
+>    *N*-day horizon and that the changes are still on the Files tab. It must not
+>    render an empty canvas. Same check for a run that named no file (an idle
+>    sentence, not a blank picture) and for an id that does not exist.
+> 9. **A run with no diff.** Delete a finished run's branch and reload the map.
+>    The changed ring must disappear from every node, the legend must drop its
+>    "ringed" row, and each file's inspector must read "Unknown — there is no diff
+>    for this run" rather than "Not changed".
+> 10. **Folding.** The budget is 300 drawn files and no run on this install is near
+>    it, so this needs a run that touched a few hundred files or a temporarily
+>    lowered `MAX_DRAWN_FILES`. A folded directory draws as one larger node with
+>    its name and "N files" under it, the notice above the canvas gives the total
+>    folded, and clicking one opens it — the files inside appear *beside it*
+>    rather than flying in from the middle of the map, the surrounding layout does
+>    not jump, and the inspector then describes the directory that just opened
+>    rather than clearing. Open a second fold afterwards: nothing already on
+>    screen may change position except by settling, including a directory the
+>    budget closes again to pay for the one you opened. Nothing should ever
+>    vanish.
+> 11. **Both themes and the OS switch.** Toggle light/dark with the map open; the
+>    node colours must re-probe without a reload. Then leave the app on "Match
+>    system" and change the OS appearance, which is the boundary that fires no
+>    React render.
+> 12. **Narrow.** At 390px the split stacks, the canvas keeps its 24rem height, and
+>    dragging on the canvas pans rather than scrolling the page.
+
 > **The four frontend reachability fixes — the paged runs list, quick open's
 > search, the run log's filter and the settings field search — were written on
 > branch `uf/usagefoundry-721638d11c0b-1-41e5e190` by two runs, and a third that

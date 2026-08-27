@@ -8,6 +8,26 @@ import {
 } from "react";
 import type { KnowledgeNodeDTO } from "@/lib/apiTypes";
 import {
+  boundsOf,
+  canvasPoint,
+  cssSize,
+  pixelRatio,
+  fitView as fitViewTo,
+  nearestWithin,
+  observeCanvasSize,
+  observeTheme,
+  panBy,
+  probeFont,
+  probeTokens,
+  screenToWorld,
+  visibleWorldRect,
+  wheelZoomFactor,
+  zoomAt,
+  CLICK_SLOP,
+  HIT_SLOP_PX,
+  type View,
+} from "@/lib/canvasView";
+import {
   countDegrees,
   createSimulation,
   reheat,
@@ -28,18 +48,20 @@ import {
 /**
  * The vault's link graph, drawn.
  *
- * This is the app's first `<canvas>`, so nothing above it settles the questions
- * a canvas asks and they are answered here rather than assumed:
+ * This was the app's first `<canvas>`, and the questions a canvas asks — what a
+ * world coordinate is on screen, what a click is over, how a backing store is
+ * sized, what a wheel notch is worth — were first answered here. They are no
+ * longer answered *here*: they are in `canvasView.ts`, because none of those
+ * answers is about a vault and a second canvas that copied them is where two
+ * surfaces start disagreeing about what a drag does. Read that module for the
+ * transform, the hit test, the pixel ratio and the colour probe.
  *
- * **Colour cannot be read from a variable.** Every token in `globals.css` is a
- * `light-dark()` or a `color-mix()`, no `@property` registers any of them, and
- * `getComputedStyle(root).getPropertyValue("--ink")` therefore returns the
- * literal source text — which is not a value `ctx.fillStyle` accepts. The only
- * thing that resolves one is an element: set `color` to `var(--token)` on a real
- * node and read the *computed* `color` back as `rgb(…)`. That is what `probe`
- * does, and it has to run again whenever the answer could change — on an
- * explicit theme switch, which `ThemeToggle` makes by setting `data-theme` on
- * `<html>`, and on an OS scheme flip while the app is following the system.
+ * What stays is everything that knows this is a graph of notes:
+ *
+ * **What a node looks like and what that means.** Its radius is its degree,
+ * damped; its colour is the first group whose query claims it, or its kind; a
+ * phantom is drawn hollow because it is a link nobody has written the note for
+ * yet. `canvasView` is handed a `reachOf` and a margin and is told none of this.
  *
  * **The simulation must stop.** A settled graph that kept asking for frames is a
  * warm laptop on a page that looks finished, so the loop ends when `step`
@@ -53,28 +75,20 @@ import {
  * keyboard model nobody would find.
  */
 
-/** World units per screen pixel, at the ends the wheel is clamped to. */
-const ZOOM_MIN = 0.05;
-const ZOOM_MAX = 8;
-
-/** How far a pointer may travel between down and up and still count as a click. */
-const CLICK_SLOP = 4;
-
-/**
- * Pixels one line of `deltaMode: DOM_DELTA_LINE` is taken to be worth.
- *
- * Firefox reports a mouse wheel in lines and the other engines report pixels,
- * and the two differ by about two orders of magnitude — so the same notch that
- * zooms in Chrome moves this by a factor of 1.005 there, which reads as broken
- * rather than absent. The browser will not say what a line is worth, and this
- * is an estimate rather than a measurement: a rough line box at this app's
- * 13px body, chosen so one notch travels about the same distance in both.
- * Nobody has held the two side by side; a Firefox mouse is what would settle it.
- */
-const LINE_HEIGHT_PX = 16;
-
 /** Zoom range over which a label ramps from invisible to solid. */
 const LABEL_RAMP = 0.35;
+
+/**
+ * How far outside the viewport a node still counts as drawable, in screen px.
+ *
+ * Wide enough that a node just off the edge still draws the link coming in,
+ * which is why this is the graph's number and not `canvasView`'s: a surface
+ * whose marks are bounded by their own dot would cull at zero.
+ */
+const CULL_MARGIN_PX = 120;
+
+/** Screen pixels left around the graph when it is framed to fit. */
+const FIT_PAD = 40;
 
 /**
  * Frames a non-animated build is allowed to burn settling before it draws.
@@ -99,40 +113,20 @@ const TOKENS = [
 type Palette = Record<(typeof TOKENS)[number], string> & { font: string };
 
 /**
- * Resolve the theme's colours to something a 2D context accepts.
+ * Which tokens the graph draws with, resolved to values a 2D context accepts.
  *
- * One throwaway element rather than one per token: the read is what costs, and
- * it happens on mount and on a theme change, never in a frame.
+ * The list is the graph's — a surface picks its own palette — and the way one
+ * is read out of a stylesheet is not, so `probeTokens` does the resolving. The
+ * labels take the host's own type because the canvas default is 10px
+ * sans-serif and reads as a different program.
  */
 function probe(host: HTMLElement): Palette {
-  const el = document.createElement("span");
-  el.style.position = "absolute";
-  el.style.width = "0";
-  el.style.height = "0";
-  el.style.opacity = "0";
-  el.style.pointerEvents = "none";
-  host.appendChild(el);
-  const out = { font: "" } as Palette;
-  for (const token of TOKENS) {
-    el.style.color = `var(${token})`;
-    out[token] = getComputedStyle(el).color;
-  }
-  // The graph's labels are the app's type, not the canvas default — which is
-  // 10px sans-serif and reads as a different program.
-  out.font = getComputedStyle(host).fontFamily || "system-ui, sans-serif";
-  el.remove();
-  return out;
+  return { ...probeTokens(host, TOKENS), font: probeFont(host) };
 }
 
 /** A node's drawn radius: its degree, damped, times the operator's multiplier. */
 function radiusOf(node: SimNode, nodeSize: number): number {
   return (2.5 + Math.sqrt(node.degree) * 1.7) * nodeSize;
-}
-
-interface View {
-  x: number;
-  y: number;
-  k: number;
 }
 
 export function KnowledgeGraphCanvas({
@@ -203,9 +197,8 @@ export function KnowledgeGraphCanvas({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const dpr = window.devicePixelRatio || 1;
-    const width = canvas.width / dpr;
-    const height = canvas.height / dpr;
+    const dpr = pixelRatio();
+    const { width, height } = cssSize(canvas, dpr);
     const view = viewRef.current;
     const { arrows, textFade, nodeSize, linkThickness } = displayRef.current;
     const nodes = sim.nodes;
@@ -218,16 +211,10 @@ export function KnowledgeGraphCanvas({
     ctx.translate(view.x, view.y);
     ctx.scale(view.k, view.k);
 
-    // The world rectangle the canvas is currently showing, with a margin wide
-    // enough that a node just off the edge still draws the link coming in.
     // Culling is where the frame rate at a zoomed-in vault comes from: the cost
     // of a graph is the drawing, not the arithmetic, and most of a zoomed-in
     // graph is not on the screen.
-    const margin = 120 / view.k;
-    const left = -view.x / view.k - margin;
-    const top = -view.y / view.k - margin;
-    const right = left + width / view.k + margin * 2;
-    const bottom = top + height / view.k + margin * 2;
+    const { left, top, right, bottom } = visibleWorldRect(view, width, height, CULL_MARGIN_PX);
     const visible = (x: number, y: number) => x >= left && x <= right && y >= top && y <= bottom;
 
     /* Links first, so a node is never drawn under one of its own edges.
@@ -349,34 +336,11 @@ export function KnowledgeGraphCanvas({
   const fitView = useCallback(() => {
     const canvas = canvasRef.current;
     const sim = simRef.current;
-    if (!canvas || !sim || sim.nodes.length === 0) return;
-    const dpr = window.devicePixelRatio || 1;
-    const width = canvas.width / dpr;
-    const height = canvas.height / dpr;
-
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const node of sim.nodes) {
-      if (node.x < minX) minX = node.x;
-      if (node.y < minY) minY = node.y;
-      if (node.x > maxX) maxX = node.x;
-      if (node.y > maxY) maxY = node.y;
-    }
-    const pad = 40;
-    const k = Math.min(
-      ZOOM_MAX,
-      Math.max(
-        ZOOM_MIN,
-        Math.min((width - pad * 2) / Math.max(1, maxX - minX), (height - pad * 2) / Math.max(1, maxY - minY)),
-      ),
-    );
-    viewRef.current = {
-      k,
-      x: width / 2 - ((minX + maxX) / 2) * k,
-      y: height / 2 - ((minY + maxY) / 2) * k,
-    };
+    if (!canvas || !sim) return;
+    const bounds = boundsOf(sim.nodes);
+    if (!bounds) return;
+    const { width, height } = cssSize(canvas, pixelRatio());
+    viewRef.current = fitViewTo(bounds, width, height, FIT_PAD);
   }, []);
 
   const tick = useCallback(() => {
@@ -410,24 +374,9 @@ export function KnowledgeGraphCanvas({
     const canvas = canvasRef.current;
     if (!host || !canvas) return;
 
-    const resize = () => {
-      const dpr = window.devicePixelRatio || 1;
-      const rect = host.getBoundingClientRect();
-      // The backing store is in device pixels and the element is in CSS ones.
-      // Setting either without the other is the whole of why a canvas looks
-      // soft on a retina display, and it also clears the surface — so a resize
-      // is always followed by a draw.
-      canvas.width = Math.max(1, Math.round(rect.width * dpr));
-      canvas.height = Math.max(1, Math.round(rect.height * dpr));
-      canvas.style.width = `${rect.width}px`;
-      canvas.style.height = `${rect.height}px`;
-      schedule();
-    };
-
-    resize();
-    const observer = new ResizeObserver(resize);
-    observer.observe(host);
-    return () => observer.disconnect();
+    // Sizing clears the surface, so every resize is followed by a draw — which
+    // is what `schedule` is doing as the callback rather than after the call.
+    return observeCanvasSize(host, canvas, schedule);
   }, [schedule]);
 
   /* ---------------------------- the palette ---------------------------- */
@@ -441,21 +390,7 @@ export function KnowledgeGraphCanvas({
       schedule();
     };
     reread();
-
-    // Two boundaries, and each one is a way the answer changes without this
-    // component rendering. `data-theme` is what ThemeToggle sets; the media
-    // query is the OS flipping underneath "Match system", which sets nothing.
-    const attribute = new MutationObserver(reread);
-    attribute.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme"],
-    });
-    const scheme = window.matchMedia("(prefers-color-scheme: dark)");
-    scheme.addEventListener("change", reread);
-    return () => {
-      attribute.disconnect();
-      scheme.removeEventListener("change", reread);
-    };
+    return observeTheme(reread);
   }, [schedule]);
 
   /* ---------------------------- reduced motion -------------------------- */
@@ -562,34 +497,25 @@ export function KnowledgeGraphCanvas({
 
   const toWorld = useCallback((event: { clientX: number; clientY: number }) => {
     const canvas = canvasRef.current;
-    const view = viewRef.current;
     if (!canvas) return { x: 0, y: 0 };
-    const rect = canvas.getBoundingClientRect();
-    return {
-      x: (event.clientX - rect.left - view.x) / view.k,
-      y: (event.clientY - rect.top - view.y) / view.k,
-    };
+    const point = canvasPoint(canvas.getBoundingClientRect(), event.clientX, event.clientY);
+    return screenToWorld(viewRef.current, point.x, point.y);
   }, []);
 
+  /* A node's reach is its drawn radius plus a few screen pixels of forgiveness,
+     which is the one thing `nearestWithin` is not allowed to know: a radius
+     here means a degree, and that is the vault's arithmetic rather than the
+     canvas's. Nearest wins over first, and that rule is the shared module's. */
   const nodeAt = useCallback((wx: number, wy: number): number | null => {
     const sim = simRef.current;
     if (!sim) return null;
     const size = displayRef.current.nodeSize;
-    // Nearest wins, not first: two nodes overlap often enough at low zoom that
-    // taking the first hit would open whichever the vault happened to list
-    // earlier, which is not a thing the operator can see or predict.
-    let best: number | null = null;
-    let bestDistance = Infinity;
-    for (let i = 0; i < sim.nodes.length; i++) {
-      const node = sim.nodes[i];
-      const reach = radiusOf(node, size) + 4 / viewRef.current.k;
-      const distance = Math.hypot(node.x - wx, node.y - wy);
-      if (distance <= reach && distance < bestDistance) {
-        best = i;
-        bestDistance = distance;
-      }
-    }
-    return best;
+    return nearestWithin(
+      sim.nodes,
+      wx,
+      wy,
+      (_point, i) => radiusOf(sim.nodes[i], size) + HIT_SLOP_PX / viewRef.current.k,
+    );
   }, []);
 
   function onPointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
@@ -633,8 +559,7 @@ export function KnowledgeGraphCanvas({
 
     if (drag.index === null) {
       touchedRef.current = true;
-      view.x += dx;
-      view.y += dy;
+      viewRef.current = panBy(view, dx, dy);
     } else if (sim) {
       const node = sim.nodes[drag.index];
       node.fx = (node.fx ?? node.x) + dx / view.k;
@@ -692,24 +617,10 @@ export function KnowledgeGraphCanvas({
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
       touchedRef.current = true;
-      const view = viewRef.current;
       const rect = canvas.getBoundingClientRect();
-      const px = event.clientX - rect.left;
-      const py = event.clientY - rect.top;
-      // A wheel reports lines or pages as readily as pixels, and Firefox's
-      // three lines a notch is a ~1.005 factor here — a zoom that looks broken
-      // rather than absent. The two non-pixel modes are scaled to roughly the
-      // pixels the same gesture would have produced.
-      const unit =
-        event.deltaMode === 1 ? LINE_HEIGHT_PX : event.deltaMode === 2 ? rect.height : 1;
-      // Zoom about the pointer: the thing under it stays under it, which is what
-      // makes a wheel feel like moving a camera rather than rescaling a picture.
-      const factor = Math.exp(-event.deltaY * unit * 0.0015);
-      const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, view.k * factor));
-      const scale = next / view.k;
-      view.x = px - (px - view.x) * scale;
-      view.y = py - (py - view.y) * scale;
-      view.k = next;
+      const { x: px, y: py } = canvasPoint(rect, event.clientX, event.clientY);
+      const factor = wheelZoomFactor(event.deltaY, event.deltaMode, rect.height);
+      viewRef.current = zoomAt(viewRef.current, px, py, factor);
       schedule();
     };
 

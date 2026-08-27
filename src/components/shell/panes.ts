@@ -65,6 +65,12 @@ export function activePane(pathname: string): Pane | null {
  */
 export function toolbarTitle(pathname: string): string {
   if (pathname === "/runs/new") return "New run";
+  // Before the line under it, which would otherwise title a sub-route with the
+  // name of the page it hangs off — and a toolbar saying "Run" over a screen
+  // that is not the run page is the one breadcrumb an operator has.
+  if (pathname.endsWith("/touched") && pathname.startsWith("/runs/")) {
+    return "What it touched";
+  }
   if (pathname.startsWith("/runs/")) return "Run";
   if (pathname === "/workflows/new") return "New workflow";
   if (pathname.endsWith("/edit") && pathname.startsWith("/workflows/")) {
