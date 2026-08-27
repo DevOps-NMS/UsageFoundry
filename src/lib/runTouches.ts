@@ -36,6 +36,22 @@ export interface TouchedFile {
    * disappear. Sorted, so two runs that did the same work render the same way.
    */
   by: string[];
+  /**
+   * Which tools named it, distinct and sorted.
+   *
+   * Carried on the file rather than left as a shape of its own, because that is
+   * the *only* form tool identity is allowed to take on the map at
+   * `/runs/[id]/touched`: tool → file is a star with a dozen hubs and nearly
+   * every file hanging off `Read`, which draws one fact an operator already
+   * knows. As an attribute it costs a set per file and answers "what was done to
+   * this file" without giving `Read` a node of its own.
+   *
+   * The table above this does not read it. It is here rather than in a second
+   * pass over the same rows because the pass that fills `by` is already open,
+   * and a second derivation of the same scan is the thing this module exists to
+   * stop.
+   */
+  tools: string[];
 }
 
 /**
@@ -119,7 +135,10 @@ export function reconcileTouches(
   // once as a `folder` path relativises to one string, and the scan's GROUP BY
   // cannot merge them because it also groups by tool and by caller — so the
   // merge has to happen here or the row appears twice with the counts split.
-  const byPath = new Map<string, TouchedFile & { actors: Set<string> }>();
+  const byPath = new Map<
+    string,
+    TouchedFile & { actors: Set<string>; toolNames: Set<string> }
+  >();
 
   for (const row of touches) {
     let file = byPath.get(row.path);
@@ -131,13 +150,16 @@ export function reconcileTouches(
         inDiff: !row.outside && changedSet.has(row.path),
         outside: row.outside,
         by: [],
+        tools: [],
         actors: new Set<string>(),
+        toolNames: new Set<string>(),
       };
       byPath.set(row.path, file);
     }
     if (WRITING_TOOLS.has(row.tool)) file.writes += row.calls;
     else file.reads += row.calls;
     file.actors.add(touchActor(row));
+    file.toolNames.add(row.tool);
     // One row outside the checkout and one inside for the same string cannot
     // happen — `outside` is a function of the path — but if it ever did, the
     // conservative reading is that the diff cannot speak for it.
@@ -147,9 +169,10 @@ export function reconcileTouches(
     }
   }
 
-  const files = [...byPath.values()].map(({ actors, ...file }) => ({
+  const files = [...byPath.values()].map(({ actors, toolNames, ...file }) => ({
     ...file,
     by: [...actors].sort(),
+    tools: [...toolNames].sort(),
   }));
 
   const touched = files.filter((f) => !f.outside);
@@ -163,6 +186,7 @@ export function reconcileTouches(
         inDiff: true,
         outside: false,
         by: [],
+        tools: [],
       })),
     touchedAndChanged: touched.filter((f) => f.inDiff),
     touchedNotChanged: touched.filter((f) => !f.inDiff),
