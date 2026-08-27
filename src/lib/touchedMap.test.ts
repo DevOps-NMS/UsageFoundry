@@ -6,6 +6,7 @@ import {
   buildTouchTree,
   dirName,
   dirOf,
+  nodeId,
   parentOf,
   planTouchedMap,
   touchedMapView,
@@ -249,6 +250,31 @@ describe("planTouchedMap", () => {
     assert.deepEqual(plan.folded, []);
     assert.equal(plan.drawnFiles, 30);
     assertNothingDropped(plan, 30);
+  });
+
+  it("gives one directory two ids, and the click that opens it swaps them", () => {
+    // The contract the canvas holds a selection and a carried position across.
+    // A directory is one place drawn two ways, and opening it is the moment the
+    // id changes — so a consumer keying on the drawn id loses the one node that
+    // was certainly on screen a moment ago. Nothing throws either way: the
+    // inspector clears on the click that was meant to explain the unfolding, and
+    // the anchor jumps to the world origin taking its rosette with it.
+    const paths = Array.from({ length: 6 }, (_, i) => `src/lib/deep/f${i}.ts`);
+    const tree = treeOf(paths);
+
+    const shut = planTouchedMap(tree, { budget: 1 });
+    assert.ok(shut.nodes.some((n) => n.id === nodeId("folded", "src/lib/deep")));
+    assert.equal(
+      shut.nodes.some((n) => n.id === nodeId("dir", "src/lib/deep")),
+      false,
+    );
+
+    const open = planTouchedMap(tree, { budget: 1, expanded: new Set(["src/lib/deep"]) });
+    assert.ok(open.nodes.some((n) => n.id === nodeId("dir", "src/lib/deep")));
+    assert.equal(
+      open.nodes.some((n) => n.id === nodeId("folded", "src/lib/deep")),
+      false,
+    );
   });
 
   it("hangs every drawn file off its own directory and nothing else", () => {

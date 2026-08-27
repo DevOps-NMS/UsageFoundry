@@ -120,9 +120,7 @@ export default function RunTouchedPage({ params }: Ctx) {
     [plan, selectedId],
   );
 
-  const onSelect = useCallback((node: PlanNode | null) => {
-    setSelectedId(node?.id ?? null);
-  }, []);
+  const onSelect = useCallback((id: string | null) => setSelectedId(id), []);
 
   const onExpand = useCallback((dirPath: string) => {
     setExpanded((current) => {
@@ -217,9 +215,10 @@ export default function RunTouchedPage({ params }: Ctx) {
               <strong>
                 {plan.foldedFiles} file{plan.foldedFiles === 1 ? "" : "s"}
               </strong>{" "}
-              are behind {plan.folded.length} folded director
-              {plan.folded.length === 1 ? "y" : "ies"}, drawn as one node each with the
-              count on it. Nothing has been dropped — click a folded node to open it.
+              {plan.foldedFiles === 1 ? "is" : "are"} behind {plan.folded.length} folded
+              director{plan.folded.length === 1 ? "y" : "ies"}, drawn as one node each
+              with the count on it. Nothing has been dropped — click a folded node to
+              open it.
             </Notice>
           )}
 
@@ -353,7 +352,10 @@ function Inspector({ node, changedKnown }: { node: PlanNode | null; changedKnown
         {node.kind === "file" && node.file ? (
           <FileFacts file={node.file} changedKnown={changedKnown} />
         ) : node.dir ? (
-          <DirFacts dir={node.dir} folded={node.kind === "folded"} changedKnown={changedKnown} />
+          // No branch for `folded`: clicking a fold opens it, and the selection
+          // it leaves behind is the open directory. A row about being folded
+          // could never render, which is a worse thing for it to be than absent.
+          <DirFacts dir={node.dir} changedKnown={changedKnown} />
         ) : null}
       </div>
     </>
@@ -396,15 +398,7 @@ function FileFacts({ file, changedKnown }: { file: MapFile; changedKnown: boolea
   );
 }
 
-function DirFacts({
-  dir,
-  folded,
-  changedKnown,
-}: {
-  dir: MapDir;
-  folded: boolean;
-  changedKnown: boolean;
-}) {
+function DirFacts({ dir, changedKnown }: { dir: MapDir; changedKnown: boolean }) {
   return (
     <dl className="space-y-1 text-xs">
       <Fact label="Holds">
@@ -421,7 +415,6 @@ function DirFacts({
         </Fact>
       )}
       {dir.tools.length > 0 && <Fact label="Tools">{dir.tools.join(", ")}</Fact>}
-      {folded && <Fact label="Folded">Opened by the click that selected it</Fact>}
     </dl>
   );
 }

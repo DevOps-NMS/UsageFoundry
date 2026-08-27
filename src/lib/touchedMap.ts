@@ -283,6 +283,21 @@ export interface PlanNode {
   dir: MapDir | null;
 }
 
+/**
+ * A drawn node's id, built in one place.
+ *
+ * A directory has two of them — `dir:p` open and `folded:p` closed — and the
+ * transition between them happens on the click that opens it. Anything holding
+ * an id across that click has to know which one it is about to become, and a
+ * consumer spelling `` `dir:${path}` `` itself is how the surface ends up
+ * clearing its own inspector on the one click that was supposed to explain
+ * something. `planTouchedMap` builds every id through here and so does the
+ * canvas.
+ */
+export function nodeId(kind: PlanNode["kind"], path: string): string {
+  return `${kind}:${path}`;
+}
+
 export interface MapPlan {
   nodes: PlanNode[];
   /** Containment, as indices into `nodes` — never a tool, never causation. */
@@ -344,7 +359,7 @@ export function planTouchedMap(tree: TouchedTree, options: PlanOptions): MapPlan
     if (isFolded(dir, cutoff, expanded)) {
       const index = nodes.length;
       nodes.push({
-        id: `folded:${path}`,
+        id: nodeId("folded", path),
         kind: "folded",
         path,
         label: dir.name,
@@ -360,7 +375,7 @@ export function planTouchedMap(tree: TouchedTree, options: PlanOptions): MapPlan
 
     const index = nodes.length;
     nodes.push({
-      id: `dir:${path}`,
+      id: nodeId("dir", path),
       kind: "dir",
       path,
       label: dir.name,
@@ -373,7 +388,7 @@ export function planTouchedMap(tree: TouchedTree, options: PlanOptions): MapPlan
     for (const file of dir.files) {
       const at = nodes.length;
       nodes.push({
-        id: `file:${file.path}`,
+        id: nodeId("file", file.path),
         kind: "file",
         path: file.path,
         label: file.name,

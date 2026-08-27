@@ -36,7 +36,7 @@ import {
   type SimNode,
   type SimState,
 } from "@/lib/forceLayout";
-import type { MapPlan, PlanNode } from "@/lib/touchedMap";
+import { nodeId, type MapPlan, type PlanNode } from "@/lib/touchedMap";
 
 /**
  * A run's touches, drawn where they sit in the repository.
@@ -106,7 +106,7 @@ const TOKENS = [
   "--fg-faint",
   "--border",
   "--accent",
-  "--accent-line",
+  "--tint",
   "--warn",
   "--danger",
   "--bg-raised",
@@ -117,6 +117,22 @@ type Palette = Record<(typeof TOKENS)[number], string> & { font: string };
 
 function probe(host: HTMLElement): Palette {
   return { ...probeTokens(host, TOKENS), font: probeFont(host) };
+}
+
+/**
+ * What a node *is*, across a fold opening or closing under it.
+ *
+ * A directory is one place in the repository and the surface draws it two ways:
+ * `dir:p` when it is open and `folded:p` when it is not. Keying a carried
+ * position or a drag pin on the drawn id means the one node that was certainly
+ * on screen a moment ago — the fold the operator just clicked, or a sibling the
+ * budget just closed — is the one the carry misses, and it lands back on the
+ * seeding spiral at the world origin dragging its rosette with it. Both
+ * transitions are reachable: opening a directory raises the drawn count, which
+ * can drop the cutoff and fold a sibling that was open.
+ */
+function placeKey(item: PlanNode): string {
+  return item.kind === "file" ? `file:${item.path}` : `place:${item.path}`;
 }
 
 /**
@@ -165,7 +181,8 @@ export function RunTouchedMap({
   /** False with no diff: no node may draw the changed ring. */
   changedKnown: boolean;
   selectedId: string | null;
-  onSelect: (node: PlanNode | null) => void;
+  /** The id to select, never the node — see `nodeId`: a fold changes id as it opens. */
+  onSelect: (id: string | null) => void;
   onExpand: (dirPath: string) => void;
   className?: string;
 }) {
@@ -319,11 +336,16 @@ export function RunTouchedMap({
       }
 
       // Selection and hover share a halo well clear of every mark above, so
-      // neither can be read as part of what the node says about its file.
-      if (item.id === selected || i === hover) {
-        ctx.globalAlpha = item.id === selected ? 1 : 0.5;
-        ctx.lineWidth = 2 / view.k;
-        ctx.strokeStyle = palette["--accent-line"];
+      // neither can be read as part of what the node says about its file. Not
+      // `--accent-line`, which is a 40% accent / 60% border mix meant for
+      // hairlines: at a ring's width against a canvas it is the same value as
+      // the edges, and a selected node that does not read as selected is the
+      // failure. `--tint` is what the other canvas rings its focus with.
+      const isSelected = item.id === selected;
+      if (isSelected || i === hover) {
+        ctx.globalAlpha = isSelected ? 1 : 0.55;
+        ctx.lineWidth = (isSelected ? 2 : 1.5) / view.k;
+        ctx.strokeStyle = isSelected ? palette["--tint"] : palette["--fg-muted"];
         ctx.beginPath();
         ctx.arc(node.x, node.y, radius + 6 / view.k, 0, Math.PI * 2);
         ctx.stroke();
@@ -440,43 +462,50 @@ export function RunTouchedMap({
   /* ------------------------------ the plan ----------------------------- */
 
   useEffect(() => {
+    // Where each *place* was, rather than where each drawn id was, so a
+    // directory that changed which way it is drawn keeps the position it had.
     const previous = simRef.current;
     const previousMeta = metaRef.current;
-    const carry = new Map<string, { x: number; y: number }>();
+    const wasAt = new Map<string, { x: number; y: number }>();
     if (previous) {
       for (let i = 0; i < previous.nodes.length; i++) {
-        const node = previous.nodes[i];
-        const at = { x: node.x, y: node.y };
-        carry.set(node.id, at);
-        // A fold that opens is the *same directory* under a new id — `folded:p`
-        // becomes `dir:p` — so without this alias the carry misses it, the
-        // anchor snaps to the world origin, and it drags the rosette of every
-        // sibling that did carry across the screen with it.
         const item = previousMeta[i];
-        if (item && item.kind === "folded") carry.set(`dir:${item.path}`, at);
-      }
-      // The files the fold was standing for have no previous position at all.
-      // Seeded by `seedPositions` they would start on a spiral around the origin
-      // and fly in from wherever that is; started beside the directory that just
-      // opened, the expansion reads as an unfolding. The golden-angle offset is
-      // what keeps two of them off the same point, which is a zero distance the
-      // repulsion step would divide by.
-      const GOLDEN = Math.PI * (3 - Math.sqrt(5));
-      for (let i = 0; i < plan.edges.length; i++) {
-        const child = plan.nodes[plan.edges[i].source];
-        const parent = plan.nodes[plan.edges[i].target];
-        if (!child || !parent || carry.has(child.id)) continue;
-        const at = carry.get(parent.id);
-        if (!at) continue;
-        const spread = FORCES.linkDistance * 0.5;
-        carry.set(child.id, {
-          x: at.x + spread * Math.cos(i * GOLDEN),
-          y: at.y + spread * Math.sin(i * GOLDEN),
-        });
+        if (item) wasAt.set(placeKey(item), { x: previous.nodes[i].x, y: previous.nodes[i].y });
       }
     }
-    // After the aliases, so a node the operator put somewhere on purpose wins.
-    for (const [id, at] of pinsRef.current) carry.set(id, at);
+
+    const carry = new Map<string, { x: number; y: number }>();
+    for (const item of plan.nodes) {
+      const at = wasAt.get(placeKey(item));
+      if (at) carry.set(item.id, at);
+    }
+
+    // The files a fold was standing for have no previous position at all.
+    // Seeded by `seedPositions` they start on a spiral around the world origin
+    // and fly in from wherever that is; started beside the directory that just
+    // opened, the expansion reads as an unfolding. The golden-angle offset is
+    // what keeps two of them off the same point, which is a zero distance the
+    // repulsion step would have to nudge apart. Walk order is parent-first, so a
+    // directory's own position is in `carry` before its children ask for it.
+    const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+    const spread = FORCES.linkDistance * 0.5;
+    for (let i = 0; i < plan.edges.length; i++) {
+      const child = plan.nodes[plan.edges[i].source];
+      const parent = plan.nodes[plan.edges[i].target];
+      if (!child || !parent || carry.has(child.id)) continue;
+      const at = carry.get(parent.id);
+      if (!at) continue;
+      carry.set(child.id, {
+        x: at.x + spread * Math.cos(i * GOLDEN),
+        y: at.y + spread * Math.sin(i * GOLDEN),
+      });
+    }
+
+    // Last, so a node the operator put somewhere on purpose outranks both.
+    for (const item of plan.nodes) {
+      const pin = pinsRef.current.get(placeKey(item));
+      if (pin) carry.set(item.id, pin);
+    }
 
     const simNodes: SimNode[] = plan.nodes.map((item) => ({
       id: item.id,
@@ -495,11 +524,11 @@ export function RunTouchedMap({
 
     const sim = createSimulation(simNodes, simEdges, carry);
     countDegrees(sim.nodes, sim.edges);
-    for (const node of sim.nodes) {
-      const pin = pinsRef.current.get(node.id);
+    for (let i = 0; i < sim.nodes.length; i++) {
+      const pin = pinsRef.current.get(placeKey(plan.nodes[i]));
       if (pin) {
-        node.fx = pin.x;
-        node.fy = pin.y;
+        sim.nodes[i].fx = pin.x;
+        sim.nodes[i].fy = pin.y;
       }
     }
 
@@ -603,6 +632,16 @@ export function RunTouchedMap({
       const node = sim.nodes[drag.index];
       node.fx = (node.fx ?? node.x) + dx / view.k;
       node.fy = (node.fy ?? node.y) + dy / view.k;
+      // The position too, and not only the pin. `step` is what copies a pin onto
+      // a position, and under `prefers-reduced-motion` it is never called from
+      // the loop — so a drag would move nothing at all on screen while still
+      // recording where it went, and the node would jump there later when
+      // something else forced a settle. This is exactly what `step` does with a
+      // pinned node, so it is the same arithmetic either way.
+      node.x = node.fx;
+      node.y = node.fy;
+      node.vx = 0;
+      node.vy = 0;
       reheat(sim, 0.3);
     }
     schedule();
@@ -619,22 +658,33 @@ export function RunTouchedMap({
     }
 
     const sim = simRef.current;
-    if (sim && drag.index !== null) {
+    const dragged = drag.index === null ? null : metaRef.current[drag.index];
+    if (sim && drag.index !== null && dragged) {
       const node = sim.nodes[drag.index];
       // Dropped is where it stays: a node that sprang back would make a drag a
-      // way of disturbing the arrangement rather than of making one.
+      // way of disturbing the arrangement rather than of making one. Keyed on
+      // the place rather than the drawn id, so a directory dragged while folded
+      // is still there once it is opened.
       if (node.fx !== null && node.fy !== null) {
-        pinsRef.current.set(node.id, { x: node.fx, y: node.fy });
+        pinsRef.current.set(placeKey(dragged), { x: node.fx, y: node.fy });
       }
     }
 
     if (drag.moved <= CLICK_SLOP) {
-      const item = drag.index === null ? null : metaRef.current[drag.index];
       // A fold opens on the click that would otherwise only select it: it is the
       // one node on this surface standing for something the operator cannot
       // otherwise reach, and the inspector says what it is either way.
-      if (item?.kind === "folded") expandRef.current(item.path);
-      selectRef.current(item ?? null);
+      //
+      // Selected by the id it is *about to have*, not the one it has. Opening
+      // replaces `folded:p` with `dir:p`, and the page looks the selection up by
+      // id — so selecting the fold clears the inspector on the very click that
+      // was supposed to explain what had just unfolded.
+      if (dragged?.kind === "folded") {
+        expandRef.current(dragged.path);
+        selectRef.current(nodeId("dir", dragged.path));
+      } else {
+        selectRef.current(dragged?.id ?? null);
+      }
     }
     schedule();
   }

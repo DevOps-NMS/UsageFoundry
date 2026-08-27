@@ -1737,7 +1737,13 @@ through before trusting this unattended:
 > 6. **The gestures.** Drag the background to pan, wheel to zoom — the point under
 >    the cursor should stay under it — drag a node and it should stay where it was
 >    dropped. Click a file: the inspector on the right fills in with its path,
->    counts, tools and callers. Click empty space: it clears.
+>    counts, tools and callers, and the node takes a `--tint` halo well clear of
+>    its own edge — check that halo actually reads as *selected*, since the ring
+>    it has to be told apart from is the foreground-coloured one meaning "in the
+>    diff". Click empty space: it clears. Then repeat this whole step with "Reduce
+>    motion" on: the integrator never runs there, so the drag writes the position
+>    itself, and a drag that appears to do nothing — or a node that jumps
+>    somewhere later — is that path being wrong.
 > 7. **A run with one work cycle.** This is the common case on this install and
 >    the map is deliberately built without a time axis, so it must not look broken
 >    or half-empty: the header says "… across 1 work cycle" and nothing else on the
@@ -1758,8 +1764,13 @@ through before trusting this unattended:
 >    it, so this needs a run that touched a few hundred files or a temporarily
 >    lowered `MAX_DRAWN_FILES`. A folded directory draws as one larger node with
 >    its name and "N files" under it, the notice above the canvas gives the total
->    folded, and clicking one opens it — the files inside appear and the
->    surrounding layout does not jump. Nothing should ever vanish.
+>    folded, and clicking one opens it — the files inside appear *beside it*
+>    rather than flying in from the middle of the map, the surrounding layout does
+>    not jump, and the inspector then describes the directory that just opened
+>    rather than clearing. Open a second fold afterwards: nothing already on
+>    screen may change position except by settling, including a directory the
+>    budget closes again to pay for the one you opened. Nothing should ever
+>    vanish.
 > 11. **Both themes and the OS switch.** Toggle light/dark with the map open; the
 >    node colours must re-probe without a reload. Then leave the app on "Match
 >    system" and change the OS appearance, which is the boundary that fires no
