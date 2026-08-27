@@ -61,12 +61,41 @@ const GROUPS = [
       "diff can say nothing about them.",
     fold: false,
   },
-] as const satisfies readonly {
+] as const satisfies readonly TouchGroup[];
+
+/**
+ * The same rows when there is no diff to reconcile against.
+ *
+ * A run whose branch was deleted has a changed set that is *unknown* rather
+ * than empty, and the four labels above all make a claim about it — "named, and
+ * not changed" over a file nobody can say was not changed is the reconciliation
+ * asserting the thing it was built to check. So the two groups whose labels
+ * survive without a diff are kept, and `outsideCheckout` is one of them because
+ * being outside the checkout is a property of the path rather than of the
+ * branch.
+ */
+const GROUPS_WITHOUT_DIFF = [
+  {
+    key: "touchedNotChanged",
+    label: "Named by a tool call",
+    footnote: null,
+    fold: false,
+  },
+  {
+    key: "outsideCheckout",
+    label: "Named outside the checkout",
+    footnote:
+      "Matched neither this run's working directory nor its folder.",
+    fold: false,
+  },
+] as const satisfies readonly TouchGroup[];
+
+interface TouchGroup {
   key: "changedNotTouched" | "touchedNotChanged" | "outsideCheckout" | "touchedAndChanged";
   label: string;
   footnote: string | null;
   fold: boolean;
-}[];
+}
 
 export function RunTouches({ run, diff }: { run: RunDTO; diff: RunDiffDTO }) {
   const [touched, setTouched] = useState<RunTouchedDTO | null>(null);
@@ -96,6 +125,14 @@ export function RunTouches({ run, diff }: { run: RunDTO; diff: RunDiffDTO }) {
       live = false;
     };
   }, [run.id]);
+
+  // With `kind: "none"` the changed set is unknown rather than empty — the
+  // branch is gone, or the run never had one — so the groups that make a claim
+  // about it are not offered. The header's two figures and the three empty
+  // states are unaffected: they are facts about the events, not about the diff,
+  // and an old run whose branch was deleted is exactly the one whose events are
+  // most likely to have been swept.
+  const reconcilable = diff.kind !== "none";
 
   // `path` alone, not `oldPath`: a rename's old name is a path no tool call
   // would have named, and listing it would put a file in "changed, never named"
@@ -155,8 +192,15 @@ export function RunTouches({ run, diff }: { run: RunDTO; diff: RunDiffDTO }) {
         </Empty>
       )}
 
+      {report && !reconcilable && (
+        <Notice tone="warn" quiet>
+          {diff.reason ?? "There is no diff for this run."} Without one, these
+          files cannot be reconciled against what changed — only listed.
+        </Notice>
+      )}
+
       {report &&
-        GROUPS.map(({ key, label, footnote, fold }) => {
+        (reconcilable ? GROUPS : GROUPS_WITHOUT_DIFF).map(({ key, label, footnote, fold }) => {
           const rows = report[key];
           if (rows.length === 0) return null;
           const table = (

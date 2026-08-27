@@ -200,11 +200,12 @@ export function RunDiff({ run }: { run: RunDTO }) {
         )}
       </Card>
 
-      {/* Beneath the diff rather than inside it, and only once there is a file
-          list to reconcile against: with `kind: "none"` the changed set is
-          unknown rather than empty, and every file the run read would then be
-          reported as one it read and did not change. */}
-      {diff && diff.kind !== "none" && <RunTouches run={run} diff={diff} />}
+      {/* Beneath the diff rather than inside it, and given the whole diff rather
+          than its file list: what a `kind: "none"` means for the reconciliation
+          is that component's decision, and an old run whose branch was deleted
+          is exactly the one whose events are most likely to have aged out —
+          which is a thing to say rather than a card to withhold. */}
+      {diff && <RunTouches run={run} diff={diff} />}
     </>
   );
 }
