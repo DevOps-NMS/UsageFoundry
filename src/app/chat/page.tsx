@@ -652,32 +652,32 @@ export default function ChatPage() {
     });
   };
 
+  /* The page is exactly the pane at `lg`, and nothing on it may make the
+     pane scroll. Both boxes in the row below already scroll themselves, so a
+     scrollbar out here is one the reader works through *behind* two that are
+     doing the same job — and the first thing it pushes past the fold is the
+     composer, the one control this page exists to be typed into.
+
+     The shell's column stays `min-h-full`, because every other page depends
+     on growing past the pane, so the bound is this page's own — and it is
+     two boxes rather than one. The outer takes what the column has left
+     over. The inner is taken *out of flow*, which is the half that is not
+     obvious: an in-flow box with no height of its own reports its content as
+     its intrinsic height, so a long thread grows the column back through the
+     very item meant to bound it. Measured in Chromium against this exact
+     nesting — `h-full`, `flex-1` with `min-h-0`, `height: 0` with `grow`,
+     and `overflow-hidden` all hand the column the whole transcript, and only
+     the out-of-flow box does not. It contributes nothing to that
+     measurement and simply takes the box it was given, which is the trade
+     `Log`'s `pane` size already makes one page over.
+
+     Below `lg` neither half applies and the page composes as it always did:
+     the proposals sit *under* the thread, which is a second column of
+     content the page is meant to scroll, and both cards keep the bounded
+     `max-h-[34rem]` they have there. The wrapper is a flex column at every
+     width all the same, so the margins between the header's own blocks stay
+     uncollapsed exactly as they were when the shell's column held them. */
   return (
-    /* The page is exactly the pane at `lg`, and nothing on it may make the
-        pane scroll. Both boxes in the row below already scroll themselves, so a
-        scrollbar out here is one the reader works through *behind* two that are
-        doing the same job — and the first thing it pushes past the fold is the
-        composer, the one control this page exists to be typed into.
-
-        The shell's column stays `min-h-full`, because every other page depends
-        on growing past the pane, so the bound is this page's own — and it is
-        two boxes rather than one. The outer takes what the column has left
-        over. The inner is taken *out of flow*, which is the half that is not
-        obvious: an in-flow box with no height of its own reports its content as
-        its intrinsic height, so a long thread grows the column back through the
-        very item meant to bound it. Measured in Chromium against this exact
-        nesting — `h-full`, `flex-1` with `min-h-0`, `height: 0` with `grow`,
-        and `overflow-hidden` all hand the column the whole transcript, and only
-        the out-of-flow box does not. It contributes nothing to that
-        measurement and simply takes the box it was given, which is the trade
-        `Log`'s `pane` size already makes one page over.
-
-        Below `lg` neither half applies and the page composes as it always did:
-        the proposals sit *under* the thread, which is a second column of
-        content the page is meant to scroll, and both cards keep the bounded
-        `max-h-[34rem]` they have there. The wrapper is a flex column at every
-        width all the same, so the margins between the header's own blocks stay
-        uncollapsed exactly as they were when the shell's column held them. */
     <div className="relative flex flex-col lg:min-h-0 lg:flex-1">
       <div className="flex flex-col lg:absolute lg:inset-0">
         <div className="mb-3 flex flex-wrap items-center gap-3">
