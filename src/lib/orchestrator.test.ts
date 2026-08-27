@@ -77,7 +77,9 @@ const {
   duePausedRuns,
   edgeSatisfied,
   injectionFates,
+  guardScanDue,
   interruptOutcome,
+  liveTickPlan,
   overlaps,
   planPausedRun,
   releasableRuns,
@@ -4548,6 +4550,71 @@ describe("what a lifecycle event says on stdout", () => {
  * here is the one this route was parameterised to end: a miss that reads as an
  * absence.
  */
+describe("the live ticker's two cadences", () => {
+  /**
+   * Both halves used to ride one interval, and both ways of collapsing them
+   * back are silent.
+   *
+   * The context reading is the only answer this app has to "how full is this
+   * run", and it rode `liveGuardIntervalSeconds` — a setting about money, which
+   * an operator may reasonably put at ten minutes. The panel then sat ten
+   * minutes behind showing a perfectly plausible number, with nothing on screen
+   * naming the setting that had moved it. The other direction costs instead of
+   * lying: `buildSnapshot` is uncoalesced and is the expensive half, so a
+   * `guardMs` that collapsed onto the floored tick would run it five times as
+   * often as the operator asked and nothing would say so either.
+   */
+  it("floors the tick at the context ceiling however high the setting goes", () => {
+    const plan = liveTickPlan(600);
+    assert.equal(plan.tickMs, 120_000, "the reading is taken at least this often");
+    assert.equal(plan.guardMs, 600_000, "and the budget keeps the operator's own");
+  });
+
+  it("leaves a setting under the ceiling exactly where it was", () => {
+    // The default, and the case every install is actually on: one cadence, and
+    // the split costs it nothing.
+    const plan = liveTickPlan(60);
+    assert.deepEqual(plan, { tickMs: 60_000, guardMs: 60_000 });
+  });
+
+  it("keeps the setting's own floor rather than trusting the row", () => {
+    // `saveSettings` clamps at 15, but a row written by an older build — or by
+    // hand — is not obliged to have been through it, and 0 here is an interval
+    // of zero milliseconds.
+    assert.deepEqual(liveTickPlan(0), { tickMs: 15_000, guardMs: 15_000 });
+    assert.deepEqual(liveTickPlan(-30), { tickMs: 15_000, guardMs: 15_000 });
+  });
+
+  it("runs the budget scan on the first tick after the ticker starts", () => {
+    // `guardScan.at` is zeroed when the ticker starts, so the run it was
+    // started for is scanned rather than waiting out a whole interval.
+    assert.equal(guardScanDue(0, 1_000_000, liveTickPlan(600)), true);
+  });
+
+  it("rounds the budget scan to the nearest tick instead of pushing it late", () => {
+    const plan = liveTickPlan(600);
+    const at = 1_000_000;
+    // A tick a hair early. Refusing it would push the scan a whole tick past the
+    // cadence the operator set — 12 minutes on a 10-minute setting — and the
+    // error compounds every time it happens.
+    assert.equal(guardScanDue(at, at + 599_900, plan), true);
+    // Half a tick early is the boundary itself, and is included.
+    assert.equal(guardScanDue(at, at + 540_000, plan), true);
+    // Further out than that is a tick of its own and waits.
+    assert.equal(guardScanDue(at, at + 539_999, plan), false);
+    assert.equal(guardScanDue(at, at + 120_000, plan), false);
+  });
+
+  it("never stands the budget scan down where the two cadences are one", () => {
+    // The default install: every tick is a guard tick, and a scan arriving a
+    // few milliseconds early must not be skipped into a 2-minute cadence.
+    const plan = liveTickPlan(60);
+    const at = 1_000_000;
+    assert.equal(guardScanDue(at, at + 59_990, plan), true);
+    assert.equal(guardScanDue(at, at + 60_000, plan), true);
+  });
+});
+
 describe("normalizeRunListQuery", () => {
   it("answers an unreadable page size with the ordinary page, not the smallest one", () => {
     // `selectBranchCandidates`' reasoning verbatim: these arrive off a query

@@ -13,7 +13,12 @@ import {
   resolvePrice,
 } from "./pricing";
 import { scanUsage, type UsageEntry } from "./transcripts";
-import type { ContextOccupancyDTO, ContextSampleBasisDTO, PruneTier } from "./apiTypes";
+import type {
+  ContextCheckDTO,
+  ContextOccupancyDTO,
+  ContextSampleBasisDTO,
+  PruneTier,
+} from "./apiTypes";
 import { getSettings, type Settings } from "./settings";
 
 /**
@@ -727,6 +732,10 @@ export function sampleContext(
   }
 
   const reading = apiContextSample(transcriptPath, last?.frame_id ?? null);
+  // Before every return below, because every one of them is a tick that looked.
+  // The two returns that follow write no row, and they are the ordinary case
+  // rather than the exception — see `noteContextCheck`.
+  noteContextCheck(runId, reading);
 
   // A transcript that could not be read is not a run whose context fell to
   // nothing, and neither is a conversation that has not opened yet. Both would
@@ -777,6 +786,56 @@ function sameReading(last: StoredSample, reading: ContextReading): boolean {
   return (
     last.frame_id === null && last.basis === reading.basis && last.tokens === reading.tokens
   );
+}
+
+/**
+ * When each live run's transcript was last read, whatever came of it.
+ *
+ * ## Why this is not the newest sample's timestamp
+ *
+ * Measured on this install: a run whose main agent spawned one sub-agent at
+ * 18:15:59 gained no sample for **22 minutes**, because every frame written in
+ * that stretch was `isSidechain` and this measure excludes them exactly as the
+ * ceiling does. The tick ran twenty-two times and read the transcript twenty-two
+ * times; the figure it found was the same one every time, and it was *correct* —
+ * the parent's context genuinely does not grow while a sub-agent works, since
+ * nothing enters it until the tool result returns. The panel nonetheless said
+ * "read 22m ago", which is what an operator reads as a dead poll, and the same
+ * shape occurs on any tool call that outlasts a few ticks.
+ *
+ * So the two facts are stored separately: `context_samples` says when the number
+ * last *moved*, and this says when it was last *looked at*.
+ *
+ * ## Why in memory and on `globalThis`
+ *
+ * It is a property of this process's ticker, not of the run — a server that has
+ * just restarted has read nothing, however recently the run it inherited was
+ * read by the server before it, and a stored row would let it claim otherwise
+ * across exactly the restart an operator is most likely to be watching. A fresh
+ * key rather than a reused one, per the note on `orchestrator.ts:373`: `??=`
+ * only initialises when absent, so a key whose shape changed survives a dev hot
+ * reload with the old value in it.
+ *
+ * Bounded by `forgetContextCheck` on the run's own teardown, beside the rest of
+ * its per-run state.
+ */
+const contextChecks = ((globalThis as unknown as {
+  __ufContextChecks?: Map<string, ContextCheckDTO>;
+}).__ufContextChecks ??= new Map<string, ContextCheckDTO>());
+
+/** Write down that a tick read this run, and what measure it came back in. */
+function noteContextCheck(runId: string, reading: ContextReading): void {
+  contextChecks.set(runId, { ts: Date.now(), basis: reading.basis });
+}
+
+/** The last read of one run, or null where this process has taken none. */
+export function lastContextCheck(runId: string): ContextCheckDTO | null {
+  return contextChecks.get(runId) ?? null;
+}
+
+/** Dropped with the run's other per-run state when its loop ends. */
+export function forgetContextCheck(runId: string): void {
+  contextChecks.delete(runId);
 }
 
 /**
@@ -871,6 +930,9 @@ export function contextOccupancy(runId: string): ContextOccupancyDTO | undefined
         tokensRemoved: r.tokens_removed,
       })),
       pruneCount: countFor("prune_receipts", runId, receipts.length, CONTEXT_PRUNE_MARKS_MAX),
+      // Read here rather than left to the route, so the series and the tick that
+      // produced it cannot be assembled from two different moments.
+      lastCheck: lastContextCheck(runId),
     };
   } catch (err) {
     noteBookkeepingFailure("contextOccupancy", err);

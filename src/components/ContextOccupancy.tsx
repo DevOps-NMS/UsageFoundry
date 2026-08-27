@@ -4,10 +4,22 @@
 // rewrites the path alias at runtime, so a tested component has to import the
 // way src/lib, Meter.tsx and LiveTelemetry.tsx already do.
 import type { ContextOccupancyDTO, ContextSampleDTO } from "../lib/apiTypes";
-import { fmtClock, fmtRelative, fmtTokens } from "../lib/format";
+import { fmtClock, fmtDuration, fmtRelative, fmtTokens } from "../lib/format";
 import { Meter } from "./Meter";
 import { Stat } from "./ui/Card";
 import { TBody, THead, Table, Td, Th, Tr } from "./ui/Table";
+
+/**
+ * How far the figure may fall behind the read before the gap is worth naming.
+ *
+ * Above the two-minute ceiling on the read itself, deliberately: a gap smaller
+ * than that is one tick that found the same frame, which is the ordinary case
+ * on any tool call and says nothing an operator needs. What this catches is the
+ * case that used to render as a dead poll — a run inside one long tool call or
+ * one sub-agent, whose main thread has not been billed for a request in
+ * minutes, and whose figure is nonetheless the current one.
+ */
+const HOLD_NOTICE_MS = 3 * 60_000;
 
 /**
  * How full one run's context is now, and how it got there.
@@ -32,6 +44,17 @@ import { TBody, THead, Table, Td, Th, Tr } from "./ui/Table";
  * behind it has already moved twice — 167,000, then 300,000, then 200,000 — and
  * a component dividing by a hardcoded 200,000 would go on drawing the old
  * percentage after the next move, correctly-looking and wrong.
+ *
+ * ## Why the age shown is not the newest point's
+ *
+ * `lastCheck` is when the tick last *read* this run; the newest sample is when
+ * the number last *moved*. They come apart by design — the series is
+ * deduplicated on the `usage` frame it came from, and a run whose main thread is
+ * inside one sub-agent gains no frame at all for as long as that lasts, measured
+ * at 22 minutes on this install. Drawing the sample's own timestamp as "read 22m
+ * ago" said the poll had died when what had actually happened was that the
+ * figure was still correct, which is the one thing this panel must not get
+ * backwards. So the age is the read's, and the hold is said separately.
  *
  * ## What the picture claims
  *
@@ -66,6 +89,17 @@ export function ContextOccupancy({
   const latest = samples.length > 0 ? samples[samples.length - 1] : null;
   const fraction =
     latest !== null && hasCeiling ? latest.tokens / ceilingTokens : null;
+
+  // Only while the run can move. A finished run's last reading is final and the
+  // tick that took it stopped when the run did, so an age against it would count
+  // up for ever on a number nothing is going to change.
+  const check = live ? context.lastCheck : null;
+  // Falls back to the sample's own timestamp, which is what this line said
+  // before `lastCheck` existed: a server restarted mid-run has read nothing yet,
+  // and borrowing the previous process's reading would be exactly the freshness
+  // this exists to stop inventing.
+  const readAt = check?.ts ?? latest?.ts ?? now;
+  const held = latest === null || check === null ? 0 : check.ts - latest.ts;
 
   return (
     <>
@@ -104,7 +138,20 @@ export function ContextOccupancy({
               meter's own head, where it is already tabular and already sized. */}
           <Stat>{fmtTokens(latest.tokens)}</Stat>
           <div className="mt-0.5 text-xs tabular-nums text-ink-muted">
-            {live ? <>read {fmtRelative(latest.ts, now)}</> : <>final reading</>}{" "}
+            {!live ? (
+              <>final reading</>
+            ) : check?.basis === "unreadable" ? (
+              // Said in place of the age rather than beside it. A read that
+              // failed is not a fresh reading, and "read just now" over a figure
+              // nothing could confirm is the one wording that would make this
+              // panel worse than having none.
+              <>last read {fmtRelative(readAt, now)} found nothing to read</>
+            ) : (
+              <>read {fmtRelative(readAt, now)}</>
+            )}
+            {held >= HOLD_NOTICE_MS && (
+              <> · unchanged for {fmtDuration(held)}</>
+            )}{" "}
             · work cycle {latest.iteration}
           </div>
           <Meter
@@ -123,6 +170,7 @@ export function ContextOccupancy({
           <Caption
             context={context}
             latest={latest}
+            held={held}
             drawnPrunes={prunesInSpan(samples, prunes).length}
           />
         </>
@@ -476,10 +524,13 @@ function describeSeries(
 function Caption({
   context,
   latest,
+  held,
   drawnPrunes,
 }: {
   context: ContextOccupancyDTO;
   latest: ContextSampleDTO;
+  /** How far the newest reading trails the newest read; 0 where it does not. */
+  held: number;
   drawnPrunes: number;
 }) {
   const { samples, sampleCount, prunes } = context;
@@ -495,6 +546,18 @@ function Caption({
       instead, which runs tens of thousands of tokens either side of this in both
       directions, so a prune&rsquo;s removed tokens must not be subtracted from
       anything here.
+      {held >= HOLD_NOTICE_MS && (
+        <>
+          {" "}
+          Nothing has moved it for {fmtDuration(held)} and it is still being
+          read: the series only gains a point when this run&rsquo;s{" "}
+          <em>main thread</em> finishes another request, and a long tool call or
+          a sub-agent adds nothing to that — a sub-agent&rsquo;s turns are not
+          this conversation&rsquo;s context and do not enter it until its result
+          comes back. The figure is current; it is the conversation that is
+          waiting.
+        </>
+      )}
       {latest.basis === "transcript" && (
         <>
           {" "}

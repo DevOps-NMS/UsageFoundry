@@ -2083,7 +2083,7 @@ through before trusting this unattended:
   the money on it came from hand-written DTOs rather than a real
   `prune_receipts` table.
 
-  **The context occupancy series has never been written by a real run.** Every
+  ~~**The context occupancy series has never been written by a real run.**~~ **Withdrawn — measured on 2026-08-27; see the entry below.** Every
   claim about it comes from unit tests over hand-written transcript fixtures
   (`contextSamples.test.ts`): no `context_samples` row on this install was
   produced by `liveGuardTick` against a live child, so the cadence the series
@@ -2100,6 +2100,43 @@ through before trusting this unattended:
   retention half is exercised (`retentionSweep.test.ts` pins that a blank horizon
   sweeps none of it) but no sweep has removed a real sample, and no run has
   reached `CONTEXT_SAMPLES_PER_RUN`.
+
+  **The series has now been written by real runs, and its cadence measured — it
+  is not the ticker's.** 198 rows across 10 runs on this install, all on
+  2026-08-27 between 16:42 and 20:03 UTC, read out of `/data/usagefoundry.db` in
+  the running container with `liveGuardIntervalSeconds` at its default 60. Of
+  the 188 consecutive pairs, **159 are one tick apart** (under 90 s), 22 are
+  more than two minutes apart, 5 are more than five, and **the widest is 1,320 s
+  — 22 minutes**. Every gap is an exact multiple of 60 s and every row's
+  timestamp lands on the ticker's own phase second, which is what separates the
+  two candidate explanations: the ticker never ran late, and the gaps are
+  deduplication refusing to write an unchanged frame. Readings ran 34,495 to
+  317,477 tokens. The **`turns_exact` false branch is no longer unmeasured** — 16
+  rows across two runs carry it — and neither is the ticker's write path under a
+  live child. Still unmeasured: the `transcript` fallback basis (0 of 198 rows;
+  every reading found a usage frame), the cost of the scan, `CONTEXT_SAMPLES_PER_RUN`
+  (the largest single run holds 38 rows), and any retention sweep over real rows.
+
+  **What the widest gap was, and what the panel said about it.** Run
+  `fc491479` at 18:15:59 called the `Agent` tool; from 18:16 to 18:38 every frame
+  its transcript gained was a sub-agent's, which this measure excludes exactly as
+  the ceiling does, so no row was written for 22 minutes. Context across that gap
+  went 186,989 → 197,286. The panel, which had only the newest row's timestamp,
+  rendered "read 22m ago" — and the figure it was labelling was correct
+  throughout, because a parent's context does not grow while a sub-agent works.
+  That is the report `lastCheck` and `liveTickPlan` were written against.
+
+  **Not yet verified by hand:** the freshness split has `npm run typecheck`
+  (exit 0), `npm test` (**1,902 tests / 0 failures**, of which 16 are new) and
+  `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` (exit 0) behind it, and
+  the container was **not** rebuilt — so no browser has seen the new line. What
+  to read on the next rebuild, on a live run: that the age moves every tick
+  rather than every turn, that "unchanged for" appears on a run inside a
+  sub-agent and *not* on an ordinary one, and that a restart mid-run drops the
+  age back to the point's own rather than inventing a fresh one. `guardScanDue`'s
+  stand-down has never been exercised at all on this install, because it does
+  nothing at the default interval: it needs `liveGuardIntervalSeconds` above 120
+  to have any effect.
 
   **The occupancy panel that draws that series was rendered by a browser, and
   the run page it sits on was not.** Correcting the entry two above: this

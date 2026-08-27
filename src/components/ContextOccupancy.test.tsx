@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ContextOccupancy } from "./ContextOccupancy";
 import type {
+  ContextCheckDTO,
   ContextOccupancyDTO,
   ContextPruneMarkDTO,
   ContextSampleDTO,
@@ -24,6 +25,13 @@ import type {
  *  - The caption's currency sentence going missing. This page carries token
  *    figures in two bases that differ by tens of thousands in **both**
  *    directions, and the arithmetic across them typechecks.
+ *  - The age drawn against the newest *point* rather than the newest *read*.
+ *    Samples are deduplicated on the `usage` frame they came from, so a run
+ *    inside one sub-agent gains none for as long as that lasts — 22 minutes,
+ *    measured on this install — and the panel then reported a poll that had
+ *    died over a figure that was current. Both halves are pinned: the age comes
+ *    off `lastCheck`, and the hold is named rather than left to be inferred
+ *    from an age that no longer moves.
  *
  * `LiveTelemetry.test.tsx` is the precedent for the last one: a component whose
  * copy is load-bearing gets that copy pinned.
@@ -58,8 +66,16 @@ function series(over: Partial<ContextOccupancyDTO> = {}): ContextOccupancyDTO {
     sampleCount: samples.length,
     prunes: [],
     pruneCount: 0,
+    // Read on the same tick that wrote the newest point, which is the ordinary
+    // steady state: the cases below are the ones where it is not.
+    lastCheck: { ts: NOW, basis: "api" },
     ...over,
   };
+}
+
+/** A tick that looked, at a time of its own. */
+function check(over: Partial<ContextCheckDTO> = {}): ContextCheckDTO {
+  return { ts: NOW, basis: "api", ...over };
 }
 
 function prune(over: Partial<ContextPruneMarkDTO> = {}): ContextPruneMarkDTO {
@@ -128,6 +144,90 @@ test("a finished run's last point is a final reading, not a stale poll", () => {
 
   const done = render(series(), false);
   assert.match(done, /final reading/);
+});
+
+/**
+ * A run that has spent 22 minutes inside one sub-agent, which is the case
+ * measured on this install: the tick read the transcript 22 times, found the
+ * same `usage` frame every time and wrote no row, and the figure it found was
+ * correct throughout — a sub-agent's turns are not this conversation's context.
+ */
+function heldSeries(over: Partial<ContextOccupancyDTO> = {}): ContextOccupancyDTO {
+  // The read is 20 seconds old and the newest point is 22 minutes older than
+  // the read, so the two ages are separable in the output rather than differing
+  // by a rounding.
+  const read = NOW - 20_000;
+  const held = [
+    sample({ ts: read - 24 * 60_000, tokens: 30_000 }),
+    sample({ ts: read - 22 * 60_000, tokens: 60_000 }),
+  ];
+  return series({
+    samples: held,
+    sampleCount: held.length,
+    lastCheck: check({ ts: read }),
+    ...over,
+  });
+}
+
+test("the age is the tick's, not the newest point's", () => {
+  const html = render(heldSeries());
+  // 20 seconds since the read, so the age rounds to nothing. The bug this
+  // replaces put "22m ago" here — a dead poll over a live figure.
+  assert.match(html, /read just now/);
+  assert.doesNotMatch(html, /read 22m ago/, "the point's own age is not the read's");
+  assert.doesNotMatch(html, /read 22m/, "nor anywhere near it");
+  // And the gap is named rather than left to be inferred from an age that has
+  // stopped moving, which is the half that makes the first one readable.
+  assert.match(html, /unchanged for 22m 0s/);
+  assert.match(
+    html,
+    /main thread<\/em> finishes another request/,
+    "and the caption says why a live run's figure can sit still",
+  );
+});
+
+test("a gap inside one read interval is not worth naming", () => {
+  // Two minutes is the ceiling on the read itself, so anything under it is one
+  // tick that found the same frame — the ordinary case on any tool call, and a
+  // "unchanged for" on every second run is noise that trains an operator to
+  // stop reading the line.
+  const html = render(
+    heldSeries({
+      samples: [sample({ ts: NOW - 2 * 60_000 - 20_000, tokens: 60_000 })],
+      sampleCount: 1,
+      lastCheck: check({ ts: NOW - 20_000 }),
+    }),
+  );
+  assert.doesNotMatch(html, /unchanged for/);
+});
+
+test("with no read reported the age falls back to the point's own", () => {
+  // A server restarted mid-run has read nothing yet. Borrowing the previous
+  // process's reading would be exactly the freshness `lastCheck` exists to stop
+  // this panel inventing, so it says what it did before the field existed.
+  const html = render(heldSeries({ lastCheck: null }));
+  assert.match(html, /read 22m ago/);
+  assert.doesNotMatch(html, /unchanged for/, "there is no read to hold against");
+});
+
+test("a read that found nothing is not a fresh reading", () => {
+  // `unreadable` is a different statement from a figure that has not moved, and
+  // "read just now" over a number nothing could confirm is the one wording that
+  // would leave this panel worse than absent.
+  const html = render(
+    heldSeries({ lastCheck: check({ ts: NOW - 20_000, basis: "unreadable" }) }),
+  );
+  assert.match(html, /last read just now found nothing to read/);
+  assert.doesNotMatch(html, /read just now ·/);
+});
+
+test("a finished run is not given an age at all", () => {
+  // Its tick stopped when it did, so an age would count up for ever against a
+  // number nothing is going to change.
+  const html = render(heldSeries(), false);
+  assert.match(html, /final reading/);
+  assert.doesNotMatch(html, /unchanged for/);
+  assert.doesNotMatch(html, /read /);
 });
 
 test("a prune is marked at the moment the DTO gives it", () => {

@@ -30,6 +30,14 @@ import type Database from "better-sqlite3";
  *    are the ceiling's own and were carried over deliberately; dropping either
  *    inflates the turn axis on exactly the tool-heavy runs whose growth rate
  *    somebody is trying to read.
+ *  - **A tick that writes nothing still records that it looked.** This is the
+ *    same fact as the one above, read from the other end, and getting it wrong
+ *    is the failure an operator actually reported: a run inside one sub-agent
+ *    wrote no row for 22 minutes — every frame in that stretch was `isSidechain`
+ *    and this measure excludes them — and the panel, which had only the newest
+ *    row's timestamp to go on, said "read 22m ago" over a figure that was
+ *    current the whole time. A dead poll and a conversation that is waiting look
+ *    identical from one timestamp and call for opposite responses.
  *  - **Pruning being off does not switch the series off.** This is the trap the
  *    change was written against: sampling inside a function that returns early
  *    on `pruningEnabled()` leaves the indicator permanently blank on every
@@ -75,6 +83,10 @@ after(() => {
 beforeEach(() => {
   dbMod.db().prepare("DELETE FROM context_samples").run();
   dbMod.db().prepare("DELETE FROM prune_receipts").run();
+  // In memory rather than in a row, so it survives the two deletes above and
+  // would otherwise carry one case's reading into the next.
+  pruningMod.forgetContextCheck("r1");
+  pruningMod.forgetContextCheck("r2");
 });
 
 /** One assistant record, as the CLI writes it. */
@@ -169,6 +181,48 @@ describe("sampleContext", () => {
     assert.equal(first.tokens, 5_010);
     assert.equal(second.tokens, 5_010);
     assert.equal(third.tokens, 5_010);
+  });
+
+  it("records that it looked even on the ticks that write no row", () => {
+    // The 22-minute case: the same frame, read over and over. Without this the
+    // only timestamp the panel has is the row's, and a run whose main thread is
+    // inside one sub-agent is indistinguishable from a poll that has died.
+    const file = transcript("looked.jsonl", [turn("m1", { input: 10, read: 5_000 })]);
+
+    pruningMod.sampleContext("r1", 1, file);
+    const afterFirst = pruningMod.lastContextCheck("r1");
+    assert.ok(afterFirst, "the first read is recorded");
+    assert.equal(afterFirst.basis, "api");
+
+    const before = rows()[0].ts as number;
+    pruningMod.sampleContext("r1", 1, file);
+    assert.equal(rows().length, 1, "still one row — the frame did not move");
+    const afterSecond = pruningMod.lastContextCheck("r1");
+    assert.ok(afterSecond);
+    assert.ok(
+      afterSecond.ts >= before,
+      "but the read is no older than the row it declined to write",
+    );
+  });
+
+  it("records the look that failed as a failure, not as freshness", () => {
+    // `unreadable` and "unchanged" are opposite statements. A read that found
+    // nothing reported as a fresh reading is the one wording that leaves the
+    // panel worse than absent.
+    pruningMod.sampleContext("r1", 1, path.join(transcripts, "missing.jsonl"));
+
+    const check = pruningMod.lastContextCheck("r1");
+    assert.ok(check);
+    assert.equal(check.basis, "unreadable");
+    assert.equal(rows().length, 0, "and still nothing is written to the series");
+  });
+
+  it("keeps one run's reads out of another's", () => {
+    const file = transcript("mine.jsonl", [turn("m1", { input: 10, read: 5_000 })]);
+    pruningMod.sampleContext("r1", 1, file);
+
+    assert.ok(pruningMod.lastContextCheck("r1"));
+    assert.equal(pruningMod.lastContextCheck("r2"), null);
   });
 
   it("appends when the frame moves, and counts the turns between the two", () => {
@@ -426,6 +480,39 @@ describe("contextOccupancy", () => {
     // and a live run's recent shape is what somebody opened the page for.
     assert.equal(view.samples[view.samples.length - 1].turnIndex, n - 1);
     assert.equal(view.samples[0].turnIndex, 25);
+  });
+
+  it("carries the last read beside the series, not in place of it", () => {
+    const file = transcript("occ-check.jsonl", [turn("m1", { input: 10, read: 5_000 })]);
+    pruningMod.sampleContext("r1", 1, file);
+    // A second tick on the same frame: the series does not move and the read
+    // does. Both halves have to reach the DTO or the page cannot tell them
+    // apart, which is the whole point of the field.
+    pruningMod.sampleContext("r1", 1, file);
+
+    const dto = pruningMod.contextOccupancy("r1");
+    assert.ok(dto);
+    assert.equal(dto.samples.length, 1);
+    assert.ok(dto.lastCheck, "the tick that read it is on the wire");
+    assert.equal(dto.lastCheck.basis, "api");
+    assert.ok(dto.lastCheck.ts >= dto.samples[0].ts);
+  });
+
+  it("reports no read at all where this process has taken none", () => {
+    // A server restarted mid-run inherits the rows and none of the reads.
+    // Borrowing the previous process's would be freshness it cannot vouch for.
+    dbMod
+      .db()
+      .prepare(
+        `INSERT INTO context_samples
+           (ts, run_id, iteration, tokens, basis, frame_id, turn_index, turns_exact)
+         VALUES (?, 'r1', 1, 5000, 'api', 'inherited', 1, 1)`,
+      )
+      .run(Date.now());
+
+    const dto = pruningMod.contextOccupancy("r1");
+    assert.ok(dto);
+    assert.equal(dto.lastCheck, null);
   });
 
   it("is undefined for a run with neither samples nor prunes", () => {

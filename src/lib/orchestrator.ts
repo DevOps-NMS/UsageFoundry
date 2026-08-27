@@ -65,6 +65,7 @@ import {
   sampleContext,
   coldAgeRefusalMessage,
   CYCLE_CONTEXT_CEILING_TOKENS,
+  forgetContextCheck,
   freshestPayback,
   PAYBACK_HORIZON_TURNS,
   paybackTurns,
@@ -9344,6 +9345,7 @@ export async function startRun(id: string): Promise<void> {
     interrupts.delete(id);
     liveGuards.delete(id);
     contextWatches.delete(id);
+    forgetContextCheck(id);
     earlyEndDeclined.delete(id);
     boundaryDeclines.delete(id);
     pendingFork.delete(id);
@@ -9614,12 +9616,85 @@ export function stopRun(id: string, cause: string = OPERATOR_CAUSE): StopOutcome
 /* Live guards and the paused-run sweeper                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The longest a live run may go without having its context read.
+ *
+ * The occupancy reading rides the live-guard tick, and that tick's period is
+ * `liveGuardIntervalSeconds` — a setting about *money*, whose description on the
+ * settings page is about re-reading usage mid-cycle and which an operator is
+ * entitled to set to ten minutes on an install where nothing stops mid-cycle.
+ * Doing so used to take the context indicator with it, silently: the panel is
+ * the only answer this app has to "how full is this run" and it would then be
+ * up to ten minutes behind with nothing on screen saying which setting had moved
+ * it. Two minutes is the operator's stated tolerance for that panel, and it is
+ * far above the cost of the read it bounds — one tail parse per live run.
+ *
+ * This is a **floor on the tick**, not a second timer. The budget half keeps the
+ * operator's own cadence through `liveTickPlan`, because a budget scan is the
+ * expensive half and speeding it up is not what this is for.
+ */
+const CONTEXT_READ_MAX_INTERVAL_MS = 120_000;
+
+/** The shortest tick the live guard offers, and `startLiveTicker`'s own floor. */
+const MIN_LIVE_TICK_SECONDS = 15;
+
+/**
+ * How often the ticker fires, and how often the budget half of it runs.
+ *
+ * Pure, and separated out because both ways of being wrong here are silent. A
+ * `tickMs` that ignored the ceiling leaves the context panel as far behind as
+ * the operator's setting, which is the bug this exists to fix and shows up as a
+ * plausible-looking number with a stale age. A `guardMs` that collapsed onto
+ * `tickMs` would run `buildSnapshot` — the expensive half, uncoalesced — five
+ * times as often as the operator asked on an install with the interval set
+ * high, which costs and reads as nothing at all.
+ */
+export function liveTickPlan(guardIntervalSeconds: number): {
+  tickMs: number;
+  guardMs: number;
+} {
+  const guardMs = Math.max(MIN_LIVE_TICK_SECONDS, guardIntervalSeconds) * 1000;
+  return { tickMs: Math.min(guardMs, CONTEXT_READ_MAX_INTERVAL_MS), guardMs };
+}
+
+/**
+ * Whether this tick is the one that also re-reads the budget.
+ *
+ * Half a tick of slack, and that is the whole subtlety: `setInterval` drifts and
+ * a tick landing a few milliseconds early would be refused, pushing the budget
+ * scan a **whole tick** past the cadence the operator set — 12 minutes on a
+ * 10-minute setting, growing every time it happens. Rounding to the nearest tick
+ * keeps the long-run average on the setting.
+ */
+export function guardScanDue(
+  lastAt: number,
+  now: number,
+  plan: { tickMs: number; guardMs: number },
+): boolean {
+  return now - lastAt + plan.tickMs / 2 >= plan.guardMs;
+}
+
+/**
+ * The budget half's own cadence, held across the ticks it sits out.
+ *
+ * Its own `globalThis` key rather than a field on `timers`: adding one to that
+ * shape would leave a dev hot reload holding the pre-upgrade object, which `??=`
+ * does not re-initialise — the trap `orchestrator.ts:373` records.
+ */
+const guardScan = ((globalThis as unknown as {
+  __ufGuardScan?: { plan: { tickMs: number; guardMs: number }; at: number };
+}).__ufGuardScan ??= { plan: { tickMs: 0, guardMs: 0 }, at: 0 });
+
 function startLiveTicker(): void {
   if (timers.live) return;
   // Read once at start. A change to the setting takes effect the next time the
   // ticker stops and starts, which is at the end of the last live cycle.
-  const seconds = Math.max(15, getSettings().liveGuardIntervalSeconds);
-  timers.live = setInterval(() => void liveGuardTick(), seconds * 1000);
+  const plan = liveTickPlan(getSettings().liveGuardIntervalSeconds);
+  // Zeroed rather than carried over, so the first tick of a freshly started
+  // ticker always scans: the run it was started for has never been read.
+  guardScan.plan = plan;
+  guardScan.at = 0;
+  timers.live = setInterval(() => void liveGuardTick(), plan.tickMs);
   timers.live.unref?.();
 }
 
@@ -9659,6 +9734,12 @@ async function liveGuardTick(): Promise<void> {
     // read — see the function's own note on why that half is not gated on
     // pruning being switched on.
     await checkContextCeilings();
+
+    // The context read above runs on every tick; the budget scan below runs on
+    // the operator's own interval, which the tick may now be faster than. See
+    // `CONTEXT_READ_MAX_INTERVAL_MS` for why the two came apart.
+    if (!guardScanDue(guardScan.at, Date.now(), guardScan.plan)) return;
+    guardScan.at = Date.now();
 
     const pending = [...liveGuards].filter(([id]) => !interrupts.has(id));
     if (pending.length === 0) return;

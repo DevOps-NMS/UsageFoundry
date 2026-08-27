@@ -346,6 +346,35 @@ export interface ContextSampleDTO {
   turnsExact: boolean;
 }
 
+/**
+ * The last time the live-guard tick read a run's transcript, whatever it found.
+ *
+ * Separate from the newest sample, and that separation is the point. Samples are
+ * deduplicated on the `usage` frame they came from, so the series only gains a
+ * point when the run's **main thread** finishes another request — and a run that
+ * has spent twenty minutes inside one sub-agent, whose frames this measure
+ * excludes, has a newest sample twenty minutes old and a figure that is
+ * nonetheless current. Labelling the sample's own timestamp as "read Xm ago" put
+ * that on screen as a stalled poll, which is the one reading it must not have:
+ * an operator who cannot tell "nothing has changed" from "nothing is looking"
+ * has no indicator at all.
+ *
+ * Held in memory rather than in a row, because it describes the *process* that
+ * is doing the reading and not the run: a server that has just restarted has not
+ * looked at anything yet, however recently the run it inherited was read by the
+ * server before it. Null until the first tick of this process, and the caller
+ * then has nothing to claim.
+ */
+export interface ContextCheckDTO {
+  ts: number;
+  /**
+   * What that read found — `unreadable` when the transcript could not be read at
+   * all, which is a different statement from a reading that has not moved and is
+   * the one an operator must not see as freshness.
+   */
+  basis: ContextSampleBasisDTO | "unreadable";
+}
+
 /** A cut, on the same axis as the samples, so a fall in context has a cause. */
 export interface ContextPruneMarkDTO {
   ts: number;
@@ -362,7 +391,9 @@ export interface ContextPruneMarkDTO {
  * live-guard tick at whatever cadence `liveGuardIntervalSeconds` runs at, and
  * deduplicated on the `usage` frame it came from — so the gaps between points
  * are the conversation's own turns rather than a fixed interval, and two points
- * far apart in time mean one long tool call rather than missing data.
+ * far apart in time mean one long tool call rather than missing data. That is
+ * what `lastCheck` exists to say out loud: the tick's own cadence, carried
+ * beside a series whose cadence is the conversation's.
  *
  * `ceilingTokens` travels with the series because the constant behind it has
  * already moved twice; a consumer computing a percentage against a hardcoded
@@ -384,6 +415,13 @@ export interface ContextOccupancyDTO {
   sampleCount: number;
   prunes: ContextPruneMarkDTO[];
   pruneCount: number;
+  /**
+   * When this run's transcript was last *read*, which is not when the series
+   * last gained a point — see `ContextCheckDTO`. Render the age of this and the
+   * age of the newest sample as two different facts, or the routine case of a
+   * long tool call reads as a poll that has died.
+   */
+  lastCheck: ContextCheckDTO | null;
 }
 
 /**
