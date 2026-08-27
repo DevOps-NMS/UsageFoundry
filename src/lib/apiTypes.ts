@@ -2483,8 +2483,8 @@ export interface ChatProposalDTO {
  * Every question the thread has ever held is carried, decided ones included,
  * for `ChatProposalDTO`'s reason: a card that vanished when it was answered
  * reads as one nobody was ever asked, and the answer is part of what the
- * conversation *was*. `status` is what the panel keys on — `pending` is the
- * only one with anything to click.
+ * conversation *was*. `status` is what a reader keys on — `pending` is the only
+ * one with anything left to do.
  *
  * Note what this deliberately does not carry, and cannot be made to: a guard, a
  * budget, a permission mode, a run. A question is a sentence and an answer is a

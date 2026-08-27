@@ -302,8 +302,9 @@ const CHAT_TOOLS = [
     description:
       "Ask the operator something you cannot find out by reading, and end " +
       "your turn. This does NOT return their answer: it records the question, " +
-      "the operator answers it in the chat panel, and the answer arrives as " +
-      "their next message in this conversation. So call it once, say in your " +
+      "and whatever the operator says next in this conversation is the answer " +
+      "— it reaches you as their next message, with each question quoted above " +
+      "the answer to it. So call it once, say in your " +
       "reply what you asked and why, and stop — calling it again or waiting " +
       "spends this turn and tells you nothing. Ask only what the repository " +
       "cannot tell you: which of two jobs matters more, what \"done\" means " +
@@ -1457,9 +1458,10 @@ function proposeWorkflow(args: Record<string, unknown>, chatId: string) {
  * the write reads as a step in a sequence rather than as the end of one.
  *
  * Nothing is appended to the thread. `save_template` does, because a template
- * write leaves nothing on screen; a question leaves a card, and the answer
- * message quotes the question back — so the question survives even the replay
- * a lost session falls back to, without a system message duplicating the card.
+ * write leaves nothing behind for the operator to act on; a question leaves a
+ * row of its own that the chat payload carries, and the answer message quotes
+ * the question back — so it survives even the replay a lost session falls back
+ * to, without a system message saying twice what the row already says.
  */
 function askOperator(args: Record<string, unknown>, chatId: string) {
   const raw = Array.isArray(args.questions) ? args.questions : [];
@@ -1493,7 +1495,20 @@ function askOperator(args: Record<string, unknown>, chatId: string) {
     const question = String(q.question ?? "").trim();
     if (!question) return text("Every question needs its text.", true);
 
+    // Normalized first, so every refusal below counts what would actually be
+    // rendered rather than what arrived: twenty distinct choices and twenty
+    // copies of one are different mistakes and get different sentences.
     const choices = normalizeChoices(q.choices);
+    const allowText = q.allowText !== false;
+
+    if (choices.length > MAX_QUESTION_CHOICES) {
+      return text(
+        `"${question}" offers ${choices.length} choices, and the most that can ` +
+          `be shown is ${MAX_QUESTION_CHOICES}. Past that it is a search rather ` +
+          "than a decision — narrow it, or ask it in the open.",
+        true,
+      );
+    }
     // One choice is not a choice, and the operator has no way to say so — it
     // reads as a decision already taken. Refused rather than quietly turned
     // into free text, because which of the two the model meant is not
@@ -1506,17 +1521,23 @@ function askOperator(args: Record<string, unknown>, chatId: string) {
         true,
       );
     }
-    if (
-      Array.isArray(q.choices) &&
-      q.choices.length > MAX_QUESTION_CHOICES
-    ) {
+    // The unanswerable question, and the one this route exists to catch: no
+    // choices and no typing is a card with nothing on it to press, holding one
+    // of the operator's five slots until some later message supersedes it. It
+    // is reachable without the model meaning any of it — `choices` sent as a
+    // bare string normalizes to none, which is exactly the arrival shape
+    // `normalizeChoices` is built to survive — so it is refused by name rather
+    // than by turning `allowText` back on, which would answer a different
+    // question from the one that was asked.
+    if (choices.length === 0 && !allowText) {
       return text(
-        `"${question}" offers ${q.choices.length} choices, and the most that ` +
-          `can be shown is ${MAX_QUESTION_CHOICES}. Past that it is a search ` +
-          "rather than a decision — narrow it, or ask it in the open.",
+        `"${question}" offers no choices and does not allow a typed answer, so ` +
+          "there is no way to answer it. Offer at least two choices, or leave " +
+          "allowText true.",
         true,
       );
     }
+
     questions.push({
       question,
       choices,
@@ -1524,7 +1545,7 @@ function askOperator(args: Record<string, unknown>, chatId: string) {
       // choices: a question the operator cannot answer in their own words is
       // one they answer by ignoring, and a superseded question teaches the
       // model nothing about what it got wrong.
-      allowText: q.allowText !== false,
+      allowText,
     });
   }
 

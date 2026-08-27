@@ -4086,12 +4086,19 @@ through before trusting this unattended:
   `docker compose up --build` half of the verification loop could not be
   attempted at all rather than having been skipped. What was run, on this
   branch: `NODE_ENV=development npm ci --include=dev` (exit 0),
-  `npm run typecheck` (exit 0) and `npm test` (**1,825 tests / 272 suites / 0
+  `npm run typecheck` (exit 0) and `npm test` (**1,824 tests / 272 suites / 0
   failures**). `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` was
   **not** run, so the new route file has never been through the Next.js build —
-  only through `tsc`. There is also no UI — that is a separate run continuing this
-  branch — so no question has ever been rendered and `POST
+  only through `tsc`. There is also no UI — that is a separate run continuing
+  this branch — so no question has ever been rendered and `POST
   /api/chat/[id]/questions` has never been called by anything but a unit test.
+  **The tool is on the wire before the panel is**, which is a real state a live
+  install can be in: a chat that asks now leaves a row nothing draws, and the
+  operator sees only the reply saying what was asked. It does not jam — the
+  next ordinary message supersedes every open question, so the five-question
+  cap cannot be reached and held — but until the panel lands the answer reaches
+  the model only as whatever the operator types next, without the question
+  quoted above it.
 
   **The load-bearing unknown is whether the pinned CLI stops when it is told
   to.** A tool call cannot block on a click: `CHAT_TIMEOUT_MS` is ten minutes

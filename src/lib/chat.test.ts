@@ -22,8 +22,9 @@ import type { RegistryAgent } from "./agents";
 
 /**
  * Covers `planProposal`, `planApprovalBatch`, `chatPrompt`, `decisionNote`,
- * `githubSlug`, `settleOnExit`, `staleTurn` and the turn claim in
- * `sendChatMessage`, and only those.
+ * `githubSlug`, `settleOnExit`, `staleTurn`, the three that decide what the
+ * operator is asked and what an answer settles — `normalizeChoices`,
+ * `answerMessage`, `settleQuestions` — and the turn claim in `sendChatMessage`.
  *
  * Each is the same class of failure the rest of this suite is reserved for —
  * silent, and expensive:
@@ -93,6 +94,20 @@ import type { RegistryAgent } from "./agents";
  *    mid-answer; wrong in the other it never fires, and the bound quietly stops
  *    existing — a thread that says "Thinking…" for ever, refusing every
  *    message, with nothing short of a server restart able to clear it.
+ *  - The three about questions to the operator earn their place together,
+ *    because each of them fails as a *question* rather than as an error. A
+ *    choices list that arrived holding a null is a button reading "null" that
+ *    somebody can press, and their answer then means something the model never
+ *    offered. An answer sent without the question above it is a bare string a
+ *    fresh child has to guess the referent of, and the guess is silent — it
+ *    proposes against whichever question it decided that answered. And an id
+ *    dropped rather than refused is the operator's typed answer missing from
+ *    the text the model reads, which the model then answers as though the
+ *    questions that survived were all it asked.
+ *  - What settles the rows is a query rather than any of those, so the
+ *    supersede rule is driven against the database instead, on
+ *    `chatOrder.test.ts`'s grounds — as is the order a set of questions comes
+ *    back in, which is that file's own defect one table over.
  */
 
 /* ------------------------------------------------------------------ */
@@ -1012,11 +1027,15 @@ describe("normalizeChoices", () => {
     assert.deepEqual(normalizeChoices({ 0: "pnpm" }), []);
   });
 
-  it("stops at the cap rather than returning a list nothing can show", () => {
+  it("does not truncate, because the caller refuses instead", () => {
+    // Deliberately uncapped: a silent truncation here leaves the model
+    // believing it offered choices the operator was never shown, where
+    // `askOperator` refuses the whole question and says how many it counted.
     const many = Array.from({ length: MAX_QUESTION_CHOICES + 4 }, (_, i) => `c${i}`);
-    const kept = normalizeChoices(many);
-    assert.equal(kept.length, MAX_QUESTION_CHOICES);
-    assert.deepEqual(kept, many.slice(0, MAX_QUESTION_CHOICES));
+    assert.deepEqual(normalizeChoices(many), many);
+    // And what makes that refusal accurate: twenty copies of one choice is one
+    // choice, which is a different mistake with a different sentence.
+    assert.deepEqual(normalizeChoices(Array(20).fill("a")), ["a"]);
   });
 });
 
@@ -1048,25 +1067,33 @@ describe("answerMessage", () => {
 });
 
 describe("settleQuestions", () => {
-  const open = [{ id: "q1" }, { id: "q2" }, { id: "q3" }];
+  const open = [
+    { id: "q1", question: "Which package manager?" },
+    { id: "q2", question: "Should it push?" },
+    { id: "q3", question: "Which folder?" },
+  ];
 
-  it("supersedes every question the answer left open", () => {
-    // The lifecycle decision, in one assertion: answering two of three settles
-    // the third as overtaken rather than leaving a card that starts another
-    // billed turn about a conversation that has moved on.
-    const settled = settleQuestions(open, [{ id: "q1" }, { id: "q3" }]);
+  it("carries every open question into the message, answered or not", () => {
+    // Answering two of three still sends all three. The one left out would be
+    // indistinguishable from a question that was never asked, and the model's
+    // next move is to ask it again — a second turn for something the operator
+    // has already declined once. Asked order, not answered order.
+    const settled = settleQuestions(open, [
+      { id: "q3", answer: "acme/api" },
+      { id: "q1", answer: "pnpm" },
+    ]);
     assert.equal(settled.ok, true);
     if (!settled.ok) return;
-    assert.deepEqual(settled.answered, ["q1", "q3"]);
-    assert.deepEqual(settled.superseded, ["q2"]);
-  });
-
-  it("supersedes all of them when the operator says something else", () => {
-    const settled = settleQuestions(open, []);
-    assert.equal(settled.ok, true);
-    if (!settled.ok) return;
-    assert.deepEqual(settled.answered, []);
-    assert.deepEqual(settled.superseded, ["q1", "q2", "q3"]);
+    assert.deepEqual(settled.entries, [
+      { question: "Which package manager?", answer: "pnpm" },
+      { question: "Should it push?", answer: null },
+      { question: "Which folder?", answer: "acme/api" },
+    ]);
+    // Only the answered ones close; the rest are superseded by the query.
+    assert.deepEqual(settled.answered, [
+      { id: "q1", answer: "pnpm" },
+      { id: "q3", answer: "acme/api" },
+    ]);
   });
 
   it("fails the whole call rather than dropping an id it cannot place", () => {
@@ -1075,12 +1102,18 @@ describe("settleQuestions", () => {
     // typed answer silently missing from the text the model reads — and the
     // model then answers as though the questions that survived were all it
     // asked.
-    const stale = settleQuestions(open, [{ id: "q1" }, { id: "gone" }]);
+    const stale = settleQuestions(open, [
+      { id: "q1", answer: "pnpm" },
+      { id: "gone", answer: "yes" },
+    ]);
     assert.equal(stale.ok, false);
     if (stale.ok) return;
     assert.match(stale.reason, /no longer waiting/);
 
-    const twice = settleQuestions(open, [{ id: "q1" }, { id: "q1" }]);
+    const twice = settleQuestions(open, [
+      { id: "q1", answer: "pnpm" },
+      { id: "q1", answer: "npm" },
+    ]);
     assert.equal(twice.ok, false);
   });
 });

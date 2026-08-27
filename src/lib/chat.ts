@@ -568,10 +568,16 @@ function settleOpenQuestions(
  * *question* rather than an error: a choices array that arrived as a string, or
  * held nulls, or repeated an option twice, renders as a card with no buttons or
  * with two identical ones, and the operator's answer then means something the
- * model did not offer. Trimmed and de-duplicated for that reason and capped for
- * `MAX_QUESTION_CHOICES`'s. Anything not a string is dropped rather than
- * stringified: `String(null)` is the word "null", which is a choice nobody wrote
- * and one an operator could click.
+ * model did not offer. Anything not a string is dropped rather than stringified:
+ * `String(null)` is the word "null", which is a choice nobody wrote and one an
+ * operator could click.
+ *
+ * It deliberately does **not** cap the list, though `MAX_QUESTION_CHOICES`
+ * exists: a caller that silently truncated would leave the model believing it
+ * had offered choices the operator was never shown. The cap is `askOperator`'s
+ * refusal, and it is applied to what this returns rather than to what arrived —
+ * so "twenty choices" and "twenty copies of one choice" are told apart, and the
+ * count in the refusal is the count that would have been rendered.
  */
 export function normalizeChoices(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
@@ -579,9 +585,7 @@ export function normalizeChoices(raw: unknown): string[] {
   for (const entry of raw) {
     if (typeof entry !== "string") continue;
     const choice = entry.trim();
-    if (!choice || seen.has(choice)) continue;
-    seen.add(choice);
-    if (seen.size === MAX_QUESTION_CHOICES) break;
+    if (choice) seen.add(choice);
   }
   return [...seen];
 }
@@ -617,40 +621,50 @@ export function answerMessage(entries: readonly AnsweredQuestion[]): string {
 }
 
 export type QuestionSettlement =
-  | { ok: true; answered: string[]; superseded: string[] }
+  | {
+      ok: true;
+      /** Every open question, in the order it was asked, for `answerMessage`. */
+      entries: AnsweredQuestion[];
+      /** The ones with an answer against them, for the UPDATE that closes them. */
+      answered: QuestionAnswer[];
+    }
   | { ok: false; reason: string };
 
 /**
- * Which of a chat's open questions this message settles, and how.
+ * The whole of what a set of answers decides, before anything is written.
  *
- * Pure and unit-tested, for `planApprovalBatch`'s reason: it is a partition
- * whose every wrong answer is silent. An answered question left `pending` keeps
- * a card on screen that sends the same answer again; a question marked
- * `answered` whose text never reached the message is a row claiming the model
- * was told something it was not; and an ordinary message that left three
- * questions open leaves the operator three buttons that each start a billed
- * turn about a conversation that has moved on.
+ * Pure and unit-tested, for `planApprovalBatch`'s reason: this is the step where
+ * what a person clicked becomes what a model is told, and every way of getting
+ * it wrong is silent. It answers all three questions the caller has — whether to
+ * refuse, what the message says, and which rows close — and everything it
+ * returns is used, so a wrong partition is a wrong message rather than a value
+ * nobody reads.
  *
- * **An ordinary message supersedes every open question**, which is the decision
- * this function encodes. Saying something else *is* an answer — it is the
- * operator declining the question and redirecting — and the alternative, leaving
- * them open, means a card the operator can click a week later to start a turn
- * answering a question nothing in the thread is about any more.
+ * **An id that is not open fails the whole call** rather than being dropped,
+ * which is where this diverges from the proposals route. There the ids are
+ * independent and a stale one costs nothing; here they compose one message, so
+ * a dropped id is the operator's typed answer silently absent from the text the
+ * model reads — and the model then answers about the questions that did survive
+ * as though those were all it asked.
  *
- * An id that is not open in this chat fails the **whole** call rather than being
- * dropped, which is where this diverges from the proposals route. There, the
- * ids are independent and a stale one costs nothing; here they compose one
- * message, so a dropped id is the operator's typed answer silently absent from
- * the text the model reads — and the model then answers about the questions that
- * did survive as though those were all it asked.
+ * **Every open question is in `entries`, answered or not.** A question left out
+ * is indistinguishable from one that was never asked, and the model's next move
+ * is to ask it again — a second turn and a second ten-minute window for
+ * something the operator has already declined once.
+ *
+ * What is deliberately *not* here is the supersede rule. Nothing an operator
+ * sends leaves a question open, and that is enforced by a single
+ * `WHERE status='pending'` UPDATE in `settleOpenQuestions` covering both doors —
+ * an ordinary message never reaches this function at all. The rule is in the
+ * query, so it is pinned against a database rather than here.
  */
 export function settleQuestions(
-  open: ReadonlyArray<Pick<ChatQuestionRow, "id">>,
-  answering: ReadonlyArray<{ id: string }>,
+  open: ReadonlyArray<Pick<ChatQuestionRow, "id" | "question">>,
+  answering: ReadonlyArray<QuestionAnswer>,
 ): QuestionSettlement {
+  const byId = new Map<string, string>();
   const ids = new Set(open.map((q) => q.id));
-  const answered: string[] = [];
-  for (const { id } of answering) {
+  for (const { id, answer } of answering) {
     if (!ids.has(id)) {
       return {
         ok: false,
@@ -659,15 +673,22 @@ export function settleQuestions(
           "or the conversation moved past it. Reload the chat.",
       };
     }
-    if (answered.includes(id)) {
+    if (byId.has(id)) {
       return { ok: false, reason: "That question was answered twice in one request." };
     }
-    answered.push(id);
+    byId.set(id, answer);
   }
   return {
     ok: true,
-    answered,
-    superseded: [...ids].filter((id) => !answered.includes(id)),
+    // In the order they were asked rather than the order they were answered, so
+    // the message reads back as the list the model wrote.
+    entries: open.map((q) => ({
+      question: q.question,
+      answer: byId.get(q.id) ?? null,
+    })),
+    answered: open.flatMap((q) =>
+      byId.has(q.id) ? [{ id: q.id, answer: byId.get(q.id)! }] : [],
+    ),
   };
 }
 
@@ -1878,7 +1899,8 @@ export async function sendChatMessage(
  *
  * An empty list is refused for the reason an empty approval batch is: a 200
  * that started a billed turn saying nothing was answered is indistinguishable
- * from one that worked, and the page clears its state on `res.ok`.
+ * from one that worked, and a caller that clears its state on `res.ok` has no
+ * way to tell them apart.
  */
 export async function answerChatQuestions(
   chatId: string,
@@ -1895,19 +1917,14 @@ export async function answerChatQuestions(
     return { ok: false, reason: "Nothing to answer." };
   }
 
-  const open = pendingQuestions(chatId);
-  const settlement = settleQuestions(open, given);
+  const settlement = settleQuestions(pendingQuestions(chatId), given);
   if (!settlement.ok) return { ok: false, reason: settlement.reason };
 
-  // In the order they were asked rather than the order they were answered, so
-  // the message reads as the list the model wrote. The unanswered ones are
-  // named too — see `answerMessage` for why leaving them out costs a turn.
-  const byId = new Map(given.map((a) => [a.id, a.answer]));
-  const message = answerMessage(
-    open.map((q) => ({ question: q.question, answer: byId.get(q.id) ?? null })),
+  return sendChatMessage(
+    chatId,
+    answerMessage(settlement.entries),
+    settlement.answered,
   );
-
-  return sendChatMessage(chatId, message, given);
 }
 
 export interface TurnResult {
