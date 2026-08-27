@@ -870,8 +870,17 @@ async function callTool(
   // must not be able to write a proposal into a stranger's thread.
   const chatId = subject.kind === "chat" ? subject.chatId : null;
   if (chatId === null && (CHAT_TOOLS.some((t) => t.name === name))) {
+    // `ask_operator` is the one of these with no alternative to name, and
+    // pointing a block at `emit_runs` would be worse than saying nothing: a
+    // block that wanted an answer would emit a run whose task is the question.
+    // A block runs with nobody looking, which is the whole difference between
+    // it and a chat — what it does with an unanswerable question is decide.
     return text(
-      `${name} is not available to an orchestrator block. Use emit_runs.`,
+      name === "ask_operator"
+        ? "ask_operator is not available to an orchestrator block: there is " +
+          "nobody watching this workflow to answer. Decide with what you can " +
+          "read, and say what you assumed in your reply."
+        : `${name} is not available to an orchestrator block. Use emit_runs.`,
       true,
     );
   }
@@ -1523,11 +1532,11 @@ function askOperator(args: Record<string, unknown>, chatId: string) {
 
   return text(
     `Recorded ${questions.length} question${questions.length === 1 ? "" : "s"} ` +
-      "for the operator. **Your turn ends here.** Nothing returns their answer " +
-      "to you — it arrives as their next message in this conversation, with " +
-      "each question quoted above the answer to it. Finish your reply now: say " +
+      "for the operator. Your turn ends here. Nothing returns their answer to " +
+      "you: it arrives as their next message in this conversation, with each " +
+      "question quoted above the answer to it. Finish your reply now — say " +
       "what you asked, why it changes what you would propose, and what you " +
-      "would propose under each answer. Do not call this again.",
+      "would propose under each answer — and do NOT call this again.",
   );
 }
 

@@ -472,7 +472,9 @@ export function listQuestions(chatId: string): ChatQuestionRow[] {
     .all(chatId) as ChatQuestionRow[];
 }
 
-export function getQuestion(id: string): ChatQuestionRow | null {
+/** Not exported: everything outside this module reads a chat's questions as a
+ *  set, because that is how they are asked and how they are settled. */
+function getQuestion(id: string): ChatQuestionRow | null {
   return (
     (db().prepare("SELECT * FROM chat_questions WHERE id = ?").get(id) as
       | ChatQuestionRow
