@@ -1760,6 +1760,50 @@ export interface RunDiffDTO {
 }
 
 /**
+ * One file a run's tool events named, collapsed over the calls that named it
+ * the same way.
+ *
+ * A row is an *attempt*: `run_events` records a tool call when it is made and a
+ * result only when it failed, so nothing here says the call worked. The header
+ * carries that hedge once rather than every row carrying a mark it cannot
+ * honestly draw.
+ */
+export interface RunTouchDTO {
+  /**
+   * Relative to the run's checkout where it fell inside one, and the absolute
+   * path where it did not — which is what `outside` distinguishes.
+   */
+  path: string;
+  /** Matched neither `runs.work_dir` nor `runs.folder`. */
+  outside: boolean;
+  /** The tool's own name, as the CLI reported it. */
+  tool: string;
+  /** The sub-agent's own name, when the `Task` call that opened it was seen. */
+  subagent: string | null;
+  /** Set on any delegated call, named or not. */
+  parentToolUseId: string | null;
+  calls: number;
+}
+
+/**
+ * What a run's tool events say it touched.
+ *
+ * Four answers rather than one plus an empty list, because "swept", "made no
+ * file-naming call" and "no such run" are three different facts that all render
+ * as nothing at all. An empty list standing for any of them reads as a run that
+ * touched nothing.
+ */
+export type RunTouchedDTO =
+  | {
+      /** Terminal and past `eventRetentionDays`, so its events were deleted. */
+      kind: "swept";
+      horizonDays: number;
+    }
+  | { kind: "empty"; cycles: number }
+  | { kind: "none"; reason: string }
+  | { kind: "report"; touches: RunTouchDTO[]; cycles: number };
+
+/**
  * One billed Claude invocation about a run, outside its work cycles: a review
  * of what it changed, or a resolution of a merge conflict on its branch.
  */

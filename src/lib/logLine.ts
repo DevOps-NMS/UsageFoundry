@@ -66,6 +66,24 @@ const HEADLINE_FIELDS = [
   "path",
 ] as const;
 
+/**
+ * The headline fields that name a *file on disk*, in the order they win.
+ *
+ * A subset of `HEADLINE_FIELDS` and typed as one, so a field renamed there stops
+ * this compiling rather than quietly emptying the reader that scans for it —
+ * which is the failure the docblock above already guards against by keying on
+ * field names rather than tool names, and which a second hand-written list here
+ * would reintroduce.
+ *
+ * `path` is deliberately absent even though it is a headline field: on `Glob`
+ * and `Grep` it is the *directory* a search ran in, and a directory sitting in a
+ * list of touched files is a different kind of thing wearing the same row.
+ */
+export const TOOL_FILE_FIELDS: readonly (typeof HEADLINE_FIELDS)[number][] = [
+  "file_path",
+  "notebook_path",
+];
+
 const MAX_ARG = 160;
 
 /**
