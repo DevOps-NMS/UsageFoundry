@@ -1134,6 +1134,60 @@ Built and exercised against real transcripts:
   transcript with no size gate in front of it (bounded by a read and a `split`
   per run per minute, not measured).
 
+- **The fixed ~55,000 was 17,229 tokens of the intake filter, and the entry
+  above measured it without knowing that.** The `57,819 tokens against 2,759 of
+  conversation` recorded there is not what a run costs to start; it is what a run
+  costs to start *through the proxy*. Pointing `ANTHROPIC_BASE_URL` anywhere but
+  the API turns the CLI's **tool deferral** off — deferred loading sends a tool's
+  name and withholds its JSON schema until the model asks through `ToolSearch`,
+  and with a custom base URL the CLI stops offering `ToolSearch` at all and every
+  schema rides every request.
+
+  Measured 2026-08-27 in the running container, on the live run's own argv read
+  out of `/proc/<pid>/cmdline` and replayed with one variable changed and nothing
+  else — same worktree, same model, same trivial prompt:
+
+  | | prompt tokens |
+  | --- | --- |
+  | bare `claude -p`, Haiku, `/workspace` | 17,084 |
+  | same, from the worktree (this repo's `CLAUDE.md`) | 20,883 |
+  | switched to `claude-opus-5[1m]` | 28,518 |
+  | the app's whole argv — agents, notices, plugin dirs, sandbox settings | 30,845 |
+  | **`ANTHROPIC_BASE_URL=http://127.0.0.1:8789`** | **48,074** |
+  | the same, plus `ENABLE_TOOL_SEARCH=1` | 30,849 |
+
+  So the fix restores the direct-to-API figure to within four tokens rather than
+  introducing a mode: `ENABLE_TOOL_SEARCH=1` is exported beside the base URL in
+  `docker-entrypoint.sh`, inside the same `winnow_up` branch, because it is only
+  ever wrong when that export did not happen. Confirmed on Haiku the same way,
+  34,161 against 20,828. The 19 tools it puts back behind `ToolSearch` are named
+  in the transcript's own `deferred_tools_delta` — `Cron{Create,Delete,List}`,
+  `DesignSync`, `EnterWorktree`, `ExitWorktree`, `Monitor`, `NotebookEdit`,
+  `PushNotification`, `RemoteTrigger`, `SendMessage`, `Task{Create,Get,List,
+  Output,Stop,Update}`, `WebFetch`, `WebSearch`. `Task` itself is **not** among
+  them, so `DELEGATION_NOTICE`'s advice stays one call away. `ENABLE_TOOL_SEARCH=auto`
+  was measured too and does nothing here: 34,302, the un-deferred figure.
+
+  The corpus dates the regression. Across 591 fresh container sessions, 528
+  carry a `deferred_tools_delta` before their first request and opened at a
+  median **36,597**; the 63 that carry none opened at **51,388**. The earliest
+  session with none is `2026-08-24T14:05:19`, and the `/workspace` sessions —
+  whose prompts are ~50 tokens and never change — step from 30,558 to 51,106 at
+  that same timestamp. That is when `WINNOW_FILTER=1` was first switched on.
+
+  **What this costs against what the filter saves is not netted anywhere.**
+  `intakeFilter.ts` prices what the filter keeps off the wire; nothing prices
+  the 17,229 tokens it added to every request to do it — paid once at the write
+  rate and then at the cache-read rate on every turn of the cycle. The two
+  belong beside each other on `ContextControlAside` and are not there yet.
+
+  **Not yet verified by hand:** the entrypoint change has not been through a
+  rebuild — the container was carrying a live billed run. What to check on the
+  next `docker compose up --build`: that a real run's first request lands near
+  30,800 rather than 48,000, that `deferred_tools_delta` appears in its
+  transcript, and that a run needing `WebSearch` or `WebFetch` reaches it through
+  `ToolSearch` without stalling.
+
 - **`--autocompact`'s sign, and what the flag actually does.** Measured
   2026-08-22 over 1,147 transcripts through this app's own `scanUsage()`,
   `parseCompactionBoundary()` and `pricing.ts`, and settles issue #156. Read the

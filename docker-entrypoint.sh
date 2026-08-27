@@ -958,6 +958,25 @@ if [ "${WINNOW_FILTER:-}" = "1" ]; then
 
     if [ -n "$winnow_up" ]; then
       export ANTHROPIC_BASE_URL="http://127.0.0.1:$WINNOW_PORT"
+      # Pointing ANTHROPIC_BASE_URL anywhere but the API turns the CLI's tool
+      # *deferral* off, and that is a bill the filter's own ledger never shows.
+      # Deferred loading sends a tool's name and withholds its JSON schema until
+      # the model asks for it through ToolSearch; with a custom base URL the CLI
+      # stops offering ToolSearch at all and every schema rides every request.
+      # Measured 2026-08-27 in this container, one variable changed and nothing
+      # else: 30,845 tokens direct against 48,074 through the proxy on the real
+      # spawn argv — 17,229 tokens on the cold write and again at the cache-read
+      # rate on every turn after it. On the corpus the same step is visible as a
+      # cliff: 528 sessions before it opened at a median 36,597 and the 63 after
+      # at 51,388, the change landing 2026-08-24T14:05, which is when this block
+      # was first switched on.
+      #
+      # Setting it to "1" restores exactly the behaviour of talking to the API
+      # directly — 30,849 measured on the same argv, back within 4 tokens — so
+      # this is not a new mode, it is the one the filter took away. It belongs
+      # inside this branch rather than in compose because it is only ever wrong
+      # when the base URL above is unset.
+      export ENABLE_TOOL_SEARCH=1
       echo "[usagefoundry] winnow intake filter on 127.0.0.1:$WINNOW_PORT;" \
            "agents routed through it. To stop it rewriting without a restart:" \
            "docker compose exec usagefoundry touch /data/winnow/filter-off" >&2
