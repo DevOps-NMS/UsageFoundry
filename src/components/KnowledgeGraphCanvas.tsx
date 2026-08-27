@@ -11,7 +11,7 @@ import {
   boundsOf,
   canvasPoint,
   cssSize,
-  devicePixelRatio,
+  pixelRatio,
   fitView as fitViewTo,
   nearestWithin,
   observeCanvasSize,
@@ -197,7 +197,7 @@ export function KnowledgeGraphCanvas({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const dpr = devicePixelRatio();
+    const dpr = pixelRatio();
     const { width, height } = cssSize(canvas, dpr);
     const view = viewRef.current;
     const { arrows, textFade, nodeSize, linkThickness } = displayRef.current;
@@ -339,7 +339,7 @@ export function KnowledgeGraphCanvas({
     if (!canvas || !sim) return;
     const bounds = boundsOf(sim.nodes);
     if (!bounds) return;
-    const { width, height } = cssSize(canvas, devicePixelRatio());
+    const { width, height } = cssSize(canvas, pixelRatio());
     viewRef.current = fitViewTo(bounds, width, height, FIT_PAD);
   }, []);
 

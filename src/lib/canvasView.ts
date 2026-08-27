@@ -73,7 +73,15 @@ export interface ZoomLimits {
 export const ZOOM_MIN = 0.05;
 export const ZOOM_MAX = 8;
 
-export const DEFAULT_ZOOM_LIMITS: ZoomLimits = { min: ZOOM_MIN, max: ZOOM_MAX };
+/**
+ * Frozen because it is the default argument of three exported functions.
+ *
+ * A caller that wrote `DEFAULT_ZOOM_LIMITS.max = 2` would change the ceiling
+ * for every surface in the app from anywhere, and the symptom would be a graph
+ * that stops zooming on a page nobody was editing. A caller wanting its own
+ * range passes one.
+ */
+export const DEFAULT_ZOOM_LIMITS: ZoomLimits = Object.freeze({ min: ZOOM_MIN, max: ZOOM_MAX });
 
 /** How far a pointer may travel between down and up and still count as a click. */
 export const CLICK_SLOP = 4;
@@ -295,8 +303,16 @@ export function nearestWithin(
 
 /* ------------------------------ the size ------------------------------ */
 
-/** The ratio, with the fallback every caller was writing inline. */
-export function devicePixelRatio(): number {
+/**
+ * The ratio, with the fallback every caller was writing inline.
+ *
+ * Deliberately not named `devicePixelRatio`: that would shadow the DOM global
+ * of that name at every import site, and the next person to write `const dpr =
+ * devicePixelRatio` without the parentheses would multiply a width by a
+ * function. `NaN` is not a size a canvas complains about — it just draws
+ * nothing.
+ */
+export function pixelRatio(): number {
   return window.devicePixelRatio || 1;
 }
 
@@ -322,7 +338,7 @@ export function cssSize(canvas: HTMLCanvasElement, dpr: number): { width: number
  * silently, because every individual measurement is correct.
  */
 export function sizeCanvasToHost(canvas: HTMLCanvasElement, host: HTMLElement): void {
-  const dpr = devicePixelRatio();
+  const dpr = pixelRatio();
   const rect = host.getBoundingClientRect();
   canvas.width = Math.max(1, Math.round(rect.width * dpr));
   canvas.height = Math.max(1, Math.round(rect.height * dpr));
