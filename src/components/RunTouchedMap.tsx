@@ -441,8 +441,41 @@ export function RunTouchedMap({
 
   useEffect(() => {
     const previous = simRef.current;
+    const previousMeta = metaRef.current;
     const carry = new Map<string, { x: number; y: number }>();
-    if (previous) for (const node of previous.nodes) carry.set(node.id, { x: node.x, y: node.y });
+    if (previous) {
+      for (let i = 0; i < previous.nodes.length; i++) {
+        const node = previous.nodes[i];
+        const at = { x: node.x, y: node.y };
+        carry.set(node.id, at);
+        // A fold that opens is the *same directory* under a new id — `folded:p`
+        // becomes `dir:p` — so without this alias the carry misses it, the
+        // anchor snaps to the world origin, and it drags the rosette of every
+        // sibling that did carry across the screen with it.
+        const item = previousMeta[i];
+        if (item && item.kind === "folded") carry.set(`dir:${item.path}`, at);
+      }
+      // The files the fold was standing for have no previous position at all.
+      // Seeded by `seedPositions` they would start on a spiral around the origin
+      // and fly in from wherever that is; started beside the directory that just
+      // opened, the expansion reads as an unfolding. The golden-angle offset is
+      // what keeps two of them off the same point, which is a zero distance the
+      // repulsion step would divide by.
+      const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+      for (let i = 0; i < plan.edges.length; i++) {
+        const child = plan.nodes[plan.edges[i].source];
+        const parent = plan.nodes[plan.edges[i].target];
+        if (!child || !parent || carry.has(child.id)) continue;
+        const at = carry.get(parent.id);
+        if (!at) continue;
+        const spread = FORCES.linkDistance * 0.5;
+        carry.set(child.id, {
+          x: at.x + spread * Math.cos(i * GOLDEN),
+          y: at.y + spread * Math.sin(i * GOLDEN),
+        });
+      }
+    }
+    // After the aliases, so a node the operator put somewhere on purpose wins.
     for (const [id, at] of pinsRef.current) carry.set(id, at);
 
     const simNodes: SimNode[] = plan.nodes.map((item) => ({

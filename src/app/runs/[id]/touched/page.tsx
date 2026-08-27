@@ -1,6 +1,7 @@
 "use client";
 
 import { use, useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import Link from "next/link";
 import type { RunDiffDTO, RunTouchedDTO } from "@/lib/apiTypes";
 import {
@@ -173,12 +174,33 @@ export default function RunTouchedPage({ params }: Ctx) {
 
       {view?.kind === "map" && plan && tree && (
         <Card emphasis="primary">
-          <CardTitle>{tree.files.length === 1 ? "One file" : `${tree.files.length} files`}</CardTitle>
+          <CardTitle>Laid out by directory</CardTitle>
 
           <TouchHeadline
             distinctTouched={view.report.distinctTouched}
             cycles={view.cycles}
           />
+
+          {/* The two figures on this card are different numbers and would read
+              as a contradiction side by side: the headline counts what the
+              *events* named, and the map positions those plus every file only
+              the diff knows about. Saying which is which is cheaper than
+              dropping one of them, and the second is the group the survey
+              recorded a tool → file graph as unable to draw at all. */}
+          {view.report.changedNotTouched.length > 0 && (
+            <p className="mb-3 text-sm text-ink-muted">
+              <strong className="font-semibold tabular-nums text-ink">
+                {tree.files.length}
+              </strong>{" "}
+              file{tree.files.length === 1 ? " is" : "s are"} positioned below, because{" "}
+              <strong className="font-semibold tabular-nums text-ink">
+                {view.report.changedNotTouched.length}
+              </strong>{" "}
+              of them changed without any tool call naming{" "}
+              {view.report.changedNotTouched.length === 1 ? "it" : "them"} — drawn
+              hollow, and written by something that names no file.
+            </p>
+          )}
 
           {!view.changedKnown && <TouchNoDiffNotice reason={view.diffReason} shows="drawn" />}
 
@@ -295,7 +317,7 @@ function Legend({ changedKnown }: { changedKnown: boolean }) {
   );
 }
 
-function LegendRow({ swatch, children }: { swatch: React.ReactNode; children: React.ReactNode }) {
+function LegendRow({ swatch, children }: { swatch: ReactNode; children: ReactNode }) {
   return (
     <li className="flex items-start gap-2">
       <span className="mt-0.5 shrink-0">{swatch}</span>
@@ -404,7 +426,7 @@ function DirFacts({
   );
 }
 
-function Fact({ label, children }: { label: string; children: React.ReactNode }) {
+function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex gap-2">
       <dt className="w-20 shrink-0 text-ink-faint">{label}</dt>
