@@ -2477,6 +2477,42 @@ export interface ChatProposalDTO {
   error: string | null;
 }
 
+/**
+ * One question the chat put to the operator, as the panel reads it.
+ *
+ * Every question the thread has ever held is carried, decided ones included,
+ * for `ChatProposalDTO`'s reason: a card that vanished when it was answered
+ * reads as one nobody was ever asked, and the answer is part of what the
+ * conversation *was*. `status` is what the panel keys on — `pending` is the
+ * only one with anything to click.
+ *
+ * Note what this deliberately does not carry, and cannot be made to: a guard, a
+ * budget, a permission mode, a run. A question is a sentence and an answer is a
+ * sentence, and the only thing answering one starts is another chat turn.
+ */
+export interface ChatQuestionDTO {
+  id: string;
+  createdAt: number;
+  question: string;
+  /** Concrete answers offered. Empty when the question has no shortlist. */
+  choices: string[];
+  /**
+   * The operator may type instead of picking. Separate from `choices` being
+   * empty: "pick one of these three" and "pick one of these three or say
+   * something else" are different questions, and only the second may be
+   * answered with prose.
+   */
+  allowText: boolean;
+  /**
+   * `superseded` is the operator having answered by saying something else. It
+   * is not a failure and should not read as one — the question was overtaken.
+   */
+  status: "pending" | "answered" | "superseded";
+  /** What the operator said, verbatim. Null unless `status` is `answered`. */
+  answer: string | null;
+  answeredAt: number | null;
+}
+
 export interface ChatDTO {
   id: string;
   createdAt: number;
@@ -2489,6 +2525,16 @@ export interface ChatDTO {
   error: string | null;
   messages: ChatMessageDTO[];
   proposals: ChatProposalDTO[];
+  /**
+   * Every question this thread has asked, oldest first.
+   *
+   * A pending question is derived from these rather than from `status`, which
+   * stays the three states a *turn* can be in — see the note above
+   * `listQuestions`. A chat waiting on an answer is `idle`: there is no child,
+   * the operator may type anything they like into the composer, and doing so
+   * supersedes what is open.
+   */
+  questions: ChatQuestionDTO[];
 }
 
 export interface ChatListEntryDTO {
@@ -2498,6 +2544,13 @@ export interface ChatListEntryDTO {
   status: "idle" | "thinking" | "failed";
   costUSD: number;
   pendingCount: number;
+  /**
+   * Questions waiting on this thread. Beside `pendingCount` rather than added
+   * to it: both are things waiting for the operator, but one is approving work
+   * and the other is answering a sentence, and a list that summed them would
+   * send the reader to the wrong half of the page.
+   */
+  pendingQuestionCount: number;
 }
 
 /* ------------------------------------------------------------------ */

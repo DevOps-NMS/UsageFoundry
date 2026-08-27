@@ -94,6 +94,16 @@ export type ChatRole = "user" | "assistant" | "system";
 export type ProposalStatus = "pending" | "approved" | "rejected" | "failed";
 
 /**
+ * What became of a question the chat put to the operator.
+ *
+ * `superseded` is the operator answering by saying something else, and it is a
+ * third state rather than a deletion for `chat_proposals`' reason: the thread
+ * has to read as what happened, and a question that vanished reads as one
+ * nobody was ever asked.
+ */
+export type QuestionStatus = "pending" | "answered" | "superseded";
+
+/**
  * What a proposal is a proposal *of*.
  *
  * `run` is the original and the default, for the reason `WorkflowNode.kind`
@@ -156,6 +166,21 @@ export interface ChatMessageRow {
   seq: number;
   role: ChatRole;
   text: string;
+}
+
+export interface ChatQuestionRow {
+  id: string;
+  chat_id: string;
+  created_at: number;
+  question: string;
+  /** JSON `string[]`, or `'[]'`. Read through `questionChoices`. */
+  choices: string;
+  /** SQLite has no boolean; 1 is "the operator may type instead of picking". */
+  allow_text: number;
+  status: QuestionStatus;
+  /** The operator's words, verbatim. Null until answered, and on a superseded one. */
+  answer: string | null;
+  answered_at: number | null;
 }
 
 export interface ChatProposalRow {
@@ -227,6 +252,49 @@ export function proposalDeps(
     return [];
   }
 }
+
+/**
+ * The choices a question offered, or none.
+ *
+ * Never throws, for `proposalDeps`' reason: the column is written by this module
+ * and read back by it, but a row an older build or a hand edit left must not be
+ * able to 500 the chat page. An unreadable list is *no* choices, which is the
+ * reading that fails safe in only one direction — the question is still
+ * answerable when `allow_text` is set, and unanswerable rather than silently
+ * answerable with something nobody offered when it is not.
+ */
+export function questionChoices(
+  row: Pick<ChatQuestionRow, "choices">,
+): string[] {
+  if (!row.choices) return [];
+  try {
+    const parsed = JSON.parse(row.choices) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((c) => (typeof c === "string" && c ? [c] : []));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * How many unanswered questions one chat may hold.
+ *
+ * `MAX_PENDING_PROPOSALS`' reasoning at a tenth the scale, because the thing
+ * being bounded is smaller: a question is answered in one sitting by the person
+ * who is already reading the reply, and a list longer than this stops being a
+ * question and becomes a form. A form gets skimmed, and a skimmed answer is
+ * worse than no answer — the model proposed on it either way, and only one of
+ * those two the operator will remember agreeing to.
+ */
+export const MAX_OPEN_QUESTIONS = 5;
+
+/**
+ * How many concrete answers one question may offer.
+ *
+ * Same bound for the same reason one level down. Past this the choices are a
+ * search rather than a decision, and what the operator wants then is to type.
+ */
+export const MAX_QUESTION_CHOICES = 8;
 
 /**
  * How many undecided proposals one chat may hold.
@@ -357,6 +425,237 @@ export function getProposal(id: string): ChatProposalRow | null {
 
 export function pendingProposals(chatId: string): ChatProposalRow[] {
   return listProposals(chatId).filter((p) => p.status === "pending");
+}
+
+/* ------------------------------------------------------------------ */
+/* Questions to the operator                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * **A pending question is derived from this table and is not a chat status.**
+ *
+ * The alternative was a fourth `chat_sessions.status`, and it was rejected for
+ * three reasons that are each on their own sufficient. The row is settled by
+ * `finishTurn` under `WHERE status='thinking'`, which is the settle-once latch
+ * every stranded-turn path depends on — a status meaning "asked and waiting"
+ * would have to be written by that same statement, so a cancelled or timed-out
+ * turn that had already asked would settle as `failed` and lose the question, or
+ * settle as `asking` and lose the failure. Second, `reconcileChatsOnBoot` fails
+ * out `thinking` rows because the child is gone with the process; a question is
+ * a row in a database and survives a restart intact, so a state that meant both
+ * would have to be excluded there by hand — a silent way for a restart to eat
+ * every open question. Third, `sendChatMessage` refuses to send into a
+ * `thinking` chat, and an answer *is* a message: a status meaning "waiting for
+ * the operator" would sit next to that guard and be one careless `<>` away from
+ * refusing the very answer it exists to collect.
+ *
+ * What this costs is one query on the page's poll, which is the same query the
+ * proposals already pay for. What it buys is that nothing about the turn
+ * lifecycle changes at all: a turn that asks ends `idle` like any other, an
+ * answer is an ordinary message, and a question outlives every way a turn can
+ * die.
+ */
+export function listQuestions(chatId: string): ChatQuestionRow[] {
+  return db()
+    .prepare(
+      "SELECT * FROM chat_questions WHERE chat_id = ? ORDER BY created_at, id",
+    )
+    .all(chatId) as ChatQuestionRow[];
+}
+
+export function getQuestion(id: string): ChatQuestionRow | null {
+  return (
+    (db().prepare("SELECT * FROM chat_questions WHERE id = ?").get(id) as
+      | ChatQuestionRow
+      | undefined) ?? null
+  );
+}
+
+export function pendingQuestions(chatId: string): ChatQuestionRow[] {
+  return listQuestions(chatId).filter((q) => q.status === "pending");
+}
+
+export interface QuestionInput {
+  question: string;
+  /** Concrete answers offered, already normalized. Empty for free text. */
+  choices: readonly string[];
+  /** May the operator type instead of picking? */
+  allowText: boolean;
+}
+
+/**
+ * Record what one turn asked, in the order it asked it.
+ *
+ * One statement per question rather than one row holding a list, because the
+ * operator answers them one at a time and an answer has to attach to the
+ * sentence it answers. `created_at` is shared across the call so the page shows
+ * them as the set they were asked as.
+ */
+export function createQuestions(
+  chatId: string,
+  inputs: readonly QuestionInput[],
+): ChatQuestionRow[] {
+  const now = Date.now();
+  const insert = db().prepare(
+    `INSERT INTO chat_questions
+       (id, chat_id, created_at, question, choices, allow_text, status)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+  );
+  return inputs.map((input) => {
+    const id = randomUUID();
+    insert.run(
+      id,
+      chatId,
+      now,
+      input.question,
+      JSON.stringify([...input.choices]),
+      input.allowText ? 1 : 0,
+    );
+    return getQuestion(id)!;
+  });
+}
+
+/**
+ * Close every question this message settles, and supersede whatever is left.
+ *
+ * Called from inside `sendChatMessage`'s no-`await` window, so a request that
+ * lost the claim settles nothing. Both statements are bounded by
+ * `status='pending'` and by the chat, which makes the pass idempotent and makes
+ * an id that has stopped being open a no-op rather than a resurrection — the
+ * refusal a person can act on is `settleQuestions`, decided before any of this
+ * is paid for.
+ *
+ * The second statement is the whole supersede rule and it covers both doors:
+ * an ordinary message settles nothing and supersedes everything, and an answer
+ * to two of three questions supersedes the third. `answered_at` is deliberately
+ * left null there — it is the instant an answer was given, and a superseded
+ * question was never answered.
+ */
+function settleOpenQuestions(
+  chatId: string,
+  answers: readonly QuestionAnswer[],
+): void {
+  const now = Date.now();
+  const answer = db().prepare(
+    `UPDATE chat_questions SET status='answered', answer=?, answered_at=?
+      WHERE id=? AND chat_id=? AND status='pending'`,
+  );
+  for (const a of answers) answer.run(a.answer, now, a.id, chatId);
+  db()
+    .prepare(
+      "UPDATE chat_questions SET status='superseded' WHERE chat_id=? AND status='pending'",
+    )
+    .run(chatId);
+}
+
+/**
+ * The choices a question may offer, from whatever the tool call carried.
+ *
+ * Pure and unit-tested, because every way of getting it wrong produces a
+ * *question* rather than an error: a choices array that arrived as a string, or
+ * held nulls, or repeated an option twice, renders as a card with no buttons or
+ * with two identical ones, and the operator's answer then means something the
+ * model did not offer. Trimmed and de-duplicated for that reason and capped for
+ * `MAX_QUESTION_CHOICES`'s. Anything not a string is dropped rather than
+ * stringified: `String(null)` is the word "null", which is a choice nobody wrote
+ * and one an operator could click.
+ */
+export function normalizeChoices(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== "string") continue;
+    const choice = entry.trim();
+    if (!choice || seen.has(choice)) continue;
+    seen.add(choice);
+    if (seen.size === MAX_QUESTION_CHOICES) break;
+  }
+  return [...seen];
+}
+
+/** One question and what the operator said to it, as the next turn reads it. */
+export interface AnsweredQuestion {
+  question: string;
+  /** Null when the operator left this one alone. */
+  answer: string | null;
+}
+
+/**
+ * What the answering turn is actually sent.
+ *
+ * Pure and unit-tested, and the failure it exists against is the one the whole
+ * mechanism turns on: the answer reaches a **fresh child**, resumed against the
+ * session but with no memory of the tool call in its own process. A bare
+ * "pnpm" is a message the model has to guess the referent of, and the guess is
+ * silent — it proposes against whichever question it decided that answered.
+ * Quoting the question back costs a few dozen tokens and removes the guess.
+ *
+ * An unanswered question is named too, rather than left out. Left out, it is
+ * indistinguishable from a question that was never asked, and the model's next
+ * move is to ask it again — which is a second turn, a second ten-minute window
+ * and a second card, for a question the operator has already declined once.
+ */
+export function answerMessage(entries: readonly AnsweredQuestion[]): string {
+  const lines = ["Answers to your questions:"];
+  for (const entry of entries) {
+    lines.push("", `Q: ${entry.question}`, `A: ${entry.answer ?? "(not answered)"}`);
+  }
+  return lines.join("\n");
+}
+
+export type QuestionSettlement =
+  | { ok: true; answered: string[]; superseded: string[] }
+  | { ok: false; reason: string };
+
+/**
+ * Which of a chat's open questions this message settles, and how.
+ *
+ * Pure and unit-tested, for `planApprovalBatch`'s reason: it is a partition
+ * whose every wrong answer is silent. An answered question left `pending` keeps
+ * a card on screen that sends the same answer again; a question marked
+ * `answered` whose text never reached the message is a row claiming the model
+ * was told something it was not; and an ordinary message that left three
+ * questions open leaves the operator three buttons that each start a billed
+ * turn about a conversation that has moved on.
+ *
+ * **An ordinary message supersedes every open question**, which is the decision
+ * this function encodes. Saying something else *is* an answer — it is the
+ * operator declining the question and redirecting — and the alternative, leaving
+ * them open, means a card the operator can click a week later to start a turn
+ * answering a question nothing in the thread is about any more.
+ *
+ * An id that is not open in this chat fails the **whole** call rather than being
+ * dropped, which is where this diverges from the proposals route. There, the
+ * ids are independent and a stale one costs nothing; here they compose one
+ * message, so a dropped id is the operator's typed answer silently absent from
+ * the text the model reads — and the model then answers about the questions that
+ * did survive as though those were all it asked.
+ */
+export function settleQuestions(
+  open: ReadonlyArray<Pick<ChatQuestionRow, "id">>,
+  answering: ReadonlyArray<{ id: string }>,
+): QuestionSettlement {
+  const ids = new Set(open.map((q) => q.id));
+  const answered: string[] = [];
+  for (const { id } of answering) {
+    if (!ids.has(id)) {
+      return {
+        ok: false,
+        reason:
+          "That question is no longer waiting for an answer — it was answered " +
+          "or the conversation moved past it. Reload the chat.",
+      };
+    }
+    if (answered.includes(id)) {
+      return { ok: false, reason: "That question was answered twice in one request." };
+    }
+    answered.push(id);
+  }
+  return {
+    ok: true,
+    answered,
+    superseded: [...ids].filter((id) => !answered.includes(id)),
+  };
 }
 
 /**
@@ -1455,16 +1754,30 @@ function stopChatSweeper(): void {
   sweeper.timer = null;
 }
 
+/** One open question and what the operator typed or picked for it. */
+export interface QuestionAnswer {
+  id: string;
+  answer: string;
+}
+
 /**
  * Send a message and return as soon as the child is on its way.
  *
  * The child outlives the request for the reason a review's does: it runs for
  * minutes and holding an HTTP connection open for it fails behind any proxy.
  * The row is the handle, and the page polls it.
+ *
+ * `answers` is what makes this the *only* door a turn starts from, rather than
+ * the answer route growing a second copy of the claim, the two spend gates and
+ * the no-`await` window. An answer is a message; what is different about it is
+ * only which rows it settles, and those are settled inside the same window the
+ * message is appended in — so a request that loses the claim marks nothing
+ * answered, exactly as it appends nothing.
  */
 export async function sendChatMessage(
   chatId: string,
   message: string,
+  answers: readonly QuestionAnswer[] = [],
 ): Promise<ChatOutcome> {
   // A turn is a billed child and a claim on a row in a shared table, and the
   // claim is only a claim because one process makes it. Refused ahead of
@@ -1499,6 +1812,7 @@ export async function sendChatMessage(
   if (!claimed) return ALREADY_THINKING;
 
   appendMessage(chatId, "user", text);
+  settleOpenQuestions(chatId, answers);
   const history = listMessages(chatId)
     .slice(0, -1)
     .map((m) => ({ role: m.role, text: m.text }));
@@ -1529,6 +1843,58 @@ export async function sendChatMessage(
   }
 
   return { ok: true };
+}
+
+/**
+ * Answer what the chat asked, and start the turn that reads the answers.
+ *
+ * The counterpart to the composer, and the reason it is a second entry point
+ * rather than a second implementation: everything that bounds a turn —
+ * `dataDirRefusal`, `assistRefusal`, the install ceiling, the claim, the
+ * sweeper — is in `sendChatMessage`, and an answer that reached the CLI around
+ * any of them would be a route to spend nobody gated. All this adds is the two
+ * things only this door knows: which rows are being settled, and what the
+ * message the model reads has to say.
+ *
+ * **It refuses the whole call when any id is not open**, which is
+ * `settleQuestions`' rule and not the proposals route's. There the ids are
+ * independent, so a stale one is dropped and reported; here they compose one
+ * message, and dropping one means the operator's typed answer is silently
+ * absent from the text the model reads — which is worse than the refusal,
+ * because the model then proposes on a question it thinks nobody answered.
+ *
+ * An empty list is refused for the reason an empty approval batch is: a 200
+ * that started a billed turn saying nothing was answered is indistinguishable
+ * from one that worked, and the page clears its state on `res.ok`.
+ */
+export async function answerChatQuestions(
+  chatId: string,
+  answers: readonly QuestionAnswer[],
+): Promise<ChatOutcome> {
+  const chat = getChat(chatId);
+  if (!chat) return { ok: false, reason: "No such chat." };
+
+  const given = answers.flatMap((a) => {
+    const answer = a.answer.trim();
+    return answer ? [{ id: a.id, answer }] : [];
+  });
+  if (given.length === 0) {
+    return { ok: false, reason: "Nothing to answer." };
+  }
+
+  const open = pendingQuestions(chatId);
+  const settlement = settleQuestions(open, given);
+  if (!settlement.ok) return { ok: false, reason: settlement.reason };
+
+  // In the order they were asked rather than the order they were answered, so
+  // the message reads as the list the model wrote. The unanswered ones are
+  // named too — see `answerMessage` for why leaving them out costs a turn.
+  const byId = new Map(given.map((a) => [a.id, a.answer]));
+  const message = answerMessage(
+    open.map((q) => ({ question: q.question, answer: byId.get(q.id) ?? null })),
+  );
+
+  return sendChatMessage(chatId, message, given);
 }
 
 export interface TurnResult {

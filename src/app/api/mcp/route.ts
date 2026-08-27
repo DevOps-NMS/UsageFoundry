@@ -3,13 +3,19 @@ import {
   appendMessage,
   chatOwnsRun,
   createProposal,
+  createQuestions,
   listProposals,
+  MAX_OPEN_QUESTIONS,
   MAX_PENDING_PROPOSALS,
+  MAX_QUESTION_CHOICES,
+  normalizeChoices,
   pendingProposals,
+  pendingQuestions,
   proposalDeps,
   subjectForCapability,
   type CapabilitySubject,
   type ProposalDependency,
+  type QuestionInput,
 } from "@/lib/chat";
 import {
   currentKnowledge,
@@ -279,6 +285,81 @@ const CHAT_TOOLS = [
         },
       },
       required: ["prompt"],
+      additionalProperties: false,
+    },
+  },
+  {
+    // The description below is the whole of what the model is told about
+    // asking, and it is long for `systemPrompt()`'s stated reason: the
+    // tool-calling half of the orchestrator's instructions lives here, where it
+    // cannot drift from the schema, and is deliberately not repeated in the
+    // prompt. The sentence that must never be cut is the second one. A model
+    // that reads this as "returns the operator's answer" calls it, gets a
+    // receipt, calls it again, and spends the turn's whole budget asking the
+    // same question in a loop — which is what a tool that *could* block would
+    // do to the ten-minute timeout anyway.
+    name: "ask_operator",
+    description:
+      "Ask the operator something you cannot find out by reading, and end " +
+      "your turn. This does NOT return their answer: it records the question, " +
+      "the operator answers it in the chat panel, and the answer arrives as " +
+      "their next message in this conversation. So call it once, say in your " +
+      "reply what you asked and why, and stop — calling it again or waiting " +
+      "spends this turn and tells you nothing. Ask only what the repository " +
+      "cannot tell you: which of two jobs matters more, what \"done\" means " +
+      "here, whether a risk is acceptable, which of several folders they meant. " +
+      "Never ask what a file, `git log`, `gh` or `list_folders` would answer, " +
+      "and never ask for permission to propose — the operator approves every " +
+      "proposal by hand already, so asking first costs a turn and changes " +
+      "nothing. Put everything you need in this one call and keep it to a " +
+      `couple of questions (at most ${MAX_OPEN_QUESTIONS}); each one costs the ` +
+      "operator a read and costs you a whole turn. Offer concrete choices " +
+      "whenever the answer is a choice, and say in your reply what you would " +
+      "propose under each one — an operator picking between proposals answers " +
+      "in one click, where an operator answering a quiz has to imagine what " +
+      "you would do with it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        questions: {
+          type: "array",
+          description:
+            "The questions, in the order the operator should read them.",
+          items: {
+            type: "object",
+            properties: {
+              question: {
+                type: "string",
+                description:
+                  "One question, in full. It is shown on its own, so it has " +
+                  "to carry its own context: name the file, the run or the " +
+                  "folder it is about rather than saying \"the second one\".",
+              },
+              choices: {
+                type: "array",
+                items: { type: "string" },
+                description:
+                  "Concrete answers to pick from, two or more, each short " +
+                  "enough to read on a button. Omit for a question with no " +
+                  "shortlist. Do not put \"something else\" in here — that is " +
+                  "allowText.",
+              },
+              allowText: {
+                type: "boolean",
+                description:
+                  "Whether the operator may type instead of picking. True by " +
+                  "default. Set it false only when an answer outside the " +
+                  "choices would be meaningless to you, because a question " +
+                  "nobody can answer in their own words is one they will " +
+                  "answer by ignoring.",
+              },
+            },
+            required: ["question"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["questions"],
       additionalProperties: false,
     },
   },
@@ -979,6 +1060,9 @@ async function callTool(
       );
     }
 
+    case "ask_operator":
+      return askOperator(args, chatId!);
+
     case "save_template":
       return saveTemplate(args, chatId!);
 
@@ -1351,6 +1435,99 @@ function proposeWorkflow(args: Record<string, unknown>, chatId: string) {
         : "") +
       " It is saved with no workflow-wide budget, so it can be run by hand and " +
       "cannot be scheduled until the operator sets one.",
+  );
+}
+
+/**
+ * Record what the chat wants to know, and tell it plainly that it is done.
+ *
+ * The tool result is the second place — after the description — where "this
+ * turn is over" has to be unmissable, and it is the one the model reads
+ * *after* deciding to call. It says what was recorded, that no answer is
+ * coming here, and what to do instead, because a receipt that only confirms
+ * the write reads as a step in a sequence rather than as the end of one.
+ *
+ * Nothing is appended to the thread. `save_template` does, because a template
+ * write leaves nothing on screen; a question leaves a card, and the answer
+ * message quotes the question back — so the question survives even the replay
+ * a lost session falls back to, without a system message duplicating the card.
+ */
+function askOperator(args: Record<string, unknown>, chatId: string) {
+  const raw = Array.isArray(args.questions) ? args.questions : [];
+  if (raw.length === 0) {
+    return text(
+      "ask_operator needs at least one question. If you know what to do, " +
+        "propose it instead — the operator approves every proposal by hand.",
+      true,
+    );
+  }
+
+  // Bounded against what is *already* open as well as against this call: a
+  // turn may call this twice, and a chat whose last turn asked five questions
+  // the operator has not read yet does not need five more.
+  const open = pendingQuestions(chatId);
+  if (open.length + raw.length > MAX_OPEN_QUESTIONS) {
+    return text(
+      `That would leave ${open.length + raw.length} questions waiting, and the ` +
+        `limit is ${MAX_OPEN_QUESTIONS}${
+          open.length > 0 ? ` (${open.length} of them already asked)` : ""
+        }. A list that long is a form rather than a question, and a form gets ` +
+        "skimmed. Ask the ones that change what you would propose, and say the " +
+        "rest in your reply.",
+      true,
+    );
+  }
+
+  const questions: QuestionInput[] = [];
+  for (const entry of raw) {
+    const q = (entry ?? {}) as Record<string, unknown>;
+    const question = String(q.question ?? "").trim();
+    if (!question) return text("Every question needs its text.", true);
+
+    const choices = normalizeChoices(q.choices);
+    // One choice is not a choice, and the operator has no way to say so — it
+    // reads as a decision already taken. Refused rather than quietly turned
+    // into free text, because which of the two the model meant is not
+    // something this route can know.
+    if (choices.length === 1) {
+      return text(
+        `"${question}" offers one choice, which is not a choice. Offer at ` +
+          "least two, or omit choices and let the operator answer in their " +
+          "own words.",
+        true,
+      );
+    }
+    if (
+      Array.isArray(q.choices) &&
+      q.choices.length > MAX_QUESTION_CHOICES
+    ) {
+      return text(
+        `"${question}" offers ${q.choices.length} choices, and the most that ` +
+          `can be shown is ${MAX_QUESTION_CHOICES}. Past that it is a search ` +
+          "rather than a decision — narrow it, or ask it in the open.",
+        true,
+      );
+    }
+    questions.push({
+      question,
+      choices,
+      // True unless the model says otherwise, including when it offers
+      // choices: a question the operator cannot answer in their own words is
+      // one they answer by ignoring, and a superseded question teaches the
+      // model nothing about what it got wrong.
+      allowText: q.allowText !== false,
+    });
+  }
+
+  createQuestions(chatId, questions);
+
+  return text(
+    `Recorded ${questions.length} question${questions.length === 1 ? "" : "s"} ` +
+      "for the operator. **Your turn ends here.** Nothing returns their answer " +
+      "to you — it arrives as their next message in this conversation, with " +
+      "each question quoted above the answer to it. Finish your reply now: say " +
+      "what you asked, why it changes what you would propose, and what you " +
+      "would propose under each answer. Do not call this again.",
   );
 }
 

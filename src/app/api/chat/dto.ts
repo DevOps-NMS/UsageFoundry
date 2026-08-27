@@ -5,8 +5,12 @@ import {
   listChats,
   listMessages,
   listProposals,
+  listQuestions,
   pendingProposals,
+  pendingQuestions,
   proposalDeps,
+  questionChoices,
+  type ChatQuestionRow,
   type ChatRow,
 } from "../../../lib/chat";
 import {
@@ -24,6 +28,7 @@ import type {
   ChatDTO,
   ChatListEntryDTO,
   ChatProposalDTO,
+  ChatQuestionDTO,
   ProposedBlockDTO,
 } from "../../../lib/apiTypes";
 
@@ -53,6 +58,30 @@ export function chatDTO(chat: ChatRow): ChatDTO {
       text: m.text,
     })),
     proposals: proposalDTOs(listProposals(chat.id)),
+    questions: listQuestions(chat.id).map(questionDTO),
+  };
+}
+
+/**
+ * One question, with its choices parsed on the way out.
+ *
+ * Parsed here rather than on the client for `proposalDTO`'s reason: the column
+ * is JSON this module wrote, and a page that parsed it would be a second reader
+ * of a format only `chat.ts` defines. `questionChoices` never throws, so a row
+ * an older build left renders as a question with no shortlist rather than as a
+ * chat page that 500s — and `allowText` is what decides whether that is still
+ * answerable, which is why the two are separate fields.
+ */
+function questionDTO(q: ChatQuestionRow): ChatQuestionDTO {
+  return {
+    id: q.id,
+    createdAt: q.created_at,
+    question: q.question,
+    choices: questionChoices(q),
+    allowText: q.allow_text === 1,
+    status: q.status,
+    answer: q.answer,
+    answeredAt: q.answered_at,
   };
 }
 
@@ -93,6 +122,7 @@ export function chatListDTO(): ChatListEntryDTO[] {
     status: c.status,
     costUSD: c.cost_usd,
     pendingCount: pendingProposals(c.id).length,
+    pendingQuestionCount: pendingQuestions(c.id).length,
   }));
 }
 

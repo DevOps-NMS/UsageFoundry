@@ -621,12 +621,59 @@ function migrate(db: Database.Database) {
     -- --permission-mode that reopenRun refuses to become the third.
     ${CHAT_PROPOSALS_TABLE}
 
+    -- A question the chat put to the operator, and what came back.
+    --
+    -- The second approval-shaped table on this path and it holds what
+    -- chat_proposals holds: nothing. No guard, no permission mode, no folder
+    -- claim, no concurrency slot, and nothing derived from activeRuns() can see
+    -- it. A question is a sentence and an answer is a sentence, so there is
+    -- deliberately no column here a model could route a budget through.
+    --
+    -- It is a table at all because a turn cannot wait. CHAT_TIMEOUT_MS kills an
+    -- overrunning child and throws its answer away, so a tool that blocked
+    -- until the operator clicked would burn ten minutes and lose the turn that
+    -- asked. Asking therefore *ends* the turn, and the answer arrives as the
+    -- next turn's user message against the same resumed session.
+    CREATE TABLE IF NOT EXISTS chat_questions (
+      id          TEXT PRIMARY KEY,
+      chat_id     TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      created_at  INTEGER NOT NULL,
+      -- What was asked, in the model's own words. Stored rather than left to be
+      -- read out of the thread because the answer quotes it back: the turn that
+      -- reads the answer is a fresh child, and "the second one" is not an
+      -- answer to anything it can see.
+      question    TEXT NOT NULL,
+      -- JSON string[]: the concrete answers offered, or '[]' for a question
+      -- with none. A JSON column rather than a fourth table for
+      -- chat_proposals.depends_on's reason — it is written and read whole, by
+      -- one module, and is never joined against.
+      choices     TEXT NOT NULL DEFAULT '[]',
+      -- Whether the operator may type instead of picking one of the choices.
+      -- Separate from the choices being empty, because "pick one of these
+      -- three" and "pick one of these three or say something else" are
+      -- different questions, and a UI that inferred the second from a non-empty
+      -- list would silently widen every question the model meant to close.
+      allow_text  INTEGER NOT NULL DEFAULT 1,
+      -- 'pending' | 'answered' | 'superseded'. The third is the operator
+      -- answering by saying something else: the question was overtaken, and a
+      -- card left clickable would send an answer into a conversation that has
+      -- already moved past it. Kept rather than deleted, so the thread reads as
+      -- what happened.
+      status      TEXT NOT NULL DEFAULT 'pending',
+      -- What the operator said, exactly as they said it. Null until answered,
+      -- and null for ever on a superseded one.
+      answer      TEXT,
+      answered_at INTEGER
+    );
+
     CREATE INDEX IF NOT EXISTS idx_run_events_run
       ON run_events(run_id, id);
     CREATE INDEX IF NOT EXISTS idx_chat_messages_chat
       ON chat_messages(chat_id, ts);
     CREATE INDEX IF NOT EXISTS idx_chat_proposals_chat
       ON chat_proposals(chat_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_chat_questions_chat
+      ON chat_questions(chat_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_merge_queue_batch
       ON merge_queue(batch_id, position);
     -- The worker's own query: the next queued row, across every batch. The

@@ -113,24 +113,32 @@ process.env.CLAUDE_BIN = path.join(tmp, "no-such-claude");
 // `orchestrator.test.ts` does it.
 const {
   CHAT_TIMEOUT_MS,
+  MAX_QUESTION_CHOICES,
   STALE_TURN_MARGIN_MS,
+  answerChatQuestions,
+  answerMessage,
   chatOwnsRun,
   chatPrompt,
   composeTask,
   createChat,
   createProposal,
+  createQuestions,
   markProposal,
   decisionNote,
   getChat,
   listMessages,
   listProposals,
+  listQuestions,
+  normalizeChoices,
   proposalDeps,
   parseTurnOutput,
   planApprovalBatch,
   planProposal,
+  questionChoices,
   removeMcpConfig,
   sendChatMessage,
   settleOnExit,
+  settleQuestions,
   staleTurn,
   writeMcpConfig,
   MCP_CONFIG_BASE,
@@ -981,6 +989,209 @@ describe("a proposal's label, dependencies and graph survive the round trip", ()
       proposalDeps({ depends_on: '[{"specId":"a","edge":"whenever"}]' }),
       [],
     );
+  });
+});
+
+describe("normalizeChoices", () => {
+  // Every case here produces a *question* rather than an error, which is why
+  // this is a function and not a cast at the call site: a choices array that
+  // arrived holding a null renders as a button reading "null", and an operator
+  // who clicks it has answered with something the model never offered.
+  it("keeps what a person could be shown and drops the rest", () => {
+    assert.deepEqual(normalizeChoices(["pnpm", "  npm  "]), ["pnpm", "npm"]);
+    assert.deepEqual(normalizeChoices(["a", "a", "  a"]), ["a"]);
+    assert.deepEqual(normalizeChoices(["a", null, 3, "", "  ", "b"]), ["a", "b"]);
+  });
+
+  it("reads anything that is not a list as no choices at all", () => {
+    // The reading that fails safe: a question with no shortlist is still
+    // answerable when `allow_text` is set, where an invented one is not
+    // answerable *correctly* at all.
+    assert.deepEqual(normalizeChoices("pnpm"), []);
+    assert.deepEqual(normalizeChoices(undefined), []);
+    assert.deepEqual(normalizeChoices({ 0: "pnpm" }), []);
+  });
+
+  it("stops at the cap rather than returning a list nothing can show", () => {
+    const many = Array.from({ length: MAX_QUESTION_CHOICES + 4 }, (_, i) => `c${i}`);
+    const kept = normalizeChoices(many);
+    assert.equal(kept.length, MAX_QUESTION_CHOICES);
+    assert.deepEqual(kept, many.slice(0, MAX_QUESTION_CHOICES));
+  });
+});
+
+describe("answerMessage", () => {
+  // What this pins is that the answer is not a bare string. The turn that reads
+  // it is a fresh child: it has the thread by `--resume`, but the tool call it
+  // made lives in a process that has exited, and "pnpm" on its own is a message
+  // whose referent it has to guess. The guess is silent — it proposes against
+  // whichever question it decided that answered.
+  it("quotes each question above the answer to it", () => {
+    const text = answerMessage([
+      { question: "Which package manager?", answer: "pnpm" },
+      { question: "Update the lockfile too?", answer: "yes" },
+    ]);
+    assert.match(text, /Q: Which package manager\?\nA: pnpm/);
+    assert.match(text, /Q: Update the lockfile too\?\nA: yes/);
+  });
+
+  it("names a question the operator left alone rather than omitting it", () => {
+    // Omitted, it is indistinguishable from a question that was never asked,
+    // and the model's next move is to ask it again — a second turn and a second
+    // card for something the operator has already declined once.
+    const text = answerMessage([
+      { question: "Which package manager?", answer: "pnpm" },
+      { question: "Should it push?", answer: null },
+    ]);
+    assert.match(text, /Q: Should it push\?\nA: \(not answered\)/);
+  });
+});
+
+describe("settleQuestions", () => {
+  const open = [{ id: "q1" }, { id: "q2" }, { id: "q3" }];
+
+  it("supersedes every question the answer left open", () => {
+    // The lifecycle decision, in one assertion: answering two of three settles
+    // the third as overtaken rather than leaving a card that starts another
+    // billed turn about a conversation that has moved on.
+    const settled = settleQuestions(open, [{ id: "q1" }, { id: "q3" }]);
+    assert.equal(settled.ok, true);
+    if (!settled.ok) return;
+    assert.deepEqual(settled.answered, ["q1", "q3"]);
+    assert.deepEqual(settled.superseded, ["q2"]);
+  });
+
+  it("supersedes all of them when the operator says something else", () => {
+    const settled = settleQuestions(open, []);
+    assert.equal(settled.ok, true);
+    if (!settled.ok) return;
+    assert.deepEqual(settled.answered, []);
+    assert.deepEqual(settled.superseded, ["q1", "q2", "q3"]);
+  });
+
+  it("fails the whole call rather than dropping an id it cannot place", () => {
+    // Where this diverges from the approval batch, which drops a stale id and
+    // reports it. These compose one message, so a dropped id is the operator's
+    // typed answer silently missing from the text the model reads — and the
+    // model then answers as though the questions that survived were all it
+    // asked.
+    const stale = settleQuestions(open, [{ id: "q1" }, { id: "gone" }]);
+    assert.equal(stale.ok, false);
+    if (stale.ok) return;
+    assert.match(stale.reason, /no longer waiting/);
+
+    const twice = settleQuestions(open, [{ id: "q1" }, { id: "q1" }]);
+    assert.equal(twice.ok, false);
+  });
+});
+
+describe("a question's choices survive the round trip", () => {
+  // `proposalDeps`' case one column over, and the same silent failure: a JSON
+  // column written by this module and read back by it, where a shape mismatch
+  // returns an empty list rather than throwing. Here that is a question card
+  // with no buttons on it — which, on a question the model asked as a
+  // pick-one, is a question nobody can answer.
+  it("reads back what was written, and an unreadable list as none", () => {
+    const chat = createChat();
+    createQuestions(chat.id, [
+      { question: "Which package manager?", choices: ["pnpm", "npm"], allowText: false },
+      { question: "Anything else?", choices: [], allowText: true },
+    ]);
+
+    const rows = listQuestions(chat.id);
+    const byText = (q: string) => rows.find((r) => r.question === q)!;
+
+    assert.deepEqual(questionChoices(byText("Which package manager?")), [
+      "pnpm",
+      "npm",
+    ]);
+    assert.equal(byText("Which package manager?").allow_text, 0);
+    assert.deepEqual(questionChoices(byText("Anything else?")), []);
+    // The two must stay distinguishable: a free-text question and a pick-one
+    // whose list did not survive look identical on `choices` alone.
+    assert.equal(byText("Anything else?").allow_text, 1);
+
+    assert.deepEqual(questionChoices({ choices: "not json" }), []);
+    assert.deepEqual(questionChoices({ choices: '{"a":1}' }), []);
+    assert.deepEqual(questionChoices({ choices: '["a", null, 2]' }), ["a"]);
+  });
+});
+
+describe("what a message does to an open question", () => {
+  // The supersede rule is in the SQL rather than in the pure function above it —
+  // `settleQuestions` decides the refusal and composes the message, and the
+  // UPDATE settles the rows — so it is pinned here for `chatOrder.test.ts`'s
+  // reason: the decision *is* the query, and both ways of getting it wrong are
+  // silent. Left pending, the card sends the same answer again; superseded when
+  // it was answered, the thread claims the operator never said what they said.
+  it("supersedes it when the operator sends an ordinary message instead", async () => {
+    const chat = createChat();
+    createQuestions(chat.id, [
+      { question: "Which package manager?", choices: [], allowText: true },
+    ]);
+
+    assert.equal((await sendChatMessage(chat.id, "never mind, do the other thing")).ok, true);
+
+    const [question] = listQuestions(chat.id);
+    assert.equal(question.status, "superseded");
+    // Never answered, so nothing may claim an instant at which it was.
+    assert.equal(question.answer, null);
+    assert.equal(question.answered_at, null);
+
+    await settle();
+  });
+
+  it("answers the ones named and supersedes the rest, in one turn", async () => {
+    const chat = createChat();
+    const [first, second] = createQuestions(chat.id, [
+      { question: "Which package manager?", choices: ["pnpm", "npm"], allowText: true },
+      { question: "Should it push?", choices: [], allowText: true },
+    ]);
+
+    const before = spawnCount;
+    const res = await answerChatQuestions(chat.id, [
+      { id: first.id, answer: "pnpm" },
+    ]);
+    assert.equal(res.ok, true);
+    // One turn for the whole set, not one per answer: the message carries both
+    // questions and the model reads them together.
+    assert.equal(spawnCount - before, 1);
+
+    const rows = listQuestions(chat.id);
+    const answered = rows.find((q) => q.id === first.id)!;
+    assert.equal(answered.status, "answered");
+    assert.equal(answered.answer, "pnpm");
+    assert.ok(answered.answered_at !== null);
+    assert.equal(rows.find((q) => q.id === second.id)!.status, "superseded");
+
+    // And what the model is actually sent, which is the point of the whole
+    // mechanism: the question, not a bare "pnpm".
+    const sent = listMessages(chat.id).filter((m) => m.role === "user").pop()!;
+    assert.match(sent.text, /Q: Which package manager\?\nA: pnpm/);
+    assert.match(sent.text, /Q: Should it push\?\nA: \(not answered\)/);
+
+    await settle();
+  });
+
+  it("refuses an answer to a question that is no longer open", async () => {
+    const chat = createChat();
+    const [question] = createQuestions(chat.id, [
+      { question: "Which package manager?", choices: [], allowText: true },
+    ]);
+    assert.equal((await sendChatMessage(chat.id, "something else")).ok, true);
+    await settle();
+
+    // What a stale card sends. It must not start a turn: the conversation has
+    // moved past the question, and the answer would read as a non sequitur the
+    // model then proposes against.
+    const before = spawnCount;
+    const res = await answerChatQuestions(chat.id, [
+      { id: question.id, answer: "pnpm" },
+    ]);
+    assert.equal(res.ok, false);
+    if (res.ok) return;
+    assert.match(res.reason, /no longer waiting/);
+    assert.equal(spawnCount - before, 0);
   });
 });
 
