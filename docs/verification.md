@@ -4079,6 +4079,51 @@ through before trusting this unattended:
   10. Watch the network panel: `/api/runs/[id]/touched` is fetched **once** on
       opening the tab and never again. It must not join the 3-second poll.
 
+- **The whole of `ask_operator` — the server half of a chat that asks the
+  operator a question.** **No CLI was run, no browser was opened and no
+  container was started**, so nothing below has been *seen*. Docker is not
+  available in the container this was written in, which means the
+  `docker compose up --build` half of the verification loop could not be
+  attempted at all rather than having been skipped. What was run, on this
+  branch: `NODE_ENV=development npm ci --include=dev` (exit 0),
+  `npm run typecheck` (exit 0) and `npm test` (**1,824 tests / 272 suites / 0
+  failures**). There is also no UI — that is a separate run continuing this
+  branch — so no question has ever been rendered and `POST
+  /api/chat/[id]/questions` has never been called by anything but a unit test.
+
+  **The load-bearing unknown is whether the pinned CLI stops when it is told
+  to.** A tool call cannot block on a click: `CHAT_TIMEOUT_MS` is ten minutes
+  and an overrunning turn is killed with its answer discarded, so `ask_operator`
+  records its rows and returns at once. Everything that then makes the turn
+  *end* is prose — the tool description, and the result text saying in as many
+  words that no answer is coming back through it. Neither is a mechanism, and
+  what a model that reads it the other way does is call the tool again, which
+  the pending-question cap turns into a refusal rather than a loop but which
+  still spends the turn. That is the same class of assumption as "an
+  unrestricted chat stays an orchestrator" further up this list, and it wants
+  the same test: ask the chat something under-specified, watch whether it asks
+  once and stops.
+
+  **The second is whether the next turn knows what it is answering.** A question
+  asked in one turn and answered in the next is the same conversation to the
+  model only if `--resume` carries the tool call, which has not been measured
+  here. The answer message quotes each question above the answer to it
+  *precisely* because it might not — but that quoting has never been read by a
+  real child, so what is unverified is whether the model treats it as its own
+  question or as the operator narrating one.
+
+  Four smaller things, none of them measured. `MAX_OPEN_QUESTIONS` (5) and
+  `MAX_QUESTION_CHOICES` (8) are argued from `MAX_PENDING_PROPOSALS`' reasoning,
+  not from watching anyone answer anything. What an exchange *costs* is
+  unknown and is not free — a question is a whole extra turn each way, against
+  `chatTurnBudgetUSD` twice. The `chat_questions` statement is a
+  `CREATE TABLE IF NOT EXISTS` and `SCHEMA_VERSION` was deliberately not bumped,
+  which follows `db.ts`'s own rule for an additive migration but has only been
+  run against databases this suite created. And a stranded turn whose capability
+  is still live can in principle write a question into a chat the row already
+  says is idle; the answer path is idempotent against it and the pending cap
+  bounds it, but that window has not been reproduced.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
@@ -4088,12 +4133,14 @@ what bounds the run, how a
 run's diff is parsed and budgeted, whether a saved graph of run blocks can run at
 all and the order its runs are created in, when a branch may be landed, what a
 queued merge does with the branch it reaches, what counts as a conflict marker — both
-for deciding whether one was really resolved and for deciding what to show — and
+for deciding whether one was really resolved and for deciding what to show, what
+the orchestrator chat may ask its operator and what an answer to it settles — and
 the two renderings that would lie quietly about a number: an unconfigured
 ceiling, and a first-party figure shown beside the meters. Two entries are
 neither a function nor a rendering: the order a chat's thread renders in, driven
 against a real database because what it pins is in the SQL rather than in any
-function; and that the image leaves the data volume writable by whatever uid
+function — as is what an operator's message does to a question the chat left
+open, which is the same table and the same argument; and that the image leaves the data volume writable by whatever uid
 compose runs the container as, which is otherwise checked by nothing here and
 fails only on Linux, only under a non-1000 `UF_UID`, and only by refusing every
 data route. A third is the backup round trip, which is neither of those either:
