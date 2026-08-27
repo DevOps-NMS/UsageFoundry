@@ -3,11 +3,18 @@
 import { useEffect, useMemo, useState } from "react";
 import type { RunDTO, RunDiffDTO, RunTouchedDTO } from "@/lib/apiTypes";
 import { reconcileTouches, type TouchedFile } from "@/lib/runTouches";
+import { ButtonLink } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Disclosure } from "@/components/ui/Disclosure";
 import { GroupLabel } from "@/components/ui/List";
 import { ListView, STICKY_HEAD } from "@/components/ui/ListView";
 import { Notice } from "@/components/ui/Notice";
+import {
+  TOUCH_IDLE_SENTENCE,
+  TouchHeadline,
+  TouchNoDiffNotice,
+  TouchSweptNotice,
+} from "@/components/RunTouchNotes";
 import { Table, TBody, THead, Th, Td, Tr } from "@/components/ui/Table";
 
 /**
@@ -146,7 +153,19 @@ export function RunTouches({ run, diff }: { run: RunDTO; diff: RunDiffDTO }) {
 
   return (
     <Card className="mt-4">
-      <CardTitle>What it touched</CardTitle>
+      <CardTitle>
+        What it touched
+        {/* The one link to the map, and the only one anywhere. It is offered
+            only over a report, because the sub-route's own three sentences for
+            having nothing are the same three this card just said — sending the
+            operator to a second screen to read them again is a click that
+            answers nothing. */}
+        {touched?.kind === "report" && (
+          <ButtonLink href={`/runs/${run.id}/touched`} className="ml-auto">
+            Lay it out
+          </ButtonLink>
+        )}
+      </CardTitle>
 
       {error && <Notice tone="danger">{error}</Notice>}
 
@@ -156,33 +175,16 @@ export function RunTouches({ run, diff }: { run: RunDTO; diff: RunDiffDTO }) {
           call worked, and a column that is wrong inside a retry loop is worse
           than one that is absent. */}
       {touched?.kind === "report" && report && (
-        <p className="mb-3 text-sm text-ink-muted">
-          <strong className="font-semibold tabular-nums text-ink">
-            {report.distinctTouched}
-          </strong>{" "}
-          distinct file{report.distinctTouched === 1 ? "" : "s"} named across{" "}
-          <strong className="font-semibold tabular-nums text-ink">
-            {touched.cycles}
-          </strong>{" "}
-          work cycle{touched.cycles === 1 ? "" : "s"}. A call being recorded means
-          it was <em>attempted</em>: this app stores a tool result only when the
-          tool failed, so nothing here says a read or a write succeeded.
-        </p>
+        <TouchHeadline distinctTouched={report.distinctTouched} cycles={touched.cycles} />
       )}
 
       {/* Three ways of having nothing, kept apart, because all three otherwise
           render as a run that touched no file at all. */}
       {touched?.kind === "swept" && (
-        <Notice tone="warn" quiet>
-          This run&apos;s tool events were removed on the {touched.horizonDays}-day
-          event horizon, so nothing here can say what it touched. Its changes are
-          still above — a checkout is kept on a different clock.
-        </Notice>
+        <TouchSweptNotice horizonDays={touched.horizonDays} changesAt="above" />
       )}
 
-      {touched?.kind === "empty" && (
-        <Empty>No tool call in this run&apos;s log named a file.</Empty>
-      )}
+      {touched?.kind === "empty" && <Empty>{TOUCH_IDLE_SENTENCE}</Empty>}
 
       {touched?.kind === "none" && <Empty>{touched.reason}</Empty>}
 
@@ -192,12 +194,7 @@ export function RunTouches({ run, diff }: { run: RunDTO; diff: RunDiffDTO }) {
         </Empty>
       )}
 
-      {report && !reconcilable && (
-        <Notice tone="warn" quiet>
-          {diff.reason ?? "There is no diff for this run."} Without one, these
-          files cannot be reconciled against what changed — only listed.
-        </Notice>
-      )}
+      {report && !reconcilable && <TouchNoDiffNotice reason={diff.reason} shows="listed" />}
 
       {report &&
         (reconcilable ? GROUPS : GROUPS_WITHOUT_DIFF).map(({ key, label, footnote, fold }) => {
