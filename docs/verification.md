@@ -1663,6 +1663,79 @@ through before trusting this unattended:
 > handling is the one branch no other engine takes, and its own docblock says
 > the 16px line height is an estimate nobody has held against a real mouse.
 
+> **The map at `/runs/[id]/touched` has never been seen.** It was built and
+> shipped without a browser: Docker is unavailable in the environment it was
+> written in and no browser could be driven there, so every statement about it
+> below is a statement about the code. It typechecks, `next build` registers the
+> route, its reduction, its fold rule and its three empty states are unit-tested
+> in `touchedMap.test.ts`, and every Tailwind class it uses was grepped out of
+> the emitted stylesheet rather than assumed — which catches a spelling Tailwind
+> would drop silently and catches nothing at all about whether the picture is
+> legible. Nobody has looked at it.
+>
+> Open a settled run that changed something, take the **Files** tab, and press
+> **Lay it out** on the "What it touched" card. At 1440×900:
+>
+> 1. **The shell.** Runs is still the lit row in the sidebar and the toolbar
+>    reads "What it touched" — both were verified by running `activePane` and
+>    `toolbarTitle` over `/runs/<id>/touched`, but only the functions were, not
+>    the rendering. ⌘3 should still come back here.
+> 2. **The first frame.** The map settles and *stops*. Watch a CPU meter for ten
+>    seconds after it comes to rest: a canvas that keeps asking for frames is the
+>    failure `forceLayout`'s cooling exists to prevent, and it looks identical to
+>    one that has stopped. Then turn on "Reduce motion" at the OS level and
+>    reload: the layout should arrive already settled, in one step, with no
+>    visible animation at all.
+> 3. **The arrangement.** Files should sit in clusters around a small ringed
+>    directory node carrying the directory's name, and the clusters should be
+>    separated rather than one mass. This is the whole deliverable and the thing
+>    least likely to be right first time: `FORCES` in `RunTouchedMap.tsx` is the
+>    graph panel's defaults with `linkDistance` dropped from 90 to 70, chosen by
+>    reasoning about a rosette rather than by looking at one. If files crowd
+>    their directory or clusters overlap, that constant is the dial.
+> 4. **What a node says.** Against the legend beside the canvas: a read-only file
+>    is grey, a written one is accent blue, one that is both is accent with a grey
+>    core, and a file that changed with no tool call behind it is hollow with a red
+>    edge. A ring in the foreground colour means the branch diff lists it; a dashed
+>    amber ring means outside the checkout. Check the accent-and-grey core is
+>    actually distinguishable from plain accent at the smallest node on screen — it
+>    is a disc at half radius and nobody has seen it below about 5px.
+> 5. **Labels.** Directory names are always drawn; file names ramp in above about
+>    0.75 scale, and appear immediately on whatever the pointer is over. Zoom out
+>    far: the file names should go, the directory names should stay.
+> 6. **The gestures.** Drag the background to pan, wheel to zoom — the point under
+>    the cursor should stay under it — drag a node and it should stay where it was
+>    dropped. Click a file: the inspector on the right fills in with its path,
+>    counts, tools and callers. Click empty space: it clears.
+> 7. **A run with one work cycle.** This is the common case on this install and
+>    the map is deliberately built without a time axis, so it must not look broken
+>    or half-empty: the header says "… across 1 work cycle" and nothing else on the
+>    page mentions cycles at all. Confirm there is no empty column, axis or legend
+>    entry waiting for a second one.
+> 8. **A run whose events were swept.** Find or make a run older than
+>    `eventRetentionDays` whose branch still exists. The card on the Files tab
+>    offers no "Lay it out" button at all — the link is only drawn over a report —
+>    so the route has to be typed. It must say the events were removed on the
+>    *N*-day horizon and that the changes are still on the Files tab. It must not
+>    render an empty canvas. Same check for a run that named no file (an idle
+>    sentence, not a blank picture) and for an id that does not exist.
+> 9. **A run with no diff.** Delete a finished run's branch and reload the map.
+>    The changed ring must disappear from every node, the legend must drop its
+>    "ringed" row, and each file's inspector must read "Unknown — there is no diff
+>    for this run" rather than "Not changed".
+> 10. **Folding.** The budget is 300 drawn files and no run on this install is near
+>    it, so this needs a run that touched a few hundred files or a temporarily
+>    lowered `MAX_DRAWN_FILES`. A folded directory draws as one larger node with
+>    its name and "N files" under it, the notice above the canvas gives the total
+>    folded, and clicking one opens it — the files inside appear and the
+>    surrounding layout does not jump. Nothing should ever vanish.
+> 11. **Both themes and the OS switch.** Toggle light/dark with the map open; the
+>    node colours must re-probe without a reload. Then leave the app on "Match
+>    system" and change the OS appearance, which is the boundary that fires no
+>    React render.
+> 12. **Narrow.** At 390px the split stacks, the canvas keeps its 24rem height, and
+>    dragging on the canvas pans rather than scrolling the page.
+
 > **The four frontend reachability fixes — the paged runs list, quick open's
 > search, the run log's filter and the settings field search — were written on
 > branch `uf/usagefoundry-721638d11c0b-1-41e5e190` by two runs, and a third that

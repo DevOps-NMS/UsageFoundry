@@ -5,9 +5,11 @@ the session touched and creates a VISUAL FLOW TYPE representation of what the
 flow touched and changed". Should this app draw what a run touched, where, and as
 what?
 
-**The state:** open. Nine options across two independent axes, one recommended,
-five refused by name, one deferred. **Nothing here is a decision and no product
-code changed.**
+**The state:** closed, and the recommendation below was overridden — see
+[What happened next](#what-happened-next). Nine options across two independent
+axes, one recommended, five refused by name, one deferred. **Nothing in this
+directory is itself a decision**; what shipped is recorded there and in
+`docs/agent/git-and-review.md`.
 
 ---
 
@@ -32,6 +34,30 @@ a serious option this survey never weighed, because it could not know its premis
 held. The query is one line ([13-validation.md](13-validation.md#the-one-number-that-decides-everything))
 and the first slice prints the answer in its own header.
 
+## What happened next
+
+Both halves shipped, and the second one overrides the recommendation above.
+
+The first slice landed — `runTouchScan.ts`, `runTouches.ts`, `RunTouches.tsx`
+and `/api/runs/[id]/touched`, as a sorted list with counts under the run page's
+Files tab. It printed the number this survey said would decide the question:
+**39 distinct files across 1 work cycle**, on a real run.
+
+The operator read that, read the mockup, and asked for the picture anyway. That
+is `/runs/[id]/touched`, and the call is made. What the measurement settles is
+narrower than either side of the argument here: **scale was never the problem** —
+39 nodes is a sixty-fourth of `knowledgeGraph.ts`'s drawable ceiling, and every
+hairball argument above was made from an empty database — while **the bipartite
+star is exactly the problem this survey said it was, and it is size-independent.**
+So the picture is not the graph this document refused. Tool → file is not drawn
+at all: the node set is files, the layout is the path hierarchy, and tool identity
+rides on the node as an attribute. Every *finding* here still binds and is written
+into `docs/agent/git-and-review.md` — success is never recorded, a failure joins
+its call only by a command string, `capGraph` prunes backwards for this view, and
+events are swept at 30 days. One correction: `canvasView.ts`, which this survey
+correctly reported did not exist, was written before the map was, so the second
+canvas cost no second copy of anything.
+
 ---
 
 ## The row for `proposals/README.md`
@@ -41,7 +67,7 @@ and the first slice prints the answer in its own header.
 
 | Proposal | Question | State |
 |---|---|---|
-| [SessionFlow](SessionFlow/README.md) | An operator asked for a new left-hand tab drawing a visual flow of what a session touched and changed. Should this app draw that, where, and as what? | Open; one recommendation, and it is **against the graph** — build a touched/changed reconciliation as a sorted list with counts under the run page's existing Changes tab, and refuse five options by name. **Both placements the request named are banned by written invariants and neither is a close call**: a tenth pane is named in `docs/agent/ui-density-audit.md:159-161` ("A tenth destination has no digit"), and it fails the `/knowledge` test — a run's flow *is* about an existing pane — in the same paragraph that granted the only exception ever granted; a sixth tab exceeds `docs/agent/conventions.md:50`'s two-to-five cap and contradicts `ui-density-audit.md:1122`, which froze this strip at "five labels, the order" as part of a redesign of that page. So the fork resolves to neither, and the ban's own sentence names the replacement: "New destinations are sub-routes under an existing pane." The graph is refused on the **data**, not on cost: every candidate edge is a hub spoke (tool→file is bipartite with ~12 hubs), a clique (co-occurrence per cycle is 780 edges for 40 files) or a timeline, `capGraph` prunes **by degree, largest first** so the one nearly-generic piece of graph plumbing keeps the tool hubs and drops the files, and an edge cannot carry the hedge every touch needs — **success is never recorded** (`orchestrator.ts:7343-7344`) and a failure joins to its call only by a whitespace-flattened 160-character command string, because the `tool` row stores no `tool_use` id. The data is in better shape than the brief assumed: `clipToolInput` is field-aware rather than a byte slice, `command` is first and `file_path` second in `HEADLINE_FIELDS`, and **the extraction query already runs in production** — `readCountsFor` (`fileCostNotice.ts:328-363`) pulls `$.input.file_path` out of `run_events` with `json_extract` today, for a prompt rather than for a person. Two brief leads corrected: `clipToolInput` is in `logLine.ts:145-189`, not `retention.ts`; and a failed `Read` *is* distinguishable from a successful one, by a separate `tool_error` row — the real problem is that the two rows share no key. **Refused by name:** a tenth pane, a sixth tab, a node-and-edge canvas (whose true cost is a second copy of a 450-line private canvas, since `canvasView.ts` — claimed to exist at `forceLayout.ts:7` — **does not**), a fleet-wide view (the full scan `fileCostNotice.ts:303-308` already refused an index for, with no `base..branch` to reconcile against), and a per-call failure mark. **Deferred rather than refused:** the file × work-cycle grid, the only visual that survives its own scrutiny and the only one with direction in it, held back solely because both its axes are unmeasured — which the first slice fixes. Three findings against the tree, none blocking: `orchestrator.ts:9876` asserts "`run_events` has no retention" and `retention.ts:145-151` deletes it on 30 days; `forceLayout.ts:7` names a module that was never written; and three documents disagree about the pane ceiling — `panes.ts:15-16` says "Knowledge is the ninth" when Knowledge is seventh and Settings is ninth, and `conventions.md:50` still says "closed at eight" while `conventions.md:57` counts nine. Unverified: **every count of anything** — `/data` is empty, no `*.db` exists in the checkout, and **no `run_events` row was ever quoted because none was reachable**; no browser was opened and no container started, so "hairball" is an argument from node counts and pruning rules rather than from having seen one |
+| [SessionFlow](SessionFlow/README.md) | An operator asked for a new left-hand tab drawing a visual flow of what a session touched and changed. Should this app draw that, where, and as what? | **Closed — both halves shipped, and the recommendation was overridden.** The list landed and printed the one number this survey said would decide it (39 distinct files across 1 work cycle); the operator then asked for the picture, and it is `/runs/[id]/touched`, laid out by **path** rather than by tool, so the star below is not drawn at all. The findings all still bind and are in `docs/agent/git-and-review.md`. What follows is the survey as written. One recommendation, and it is **against the graph** — build a touched/changed reconciliation as a sorted list with counts under the run page's existing Changes tab, and refuse five options by name. **Both placements the request named are banned by written invariants and neither is a close call**: a tenth pane is named in `docs/agent/ui-density-audit.md:159-161` ("A tenth destination has no digit"), and it fails the `/knowledge` test — a run's flow *is* about an existing pane — in the same paragraph that granted the only exception ever granted; a sixth tab exceeds `docs/agent/conventions.md:50`'s two-to-five cap and contradicts `ui-density-audit.md:1122`, which froze this strip at "five labels, the order" as part of a redesign of that page. So the fork resolves to neither, and the ban's own sentence names the replacement: "New destinations are sub-routes under an existing pane." The graph is refused on the **data**, not on cost: every candidate edge is a hub spoke (tool→file is bipartite with ~12 hubs), a clique (co-occurrence per cycle is 780 edges for 40 files) or a timeline, `capGraph` prunes **by degree, largest first** so the one nearly-generic piece of graph plumbing keeps the tool hubs and drops the files, and an edge cannot carry the hedge every touch needs — **success is never recorded** (`orchestrator.ts:7343-7344`) and a failure joins to its call only by a whitespace-flattened 160-character command string, because the `tool` row stores no `tool_use` id. The data is in better shape than the brief assumed: `clipToolInput` is field-aware rather than a byte slice, `command` is first and `file_path` second in `HEADLINE_FIELDS`, and **the extraction query already runs in production** — `readCountsFor` (`fileCostNotice.ts:328-363`) pulls `$.input.file_path` out of `run_events` with `json_extract` today, for a prompt rather than for a person. Two brief leads corrected: `clipToolInput` is in `logLine.ts:145-189`, not `retention.ts`; and a failed `Read` *is* distinguishable from a successful one, by a separate `tool_error` row — the real problem is that the two rows share no key. **Refused by name:** a tenth pane, a sixth tab, a node-and-edge canvas (whose true cost is a second copy of a 450-line private canvas, since `canvasView.ts` — claimed to exist at `forceLayout.ts:7` — **does not**), a fleet-wide view (the full scan `fileCostNotice.ts:303-308` already refused an index for, with no `base..branch` to reconcile against), and a per-call failure mark. **Deferred rather than refused:** the file × work-cycle grid, the only visual that survives its own scrutiny and the only one with direction in it, held back solely because both its axes are unmeasured — which the first slice fixes. Three findings against the tree, none blocking: `orchestrator.ts:9876` asserts "`run_events` has no retention" and `retention.ts:145-151` deletes it on 30 days; `forceLayout.ts:7` names a module that was never written; and three documents disagree about the pane ceiling — `panes.ts:15-16` says "Knowledge is the ninth" when Knowledge is seventh and Settings is ninth, and `conventions.md:50` still says "closed at eight" while `conventions.md:57` counts nine. Unverified: **every count of anything** — `/data` is empty, no `*.db` exists in the checkout, and **no `run_events` row was ever quoted because none was reachable**; no browser was opened and no container started, so "hairball" is an argument from node counts and pruning rules rather than from having seen one |
 
 ---
 
