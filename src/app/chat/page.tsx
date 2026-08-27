@@ -1466,93 +1466,102 @@ function AskedQuestions({
         )}
       </div>
 
-      {questions.map((q) => (
-        <div key={q.id} className="mt-3 first:mt-0">
-          <p className="text-sm leading-normal text-ink">{q.question}</p>
+      {/* Hairlines between them, `Decided`'s construction one card over. A
+          question with a text field under it and the next question's sentence
+          below that is three blocks at one spacing, and the field then reads as
+          belonging to whichever of the two the eye reached first — which is a
+          typed answer filed against the wrong question. A rule is what says
+          where one decision ends. It costs nothing with a single question,
+          which is the common case: `divide-y` draws between siblings. */}
+      <div className="flex flex-col divide-y divide-line">
+        {questions.map((q) => (
+          <div key={q.id} className="py-3 first:pt-0 last:pb-0">
+            <p className="text-sm leading-normal text-ink">{q.question}</p>
 
-          {q.status === "answered" && (
-            <p className="mt-1 text-xs leading-normal text-ink-muted">
-              You answered{" "}
-              <span className="font-medium text-ink">{q.answer}</span>
-            </p>
-          )}
-          {q.status === "superseded" && (
-            <p className="mt-1 text-xs leading-normal text-ink-muted">
-              Overtaken by what you said next.
-            </p>
-          )}
+            {q.status === "answered" && (
+              <p className="mt-1 text-xs leading-normal text-ink-muted">
+                You answered{" "}
+                <span className="font-medium text-ink">{q.answer}</span>
+              </p>
+            )}
+            {q.status === "superseded" && (
+              <p className="mt-1 text-xs leading-normal text-ink-muted">
+                Overtaken by what you said next.
+              </p>
+            )}
 
-          {q.status === "pending" && (
-            <>
-              {q.choices.length > 0 && (
-                <ButtonRow className="mt-2">
-                  {q.choices.map((choice) => (
-                    <Button
-                      key={choice}
-                      size="compact"
-                      variant={
-                        CHOICE_VARIANT[
-                          drafts[q.id] === choice ? "chosen" : "offered"
-                        ]
-                      }
-                      // A toggle only where it is one. With this the last open
-                      // question, the press is the answer and announcing it as
-                      // pressed would describe a control that is already gone.
-                      aria-pressed={
-                        open.length > 1 ? drafts[q.id] === choice : undefined
-                      }
-                      disabled={disabled}
-                      onClick={() => choose(q.id, choice)}
-                    >
-                      {choice}
-                    </Button>
-                  ))}
-                </ButtonRow>
-              )}
+            {q.status === "pending" && (
+              <>
+                {q.choices.length > 0 && (
+                  <ButtonRow className="mt-2">
+                    {q.choices.map((choice) => (
+                      <Button
+                        key={choice}
+                        size="compact"
+                        variant={
+                          CHOICE_VARIANT[
+                            drafts[q.id] === choice ? "chosen" : "offered"
+                          ]
+                        }
+                        // A toggle only where it is one. With this the last open
+                        // question, the press is the answer and announcing it as
+                        // pressed would describe a control that is already gone.
+                        aria-pressed={
+                          open.length > 1 ? drafts[q.id] === choice : undefined
+                        }
+                        disabled={disabled}
+                        onClick={() => choose(q.id, choice)}
+                      >
+                        {choice}
+                      </Button>
+                    ))}
+                  </ButtonRow>
+                )}
 
-              {q.allowText && (
-                // A kit control, not a hand-written one: below `md`, iOS Safari
-                // zooms the page in on any text control under 16px and never
-                // zooms back out, and `Input` is where that floor lives. The
-                // composer is this app's one hand-written exception and is not
-                // a precedent for a second.
-                <Input
-                  className="mt-2"
-                  aria-label={q.question}
-                  placeholder={
-                    q.choices.length > 0 ? "…or type an answer" : "Your answer"
-                  }
-                  value={drafts[q.id] ?? ""}
-                  disabled={disabled}
-                  onChange={(e) =>
-                    setDrafts((d) => ({ ...d, [q.id]: e.target.value }))
-                  }
-                  onKeyDown={(e) => {
-                    // The composer's chord, in the one other field on this page
-                    // that sends. No Shift+Enter branch: this is a single-line
-                    // input and there is no newline to make.
-                    if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
-                    e.preventDefault();
-                    if (!disabled) submit();
-                  }}
-                />
-              )}
+                {q.allowText && (
+                  // A kit control, not a hand-written one: below `md`, iOS Safari
+                  // zooms the page in on any text control under 16px and never
+                  // zooms back out, and `Input` is where that floor lives. The
+                  // composer is this app's one hand-written exception and is not
+                  // a precedent for a second.
+                  <Input
+                    className="mt-2"
+                    aria-label={q.question}
+                    placeholder={
+                      q.choices.length > 0 ? "…or type an answer" : "Your answer"
+                    }
+                    value={drafts[q.id] ?? ""}
+                    disabled={disabled}
+                    onChange={(e) =>
+                      setDrafts((d) => ({ ...d, [q.id]: e.target.value }))
+                    }
+                    onKeyDown={(e) => {
+                      // The composer's chord, in the one other field on this page
+                      // that sends. No Shift+Enter branch: this is a single-line
+                      // input and there is no newline to make.
+                      if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+                      e.preventDefault();
+                      if (!disabled) submit();
+                    }}
+                  />
+                )}
 
-              {q.choices.length === 0 && !q.allowText && (
-                // Reachable rather than theoretical: `questionChoices` answers
-                // an unreadable `choices` column with none, which is the
-                // reading that fails safe — and it leaves a question with
-                // nothing on it to press. Said, because the way out is a
-                // different control on a different part of the page.
-                <p className="mt-1 text-2xs leading-normal text-warn">
-                  This question offers nothing to press and no way to type an
-                  answer. Reply in the composer instead, which closes it.
-                </p>
-              )}
-            </>
-          )}
-        </div>
-      ))}
+                {q.choices.length === 0 && !q.allowText && (
+                  // Reachable rather than theoretical: `questionChoices` answers
+                  // an unreadable `choices` column with none, which is the
+                  // reading that fails safe — and it leaves a question with
+                  // nothing on it to press. Said, because the way out is a
+                  // different control on a different part of the page.
+                  <p className="mt-1 text-2xs leading-normal text-warn">
+                    This question offers nothing to press and no way to type an
+                    answer. Reply in the composer instead, which closes it.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        ))}
+      </div>
 
       {open.length > 0 && (
         <>
