@@ -58,8 +58,8 @@ The reply's shape is specified for exactly one ending.
 
 So the model is not merely unequipped to ask — it is instructed toward the
 guess. What it does when it is unsure is unmeasured here (see
-[the unverifiable list](28-validation.md#what-cannot-be-checked-here)), but the
-prompt's incentive is one-directional and stated three times.
+[what cannot be checked by hand](28-validation.md#what-cannot-be-checked-by-hand-here)),
+but the prompt's incentive is one-directional and stated three times.
 
 ## <a id="f2"></a>F2 — `idle` means two different things and the app cannot tell them apart
 
