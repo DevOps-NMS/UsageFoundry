@@ -1621,7 +1621,7 @@ through before trusting this unattended:
 > meant to be identical, and the one thing that would demonstrate that — that
 > the graph still pans and zooms — is the thing that run could not check.
 > Everything claimed for it rests on `npm run typecheck` (exit 0), `npm test`
-> (**1,834 tests / 267 suites / 0 failures**, of which 21 are the new
+> (**1,834 tests / 267 suites / 0 failures**, of which 22 are the new
 > `canvasView.test.ts`) and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
 > build` (exit 0). The unit tests cover the arithmetic and cover *none* of the
 > DOM wiring: `observeCanvasSize`, `observeTheme`, `probeTokens` and
