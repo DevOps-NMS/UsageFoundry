@@ -1450,7 +1450,26 @@ function migrate(db: Database.Database) {
       min_cold_age      INTEGER,
       -- Null until a cycle has tried to resume the fork: 1 it did, 0 it could
       -- not and the run rolled back.
-      resumed           INTEGER
+      resumed           INTEGER,
+      -- Which of the two moments this fork was taken at: 'boundary' for the
+      -- natural handover between work cycles, 'early-end' for the one this app
+      -- manufactures by cutting a cycle short at the context ceiling. The same
+      -- column prune_receipts carries, and for the same reason -- it decides how
+      -- the netting prices the cut. Without it every fork was read as a
+      -- boundary, so a fork at an early end was priced free while the identical
+      -- operation under the legacy engine was charged its whole rewrite.
+      -- Null on rows written before the column existed; see forkCutFromRow.
+      trigger           TEXT,
+      -- The forked conversation, measured the way prune_receipts.tokens_after is
+      -- measured -- contextTokens over the written transcript. It is what the
+      -- next resume has to write, and the early-end branch of netReceipt prices
+      -- exactly that until a real turn lands to be read instead.
+      --
+      -- Not derivable from the columns beside it: suffix_bytes is S, the tail
+      -- standing after the cut line, which on this install runs 70-90k against
+      -- conversations of 180k. Estimating the rewrite from S understated it by
+      -- about a third.
+      context_tokens_after INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_fork_attempts_ts ON fork_attempts(ts);
     CREATE INDEX IF NOT EXISTS idx_fork_attempts_run ON fork_attempts(run_id, ts);
@@ -1464,6 +1483,11 @@ function migrate(db: Database.Database) {
   // row, `markForkResumed` has no id to update and `pendingForkFor` finds
   // nothing to recover a restarted run with.
   addColumn(db, "fork_attempts", "suffix_bytes", "INTEGER NOT NULL DEFAULT 0");
+  // Same story, same fix, and the reason the two are worth naming separately:
+  // the CREATE above is a no-op on every install that already has the table, so
+  // a column added to it reaches new databases only.
+  addColumn(db, "fork_attempts", "trigger", "TEXT");
+  addColumn(db, "fork_attempts", "context_tokens_after", "INTEGER");
 
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as

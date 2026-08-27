@@ -107,7 +107,7 @@ describe("a fork attempt that cannot be recorded", () => {
     db.exec("DELETE FROM ops_events");
 
     const ids = Array.from({ length: 20 }, (_, i) =>
-      pruningMod.recordForkAttempt(`r${i}`, "s-old", FORK, 0),
+      pruningMod.recordForkAttempt(`r${i}`, "s-old", FORK, 0, "boundary", null),
     );
 
     // Still non-fatal, and still null: the run carries on without a receipt.
@@ -124,24 +124,39 @@ describe("a fork attempt that cannot be recorded", () => {
     assert.match(reported[0].message, /suffix_bytes/);
   });
 
-  it("writes the row once the column is there", () => {
+  it("writes the row once the columns are there", () => {
     const db = dbMod.db();
     db.exec("DROP TABLE IF EXISTS fork_attempts");
     db.exec(FORK_ATTEMPTS_PRE_SUFFIX);
+    // Every column `addColumn` adds in `db.ts`, in the same order. This list
+    // failing to keep up is itself the fault under test: the INSERT names these
+    // and a table without them throws, which `recordForkAttempt` swallows.
     db.exec("ALTER TABLE fork_attempts ADD COLUMN suffix_bytes INTEGER NOT NULL DEFAULT 0");
+    db.exec("ALTER TABLE fork_attempts ADD COLUMN trigger TEXT");
+    db.exec("ALTER TABLE fork_attempts ADD COLUMN context_tokens_after INTEGER");
     db.exec("DELETE FROM ops_events");
 
-    const rowId = pruningMod.recordForkAttempt("r-ok", "s-old", FORK, 0);
+    const rowId = pruningMod.recordForkAttempt(
+      "r-ok",
+      "s-old",
+      FORK,
+      0,
+      "early-end",
+      180_000,
+    );
 
     assert.notEqual(rowId, null);
     assert.equal(failures(db).length, 0);
-    assert.equal(
-      (
-        db.prepare("SELECT suffix_bytes s FROM fork_attempts WHERE id = ?").get(rowId) as {
-          s: number;
-        }
-      ).s,
-      81920,
-    );
+    const stored = db
+      .prepare(
+        "SELECT suffix_bytes s, trigger t, context_tokens_after c FROM fork_attempts WHERE id = ?",
+      )
+      .get(rowId) as { s: number; t: string; c: number };
+    assert.equal(stored.s, 81920);
+    // The two that decide how the cut is priced. A fork recorded without them
+    // reads as a free boundary cut, which is how three early-end forks came to
+    // be reported at $0 against $5.42 of billed rewrite.
+    assert.equal(stored.t, "early-end");
+    assert.equal(stored.c, 180_000);
   });
 });
