@@ -4605,14 +4605,36 @@ function admitWaiting(run: RunRow): boolean {
 
 interface IterationResult {
   exitCode: number;
+  /**
+   * What this child reported spending, over every `result` event it emitted.
+   *
+   * Not a sum of them: `total_cost_usd` is the session's running total and one
+   * child can emit two. `cycleCostAfterResult` owns that and says why. Across
+   * children it *is* summed, by the `+=` in the run loop, because a restart
+   * begins a fresh CLI accumulator.
+   */
   costUSD: number;
+  /**
+   * Every token this cycle's `result` events reported, summed — `usage` is that
+   * stretch's own rather than the session's, which is the half of the event
+   * `costUSD` above is not.
+   *
+   * **Main thread only, and it is the CLI that scopes it that way.** A `Task`
+   * this cycle delegated is absent from `usage` entirely, so this understates a
+   * delegating cycle by whatever its sub-agents burned — 5,915,907 against
+   * telemetry's 8,481,166 on run `075f7959`, where three `Explore` sub-agents
+   * made 54 of the session's 110 requests. Not corrected from telemetry here:
+   * that would make `runs.spent_tokens` a mixture of two sources, which is the
+   * one thing the telemetry card exists to stay out of. The sub-agents' share
+   * is reported beside it rather than folded into it.
+   */
   tokens: number;
   /**
    * How large the conversation was when this cycle stopped talking — the
    * context the *next* cycle would inherit if it resumed.
    *
    * A different quantity from `tokens` above and the two must not be confused.
-   * `tokens` is the cycle's whole bill summed over every turn, so it grows with
+   * `tokens` is the cycle's bill summed over every turn, so it grows with
    * how much work was done; this is one turn's resident window, so it grows
    * with how much has been *said*. `startsFresh` reads this one, because the
    * question it answers is what a `--resume` would cost per turn, not what the
@@ -6949,6 +6971,7 @@ async function pruneAtBoundary(
           sessionId,
           settings.contextPruningForkMinColdAge,
           BOUNDARY_BREAK_EVEN_BUDGET,
+          "boundary",
           adopt,
         )
       : await prune(id, sessionId, "boundary");
@@ -7002,6 +7025,20 @@ async function settleBoundary(
  * cut, so a second gate on the same arithmetic could only decline to use a
  * boundary already paid for. `BOUNDARY_BREAK_EVEN_BUDGET` carries the argument.
  *
+ * That is not in tension with passing `early-end` below, though it reads like
+ * it. Two different questions:
+ *
+ * - **Should this cut happen?** No, the rewrite is already committed; refusing
+ *   here forgoes the saving without avoiding the cost. Hence no gate.
+ * - **Who owns the rewrite on the books?** The pruning feature, because the
+ *   only reason this boundary exists is that the ceiling watcher made it in
+ *   order to cut. Hence `early-end`.
+ *
+ * Measured on this install, that write is ~$1.80 a time — 178k–183k tokens at
+ * the one-hour class. So the gate worth arguing about is the ceiling watcher's,
+ * which decides whether to spend it at all, and not this one. Reporting it here
+ * is what puts the number in front of that argument.
+ *
  * `--min-cold-age` does not stand here either, and for the third time it is the
  * same argument: the session was live seconds ago because a fork can only happen
  * seconds after a child exits, so the guard's pass condition is unreachable on
@@ -7025,6 +7062,13 @@ async function pruneAtEarlyEnd(
         sessionId,
         settings.contextPruningForkMinColdAge,
         BOUNDARY_BREAK_EVEN_BUDGET,
+        // The trigger the receipt is priced by, and the reason it is passed
+        // rather than assumed: a fork here rides a boundary that exists only
+        // because this app made it in order to cut, so the rewrite it causes is
+        // charged to the cut exactly as the legacy pruner's is. `forkAndAdopt`
+        // used to record every fork as a `boundary` and this moment was priced
+        // free — see `forkCutFromRow`.
+        "early-end",
         adopt,
       )
     : await prune(id, sessionId, "early-end");
@@ -7036,16 +7080,19 @@ async function pruneAtEarlyEnd(
  *
  * Called from both moments a resume is already committed — the natural cycle
  * boundary and the manufactured one the ceiling watcher makes by ending a cycle
- * early. Nothing here distinguishes them, because by the time this runs there is
- * nothing to distinguish: the rewrite is spent either way and the cut rides it.
- * `maxBreakEven` carries the caller's position on that; see
- * `BOUNDARY_BREAK_EVEN_BUDGET`.
+ * early. The *mechanics* do not distinguish them: the rewrite is spent either
+ * way and the cut rides it, which is what `maxBreakEven` carries a position on
+ * (see `BOUNDARY_BREAK_EVEN_BUDGET`). The **accounting** must, which is what
+ * `trigger` carries — a boundary this app manufactured in order to cut owns the
+ * rewrite it causes, and one that was going to happen anyway does not. Recording
+ * every fork as a `boundary` is what let an early-end fork be priced free while
+ * the identical operation under the legacy engine was charged in full.
  *
- * Returns null always, and that is not a stub. `PruneOutcome` describes an
- * in-place edit — a before and an after of one file — and a fork has neither,
- * so `contextAfterPrune` has nothing to correct with. The next cycle's own
- * usage frames will report what the forked conversation costs, which is the
- * measurement that matters and the one this app already trusts everywhere else.
+ * Returns null on a refusal and a synthesised `PruneOutcome` on success. Only
+ * `tokensRemoved` is read from it, by `contextAfterPrune`; the rest is filled
+ * from what the fork reported rather than invented. Non-null is therefore also
+ * the signal that a cut landed, which is what `settleBoundary` labels the
+ * control group by — so this must not go back to returning null on success.
  *
  * The adoption is deliberately not verified here, because it cannot be: the
  * only thing that proves a fork resumes is a resume. `pendingFork` carries the
@@ -7056,6 +7103,7 @@ async function forkAndAdopt(
   sessionId: string | null,
   minColdAge: number | null,
   maxBreakEven: number | null,
+  trigger: PruneTrigger,
   adopt: (sid: string) => void,
 ): Promise<PruneOutcome | null> {
   if (!sessionId) return null;
@@ -7071,7 +7119,22 @@ async function forkAndAdopt(
     return null;
   }
 
-  const rowId = recordForkAttempt(id, sessionId, result, minColdAge);
+  // Measured off the written file, in the currency `prune_receipts.tokens_after`
+  // already uses, so the two engines' receipts are comparable rather than merely
+  // similarly named. This is what the next resume has to write, and the netting
+  // prices exactly that until a real turn lands to be read instead. Only for a
+  // fork that was written — a refusal wrote no file to measure.
+  const contextTokensAfter =
+    result.written && result.out ? contextTokens(result.out) : null;
+
+  const rowId = recordForkAttempt(
+    id,
+    sessionId,
+    result,
+    minColdAge,
+    trigger,
+    contextTokensAfter,
+  );
 
   if (!result.written || !result.newSessionId) {
     // A refusal is a result, not a failure, and the two must not read alike.
@@ -7426,6 +7489,43 @@ export function toolResultFailures(
   return failures;
 }
 
+/**
+ * What the cycle has cost after one `result` event, given what it stood at.
+ *
+ * **The two figures on that one event disagree about what they measure, and
+ * this is the half that is cumulative.** `total_cost_usd` is the *session's*
+ * running total, so a second `result` from the same child already contains
+ * everything the first reported; `usage` beside it is only that stretch's own
+ * and is still summed at the call site. Adding both costs charges the first
+ * stretch twice, and nothing says so — the run page, the log and the exit code
+ * are those of a cycle that went well.
+ *
+ * One child emits two terminal results whenever a turn ends while a background
+ * sub-agent is still running and the same session is woken again when it
+ * answers. Measured on run `075f7959`: `$7.025419` and `$9.330155` arrived in
+ * the same millisecond, the first equal to the session's cumulative telemetry
+ * at the instant that turn ended and the second to its total over all 110
+ * requests, and `spent_usd` was stored as their sum — 75% above what the
+ * session actually cost, on the figure `maxRunCostUSD` is compared against.
+ *
+ * A **restart** is not this case and must keep summing: a cycle that died at
+ * `error_during_execution` and resumed gets a second child, a second
+ * `IterationResult` and a CLI accumulator that starts at zero, which is why
+ * every such run reconciles to the cent against telemetry today. That is the
+ * whole reason this is scoped to one `IterationResult` rather than to the run.
+ *
+ * The larger rather than the last, and a non-positive reading ignored: a
+ * running total does not go backwards, so the two agree on every well-formed
+ * stream, and where they differ it is because the field was absent, unparseable
+ * or zero — which must leave a figure already reported standing rather than
+ * erase it.
+ */
+export function cycleCostAfterResult(prevUSD: number, reported: unknown): number {
+  const cost = Number(reported ?? 0);
+  if (!Number.isFinite(cost) || cost <= 0) return prevUSD;
+  return Math.max(prevUSD, cost);
+}
+
 /** Interpret one line of Claude Code's `stream-json` output. */
 function handleStreamLine(
   runId: string,
@@ -7646,8 +7746,13 @@ function handleStreamLine(
   if (type === "result") {
     // Authoritative per-iteration accounting from the CLI itself.
     acc.sawResult = true;
-    const cost = Number(ev.total_cost_usd ?? 0);
-    if (Number.isFinite(cost)) acc.costUSD += cost;
+    // Assigned through `cycleCostAfterResult` rather than accumulated, and the
+    // `+=` on tokens four lines down is deliberately not the same shape: see
+    // that function for why one of these two fields is a session running total
+    // and the other is not.
+    const before = acc.costUSD;
+    acc.costUSD = cycleCostAfterResult(acc.costUSD, ev.total_cost_usd);
+    const cost = acc.costUSD - before;
 
     const usage = (ev.usage ?? {}) as Record<string, unknown>;
     const n = (v: unknown) => (typeof v === "number" ? v : 0);
@@ -7703,6 +7808,11 @@ function handleStreamLine(
       kind: "result",
       payload: {
         subtype: ev.subtype,
+        // What this result *added*, not the number the CLI printed. The feed
+        // renders one of these per stretch and a reader adds them up, so on the
+        // two-result cycle `cycleCostAfterResult` describes the raw figure would
+        // put the whole session's total on the second row and invite exactly the
+        // double-count the field above no longer makes.
         costUSD: cost,
         numTurns: ev.num_turns,
         durationMs: ev.duration_ms,
@@ -8811,12 +8921,35 @@ export async function startRun(id: string): Promise<void> {
             .run(iterations, id);
         }
 
+        // Captured before the cut, because `adoptSession` reassigns `sessionId`
+        // and the probe is a statement about the conversation that was standing
+        // at this boundary — the same reason `pruneAtBoundary` passes its own
+        // parameter rather than whatever the fork adopted.
+        const boundarySessionId = sessionId;
+        const boundaryContextTokens = lastContextTokens;
+        const earlyEndOutcome = await pruneAtEarlyEnd(id, sessionId, adoptSession);
         lastContextTokens = contextAfterPrune(
           lastContextTokens,
           // `adoptSession` and not `prune` directly: under the fork engine this
           // writes a new transcript and the run has to move onto it, exactly as
           // at a natural boundary. Passing the closure is what lets it.
-          await pruneAtEarlyEnd(id, sessionId, adoptSession),
+          earlyEndOutcome,
+        );
+        // The other half of the boundary bookkeeping, and it was missing here.
+        // `settleBoundary` was called only from `pruneAtBoundary`, so on an
+        // install where the context ceiling reaches every run before a natural
+        // boundary does — which is this one, 50 early-end receipts against 2 —
+        // `resume_probes` stayed empty for ever. That table is the control group
+        // `boundaryInvalidation` needs before it will charge anything, so with
+        // it empty every boundary cut was priced at $0 and the reported net
+        // could not go negative. An empty control is not a neutral state: it is
+        // the one that silently restores the assumption the control exists to
+        // test.
+        await settleBoundary(
+          id,
+          boundarySessionId,
+          earlyEndOutcome !== null,
+          boundaryContextTokens,
         );
         continue;
       }

@@ -1077,6 +1077,8 @@ describe("forkCutFromRow", () => {
     netBytes: 22_725,
     suffixBytes: 122_902,
     model: "claude-opus-5",
+    trigger: "boundary" as const,
+    contextTokensAfter: null,
   };
 
   it("counts the net of the cut, not the gross", () => {
@@ -1121,14 +1123,62 @@ describe("forkCutFromRow", () => {
     assert.ok(old.tokensBefore < now.tokensBefore);
   });
 
-  it("is a boundary cut, so it inherits the unanswered invalidation question", () => {
-    // A fork rides the resume the next cycle was going to make anyway — the
-    // same claim, unproven in the same way, as the boundary prune's. It must
-    // not be filed as an early end, which is charged its write in full.
+  it("keeps a boundary fork's unanswered invalidation question", () => {
+    // A fork at a *natural* boundary rides the resume the next cycle was going
+    // to make anyway — the same claim, unproven in the same way, as the
+    // boundary prune's.
     assert.equal(forkCutFromRow(REAL).trigger, "boundary");
     const net = netReceipt(forkCutFromRow(REAL), 10);
     assert.equal(net.invalidationKnown, false);
     assert.equal(net.invalidationUSD, 0);
+  });
+
+  it("charges a fork taken at an early end, as the legacy pruner already is", () => {
+    // The bug this column exists to close. Every fork used to be filed as a
+    // `boundary` whatever moment it was taken at, so a cut at a boundary this
+    // app manufactured — by ending a cycle at the context ceiling *in order to
+    // cut* — was priced free, while the identical operation under the legacy
+    // engine was charged its whole rewrite. Measured on the three forks that
+    // first ran here: $0.00 reported against $1.79–1.83 billed.
+    const cut = forkCutFromRow({ ...REAL, trigger: "early-end" });
+    assert.equal(cut.trigger, "early-end");
+    const net = netReceipt(cut, 10);
+    assert.equal(net.invalidationKnown, true, "an early end's write is not in doubt");
+    assert.ok(net.invalidationUSD > 0, "and it is not free");
+  });
+
+  it("reads a row with no trigger as an early end, the conservative way", () => {
+    // Rows written before the column. Unknown resolves to *charged* rather than
+    // free, because this figure decides whether to keep a feature switched on
+    // and the failure that hid this bug for two days was a cost silently
+    // reported as zero.
+    const { trigger: _dropped, ...noTrigger } = REAL;
+    const cut = forkCutFromRow({ ...noTrigger, trigger: null });
+    assert.equal(cut.trigger, "early-end");
+    assert.ok(netReceipt(cut, 10).invalidationUSD > 0);
+  });
+
+  it("prices the rewrite off the forked conversation, not off the suffix", () => {
+    // `tokensAfter` is what a resume has to write. The suffix after the cut is
+    // not that: on the first three forks here the suffix ran 70–87k against
+    // conversations of ~180k, and estimating the write from it put the cost at
+    // $0.62–0.69 where $1.79–1.83 was billed.
+    const measured = forkCutFromRow({
+      ...REAL,
+      trigger: "early-end",
+      contextTokensAfter: 180_000,
+    });
+    assert.equal(measured.tokensAfter, 180_000);
+
+    const inferred = forkCutFromRow({ ...REAL, trigger: "early-end" });
+    assert.ok(
+      measured.tokensAfter > inferred.tokensAfter * 2,
+      "the suffix-derived fallback is the one that understates the cost",
+    );
+    assert.ok(
+      netReceipt(measured, 10).invalidationUSD >
+        netReceipt(inferred, 10).invalidationUSD,
+    );
   });
 
   it("charges a fork when the control says clean resumes run warm", () => {

@@ -89,6 +89,7 @@ const {
   isTransientApiError,
   isUsageLimit,
   copyGlobsFor,
+  cycleCostAfterResult,
   logLifecycle,
   maxRetriesFor,
   transientBackoffMs,
@@ -3593,6 +3594,58 @@ describe("failed tool results", () => {
 
     assert.equal(failure.text.length, 600);
     assert.equal(failure.text.endsWith("…"), true);
+  });
+});
+
+describe("cycleCostAfterResult", () => {
+  // The failure this is written against is silent and it is money: nothing
+  // throws, the cycle exits 0, the log reads like an ordinary run, and the only
+  // evidence is a figure on the run page that no other reading agrees with —
+  // including the one `maxRunCostUSD` is compared against.
+
+  it("takes a second result's total whole, because it already contains the first", () => {
+    // Run 075f7959, verbatim. One child, two terminal `result` events in the
+    // same millisecond: the agent's turn ended while a background `Explore`
+    // sub-agent was still running, and the same session was woken again when it
+    // answered. `total_cost_usd` is the session's running total, so $9.330155
+    // *is* the whole cycle — telemetry recorded exactly that across all 110 of
+    // the session's requests. Summing them stored $16.355574, 75% over.
+    const first = cycleCostAfterResult(0, 7.025419);
+    assert.equal(first, 7.025419);
+    assert.equal(cycleCostAfterResult(first, 9.330155), 9.330155);
+  });
+
+  it("leaves a figure already reported standing when the next reading is missing", () => {
+    // The whole risk of assigning rather than accumulating. A `result` whose
+    // cost field is absent, unparseable or zero says nothing about the session,
+    // and must not be able to erase what an earlier one measured — that would
+    // trade a cycle overstated by 75% for one silently reported at $0.
+    for (const absent of [undefined, null, "", "n/a", NaN, 0, -1]) {
+      assert.equal(cycleCostAfterResult(7.025419, absent), 7.025419);
+    }
+    // …and a first reading of nothing is still nothing, rather than a NaN that
+    // would poison `spent_usd` for the rest of the run.
+    assert.equal(cycleCostAfterResult(0, undefined), 0);
+  });
+
+  it("does not go backwards on an out-of-order reading", () => {
+    // A running total is monotone, so the larger and the last agree on every
+    // well-formed stream. Where they could differ the stream is already wrong,
+    // and understating spend is the direction a budget guard cannot recover
+    // from.
+    assert.equal(cycleCostAfterResult(9.330155, 7.025419), 9.330155);
+  });
+
+  it("is scoped to one child, so a restart still sums", () => {
+    // Not a property of this function but of where it is called: a cycle that
+    // died at `error_during_execution` and resumed gets a second child with a
+    // CLI accumulator that starts at zero, and the run loop's own `+=` across
+    // children is what makes those runs reconcile to the cent. Pinned as the
+    // arithmetic that must survive: each child folds its own results, and only
+    // then are the children added.
+    const died = cycleCostAfterResult(0, 3.8235865);
+    const resumed = cycleCostAfterResult(0, 13.6167145);
+    assert.equal(Number((died + resumed).toFixed(4)), 17.4403);
   });
 });
 

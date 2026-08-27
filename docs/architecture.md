@@ -55,6 +55,12 @@ src/lib/
                    against the diff's file list, into four groups. Reaches
                    nothing, because `RunTouches.tsx` imports it — the split is
                    what keeps `node:fs` out of the browser bundle
+  touchedMap.ts    those four groups as a directory tree, for the picture at
+                   /runs/[id]/touched: the node set is files and the layout is
+                   the path hierarchy, because tool → file is a star. Folds at
+                   a depth when over budget and never drops a file; adds no
+                   field that could be read as an outcome. Reaches nothing,
+                   for `runTouches.ts`'s own reason
   review.ts        the on-demand reviewer (a third, deliberate child process)
   land.ts          merge preview, landing, branch deletion, branch inventory
   chat.ts          the orchestrator chat (a fourth, deliberate child process),
@@ -73,6 +79,11 @@ src/lib/
                    local-graph walk, and the settings the browser stores
   forceLayout.ts   the force-directed layout under it: Barnes-Hut repulsion,
                    link springs, centring, and an alpha that cools to a stop
+  canvasView.ts    what every <canvas> needs and none of them owns: the
+                   world/screen transform, the cull rectangle, framing, the
+                   nearest-within-reach hit test, device-pixel sizing under a
+                   ResizeObserver, the wheel's deltaMode, the colour probe.
+                   Knows what a pixel is and never what is drawn on it
   db.ts            SQLite (runs, events, reviews, chats, proposals, workflows,
                    schedules, settings)
 src/app/api/       usage · account · runs · branches · calibrate · settings ·

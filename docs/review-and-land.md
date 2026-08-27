@@ -35,6 +35,40 @@ stop at a size limit. When that happens the page says how many files are listed
 without contents, because a diff that quietly shows twelve of forty reads as a run
 that touched twelve.
 
+**What it touched.** Under the diff, the files the run's tool calls *named*,
+grouped against the files its branch *changed*. The interesting group is the one
+neither list has on its own: changed and never named by any tool call, which
+means something that names no file wrote it — a `Bash` command, a formatter, a
+codegen step. Beside it: named and changed, named and not changed (read and never
+used, or edited and reverted), and named outside the checkout entirely.
+
+A recorded call means the call was **attempted**. UsageFoundry stores a tool's
+result only when the tool failed, and a failure carries nothing that ties it back
+to the call that caused it, so nothing on this card or the map below says a read
+or a write succeeded.
+
+**Lay it out.** A button on that card opens `/runs/<id>/touched`, the same files
+drawn as a picture. They are positioned by where they sit in the repository —
+`src/lib/` in one cluster, `docs/` in another — so the question it answers is
+which part of the tree the run worked in and where reading turned into writing. A
+node's size is how many calls named it; its fill is read, written, or both; a ring
+means the branch diff lists it; a dashed ring means it is outside the checkout;
+and a hollow red one is a file that changed with no tool call behind it. Drag to
+pan, scroll to zoom, drag a node to arrange it, click one to read it in full.
+
+Deliberately *not* a graph of tools: a line means "is in", never "was called by".
+Which tools named a file is written on the file. A tool-to-file graph is a star —
+a dozen hubs with nearly every file hanging off `Read` — and it draws one fact the
+count at the top of the card already gives you.
+
+Very large runs fold whole directories into a single node carrying the number of
+files behind it; the page says how many are folded, and clicking one opens it.
+Nothing is ever dropped.
+
+If the run is old enough that its events were swept, the page says *swept* rather
+than showing you an empty picture — the checkout is kept on a different clock, so
+the changes are still there when the events are not.
+
 **The review.** A button that runs Claude once against the diff, the task the run
 was given, and how it ended, and asks what changed, what to look at first, and
 what looks risky. It is on demand only and never automatic — it is billed, and a

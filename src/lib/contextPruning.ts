@@ -1708,6 +1708,8 @@ export function recordForkAttempt(
   sourceSessionId: string | null,
   result: ForkResult,
   minColdAgeSeconds: number | null,
+  trigger: PruneTrigger,
+  contextTokensAfter: number | null,
 ): number | null {
   try {
     const info = db()
@@ -1715,8 +1717,8 @@ export function recordForkAttempt(
         `INSERT INTO fork_attempts
            (ts, run_id, source_session_id, new_session_id, written, refused_by,
             reason, removed_bytes, net_bytes, suffix_bytes, break_even_turns,
-            cold_age_seconds, min_cold_age)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            cold_age_seconds, min_cold_age, trigger, context_tokens_after)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         Date.now(),
@@ -1732,6 +1734,8 @@ export function recordForkAttempt(
         result.breakEvenTurns,
         result.coldAgeSeconds,
         minColdAgeSeconds,
+        trigger,
+        contextTokensAfter,
       );
     return Number(info.lastInsertRowid);
   } catch (err) {
@@ -2641,17 +2645,20 @@ export async function priceReceipts(
  *
  * ## The invalidation is the same open question, arriving unchanged
  *
- * A fork at a cycle boundary is a `boundary` cut, so it goes through
- * `boundaryInvalidation` and inherits the whole indeterminate-until-a-control
- * treatment. That is right rather than convenient: the counterfactual is
- * identical — would the resume have rewritten this prefix anyway — and a fork
- * does not answer it any better than an in-place edit does. If anything the
- * question is sharper here, because the fork's prefix is genuinely new content
- * that was never cached under any key.
+ * A fork is priced by **where it was taken**, exactly as a prune receipt is.
+ * At a natural boundary it is a `boundary` cut and goes through
+ * `boundaryInvalidation` with the whole indeterminate-until-a-control
+ * treatment, because there the counterfactual is genuinely open: the resume
+ * might have rewritten this prefix anyway. At an early end it is an `early-end`
+ * cut and is charged its rewrite, because that boundary exists only because
+ * this app made it in order to cut.
  *
- * `tokensAfter` is `tokensBefore - tokensRemoved` rather than a second reading,
- * and cannot be otherwise: there is no post-cut measurement of a file that was
- * written rather than edited. It errs the same way the pruner's does.
+ * That distinction used to be missing — every fork was read as a boundary — and
+ * it was not a rounding error. On the three forks that first ran here, the
+ * resumes wrote 178k–183k tokens at the one-hour class, about $1.80 each, and
+ * all of it was reported as $0 against $0.86 of savings. The identical
+ * operation under the legacy engine was charged in full, so the engine switch
+ * silently moved the same event onto the free side of the ledger.
  */
 export async function forkSavings(
   filter: { from: number; to: number } | { runId: string },
@@ -2662,9 +2669,9 @@ export async function forkSavings(
 /**
  * One `fork_attempts` row as a cut the netting can price.
  *
- * Pure and exported so the two conversions in it can be tested without a
- * database: the byte-to-token change of basis, and what happens to a row
- * written before `suffix_bytes` existed.
+ * Pure and exported so the conversions in it can be tested without a database:
+ * the byte-to-token change of basis, what happens to a row written before
+ * `suffix_bytes` existed, and how a row with no recorded trigger is read.
  */
 export function forkCutFromRow(row: {
   ts: number;
@@ -2673,6 +2680,8 @@ export function forkCutFromRow(row: {
   netBytes: number;
   suffixBytes: number;
   model: string | null;
+  trigger: PruneTrigger | null;
+  contextTokensAfter: number | null;
 }): NettableCut {
   // The **net** of the cut, not the gross. `removedBytes` is what came out;
   // `netBytes` is that less the pointers winnow put back in, and the pointers
@@ -2697,12 +2706,26 @@ export function forkCutFromRow(row: {
   return {
     ts: row.ts,
     runId: row.runId,
-    // A fork happens at a cycle boundary. It rides the same resume the boundary
-    // prune does and inherits the same unanswered question about whether that
-    // resume was paying anyway.
-    trigger: "boundary",
+    // A row with no trigger predates the column. Read as `early-end`, which is
+    // the **conservative** direction on a figure that decides whether to keep a
+    // feature switched on: it charges the rewrite rather than assuming it away.
+    // It also happens to be true of every fork written before the column
+    // existed, because the context ceiling reaches a run before a natural
+    // boundary does — this install has 50 early-end receipts against 2 boundary
+    // ones, and every fork it has ever written came from the early-end path.
+    trigger: row.trigger ?? "early-end",
     tokensBefore: before,
-    tokensAfter: Math.max(0, before - removed),
+    // The forked conversation as measured, not as inferred. `before - removed`
+    // is the *suffix* after the cut, which is not what a resume writes — it
+    // writes the whole conversation, and on the first three forks here that was
+    // 180k against a suffix of 70–87k. Estimating the rewrite from the suffix
+    // put the cost at $0.62–0.69 where $1.79–1.83 was billed. The fallback is
+    // kept for rows written before the column, and is wrong in the direction
+    // that understates cost — which is why it is a fallback and not the rule.
+    tokensAfter:
+      row.contextTokensAfter !== null && row.contextTokensAfter > 0
+        ? row.contextTokensAfter
+        : Math.max(0, before - removed),
     tokensRemoved: removed,
     model: row.model,
   };
@@ -2718,7 +2741,8 @@ function readForkCuts(
   try {
     const rows = db()
       .prepare(
-        `SELECT ts, run_id, new_session_id, removed_bytes, net_bytes, suffix_bytes
+        `SELECT ts, run_id, new_session_id, removed_bytes, net_bytes, suffix_bytes,
+                trigger, context_tokens_after
            FROM fork_attempts
           WHERE written = 1 AND ${where}
           ORDER BY ts`,
@@ -2730,6 +2754,8 @@ function readForkCuts(
       removed_bytes: number;
       net_bytes: number;
       suffix_bytes: number;
+      trigger: PruneTrigger | null;
+      context_tokens_after: number | null;
     }[];
 
     // One lookup per run, as `priceReceipts` does, and for the model rather
@@ -2752,6 +2778,8 @@ function readForkCuts(
           netBytes: r.net_bytes,
           suffixBytes: r.suffix_bytes,
           model: models.get(r.run_id) ?? null,
+          trigger: r.trigger,
+          contextTokensAfter: r.context_tokens_after,
         }),
       };
     });

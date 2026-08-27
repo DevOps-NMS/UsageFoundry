@@ -3,9 +3,11 @@
  *
  * Separate from `canvasGraph.ts`, which is the *workflow* canvas's geometry:
  * that one lays a DAG out in deterministic columns and never moves again, and
- * the two have no force, no velocity and no cooling in common. What they do
- * share — the world/screen transform and hit testing — lives in `canvasView.ts`
- * and is imported by both.
+ * the two have no force, no velocity and no cooling in common. Nothing in this
+ * file is shared with either — what a surface has in common with any other
+ * canvas is the world/screen transform, hit testing, the pixel ratio and the
+ * gestures, and that is `canvasView.ts`, which this file does not import and
+ * `KnowledgeGraphCanvas` does.
  *
  * ## Why the layout is hand-rolled
  *
