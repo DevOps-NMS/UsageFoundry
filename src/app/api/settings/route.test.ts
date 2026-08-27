@@ -249,6 +249,58 @@ for (const key of Object.keys(PROBES) as (keyof Settings)[]) {
   });
 }
 
+/**
+ * The one key here whose `0` and blank are opposites rather than synonyms.
+ *
+ * Everywhere else on this route a number is a limit, and `optionalNumber`'s
+ * closing `n > 0 ? n : null` is right for all of them: a cost ceiling of zero
+ * and no cost ceiling are the same request. This key is a threshold, not a
+ * limit. `0` is the shipped default and the only value that ever forks; blank
+ * defers to winnow's own hour, and an hour at a cycle boundary refuses every
+ * time. Sharing that helper meant typing 0 returned 200, redrew the form as
+ * blank, and left the engine off.
+ *
+ * The probe loop above cannot catch this, and did not: its probe sends 30, and
+ * 30 is on the surviving side of the fold. Only 0 distinguishes the two.
+ */
+test("PUT /api/settings stores a fork quiet period of 0 as 0, not as blank", async () => {
+  const answered = await write("contextPruningForkMinColdAge", 0);
+  assert.equal(
+    answered.contextPruningForkMinColdAge,
+    0,
+    `0 came back as ${JSON.stringify(answered.contextPruningForkMinColdAge)} — ` +
+      `blank here means "use winnow's hour", which never forks, so an operator ` +
+      `asking for 0 would be answered with the opposite of what they asked for`,
+  );
+  assert.equal((await read()).contextPruningForkMinColdAge, 0);
+});
+
+test("PUT /api/settings still reads a blank fork quiet period as blank", async () => {
+  await write("contextPruningForkMinColdAge", 45);
+  const answered = await write("contextPruningForkMinColdAge", "");
+  assert.equal(answered.contextPruningForkMinColdAge, null);
+  assert.equal((await read()).contextPruningForkMinColdAge, null);
+});
+
+test("PUT /api/settings refuses a negative fork quiet period instead of blanking it", async () => {
+  // Unreachable while the key went through `optionalNumber`: -5 was folded to
+  // null and stored as "defer to winnow", so a typo turned the engine off and
+  // answered 200. The route always carried this message; nothing could reach it.
+  const { PUT } = await import("./route");
+  const res = await PUT(
+    new Request("http://localhost/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ contextPruningForkMinColdAge: -5 }),
+    }),
+  );
+  assert.equal(res.status, 400);
+  assert.match(
+    ((await res.json()) as { error: string }).error,
+    /non-negative/,
+  );
+});
+
 test("a blank prompt keeps whatever is stored", async () => {
   // The rule `continuationPrompt`, `isolationPreamble`, `donePushbackPrompt`
   // and `continuedWorkPrompt` share: emptying one would silently remove

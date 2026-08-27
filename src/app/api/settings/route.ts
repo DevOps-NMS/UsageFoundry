@@ -335,7 +335,20 @@ async function putHandler(req: Request) {
   }
 
   if ("contextPruningForkMinColdAge" in body) {
-    const n = optionalNumber(body.contextPruningForkMinColdAge);
+    // Deliberately not `optionalNumber`. That helper ends `n > 0 ? n : null`,
+    // which is right for every limit above it — a cost ceiling of 0 and no cost
+    // ceiling are the same request, so folding them together loses nothing.
+    // Here they are opposites: 0 is the shipped default and the only value that
+    // ever forks, while null hands the decision to winnow's own hour, which at
+    // a cycle boundary refuses every time. Sending this key through that helper
+    // meant an operator could type 0, get a 200 and a saved settings page, and
+    // have the value arrive as null with the engine still off.
+    //
+    // It also made the 400 below unreachable: a negative or unparseable value
+    // came back as null and was stored as "blank" rather than refused.
+    const raw = body.contextPruningForkMinColdAge;
+    const n =
+      raw === null || raw === undefined || raw === "" ? null : Number(raw);
     if (n !== null && (!Number.isFinite(n) || n < 0)) {
       return NextResponse.json(
         { error: "contextPruningForkMinColdAge must be a non-negative number of seconds, or blank" },
