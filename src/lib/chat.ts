@@ -279,19 +279,20 @@ export function questionChoices(
 /**
  * How many unanswered questions one chat may hold.
  *
- * `MAX_PENDING_PROPOSALS`' reasoning at a tenth the scale, because the thing
- * being bounded is smaller: a question is answered in one sitting by the person
- * who is already reading the reply, and a list longer than this stops being a
+ * `MAX_PENDING_PROPOSALS`' reasoning against a much smaller thing, which is why
+ * the number is a fifth of it: a proposal is a card to scan and a question is a
+ * decision to make, and past a handful of decisions the panel stops being a
  * question and becomes a form. A form gets skimmed, and a skimmed answer is
- * worse than no answer — the model proposed on it either way, and only one of
- * those two the operator will remember agreeing to.
+ * worse than no answer — the model proposes on it either way, and only one of
+ * those two is something the operator will remember agreeing to.
  */
 export const MAX_OPEN_QUESTIONS = 5;
 
 /**
  * How many concrete answers one question may offer.
  *
- * Same bound for the same reason one level down. Past this the choices are a
+ * The same argument one level down, and a larger number because picking from a
+ * list is cheaper than answering one more question. Past this the choices are a
  * search rather than a decision, and what the operator wants then is to type.
  */
 export const MAX_QUESTION_CHOICES = 8;
@@ -458,7 +459,15 @@ export function pendingProposals(chatId: string): ChatProposalRow[] {
 export function listQuestions(chatId: string): ChatQuestionRow[] {
   return db()
     .prepare(
-      "SELECT * FROM chat_questions WHERE chat_id = ? ORDER BY created_at, id",
+      // `rowid` rather than `id`, which is `listMessages`' correction one table
+      // over and the same defect: every question of one call shares a
+      // `created_at`, so the tiebreak decides the order — and `id` is a random
+      // UUID, which shuffles a numbered list of questions the model wrote in a
+      // deliberate order and shuffles the answer message quoting them back.
+      // Not a `seq` column, because there is nothing here to backfill: unlike
+      // `chat_messages` this table has never shipped, so insert order and
+      // `rowid` order have never been able to disagree.
+      "SELECT * FROM chat_questions WHERE chat_id = ? ORDER BY created_at, rowid",
     )
     .all(chatId) as ChatQuestionRow[];
 }
@@ -486,10 +495,12 @@ export interface QuestionInput {
 /**
  * Record what one turn asked, in the order it asked it.
  *
- * One statement per question rather than one row holding a list, because the
- * operator answers them one at a time and an answer has to attach to the
- * sentence it answers. `created_at` is shared across the call so the page shows
- * them as the set they were asked as.
+ * One row per question rather than one row holding a list, because an answer
+ * has to attach to the sentence it answers — the operator may answer two of
+ * three and leave the third, and what happens to the third is a fact about that
+ * question rather than about the set. `created_at` is shared across the call so
+ * the page can show them as the set they were asked as, and `listQuestions`
+ * breaks that tie on `rowid` so they stay in the order the model wrote them.
  */
 export function createQuestions(
   chatId: string,

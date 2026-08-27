@@ -1115,6 +1115,35 @@ describe("a question's choices survive the round trip", () => {
     assert.deepEqual(questionChoices({ choices: '{"a":1}' }), []);
     assert.deepEqual(questionChoices({ choices: '["a", null, 2]' }), ["a"]);
   });
+
+  it("keeps a set in the order it was asked in", () => {
+    // `chatOrder.test.ts`'s defect one table over: every question of one call
+    // shares a `created_at`, so the tiebreak is the whole of what orders them,
+    // and a random UUID shuffles a numbered list of questions the model wrote
+    // in a deliberate order — and shuffles the answer message quoting them
+    // back at it.
+    // Ten, which is more than `askOperator` would accept — the cap is the
+    // tool's and not the table's — because a burst is what makes the
+    // regression fail every time rather than five times in six.
+    const chat = createChat();
+    const asked = Array.from({ length: 10 }, (_, i) => ({
+      question: `question ${i}`,
+      choices: [],
+      allowText: true,
+    }));
+    createQuestions(chat.id, asked);
+
+    const rows = listQuestions(chat.id);
+    assert.equal(
+      new Set(rows.map((q) => q.created_at)).size,
+      1,
+      "the tie this orders through has to actually be there",
+    );
+    assert.deepEqual(
+      rows.map((q) => q.question),
+      asked.map((q) => q.question),
+    );
+  });
 });
 
 describe("what a message does to an open question", () => {

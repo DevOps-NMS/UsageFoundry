@@ -4086,8 +4086,10 @@ through before trusting this unattended:
   `docker compose up --build` half of the verification loop could not be
   attempted at all rather than having been skipped. What was run, on this
   branch: `NODE_ENV=development npm ci --include=dev` (exit 0),
-  `npm run typecheck` (exit 0) and `npm test` (**1,824 tests / 272 suites / 0
-  failures**). There is also no UI — that is a separate run continuing this
+  `npm run typecheck` (exit 0) and `npm test` (**1,825 tests / 272 suites / 0
+  failures**). `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` was
+  **not** run, so the new route file has never been through the Next.js build —
+  only through `tsc`. There is also no UI — that is a separate run continuing this
   branch — so no question has ever been rendered and `POST
   /api/chat/[id]/questions` has never been called by anything but a unit test.
 
