@@ -2836,20 +2836,42 @@ export function addSavings(a: PruneSavings, b: PruneSavings): PruneSavings {
   };
 }
 
+/**
+ * Both engines' cuts, priced and not yet added up.
+ *
+ * `pruneSavings` below is this plus `sumPruneSavings`, and the split exists for
+ * the one caller that has to slice before it sums: the dashboard prices once
+ * over the widest span it draws and then totals three subsets of that list, so
+ * a function returning a total is no use to it.
+ *
+ * It is exported because of what that caller did instead. It reached for
+ * `priceReceipts(readReceipts(...))` — the legacy table alone — and so the
+ * whole dashboard was blind to the fork engine: a cut showed up on its own
+ * run's page, which goes through `pruneSavings`, and nowhere on the card that
+ * says what context control has been worth. Two views of one event, disagreeing
+ * because one of them reached past the function that knows there are two
+ * tables. There is no longer a reason to reach past it.
+ */
+export async function pricedCuts(
+  filter: { from: number; to: number } | { runId: string },
+): Promise<PricedReceipt[]> {
+  // Both engines. An install that switched from one to the other has cuts of
+  // both kinds in any window wide enough to matter, and a figure covering only
+  // the engine currently configured would drop the other's work out of the
+  // total the moment the setting changed — which reads as pruning having
+  // suddenly stopped earning anything.
+  const [pruned, forked] = await Promise.all([
+    priceReceipts(readReceipts(filter)),
+    priceForks(readForkCuts(filter)),
+  ]);
+  return [...pruned, ...forked];
+}
+
 /** What pruning has been worth, over a window or over one run. */
 export async function pruneSavings(
   filter: { from: number; to: number } | { runId: string },
 ): Promise<PruneSavings> {
-  // Both engines, added. An install that switched from one to the other has
-  // cuts of both kinds in any window wide enough to matter, and a figure that
-  // covered only the engine currently configured would drop the other's work
-  // out of the total the moment the setting changed — which reads as pruning
-  // having suddenly stopped earning anything.
-  const [pruned, forked] = await Promise.all([
-    sumPruneSavings(await priceReceipts(readReceipts(filter))),
-    forkSavings(filter),
-  ]);
-  return addSavings(pruned, forked);
+  return sumPruneSavings(await pricedCuts(filter));
 }
 
 /**

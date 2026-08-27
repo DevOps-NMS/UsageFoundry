@@ -15,8 +15,7 @@ import { telemetryWindow } from "@/lib/otlp";
 import { retentionCutoff } from "@/lib/retention";
 import { installSpendReport } from "@/lib/installBudget";
 import {
-  priceReceipts,
-  readReceipts,
+  pricedCuts,
   sumPruneSavings,
 } from "../../../lib/contextPruning";
 import { readFilterSavings } from "@/lib/intakeFilter";
@@ -136,9 +135,12 @@ export async function GET(req: Request) {
     // the weekly window's own start as well, so the total can never span less
     // than a figure printed beside it on an install with a short retention.
     const pruneFrom = Math.min(completeFrom ?? 0, snapshot.weekly.startsAt);
-    const pricedReceipts = await priceReceipts(
-      readReceipts({ from: pruneFrom, to: now }),
-    );
+    // `pricedCuts` and not `priceReceipts(readReceipts(...))`: that pair reads
+    // the legacy table alone, so every cut the fork engine made was missing
+    // from this card while showing correctly on its own run's page — which goes
+    // through `pruneSavings`, which knows there are two tables. The run page and
+    // the dashboard were describing the same events and disagreeing.
+    const pricedReceipts = await pricedCuts({ from: pruneFrom, to: now });
     const prunedWithin = (from: number, to: number) =>
       sumPruneSavings(
         pricedReceipts.filter((p) => p.row.ts >= from && p.row.ts <= to),

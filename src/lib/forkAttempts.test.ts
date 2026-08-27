@@ -88,6 +88,32 @@ describe("recordForkAttempt", () => {
     assert.equal(row.cold_age_seconds, 12.5);
     assert.equal(row.min_cold_age, 300);
     assert.equal(row.resumed, null, "a fork has no verdict until one resumes it");
+    // The two that decide how the cut is priced rather than merely describing
+    // it. Without the trigger every fork read as a free boundary cut; without
+    // the conversation size the rewrite was estimated off the suffix, which is
+    // a third of it.
+    assert.equal(row.trigger, "boundary");
+    assert.equal(row.context_tokens_after, 180_000);
+  });
+
+  it("puts a fork in front of the dashboard, not only its own run's page", async () => {
+    // The two views disagreed. A run's page goes through `pruneSavings`, which
+    // reads both tables; the dashboard reached for `priceReceipts(readReceipts)`
+    // directly, which is the legacy table alone — so a fork showed a figure on
+    // one screen and was absent from the other. `pricedCuts` is the seam both
+    // now share, and this asserts it can see a fork at all.
+    const { recordForkAttempt, pricedCuts } = await import("./contextPruning.js");
+
+    recordForkAttempt("run-dash", "src-session", WRITTEN, 0, "early-end", 180_000);
+    const cuts = await pricedCuts({ runId: "run-dash" });
+    assert.equal(
+      cuts.length,
+      1,
+      "a written fork has to appear in the list the dashboard sums, or the " +
+        "card reports $0 for work that happened",
+    );
+    assert.equal(cuts[0].row.trigger, "early-end");
+    assert.equal(cuts[0].row.tokensAfter, 180_000);
   });
 
   it("records a refusal, because that is the common outcome at a boundary", async () => {
