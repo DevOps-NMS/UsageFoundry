@@ -653,458 +653,495 @@ export default function ChatPage() {
   };
 
   return (
-    <>
-      <div className="mb-3 flex flex-wrap items-center gap-3">
-        <h1 className="text-xl font-semibold tracking-tight">Orchestrator</h1>
-        <div className="ml-auto flex items-center gap-3">
-          {chat && chat.costUSD > 0 && (
-            <span className="text-xs tabular-nums text-ink-muted">
-              {fmtUSD(chat.costUSD)} this chat
-            </span>
-          )}
-          <Button variant="secondary" onClick={() => void newChat()}>
-            New chat
-          </Button>
-        </div>
-      </div>
+    /* The page is exactly the pane at `lg`, and nothing on it may make the
+        pane scroll. Both boxes in the row below already scroll themselves, so a
+        scrollbar out here is one the reader works through *behind* two that are
+        doing the same job — and the first thing it pushes past the fold is the
+        composer, the one control this page exists to be typed into.
 
-      {/* Two paragraphs of standing context stood between the heading and a box
-          that fills what is left of the pane, and everything they cost came off
-          the box — which is how the composer at the foot of it ended up under
-          the fold on a short window. What stays visible is the sentence that
-          has to be read before anything on this page is pressed: hiding *that*
-          would be trading a safety claim for a few lines of room, and the rule
-          is that a disclosure holds what some readers need rather than what all
-          of them do. The rest is read once, and is a press away with its
-          subject named on the summary. */}
-      <Notice tone="info" quiet>
-        <p>
-          <strong>Nothing here starts a run.</strong> Each proposal waits for
-          you, and then runs under the guards of the template it names — never
-          under anything the chat chose.
-        </p>
-        <Disclosure
-          className="mt-1.5"
-          summary="What the chat itself may do, and what its turns cost"
-        >
-          <p className="mt-2">
-            A proposal that names no template runs under the default guard set
-            in <Link href="/settings">Settings</Link>.
-          </p>
-          <p className="mt-2">
-            The chat itself runs with no tool restrictions, so it can read, run
-            commands and reach GitHub while it works out what to propose; the
-            instruction not to do the work, rather than a permission mode, is
-            what keeps it out of your checkouts. Its turns spend against the
-            same 5-hour window as everything else, and that cost is shown here
-            only — never added to a run&rsquo;s, or to the dashboard meters.
-          </p>
-        </Disclosure>
-      </Notice>
+        The shell's column stays `min-h-full`, because every other page depends
+        on growing past the pane, so the bound is this page's own — and it is
+        two boxes rather than one. The outer takes what the column has left
+        over. The inner is taken *out of flow*, which is the half that is not
+        obvious: an in-flow box with no height of its own reports its content as
+        its intrinsic height, so a long thread grows the column back through the
+        very item meant to bound it. Measured in Chromium against this exact
+        nesting — `h-full`, `flex-1` with `min-h-0`, `height: 0` with `grow`,
+        and `overflow-hidden` all hand the column the whole transcript, and only
+        the out-of-flow box does not. It contributes nothing to that
+        measurement and simply takes the box it was given, which is the trade
+        `Log`'s `pane` size already makes one page over.
 
-      {pollError && <Notice tone="danger">{pollError}</Notice>}
-      {error && <Notice tone="danger">{error}</Notice>}
-
-      {/* Fills what is left of the pane rather than taking 68vh of the window,
-          which is a taller box than the pane it sits in — the composer went
-          under the fold and the page grew a second scrollbar behind a thread
-          that was already scrolling itself.
-
-          Only at `lg`, where the proposals sit *beside* the thread. Stacked
-          under it there is a second column of content below the fold and the
-          page is meant to scroll, so the card stays a bounded box there.
-
-          The floor is 22rem rather than 26: a minimum is the one thing here
-          that can still push the composer out of the pane, and it does it on
-          exactly the short window that can least afford it. Below the floor the
-          thread is small; past it the page scrolls again. */}
-      <div className="grid gap-4 lg:min-h-[22rem] lg:flex-1 lg:grid-cols-[minmax(0,1fr)_360px]">
-        {/* `max-h` in rem and not vh, for the reason a box inside the pane is
-            never sized in viewport units: the pane is the window less the
-            toolbar less its own padding less everything above this row, so
-            60vh was a cap that could sit either side of the edge depending on
-            the window and never on the box it was capping. */}
-        <Card
-          emphasis="default"
-          className="flex max-h-[34rem] min-h-[22rem] flex-col lg:max-h-none lg:min-h-0"
-        >
-          <div className="relative min-h-0 flex-1">
-            <div ref={threadRef} onScroll={onScroll} className="h-full overflow-y-auto pr-1">
-              {/* `additions` only: the waiting row's elapsed time changes every
-                  second inside this region, and the default `additions text`
-                  would read the whole thing out again each time. */}
-              <div
-                role="log"
-                aria-live="polite"
-                aria-relevant="additions"
-                aria-label="Conversation"
-                className="flex flex-col"
-              >
-                {chat === null ? (
-                  <div className="py-10 text-center text-sm text-ink-muted">
-                    {pollError ? "The conversation could not be loaded." : "Loading…"}
-                  </div>
-                ) : messageCount === 0 ? (
-                  <div className="px-2 py-10 text-center">
-                    <p className="text-sm text-ink">Nothing asked yet</p>
-                    <p className="mx-auto mt-1 max-w-[46ch] text-xs leading-normal text-ink-muted">
-                      Ask it to look at something — &ldquo;check the open issues
-                      on usagefoundry and propose a run for each bug&rdquo;.
-                    </p>
-                  </div>
-                ) : (
-                  chat.messages.map((m, i) => (
-                    <Message
-                      key={m.id}
-                      message={m}
-                      grouped={i > 0 && chat.messages[i - 1].role === m.role}
-                    />
-                  ))
-                )}
-
-                {thinking && <Waiting since={waitingSince} stale={pollError !== null} />}
-
-                {turnFailure && (
-                  <div className="mt-5 max-w-[70ch] rounded-sm border-l-2 border-l-danger bg-inset px-3 py-2 text-xs leading-normal text-danger">
-                    {turnFailure}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => scrollToLatest(true)}
-              aria-hidden={!showJump}
-              tabIndex={showJump ? 0 : -1}
-              className={`absolute right-3 bottom-3 flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 text-xs font-medium text-ink shadow-e2 transition duration-[var(--motion-base)] ease-standard hover:border-ink-faint ${
-                JUMP_STATE[showJump ? "shown" : "hidden"]
-              }`}
-            >
-              <Icon name="chevron-down" size="sm" />
-              {unseen > 0 ? `${unseen} new` : "Latest"}
-            </button>
+        Below `lg` neither half applies and the page composes as it always did:
+        the proposals sit *under* the thread, which is a second column of
+        content the page is meant to scroll, and both cards keep the bounded
+        `max-h-[34rem]` they have there. The wrapper is a flex column at every
+        width all the same, so the margins between the header's own blocks stay
+        uncollapsed exactly as they were when the shell's column held them. */
+    <div className="relative flex flex-col lg:min-h-0 lg:flex-1">
+      <div className="flex flex-col lg:absolute lg:inset-0">
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <h1 className="text-xl font-semibold tracking-tight">Orchestrator</h1>
+          <div className="ml-auto flex items-center gap-3">
+            {chat && chat.costUSD > 0 && (
+              <span className="text-xs tabular-nums text-ink-muted">
+                {fmtUSD(chat.costUSD)} this chat
+              </span>
+            )}
+            <Button variant="secondary" onClick={() => void newChat()}>
+              New chat
+            </Button>
           </div>
+        </div>
 
-          {/* Pinned to the foot of the pane: the card is a flex column and the
-              thread above it is the only thing that scrolls, so the composer
-              stays where the hand expects it however long the conversation
-              gets. */}
-          <div className="relative mt-4 border-t border-line pt-4">
-            {mentionOpen && (
-              // Above the composer, because the composer is at the foot of the
-              // pane. `mousedown` rather than `click` on a row, with the
-              // default prevented: a click would blur the textarea first, and
-              // the insertion needs the caret it is about to move.
-              <div className="absolute bottom-full left-0 z-10 mb-1 w-80 max-w-full overflow-hidden rounded-lg border border-line bg-surface shadow-e2">
-                <ul id="agent-mentions" role="listbox" aria-label="Saved agents" className="py-1">
-                  {matches.map((a, i) => (
-                    <li
-                      key={a.id}
-                      id={`agent-mention-${a.id}`}
-                      role="option"
-                      aria-selected={i === active}
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        insertMention(a.name);
-                      }}
-                      onMouseEnter={() => setMentionIndex(i)}
-                      className={`cursor-pointer px-2.5 py-1.5 ${
-                        MENTION_ROW[i === active ? "active" : "idle"]
-                      }`}
-                    >
-                      <span className="block truncate text-xs font-medium text-ink">
-                        {a.name}
-                        {!a.usable && (
-                          <span className="ml-1.5 font-normal text-danger">
-                            incomplete
-                          </span>
-                        )}
-                      </span>
-                      <span className="block truncate text-2xs text-ink-muted">
-                        {a.description}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                {/* Enter is named here because it is the one thing about this
-                    list that would otherwise be found out by losing a message:
-                    it sends, exactly as it does with the list shut. */}
-                <div className="border-t border-line px-2.5 py-1.5 text-2xs text-ink-faint">
-                  Tab inserts · Enter still sends
-                  {ambientLine && <span className="mt-0.5 block">{ambientLine}</span>}
+        {/* Two paragraphs of standing context stood between the heading and a box
+            that fills what is left of the pane, and everything they cost came off
+            the box — which is how the composer at the foot of it ended up under
+            the fold on a short window. What stays visible is the sentence that
+            has to be read before anything on this page is pressed: hiding *that*
+            would be trading a safety claim for a few lines of room, and the rule
+            is that a disclosure holds what some readers need rather than what all
+            of them do. The rest is read once, and is a press away with its
+            subject named on the summary. */}
+        <Notice tone="info" quiet>
+          <p>
+            <strong>Nothing here starts a run.</strong> Each proposal waits for
+            you, and then runs under the guards of the template it names — never
+            under anything the chat chose.
+          </p>
+          <Disclosure
+            className="mt-1.5"
+            summary="What the chat itself may do, and what its turns cost"
+          >
+            <p className="mt-2">
+              A proposal that names no template runs under the default guard set
+              in <Link href="/settings">Settings</Link>.
+            </p>
+            <p className="mt-2">
+              The chat itself runs with no tool restrictions, so it can read, run
+              commands and reach GitHub while it works out what to propose; the
+              instruction not to do the work, rather than a permission mode, is
+              what keeps it out of your checkouts. Its turns spend against the
+              same 5-hour window as everything else, and that cost is shown here
+              only — never added to a run&rsquo;s, or to the dashboard meters.
+            </p>
+          </Disclosure>
+        </Notice>
+
+        {pollError && <Notice tone="danger">{pollError}</Notice>}
+        {error && <Notice tone="danger">{error}</Notice>}
+
+        {/* Takes what the header above it has left of the pane rather than 68vh
+            of the window, which is a taller box than the pane it sits in — the
+            composer went under the fold and the page grew a second scrollbar
+            behind a thread that was already scrolling itself. Everything above
+            this row is furniture that neither shrinks nor scrolls, so this is
+            the one thing on the page that gives, and the two boxes inside it
+            absorb what it gives up by scrolling as they already do.
+
+            Only at `lg`, where the proposals sit *beside* the thread. Stacked
+            under it there is a second column of content below the fold and the
+            page is meant to scroll, so the card stays a bounded box there.
+
+            `lg:min-h-0` and deliberately no floor. There was a 22rem one, and
+            with the page bounded a floor is the last thing left that can push
+            the composer out of the pane: on a 700px window with the notice's
+            disclosure open and an error banner up there is less than 22rem to
+            give, and a row that refuses to go under it overflows the bound
+            rather than shrinking inside it — which is the defect, one layer
+            further in. What the floor was buying was a thread too short to be
+            worth reading; what it cost was the composer, and a short thread
+            still scrolls. */}
+        <div className="grid gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+          {/* `max-h` in rem and not vh, for the reason a box inside the pane is
+              never sized in viewport units: the pane is the window less the
+              toolbar less its own padding less everything above this row, so
+              60vh was a cap that could sit either side of the edge depending on
+              the window and never on the box it was capping. Both caps are
+              released at `lg`, where the row above is what says how tall the
+              cards are. */}
+          <Card
+            emphasis="default"
+            className="flex max-h-[34rem] min-h-[22rem] flex-col lg:max-h-none lg:min-h-0"
+          >
+            <div className="relative min-h-0 flex-1">
+              <div ref={threadRef} onScroll={onScroll} className="h-full overflow-y-auto pr-1">
+                {/* `additions` only: the waiting row's elapsed time changes every
+                    second inside this region, and the default `additions text`
+                    would read the whole thing out again each time. */}
+                <div
+                  role="log"
+                  aria-live="polite"
+                  aria-relevant="additions"
+                  aria-label="Conversation"
+                  className="flex flex-col"
+                >
+                  {chat === null ? (
+                    <div className="py-10 text-center text-sm text-ink-muted">
+                      {pollError ? "The conversation could not be loaded." : "Loading…"}
+                    </div>
+                  ) : messageCount === 0 ? (
+                    <div className="px-2 py-10 text-center">
+                      <p className="text-sm text-ink">Nothing asked yet</p>
+                      <p className="mx-auto mt-1 max-w-[46ch] text-xs leading-normal text-ink-muted">
+                        Ask it to look at something — &ldquo;check the open issues
+                        on usagefoundry and propose a run for each bug&rdquo;.
+                      </p>
+                    </div>
+                  ) : (
+                    chat.messages.map((m, i) => (
+                      <Message
+                        key={m.id}
+                        message={m}
+                        grouped={i > 0 && chat.messages[i - 1].role === m.role}
+                      />
+                    ))
+                  )}
+
+                  {thinking && <Waiting since={waitingSince} stale={pollError !== null} />}
+
+                  {turnFailure && (
+                    <div className="mt-5 max-w-[70ch] rounded-sm border-l-2 border-l-danger bg-inset px-3 py-2 text-xs leading-normal text-danger">
+                      {turnFailure}
+                    </div>
+                  )}
                 </div>
               </div>
-            )}
-            <textarea
-              ref={composerRef}
-              aria-label="Message the orchestrator"
-              aria-autocomplete="list"
-              aria-expanded={mentionOpen}
-              aria-controls={mentionOpen ? "agent-mentions" : undefined}
-              aria-activedescendant={
-                mentionOpen && matches[active]
-                  ? `agent-mention-${matches[active].id}`
-                  : undefined
-              }
-              // No focus ring of its own. @layer base draws one halo for every
-              // focusable thing in the app, and the `outline-none` plus 3px
-              // box-shadow that used to be here was the second treatment that
-              // rule exists to have none of.
-              //
-              // `max-md:text-[16px]` for the reason CONTROL_BASE in ui/Field
-              // states it: under 16px iOS Safari zooms the page in on focus and
-              // never zooms back out. This is the one text control in the app
-              // written by hand rather than taken from the kit, so it is the
-              // one that has to repeat it.
-              className="ui-transition min-h-[4.5rem] w-full resize-none overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 font-sans text-sm max-md:text-[16px] leading-normal text-ink placeholder:text-ink-faint hover:border-line-strong focus:border-accent"
-              rows={3}
-              placeholder="Ask the orchestrator to look at something and propose runs…"
-              value={draft}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                readMention(e.target.value, e.target.selectionStart);
-              }}
-              // Caret moves that are not edits — a click, Home, an arrow key —
-              // change which token is under it, so the list has to be read
-              // there too or it survives the caret leaving the mention.
-              onSelect={(e) =>
-                readMention(
-                  e.currentTarget.value,
-                  e.currentTarget.selectionStart,
-                )
-              }
-              // Not on blur alone: a row's `mousedown` prevents the blur, so
-              // this only fires when focus really has left the composer.
-              onBlur={() => setMention(null)}
-              onKeyDown={(e) => {
-                // The mention list gets the keys nothing else here claims, and
-                // **never Enter or ⌘↩**. That is the whole rule: this composer
-                // sends on Enter, so a list that accepted a completion with it
-                // would swallow the send whenever the operator happened to be
-                // at the end of a name — which is exactly when they are most
-                // likely to be finished. Tab inserts instead, the popover says
-                // so, and the send chords fall through untouched below.
-                //
-                // Skipped entirely mid-composition: an IME owns the keyboard
-                // while a candidate is up, and a layer that took Tab or the
-                // arrows from it would break the candidate list rather than
-                // this one.
-                if (mentionOpen && !e.nativeEvent.isComposing) {
-                  if (e.key === "ArrowDown") {
-                    e.preventDefault();
-                    setMentionIndex((active + 1) % matches.length);
-                    return;
-                  }
-                  if (e.key === "ArrowUp") {
-                    e.preventDefault();
-                    setMentionIndex((active - 1 + matches.length) % matches.length);
-                    return;
-                  }
-                  if (e.key === "Tab" && !e.shiftKey) {
-                    e.preventDefault();
-                    insertMention(matches[active].name);
-                    return;
-                  }
-                  if (e.key === "Escape") {
-                    // Dismissed for this token only, so typing more of the
-                    // name does not reopen what was just shut. Consumed,
-                    // because closing the list is what Esc means here — the
-                    // shell binds it to nothing and there is no dialog under
-                    // this to fall through to.
-                    e.preventDefault();
-                    setMentionClosed(mention?.start ?? null);
-                    return;
-                  }
+
+              <button
+                type="button"
+                onClick={() => scrollToLatest(true)}
+                aria-hidden={!showJump}
+                tabIndex={showJump ? 0 : -1}
+                className={`absolute right-3 bottom-3 flex h-8 cursor-pointer items-center gap-1.5 rounded-full border border-line-strong bg-surface px-3 text-xs font-medium text-ink shadow-e2 transition duration-[var(--motion-base)] ease-standard hover:border-ink-faint ${
+                  JUMP_STATE[showJump ? "shown" : "hidden"]
+                }`}
+              >
+                <Icon name="chevron-down" size="sm" />
+                {unseen > 0 ? `${unseen} new` : "Latest"}
+              </button>
+            </div>
+
+            {/* Pinned to the foot of the pane: the card is a flex column and the
+                thread above it is the only thing that scrolls, so the composer
+                stays where the hand expects it however long the conversation
+                gets. */}
+            <div className="relative mt-4 border-t border-line pt-4">
+              {mentionOpen && (
+                // Above the composer, because the composer is at the foot of the
+                // pane. `mousedown` rather than `click` on a row, with the
+                // default prevented: a click would blur the textarea first, and
+                // the insertion needs the caret it is about to move.
+                <div className="absolute bottom-full left-0 z-10 mb-1 w-80 max-w-full overflow-hidden rounded-lg border border-line bg-surface shadow-e2">
+                  <ul id="agent-mentions" role="listbox" aria-label="Saved agents" className="py-1">
+                    {matches.map((a, i) => (
+                      <li
+                        key={a.id}
+                        id={`agent-mention-${a.id}`}
+                        role="option"
+                        aria-selected={i === active}
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          insertMention(a.name);
+                        }}
+                        onMouseEnter={() => setMentionIndex(i)}
+                        className={`cursor-pointer px-2.5 py-1.5 ${
+                          MENTION_ROW[i === active ? "active" : "idle"]
+                        }`}
+                      >
+                        <span className="block truncate text-xs font-medium text-ink">
+                          {a.name}
+                          {!a.usable && (
+                            <span className="ml-1.5 font-normal text-danger">
+                              incomplete
+                            </span>
+                          )}
+                        </span>
+                        <span className="block truncate text-2xs text-ink-muted">
+                          {a.description}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  {/* Enter is named here because it is the one thing about this
+                      list that would otherwise be found out by losing a message:
+                      it sends, exactly as it does with the list shut. */}
+                  <div className="border-t border-line px-2.5 py-1.5 text-2xs text-ink-faint">
+                    Tab inserts · Enter still sends
+                    {ambientLine && <span className="mt-0.5 block">{ambientLine}</span>}
+                  </div>
+                </div>
+              )}
+              <textarea
+                ref={composerRef}
+                aria-label="Message the orchestrator"
+                aria-autocomplete="list"
+                aria-expanded={mentionOpen}
+                aria-controls={mentionOpen ? "agent-mentions" : undefined}
+                aria-activedescendant={
+                  mentionOpen && matches[active]
+                    ? `agent-mention-${matches[active].id}`
+                    : undefined
                 }
-                // Two ways to send and one of them is the platform's. ⌘↩ is the
-                // commit chord this app already uses on the run form, and the
-                // shell's keyboard layer deliberately binds it to nothing so a
-                // field's own can never be swallowed. Enter stays, because it is
-                // what a conversation is typed with everywhere else.
+                // No focus ring of its own. @layer base draws one halo for every
+                // focusable thing in the app, and the `outline-none` plus 3px
+                // box-shadow that used to be here was the second treatment that
+                // rule exists to have none of.
                 //
-                // `isComposing` is the one that is not obvious: an IME takes
-                // Enter to accept the candidate it is showing, and sending there
-                // posts half a word. It cannot apply to ⌘↩, which is why that
-                // branch is tested first.
-                if (e.key !== "Enter") return;
-                if (e.metaKey) {
+                // `max-md:text-[16px]` for the reason CONTROL_BASE in ui/Field
+                // states it: under 16px iOS Safari zooms the page in on focus and
+                // never zooms back out. This is the one text control in the app
+                // written by hand rather than taken from the kit, so it is the
+                // one that has to repeat it.
+                className="ui-transition min-h-[4.5rem] w-full resize-none overflow-y-auto rounded-sm border border-line bg-inset px-3 py-2.5 font-sans text-sm max-md:text-[16px] leading-normal text-ink placeholder:text-ink-faint hover:border-line-strong focus:border-accent"
+                rows={3}
+                placeholder="Ask the orchestrator to look at something and propose runs…"
+                value={draft}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  readMention(e.target.value, e.target.selectionStart);
+                }}
+                // Caret moves that are not edits — a click, Home, an arrow key —
+                // change which token is under it, so the list has to be read
+                // there too or it survives the caret leaving the mention.
+                onSelect={(e) =>
+                  readMention(
+                    e.currentTarget.value,
+                    e.currentTarget.selectionStart,
+                  )
+                }
+                // Not on blur alone: a row's `mousedown` prevents the blur, so
+                // this only fires when focus really has left the composer.
+                onBlur={() => setMention(null)}
+                onKeyDown={(e) => {
+                  // The mention list gets the keys nothing else here claims, and
+                  // **never Enter or ⌘↩**. That is the whole rule: this composer
+                  // sends on Enter, so a list that accepted a completion with it
+                  // would swallow the send whenever the operator happened to be
+                  // at the end of a name — which is exactly when they are most
+                  // likely to be finished. Tab inserts instead, the popover says
+                  // so, and the send chords fall through untouched below.
+                  //
+                  // Skipped entirely mid-composition: an IME owns the keyboard
+                  // while a candidate is up, and a layer that took Tab or the
+                  // arrows from it would break the candidate list rather than
+                  // this one.
+                  if (mentionOpen && !e.nativeEvent.isComposing) {
+                    if (e.key === "ArrowDown") {
+                      e.preventDefault();
+                      setMentionIndex((active + 1) % matches.length);
+                      return;
+                    }
+                    if (e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setMentionIndex((active - 1 + matches.length) % matches.length);
+                      return;
+                    }
+                    if (e.key === "Tab" && !e.shiftKey) {
+                      e.preventDefault();
+                      insertMention(matches[active].name);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      // Dismissed for this token only, so typing more of the
+                      // name does not reopen what was just shut. Consumed,
+                      // because closing the list is what Esc means here — the
+                      // shell binds it to nothing and there is no dialog under
+                      // this to fall through to.
+                      e.preventDefault();
+                      setMentionClosed(mention?.start ?? null);
+                      return;
+                    }
+                  }
+                  // Two ways to send and one of them is the platform's. ⌘↩ is the
+                  // commit chord this app already uses on the run form, and the
+                  // shell's keyboard layer deliberately binds it to nothing so a
+                  // field's own can never be swallowed. Enter stays, because it is
+                  // what a conversation is typed with everywhere else.
+                  //
+                  // `isComposing` is the one that is not obvious: an IME takes
+                  // Enter to accept the candidate it is showing, and sending there
+                  // posts half a word. It cannot apply to ⌘↩, which is why that
+                  // branch is tested first.
+                  if (e.key !== "Enter") return;
+                  if (e.metaKey) {
+                    e.preventDefault();
+                    void send();
+                    return;
+                  }
+                  if (e.shiftKey || e.nativeEvent.isComposing) return;
                   e.preventDefault();
                   void send();
-                  return;
-                }
-                if (e.shiftKey || e.nativeEvent.isComposing) return;
-                e.preventDefault();
-                void send();
-              }}
-            />
-            <ButtonRow className="mt-2">
-              <span className="mr-auto text-xs text-ink-faint">
-                {thinking
-                  ? "Stop ends this turn and signals the process answering it"
-                  : "⌘↩ or Enter sends · Shift+Enter for a new line"}
-              </span>
-              {thinking && (
-                <Button variant="secondary" disabled={busy} onClick={() => void stop()}>
-                  Stop
-                </Button>
-              )}
-              <Button
-                onClick={() => void send()}
-                disabled={thinking || busy || !draft.trim()}
-                aria-keyshortcuts="Meta+Enter"
-              >
-                Send
-                <span aria-hidden="true" className="text-xs opacity-70">
-                  ⌘↩
-                </span>
-              </Button>
-            </ButtonRow>
-            {sendError && <Hint tone="danger">{sendError}</Hint>}
-          </div>
-        </Card>
-
-        {/* One box the height of the row, holding one list at a time. Three
-            stacked cards each grew without limit, so the column was taller than
-            the pane whatever the pane did — and the two lists nobody is acting
-            on were what you scrolled past to reach the one you were.
-
-            The card is the scroll container's parent rather than the scroll
-            container: what scrolls is the list, so the tab bar stays on screen
-            and so does the row that approves things. */}
-        <Card
-          emphasis={PROPOSALS_EMPHASIS[pending.length > 0 ? "waiting" : "clear"]}
-          className="flex max-h-[34rem] flex-col lg:max-h-none lg:min-h-0"
-        >
-          {/* A radiogroup with one option is a chip that does nothing, which is
-              what a fresh install would open on — so until there is a second
-              list to reach, this is the title it always was.
-
-              The count sits beside the control rather than on the Proposals
-              segment either way: a number only visible from the tab it belongs
-              to is one nobody reads from the other two, and this is the one on
-              the page that means somebody is waiting on a decision. */}
-          {sideTabs.length > 1 ? (
-            <div className="mb-3 flex flex-wrap items-center gap-2">
-              <SegmentedControl
-                label="What to show beside the conversation"
-                options={sideTabs}
-                value={activeSide}
-                onChange={setSide}
+                }}
               />
-              {waitingBadge}
-            </div>
-          ) : (
-            <CardTitle>
-              Proposals
-              {waitingBadge}
-            </CardTitle>
-          )}
-
-          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-            {activeSide === "proposals" &&
-              (pending.length === 0 ? (
-                <Empty>Nothing waiting for approval.</Empty>
-              ) : (
-                // One grouped box, hairlines between the rows: a proposal is an
-                // object in a list of objects, and the stack of separately
-                // bordered cards this replaces read as five unrelated panels in
-                // a 360px column.
-                <ListGroup>
-                  {pending.map((p) => (
-                    <Proposal
-                      key={p.id}
-                      proposal={p}
-                      checked={selected.has(p.id)}
-                      onToggle={() => toggle(p.id)}
-                    />
-                  ))}
-                </ListGroup>
-              ))}
-
-            {activeSide === "decided" && (
-              <div className="flex flex-col divide-y divide-line">
-                {decided
-                  .slice()
-                  .reverse()
-                  .map((p) => (
-                    <Decided key={p.id} proposal={p} />
-                  ))}
-              </div>
-            )}
-
-            {/* The current thread is in this list rather than filtered out of
-                it, because "which one am I in" is the first thing the list has
-                to answer and a row missing from a list cannot answer it. */}
-            {activeSide === "chats" && (
-              <div className="flex flex-col gap-0.5">
-                {chats.map((c) => (
-                  <ChatRow
-                    key={c.id}
-                    entry={c}
-                    current={c.id === chatId}
-                    onOpen={() => {
-                      // Ticked ids belong to the thread they were ticked in.
-                      // `newChat` clears them for the same reason; carried
-                      // over, they describe proposals not on screen and are
-                      // sent to a chat that has never held them.
-                      setSelected(new Set());
-                      setDecideError(null);
-                      void load(c.id);
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Outside the scroll region: what the click starts, counted, has to
-              be on screen beside the button that starts it — a twentieth
-              proposal must not push the sentence off the top of the list it is
-              about. */}
-          {activeSide === "proposals" && pending.length > 0 && (
-            <div className="mt-3 shrink-0 border-t border-line pt-3">
-              <Hint>
-                {approveConsequence} Runs beyond the concurrency limit queue
-                rather than being refused.
-              </Hint>
-              {/* The default action at the right edge, which is where this
-                  platform puts it and where every sheet in this app already
-                  puts it. Select all is not a decision about the work, so it
-                  sits at the other end as a ghost. */}
-              <ButtonRow className="mt-3">
+              <ButtonRow className="mt-2">
+                <span className="mr-auto text-xs text-ink-faint">
+                  {thinking
+                    ? "Stop ends this turn and signals the process answering it"
+                    : "⌘↩ or Enter sends · Shift+Enter for a new line"}
+                </span>
+                {thinking && (
+                  <Button variant="secondary" disabled={busy} onClick={() => void stop()}>
+                    Stop
+                  </Button>
+                )}
                 <Button
-                  variant="ghost"
-                  disabled={busy}
-                  onClick={() =>
-                    setSelected(
-                      allSelected ? new Set() : new Set(pending.map((p) => p.id)),
-                    )
-                  }
+                  onClick={() => void send()}
+                  disabled={thinking || busy || !draft.trim()}
+                  aria-keyshortcuts="Meta+Enter"
                 >
-                  {allSelected ? "Select none" : "Select all"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  className="ml-auto"
-                  disabled={busy || selected.size === 0}
-                  onClick={() => void decide("reject", [...selected])}
-                >
-                  Reject
-                </Button>
-                <Button
-                  disabled={busy || selected.size === 0}
-                  onClick={() => void decide("approve", [...selected])}
-                >
-                  {selected.size > 0 ? `Approve ${selected.size}` : "Approve"}
+                  Send
+                  <span aria-hidden="true" className="text-xs opacity-70">
+                    ⌘↩
+                  </span>
                 </Button>
               </ButtonRow>
-              {decideError && <Hint tone="danger">{decideError}</Hint>}
+              {sendError && <Hint tone="danger">{sendError}</Hint>}
             </div>
-          )}
-        </Card>
+          </Card>
+
+          {/* One box the height of the row, holding one list at a time. Three
+              stacked cards each grew without limit, so the column was taller than
+              the pane whatever the pane did — and the two lists nobody is acting
+              on were what you scrolled past to reach the one you were.
+
+              The card is the scroll container's parent rather than the scroll
+              container: what scrolls is the list, so the tab bar stays on screen
+              and so does the row that approves things. */}
+          <Card
+            emphasis={PROPOSALS_EMPHASIS[pending.length > 0 ? "waiting" : "clear"]}
+            className="flex max-h-[34rem] flex-col lg:max-h-none lg:min-h-0"
+          >
+            {/* A radiogroup with one option is a chip that does nothing, which is
+                what a fresh install would open on — so until there is a second
+                list to reach, this is the title it always was.
+
+                The count sits beside the control rather than on the Proposals
+                segment either way: a number only visible from the tab it belongs
+                to is one nobody reads from the other two, and this is the one on
+                the page that means somebody is waiting on a decision. */}
+            {sideTabs.length > 1 ? (
+              <div className="mb-3 flex flex-wrap items-center gap-2">
+                <SegmentedControl
+                  label="What to show beside the conversation"
+                  options={sideTabs}
+                  value={activeSide}
+                  onChange={setSide}
+                />
+                {waitingBadge}
+              </div>
+            ) : (
+              <CardTitle>
+                Proposals
+                {waitingBadge}
+              </CardTitle>
+            )}
+
+            <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+              {activeSide === "proposals" &&
+                (pending.length === 0 ? (
+                  <Empty>Nothing waiting for approval.</Empty>
+                ) : (
+                  // One grouped box, hairlines between the rows: a proposal is an
+                  // object in a list of objects, and the stack of separately
+                  // bordered cards this replaces read as five unrelated panels in
+                  // a 360px column.
+                  <ListGroup>
+                    {pending.map((p) => (
+                      <Proposal
+                        key={p.id}
+                        proposal={p}
+                        checked={selected.has(p.id)}
+                        onToggle={() => toggle(p.id)}
+                      />
+                    ))}
+                  </ListGroup>
+                ))}
+
+              {activeSide === "decided" && (
+                <div className="flex flex-col divide-y divide-line">
+                  {decided
+                    .slice()
+                    .reverse()
+                    .map((p) => (
+                      <Decided key={p.id} proposal={p} />
+                    ))}
+                </div>
+              )}
+
+              {/* The current thread is in this list rather than filtered out of
+                  it, because "which one am I in" is the first thing the list has
+                  to answer and a row missing from a list cannot answer it. */}
+              {activeSide === "chats" && (
+                <div className="flex flex-col gap-0.5">
+                  {chats.map((c) => (
+                    <ChatRow
+                      key={c.id}
+                      entry={c}
+                      current={c.id === chatId}
+                      onOpen={() => {
+                        // Ticked ids belong to the thread they were ticked in.
+                        // `newChat` clears them for the same reason; carried
+                        // over, they describe proposals not on screen and are
+                        // sent to a chat that has never held them.
+                        setSelected(new Set());
+                        setDecideError(null);
+                        void load(c.id);
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Outside the scroll region: what the click starts, counted, has to
+                be on screen beside the button that starts it — a twentieth
+                proposal must not push the sentence off the top of the list it is
+                about. */}
+            {activeSide === "proposals" && pending.length > 0 && (
+              <div className="mt-3 shrink-0 border-t border-line pt-3">
+                <Hint>
+                  {approveConsequence} Runs beyond the concurrency limit queue
+                  rather than being refused.
+                </Hint>
+                {/* The default action at the right edge, which is where this
+                    platform puts it and where every sheet in this app already
+                    puts it. Select all is not a decision about the work, so it
+                    sits at the other end as a ghost. */}
+                <ButtonRow className="mt-3">
+                  <Button
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() =>
+                      setSelected(
+                        allSelected ? new Set() : new Set(pending.map((p) => p.id)),
+                      )
+                    }
+                  >
+                    {allSelected ? "Select none" : "Select all"}
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    className="ml-auto"
+                    disabled={busy || selected.size === 0}
+                    onClick={() => void decide("reject", [...selected])}
+                  >
+                    Reject
+                  </Button>
+                  <Button
+                    disabled={busy || selected.size === 0}
+                    onClick={() => void decide("approve", [...selected])}
+                  >
+                    {selected.size > 0 ? `Approve ${selected.size}` : "Approve"}
+                  </Button>
+                </ButtonRow>
+                {decideError && <Hint tone="danger">{decideError}</Hint>}
+              </div>
+            )}
+          </Card>
+        </div>
       </div>
-    </>
+    </div>
   );
 }
 
