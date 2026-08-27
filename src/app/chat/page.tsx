@@ -1181,6 +1181,10 @@ export default function ChatPage() {
                       // sent to a chat that has never held them.
                       setSelected(new Set());
                       setDecideError(null);
+                      // Same rule: a refusal names a question of the thread
+                      // being left, and carried over it annotates a card in a
+                      // conversation it was never about.
+                      setAnswerError(null);
                       void load(c.id);
                     }}
                   />
@@ -1581,10 +1585,14 @@ function AskedQuestions({
               This turn is still working — you can answer once it finishes.
             </p>
           )}
+          {/* Inside the open branch, because the page holds one answer error
+              and every question card in the thread is handed it. Drawn
+              unconditionally, a refusal would also appear under every settled
+              pair further up — a sentence about a press, against a question
+              decided last week. */}
+          {error && <Hint tone="danger">{error}</Hint>}
         </>
       )}
-
-      {error && <Hint tone="danger">{error}</Hint>}
     </div>
   );
 }
