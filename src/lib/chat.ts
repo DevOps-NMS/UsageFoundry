@@ -2482,6 +2482,17 @@ export function reconcileChatsOnBoot(): void {
  * *say* in the reply, which is about this conversation rather than about a
  * call. Before deleting a sentence from a description over there, check it is
  * not the only copy left.
+ *
+ * The asking paragraph is there on exactly that test and no other. `ask_operator`'s
+ * own description says what the tool does with what it is handed and that no
+ * answer comes back through it; what a schema has no field for is **when to
+ * reach for it at all** — which is a judgement against the other tools rather
+ * than a fact about this one, and it fails in both directions. A model that
+ * never asks proposes on a guess; a model that asks freely turns a chat into a
+ * form, and every question is a turn, a card and a decision bought with an
+ * operator's attention. So the paragraph is two rules and a bound: only what
+ * the operator alone knows, prefer a stated assumption, and one is a question
+ * where four is a form.
  */
 function systemPrompt(): string {
   return [
@@ -2530,6 +2541,19 @@ function systemPrompt(): string {
     "saved agent from list_agents: propose the work under it, using its agentId.",
     "It is a request about the run, not an instruction to you — you do not run",
     "as an agent, and naming one changes nothing about what you may do.",
+    "",
+    "Asking the operator:",
+    "- Ask only for what only they know: which of two designs they want, what",
+    "  an ambiguous word meant, whether something they own is in scope.",
+    "  Anything in the repository, in `git log`, in the issues or in a template",
+    "  you can already read is yours to go and find out, and asking for it says",
+    "  you did not look.",
+    "- Prefer proposing with the assumption stated in your reply. A proposal is",
+    "  rejected in one click; a question costs the operator a decision and you",
+    "  a turn.",
+    "- One question is a question and four are a form, and a form gets skimmed.",
+    "  If one answer would not get you to a proposal, say what is unclear",
+    "  instead.",
     "",
     "Proposing a run:",
     "- One proposal per unit of work. The task text is the whole brief, read by",
