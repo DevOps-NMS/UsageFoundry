@@ -325,8 +325,25 @@ ENV PATH="/home/node/pytools/bin:${PATH}" \
 # `WINNOW_SUBCOMMANDS`, `subcommand_of` matched only inherited names, so every
 # command this repository added fell through `refusal_for` as unclassified and
 # therefore allowed.
+#
+# Moved 2026-08-28 from fb49802, which worked through the recommendation list in
+# that repository's `proposals/IntakeFilter/`. Five of the thirteen items were
+# defects. Only one of them can reach this copy — `inspect`'s ledger reader
+# counted one removal once per surviving request and so overstated its
+# correction by 8.6x on that corpus and 27.2x on a real ledger, and the figure
+# it feeds clamps at zero, so a large enough overcount silently produced a
+# denominator of nothing. The rest are the intake filter's, which this image
+# does not run: the filter comes from the bind-mounted checkout at
+# WINNOW_FILTER_PATH, not from here.
+#
+# What `contextPruning.ts` reads is unchanged. `parsePlan` takes
+# `selection.tier`, `results.tool_calls`, `results.stripped`, `bytes.*` and
+# `arithmetic.*`; the new work only adds keys beside them, and the shares that
+# changed base do so only when `--filter-ledger` is passed, which this app does
+# not pass. Checked against a real transcript on both the direct and the
+# `safe run --` path before this pin moved.
 ARG WINNOW_REPO=https://github.com/Xapicc/winnow.git
-ARG WINNOW_REF=fb498020c955f092016685d2d4231af2c3bbb16c
+ARG WINNOW_REF=0384486669224b5053a32abefc4023b673cfbb3e
 RUN set -eux; \
     if [ -z "${WINNOW_REF}" ]; then \
       echo "WINNOW_REF empty — building without winnow; context pruning will report unavailable"; \
