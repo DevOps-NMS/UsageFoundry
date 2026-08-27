@@ -4018,6 +4018,67 @@ through before trusting this unattended:
     true of the workflow list's. Both are the arithmetic that justified the
     change, not a reading of the change.
 
+- **The Files tab's touched/changed reconciliation, in a browser.** New:
+  `src/lib/runTouchScan.ts` (the `run_events` scan), `src/lib/runTouches.ts`
+  (the pure reconciliation), `GET /api/runs/[id]/touched`,
+  `src/components/RunTouches.tsx`, rendered under `RunDiff` on the run page's
+  tab — whose label is now **Files** rather than Changes, the `RunTab` value
+  still `"changes"`. **No browser was opened and no container was started**, so
+  nothing below has been *seen*.
+
+  What **is** checked, and it is more than types for once: the scan's SQL was
+  run against a real SQLite database — `better-sqlite3` in process, an in-memory
+  `runs`/`run_events` pair loaded with ten hand-written `kind: "tool"` payloads
+  — and it returned what the design claims. `/w/repo/src/a.ts` and
+  `/w/.wt/repo-1/src/a.ts` collapsed to one `src/a.ts` row with `calls: 3`,
+  which is the worktree-relativisation working; a `NotebookEdit` came back as
+  `nb.ipynb` from `$.input.notebook_path`; `/tmp/scratch.txt` came back with
+  `outside: 1`; a `Bash` carrying only `command` and a `Grep` carrying `path`
+  (a *directory*) were both excluded, as was a `kind: "log"` row; and
+  `subagent`/`parentToolUseId` survived. That was a throwaway script, not a
+  committed test — `runTouches.test.ts` covers the pure half only, nine cases.
+  Plus `typecheck` (exit 0), `npm test` (**1,805 tests / 266 suites / 0
+  failures**) and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` (exit
+  0, `/api/runs/[id]/touched` listed at 270 B).
+
+  The click list, at 1280px and again at 390px, where `Table stack` takes over
+  and the column heads leave the screen:
+
+  1. Open a finished, worktree-isolated run's **Files** tab. The tab is labelled
+     Files, not Changes; the strip still has its five labels in their order.
+  2. Under "What changed" there is a second card, **What it touched**, whose
+     header prints a distinct-file count and a work-cycle count and says a call
+     was *attempted*. **Write both numbers down** — they are what the deferred
+     file-by-cycle grid in `proposals/SessionFlow/` is waiting on, and nothing
+     else in this app prints them.
+  3. Groups appear in the order: changed-but-never-named, then named-and-changed
+     (behind a closed `Disclosure`), then named-not-changed, then outside the
+     checkout. An empty group is absent rather than an empty box.
+  4. A row with no calls at all — anything in the first group — shows an em dash
+     in Reads and Writes, never `0`. At 390px each figure is named by its own
+     `Td` label and the path is the unlabelled headline.
+  5. A run that delegated shows a sub-agent's name in **By**; a file both the
+     main thread and a sub-agent reached shows both, comma-separated.
+  6. Open a **non-isolated** run's Files tab: the diff is the folder's current
+     state, and the reconciliation should still render against it.
+  7. Open a run whose branch is gone (`kind: "none"` from the diff route). The
+     card still renders — its two figures and its empty states are facts about
+     the events, not about the diff — but it drops to **two** groups, named by
+     a tool call and named outside the checkout, with a warn notice carrying the
+     diff's own reason. Neither "changed, never named" nor "named, and not
+     changed" may appear: the changed set is *unknown* there rather than empty,
+     and either label over it is the reconciliation asserting the thing it was
+     built to check. This is the entry most likely to be wrong, because it is a
+     condition on a prop rather than anything the route answers.
+  8. Set `eventRetentionDays` low, let the sweep run, reopen a terminal run past
+     the horizon: the card says its tool events were removed on the horizon and
+     does **not** draw an empty list. The diff above it is unaffected — a
+     checkout is kept on its own clock.
+  9. A run that made only `Bash` calls says "No tool call in this run's log
+     named a file", which is a different sentence from 8.
+  10. Watch the network panel: `/api/runs/[id]/touched` is fetched **once** on
+      opening the tab and never again. It must not join the 3-second poll.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a

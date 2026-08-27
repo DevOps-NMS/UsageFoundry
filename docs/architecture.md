@@ -47,6 +47,14 @@ src/lib/
                    environment names a URL and a secret
   git.ts           the one way this app runs git — argv only, environment scrubbed
   diff.ts          a run's <base>...<branch> as a budgeted file list + patches
+  runTouchScan.ts  the files a run's `kind: "tool"` events named, as one indexed
+                   range scan over `run_events` — `readCountsFor`'s own CASE,
+                   unfiltered by tool name and keeping the rows it drops at its
+                   `ELSE NULL`, which are the touches outside the checkout
+  runTouches.ts    the pure half of the same feature: the touched set differenced
+                   against the diff's file list, into four groups. Reaches
+                   nothing, because `RunTouches.tsx` imports it — the split is
+                   what keeps `node:fs` out of the browser bundle
   review.ts        the on-demand reviewer (a third, deliberate child process)
   land.ts          merge preview, landing, branch deletion, branch inventory
   chat.ts          the orchestrator chat (a fourth, deliberate child process),
