@@ -4100,6 +4100,12 @@ through before trusting this unattended:
   the model only as whatever the operator types next, without the question
   quoted above it.
 
+  **Both of the paragraph above's gaps are closed by the entry below it**, which
+  is the run that built the panel: the build was run (exit 0), and the card has
+  now been rendered and clicked. Everything else in this entry stands — in
+  particular the two load-bearing unknowns, which are about a model and a CLI
+  and which no amount of rendering can settle.
+
   **The load-bearing unknown is whether the pinned CLI stops when it is told
   to.** A tool call cannot block on a click: `CHAT_TIMEOUT_MS` is ten minutes
   and an overrunning turn is killed with its answer discarded, so `ask_operator`
@@ -4133,6 +4139,105 @@ through before trusting this unattended:
   says is idle; the answer path is idempotent against it and the pending cap
   bounds it, but that window has not been reproduced.
 
+- **The operator's half of `ask_operator` — the card in the thread, the chat
+  list's marker, and the paragraph telling the model when to ask.** **No
+  container was started and no `claude` child was ever spawned on this path**;
+  Docker is not available in the container this was written in, so the
+  `docker compose up --build` half of the loop could not be attempted at all
+  rather than having been skipped. Run on this branch:
+  `NODE_ENV=development npm ci --include=dev` (exit 0), `npm run typecheck`
+  (exit 0), `npm test` (**1,832 tests / 272 suites / 0 failures**) and
+  `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build` (exit 0, with
+  `/api/chat/[id]/questions` listed and `/chat` at 11.4 kB).
+
+  Unlike the entry above, this one **was rendered**, and it is worth saying how,
+  because the arrangement is reusable and none of it is the shipped one. A
+  scratch `DATA_DIR` was seeded with five threads by hand, `next dev` was run
+  against it on a spare port, and Chromium was driven over it with Playwright at
+  1440×1000 and again at 390. Two environment facts had to be worked around and
+  neither is in `CLAUDE.md`: `NODE_ENV=production` is set in this container and
+  makes `next dev` answer **every** request with an `EvalError` out of the edge
+  runtime's instrumentation chunk — a blanket 500 with nothing on the page, and
+  a third member of the same family as the two traps that file already records
+  — and `UF_AUTH_TOKEN` is set both in the environment and in `.env`, so
+  `UF_ALLOW_NO_AUTH=1` does *not* open the app: `middleware.ts` gates purely on
+  the token being non-empty, and exporting it **empty** is what turns the gate
+  off. That is why every screenshot carries the red "Authentication is off"
+  banner.
+
+  What was seen: a single open question with three choices and a text field; a
+  three-question card with hairlines between the questions; an
+  answered-and-overtaken pair sitting directly above the `Answers to your
+  questions:` message that settled it; a question asked while its own turn was
+  still running, with every control out and the reason said; a question with no
+  choices and no typed answer, saying so and pointing at the composer; a refused
+  answer drawn on the card rather than under the composer, with every control
+  released again; and the thread list showing `asked you` and `asked you 3`.
+  Dark and 390px both hold, and all four text controls on the card measure 16px
+  below `md`, which is the platform floor `CONTROL_BASE` exists for.
+
+  The click wiring was exercised with `POST /api/chat/[id]/questions`
+  **intercepted in the browser**, deliberately, because the real route reaches
+  `sendChatMessage` and spawns a billed child. Asserted against the captured
+  request bodies: one press of a choice on the only open question sends exactly
+  `{"answers":[{"id":…,"answer":"pnpm"}]}` and nothing else; the same press
+  beside two open siblings sends **nothing at all** and only marks the button
+  `aria-pressed`; the row's own button then sends all three in the order they
+  are drawn; and Enter inside one question's field answers that question alone
+  and does not also send the composer's draft.
+
+  **What that arrangement cannot show is the half that spends money.** No answer
+  has ever reached a real turn: `answerChatQuestions` → `sendChatMessage` →
+  `claude -p` is driven only by the unit tests, so the first real proof that an
+  answer resumes the session and that the model reads the quoted questions as
+  its own is still the one the entry above is waiting for. Nothing here
+  discharges it. Nor has any model ever *called* `ask_operator` — the
+  system-prompt paragraph added by this run (only what the operator alone knows;
+  prefer a stated assumption; one is a question where four is a form) is written
+  against the same reasoning as `MAX_OPEN_QUESTIONS` and is equally unmeasured,
+  which matters more than usual because it is paid for on **every** turn and its
+  failure in the other direction — a chat that stops proposing and starts
+  interviewing — looks like the feature working. Three smaller things went
+  unchecked: no screen reader was run over the card, so `aria-pressed` and the
+  transcript's `role="log"` announcing a card's arrival are reasoned rather than
+  heard; the shared `busy` flag disabling the composer and the approve row while
+  an answer is in flight was never seen against a slow response, only against an
+  instant stub; and the `prefers-reduced-motion` path was not exercised, on the
+  grounds that nothing on this card moves — `ui-transition` and `Button`'s busy
+  ring are both already under `@layer base`'s blanket.
+
+  The click list, at 1440px and again at 390:
+
+  1. Ask the orchestrator something genuinely under-specified — "propose a run
+     to fix the flaky tests" in a repo whose lockfile and CI disagree. Wait for
+     the turn. A card headed **Waiting on you** appears at the foot of the
+     thread, *below* the reply, never above it.
+  2. Press a choice. It sends on that one press. The thread carries on, the card
+     stays where it is showing **You answered …**, and the message it produced
+     sits directly beneath it quoting the question. Both are meant to be there —
+     the card is the question as asked, the message is the text the model was
+     sent.
+  3. Ask something that produces two or more questions. Now a press does **not**
+     send: it marks the choice, and the button at the foot of the card reads
+     `Answer 2`. Leave one blank and send: the message says `(not answered)`
+     against it and its row reads **Overtaken by what you said next**, in muted
+     grey and never in red.
+  4. With a question open, type an ordinary message into the composer and send
+     it. The footer said what would happen; check it did — every open question
+     goes to *overtaken*, not to answered, and no card is left pressable.
+  5. Reload with a card on screen in a second tab, answer it there, then press a
+     choice in the first. The refusal appears **on the card**, in red, and every
+     button on it comes back enabled.
+  6. Open the **Chats** tab. A thread with questions open says `asked you` (or
+     `asked you 3`) in accent beside its time, distinct from the `N waiting`
+     chip, which counts proposals.
+  7. Watch the network panel with a question open and nothing else happening:
+     the poll stays at **10 seconds**. It must not speed up — nothing on the
+     server can answer — and it must not stop, because another tab can.
+  8. At 390px: the chips wrap rather than overflowing, the hairlines still
+     separate the questions, and tapping the text field does not zoom the page
+     in and leave it there.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
@@ -4143,7 +4248,8 @@ run's diff is parsed and budgeted, whether a saved graph of run blocks can run a
 all and the order its runs are created in, when a branch may be landed, what a
 queued merge does with the branch it reaches, what counts as a conflict marker — both
 for deciding whether one was really resolved and for deciding what to show, what
-the orchestrator chat may ask its operator and what an answer to it settles — and
+the orchestrator chat may ask its operator, what an answer to it settles and where
+a question is drawn in the thread that shows it — and
 the two renderings that would lie quietly about a number: an unconfigured
 ceiling, and a first-party figure shown beside the meters. Two entries are
 neither a function nor a rendering: the order a chat's thread renders in, driven
