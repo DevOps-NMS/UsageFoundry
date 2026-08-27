@@ -9,9 +9,11 @@ import type {
   ChatListEntryDTO,
   ChatMessageDTO,
   ChatProposalDTO,
+  ChatQuestionDTO,
   ProposedBlockDTO,
 } from "@/lib/apiTypes";
 import { chatRequest } from "@/lib/chatRequest";
+import { threadItems } from "@/lib/chatThread";
 import {
   describeAmbientAgents,
   fmtDateTime,
@@ -22,9 +24,10 @@ import {
 } from "@/lib/format";
 import { Markdown } from "@/components/Markdown";
 import { Badge } from "@/components/ui/Badge";
-import { Button, ButtonRow } from "@/components/ui/Button";
+import { Button, ButtonRow, type ButtonVariant } from "@/components/ui/Button";
 import { Card, CardTitle, Empty, type CardEmphasis } from "@/components/ui/Card";
 import { Disclosure } from "@/components/ui/Disclosure";
+import { Input } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { Icon } from "@/components/ui/Icon";
 import { ListGroup } from "@/components/ui/List";
@@ -143,6 +146,32 @@ const GUARD_TONE: Record<"missing" | "set", string> = {
   set: "text-ink-muted",
 };
 
+/**
+ * The leading edge of a question card, per state. Complete class strings, the
+ * kit's rule — an interpolated one emits nothing at all and does it silently.
+ *
+ * Accent while it is open, and only there. On this page accent already means
+ * "this is waiting for you" — the proposals badge, the current row in the
+ * thread list — and a question is the one thing in the *transcript* that is.
+ * Settled, it takes the same neutral edge a `system` turn wears, because it is
+ * then a record of what happened rather than something to do.
+ */
+const QUESTION_EDGE: Record<"open" | "settled", string> = {
+  open: "border-l-accent",
+  settled: "border-l-line-strong",
+};
+
+/**
+ * A choice button, per state.
+ *
+ * Only reachable while more than one question is open — with one, a choice
+ * *is* the answer and there is nothing to mark as chosen. See `AskedQuestions`.
+ */
+const CHOICE_VARIANT: Record<"chosen" | "offered", ButtonVariant> = {
+  chosen: "primary",
+  offered: "secondary",
+};
+
 /** What a proposed block is, in the words the workflow pages already use. */
 const BLOCK_KIND: Record<ProposedBlockDTO["kind"], string> = {
   run: "run",
@@ -228,6 +257,10 @@ export default function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [decideError, setDecideError] = useState<string | null>(null);
+  // A fourth, for the same reason there are three: the question card is in the
+  // transcript, and a refused answer reported under the composer is a sentence
+  // about buttons that may be several screens up.
+  const [answerError, setAnswerError] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -268,6 +301,18 @@ export default function ChatPage() {
   const chatId = chat?.id ?? null;
   const thinking = chat?.status === "thinking";
   const messageCount = chat?.messages.length ?? 0;
+  // Up here with the other derived facts rather than beside the proposal lists,
+  // because an effect below depends on the count: a `const` declared after a
+  // `useEffect` that names it in its dependency array is read before it is
+  // initialised, and that is a ReferenceError on the first render rather than
+  // anything subtle.
+  const questions = chat?.questions ?? [];
+  const openQuestions = questions.filter((q) => q.status === "pending").length;
+  // The transcript with the questions put back where they were asked. Derived
+  // on every render rather than held in state, for the reason the proposal
+  // lists are: it is a projection of the poll's answer, and a copy would be one
+  // more thing that can disagree with what the server just said.
+  const items = threadItems(chat?.messages ?? [], questions);
 
   /**
    * Neither failure may be dropped. A poll that returns early leaves the last
@@ -357,6 +402,15 @@ export default function ChatPage() {
   // for, so the guard that used to stand here meant the page never tried again
   // and the failure notice stood for ever. The cadence is unchanged — with no
   // thread there is no `thinking` status, so this is the idle timer.
+  //
+  // **A chat waiting on an answer stays on the idle period, and that is a
+  // decision rather than an omission.** The fast cadence exists to catch a turn
+  // landing; a chat with a question open has no child and nothing on the server
+  // can produce the answer, so three-second polling would be three times the
+  // requests for a row that cannot move until a person clicks. It does not
+  // stand down either, which is the half worth stating: the answer can arrive
+  // from another tab, and the thread list beside it moves for reasons that have
+  // nothing to do with this conversation — so ten seconds, not never.
   useEffect(() => {
     const period = chat?.status === "thinking" ? POLL_ACTIVE_MS : POLL_IDLE_MS;
     const t = setInterval(() => void load(chatId), period);
@@ -420,6 +474,15 @@ export default function ChatPage() {
   useEffect(() => {
     if (thinking && atBottomRef.current) scrollToLatest(false);
   }, [thinking, scrollToLatest]);
+
+  // A question is content that arrives with no message behind it —
+  // `ask_operator` writes the row mid-turn, so the card can land while the
+  // thread is still thinking and `messageCount` has not moved. Same rule as the
+  // waiting row above: it follows a reader who was already at the bottom and
+  // moves nobody else.
+  useEffect(() => {
+    if (openQuestions > 0 && atBottomRef.current) scrollToLatest(false);
+  }, [openQuestions, scrollToLatest]);
 
   useEffect(() => {
     const el = composerRef.current;
@@ -533,6 +596,35 @@ export default function ChatPage() {
     } finally {
       // `send`'s reasoning, and this handler is the one that most needs it: a
       // turn worth stopping is one where something has already gone wrong.
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Answer what the chat asked, which starts the turn that reads the answer.
+   *
+   * Deliberately its own door rather than a composer send: the route settles
+   * the rows this names and quotes each question above its answer, so the fresh
+   * child resumed against the session reads what it asked rather than a bare
+   * string. Sending the same words through the composer would *supersede* the
+   * questions instead, which is a different fact and one the model is told.
+   *
+   * `busy` is shared with the composer and the approve row for the reason it
+   * always was: one billed child per conversation, and every control that can
+   * start one is out while a request that might have is in flight.
+   */
+  const answer = async (answers: Array<{ id: string; answer: string }>) => {
+    if (!chatId || answers.length === 0 || busy || thinking) return;
+    setBusy(true);
+    setAnswerError(null);
+    try {
+      const result = await chatRequest(`/api/chat/${chatId}/questions`, { answers });
+      if (!result.ok) {
+        setAnswerError(result.error ?? "That answer could not be sent.");
+      } else if (result.chat) {
+        setChat(result.chat);
+      }
+    } finally {
       setBusy(false);
     }
   };
@@ -753,13 +845,38 @@ export default function ChatPage() {
                     </p>
                   </div>
                 ) : (
-                  chat.messages.map((m, i) => (
-                    <Message
-                      key={m.id}
-                      message={m}
-                      grouped={i > 0 && chat.messages[i - 1].role === m.role}
-                    />
-                  ))
+                  items.map((item, i) => {
+                    if (item.kind === "questions") {
+                      return (
+                        <AskedQuestions
+                          // The set as asked, so an operator part-way through
+                          // typing an answer keeps it across a poll — the ids
+                          // do not change when a sibling is answered.
+                          key={item.questions[0].id}
+                          questions={item.questions}
+                          busy={busy}
+                          thinking={thinking}
+                          error={answerError}
+                          onAnswer={(answers) => void answer(answers)}
+                        />
+                      );
+                    }
+                    // Read off the *item* before it and not the message before
+                    // it: a question card between two turns of one speaker
+                    // means they are no longer one utterance, so the second one
+                    // gets its name and its time back.
+                    const prev = items[i - 1];
+                    return (
+                      <Message
+                        key={item.message.id}
+                        message={item.message}
+                        grouped={
+                          prev?.kind === "message" &&
+                          prev.message.role === item.message.role
+                        }
+                      />
+                    );
+                  })
                 )}
 
                 {thinking && <Waiting since={waitingSince} stale={pollError !== null} />}
@@ -939,10 +1056,24 @@ export default function ChatPage() {
               }}
             />
             <ButtonRow className="mt-2">
+              {/* The composer is deliberately *not* disabled or pre-filled
+                  while a question is open: the chat is `idle`, there is no
+                  child, and the operator may say anything they like. What it
+                  owes them is what saying it does — an ordinary message is the
+                  operator declining and redirecting, and the server closes
+                  every open question as overtaken in the same statement that
+                  records it. Left unsaid, a question answered in prose here
+                  reads as still waiting, and the card stays clickable a week
+                  later to start a billed turn about a conversation nothing in
+                  the thread is about any more. */}
               <span className="mr-auto text-xs text-ink-faint">
                 {thinking
                   ? "Stop ends this turn and signals the process answering it"
-                  : "⌘↩ or Enter sends · Shift+Enter for a new line"}
+                  : openQuestions > 0
+                    ? `Answer above, or send a message — sending closes the ${
+                        openQuestions === 1 ? "question" : "questions"
+                      } as overtaken`
+                    : "⌘↩ or Enter sends · Shift+Enter for a new line"}
               </span>
               {thinking && (
                 <Button variant="secondary" disabled={busy} onClick={() => void stop()}>
@@ -1233,6 +1364,218 @@ function Waiting({ since, stale }: { since: number; stale: boolean }) {
       <span aria-hidden="true" className="text-2xs tabular-nums text-ink-faint">
         {fmtDuration(Math.max(0, now - since))}
       </span>
+    </div>
+  );
+}
+
+/**
+ * What the chat asked the operator, and what became of it.
+ *
+ * **It is in the transcript rather than in the panel beside it, and that is the
+ * split this page is built on.** The right-hand list is work waiting to be
+ * approved and costs nothing until a person clicks; a question is a sentence,
+ * answering it starts a chat turn, and it belongs in the half of the page where
+ * the other sentences are. It is drawn as an object for `Proposal`'s reason —
+ * it has controls on it — but it is deliberately not a `Card`: `emphasis`
+ * carries padding as well as elevation, and this box is inside the scrolled
+ * conversation, which is the one region on this page that must not re-pad
+ * itself under a reader's hands while it polls.
+ *
+ * **A settled question stays.** Answered or overtaken, it keeps its place above
+ * the message that settled it, because a card that disappeared when it was
+ * answered reads as a question nobody was ever asked — and the message beside
+ * it, which quotes each question above its answer, then reads as text that
+ * arrived from nowhere. `superseded` is drawn as neither a failure nor an
+ * answer: the operator said something else, which *is* an answer, and drawing
+ * it in danger red would report a redirection as a fault.
+ *
+ * **When a click sends, and when it only fills something in.** A choice sends
+ * on one press whenever it is the last question open — that is the whole point
+ * of offering buttons, and with nothing else open there is nothing the send can
+ * take with it. With siblings still open it cannot, because the answer message
+ * settles the set and supersedes whatever it did not name: one hasty press
+ * would close two questions the operator was still reading. So above one, the
+ * choices fill in and the row's own button sends them together, and the card
+ * says as much rather than leaving it to be found out.
+ */
+function AskedQuestions({
+  questions,
+  busy,
+  thinking,
+  error,
+  onAnswer,
+}: {
+  questions: ChatQuestionDTO[];
+  busy: boolean;
+  thinking: boolean;
+  error: string | null;
+  onAnswer: (answers: Array<{ id: string; answer: string }>) => void;
+}) {
+  // Keyed by question id and local to the card, so a poll landing mid-sentence
+  // re-renders around the draft rather than through it.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  const open = questions.filter((q) => q.status === "pending");
+  // Out while a turn is in flight, and said in words below. `sendChatMessage`
+  // refuses a second billed child on one conversation, so a press here during a
+  // turn is a refusal — and a question can be open while its own turn is still
+  // running, since `ask_operator` records the row and returns rather than
+  // blocking on the click.
+  const disabled = busy || thinking;
+
+  const submit = (override?: { id: string; answer: string }) => {
+    const answers = open.flatMap((q) => {
+      const value = (
+        override?.id === q.id ? override.answer : (drafts[q.id] ?? "")
+      ).trim();
+      return value ? [{ id: q.id, answer: value }] : [];
+    });
+    if (answers.length === 0) return;
+    onAnswer(answers);
+  };
+
+  const choose = (id: string, choice: string) => {
+    if (open.length === 1) {
+      submit({ id, answer: choice });
+      return;
+    }
+    setDrafts((d) => ({ ...d, [id]: choice }));
+  };
+
+  // Nothing to press it with where every open question is a shortlist and there
+  // is only one of them — the choices are the button, and a second one that
+  // never has anything to send is a control that reads as broken.
+  const sends = open.length > 1 || open.some((q) => q.allowText);
+  const ready = open.some((q) => (drafts[q.id] ?? "").trim().length > 0);
+
+  return (
+    <div
+      className={`mt-5 max-w-[70ch] rounded-sm border border-line border-l-[3px] bg-inset px-3 py-2.5 first:mt-0 ${
+        QUESTION_EDGE[open.length > 0 ? "open" : "settled"]
+      }`}
+    >
+      <div className="mb-2 flex flex-wrap items-baseline gap-2">
+        <span className="text-xs font-semibold text-ink">
+          {open.length > 0 ? "Waiting on you" : "Asked you"}
+        </span>
+        {open.length > 1 && (
+          <span className="text-2xs text-ink-muted">
+            {open.length} questions, answered together — anything left blank is
+            sent as not answered
+          </span>
+        )}
+      </div>
+
+      {questions.map((q) => (
+        <div key={q.id} className="mt-3 first:mt-0">
+          <p className="text-sm leading-normal text-ink">{q.question}</p>
+
+          {q.status === "answered" && (
+            <p className="mt-1 text-xs leading-normal text-ink-muted">
+              You answered{" "}
+              <span className="font-medium text-ink">{q.answer}</span>
+            </p>
+          )}
+          {q.status === "superseded" && (
+            <p className="mt-1 text-xs leading-normal text-ink-muted">
+              Overtaken by what you said next.
+            </p>
+          )}
+
+          {q.status === "pending" && (
+            <>
+              {q.choices.length > 0 && (
+                <ButtonRow className="mt-2">
+                  {q.choices.map((choice) => (
+                    <Button
+                      key={choice}
+                      size="compact"
+                      variant={
+                        CHOICE_VARIANT[
+                          drafts[q.id] === choice ? "chosen" : "offered"
+                        ]
+                      }
+                      // A toggle only where it is one. With this the last open
+                      // question, the press is the answer and announcing it as
+                      // pressed would describe a control that is already gone.
+                      aria-pressed={
+                        open.length > 1 ? drafts[q.id] === choice : undefined
+                      }
+                      disabled={disabled}
+                      onClick={() => choose(q.id, choice)}
+                    >
+                      {choice}
+                    </Button>
+                  ))}
+                </ButtonRow>
+              )}
+
+              {q.allowText && (
+                // A kit control, not a hand-written one: below `md`, iOS Safari
+                // zooms the page in on any text control under 16px and never
+                // zooms back out, and `Input` is where that floor lives. The
+                // composer is this app's one hand-written exception and is not
+                // a precedent for a second.
+                <Input
+                  className="mt-2"
+                  aria-label={q.question}
+                  placeholder={
+                    q.choices.length > 0 ? "…or type an answer" : "Your answer"
+                  }
+                  value={drafts[q.id] ?? ""}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    setDrafts((d) => ({ ...d, [q.id]: e.target.value }))
+                  }
+                  onKeyDown={(e) => {
+                    // The composer's chord, in the one other field on this page
+                    // that sends. No Shift+Enter branch: this is a single-line
+                    // input and there is no newline to make.
+                    if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+                    e.preventDefault();
+                    if (!disabled) submit();
+                  }}
+                />
+              )}
+
+              {q.choices.length === 0 && !q.allowText && (
+                // Reachable rather than theoretical: `questionChoices` answers
+                // an unreadable `choices` column with none, which is the
+                // reading that fails safe — and it leaves a question with
+                // nothing on it to press. Said, because the way out is a
+                // different control on a different part of the page.
+                <p className="mt-1 text-2xs leading-normal text-warn">
+                  This question offers nothing to press and no way to type an
+                  answer. Reply in the composer instead, which closes it.
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      ))}
+
+      {open.length > 0 && (
+        <>
+          {sends && (
+            <ButtonRow className="mt-3">
+              <Button
+                size="compact"
+                disabled={disabled || !ready}
+                onClick={() => submit()}
+              >
+                {open.length > 1 ? `Answer ${open.length}` : "Answer"}
+              </Button>
+            </ButtonRow>
+          )}
+          {thinking && (
+            <p className="mt-2 text-2xs leading-normal text-ink-faint">
+              This turn is still working — you can answer once it finishes.
+            </p>
+          )}
+        </>
+      )}
+
+      {error && <Hint tone="danger">{error}</Hint>}
     </div>
   );
 }
@@ -1551,6 +1894,22 @@ function ChatRow({
       <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-2xs text-ink-muted">
         <span className="tabular-nums">{fmtRelative(entry.updatedAt)}</span>
         {entry.status === "thinking" && <span className="text-accent">thinking</span>}
+        {/* A word in the row's own voice rather than a second accent chip
+            beside the proposals one. Both are things waiting for the operator
+            and the DTO keeps the counts apart on purpose — one is approving
+            work and the other is answering a sentence — so a badge that looked
+            identical to `N waiting` would send the reader to the wrong half of
+            the page, which is the confusion not summing them exists to avoid.
+            `thinking` is already drawn this way one span over, and the two can
+            legitimately be true at once: `ask_operator` records its rows while
+            the turn that called it is still running. */}
+        {entry.pendingQuestionCount > 0 && (
+          <span className="text-accent">
+            {entry.pendingQuestionCount === 1
+              ? "asked you"
+              : `asked you ${entry.pendingQuestionCount}`}
+          </span>
+        )}
         {entry.pendingCount > 0 && (
           <Badge tone="accent">{entry.pendingCount} waiting</Badge>
         )}
