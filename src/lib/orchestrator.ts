@@ -63,6 +63,7 @@ import {
   BOUNDARY_BREAK_EVEN_BUDGET,
   contextTokens,
   sampleContext,
+  coldAgeRefusalMessage,
   CYCLE_CONTEXT_CEILING_TOKENS,
   freshestPayback,
   PAYBACK_HORIZON_TURNS,
@@ -7073,20 +7074,11 @@ async function forkAndAdopt(
   const rowId = recordForkAttempt(id, sessionId, result, minColdAge);
 
   if (!result.written || !result.newSessionId) {
-    // A refusal is a result, not a failure, and the two must not read alike:
-    // `cold-age` at a boundary is the expected outcome and says the cut would
-    // not have paid for itself, which is the tool working.
+    // A refusal is a result, not a failure, and the two must not read alike.
     if (result.refusedBy === "cold-age") {
-      const age = result.coldAgeSeconds === null
-        ? "younger than the threshold"
-        : `${Math.round(result.coldAgeSeconds)}s old`;
-      log(
-        id,
-        `Left this run's conversation alone: winnow will not fork it while the ` +
-          `last request is ${age}, because the cached prefix may still be live ` +
-          `and the cut would not be free. Raise or lower ` +
-          `contextPruningForkMinColdAge to change that, deliberately.`,
-      );
+      // The wording lives in contextPruning so it can be tested against the
+      // thing that actually decides this refusal — see coldAgeRefusalMessage.
+      log(id, coldAgeRefusalMessage(result.coldAgeSeconds, minColdAge));
     } else if (result.refusedBy === "break-even") {
       // Reachable only if someone armed the gate: both callers ask for
       // `--max-break-even none` because a boundary cut rides a rewrite that was

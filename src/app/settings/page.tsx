@@ -3334,14 +3334,19 @@ export default function SettingsPage() {
                 <>
                   The tool will not cut a conversation whose last request is
                   newer than this, because the answer may still be cached and
-                  the cut would then cost more than it saves. A fork can only
-                  happen in the moment between two work cycles, which is always
-                  seconds old — so this ships at <strong>0</strong>, on the
-                  argument that the handover is the one moment the edit is free
-                  because the next cycle rewrites the conversation anyway. That
-                  is argued and not yet measured here, and raising it is how you
-                  disagree; left blank it falls back to the tool&rsquo;s own
-                  hour, at which <strong>nothing is ever forked</strong>.
+                  the cut would then cost more than it saves. Read on before
+                  setting it, because it does not behave like a dial: a fork can
+                  only happen in the moment between two work cycles, and there
+                  the last request is always a fraction of a second old. So{" "}
+                  <strong>
+                    0 forks and every other value never forks
+                  </strong>{" "}
+                  — blank included, which falls back to the tool&rsquo;s own
+                  hour. It ships at 0 on the argument that the handover is the
+                  one moment the edit is free, because the next cycle rewrites
+                  the conversation anyway. That is argued and not yet measured
+                  here, and raising this is how you disagree — but raise it
+                  meaning &ldquo;off&rdquo;, not meaning &ldquo;later&rdquo;.
                   Whatever is in force is recorded against every fork, so the
                   bet is on the record rather than in someone&rsquo;s memory
                 </>

@@ -1612,6 +1612,44 @@ export function forkTranscript(
   });
 }
 
+/**
+ * What an operator is told when the quiet-period guard refuses a fork.
+ *
+ * Pure, and exported, for one reason: the number that decides this outcome is
+ * `minColdAge`, and the first version of this line did not print it. It printed
+ * the age — "the last request is 0s old" — which reads as a statement about the
+ * conversation and invites the reading that the conversation was too hot. The
+ * conversation is *always* too hot by that reading: a fork happens in the gap
+ * between two work cycles, so the age is a fraction of a second every time and
+ * carries no information at all. Four consecutive refusals over two days were
+ * diagnosed as a bad default in this app when the install had `30` stored
+ * against it the whole time, which the log could have said and didn't.
+ *
+ * So the contract under test is: the effective threshold appears, and the line
+ * says that any threshold above 0 refuses every fork rather than delaying one.
+ */
+export function coldAgeRefusalMessage(
+  coldAgeSeconds: number | null,
+  minColdAge: number | null,
+): string {
+  const age =
+    coldAgeSeconds === null
+      ? "younger than the threshold"
+      : `${Math.round(coldAgeSeconds)}s old`;
+  const threshold =
+    minColdAge === null
+      ? "no quiet period is set here, so winnow applied its own hour"
+      : `the quiet period is set to ${minColdAge}s`;
+  return (
+    `Left this run's conversation alone: winnow's quiet-period guard refused ` +
+    `the fork. The last request is ${age} and ${threshold}. A fork can only ` +
+    `happen between two work cycles, where the conversation is always seconds ` +
+    `old — so any quiet period above 0 means nothing is ever forked. Set ` +
+    `contextPruningForkMinColdAge to 0 to cut here, or turn context pruning ` +
+    `off if that is what you meant.`
+  );
+}
+
 /** The fields of `fork --json` this app reads, or null if the body is unusable. */
 export function parseFork(body: string): ForkResult | null {
   try {

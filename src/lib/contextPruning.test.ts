@@ -9,6 +9,7 @@ import {
   boundaryAction,
   BOUNDARY_RECHECK_AFTER,
   classifyResume,
+  coldAgeRefusalMessage,
   contextTokens,
   forkCutFromRow,
   groupPruneSavingsByRun,
@@ -838,6 +839,43 @@ describe("freshestPayback — which engine's record the gates read", () => {
 
   it("says nothing when the last cut removed nothing", () => {
     assert.equal(freshestPayback({ ts: 1, s: 100, d: 0 }, null), null);
+  });
+});
+
+describe("coldAgeRefusalMessage — the number that decides it appears in it", () => {
+  /**
+   * These are the readings this install actually refused on, taken from its own
+   * `fork_attempts` rows: four boundaries across two days, `min_cold_age` 30 on
+   * every one of them, ages 0.395s to 0.619s. Not one line said "30", so the
+   * refusal was read as a hot transcript and chased into this app's defaults
+   * while the stored setting sat there unexamined.
+   */
+  it("names the threshold, which is the only thing that varies", () => {
+    const message = coldAgeRefusalMessage(0.463, 30);
+    assert.match(message, /30s/, "the threshold must be in the line");
+    assert.match(message, /0s old/, "so must the age it was compared against");
+  });
+
+  it("says a threshold above zero refuses always, rather than delays", () => {
+    const message = coldAgeRefusalMessage(0.395, 30);
+    // The distinction the first wording lost. "Not yet" invites waiting;
+    // "never" sends the operator to the setting, which is where the fix is.
+    assert.match(message, /nothing is ever forked/);
+    assert.match(message, /contextPruningForkMinColdAge to 0/);
+  });
+
+  it("distinguishes an unset quiet period from a set one", () => {
+    // Unset is not lenient: winnow supplies its own hour, and an hour at a
+    // boundary is the same off switch a 30 is, reached by a different route.
+    assert.match(coldAgeRefusalMessage(0.4, null), /winnow applied its own hour/);
+    assert.doesNotMatch(coldAgeRefusalMessage(0.4, null), /set to/);
+    assert.match(coldAgeRefusalMessage(0.4, 0), /set to 0s/);
+  });
+
+  it("still reads when winnow reported no age at all", () => {
+    const message = coldAgeRefusalMessage(null, 30);
+    assert.match(message, /younger than the threshold/);
+    assert.doesNotMatch(message, /NaN|undefined|null/);
   });
 });
 
