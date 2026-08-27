@@ -66,7 +66,7 @@ describe("recordForkAttempt", () => {
     const { recordForkAttempt } = await import("./contextPruning.js");
     const { db } = await import("./db.js");
 
-    const rowId = recordForkAttempt("run-a", "src-session", WRITTEN, 300);
+    const rowId = recordForkAttempt("run-a", "src-session", WRITTEN, 300, "boundary", 180_000);
     assert.notEqual(
       rowId,
       null,
@@ -98,7 +98,7 @@ describe("recordForkAttempt", () => {
     const { recordForkAttempt } = await import("./contextPruning.js");
     const { db } = await import("./db.js");
 
-    const rowId = recordForkAttempt("run-b", "src-session", REFUSED, 3600);
+    const rowId = recordForkAttempt("run-b", "src-session", REFUSED, 3600, "early-end", null);
     assert.notEqual(rowId, null);
 
     const row = db()
@@ -118,13 +118,13 @@ describe("recordForkAttempt", () => {
         resumed: number | null;
       }).resumed;
 
-    const good = recordForkAttempt("run-c", "s", WRITTEN, 0)!;
+    const good = recordForkAttempt("run-c", "s", WRITTEN, 0, "boundary", null)!;
     markForkResumed(good, true);
     assert.equal(read(good), 1);
 
     // The kill condition. It has to be writable, or milestone 2's guardrail
     // cannot fail — which is worse than failing it.
-    const bad = recordForkAttempt("run-d", "s", WRITTEN, 0)!;
+    const bad = recordForkAttempt("run-d", "s", WRITTEN, 0, "boundary", null)!;
     markForkResumed(bad, false);
     assert.equal(read(bad), 0);
   });
@@ -134,7 +134,7 @@ describe("recordForkAttempt", () => {
       "./contextPruning.js"
     );
 
-    const rowId = recordForkAttempt("run-e", "before-the-fork", WRITTEN, 0)!;
+    const rowId = recordForkAttempt("run-e", "before-the-fork", WRITTEN, 0, "boundary", null)!;
     const found = pendingForkFor("run-e", WRITTEN.newSessionId);
     assert.equal(found?.rowId, rowId);
     assert.equal(found?.fallbackSessionId, "before-the-fork");
@@ -158,7 +158,7 @@ describe("recordForkAttempt", () => {
       )
       .run("run-f", "/x", "t", "completed", 10, Date.now() - 1000, "claude-opus-5");
 
-    recordForkAttempt("run-f", "s", WRITTEN, 0);
+    recordForkAttempt("run-f", "s", WRITTEN, 0, "boundary", null);
     const savings = await forkSavings({ runId: "run-f" });
     assert.equal(savings.prunes, 1);
     assert.ok(savings.tokensRemoved > 0);

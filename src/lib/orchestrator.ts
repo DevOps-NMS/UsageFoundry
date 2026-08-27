@@ -6971,6 +6971,7 @@ async function pruneAtBoundary(
           sessionId,
           settings.contextPruningForkMinColdAge,
           BOUNDARY_BREAK_EVEN_BUDGET,
+          "boundary",
           adopt,
         )
       : await prune(id, sessionId, "boundary");
@@ -7024,6 +7025,20 @@ async function settleBoundary(
  * cut, so a second gate on the same arithmetic could only decline to use a
  * boundary already paid for. `BOUNDARY_BREAK_EVEN_BUDGET` carries the argument.
  *
+ * That is not in tension with passing `early-end` below, though it reads like
+ * it. Two different questions:
+ *
+ * - **Should this cut happen?** No, the rewrite is already committed; refusing
+ *   here forgoes the saving without avoiding the cost. Hence no gate.
+ * - **Who owns the rewrite on the books?** The pruning feature, because the
+ *   only reason this boundary exists is that the ceiling watcher made it in
+ *   order to cut. Hence `early-end`.
+ *
+ * Measured on this install, that write is ~$1.80 a time — 178k–183k tokens at
+ * the one-hour class. So the gate worth arguing about is the ceiling watcher's,
+ * which decides whether to spend it at all, and not this one. Reporting it here
+ * is what puts the number in front of that argument.
+ *
  * `--min-cold-age` does not stand here either, and for the third time it is the
  * same argument: the session was live seconds ago because a fork can only happen
  * seconds after a child exits, so the guard's pass condition is unreachable on
@@ -7047,6 +7062,13 @@ async function pruneAtEarlyEnd(
         sessionId,
         settings.contextPruningForkMinColdAge,
         BOUNDARY_BREAK_EVEN_BUDGET,
+        // The trigger the receipt is priced by, and the reason it is passed
+        // rather than assumed: a fork here rides a boundary that exists only
+        // because this app made it in order to cut, so the rewrite it causes is
+        // charged to the cut exactly as the legacy pruner's is. `forkAndAdopt`
+        // used to record every fork as a `boundary` and this moment was priced
+        // free — see `forkCutFromRow`.
+        "early-end",
         adopt,
       )
     : await prune(id, sessionId, "early-end");
@@ -7058,16 +7080,19 @@ async function pruneAtEarlyEnd(
  *
  * Called from both moments a resume is already committed — the natural cycle
  * boundary and the manufactured one the ceiling watcher makes by ending a cycle
- * early. Nothing here distinguishes them, because by the time this runs there is
- * nothing to distinguish: the rewrite is spent either way and the cut rides it.
- * `maxBreakEven` carries the caller's position on that; see
- * `BOUNDARY_BREAK_EVEN_BUDGET`.
+ * early. The *mechanics* do not distinguish them: the rewrite is spent either
+ * way and the cut rides it, which is what `maxBreakEven` carries a position on
+ * (see `BOUNDARY_BREAK_EVEN_BUDGET`). The **accounting** must, which is what
+ * `trigger` carries — a boundary this app manufactured in order to cut owns the
+ * rewrite it causes, and one that was going to happen anyway does not. Recording
+ * every fork as a `boundary` is what let an early-end fork be priced free while
+ * the identical operation under the legacy engine was charged in full.
  *
- * Returns null always, and that is not a stub. `PruneOutcome` describes an
- * in-place edit — a before and an after of one file — and a fork has neither,
- * so `contextAfterPrune` has nothing to correct with. The next cycle's own
- * usage frames will report what the forked conversation costs, which is the
- * measurement that matters and the one this app already trusts everywhere else.
+ * Returns null on a refusal and a synthesised `PruneOutcome` on success. Only
+ * `tokensRemoved` is read from it, by `contextAfterPrune`; the rest is filled
+ * from what the fork reported rather than invented. Non-null is therefore also
+ * the signal that a cut landed, which is what `settleBoundary` labels the
+ * control group by — so this must not go back to returning null on success.
  *
  * The adoption is deliberately not verified here, because it cannot be: the
  * only thing that proves a fork resumes is a resume. `pendingFork` carries the
@@ -7078,6 +7103,7 @@ async function forkAndAdopt(
   sessionId: string | null,
   minColdAge: number | null,
   maxBreakEven: number | null,
+  trigger: PruneTrigger,
   adopt: (sid: string) => void,
 ): Promise<PruneOutcome | null> {
   if (!sessionId) return null;
@@ -7093,7 +7119,22 @@ async function forkAndAdopt(
     return null;
   }
 
-  const rowId = recordForkAttempt(id, sessionId, result, minColdAge);
+  // Measured off the written file, in the currency `prune_receipts.tokens_after`
+  // already uses, so the two engines' receipts are comparable rather than merely
+  // similarly named. This is what the next resume has to write, and the netting
+  // prices exactly that until a real turn lands to be read instead. Only for a
+  // fork that was written — a refusal wrote no file to measure.
+  const contextTokensAfter =
+    result.written && result.out ? contextTokens(result.out) : null;
+
+  const rowId = recordForkAttempt(
+    id,
+    sessionId,
+    result,
+    minColdAge,
+    trigger,
+    contextTokensAfter,
+  );
 
   if (!result.written || !result.newSessionId) {
     // A refusal is a result, not a failure, and the two must not read alike.
@@ -8880,12 +8921,35 @@ export async function startRun(id: string): Promise<void> {
             .run(iterations, id);
         }
 
+        // Captured before the cut, because `adoptSession` reassigns `sessionId`
+        // and the probe is a statement about the conversation that was standing
+        // at this boundary — the same reason `pruneAtBoundary` passes its own
+        // parameter rather than whatever the fork adopted.
+        const boundarySessionId = sessionId;
+        const boundaryContextTokens = lastContextTokens;
+        const earlyEndOutcome = await pruneAtEarlyEnd(id, sessionId, adoptSession);
         lastContextTokens = contextAfterPrune(
           lastContextTokens,
           // `adoptSession` and not `prune` directly: under the fork engine this
           // writes a new transcript and the run has to move onto it, exactly as
           // at a natural boundary. Passing the closure is what lets it.
-          await pruneAtEarlyEnd(id, sessionId, adoptSession),
+          earlyEndOutcome,
+        );
+        // The other half of the boundary bookkeeping, and it was missing here.
+        // `settleBoundary` was called only from `pruneAtBoundary`, so on an
+        // install where the context ceiling reaches every run before a natural
+        // boundary does — which is this one, 50 early-end receipts against 2 —
+        // `resume_probes` stayed empty for ever. That table is the control group
+        // `boundaryInvalidation` needs before it will charge anything, so with
+        // it empty every boundary cut was priced at $0 and the reported net
+        // could not go negative. An empty control is not a neutral state: it is
+        // the one that silently restores the assumption the control exists to
+        // test.
+        await settleBoundary(
+          id,
+          boundarySessionId,
+          earlyEndOutcome !== null,
+          boundaryContextTokens,
         );
         continue;
       }
