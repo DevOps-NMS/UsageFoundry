@@ -8,6 +8,7 @@ import {
   apiContextTokens,
   boundaryAction,
   BOUNDARY_RECHECK_AFTER,
+  ceilingPayback,
   classifyResume,
   coldAgeRefusalMessage,
   contextTokens,
@@ -101,6 +102,95 @@ describe("paybackTurns", () => {
     // for — and it is what the caller distinguishes "no history" by.
     assert.equal(paybackTurns(50_000, 0), null);
     assert.equal(paybackTurns(50_000, -5), null);
+  });
+});
+
+describe("ceilingPayback — what a manufactured boundary would cost", () => {
+  /**
+   * The three forks this install actually took, priced against the bill.
+   *
+   * Each row is a real `fork_attempts` row and the real resume that followed
+   * it: `write` is the tokens that resume created at the one-hour class, read
+   * out of the new session's first billed turn, and `billed` is that write
+   * divided by the `0.1·D` a turn the cut earns back. `netBytes` is the row's
+   * own figure.
+   *
+   * These exist because the gate that was supposed to refuse them read
+   * `suffix_bytes` — the tail after the cut line, 70–87k against ~180k written
+   * — and priced them at 74, 131 and 275 turns. All three were taken. They cost
+   * $5.42 and returned $0.86.
+   */
+  const MEASURED = [
+    { run: "3da14af4", netBytes: 16_839, suffixBytes: 261_172, write: 180_259, billed: 771 },
+    { run: "07f9e442", netBytes: 31_962, suffixBytes: 253_583, write: 178_675, billed: 403 },
+    { run: "7f361068", netBytes: 63_337, suffixBytes: 311_966, write: 183_187, billed: 209 },
+  ];
+
+  it("is not paybackTurns over the suffix, which is what let these through", () => {
+    // Pinned so nobody folds the two together again. The suffix is a real
+    // quantity and `paybackTurns` prices it correctly; it is simply not what a
+    // resume rewrites. Reading these three through it gave 275, 131 and 74
+    // turns against a billed 771, 403 and 209 — every one of them less than
+    // half the truth, and on the cheapest cut less than a tenth.
+    for (const m of MEASURED) {
+      const viaSuffix = paybackTurns(
+        m.suffixBytes / BYTES_PER_TOKEN,
+        m.netBytes / BYTES_PER_TOKEN,
+      )!;
+      assert.ok(
+        viaSuffix < m.billed / 2,
+        `${m.run}: the suffix reading gave ${viaSuffix} against a billed ${m.billed}, ` +
+          `so it must not be reachable from this decision`,
+      );
+    }
+  });
+
+  for (const m of MEASURED) {
+    it(`reproduces the bill on ${m.run}, within a turn`, () => {
+      const removed = m.netBytes / BYTES_PER_TOKEN;
+      // The conversation as it stood before the cut, in the currency the
+      // ceiling reads. `write` is what was left after it.
+      const apiContextNow = m.write + removed;
+      const predicted = ceilingPayback(apiContextNow, { netBytes: m.netBytes })!;
+      assert.ok(
+        Math.abs(predicted - m.billed) <= 1,
+        `predicted ${predicted} against a billed ${m.billed}`,
+      );
+      assert.ok(
+        predicted > PAYBACK_HORIZON_TURNS,
+        "every one of these must now be refused — that is the whole point",
+      );
+    });
+  }
+
+  it("clears the horizon only when the cut is worth about half the conversation", () => {
+    // T* = 20·(1−f)/f, so the horizon of 18 turns needs f ≈ 53%. This is the
+    // number that says pruning is the wrong tool for these conversations:
+    // winnow finds 2–10% in them, and no tier setting moves that.
+    const conversation = 200_000;
+    const half = conversation * 0.53 * BYTES_PER_TOKEN;
+    assert.ok(ceilingPayback(conversation, { netBytes: half })! <= PAYBACK_HORIZON_TURNS);
+
+    const tenth = conversation * 0.1 * BYTES_PER_TOKEN;
+    assert.equal(ceilingPayback(conversation, { netBytes: tenth }), 180);
+  });
+
+  it("answers null when there is no measurement, which the caller declines on", () => {
+    // The inversion that is the fix. `predictedPayback`'s null means "no history
+    // yet" and resolves to prune; this one means "nothing priced it", and the
+    // caller must not spend a boundary on it. A number here — 0, or Infinity —
+    // would make the gate decide on something nobody measured.
+    assert.equal(ceilingPayback(200_000, null), null);
+    assert.equal(ceilingPayback(200_000, { netBytes: 0 }), null);
+    assert.equal(ceilingPayback(200_000, { netBytes: -5 }), null);
+  });
+
+  it("does not go negative when the cut is bigger than the conversation", () => {
+    // Reachable: `netBytes` is transcript-measured and `apiContextNow` is the
+    // API-visible figure, and the transcript runs high because the intake
+    // filter drops results on the wire that Claude Code still writes to disk.
+    // So a cut can be reported as larger than the conversation it is cut from.
+    assert.equal(ceilingPayback(1_000, { netBytes: 900_000 }), 0);
   });
 });
 

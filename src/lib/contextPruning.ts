@@ -924,12 +924,83 @@ export function paybackTurns(suffixBeforeCut: number, removedTokens: number): nu
 }
 
 /**
+ * What a cut would cost at the context ceiling, in turns, before one is taken.
+ *
+ * The decision this serves is the expensive one: whether to **manufacture** a
+ * cycle boundary by ending a cycle early. That boundary is what forces a cold
+ * rewrite of the whole conversation — measured at 178k–183k tokens, about $1.80
+ * a time on this install — and it happens only because this app chose it, so
+ * the counterfactual is a cycle that simply carries on and writes nothing.
+ *
+ * ```
+ * cost     2.0 · C      one cold rewrite of the conversation left after the cut
+ * earns    0.1 · D      per later turn, for not re-reading what came out
+ * T*    =  20 · C / D
+ * ```
+ *
+ * Checked against every fork this install has taken, using the conversation
+ * each resume actually wrote and the turns its billed cost implies:
+ *
+ * | write   | D      | 20·C/D | billed |
+ * |---------|--------|--------|--------|
+ * | 180,259 |  4,678 |    771 |    771 |
+ * | 178,675 |  8,878 |    402 |    403 |
+ * | 183,187 | 17,594 |    208 |    209 |
+ *
+ * ## Why this is not `paybackTurns`
+ *
+ * That one implements winnow's SPEC formula, `19·(S/D) − 20`, over `S` — the
+ * suffix standing after the cut line. It is right for what it prices and is
+ * tested against winnow's own worked examples. It is the wrong quantity here:
+ * a resume does not rewrite the suffix, it rewrites the conversation, and on
+ * these three the suffix was 70–87k against ~180k written. Read through `S` the
+ * same cuts priced at 74–275 turns where 209–771 was billed, which is how a
+ * gate meant to catch exactly this let all three through.
+ *
+ * ## Two knowingly-imprecise inputs, both erring the same way
+ *
+ * `apiContextNow` is `sampleContext`'s API-visible figure and not
+ * `contextTokens`, deliberately — the transcript runs ~37% high because the
+ * intake filter drops tool results on the wire that Claude Code still writes to
+ * disk (`apiContextTokens` documents 183,803 against a real 114,485). But it
+ * also carries the ~21.9k static head — system prompt and tool definitions —
+ * which a resume re-reads rather than rewrites, so `apiContextNow − D` sits
+ * about 10% above what actually gets written.
+ *
+ * And `D` is transcript-measured, so it counts anything the intake filter had
+ * already taken off the wire — bounded by the overlap between the two
+ * mechanisms, measured at 4.06% in `intakeFilter.ts`.
+ *
+ * Both push `T*` up, which declines more cuts. That is the direction to be
+ * wrong in on a gate whose failure mode was being too permissive.
+ *
+ * Null when there is nothing to weigh: no plan, or a plan that removes nothing.
+ * **Null must decline here**, which is the opposite of `predictedPayback`'s
+ * null — that one means "this run has not cut yet" and resolves to prune on
+ * `boundaryAction`'s aggregate argument. This one means "no measurement", and
+ * spending $1.80 on an unmeasured cut is the mistake being corrected.
+ */
+export function ceilingPayback(
+  apiContextNow: number,
+  plan: { netBytes: number } | null,
+): number | null {
+  if (!plan) return null;
+  const removed = plan.netBytes / BYTES_PER_TOKEN;
+  if (removed <= 0) return null;
+  const conversationAfter = Math.max(0, apiContextNow - removed);
+  return Math.max(0, Math.round((20 * conversationAfter) / removed));
+}
+
+/**
  * One record of a past cut: when it was made, and the `S` and `D` it had.
  *
- * The units are whatever the row that produced it used — `prune_receipts` counts
- * tokens and `fork_attempts` counts bytes — and that is safe because
- * `paybackTurns` reads `S/D` as a ratio and a reading never mixes two rows.
- * Nothing may combine `s` from one reading with `d` from another.
+ * **Both fields are tokens.** They did not have to be while each engine's row
+ * supplied both — `paybackTurns` reads `S/D` as a ratio, so a reading in bytes
+ * divided by a reading in bytes was safe. That stopped being true when the fork
+ * reading moved from `suffix_bytes` to `context_tokens_after`: one column counts
+ * tokens and the other bytes, and a reading built from both is wrong by
+ * `BYTES_PER_TOKEN` while typechecking perfectly. `predictedPayback` converts at
+ * the read. Nothing may combine `s` from one reading with `d` from another.
  */
 export interface PaybackReading {
   ts: number;

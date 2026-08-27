@@ -70,6 +70,7 @@ import {
   paybackTurns,
   type PaybackReading,
   boundaryAction,
+  ceilingPayback,
   forkTranscript,
   pendingForkFor,
   PLAN_TIER,
@@ -9765,8 +9766,12 @@ async function checkContextCeilings(): Promise<void> {
     if (!sessionId) continue;
 
     let tokens: number;
+    // Hoisted out of the try because the payback measurement below needs it
+    // too, and resolving the session twice on the same tick would be a second
+    // directory walk for an answer already in hand.
+    let transcript: string | null = null;
     try {
-      const transcript = await resolveSessionTranscript(sessionId);
+      transcript = await resolveSessionTranscript(sessionId);
       if (!transcript) continue;
       // Read off `usage` rather than estimated from bytes. The two diverge by
       // tens of thousands of tokens in both directions on this install — the
@@ -9785,18 +9790,46 @@ async function checkContextCeilings(): Promise<void> {
     if (!pruning) continue;
     if (tokens < CYCLE_CONTEXT_CEILING_TOKENS) continue;
 
-    const predicted = predictedPayback(id);
-    if (predicted !== null && predicted > PAYBACK_HORIZON_TURNS) {
+    // Asked about **this** conversation, now, rather than inferred from the last
+    // cut this run made. `predictedPayback` returns null until a run has cut
+    // once, and null resolved to "act" — so every run's first crossing
+    // manufactured a boundary unconditionally, and a manufactured boundary is a
+    // cold rewrite of the whole conversation. Measured on this install: 178k–183k
+    // tokens at the one-hour class, about $1.80, spent to remove 2.3%–8.8% of a
+    // conversation, needing 209–771 further turns to repay against cycles that
+    // ran 36–67. The gate was not wrong afterwards; it never saw the first one.
+    //
+    // `plan` is read-only, is allowed while the session is live, and is the same
+    // subprocess `observePlan` already spawns at every boundary — whose answer
+    // went into `plan_observations` and was read by nothing. Bounded: this runs
+    // only above the ceiling, and `earlyEndDeclined` latches per run.
+    const plan = await planCut(transcript);
+    const predicted = ceilingPayback(tokens, plan);
+    if (predicted === null || predicted > PAYBACK_HORIZON_TURNS) {
+      // Null declines here, which is the opposite of what `predictedPayback`'s
+      // null meant. That one was "no history", and `boundaryAction`'s aggregate
+      // argument says an unknown of that kind should prune. This one is "no
+      // measurement", and there is no argument for spending $1.80 on a cut
+      // nothing has priced.
+      //
       // Said once per run rather than once per tick: `earlyEndDeclined` latches,
       // because a run sitting above the ceiling would otherwise repeat this
       // every minute for hours.
       if (!earlyEndDeclined.has(id)) {
         earlyEndDeclined.add(id);
+        const removed = plan ? Math.round(plan.netBytes / BYTES_PER_TOKEN) : 0;
+        const share = plan && tokens > 0 ? (removed / tokens) * 100 : 0;
         log(
           id,
           `This run's context has passed ${fmtTokens(CYCLE_CONTEXT_CEILING_TOKENS)} tokens, ` +
-            `but the last prune here removed too little to pay for another one ` +
-            `(it would need ${predicted} more turns to break even). Letting the cycle run on.`,
+            (predicted === null
+              ? `but nothing here could be priced as worth removing. `
+              : `but a cut here would remove ${fmtTokens(removed)} tokens ` +
+                `(${share.toFixed(1)}% of it) and need ${predicted} further turns to ` +
+                `pay for the rewrite that ending this cycle would cause — the limit ` +
+                `is ${PAYBACK_HORIZON_TURNS}. `) +
+            `Letting the cycle run on, which costs cache reads at 0.1× and ` +
+            `invalidates nothing.`,
         );
       }
       continue;
@@ -9832,17 +9865,32 @@ function predictedPayback(runId: string): number | null {
           WHERE run_id = ? ORDER BY ts DESC LIMIT 1`,
       )
       .get(runId) as PaybackReading | undefined;
-    // The other engine's record of the same two quantities: S is the suffix
-    // standing after the cut line and D is what came out net of the pointers
-    // that replaced it. Reading receipts alone left a run under the fork engine
-    // with no prediction at all — see `freshestPayback`, which also holds the
-    // note about the two tables' units.
-    const fork = db()
+    // The other engine's record of the same two quantities. `S` is
+    // `context_tokens_after` and **not** `suffix_bytes`, which is what this read
+    // for and got wrong by a factor of two and a half: the suffix is the tail
+    // standing after the cut line, 70–87k on the forks this install has taken,
+    // where what a resume rewrites is the conversation, ~180k. Through the
+    // suffix those cuts priced at 74–275 turns against a billed 209–771, so the
+    // gate meant to refuse exactly them was reading a number less than half the
+    // truth. See `ceilingPayback` for the arithmetic and the measurements.
+    //
+    // Both fields are converted to tokens here rather than passed as stored.
+    // `paybackTurns` reads `S/D` as a ratio, so a reading that mixed the
+    // column's tokens with the other column's bytes would be wrong by
+    // `BYTES_PER_TOKEN` and typecheck perfectly.
+    //
+    // Reading receipts alone left a run under the fork engine with no prediction
+    // at all — see `freshestPayback`.
+    const forkRow = db()
       .prepare(
-        `SELECT ts, suffix_bytes AS s, net_bytes AS d FROM fork_attempts
-          WHERE run_id = ? AND net_bytes > 0 ORDER BY ts DESC LIMIT 1`,
+        `SELECT ts, context_tokens_after AS s, net_bytes AS d FROM fork_attempts
+          WHERE run_id = ? AND net_bytes > 0 AND context_tokens_after > 0
+          ORDER BY ts DESC LIMIT 1`,
       )
-      .get(runId) as PaybackReading | undefined;
+      .get(runId) as { ts: number; s: number; d: number } | undefined;
+    const fork: PaybackReading | undefined = forkRow
+      ? { ts: forkRow.ts, s: forkRow.s, d: forkRow.d / BYTES_PER_TOKEN }
+      : undefined;
     return freshestPayback(receipt, fork);
   } catch {
     return null;
