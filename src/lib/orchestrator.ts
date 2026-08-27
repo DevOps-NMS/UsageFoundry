@@ -4605,14 +4605,36 @@ function admitWaiting(run: RunRow): boolean {
 
 interface IterationResult {
   exitCode: number;
+  /**
+   * What this child reported spending, over every `result` event it emitted.
+   *
+   * Not a sum of them: `total_cost_usd` is the session's running total and one
+   * child can emit two. `cycleCostAfterResult` owns that and says why. Across
+   * children it *is* summed, by the `+=` in the run loop, because a restart
+   * begins a fresh CLI accumulator.
+   */
   costUSD: number;
+  /**
+   * Every token this cycle's `result` events reported, summed — `usage` is that
+   * stretch's own rather than the session's, which is the half of the event
+   * `costUSD` above is not.
+   *
+   * **Main thread only, and it is the CLI that scopes it that way.** A `Task`
+   * this cycle delegated is absent from `usage` entirely, so this understates a
+   * delegating cycle by whatever its sub-agents burned — 5,915,907 against
+   * telemetry's 8,481,166 on run `075f7959`, where three `Explore` sub-agents
+   * made 54 of the session's 110 requests. Not corrected from telemetry here:
+   * that would make `runs.spent_tokens` a mixture of two sources, which is the
+   * one thing the telemetry card exists to stay out of. The sub-agents' share
+   * is reported beside it rather than folded into it.
+   */
   tokens: number;
   /**
    * How large the conversation was when this cycle stopped talking — the
    * context the *next* cycle would inherit if it resumed.
    *
    * A different quantity from `tokens` above and the two must not be confused.
-   * `tokens` is the cycle's whole bill summed over every turn, so it grows with
+   * `tokens` is the cycle's bill summed over every turn, so it grows with
    * how much work was done; this is one turn's resident window, so it grows
    * with how much has been *said*. `startsFresh` reads this one, because the
    * question it answers is what a `--resume` would cost per turn, not what the
@@ -7426,6 +7448,43 @@ export function toolResultFailures(
   return failures;
 }
 
+/**
+ * What the cycle has cost after one `result` event, given what it stood at.
+ *
+ * **The two figures on that one event disagree about what they measure, and
+ * this is the half that is cumulative.** `total_cost_usd` is the *session's*
+ * running total, so a second `result` from the same child already contains
+ * everything the first reported; `usage` beside it is only that stretch's own
+ * and is still summed at the call site. Adding both costs charges the first
+ * stretch twice, and nothing says so — the run page, the log and the exit code
+ * are those of a cycle that went well.
+ *
+ * One child emits two terminal results whenever a turn ends while a background
+ * sub-agent is still running and the same session is woken again when it
+ * answers. Measured on run `075f7959`: `$7.025419` and `$9.330155` arrived in
+ * the same millisecond, the first equal to the session's cumulative telemetry
+ * at the instant that turn ended and the second to its total over all 110
+ * requests, and `spent_usd` was stored as their sum — 75% above what the
+ * session actually cost, on the figure `maxRunCostUSD` is compared against.
+ *
+ * A **restart** is not this case and must keep summing: a cycle that died at
+ * `error_during_execution` and resumed gets a second child, a second
+ * `IterationResult` and a CLI accumulator that starts at zero, which is why
+ * every such run reconciles to the cent against telemetry today. That is the
+ * whole reason this is scoped to one `IterationResult` rather than to the run.
+ *
+ * The larger rather than the last, and a non-positive reading ignored: a
+ * running total does not go backwards, so the two agree on every well-formed
+ * stream, and where they differ it is because the field was absent, unparseable
+ * or zero — which must leave a figure already reported standing rather than
+ * erase it.
+ */
+export function cycleCostAfterResult(prevUSD: number, reported: unknown): number {
+  const cost = Number(reported ?? 0);
+  if (!Number.isFinite(cost) || cost <= 0) return prevUSD;
+  return Math.max(prevUSD, cost);
+}
+
 /** Interpret one line of Claude Code's `stream-json` output. */
 function handleStreamLine(
   runId: string,
@@ -7646,8 +7705,13 @@ function handleStreamLine(
   if (type === "result") {
     // Authoritative per-iteration accounting from the CLI itself.
     acc.sawResult = true;
-    const cost = Number(ev.total_cost_usd ?? 0);
-    if (Number.isFinite(cost)) acc.costUSD += cost;
+    // Assigned through `cycleCostAfterResult` rather than accumulated, and the
+    // `+=` on tokens four lines down is deliberately not the same shape: see
+    // that function for why one of these two fields is a session running total
+    // and the other is not.
+    const before = acc.costUSD;
+    acc.costUSD = cycleCostAfterResult(acc.costUSD, ev.total_cost_usd);
+    const cost = acc.costUSD - before;
 
     const usage = (ev.usage ?? {}) as Record<string, unknown>;
     const n = (v: unknown) => (typeof v === "number" ? v : 0);
@@ -7703,6 +7767,11 @@ function handleStreamLine(
       kind: "result",
       payload: {
         subtype: ev.subtype,
+        // What this result *added*, not the number the CLI printed. The feed
+        // renders one of these per stretch and a reader adds them up, so on the
+        // two-result cycle `cycleCostAfterResult` describes the raw figure would
+        // put the whole session's total on the second row and invite exactly the
+        // double-count the field above no longer makes.
         costUSD: cost,
         numTurns: ev.num_turns,
         durationMs: ev.duration_ms,

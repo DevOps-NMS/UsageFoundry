@@ -1606,6 +1606,64 @@ Built and exercised against real transcripts:
   for this context` out of `edge-instrumentation`, before any of this change was
   involved. A production build and `next start` were the way in.
 
+- **A cycle's spend was the sum of two `result` events, and one of them already
+  contained the other.** Measured on the live container on 2026-08-27 against
+  run `075f7959` (session `ff106514-…`, one work cycle, 20.6 minutes, the
+  `ts-coder` agent on `claude-opus-5`). The run row read **$16.355574 /
+  5,915,907 tokens**; the telemetry card beside it read **$9.330155 / 8,481,166
+  tokens** — 75% apart on money and 30% apart on tokens, in *opposite*
+  directions, which is what made it worth chasing rather than filing as an
+  export that had dropped a batch.
+
+  Telemetry is the reading that reconciles. The session's transcripts hold 110
+  unique `requestId`s — 56 in `ff106514-….jsonl` and 37/10/7 in the three
+  `subagents/agent-*.jsonl` files — and `otlp_requests` holds exactly 110 rows
+  totalling exactly 8,481,166 tokens. Token for token, so there is no room in
+  the transcript for the extra $7 the run row claimed. Its per-class rates check
+  out too: 1,458 / 57,607 / 5,709,769 / 147,073 at `pricing.ts`'s
+  `claude-opus-5` with 1h cache writes comes to $5.773080, which is the `sdk`
+  rows' total to six decimals.
+
+  `run_events` held **two `result` rows at the same millisecond**
+  (`1787852651348`): `{costUSD: 7.025419, numTurns: 60}` and `{costUSD:
+  9.330155, numTurns: 9}`, and `orchestrator.ts` added them. Both are session
+  running totals: $7.025419 is the cumulative telemetry at `1787852201959`
+  exactly — an `sdk` request — and $9.330155 is the cumulative total at the last
+  request of the run. The second contains the first. What produced two of them
+  from one child is visible in the same feed: the agent's turn ended at
+  `…201959` while the `Adversarially verify refactor fidelity` `Explore`
+  sub-agent was still running, and when it answered at `…509306` the *same*
+  session re-inited (`system:init` at `…509435`, same `session_id`) and ran 8
+  more main-thread requests to a second terminal result.
+
+  The token gap is the other half of the same event and does not have the same
+  cause: `result.usage` is per-stretch, so summing it is right, but it is
+  main-thread-only. 5,915,907 is exactly the 56 `sdk` requests, split
+  4,798,457 / 1,117,450 across the two stretches; the 54 sub-agent requests
+  (2,565,259 tokens, $3.557076) are absent from it entirely. That is the CLI's
+  scoping, not this app's, and correcting it from telemetry would make
+  `runs.spent_tokens` a mixture of two sources.
+
+  **The shape is rare and the discriminator was checked**, which is why every
+  other multi-`result` run reconciles: across 39 recent runs with more than one
+  `result` and telemetry to compare against, drift is $0.000 for all but two.
+  The rest are restarts — a first `result` of `error_during_execution`, then a
+  new child with a CLI accumulator that starts at zero, so summing partitions
+  correctly. The two that drift are this run (+$7.025) and `65252b8a` (+$29.082),
+  both with two `success` results inside one cycle. `cycleCostAfterResult` is
+  therefore scoped to one `IterationResult` and the run loop's `+=` across
+  children is untouched.
+
+  **Not yet verified by hand:** the fix has `npm run typecheck` (exit 0) and
+  `npm test` (**1,816 tests / 268 suites / 0 failures**, of which 4 are the new
+  `cycleCostAfterResult` cases) behind it and has **not** been read in the
+  running app — the container was deliberately left alone rather than rebuilt.
+  No `next build` was run either. What to check on the next rebuild is the thing
+  no unit test can reach: a real two-`success`-result cycle, and that the run
+  page's spend then agrees with its telemetry card rather than exceeding it. The
+  two runs above are **not** retroactively corrected — `runs.spent_usd` is
+  stored, not derived, so both rows keep their inflated figures.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
