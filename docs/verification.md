@@ -1673,6 +1673,37 @@ through before trusting this unattended:
 > would drop silently and catches nothing at all about whether the picture is
 > legible. Nobody has looked at it.
 >
+> What *is* measured: the layout was run headlessly against the compiled
+> modules — no DOM, no canvas, just `buildTouchTree` → `planTouchedMap` →
+> `createSimulation`/`step` to settlement — over five shapes. It is not a
+> substitute for looking, because it says nothing about colour, label
+> collision or whether any of it is readable, but it does settle the two
+> things that are arithmetic rather than taste.
+>
+> **The loop stops.** Every shape reached `step() === false` at 250 frames
+> against a 2,000-frame cap, which is the cooling curve doing what
+> `ALPHA_DECAY` says and is the failure that otherwise looks identical to
+> success.
+>
+> **The clusters separate.** Mean directory-anchor-to-directory-anchor
+> distance against mean file-to-its-own-anchor distance: **3.6×** on a
+> reconstruction of the measured run (39 named files plus one changed-never-
+> named, 15 directories, 55 nodes, 708×642 world units, nothing folded);
+> **7.4×** at 400 files in ten directories; **1.8×** for 60 files that are
+> all in one directory, which is the degenerate case and is right — there is
+> only one cluster to separate. Closest two nodes edge to edge: 11.7 world
+> units at 39 files, 7.1 at the 60-in-one-directory case, and **−1.1** at
+> 400, so at that size one pair just touches. One file draws two nodes and
+> does not divide by zero.
+>
+> **The fold is coarse at the bottom of its range.** 400 files against the
+> shipped budget of 300 folds three directories, hides 120 files and draws
+> 280 — the intended behaviour. Forced to a budget of 100 the cutoff falls
+> to 0 and it draws *no* files at all, six nodes standing for four hundred:
+> honest, announced, and one click from opening, but a step rather than a
+> ramp. Nothing on this install is near enough to 300 for it to fire; if a
+> real run ever lands between the two, that is the thing to look at.
+>
 > Open a settled run that changed something, take the **Files** tab, and press
 > **Lay it out** on the "What it touched" card. At 1440×900:
 >
