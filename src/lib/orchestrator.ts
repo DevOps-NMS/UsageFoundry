@@ -9347,6 +9347,7 @@ export async function startRun(id: string): Promise<void> {
     contextWatches.delete(id);
     forgetContextCheck(id);
     earlyEndDeclined.delete(id);
+    ceilingMeasuredAt.delete(id);
     boundaryDeclines.delete(id);
     pendingFork.delete(id);
     // The exporter's credential dies with the run's loop, the way the chat's
@@ -9882,8 +9883,22 @@ async function checkContextCeilings(): Promise<void> {
     //
     // `plan` is read-only, is allowed while the session is live, and is the same
     // subprocess `observePlan` already spawns at every boundary — whose answer
-    // went into `plan_observations` and was read by nothing. Bounded: this runs
-    // only above the ceiling, and `earlyEndDeclined` latches per run.
+    // went into `plan_observations` and was read by nothing.
+    //
+    // Re-measured on growth rather than on every tick. This function runs once a
+    // minute and the plan spawns winnow over the whole transcript, so a run
+    // parked above the ceiling would otherwise pay a subprocess a minute for an
+    // answer that barely moves — see `CEILING_REMEASURE_GROWTH_TOKENS`.
+    // `earlyEndDeclined` does not bound this: it suppresses the log line, not
+    // the work.
+    const measuredAt = ceilingMeasuredAt.get(id);
+    if (
+      measuredAt !== undefined &&
+      tokens - measuredAt < CEILING_REMEASURE_GROWTH_TOKENS
+    ) {
+      continue;
+    }
+    ceilingMeasuredAt.set(id, tokens);
     const plan = await planCut(transcript);
     const predicted = ceilingPayback(tokens, plan);
     if (predicted === null || predicted > PAYBACK_HORIZON_TURNS) {
@@ -9915,6 +9930,13 @@ async function checkContextCeilings(): Promise<void> {
       }
       continue;
     }
+
+    // Both readings are about to stop describing anything. The cut shrinks the
+    // conversation, so the growth this was counting from is gone; and a later
+    // decline on the smaller conversation is new information an operator should
+    // be told about rather than have swallowed by a latch set before the cut.
+    ceilingMeasuredAt.delete(id);
+    earlyEndDeclined.delete(id);
 
     interruptRun(id, {
       kind: "prune",
@@ -9987,6 +10009,42 @@ function predictedPayback(runId: string): number | null {
 const earlyEndDeclined = ((globalThis as unknown as {
   __ufEarlyEndDeclined?: Set<string>;
 }).__ufEarlyEndDeclined ??= new Set<string>());
+
+/**
+ * The context a run was last measured at, so the ceiling does not re-measure it
+ * every minute.
+ *
+ * `checkContextCeilings` runs on the live ticker — every
+ * `liveGuardIntervalSeconds`, 60 by default — and the measurement it now takes
+ * spawns `winnow plan` over the whole transcript. Without this a run parked
+ * above the ceiling would spawn one subprocess a minute against a multi-megabyte
+ * file, for hours, and `earlyEndDeclined` would not stop it: that latch
+ * suppresses the *log line*, not the work.
+ *
+ * ## Why growth, and why this much of it
+ *
+ * A decline can only become an approval if `D` grows faster than the
+ * conversation does, and the gap is wide. A run declining at `D/C = 9%` needs
+ * `D/C ≈ 53%` to clear `PAYBACK_HORIZON_TURNS`; even if **every** new token were
+ * strippable, that takes about 187,000 tokens of growth. So the answer is close
+ * to stable, and a threshold well under that is already generous.
+ *
+ * Not a latch, though, for the reason `boundaryDeclines` gives about the same
+ * arithmetic: `D` is whatever the newest work happened to produce, and one cycle
+ * that greps a large tree or runs a long build can make it jump. A permanent
+ * decline on one reading would miss exactly that case.
+ *
+ * 25,000 tokens is roughly five to eight turns at the rate these runs
+ * accumulate context — frequent against a threshold that needs 187,000 to
+ * matter, and 1/60th of the subprocesses.
+ *
+ * Keyed by run and cleared when the run's loop ends, with `earlyEndDeclined`.
+ */
+const CEILING_REMEASURE_GROWTH_TOKENS = 25_000;
+
+const ceilingMeasuredAt = ((globalThis as unknown as {
+  __ufCeilingMeasuredAt?: Map<string, number>;
+}).__ufCeilingMeasuredAt ??= new Map<string, number>());
 
 /**
  * Consecutive boundaries this run's payback test has declined.
