@@ -307,6 +307,86 @@ export interface PruneSavingsDTO {
 }
 
 /**
+ * Which measure a context sample was taken in.
+ *
+ * `api` is `apiContextTokens` — the whole prompt as the API was billed for it,
+ * and the same basis the cycle ceiling acts on. `transcript` is the byte
+ * estimate that reading falls back to when the conversation holds no usable
+ * `usage` frame yet, which is a different quantity rather than a rougher one:
+ * the two are tens of thousands of tokens apart **in either direction** on this
+ * install, since the prompt carries a system prompt and tool list no transcript
+ * holds while the intake filter drops tool results the transcript keeps.
+ *
+ * On the wire so a consumer can see a basis change for what it is. A series that
+ * silently mixed the two would draw a step where only the measure moved, and
+ * every arithmetic across that step would be wrong in a way that typechecks.
+ */
+export type ContextSampleBasisDTO = "api" | "transcript";
+
+/** One reading of how full a run's context was. */
+export interface ContextSampleDTO {
+  ts: number;
+  /** The work cycle in flight when it was taken, 1-based. */
+  iteration: number;
+  tokens: number;
+  basis: ContextSampleBasisDTO;
+  /**
+   * Main-thread assistant turns behind this reading — a sub-agent's turns and
+   * the CLI's `<synthetic>` refusal frames are not this conversation's context
+   * and do not advance it.
+   */
+  turnIndex: number;
+  /**
+   * False when `turnIndex` is a **floor** rather than a count: the scan behind
+   * it is bounded at a megabyte of transcript, so a run whose first sample
+   * landed on a larger conversation cannot know what preceded it. Render the
+   * distinction or render neither — a floor drawn as an axis is a graph that
+   * states a number it does not have.
+   */
+  turnsExact: boolean;
+}
+
+/** A cut, on the same axis as the samples, so a fall in context has a cause. */
+export interface ContextPruneMarkDTO {
+  ts: number;
+  /** `boundary` or `early-end`; only the second manufactured its own moment. */
+  trigger: string;
+  /** In `contextTokens`, which is **not** the samples' basis — see `tokens`. */
+  tokensRemoved: number;
+}
+
+/**
+ * How full one run's context has been, over the run's life.
+ *
+ * **Not spend and not a meter.** It is an occupancy reading, sampled off the
+ * live-guard tick at whatever cadence `liveGuardIntervalSeconds` runs at, and
+ * deduplicated on the `usage` frame it came from — so the gaps between points
+ * are the conversation's own turns rather than a fixed interval, and two points
+ * far apart in time mean one long tool call rather than missing data.
+ *
+ * `ceilingTokens` travels with the series because the constant behind it has
+ * already moved twice; a consumer computing a percentage against a hardcoded
+ * 200,000 would go on drawing the old number after the next move, silently.
+ *
+ * `sampleCount` and `pruneCount` are the **stored** totals. Either one greater
+ * than its array's length means the array is the newest tail of something
+ * longer — a tail rather than a thinned series, because thinning needs a rule
+ * about which points survive and a series thinned by a rule the reader cannot
+ * see misstates its own peaks.
+ *
+ * `prunes[].tokensRemoved` is in `contextTokens` and `samples[].tokens` is in
+ * `apiContextTokens`. **They may not be subtracted from one another** — the
+ * marks say *when* a cut happened, never how far the series should fall.
+ */
+export interface ContextOccupancyDTO {
+  ceilingTokens: number;
+  samples: ContextSampleDTO[];
+  sampleCount: number;
+  prunes: ContextPruneMarkDTO[];
+  pruneCount: number;
+}
+
+/**
  * The netted arithmetic over one span — the whole reading, or one of the two
  * windows inside it. Every field here answers "over this span"; the ones on
  * `FilterSavingsDTO` describe the reading itself and have no span.
@@ -2236,6 +2316,8 @@ export interface StorageReportDTO {
     at: number;
     events: number;
     telemetry: number;
+    /** Absent on a sweep recorded before `context_samples` was swept at all. */
+    samples?: number;
     checkouts: number;
     transcripts: number;
     transcriptBytes: number;

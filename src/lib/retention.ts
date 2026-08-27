@@ -75,6 +75,15 @@ export interface RetentionSweep {
   events: number;
   /** Rows removed from `otlp_requests`. */
   telemetry: number;
+  /**
+   * Rows removed from `context_samples`.
+   *
+   * Absent on a blob written before this field existed, which is why the one
+   * reader renders it conditionally rather than as a `0` — a sweep that
+   * predates the column did not remove none of these, it did not know about
+   * them, and `metering.md`'s rule is that the two must not read the same.
+   */
+  samples?: number;
   /** Isolated checkouts removed from the mounts' stores. */
   checkouts: number;
   /** Session transcripts removed from `~/.claude/projects`. */
@@ -127,9 +136,10 @@ export function retentionCutoff(days: number | null, now: number): number | null
 export function sweepRunEvents(now = Date.now()): {
   events: number;
   telemetry: number;
+  samples: number;
 } {
   const cutoff = retentionCutoff(getSettings().eventRetentionDays, now);
-  if (cutoff === null) return { events: 0, telemetry: 0 };
+  if (cutoff === null) return { events: 0, telemetry: 0, samples: 0 };
 
   const settled = TERMINAL_STATUSES.map(() => "?").join(",");
   const events = db()
@@ -149,7 +159,23 @@ export function sweepRunEvents(now = Date.now()): {
     )
     .run(cutoff, ...TERMINAL_STATUSES).changes;
 
-  return { events, telemetry };
+  // The context occupancy series, on the same horizon and behind the same
+  // `settled` test, because it is the same kind of thing: evidence for a picture
+  // drawn on the run's own page, beside the log it explains. Deliberately not
+  // `prune_receipts`' treatment — those answer a weekly KPI and must outlive the
+  // run, where a sample is read only while somebody is looking at that run, so a
+  // series that outlived its own log would be a graph with nothing to read it
+  // against. `context_samples` is capped per run on insert as well; this is what
+  // bounds the table across runs.
+  const samples = db()
+    .prepare(
+      `DELETE FROM context_samples
+        WHERE ts < ?
+          AND run_id IN (SELECT id FROM runs WHERE status IN (${settled}))`,
+    )
+    .run(cutoff, ...TERMINAL_STATUSES).changes;
+
+  return { events, telemetry, samples };
 }
 
 /* ------------------------------------------------------------------ */

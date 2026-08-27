@@ -13,7 +13,7 @@ import {
   resolvePrice,
 } from "./pricing";
 import { scanUsage, type UsageEntry } from "./transcripts";
-import type { PruneTier } from "./apiTypes";
+import type { ContextOccupancyDTO, ContextSampleBasisDTO, PruneTier } from "./apiTypes";
 import { getSettings, type Settings } from "./settings";
 
 /**
@@ -366,27 +366,200 @@ export function contextTokens(transcriptPath: string): number {
  * the one failure this must not have.
  */
 export function apiContextTokens(transcriptPath: string): number {
+  return readContext(transcriptPath, null, false).tokens;
+}
+
+/**
+ * The same reading, plus where in the conversation it came from.
+ *
+ * A sibling of `apiContextTokens` rather than a widening of it, because the two
+ * callers want different amounts of work out of one scan. The ceiling wants the
+ * number and nothing else, and its scan stops at the first `usage` frame — a
+ * handful of lines from the end of the file, which is what makes it affordable
+ * once a minute per live run. The occupancy series also wants a turn count, and
+ * a count means walking back **past** that frame, so it is asked for explicitly
+ * and only by the caller that needs it.
+ *
+ * `sinceFrameId` is what keeps that walk cheap in the steady state: given the
+ * frame the previous sample came from, the scan stops there, so it parses only
+ * the turns that have happened since. A run's *first* sample has nothing to stop
+ * at and pays for the whole window once.
+ *
+ * Never throws, `apiContextTokens`' rule and for its reason: every caller is on
+ * the run loop's path.
+ */
+export function apiContextSample(
+  transcriptPath: string,
+  sinceFrameId: string | null,
+): ContextReading {
+  return readContext(transcriptPath, sinceFrameId, true);
+}
+
+/**
+ * Which measure produced a reading. Never mixed in one arithmetic.
+ *
+ * The two stored values are the DTO's, so a consumer and this module cannot
+ * drift apart on what a series is measured in; `unreadable` is this side only,
+ * because nothing that failed to read is ever written down.
+ */
+export type ContextBasis = ContextSampleBasisDTO | "unreadable";
+
+/** One reading of a live transcript's tail. */
+export interface ContextReading {
+  /** What `apiContextTokens` answers; 0 under `unreadable`. */
+  tokens: number;
+  basis: ContextBasis;
+  /**
+   * `message.id` of the frame the number came from, or null — under the
+   * `transcript` basis there is no frame, and a frame is not obliged to carry
+   * an id. Null is what pushes deduplication down onto the number itself.
+   */
+  frameId: string | null;
+  /**
+   * Main-thread assistant turns between `sinceFrameId` and this reading, or —
+   * when nothing was passed to stop at — every one the scan could see.
+   */
+  turnsAdvanced: number;
+  /** Whether `sinceFrameId` was located, so the advance is a measurement. */
+  sinceFound: boolean;
+  /** Whether the scan reached the start of the file rather than of a window. */
+  wholeFile: boolean;
+}
+
+function readContext(
+  transcriptPath: string,
+  sinceFrameId: string | null,
+  countTurns: boolean,
+): ContextReading {
+  const miss = (basis: ContextBasis, wholeFile: boolean): ContextReading => ({
+    tokens: basis === "unreadable" ? 0 : contextTokens(transcriptPath),
+    basis,
+    frameId: null,
+    turnsAdvanced: 0,
+    sinceFound: false,
+    wholeFile,
+  });
+
   let tail: { text: string; whole: boolean };
   try {
     tail = readTail(transcriptPath, TAIL_SCAN_BYTES);
   } catch {
-    return 0;
+    return miss("unreadable", false);
   }
-  const fromTail = lastPromptTokens(tail.text);
-  if (fromTail !== null) return fromTail;
+  const fromTail = scanTail(tail.text, sinceFrameId, countTurns);
+  if (fromTail) return { ...fromTail, basis: "api", wholeFile: tail.whole };
   if (!tail.whole) {
     // Nothing usable in the last megabyte, which is possible rather than
     // theoretical: the largest transcript on this install is 9.1 MB over 789
     // lines, so one tool result can be bigger than the window. Pay for the whole
     // file rather than report a conversation as empty.
     try {
-      const fromWhole = lastPromptTokens(fs.readFileSync(transcriptPath, "utf8"));
-      if (fromWhole !== null) return fromWhole;
+      const fromWhole = scanTail(fs.readFileSync(transcriptPath, "utf8"), sinceFrameId, countTurns);
+      if (fromWhole) return { ...fromWhole, basis: "api", wholeFile: true };
     } catch {
-      return 0;
+      return miss("unreadable", false);
+    }
+    return miss("transcript", true);
+  }
+  return miss("transcript", tail.whole);
+}
+
+/** What one backwards pass over a transcript's tail found. */
+interface TailScan {
+  tokens: number;
+  frameId: string | null;
+  turnsAdvanced: number;
+  sinceFound: boolean;
+}
+
+/**
+ * The prompt-plus-output of the last main-thread turn in `text`, and how many
+ * turns have happened since `sinceFrameId`.
+ *
+ * One pass, backwards, because that is where the answer is and because a
+ * transcript is appended to while this runs. The two exclusions are the same two
+ * the ceiling has always made and neither may be relaxed: a sidechain is a
+ * sub-agent's own conversation rather than this one's context, and a
+ * `<synthetic>` frame is the CLI's record of an API-level refusal carrying an
+ * all-zero `usage` block that would read as an empty run.
+ *
+ * Turns are counted as **distinct `message.id`s**, not as records: the CLI
+ * writes an assistant turn that both spoke and called a tool as more than one
+ * line sharing one id, and counting lines would report a tool-heavy run as
+ * having had several times the turns it did.
+ */
+function scanTail(
+  text: string,
+  sinceFrameId: string | null,
+  countTurns: boolean,
+): TailScan | null {
+  const lines = text.split("\n");
+  let tokens: number | null = null;
+  let frameId: string | null = null;
+  let turnsAdvanced = 0;
+  let lastId: string | null | undefined;
+
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) continue;
+    let record: {
+      type?: unknown;
+      isSidechain?: unknown;
+      message?: { id?: unknown; model?: unknown; usage?: Record<string, unknown> };
+    };
+    try {
+      record = JSON.parse(trimmed);
+    } catch {
+      // A torn trailing line is normal on a transcript being appended to.
+      continue;
+    }
+    if (record?.type !== "assistant") continue;
+    // A sub-agent's turns are not this conversation's context, and
+    // `<synthetic>` frames carry an all-zero usage block that would read as an
+    // empty run.
+    if (record.isSidechain === true) continue;
+    const message = record.message;
+    if (!message || typeof message !== "object") continue;
+    if (message.model === "<synthetic>") continue;
+
+    const id = typeof message.id === "string" && message.id ? message.id : null;
+
+    // Read the number *before* testing for the stopping frame, so a tick on
+    // which nothing has happened still reports that frame's own tokens rather
+    // than zero. That case is the ordinary one: the ticker is time-based and one
+    // tool call routinely outlasts several ticks.
+    if (tokens === null) {
+      const usage = message.usage;
+      if (usage && typeof usage === "object") {
+        const num = (key: string): number => {
+          const v = usage[key];
+          return typeof v === "number" && Number.isFinite(v) ? v : 0;
+        };
+        const prompt =
+          num("input_tokens") + num("cache_creation_input_tokens") + num("cache_read_input_tokens");
+        if (prompt > 0) {
+          tokens = prompt + num("output_tokens");
+          frameId = id;
+          // The ceiling's caller asked for a number and nothing else, so this is
+          // where its scan ends — a few lines from the end of the file.
+          if (!countTurns) break;
+        }
+      }
+    }
+
+    if (countTurns) {
+      // Everything newer than the previous sample's frame is what has happened
+      // since; the frame itself was counted by the sample that named it.
+      if (id !== null && id === sinceFrameId) {
+        if (tokens === null) return null;
+        return { tokens, frameId, turnsAdvanced, sinceFound: true };
+      }
+      if (id === null || id !== lastId) turnsAdvanced += 1;
+      lastId = id;
     }
   }
-  return contextTokens(transcriptPath);
+  if (tokens === null) return null;
+  return { tokens, frameId, turnsAdvanced, sinceFound: false };
 }
 
 /**
@@ -465,6 +638,259 @@ function lastPromptTokens(text: string): number | null {
     return prompt + num("output_tokens");
   }
   return null;
+}
+
+/* ------------------------------------------------------------------ */
+/* The occupancy series — what a live run's context was doing           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * How many samples one run may keep, oldest discarded first.
+ *
+ * These rows are written on the run loop's path for every live run and nothing
+ * about a run bounds how many turns it takes, so an unbounded table here is a
+ * defect rather than a follow-up. 2,000 is far past anything observed — the
+ * series holds about one row per assistant turn once duplicates are dropped,
+ * and no run on this install has come near that — so the cap is a backstop
+ * against a pathological run rather than a shape the ordinary one meets.
+ *
+ * The **oldest** go, because the reason to look at this series is a run that is
+ * either live now or was live recently, and its recent shape is what an operator
+ * is reading. A run that hits the cap says so through `sampleCount`, which is
+ * the stored total rather than the number returned.
+ */
+export const CONTEXT_SAMPLES_PER_RUN = 2_000;
+
+/**
+ * How many samples the run DTO carries, newest first.
+ *
+ * The run page polls that route every three seconds for as long as a tab is
+ * open, and a run can be hours long, so the series is capped there as well as in
+ * the table. A **tail** rather than a thinned series, deliberately: thinning
+ * needs a rule about which points survive, and a series thinned by a rule the
+ * consumer cannot see is a graph that lies about its own peaks — which is the
+ * one thing a context meter must not do. The DTO carries the stored total beside
+ * the array so a reader can see that it is holding the end of something longer.
+ */
+export const CONTEXT_SERIES_MAX_POINTS = 500;
+
+/** The same rule for the prune marks that sit under the series. */
+export const CONTEXT_PRUNE_MARKS_MAX = 200;
+
+/** The last sample stored for a run, as SQLite holds it. */
+interface StoredSample {
+  frame_id: string | null;
+  basis: string;
+  tokens: number;
+  turn_index: number;
+  turns_exact: number;
+}
+
+/**
+ * Take a reading of one live run's context and store it if it is new.
+ *
+ * Called from the live-guard tick, which already had this number in hand and
+ * threw it away: the ceiling compares it and `continue`s on everything below,
+ * which is every value a graph of occupancy is made of. So this is the same
+ * measurement, taken once, written down — it adds no second transcript read and
+ * no tokeniser, and it returns the reading so its caller can go on to make the
+ * ceiling decision from it.
+ *
+ * **Deduplicated on the frame the number came from.** The ticker is time-based
+ * and a single tool call routinely outlasts several ticks, so consecutive reads
+ * return the identical `usage` frame; a row per tick would make the series
+ * mostly flat duplicates and a graph of it would understate how fast context is
+ * actually growing. When there is no frame to name — the byte-estimate fallback,
+ * or a frame carrying no id — the identity falls back to (basis, tokens), which
+ * is the same statement one measure down.
+ *
+ * Never throws. A sample is evidence, `recordPrune`'s rule: losing one must not
+ * turn a live run into a failed one.
+ */
+export function sampleContext(
+  runId: string,
+  iteration: number,
+  transcriptPath: string,
+): ContextReading {
+  let last: StoredSample | undefined;
+  try {
+    last = db()
+      .prepare(
+        `SELECT frame_id, basis, tokens, turn_index, turns_exact
+           FROM context_samples WHERE run_id = ? ORDER BY id DESC LIMIT 1`,
+      )
+      .get(runId) as StoredSample | undefined;
+  } catch (err) {
+    // Read first so the scan can stop at the previous sample's frame. Failing
+    // here costs the turn count its exactness, never the reading.
+    noteBookkeepingFailure("sampleContext.read", err);
+  }
+
+  const reading = apiContextSample(transcriptPath, last?.frame_id ?? null);
+
+  // A transcript that could not be read is not a run whose context fell to
+  // nothing, and neither is a conversation that has not opened yet. Both would
+  // draw a cliff that never happened, which is worse than a gap.
+  if (reading.basis === "unreadable" || reading.tokens <= 0) return reading;
+  if (last && sameReading(last, reading)) return reading;
+
+  const turns = nextTurnIndex(
+    last ? { turnIndex: last.turn_index, exact: last.turns_exact !== 0 } : null,
+    reading,
+  );
+
+  try {
+    db()
+      .prepare(
+        `INSERT INTO context_samples
+           (ts, run_id, iteration, tokens, basis, frame_id, turn_index, turns_exact)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        Date.now(),
+        runId,
+        iteration,
+        reading.tokens,
+        reading.basis,
+        reading.frameId,
+        turns.turnIndex,
+        turns.exact ? 1 : 0,
+      );
+    db()
+      .prepare(
+        `DELETE FROM context_samples
+          WHERE run_id = ?
+            AND id NOT IN (
+              SELECT id FROM context_samples WHERE run_id = ? ORDER BY id DESC LIMIT ?
+            )`,
+      )
+      .run(runId, runId, CONTEXT_SAMPLES_PER_RUN);
+  } catch (err) {
+    noteBookkeepingFailure("sampleContext", err);
+  }
+  return reading;
+}
+
+/** Whether a new reading is the one already on the row. */
+function sameReading(last: StoredSample, reading: ContextReading): boolean {
+  if (reading.frameId !== null) return last.frame_id === reading.frameId;
+  return (
+    last.frame_id === null && last.basis === reading.basis && last.tokens === reading.tokens
+  );
+}
+
+/**
+ * Where a reading lands on the run's turn counter, and whether that is a fact.
+ *
+ * Pure, because every way of being wrong here typechecks and produces a number
+ * that looks entirely ordinary — a turn axis that quietly stops advancing, or
+ * one that double-counts a conversation after a resume, reads as the run having
+ * behaved differently rather than as this arithmetic being wrong.
+ *
+ * Three cases and they are not the same case:
+ *
+ *  - The scan walked to the **start of the file** without meeting the frame it
+ *    was told to stop at. There is nothing before what it counted, so this is
+ *    the conversation's whole length rather than an advance on anything — which
+ *    is also what a `--resume` into a new transcript looks like from here.
+ *  - It met that frame, so the advance is measured and inherits whatever the
+ *    previous index was.
+ *  - It ran out of **window**. The tail scan is bounded at a megabyte, so the
+ *    frame may be real and simply further back than the scan reached; the
+ *    advance is then a floor, and a floor added to anything stays one.
+ */
+export function nextTurnIndex(
+  last: { turnIndex: number; exact: boolean } | null,
+  reading: Pick<ContextReading, "turnsAdvanced" | "sinceFound" | "wholeFile">,
+): { turnIndex: number; exact: boolean } {
+  if (!reading.sinceFound && reading.wholeFile) {
+    return { turnIndex: reading.turnsAdvanced, exact: true };
+  }
+  if (last === null) return { turnIndex: reading.turnsAdvanced, exact: false };
+  return {
+    turnIndex: last.turnIndex + reading.turnsAdvanced,
+    exact: last.exact && reading.sinceFound,
+  };
+}
+
+/**
+ * One run's occupancy series, with what a reader needs to draw it against.
+ *
+ * The ceiling travels with the samples because it is a module constant that has
+ * already moved twice — 167,000, then 300,000, then 200,000 — so a consumer
+ * computing a percentage against a hardcoded 200k would go on drawing the old
+ * number after the next change, silently and correctly-looking.
+ *
+ * The prune marks travel with them for the same kind of reason: context falling
+ * by tens of thousands of tokens between two samples is an unexplained cliff
+ * unless the thing that caused it is on the same axis. They are read from
+ * `prune_receipts` rather than recomputed — that table already holds them and is
+ * the one record of what a cut took out.
+ *
+ * Undefined when this run has neither, so a caller can drop the section rather
+ * than ship an empty series on a three-second poll.
+ */
+export function contextOccupancy(runId: string): ContextOccupancyDTO | undefined {
+  try {
+    const rows = db()
+      .prepare(
+        `SELECT ts, iteration, tokens, basis, turn_index, turns_exact
+           FROM context_samples WHERE run_id = ? ORDER BY id DESC LIMIT ?`,
+      )
+      .all(runId, CONTEXT_SERIES_MAX_POINTS) as Array<
+      StoredSample & { ts: number; iteration: number }
+    >;
+    const receipts = db()
+      .prepare(
+        `SELECT ts, trigger, tokens_removed FROM prune_receipts
+          WHERE run_id = ? ORDER BY ts DESC LIMIT ?`,
+      )
+      .all(runId, CONTEXT_PRUNE_MARKS_MAX) as Array<{
+      ts: number;
+      trigger: PruneTrigger;
+      tokens_removed: number;
+    }>;
+    if (rows.length === 0 && receipts.length === 0) return undefined;
+
+    return {
+      ceilingTokens: CYCLE_CONTEXT_CEILING_TOKENS,
+      // Reversed rather than selected ascending: the cap has to take the newest
+      // rows, which needs a descending scan, and a series is drawn oldest-first.
+      samples: rows.reverse().map((r) => ({
+        ts: r.ts,
+        iteration: r.iteration,
+        tokens: r.tokens,
+        basis: r.basis === "transcript" ? "transcript" : "api",
+        turnIndex: r.turn_index,
+        turnsExact: r.turns_exact !== 0,
+      })),
+      sampleCount: countFor("context_samples", runId, rows.length, CONTEXT_SERIES_MAX_POINTS),
+      prunes: receipts.reverse().map((r) => ({
+        ts: r.ts,
+        trigger: r.trigger,
+        tokensRemoved: r.tokens_removed,
+      })),
+      pruneCount: countFor("prune_receipts", runId, receipts.length, CONTEXT_PRUNE_MARKS_MAX),
+    };
+  } catch (err) {
+    noteBookkeepingFailure("contextOccupancy", err);
+    return undefined;
+  }
+}
+
+/**
+ * The stored total, asked for only when the page might be holding a tail.
+ *
+ * A short page proves the total by itself, and this route is polled every three
+ * seconds per open run page — so the `COUNT(*)` is skipped on the case that is
+ * almost always the one in front of it.
+ */
+function countFor(table: string, runId: string, returned: number, limit: number): number {
+  if (returned < limit) return returned;
+  const row = db()
+    .prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE run_id = ?`)
+    .get(runId) as { n: number };
+  return row.n;
 }
 
 /**

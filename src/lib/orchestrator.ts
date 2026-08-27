@@ -60,9 +60,9 @@ import {
 import { parseRunAgent, sessionAgentArgs, type AgentDefinition } from "./agents";
 import { enabledPluginDirs, pluginDirArgs } from "./plugins";
 import {
-  apiContextTokens,
   BOUNDARY_BREAK_EVEN_BUDGET,
   contextTokens,
+  sampleContext,
   CYCLE_CONTEXT_CEILING_TOKENS,
   freshestPayback,
   PAYBACK_HORIZON_TURNS,
@@ -512,11 +512,25 @@ const liveGuards = ((globalThis as unknown as {
  */
 interface ContextWatch {
   sessionId: () => string | null;
+  /**
+   * The work cycle in flight, so a sample can be filed against it. A closure for
+   * `sessionId`'s reason — the loop's counter moves between cycles while this
+   * entry stays — and the loop's own value rather than the `runs` row, which is
+   * written after a cycle ends and would file every live sample one behind.
+   */
+  iteration: () => number;
 }
 
+/**
+ * A **new key**, because the value's shape changed when `iteration` was added.
+ * `??=` only initialises when absent, so a dev hot reload would keep the old
+ * one-field entries at the old key and every read of the new field would be
+ * undefined — the trap this file records at `__ufInterrupts`. The cost is one
+ * cold rebuild.
+ */
 const contextWatches = ((globalThis as unknown as {
-  __ufContextWatches?: Map<string, ContextWatch>;
-}).__ufContextWatches ??= new Map<string, ContextWatch>());
+  __ufContextWatches2?: Map<string, ContextWatch>;
+}).__ufContextWatches2 ??= new Map<string, ContextWatch>());
 
 /**
  * How many times one run may have a cycle ended early and refunded.
@@ -8575,7 +8589,7 @@ export async function startRun(id: string): Promise<void> {
       // `--autocompact`, and that flag did not ask about `enforcement`.
       // `pruningEnabled` is re-read on the tick rather than tested here, so an
       // operator switching the feature off reaches a cycle already in flight.
-      contextWatches.set(id, { sessionId: () => sessionId });
+      contextWatches.set(id, { sessionId: () => sessionId, iteration: () => iterations });
       startLiveTicker();
 
       let res: IterationResult;
@@ -9515,7 +9529,9 @@ async function liveGuardTick(): Promise<void> {
     // per run and parses backwards from its end until it finds a usage frame. A
     // run that crosses the ceiling is interrupted here and then skipped by the
     // budget loop below on the `interrupts.has(id)` test every branch already
-    // makes.
+    // makes. It is also where the occupancy series is written, off that same
+    // read — see the function's own note on why that half is not gated on
+    // pruning being switched on.
     await checkContextCeilings();
 
     const pending = [...liveGuards].filter(([id]) => !interrupts.has(id));
@@ -9553,7 +9569,14 @@ async function liveGuardTick(): Promise<void> {
 }
 
 /**
- * End any cycle whose context has passed the ceiling, so it can be pruned.
+ * Record how full every live run's context is, and end any cycle past the
+ * ceiling so it can be pruned.
+ *
+ * Two jobs off one read, and the order between them is load-bearing: the sample
+ * is stored **before** the ceiling comparison, because that comparison discards
+ * every reading below the ceiling and those are every reading a graph of
+ * occupancy is made of. Sampling after it would record only the runs that were
+ * already over.
  *
  * This is what replaced `--autocompact`, and the shape of the replacement is the
  * part worth reading. The CLI compacted *in place*: it summarised the
@@ -9597,7 +9620,19 @@ async function liveGuardTick(): Promise<void> {
  */
 async function checkContextCeilings(): Promise<void> {
   if (contextWatches.size === 0) return;
-  if (!pruningEnabled()) return;
+
+  // `pruningEnabled()` used to stand in front of this whole function, and moving
+  // it down one level is the point of this pass. The reading below is the only
+  // answer this app has to "how full is this run's context", and it was
+  // reachable only where pruning happened to be switched on — so on every other
+  // install the indicator was permanently blank, install-dependent and with
+  // nothing anywhere saying why. The **watch** is registered unconditionally
+  // beside every spawn, because the ceiling replaced a flag that rode every
+  // cycle of every run; so the reading belongs with the watch and only the
+  // acting-on-it belongs with the feature. It costs nothing extra where pruning
+  // is on: one scan answers both, and the sample is taken before the ceiling
+  // comparison rather than after, which would record only runs already over it.
+  const pruning = pruningEnabled();
 
   for (const [id, watch] of contextWatches) {
     if (interrupts.has(id)) continue;
@@ -9615,12 +9650,14 @@ async function checkContextCeilings(): Promise<void> {
       // transcript never held. See `apiContextTokens`. Ending a cycle against a
       // conversation the API was never asked to carry is a prune that pays
       // `1.9·S` for nothing.
-      tokens = apiContextTokens(transcript);
+      tokens = sampleContext(id, watch.iteration(), transcript).tokens;
     } catch {
       // A transcript that cannot be read is not a run to end. The budget guards
       // below are unaffected and the next tick tries again.
       continue;
     }
+
+    if (!pruning) continue;
     if (tokens < CYCLE_CONTEXT_CEILING_TOKENS) continue;
 
     const predicted = predictedPayback(id);

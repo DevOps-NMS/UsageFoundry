@@ -1265,6 +1265,68 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_prune_receipts_run ON prune_receipts(run_id, ts);
   `);
 
+  // How full a live run's context was, sampled over the run's life.
+  //
+  // A run in flight had no readable answer to that at all: the reading was
+  // already being taken once a live-guard tick per run and then thrown away by
+  // the ceiling comparison, which discards every value *below* the ceiling —
+  // which is every value an occupancy graph is made of.
+  //
+  // **`tokens` is the API-visible currency (`apiContextTokens`), the same basis
+  // the ceiling acts on** — never `contextTokens`, which `prune_receipts` uses.
+  // The two are tens of thousands of tokens apart **in either direction** on
+  // this install and the codebase treats mixing them in one arithmetic as a
+  // bug, so the basis is named on the row rather than left to the reader:
+  // `basis` is 'api' when a `usage` frame produced the number and 'transcript'
+  // when `apiContextTokens` fell back to the byte estimate because the
+  // conversation holds no usable frame yet. A series that silently mixed the
+  // two would draw a cliff where only the measure changed.
+  //
+  // `frame_id` is the assistant `message.id` the reading came from, and it is
+  // what makes the series a series rather than a flat duplicate: the tick is
+  // time-based and one tool call can outlast several of them, so consecutive
+  // reads routinely return the identical frame. A row is written only when the
+  // underlying frame moves. Null when the frame carried no id, or under the
+  // 'transcript' basis where there is no frame at all — those dedupe on
+  // (basis, tokens) instead, which is the same statement one measure down.
+  //
+  // `turn_index` counts main-thread assistant turns, sidechain and `<synthetic>`
+  // frames excluded exactly as `apiContextTokens` excludes them: a sub-agent's
+  // turns are not this conversation's context. `turns_exact` is 0 when the
+  // count is a **floor** — the tail scan is bounded at a megabyte, so a run
+  // whose first sample lands on a transcript larger than that cannot know how
+  // many turns preceded it. Once a floor, always a floor, since every later
+  // advance is added to it. Carried rather than folded into the number, on
+  // `metering.md`'s rule that an unknown must not render as a fact.
+  //
+  // Bounded twice: `CONTEXT_SAMPLES_PER_RUN` caps what one run may hold, oldest
+  // first, and `sweepRunEvents` drops a settled run's samples on the same
+  // horizon as the log they sit beside on the same page. Unlike `prune_receipts`
+  // — a weekly KPI whose evidence must outlive the run — these are read only
+  // while somebody is looking at that run, so they expire with its log rather
+  // than outliving it.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS context_samples (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts          INTEGER NOT NULL,
+      -- A plain column, on webhook_deliveries.run_id's reasoning: nothing
+      -- deletes a runs row, so a cascade would describe a deletion that never
+      -- happens.
+      run_id      TEXT NOT NULL,
+      -- The work cycle in flight when the reading was taken, 1-based. The
+      -- loop's own counter rather than the runs row, which is written after a
+      -- cycle ends and so lags a live sample by one.
+      iteration   INTEGER NOT NULL,
+      tokens      INTEGER NOT NULL,
+      basis       TEXT NOT NULL,
+      frame_id    TEXT,
+      turn_index  INTEGER NOT NULL,
+      turns_exact INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_context_samples_run ON context_samples(run_id, id);
+    CREATE INDEX IF NOT EXISTS idx_context_samples_ts ON context_samples(ts);
+  `);
+
   // Every cycle boundary, pruned or not — and the `not` is the point.
   //
   // A prune receipt records what was cut. It cannot record what a resume would
