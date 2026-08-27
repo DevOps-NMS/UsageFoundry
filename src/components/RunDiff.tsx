@@ -7,6 +7,7 @@ import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Hint } from "@/components/ui/Hint";
 import { Notice } from "@/components/ui/Notice";
 import { DiffFileRow } from "@/components/ui/Patch";
+import { RunTouches } from "@/components/RunTouches";
 
 /**
  * What the run actually changed.
@@ -75,127 +76,135 @@ export function RunDiff({ run }: { run: RunDTO }) {
   return (
     // The outcome once a run is over, and a one-line stub while it is still
     // writing — so it leads only when there is something settled to read.
-    <Card emphasis={settled ? "primary" : "quiet"}>
-      <CardTitle>
-        What changed
-        <Button
-          variant="secondary"
-          className="ml-auto transition-colors duration-150"
-          onClick={load}
-          disabled={loading}
-        >
-          {loading ? "Reading…" : diff ? "Refresh" : "Show changes"}
-        </Button>
-      </CardTitle>
-
-      {error && <Notice tone="danger">{error}</Notice>}
-
-      {/* Shaped like the file list it is standing in for, so the card does not
-          resize under the reader when the answer arrives. */}
-      {loading && !diff && (
-        <div aria-busy="true" aria-live="polite">
-          <span className="sr-only">Reading the repository…</span>
-          {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="flex items-center gap-2 border-b border-line py-2.5 last:border-b-0"
-            >
-              <div className="h-3.5 flex-1 rounded-sm bg-inset" />
-              <div className="h-3.5 w-12 rounded-sm bg-inset" />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {!diff && !error && !loading && (
-        <Empty>
-          {settled
-            ? "Nothing loaded — read it with the button above."
-            : "This run is still working, so its changes are read on request."}
-        </Empty>
-      )}
-
-      {diff && (
-        <>
-          {diff.caveat && <Notice tone="warn">{diff.caveat}</Notice>}
-
-          {diff.kind === "none" && <Empty>{diff.reason ?? "Nothing to show."}</Empty>}
-
-          {diff.kind === "range" && (
-            <div className="mb-2 text-sm tabular-nums text-ink-muted">
-              {diff.filesChanged === 0 ? (
-                (diff.reason ?? "No files changed.")
-              ) : (
-                <>
-                  <strong className="font-semibold text-ink">
-                    {diff.filesChanged}
-                  </strong>{" "}
-                  file{diff.filesChanged === 1 ? "" : "s"} on{" "}
-                  <span className="mono">{diff.branch}</span> ·{" "}
-                  {/* The sign is in the text, not only in the colour: these read
-                      the same way in a screenshot, in high contrast, and to a
-                      reader who cannot tell green from red. */}
-                  <span className="text-ok">+{diff.added}</span>{" "}
-                  <span className="text-danger">−{diff.deleted}</span>
-                </>
-              )}
-            </div>
-          )}
-
-          {diff.omittedPatches > 0 && (
-            <Notice tone="warn">
-              <strong>
-                {diff.omittedPatches} file{diff.omittedPatches === 1 ? "" : "s"} listed
-                without contents.
-              </strong>{" "}
-              The change is too large to render whole. Every changed file is still in
-              the list below.
-            </Notice>
-          )}
-
-          <div
-            className={
-              filesScroll
-                ? "max-h-[26rem] overflow-y-auto rounded-sm border border-line px-2.5"
-                : ""
-            }
-            tabIndex={filesScroll ? 0 : undefined}
-            role={filesScroll ? "group" : undefined}
-            aria-label={filesScroll ? "Changed files" : undefined}
+    <>
+      <Card emphasis={settled ? "primary" : "quiet"}>
+        <CardTitle>
+          What changed
+          <Button
+            variant="secondary"
+            className="ml-auto transition-colors duration-150"
+            onClick={load}
+            disabled={loading}
           >
-            {diff.files.map((f) => (
-              <DiffFileRow key={`${f.oldPath ?? ""}:${f.path}`} file={f} />
+            {loading ? "Reading…" : diff ? "Refresh" : "Show changes"}
+          </Button>
+        </CardTitle>
+
+        {error && <Notice tone="danger">{error}</Notice>}
+
+        {/* Shaped like the file list it is standing in for, so the card does not
+            resize under the reader when the answer arrives. */}
+        {loading && !diff && (
+          <div aria-busy="true" aria-live="polite">
+            <span className="sr-only">Reading the repository…</span>
+            {[0, 1, 2].map((i) => (
+              <div
+                key={i}
+                className="flex items-center gap-2 border-b border-line py-2.5 last:border-b-0"
+              >
+                <div className="h-3.5 flex-1 rounded-sm bg-inset" />
+                <div className="h-3.5 w-12 rounded-sm bg-inset" />
+              </div>
             ))}
           </div>
+        )}
 
-          {diff.uncommitted.length > 0 && (
-            <div className="mt-4 border-t border-line pt-3.5">
-              {/* Two wordings for two different places, and the branch is the
-                  whole of the difference: an isolated run's checkout is not the
-                  operator's folder. There was a third wording on the Land card
-                  for the same list; one name each is what the reader needs to
-                  match them up. */}
-              <div className="mb-2 text-xs font-semibold text-ink">
-                {diff.kind === "range"
-                  ? "Uncommitted in the checkout"
-                  : "Uncommitted in this folder"}
+        {!diff && !error && !loading && (
+          <Empty>
+            {settled
+              ? "Nothing loaded — read it with the button above."
+              : "This run is still working, so its changes are read on request."}
+          </Empty>
+        )}
+
+        {diff && (
+          <>
+            {diff.caveat && <Notice tone="warn">{diff.caveat}</Notice>}
+
+            {diff.kind === "none" && <Empty>{diff.reason ?? "Nothing to show."}</Empty>}
+
+            {diff.kind === "range" && (
+              <div className="mb-2 text-sm tabular-nums text-ink-muted">
+                {diff.filesChanged === 0 ? (
+                  (diff.reason ?? "No files changed.")
+                ) : (
+                  <>
+                    <strong className="font-semibold text-ink">
+                      {diff.filesChanged}
+                    </strong>{" "}
+                    file{diff.filesChanged === 1 ? "" : "s"} on{" "}
+                    <span className="mono">{diff.branch}</span> ·{" "}
+                    {/* The sign is in the text, not only in the colour: these read
+                        the same way in a screenshot, in high contrast, and to a
+                        reader who cannot tell green from red. */}
+                    <span className="text-ok">+{diff.added}</span>{" "}
+                    <span className="text-danger">−{diff.deleted}</span>
+                  </>
+                )}
               </div>
-              <div className="mono max-h-40 overflow-auto rounded-sm border border-line bg-inset p-2.5">
-                {diff.uncommitted.map((l) => (
-                  <div key={l} className="whitespace-pre text-ink-muted">
-                    {l}
-                  </div>
-                ))}
-              </div>
-              {diff.kind === "range" && (
-                <Hint tone="warn">
-                  Not on the branch, so landing it will not bring these over
-                </Hint>
-              )}
+            )}
+
+            {diff.omittedPatches > 0 && (
+              <Notice tone="warn">
+                <strong>
+                  {diff.omittedPatches} file{diff.omittedPatches === 1 ? "" : "s"} listed
+                  without contents.
+                </strong>{" "}
+                The change is too large to render whole. Every changed file is still in
+                the list below.
+              </Notice>
+            )}
+
+            <div
+              className={
+                filesScroll
+                  ? "max-h-[26rem] overflow-y-auto rounded-sm border border-line px-2.5"
+                  : ""
+              }
+              tabIndex={filesScroll ? 0 : undefined}
+              role={filesScroll ? "group" : undefined}
+              aria-label={filesScroll ? "Changed files" : undefined}
+            >
+              {diff.files.map((f) => (
+                <DiffFileRow key={`${f.oldPath ?? ""}:${f.path}`} file={f} />
+              ))}
             </div>
-          )}
-        </>
-      )}
-    </Card>
+
+            {diff.uncommitted.length > 0 && (
+              <div className="mt-4 border-t border-line pt-3.5">
+                {/* Two wordings for two different places, and the branch is the
+                    whole of the difference: an isolated run's checkout is not the
+                    operator's folder. There was a third wording on the Land card
+                    for the same list; one name each is what the reader needs to
+                    match them up. */}
+                <div className="mb-2 text-xs font-semibold text-ink">
+                  {diff.kind === "range"
+                    ? "Uncommitted in the checkout"
+                    : "Uncommitted in this folder"}
+                </div>
+                <div className="mono max-h-40 overflow-auto rounded-sm border border-line bg-inset p-2.5">
+                  {diff.uncommitted.map((l) => (
+                    <div key={l} className="whitespace-pre text-ink-muted">
+                      {l}
+                    </div>
+                  ))}
+                </div>
+                {diff.kind === "range" && (
+                  <Hint tone="warn">
+                    Not on the branch, so landing it will not bring these over
+                  </Hint>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </Card>
+
+      {/* Beneath the diff rather than inside it, and only once there is a file
+          list to reconcile against: with `kind: "none"` the changed set is
+          unknown rather than empty, and every file the run read would then be
+          reported as one it read and did not change. */}
+      {diff && diff.kind !== "none" && <RunTouches run={run} diff={diff} />}
+    </>
   );
 }

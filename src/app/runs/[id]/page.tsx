@@ -960,7 +960,14 @@ export default function RunDetail({
     ...(cycles.length > 0
       ? [{ value: "report" as const, label: "Report" }]
       : []),
-    { value: "changes", label: "Changes" },
+    // "Files" rather than "Changes": three of the four groups under the diff
+    // are about files that did *not* change — read and never written, changed
+    // by something that named no file, touched outside the checkout — and a
+    // label has to cover what is under it. `ui-density-audit.md:1122` freezes
+    // this strip at "five labels, the order", and this changes neither: the
+    // `RunTab` value stays `"changes"`, so every stored selection and every
+    // reader of it is untouched.
+    { value: "changes", label: "Files" },
     ...(isolated
       ? [
           { value: "review" as const, label: "Review" },
