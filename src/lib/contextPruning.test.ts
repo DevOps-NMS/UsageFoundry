@@ -8,6 +8,7 @@ import {
   apiContextTokens,
   boundaryAction,
   BOUNDARY_RECHECK_AFTER,
+  ceilingDeclineMessage,
   ceilingPayback,
   classifyResume,
   coldAgeRefusalMessage,
@@ -929,6 +930,58 @@ describe("freshestPayback — which engine's record the gates read", () => {
 
   it("says nothing when the last cut removed nothing", () => {
     assert.equal(freshestPayback({ ts: 1, s: 100, d: 0 }, null), null);
+  });
+});
+
+describe("ceilingDeclineMessage — a run left alone still says so", () => {
+  const AT_205K = {
+    contextTokens: 205_600,
+    removedTokens: 17_594,
+    turnsNeeded: 209,
+  };
+
+  it("explains itself the first time, numbers and cadence included", () => {
+    const m = ceilingDeclineMessage({ ...AT_205K, repeat: false });
+    assert.match(m, /17\.6k tokens/, "what a cut would take");
+    assert.match(m, /8\.6% of it/, "and what share of the conversation that is");
+    assert.match(m, /209 further turns/, "and what it would cost in turns");
+    assert.match(m, new RegExp(`limit of ${PAYBACK_HORIZON_TURNS}`));
+    // The question an operator asks next, answered before they ask it.
+    assert.match(m, /Checked again every 25\.0k tokens of growth/);
+  });
+
+  it("keeps saying it as the run climbs, which is the whole point", () => {
+    // A latch here left a run silent for an hour while the gate re-decided
+    // behind it. The repeat is shorter, not absent: the numbers are the part
+    // that moves, and a share that keeps falling is a run drifting further from
+    // ever being worth cutting.
+    const later = ceilingDeclineMessage({
+      contextTokens: 255_400,
+      removedTokens: 15_600,
+      turnsNeeded: 307,
+      repeat: true,
+    });
+    assert.match(later, /255\.4k tokens/);
+    assert.match(later, /6\.1% of it/);
+    assert.match(later, /307 further turns/);
+    assert.ok(
+      later.length < ceilingDeclineMessage({ ...AT_205K, repeat: false }).length,
+      "a follow-up carries the numbers, not the explanation again",
+    );
+  });
+
+  it("says so plainly when nothing could be priced", () => {
+    for (const repeat of [false, true]) {
+      const m = ceilingDeclineMessage({
+        contextTokens: 240_000,
+        removedTokens: 0,
+        turnsNeeded: null,
+        repeat,
+      });
+      assert.match(m, /nothing here could be priced as worth removing/);
+      // Never a percentage of nothing, and never a bare NaN where a figure goes.
+      assert.doesNotMatch(m, /NaN|Infinity|0\.0% of it/);
+    }
   });
 });
 

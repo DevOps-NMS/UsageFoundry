@@ -5,6 +5,8 @@ import path from "node:path";
 import { DATA_DIR } from "./config";
 import { db } from "./db";
 import { BYTES_PER_TOKEN } from "./fileCostNotice";
+// Client-safe presentation helper, no node builtins behind it — see format.ts.
+import { fmtTokens } from "./format";
 import { opsLog, recordOpsEvent } from "./ops";
 import {
   CACHE_READ_MULTIPLIER,
@@ -189,6 +191,39 @@ export const CYCLE_CONTEXT_CEILING_TOKENS = 200_000;
  * pays back has already spent the invalidation at ~2×.
  */
 export const PAYBACK_HORIZON_TURNS = 18;
+
+/**
+ * How much a conversation must grow before the ceiling re-measures it.
+ *
+ * `checkContextCeilings` runs on the live ticker — every
+ * `liveGuardIntervalSeconds`, 60 by default — and the measurement it takes
+ * spawns `winnow plan` over the whole transcript. Without a growth gate a run
+ * parked above the ceiling would spawn one subprocess a minute against a
+ * multi-megabyte file, for hours.
+ *
+ * ## Why growth, and why this much of it
+ *
+ * A decline can only become an approval if `D` grows faster than the
+ * conversation does, and the gap is wide. A run declining at `D/C = 9%` needs
+ * `D/C ≈ 53%` to clear `PAYBACK_HORIZON_TURNS`; even if **every** new token were
+ * strippable that takes about 187,000 tokens of growth. So the answer is close
+ * to stable, and a threshold well under that is already generous.
+ *
+ * Not a latch, though, for the reason `boundaryDeclines` gives about the same
+ * arithmetic: `D` is whatever the newest work happened to produce, and one cycle
+ * that greps a large tree or runs a long build can make it jump. A permanent
+ * decline on one reading would miss exactly that case.
+ *
+ * 25,000 tokens is roughly five to eight turns at the rate these runs
+ * accumulate context — frequent against a threshold that needs 187,000 to
+ * matter, and a sixtieth of the subprocesses.
+ *
+ * It also paces the operator-facing line, which is deliberate:
+ * `ceilingDeclineMessage` is emitted once per measurement, so the log follows
+ * the run's growth and never a clock. A run that stops growing stops saying
+ * anything, because nothing about it has changed.
+ */
+export const CEILING_REMEASURE_GROWTH_TOKENS = 25_000;
 
 /**
  * The tier `plan` is asked at, for the read-only observation beside each prune.
@@ -1780,6 +1815,65 @@ export function coldAgeRefusalMessage(
     `old — so any quiet period above 0 means nothing is ever forked. Set ` +
     `contextPruningForkMinColdAge to 0 to cut here, or turn context pruning ` +
     `off if that is what you meant.`
+  );
+}
+
+/**
+ * What an operator is told when a run sits above the context ceiling and is
+ * left alone.
+ *
+ * Emitted on **every** measurement, not only the first. The first version of
+ * this decision logged once per run and then went quiet, which meant a run
+ * climbing from 200k to 300k said nothing for an hour while the gate re-decided
+ * behind it. That silence is indistinguishable from a broken feature, and it is
+ * the same shape as every other fault found in this area: a cold-age guard that
+ * refused forty times without saying what threshold, a control group that never
+ * filled, a dashboard reading one of two tables. None of them threw; all of them
+ * read as "nothing is happening".
+ *
+ * Emitting per measurement rather than per tick is what makes that affordable.
+ * The measurement is paced by `CEILING_REMEASURE_GROWTH_TOKENS`, so the line
+ * follows the conversation's growth and never a clock — a run that stops growing
+ * stops repeating itself, because nothing about it has changed.
+ *
+ * `repeat` shortens the line rather than suppressing it. The first one has to
+ * explain the decision; the ones after it only have to carry the numbers, which
+ * are the part that moves and the part worth watching — a share that keeps
+ * falling is a run drifting further from ever being worth cutting, and that is
+ * the evidence for raising the ceiling or leaving pruning off.
+ */
+export function ceilingDeclineMessage(o: {
+  /** The API-visible conversation now, from `sampleContext`. */
+  contextTokens: number;
+  /** What a cut would take out, or 0 when nothing could be priced. */
+  removedTokens: number;
+  /** `ceilingPayback`'s answer; null when there was no measurement to make. */
+  turnsNeeded: number | null;
+  /** False for the first line of a run, true for every one after it. */
+  repeat: boolean;
+}): string {
+  const unpriceable = o.turnsNeeded === null || o.removedTokens <= 0;
+  const share =
+    o.contextTokens > 0 ? (o.removedTokens / o.contextTokens) * 100 : 0;
+  const finding = unpriceable
+    ? `nothing here could be priced as worth removing`
+    : `a cut would remove ${fmtTokens(o.removedTokens)} tokens ` +
+      `(${share.toFixed(1)}% of it) and need ${o.turnsNeeded} further turns to ` +
+      `pay for the rewrite that ending this cycle would cause, against a limit ` +
+      `of ${PAYBACK_HORIZON_TURNS}`;
+
+  if (o.repeat) {
+    return (
+      `Still leaving this run's conversation alone at ` +
+      `${fmtTokens(o.contextTokens)} tokens: ${finding}.`
+    );
+  }
+  return (
+    `This run's context has passed ` +
+    `${fmtTokens(CYCLE_CONTEXT_CEILING_TOKENS)} tokens, but ${finding}. ` +
+    `Letting the cycle run on, which costs cache reads at 0.1× and invalidates ` +
+    `nothing. Checked again every ` +
+    `${fmtTokens(CEILING_REMEASURE_GROWTH_TOKENS)} tokens of growth.`
   );
 }
 

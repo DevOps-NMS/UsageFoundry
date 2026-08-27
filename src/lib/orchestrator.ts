@@ -71,7 +71,9 @@ import {
   paybackTurns,
   type PaybackReading,
   boundaryAction,
+  ceilingDeclineMessage,
   ceilingPayback,
+  CEILING_REMEASURE_GROWTH_TOKENS,
   forkTranscript,
   pendingForkFor,
   PLAN_TIER,
@@ -9908,26 +9910,24 @@ async function checkContextCeilings(): Promise<void> {
       // measurement", and there is no argument for spending $1.80 on a cut
       // nothing has priced.
       //
-      // Said once per run rather than once per tick: `earlyEndDeclined` latches,
-      // because a run sitting above the ceiling would otherwise repeat this
-      // every minute for hours.
-      if (!earlyEndDeclined.has(id)) {
-        earlyEndDeclined.add(id);
-        const removed = plan ? Math.round(plan.netBytes / BYTES_PER_TOKEN) : 0;
-        const share = plan && tokens > 0 ? (removed / tokens) * 100 : 0;
-        log(
-          id,
-          `This run's context has passed ${fmtTokens(CYCLE_CONTEXT_CEILING_TOKENS)} tokens, ` +
-            (predicted === null
-              ? `but nothing here could be priced as worth removing. `
-              : `but a cut here would remove ${fmtTokens(removed)} tokens ` +
-                `(${share.toFixed(1)}% of it) and need ${predicted} further turns to ` +
-                `pay for the rewrite that ending this cycle would cause — the limit ` +
-                `is ${PAYBACK_HORIZON_TURNS}. `) +
-            `Letting the cycle run on, which costs cache reads at 0.1× and ` +
-            `invalidates nothing.`,
-        );
-      }
+      // Said on every measurement, not once per run. This is safe to repeat
+      // *because* the measurement is paced by growth rather than by the ticker:
+      // the line follows the conversation, and a run that stops growing stops
+      // repeating itself. Latching it instead left a run climbing from 200k to
+      // 300k silent for an hour while the gate re-decided behind it, which reads
+      // exactly like a feature that has stopped working. `earlyEndDeclined` now
+      // records only whether the decision has been *explained* yet.
+      const explained = earlyEndDeclined.has(id);
+      earlyEndDeclined.add(id);
+      log(
+        id,
+        ceilingDeclineMessage({
+          contextTokens: tokens,
+          removedTokens: plan ? Math.round(plan.netBytes / BYTES_PER_TOKEN) : 0,
+          turnsNeeded: predicted,
+          repeat: explained,
+        }),
+      );
       continue;
     }
 
@@ -10001,7 +10001,18 @@ function predictedPayback(runId: string): number | null {
 }
 
 /**
- * Runs already told their prunes are not paying.
+ * Runs that have already had the ceiling decision **explained** to them.
+ *
+ * It used to mean "already told, do not tell again", and that was the wrong
+ * shape: a run climbing from 200k to 300k said nothing for an hour while the
+ * gate kept re-deciding behind it, which is indistinguishable from a feature
+ * that has stopped working. Every decline is reported now; this only chooses
+ * between the full explanation and the short form that carries the numbers.
+ * See `ceilingDeclineMessage`.
+ *
+ * Cleared when a cut actually happens, so the next decline — taken against a
+ * conversation that has since been cut — explains itself again rather than
+ * arriving as a follow-up to a line about the old one.
  *
  * A `Set` on `globalThis` for `__ufInterrupts`' reason, and cleared with the
  * run's other per-run state when its loop ends.
@@ -10014,34 +10025,13 @@ const earlyEndDeclined = ((globalThis as unknown as {
  * The context a run was last measured at, so the ceiling does not re-measure it
  * every minute.
  *
- * `checkContextCeilings` runs on the live ticker — every
- * `liveGuardIntervalSeconds`, 60 by default — and the measurement it now takes
- * spawns `winnow plan` over the whole transcript. Without this a run parked
- * above the ceiling would spawn one subprocess a minute against a multi-megabyte
- * file, for hours, and `earlyEndDeclined` would not stop it: that latch
- * suppresses the *log line*, not the work.
+ * The threshold and the argument for it live with the other tuning constants,
+ * in `CEILING_REMEASURE_GROWTH_TOKENS`. What belongs here is the reason this is
+ * a map rather than a flag: `earlyEndDeclined` does not bound the measurement,
+ * because that latch suppresses the *log line* and not the work.
  *
- * ## Why growth, and why this much of it
- *
- * A decline can only become an approval if `D` grows faster than the
- * conversation does, and the gap is wide. A run declining at `D/C = 9%` needs
- * `D/C ≈ 53%` to clear `PAYBACK_HORIZON_TURNS`; even if **every** new token were
- * strippable, that takes about 187,000 tokens of growth. So the answer is close
- * to stable, and a threshold well under that is already generous.
- *
- * Not a latch, though, for the reason `boundaryDeclines` gives about the same
- * arithmetic: `D` is whatever the newest work happened to produce, and one cycle
- * that greps a large tree or runs a long build can make it jump. A permanent
- * decline on one reading would miss exactly that case.
- *
- * 25,000 tokens is roughly five to eight turns at the rate these runs
- * accumulate context — frequent against a threshold that needs 187,000 to
- * matter, and 1/60th of the subprocesses.
- *
- * Keyed by run and cleared when the run's loop ends, with `earlyEndDeclined`.
+ * Keyed by run, cleared when a cut happens and when the run's loop ends.
  */
-const CEILING_REMEASURE_GROWTH_TOKENS = 25_000;
-
 const ceilingMeasuredAt = ((globalThis as unknown as {
   __ufCeilingMeasuredAt?: Map<string, number>;
 }).__ufCeilingMeasuredAt ??= new Map<string, number>());
