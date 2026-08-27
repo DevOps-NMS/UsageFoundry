@@ -1053,7 +1053,7 @@ a running app and **cannot be checked in this container**.
     `describeRun`'s detail does not repeat it.
 25. `[hand]` The history filter has a **Needs review** segment and it selects
     exactly those runs.
-26. `[hand]` The Changes tab loads on its own for a `needs-review` run.
+26. `[hand]` The Files tab loads on its own for a `needs-review` run.
 27. `[hand]` The log line for the transition is warn-toned, not neutral.
 
 **Honesty**

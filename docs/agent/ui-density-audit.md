@@ -1121,7 +1121,13 @@ per-file conflict summary unchanged.
 **C12 — What does not change.**
 - **The tab strip.** Five labels, the order, the conditions each is offered
   under, the log leading, only the active tab mounted, and nothing switching
-  tabs on its own. See §5.4.
+  tabs on its own. See §5.4. **One label has since been reworded** — the third
+  reads *Files* rather than *Changes*, because three of the four groups the
+  touched/changed reconciliation adds under it are about files that did **not**
+  change, and `conventions.md:50` requires a label to cover what is under it.
+  The `RunTab` value is still `"changes"`, so no reader of the selection moved.
+  What this line froze is the **count and the order**, and both stand: a sixth
+  segment is still refused, and so is a sub-strip inside a tab (§4.2, `:178`).
 - **The split's geometry**: `lg:grid-cols-[minmax(0,1fr)_21rem]`, the explicit
   `lg:col-start-*`/`lg:row-start-1` placement, and the inspector's
   `lg:sticky` cap. §5.9.
