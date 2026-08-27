@@ -1613,6 +1613,56 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **The `canvasView.ts` extraction was not looked at.** The world/screen
+> transform, hit testing, device-pixel sizing, the pan/zoom gestures, the
+> `ResizeObserver` and the colour probe were moved out of
+> `KnowledgeGraphCanvas.tsx` into `src/lib/canvasView.ts` by a run with **no
+> Docker and no browser it could drive**. It is a refactor and behaviour is
+> meant to be identical, and the one thing that would demonstrate that — that
+> the graph still pans and zooms — is the thing that run could not check.
+> Everything claimed for it rests on `npm run typecheck` (exit 0), `npm test`
+> (**1,834 tests / 267 suites / 0 failures**, of which 21 are the new
+> `canvasView.test.ts`) and `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run
+> build` (exit 0). The unit tests cover the arithmetic and cover *none* of the
+> DOM wiring: `observeCanvasSize`, `observeTheme`, `probeTokens` and
+> `sizeCanvasToHost` have no assertions anywhere and are only known to compile.
+>
+> The click-list, at **Knowledge → the graph pane** (the vault must be mounted
+> and a graph showing; the pane is the canvas beside the settings panel):
+>
+> 1. **Pan.** Drag from empty space. The graph must follow the pointer 1:1 and
+>    stay where it is let go. Nothing may spring back.
+> 2. **Zoom about the pointer.** Put the cursor on a *named* node away from the
+>    centre and wheel both ways. That node must stay under the cursor at every
+>    step — this is the assertion most likely to have been broken, because
+>    `zoomAt` now returns a new view where the old code mutated one in place.
+> 3. **Both clamps.** Keep wheeling in past the ceiling and out past the floor.
+>    The zoom must stop and the graph must **not creep** while it is stopped.
+> 4. **Hit targets.** Click a node: the note opens. Click two overlapping nodes
+>    at low zoom: the one whose centre is nearer the cursor opens, not the other.
+>    Click empty space 5–10px off a node's edge: nothing opens.
+> 5. **Drag a node.** It must stay under the pointer, stay where dropped, and
+>    still be there after changing a filter.
+> 6. **Click versus drag.** Press on a node, move ~2px, release — the note opens.
+>    Press, move ~20px, release — it does not.
+> 7. **Device pixel ratio.** Load at dpr 1 and at dpr 2 (a HiDPI display, or
+>    Chrome DevTools' device toolbar at 2×). Labels and node edges must be
+>    crisp at both, and the graph must fill the pane rather than a quarter of it.
+> 8. **Resize.** Drag the window narrow and wide, and collapse/expand the panel
+>    beside the pane. The canvas must track the host's box and — the fault this
+>    one is for — must **not ratchet**: made tall then narrow, it must come back
+>    down rather than keeping the taller height.
+> 9. **Theme.** Flip the theme toggle, then flip the OS scheme while the app is
+>    on "Match system". The graph's colours must change on both without a
+>    reload; the second is the one that has no React render behind it.
+> 10. **The loop still stops.** Leave a settled graph alone and watch the CPU:
+>    it must go to idle. Then touch anything — a slider, a drag — and it must
+>    wake.
+>
+> Firefox is worth one pass for step 2 alone: `wheelZoomFactor`'s `deltaMode`
+> handling is the one branch no other engine takes, and its own docblock says
+> the 16px line height is an estimate nobody has held against a real mouse.
+
 > **The four frontend reachability fixes — the paged runs list, quick open's
 > search, the run log's filter and the settings field search — were written on
 > branch `uf/usagefoundry-721638d11c0b-1-41e5e190` by two runs, and a third that

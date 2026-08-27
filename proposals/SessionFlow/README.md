@@ -73,7 +73,7 @@ resolved rather than split. It is, and it resolves against both branches.
 | Distinct 2D canvases in the app | **1** (`KnowledgeGraphCanvas.tsx:734`, the only `<canvas>`) |
 | Of `canvasGraph.ts`, reusable for a file graph | **~2 lines.** It draws nothing, lays out DAG columns and emits SVG path strings |
 | Of `forceLayout.ts`, reusable | **all of it** — no `import` statement in the file |
-| Shared canvas plumbing available to a third consumer | **none.** ~450 lines, private and unexported; `canvasView.ts` is documented at `forceLayout.ts:7` and **does not exist** |
+| Shared canvas plumbing available to a third consumer | **Resolved since this was surveyed** — `src/lib/canvasView.ts` now exists, exported and unit-tested, and `KnowledgeGraphCanvas` imports it. The ~450 line count was too high: the domain-free plumbing was **89 lines** of the component, which is 199 lines of the new module. What the survey counted as shared included `draw`, which is the vault's own rendering and stayed |
 | Drawable node ceiling | **2500** (`knowledgeGraph.ts:705`), not the 4000 in `forceLayout.ts`'s prose |
 | Horizon on "touched" | **30 days** (`settings.ts:819`, swept at `retention.ts:145-151`) |
 | Horizon on "changed" | **none** — retention removes directories, never refs (`docs/agent/retention.md:22`) |

@@ -73,6 +73,11 @@ src/lib/
                    local-graph walk, and the settings the browser stores
   forceLayout.ts   the force-directed layout under it: Barnes-Hut repulsion,
                    link springs, centring, and an alpha that cools to a stop
+  canvasView.ts    what every <canvas> needs and none of them owns: the
+                   world/screen transform, the cull rectangle, framing, the
+                   nearest-within-reach hit test, device-pixel sizing under a
+                   ResizeObserver, the wheel's deltaMode, the colour probe.
+                   Knows what a pixel is and never what is drawn on it
   db.ts            SQLite (runs, events, reviews, chats, proposals, workflows,
                    schedules, settings)
 src/app/api/       usage · account · runs · branches · calibrate · settings ·
