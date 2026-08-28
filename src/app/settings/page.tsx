@@ -37,6 +37,7 @@ import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { Disclosure } from "@/components/ui/Disclosure";
 import { Field, Input, Select, Switch, Textarea } from "@/components/ui/Field";
 import { Hint, type HintTone } from "@/components/ui/Hint";
+import { Toned } from "@/components/ui/Toned";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import {
@@ -490,24 +491,6 @@ const SPEND_READ_AT: Record<BudgetPolicyDTO["enforcement"], string> = {
   "live-resume":
     "Read on a ticker while a cycle is going, and carried into the cycle as its own cap, so a run stops near it.",
 };
-
-/** Complete class strings per tone, looked up rather than interpolated. */
-const NOTE_TONE: Record<HintTone, string> = {
-  neutral: "",
-  warn: "text-warn",
-  danger: "text-danger",
-};
-
-/** A sentence inside a row's description that has to carry a tone of its own. */
-function Toned({
-  tone = "neutral",
-  children,
-}: {
-  tone?: HintTone;
-  children: ReactNode;
-}) {
-  return <span className={NOTE_TONE[tone]}>{children}</span>;
-}
 
 /**
  * What the selected permission mode lets an agent nobody is watching do.

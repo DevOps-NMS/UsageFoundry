@@ -37,7 +37,8 @@ import {
   Switch,
   Textarea,
 } from "@/components/ui/Field";
-import { Hint } from "@/components/ui/Hint";
+import { Hint, type HintTone } from "@/components/ui/Hint";
+import { Toned } from "@/components/ui/Toned";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import {
@@ -46,6 +47,7 @@ import {
 } from "@/components/ui/SegmentedControl";
 import { isCommitChord } from "@/components/shell/shortcuts";
 import { type BudgetFields, budgetFromForm } from "./budgetPayload";
+import { runFormProblems } from "./formProblems";
 
 /** Everything a template or an earlier run supplies to this form. */
 interface FormSeed {
@@ -280,26 +282,6 @@ const ENFORCEMENT_OPTIONS: readonly SegmentedOption<EnforcementModeDTO>[] = [
   { value: "live-resume", label: "Stop, then resume" },
 ];
 
-type NoteTone = "neutral" | "warn" | "danger";
-
-/** Complete class strings per tone, looked up rather than interpolated. */
-const NOTE_TONE: Record<NoteTone, string> = {
-  neutral: "",
-  warn: "text-warn",
-  danger: "text-danger",
-};
-
-/** A sentence inside a row's description that has to carry a tone of its own. */
-function Toned({
-  tone = "neutral",
-  children,
-}: {
-  tone?: NoteTone;
-  children: ReactNode;
-}) {
-  return <span className={NOTE_TONE[tone]}>{children}</span>;
-}
-
 /**
  * What the chosen permission mode lets an agent nobody is watching do.
  *
@@ -310,7 +292,7 @@ function Toned({
  */
 function permissionConsequence(mode: string): {
   text: ReactNode;
-  tone: NoteTone;
+  tone: HintTone;
 } {
   switch (mode) {
     case "plan":
@@ -430,22 +412,6 @@ function ResetToBaseline({
       Reset
     </Button>
   );
-}
-
-/**
- * Something that would stop this run from starting, said where it is wrong.
- *
- * `immediate` separates the two kinds. A range error ("150 is not a
- * percentage") is true the moment it is typed and worth saying then. An
- * emptiness error is not an error yet while the field still has the cursor in
- * it, so it waits for the operator to leave — a form that turns red under the
- * caret is a form that argues with you as you type.
- */
-interface Problem {
-  /** The control to put the cursor in when the operator asks what is missing. */
-  focus: string;
-  message: string;
-  immediate: boolean;
 }
 
 export default function NewRunPage() {
@@ -813,8 +779,11 @@ export default function NewRunPage() {
    * was there before. So the summary reads them the same way rather than
    * printing whatever is in the box.
    */
+  // Named because the refusals read it too, and a second `positive()` call
+  // there could disagree with the figure the summary is showing.
+  const effIterations = positive(maxIterations);
   const effCycles = iterationsCapped
-    ? Math.max(1, Math.floor(positive(maxIterations) ?? 1))
+    ? Math.max(1, Math.floor(effIterations ?? 1))
     : null;
   const effCost = costLimited ? positive(maxRunCostUSD) : null;
   const effMinutes = timeLimited ? positive(maxDurationMinutes) : null;
@@ -919,99 +888,26 @@ export default function NewRunPage() {
   /* Validation                                                        */
   /* ---------------------------------------------------------------- */
 
-  const problems: Problem[] = [];
-  if (!mountId || (foldersLoaded && !activeMount)) {
-    problems.push({
-      focus: "mount",
-      message: noMountsUsable
-        ? "No workspace is mounted, so there is nowhere for a run to work."
-        : "Choose the workspace this run should work in.",
-      immediate: false,
-    });
-  }
-  if (prompt.trim() === "") {
-    problems.push({
-      focus: "prompt",
-      message: "Describe what Claude should work on.",
-      immediate: false,
-    });
-  }
-  // The refusal `POST /api/runs` will give, said beside the control instead of
-  // after a round trip. Immediate, because nothing the operator does to this row
-  // except changing it can clear it, and it is usually a template naming an
-  // agent that has been deleted since it was saved.
-  if (agentMissing) {
-    problems.push({
-      focus: "agent",
-      message:
-        "That agent is not in the registry any more, so this run cannot start. Pick another one, or start with none.",
-      immediate: true,
-    });
-  }
-  if (selectedAgent && !selectedAgent.usable) {
-    problems.push({
-      focus: "agent",
-      message: `“${selectedAgent.name}” is missing its description or its prompt, and Claude Code will not register an agent like that — the run would fail the moment it spawned. Fix it, or start with none.`,
-      immediate: true,
-    });
-  }
-  if (iterationsCapped && positive(maxIterations) === null) {
-    problems.push({
-      focus: "iters",
-      message: "Set at least one work cycle, or switch the cycle limit off.",
-      immediate: false,
-    });
-  }
-  if (costLimited && effCost === null) {
-    problems.push({
-      focus: "cost",
-      message:
-        "Enter an amount above $0, or switch the spending limit off — a blank box starts a run with no spending limit at all.",
-      immediate: false,
-    });
-  }
-  if (timeLimited && effMinutes === null) {
-    problems.push({
-      focus: "dur",
-      message:
-        "Enter a number of minutes, or switch the time limit off — a blank box starts a run with no time limit at all.",
-      immediate: false,
-    });
-  }
-  if (noTerminus) {
-    problems.push({
-      // Neither limit has a value box while it is switched off, so this points
-      // at the switch that brings one back — which is stable in both states,
-      // where the number input only exists in one of them.
-      focus: "cycles-on",
-      message:
-        "Set a time limit, or cap the work cycles. Nothing else here only moves one way, so without one of them nothing would ever end this run.",
-      immediate: true,
-    });
-  }
-  // Above 100 is not a stricter guard, it is a hundredth of one: the form sends
-  // a fraction and `normalizePolicy` divides anything over 1 by a hundred
-  // again, so a typed 150 arrives as 1.5%.
-  if (
-    maxSessionFraction !== "" &&
-    !(effSessionPct !== null && effSessionPct <= 100)
-  ) {
-    problems.push({
-      focus: "sess",
-      message: "The 5-hour guard has to be between 1 and 100 percent.",
-      immediate: true,
-    });
-  }
-  if (
-    maxWeeklyFraction !== "" &&
-    !(effWeeklyPct !== null && effWeeklyPct <= 100)
-  ) {
-    problems.push({
-      focus: "wk",
-      message: "The weekly guard has to be between 1 and 100 percent.",
-      immediate: true,
-    });
-  }
+  const problems = runFormProblems({
+    mountId,
+    foldersLoaded,
+    hasActiveMount: activeMount !== null,
+    noMountsUsable,
+    prompt,
+    agentMissing,
+    selectedAgent,
+    iterationsCapped,
+    effIterations,
+    costLimited,
+    effCost,
+    timeLimited,
+    effMinutes,
+    noTerminus,
+    maxSessionFraction,
+    effSessionPct,
+    maxWeeklyFraction,
+    effWeeklyPct,
+  });
 
   const visible = problems.filter(
     (p) => p.immediate || attempted || touched[p.focus],
