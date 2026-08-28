@@ -23,15 +23,16 @@
 | 3 | `invalidateTranscriptCache` is wrong and unreachable | **gone** — the function was deleted |
 | 4 | Five unreachable exports | **four still live**; the fifth went with finding 3 |
 | 5 | Two `review.ts` doc comments on the wrong constants | **fixed** |
-| 6 | Three high-severity advisories under `next` | **still true** |
+| 6 | Three high-severity advisories under `next` | **fixed on 2026-08-28** — lockfile bump + one `overrides`; `npm audit` clean. Later than this column's date; no other row was re-checked |
 | 7 | `RunLand` overwrites the strategy choice on reload | **fixed**, #48 |
 
 ## Mechanical checks
 
 **These figures are from 2026-08-11 and are stale.** The suite has grown by an
 order of magnitude since: `npm test` on 2026-08-19 reports 1335 tests, 210
-suites, 0 failures. `npm audit` still reports 3 high, and `npm run typecheck`
-still passes.
+suites, 0 failures. `npm run typecheck` still passes. `npm audit` reported 3 high
+through 2026-08-19; as of 2026-08-28 it reports **0 vulnerabilities** — see
+finding 6, the only line here re-measured on that date.
 
 | Check | Result |
 |---|---|
@@ -288,13 +289,14 @@ const REVIEW_TIMEOUT_MS = 10 * 60_000;
 
 ### 6. Three high-severity advisories in transitive dependencies of `next`
 
-> **Still true on 2026-08-19.** `npm audit` reports the same three, still postcss
-> and sharp under `next`, still fixed only by a breaking major — now
-> `next@16.3.1` rather than the `16.3.0` named below.
+> **Fixed on 2026-08-28.** `npm audit` and `npm audit --omit=dev` both report
+> **0 vulnerabilities**. Both advisories were cleared without the `next` major
+> this section assumed was the only route — see "How they were cleared" below.
+> The dependency reasoning above the fold is kept as the 2026-08-11 record.
 
 **Labels:** security, dependencies
 
-`npm audit` reports:
+As filed on 2026-08-11, `npm audit` reported:
 
 - **postcss `<=8.5.22`** (via `next`) — high. Four advisories:
   GHSA-qx2v-qp2m-jg93 (XSS via unescaped `</style>` in stringify output),
@@ -310,14 +312,54 @@ are already on fixed versions — the vulnerable copy is `next`'s own nested one
 `sharp` backs `next/image` optimisation; this app serves no user-supplied images,
 so the libvips surface is not reachable from any route it exposes.
 
-`npm audit fix --force` wants `next@16.3.0`, a major bump from the pinned
-`^15.5.4`. That is not a change to make as part of a health check — App Router,
-`serverExternalPackages`, and the `output: "standalone"` build all need a real
-smoke test (`docker compose up --build`) behind it.
+`npm audit fix --force` wanted `next@16.3.3` by 2026-08-28, a major bump from the
+pinned `^15.5.4`. That is still not a change to make as part of a health check —
+App Router, `serverExternalPackages`, and the `output: "standalone"` build all
+need a real smoke test (`docker compose up --build`) behind it. What changed is
+that the major turned out not to be necessary for either advisory.
 
-**Suggested action.** Decide deliberately: either take the `next` 16 upgrade as
-its own piece of work with the README's "Verified" section updated, or record an
-explicit accept-risk note with the reachability argument above.
+**How they were cleared (2026-08-28).** Both were lockfile-level fixes; nothing
+under `src/` was touched and `package.json` gained one `overrides` block.
+
+- **sharp** — `next@15.5.23` reached sharp through `optionalDependencies`, and
+  pinned it `^0.34.3`, a range with no non-vulnerable member: the fix is
+  `>=0.35.0`. The unblocking detail is that `next@15.5.24` — a patch release on
+  the `backport` dist-tag, already inside the existing `^15.5.4` range — widens
+  that to `^0.34.3 || ^0.35.3`. So `npm update next && npm update sharp` moves
+  the tree to `next@15.5.24` + `sharp@0.35.4` (libvips `1.2.4` → `1.3.3`) with
+  **no `package.json` change at all**. Nothing in this repo imports sharp or
+  `next/image`, so there is no API surface to break; the bump only retires the
+  four libvips CVEs.
+- **postcss** — `next` declares an *exact* `postcss: 8.4.31`, so no 15.x release
+  clears a `<=8.5.22` advisory; only `next@16` moves the pin (to `8.5.23`).
+  Rather than take the major, `overrides.next.postcss` is set to `^8.5.26`,
+  which is the version the direct `postcss` devDependency already resolved to.
+  The nested `node_modules/next/node_modules/postcss` copy then disappears
+  entirely and `next` dedupes onto the single top-level `postcss@8.5.26`.
+
+**The residual risk this override carries**, stated plainly: it runs `next@15.5.24`
+against a postcss it does not itself pin. Two things bound it. Upstream `next@16`
+already runs on `postcss@8.5.23`, so the 8.5 line is validated against Next's own
+CSS pipeline by the framework's authors; and the failure mode is loud rather than
+silent — postcss is a build-time plugin host here, so a mismatch fails
+`next build` rather than corrupting a page. It was checked, not assumed: the
+emitted stylesheet is **byte-identical** across the change (58,021 bytes,
+sha256 `c041065e8957b297…`), which is the expected result given Tailwind v4 does
+the actual transformation through Lightning CSS and postcss only hosts the
+plugin.
+
+**Revisit when** this project moves to `next@16`: at that point the pin is
+`8.5.23` upstream, the override becomes dead weight, and it should be deleted
+rather than left to silently outrank a newer transitive pin. Revisit sooner if
+a postcss 8.5.x advisory lands, since the override now names the version the
+whole tree uses — `npm audit` will say so.
+
+Verified on 2026-08-28 at `next@15.5.24` / `sharp@0.35.4` / `postcss@8.5.26`:
+`npm audit` and `npm audit --omit=dev` both clean, `npm run typecheck` passes,
+`npm test` passes 1905/1905, and `npm run build` produces `.next/standalone`.
+A clean `npm ci` reproduces the deduped tree, which is what CI and the
+`Dockerfile` actually run. **Not** re-verified: `docker compose up --build`,
+which was unavailable in the container this was done in.
 
 ---
 
