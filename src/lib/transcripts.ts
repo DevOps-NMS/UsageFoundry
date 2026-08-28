@@ -188,6 +188,44 @@ const inflight: Map<string, Promise<FileCacheEntry>> =
   (globalInflight.__ufTranscriptInflight = new Map());
 
 /**
+ * The previous scan's inputs beside the answer they produced, so a tree that
+ * has not changed is not deduped and sorted a second time.
+ *
+ * The dedupe is two Maps over every record in the cache and the sort is an
+ * `O(n log n)` over all of them; together they are 55% of the self time of a
+ * warm scan on this operator's corpus (68,665 turns and 83,584 tool calls, 70 ms
+ * a scan). Nothing else in `runScan` scales with the corpus that way, and the
+ * dashboard polls every 10s while the run loop scans before every work cycle —
+ * so the same answer was being rebuilt from the same bytes several times a
+ * second.
+ *
+ * **Keyed on byte size, per file, in walk order.** That is not an approximation
+ * of freshness, it is the same test `readAppended` already makes: it returns the
+ * cached `FileCacheEntry` untouched when `stat.size` has not moved past the
+ * offset it holds. So an unchanged size means the entry the dedupe would read is
+ * the identical object with the identical contents, and the dedupe and the sort
+ * are pure functions of exactly those. This is therefore *exactly* as fresh as
+ * the offset cache underneath it — a same-size in-place rewrite is invisible to
+ * both, and to neither more than the other.
+ *
+ * Size rather than either array's length: a `tool_result` line arriving for a
+ * call parsed on an earlier pass rewrites that call's `resultChars` in place,
+ * changing what the dedupe sees while leaving both counts where they were. The
+ * byte count is the only one of the three that cannot miss it.
+ *
+ * The file list is compared too, and in order — `runScan`'s tie-breaks resolve
+ * against which file came first, so a reordered walk is a different answer even
+ * when every size matches.
+ */
+const globalScanMemo = globalThis as unknown as {
+  __ufScanMemo?: {
+    files: readonly string[];
+    sizes: readonly number[];
+    result: ScanResult;
+  } | null;
+};
+
+/**
  * Something under the projects directory could not be read.
  *
  * Carried rather than swallowed because every one of these shortens the entry
@@ -329,14 +367,21 @@ function readTokens(usage: Record<string, unknown>): TokenCounts {
   };
 }
 
-function parseLine(line: string, cwdRef: { value: string }): UsageEntry | null {
-  if (!line.startsWith("{")) return null;
-
+function parseLine(
+  line: string,
+  cwdRef: { value: string },
+  parsed?: Record<string, unknown>,
+): UsageEntry | null {
   let rec: Record<string, unknown>;
-  try {
-    rec = JSON.parse(line);
-  } catch {
-    return null; // partially flushed or corrupt line — skip, do not abort the file
+  if (parsed) {
+    rec = parsed; // already parsed by the caller — see `readAppended`
+  } else {
+    if (!line.startsWith("{")) return null;
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      return null; // partially flushed or corrupt line — skip, do not abort the file
+    }
   }
 
   if (typeof rec.cwd === "string" && rec.cwd) cwdRef.value = rec.cwd;
@@ -451,14 +496,35 @@ async function readAppended(file: string): Promise<FileCacheEntry> {
   for (const line of complete.split("\n")) {
     if (!line) continue;
 
-    // Two parsers over one line, reading it for different questions and
-    // sharing nothing but the bytes — `parseCompactionBoundary`'s rule, and the
-    // reason the tool reader takes the raw line rather than a record `parseLine`
-    // already produced: its own substring test skips the parse entirely on the
-    // three quarters of lines that carry no tool block, which is cheaper than
-    // threading a parsed record through a function whose whole contract is that
-    // what it returns is billable.
-    const tools = parseToolRecord(line);
+    // Two readers over one line, asking it different questions — but off one
+    // parse, not two.
+    //
+    // They used to share nothing but the bytes, on the grounds that the tool
+    // reader's substring test "skips the parse entirely on the three quarters of
+    // lines that carry no tool block". That was the right trade when it was
+    // written and the arithmetic behind it has since inverted: measured on this
+    // store, 57.6% of lines now carry a tool block, so the gate skips 42% rather
+    // than 75% — and `parseLine` below has no such gate and parses **every**
+    // line regardless. The parse the gate was avoiding therefore already
+    // happened, one statement later, and the second one bought nothing.
+    //
+    // Parsed here so that neither reader pays for it twice. Both still parse for
+    // themselves when called with a line alone, which is how their unit tests
+    // call them.
+    let record: Record<string, unknown> | undefined;
+    if (line.startsWith("{")) {
+      try {
+        record = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        // Partially flushed or corrupt. Both readers answer null for such a line
+        // on their own, so skipping it here is the same outcome one statement
+        // sooner. A line that does *not* open with `{` is left to them instead:
+        // that is the test each makes first, and it is theirs to make.
+        continue;
+      }
+    }
+
+    const tools = parseToolRecord(line, record);
     if (tools) {
       for (const call of tools.calls) {
         base.pendingToolCalls.set(call.id, base.toolCalls.length);
@@ -472,7 +538,7 @@ async function readAppended(file: string): Promise<FileCacheEntry> {
       }
     }
 
-    const entry = parseLine(line, cwdRef);
+    const entry = parseLine(line, cwdRef, record);
     if (!entry) continue;
     base.entries.push(entry);
     if (entry.ts > base.lastTs) base.lastTs = entry.ts;
@@ -624,10 +690,18 @@ function retainedRecords(): number {
  *
  * Called after a scan has taken its result, never during one: what it evicts is
  * retention, and the entries the caller is holding are unaffected.
+ *
+ * Answers whether it dropped anything, which is what tells `runScan` not to
+ * memoise the result it just built: the memo holds that result's arrays, and
+ * those point at the very records this just released. Keeping it would pin the
+ * heap eviction had already decided to give back, so an install permanently over
+ * the bound would carry both copies for the sake of a saving it cannot make
+ * anyway — a re-read from byte 0 changes no size and would otherwise read as an
+ * unchanged tree.
  */
-function evictToBound(): void {
+function evictToBound(): boolean {
   let retained = retainedRecords();
-  if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return;
+  if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return false;
 
   const candidates = [...cache.entries()]
     .filter(
@@ -636,12 +710,15 @@ function evictToBound(): void {
     )
     .sort((a, b) => a[1].lastTs - b[1].lastTs);
 
+  let evicted = false;
   for (const [file, e] of candidates) {
-    if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return;
+    if (retained <= TRANSCRIPT_CACHE_MAX_ENTRIES) return evicted;
     cache.delete(file);
     retained -= e.entries.length + e.toolCalls.length;
     cacheStats.evictions += 1;
+    evicted = true;
   }
+  return evicted;
 }
 
 /** What the cache is holding, so an operator can read it off `/api/usage`. */
@@ -775,6 +852,33 @@ async function runScan(): Promise<ScanResult> {
     }),
   );
 
+  // Nothing below this line reads the filesystem: the dedupe and the sort are
+  // pure functions of the `FileCacheEntry` objects `refreshFile` just returned,
+  // and an unchanged byte size means each of those is the same object holding
+  // the same records the last scan folded. See `__ufScanMemo` for why size is
+  // the right question and why this is no staler than the offset cache.
+  //
+  // Skipped whole when anything failed to read, in either scan: a short answer
+  // and a full one are different results, and the cheap comparison below cannot
+  // tell which failures produced the one being held.
+  const sizes = results.map((r) => (r ? r.size : -1));
+  const memo = globalScanMemo.__ufScanMemo;
+  if (
+    readFailures.length === 0 &&
+    memo &&
+    memo.files.length === files.length &&
+    memo.files.every((f, i) => f === files[i]) &&
+    memo.sizes.every((s, i) => s === sizes[i])
+  ) {
+    evictToBound();
+    scanHealth.readFailures = readFailures;
+    // A fresh instant on a shared body: the records are current as of now — that
+    // is what an unchanged tree proves — and the arrays are the ones every
+    // caller already only reads. `scannedAt` is the one field that would be a
+    // lie if it were shared.
+    return { ...memo.result, scannedAt: Date.now() };
+  }
+
   // Dedupe across files: a resumed session copies earlier turns into the new
   // transcript, so the same key legitimately appears in more than one file.
   //
@@ -899,11 +1003,11 @@ async function runScan(): Promise<ScanResult> {
   // After the result is built, never before it: this scan answers with
   // everything it read, and what eviction decides is only how much of that is
   // still in memory when the next one starts.
-  evictToBound();
+  const evicted = evictToBound();
 
   scanHealth.readFailures = readFailures;
 
-  return {
+  const result: ScanResult = {
     entries,
     toolCalls,
     fileCount: files.length,
@@ -911,6 +1015,11 @@ async function runScan(): Promise<ScanResult> {
     scannedAt: Date.now(),
     readFailures,
   };
+
+  globalScanMemo.__ufScanMemo =
+    readFailures.length === 0 && !evicted ? { files, sizes, result } : null;
+
+  return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1063,9 +1172,51 @@ export async function resolveSessionTranscript(
   sessionId: string,
 ): Promise<string | null> {
   const { files } = await listTranscriptFiles(PROJECTS_DIR);
+  return resolveIn(files, sessionId);
+}
+
+/** The rule above, against a file list the caller already has. */
+function resolveIn(files: readonly string[], sessionId: string): string | null {
   const name = `${sessionId}.jsonl`;
   const mine = files.filter((f) => path.basename(f) === name);
   return mine.length === 1 ? mine[0] : null;
+}
+
+/**
+ * Resolve several sessions against **one** walk of the projects tree.
+ *
+ * `checkContextCeilings` asks this question once per watched run on every guard
+ * tick, and each ask was a full walk for a tree every one of them was reading
+ * identically — 288 ms a tick at the default four concurrent runs on this
+ * operator's store, 1.7 s at the twenty-five an operator can opt into, all of it
+ * on the same event loop that is supposed to be guarding those runs.
+ *
+ * This is the hoist the loop already performs within a single run — "resolving
+ * the session twice on the same tick would be a second directory walk for an
+ * answer already in hand" — carried across the runs of one tick, which is the
+ * same argument about the same tree.
+ *
+ * The **rule is unchanged**, which is the whole point of sharing a file list
+ * rather than caching a resolved path: a session still answers null unless
+ * exactly one basename matches, so two projects holding the same id are still
+ * refused rather than one of them being rewritten. A per-session path cache
+ * could not keep that promise — it would have to re-walk to notice the second
+ * file, which is the cost being removed.
+ *
+ * Lazy, so a tick whose every watch is interrupted or session-less still walks
+ * nothing, and single-flight, so the first two callers of a tick share one walk
+ * rather than racing two. Scoped to the tick the caller creates it for: a longer
+ * life would be a cache with a staleness nobody had chosen.
+ */
+export function sessionTranscriptResolver(): (
+  sessionId: string,
+) => Promise<string | null> {
+  let walk: Promise<{ files: string[] }> | null = null;
+  return async (sessionId: string) => {
+    walk ??= listTranscriptFiles(PROJECTS_DIR);
+    const { files } = await walk;
+    return resolveIn(files, sessionId);
+  };
 }
 
 /**
@@ -1082,10 +1233,17 @@ export async function resolveSessionTranscript(
  *
  * In-flight refreshes are dropped alongside the cached entry, rather than left
  * to write a pre-removal offset back over it.
+ *
+ * The memoised scan result goes with them. A swept file is usually gone from
+ * disk too, which the next walk sees on its own — but this is called with paths
+ * the caller chose, and a file still present would be re-read from byte 0 to the
+ * same byte size, which reads as an unchanged tree. Dropping the memo costs one
+ * dedupe and removes the need to reason about which of the two it was.
  */
 export function forgetTranscriptFiles(files: readonly string[]): void {
   for (const file of files) {
     cache.delete(file);
     inflight.delete(file);
   }
+  globalScanMemo.__ufScanMemo = null;
 }

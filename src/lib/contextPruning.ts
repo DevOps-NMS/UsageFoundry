@@ -345,9 +345,32 @@ export function winnowAvailable(): boolean {
  * loop's path and none of them should end a cycle over a stat.
  */
 export function contextTokens(transcriptPath: string): number {
-  let bytes = 0;
+  let text: string;
   try {
-    const text = fs.readFileSync(transcriptPath, "utf8");
+    text = fs.readFileSync(transcriptPath, "utf8");
+  } catch {
+    return 0;
+  }
+  return contextTokensOf(text);
+}
+
+/**
+ * The measurement above, over text the caller has already read.
+ *
+ * `readContext` reaches its fallbacks holding the whole file in a string, and
+ * calling `contextTokens` from there read those same bytes off disk a second
+ * time within the one call — 7.6 ms of the 31.9 ms that call costs on the
+ * largest transcript this store holds. Measuring the string in hand also makes
+ * the two halves of the answer describe one snapshot rather than two reads taken
+ * milliseconds apart on a file being appended to.
+ */
+function contextTokensOf(text: string): number {
+  let bytes = 0;
+  // The whole walk stays inside a catch, not just the per-line parse: the
+  // measurement above promises never to throw, its callers are all on the run
+  // loop, and splitting the read out of that promise must not quietly narrow
+  // it. `miss` reaches this directly, so the guarantee has to live here.
+  try {
     for (const line of text.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) continue;
@@ -471,8 +494,21 @@ function readContext(
   sinceFrameId: string | null,
   countTurns: boolean,
 ): ContextReading {
-  const miss = (basis: ContextBasis, wholeFile: boolean): ContextReading => ({
-    tokens: basis === "unreadable" ? 0 : contextTokens(transcriptPath),
+  // `text` is the whole file where the caller already holds it, which every
+  // path that reaches a `transcript` basis does — the fallback below has just
+  // read it, and a tail that came back `whole` *is* it. Re-reading those bytes
+  // was a second multi-megabyte read inside the one call.
+  const miss = (
+    basis: ContextBasis,
+    wholeFile: boolean,
+    text?: string,
+  ): ContextReading => ({
+    tokens:
+      basis === "unreadable"
+        ? 0
+        : text !== undefined
+          ? contextTokensOf(text)
+          : contextTokens(transcriptPath),
     basis,
     frameId: null,
     turnsAdvanced: 0,
@@ -493,15 +529,21 @@ function readContext(
     // theoretical: the largest transcript on this install is 9.1 MB over 789
     // lines, so one tool result can be bigger than the window. Pay for the whole
     // file rather than report a conversation as empty.
+    let whole: string;
     try {
-      const fromWhole = scanTail(fs.readFileSync(transcriptPath, "utf8"), sinceFrameId, countTurns);
+      whole = fs.readFileSync(transcriptPath, "utf8");
+      const fromWhole = scanTail(whole, sinceFrameId, countTurns);
       if (fromWhole) return { ...fromWhole, basis: "api", wholeFile: true };
     } catch {
+      // The read *or* the scan: both were inside this catch before the text was
+      // hoisted out of it, and a scan that threw answered `unreadable`.
       return miss("unreadable", false);
     }
-    return miss("transcript", true);
+    return miss("transcript", true, whole);
   }
-  return miss("transcript", tail.whole);
+  // `tail.whole` is true here, so `readTail` returned the file entire and it is
+  // exactly what `contextTokens` would have gone back to disk for.
+  return miss("transcript", tail.whole, tail.text);
 }
 
 /** What one backwards pass over a transcript's tail found. */
@@ -2365,11 +2407,17 @@ export function resumeControl(
   probes: readonly CleanProbe[],
   mainThread: readonly UsageEntry[],
 ): ResumeControl {
+  // Grouped once, then one probe reads one session's turns. `firstBilledTurn`
+  // skips every entry whose session is not the one asked about, so this is the
+  // same loop over the only entries that could ever have answered it — and the
+  // one below was O(probes x every turn on the machine): 4,835 probes against
+  // 82,913 turns is 400M comparisons for a single run's page row.
+  const bySession = indexBySession(mainThread);
   let observed = 0;
   let warm = 0;
   for (const probe of probes) {
     if (!probe.sessionId) continue;
-    const firstBilled = firstBilledTurn(mainThread, probe.sessionId, probe.ts);
+    const firstBilled = firstBilledTurn(bySession, probe.sessionId, probe.ts);
     if (!firstBilled) continue;
     observed += 1;
     if (classifyResume(firstBilled) === "warm") warm += 1;
@@ -2378,6 +2426,26 @@ export function resumeControl(
     cleanResumes: observed,
     warmShare: observed === 0 ? 0 : warm / observed,
   };
+}
+
+/**
+ * Main-thread turns grouped by the session that produced them, in array order.
+ *
+ * Every reader below asks the same question — this session's turns, after this
+ * instant — and each was answering it by walking the whole corpus. Sessions
+ * partition the turns, so a group holds every candidate and nothing else, and
+ * relative order inside a group is the order the array had.
+ */
+function indexBySession(
+  mainThread: readonly UsageEntry[],
+): Map<string, UsageEntry[]> {
+  const bySession = new Map<string, UsageEntry[]>();
+  for (const e of mainThread) {
+    const bucket = bySession.get(e.sessionId);
+    if (bucket) bucket.push(e);
+    else bySession.set(e.sessionId, [e]);
+  }
+  return bySession;
 }
 
 /** One boundary at which no prune ran. */
@@ -2399,13 +2467,13 @@ export interface CleanProbe {
  * the zero-usage skip is the part that would drift.
  */
 function firstBilledTurn(
-  mainThread: readonly UsageEntry[],
+  bySession: ReadonlyMap<string, UsageEntry[]>,
   sessionId: string,
   after: number,
 ): ResumeWrite | null {
   let best: UsageEntry | null = null;
-  for (const e of mainThread) {
-    if (e.sessionId !== sessionId || e.ts <= after) continue;
+  for (const e of bySession.get(sessionId) ?? []) {
+    if (e.ts <= after) continue;
     const billed =
       e.tokens.cacheRead + e.tokens.cacheWrite5m + e.tokens.cacheWrite1h;
     if (billed <= 0) continue;
@@ -2809,12 +2877,15 @@ export async function priceReceipts(
     readCleanProbes({ from, to: Date.now() }),
     mainThread,
   );
+  // Per receipt, and it was walking every turn on the machine each time. The
+  // sort below is unchanged and still what fixes the order this relies on.
+  const bySession = indexBySession(mainThread);
 
   return receipts.map((row) => {
     const sessionId = sessions.get(row.runId) ?? null;
     const following = sessionId
-      ? mainThread
-          .filter((e) => e.sessionId === sessionId && e.ts > row.ts)
+      ? (bySession.get(sessionId) ?? [])
+          .filter((e) => e.ts > row.ts)
           .sort((a, b) => a.ts - b.ts)
       : [];
 
@@ -3037,13 +3108,18 @@ async function priceForks(
     readCleanProbes({ from, to: Date.now() }),
     mainThread,
   );
+  // Both reads below are per fork and both were walking every turn on the
+  // machine to find one session's. Same grouping `resumeControl` makes, for the
+  // same reason; only `following.length` is read, so nothing here depends on an
+  // order the grouping preserves anyway.
+  const bySession = indexBySession(mainThread);
 
   return forks.map(({ cut, sessionId }) => {
     const following = sessionId
-      ? mainThread.filter((e) => e.sessionId === sessionId && e.ts > cut.ts)
+      ? (bySession.get(sessionId) ?? []).filter((e) => e.ts > cut.ts)
       : [];
     const resumeWrite = sessionId
-      ? firstBilledTurn(mainThread, sessionId, cut.ts)
+      ? firstBilledTurn(bySession, sessionId, cut.ts)
       : null;
     return { row: cut, net: netReceipt(cut, following.length, resumeWrite, control) };
   });
