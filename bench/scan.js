@@ -10,7 +10,10 @@
  */
 const path = require("node:path");
 
-const BUILD = path.join(__dirname, "..", ".test-build", "lib");
+// `BUILD=` points this at a second compile — how every before/after number in
+// the commit messages was taken, by building the older tree into its own
+// directory and alternating the two runs rather than trusting one ordering.
+const BUILD = process.env.BUILD || path.join(__dirname, "..", ".test-build", "lib");
 const transcripts = require(path.join(BUILD, "transcripts.js"));
 const { PROJECTS_DIR } = require(path.join(BUILD, "config.js"));
 
