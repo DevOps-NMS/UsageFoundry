@@ -1716,6 +1716,53 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **The intake filter's uid drop was never booted.** `docker-entrypoint.sh` now
+> starts `python -m winnow filter` through the same `setpriv --reuid` its `gh`
+> and `uv` neighbours use, hands it an `env -i` allowlist rather than the
+> entrypoint's whole environment, and writes its ledger and off switch to a
+> named volume at `/var/lib/winnow` instead of `/data/winnow` — which is
+> root-owned 0700 and so unreachable from `UF_AGENT_UID`. The run that made the
+> change had **no Docker**, so the one observation that settles it was not made.
+>
+> What it does rest on: `dash -n docker-entrypoint.sh` (exit 0; `/bin/sh` in the
+> image is dash), `npm run typecheck` (exit 0), `npm test` (**1,909 tests / 0
+> failures**, of which 4 are the new `deployment.test.ts` group — seen failing
+> against the unfixed entrypoint before the fix and passing after), and the
+> branch under a harness: the real entrypoint executed with a recording
+> `setpriv` and `uv` on `PATH` and four credentials in its environment, once
+> with `UF_AGENT_UID=1000` and once without. The argv recorded was `setpriv
+> --reuid=1000 --regid=1000 --clear-groups env -i …`, and the environment
+> recorded was seven entries — `PATH`, `HOME`, `UV_PROJECT_ENVIRONMENT`,
+> `UV_PYTHON_INSTALL_DIR`, `UV_PYTHON_PREFERENCE`, `WINNOW_FILTER`, `PWD` — with
+> none of `UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY`, `UF_GITHUB_TOKEN` or
+> `UF_WEBHOOK_SECRET` among them. A recording `uv` is not `uv`, and none of it
+> boots a container.
+>
+> The click-list, on a host with Docker and `WINNOW_FILTER=1` in `.env`:
+>
+> 1. `docker compose up --build -d`, then `docker compose exec usagefoundry ps
+>    -o uid,cmd | grep 'winnow filter'`. The uid must be the agent's — 1000 by
+>    default — and not 0. This is the whole of the defect.
+> 2. `docker compose logs usagefoundry | grep winnow` must report the filter on
+>    its port rather than failing to open it within 90s. That timeout is what a
+>    virtualenv the agent uid cannot write looks like from outside.
+> 3. `docker compose exec usagefoundry ls -ln /var/lib/winnow`: the directory is
+>    root's 0755 and `filter.jsonl` is `0:<agent gid>` 0620.
+> 4. Run one work cycle, then `docker compose exec usagefoundry wc -l
+>    /var/lib/winnow/filter.jsonl` — it must grow. **A listening filter with an
+>    empty ledger is the failure this move exists to prevent**, and the only
+>    thing that would say so is `winnow: ledger not written:` on stderr:
+>    `_append_ledger` swallows its own `OSError`, and the dashboard reads a
+>    missing ledger as a legitimate state rather than an error.
+> 5. `docker compose exec usagefoundry touch /var/lib/winnow/filter-off` must
+>    stop the rewriting from the next request, and `rm` must resume it.
+> 6. `docker compose exec -u 1000 usagefoundry touch /var/lib/winnow/filter-off`
+>    must be **refused**. The switch is the operator's: a run that could throw it
+>    could stop paying for its own transcript.
+> 7. An install that had a ledger under `/data/winnow` before the upgrade should
+>    find its lines carried over — the entrypoint copies them once, and only
+>    when the new ledger is still empty.
+
 > **The `canvasView.ts` extraction was not looked at.** The world/screen
 > transform, hit testing, device-pixel sizing, the pan/zoom gestures, the
 > `ResizeObserver` and the colour probe were moved out of
