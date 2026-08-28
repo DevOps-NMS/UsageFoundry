@@ -9007,6 +9007,41 @@ export async function checkContextCeilings(): Promise<void> {
           repeat: explained,
         }),
       );
+      // Beside the line and not instead of it, the boundary gate's rule one
+      // function above: `earlyEndDeclined` records only whether the operator has
+      // been *told*, and the line itself expires with `run_events`, so a run held
+      // above the ceiling for forty minutes and an install where pruning was
+      // never switched on were the same empty section once the run had settled.
+      // This is the gate that takes 55 of 58 cuts on this install, so its
+      // declines are also the boundaries missing from the denominator
+      // `PruneSavings.tsx` says the money above it is measured against — a card
+      // that can only ever count the boundaries that cut.
+      //
+      // Three outcomes and not one, because the branch swallows three different
+      // answers and only the last is a refusal: `ceilingCut` returning null is
+      // "nobody could measure it" — winnow absent, or a subprocess that failed,
+      // which it collapses and this cannot tell apart — and a measurement that
+      // frees nothing is the arithmetic having nothing to weigh rather than
+      // having weighed it. An install missing the engine must not read as one
+      // whose arithmetic refused; that distinction is the whole point of the
+      // table.
+      //
+      // Written on every measurement rather than once per run, which is safe for
+      // the reason the line above it is: `CEILING_REMEASURE_GROWTH_TOKENS` paces
+      // both, so the count follows the conversation and a run that stops growing
+      // stops writing rows.
+      recordPruneDecision(
+        id,
+        "early-end",
+        cut?.engine ?? settings.contextPruningEngine,
+        cut === null ? "unavailable" : predicted === null ? "nothing" : "declined",
+        cut === null
+          ? "no engine measurement was available for this crossing"
+          : predicted === null
+            ? "the measurement removed nothing"
+            : null,
+        predicted,
+      );
       continue;
     }
 

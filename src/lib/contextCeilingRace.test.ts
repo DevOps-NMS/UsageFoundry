@@ -9,8 +9,12 @@ import type { CeilingCut } from "./contextPruning";
 import type { Interrupt } from "./orchestrator";
 
 /**
- * Covers one thing: that the ceiling tick does not end a work cycle that ended
- * while it was deciding.
+ * The ceiling tick's two silences: a cycle ended while it was deciding, and a
+ * crossing it decided *not* to act on.
+ *
+ * Both are absences, which is why they share a file: what is pinned in each case
+ * is that something is missing that should be — an interrupt that must not be
+ * written, and a row that must.
  *
  * `checkContextCeilings` reads `interrupts` at the top of its loop and then
  * awaits twice — a transcript resolution, and `ceilingCut`, which is a winnow
@@ -56,6 +60,77 @@ const HUGE_CUT: CeilingCut = {
   engine: "legacy",
   removedTokens: OVER_CEILING,
 };
+
+/**
+ * A cut small enough that `ceilingPayback` must refuse it.
+ *
+ * The mirror of `HUGE_CUT` and for the same reason: the decline cases below are
+ * about what gets *written down* when the gate refuses, so a measurement the
+ * gate would admit leaves them asserting nothing. 10k out of a 210k conversation
+ * prices at 400 turns against a horizon of 20, far enough past it that a change
+ * to the constant cannot quietly make these cases stop testing a decline.
+ */
+const TINY_CUT: CeilingCut = {
+  engine: "legacy",
+  removedTokens: 10_000,
+};
+
+/** Every decision row this install has written for one run, oldest first. */
+function decisions(runId: string): Array<{
+  trigger: string;
+  engine: string;
+  outcome: string;
+  detail: string | null;
+  predicted_turns: number | null;
+}> {
+  return dbMod
+    .db()
+    .prepare(
+      `SELECT trigger, engine, outcome, detail, predicted_turns
+         FROM prune_decisions WHERE run_id = ? ORDER BY id`,
+    )
+    .all(runId) as Array<{
+    trigger: string;
+    engine: string;
+    outcome: string;
+    detail: string | null;
+    predicted_turns: number | null;
+  }>;
+}
+
+/**
+ * Push a run's context up by `by` tokens, so the growth gate admits a second
+ * measurement.
+ *
+ * `CEILING_REMEASURE_GROWTH_TOKENS` paces the tick at 25,000, and a second tick
+ * on an unchanged transcript is skipped before it reaches either await — so a
+ * case about the *cadence* of the rows has to move the conversation, not just
+ * call the tick twice.
+ */
+function grow(runId: string, by: number): void {
+  const seqNo = Number(runId.split("-")[1]);
+  const session = `00000000-0000-4000-8000-00000000000${seqNo}`;
+  const project = path.join(root, "claude", "projects", `proj-${seqNo}`);
+  fs.appendFileSync(
+    path.join(project, `${session}.jsonl`),
+    "\n" +
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          id: `m${seqNo}-grown`,
+          role: "assistant",
+          model: "claude-opus-5",
+          content: "hi",
+          usage: {
+            input_tokens: 1_000,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: OVER_CEILING - 1_000 + by,
+            output_tokens: 5,
+          },
+        },
+      }),
+  );
+}
 
 let root: string;
 let orchestrator: typeof import("./orchestrator");
@@ -225,5 +300,78 @@ describe("the context ceiling against a cycle that ends while it is deciding", (
     assert.equal(recorded.kind, "prune");
     assert.equal(recorded.pause, false, "a prune carries on rather than parking the run");
     assert.match(recorded.reason, /ended here to be pruned/);
+  });
+});
+
+describe("the context ceiling's declines", () => {
+  it("writes down a refusal, with the figure it was refused on", async () => {
+    const id = liveCycle();
+    patch("ceilingCut", async () => TINY_CUT);
+
+    await orchestrator.checkContextCeilings();
+
+    assert.equal(
+      interrupts().get(id),
+      undefined,
+      "the gate acted on a cut it should have refused, so this proves nothing",
+    );
+    const [row, ...rest] = decisions(id);
+    assert.ok(
+      row,
+      "the gate that takes 55 of 58 cuts on this install left no row: a run held " +
+        "above the ceiling and an install with pruning switched off then read " +
+        "identically once the run had settled",
+    );
+    assert.equal(rest.length, 0, "one admitted measurement is one row");
+    assert.equal(row.outcome, "declined");
+    assert.equal(row.trigger, "early-end");
+    assert.equal(row.engine, "legacy", "the engine that measured, not the one configured");
+    // The figure the decline was actually taken on, recomputed rather than
+    // written out: a literal here would go on passing after a change to
+    // `ceilingPayback` that made the row disagree with the decision above it.
+    assert.equal(row.predicted_turns, pruningMod.ceilingPayback(OVER_CEILING, TINY_CUT));
+  });
+
+  it("does not file an install with no engine as an install whose arithmetic refused", async () => {
+    const id = liveCycle();
+    // What `ceilingCut` returns when winnow is absent and when its subprocess
+    // failed — it collapses both, so "unavailable" is as far as this can honestly
+    // go. What it must not be is "declined": an operator reading that goes
+    // looking for a horizon to move, on an install that never measured anything.
+    patch("ceilingCut", async () => null);
+
+    await orchestrator.checkContextCeilings();
+
+    const [row] = decisions(id);
+    assert.ok(row, "a crossing nobody could measure left no trace at all");
+    assert.equal(row.outcome, "unavailable");
+    assert.equal(
+      row.predicted_turns,
+      null,
+      "there was no measurement, so there is no figure to carry",
+    );
+    assert.ok(row.detail, "an outcome an operator cannot act on needs the reason beside it");
+  });
+
+  it("writes one row per measurement the growth gate admits, not one per run", async () => {
+    const id = liveCycle();
+    patch("ceilingCut", async () => TINY_CUT);
+
+    await orchestrator.checkContextCeilings();
+    // Unchanged conversation: the growth gate skips this one before either
+    // await, so it must add nothing.
+    await orchestrator.checkContextCeilings();
+    assert.equal(decisions(id).length, 1, "a tick that measured nothing wrote a row anyway");
+
+    grow(id, 30_000);
+    await orchestrator.checkContextCeilings();
+
+    assert.equal(
+      decisions(id).length,
+      2,
+      "the second decline was swallowed by `earlyEndDeclined`, which latches the " +
+        "operator-facing line and must not latch the record — a run climbing from " +
+        "200k to 300k is re-decided the whole way up",
+    );
   });
 });
