@@ -420,10 +420,21 @@ Built and exercised against real transcripts:
   deleting either, a SQLite file with no `runs` table was refused by name, a
   file that is not a database at all was refused as one, `--keep 2` deleted only
   files matching this script's own name pattern, and a second backup to an
-  existing path was refused rather than overwriting it. Six of those are the
+  existing path was refused rather than overwriting it. Seven of those are the
   unit tests in `backupRestore.test.ts`; replacing `VACUUM INTO` with
   `fs.copyFileSync` in the script fails them, which is what says they are
   measuring the mechanism rather than the file's existence.
+  The seventh was added last and was **seen to fail first**: a restore whose
+  copy dies part-way, induced with `ulimit -f 200` against a 512KB backup —
+  `EFBIG` where a full volume gives `ENOSPC`, the same unhandled throw out of
+  the same `copyFileSync`. Against the unguarded copy the scratch data directory
+  afterwards held only `usagefoundry.db.superseded-<stamp>`, a name nothing had
+  printed, and no `usagefoundry.db` at all; with the copy staged under
+  `usagefoundry.db.partial` it exits 1 saying the database *is untouched*, and
+  the file is still at its own path with all 2,000 of its rows. What was **not**
+  executed is the other half of the incident — that the next boot creates a
+  database at the empty path and comes up green — which follows from
+  `src/lib/db.ts`'s unconditional `new Database(DB_PATH)` and wants a container.
 - **The two agent flags, probed by hand against the pin
   (`@anthropic-ai/claude-code@2.1.226`).** Seven probes, each deciding a design
   question rather than confirming one. Four of them refuse before any API call,
@@ -1731,6 +1742,94 @@ through before trusting this unattended:
 > `run_reviews` rows then describing work that is actually theirs. That needs
 > Docker and two billed children. Nothing was read in the running app and no
 > `next build` was run, since nothing under `src/app/` changed.
+
+> **No real restart was taken over a live loop block.** `reconcileBlocksOnBoot`
+> now spares a `looping` block whose instance kept a member across the boot,
+> which is the same `bootBlockPlan` question its `waiting` sweep already asked.
+> What is behind it is `npm run typecheck` (exit 0) and `npm test` (**1,909
+> tests / 0 failures**, of which 4 are the new `bootBlocks.test.ts` cases — the
+> two positive ones were seen to fail against the unfixed sweep, reporting
+> `failed` where the block must read `looping`). What no test here reaches is
+> the thing the fault was made of: a container restarted while a loop's pass is
+> genuinely parked. On the next rebuild, park a pass inside `resumeGraceHours`,
+> `docker compose restart`, and check that the loop block still reads as
+> repeating on the instance page, that the sweeper resumes the pass, and that a
+> further pass is created when it settles — and, for the other direction, that a
+> loop whose pass the same boot failed still reads `failed` with the restart
+> sentence on it.
+
+> **The intake filter's uid drop was never booted.** `docker-entrypoint.sh` now
+> starts `python -m winnow filter` through the same `setpriv --reuid` its `gh`
+> and `uv` neighbours use, hands it an `env -i` allowlist rather than the
+> entrypoint's whole environment, and writes its ledger and off switch to a
+> named volume at `/var/lib/winnow` instead of `/data/winnow` — which is
+> root-owned 0700 and so unreachable from `UF_AGENT_UID`. The run that made the
+> change had **no Docker**, so the one observation that settles it was not made.
+>
+> What it does rest on: `dash -n docker-entrypoint.sh` (exit 0; `/bin/sh` in the
+> image is dash), `npm run typecheck` (exit 0), `npm test` (**1,909 tests / 0
+> failures**, of which 4 are the new `deployment.test.ts` group — seen failing
+> against the unfixed entrypoint before the fix and passing after), and the
+> branch under a harness: the real entrypoint executed with a recording
+> `setpriv` and `uv` on `PATH` and four credentials in its environment, once
+> with `UF_AGENT_UID=1000` and once without. The argv recorded was `setpriv
+> --reuid=1000 --regid=1000 --clear-groups env -i …`, and the environment
+> recorded was seven entries — `PATH`, `HOME`, `UV_PROJECT_ENVIRONMENT`,
+> `UV_PYTHON_INSTALL_DIR`, `UV_PYTHON_PREFERENCE`, `WINNOW_FILTER`, `PWD` — with
+> none of `UF_AUTH_TOKEN`, `ANTHROPIC_ADMIN_KEY`, `UF_GITHUB_TOKEN` or
+> `UF_WEBHOOK_SECRET` among them. A recording `uv` is not `uv`, and none of it
+> boots a container.
+>
+> The click-list, on a host with Docker and `WINNOW_FILTER=1` in `.env`:
+>
+> 1. `docker compose up --build -d`, then `docker compose exec usagefoundry ps
+>    -o uid,cmd | grep 'winnow filter'`. The uid must be the agent's — 1000 by
+>    default — and not 0. This is the whole of the defect.
+> 2. `docker compose logs usagefoundry | grep winnow` must report the filter on
+>    its port rather than failing to open it within 90s. That timeout is what a
+>    virtualenv the agent uid cannot write looks like from outside.
+> 3. `docker compose exec usagefoundry ls -ln /var/lib/winnow`: the directory is
+>    root's 0755 and `filter.jsonl` is `0:<agent gid>` 0620.
+> 4. Run one work cycle, then `docker compose exec usagefoundry wc -l
+>    /var/lib/winnow/filter.jsonl` — it must grow. **A listening filter with an
+>    empty ledger is the failure this move exists to prevent**, and the only
+>    thing that would say so is `winnow: ledger not written:` on stderr:
+>    `_append_ledger` swallows its own `OSError`, and the dashboard reads a
+>    missing ledger as a legitimate state rather than an error.
+> 5. `docker compose exec usagefoundry touch /var/lib/winnow/filter-off` must
+>    stop the rewriting from the next request, and `rm` must resume it.
+> 6. `docker compose exec -u 1000 usagefoundry touch /var/lib/winnow/filter-off`
+>    must be **refused**. The switch is the operator's: a run that could throw it
+>    could stop paying for its own transcript.
+> 7. An install that had a ledger under `/data/winnow` before the upgrade should
+>    find its lines carried over — the entrypoint copies them once, and only
+>    when the new ledger is still empty.
+
+> **`/app`'s ownership has never been read off a built image.** The Dockerfile
+> stopped chowning `/app` to `node` (#200): it was handing the agent uid
+> ownership of `server.js`, `.next/`, the standalone `node_modules/` and
+> `scripts/discord-relay.mjs` — the last of which the entrypoint re-runs *as
+> root* every five seconds — while the server itself runs as root. The change is
+> the removal of one path from one `chown`, and `deployment.test.ts` pins the
+> absence, but Docker was unavailable to the run that made it, so nothing has
+> confirmed that the bundle actually lands root-owned or that the boot still
+> works without the grant. Three commands settle it:
+>
+> ```bash
+> docker compose up --build -d
+> docker compose exec usagefoundry \
+>   stat -c '%U %n' /app /app/server.js /app/scripts/discord-relay.mjs
+> uid=$(docker compose exec -T usagefoundry printenv UF_AGENT_UID)
+> docker compose exec -u "$uid" usagefoundry sh -c 'touch /app/probe 2>&1; echo exit=$?'
+> ```
+>
+> The `stat` must say `root` three times and the `touch` must fail with
+> `Permission denied` and a non-zero exit. Then read the boot log for the
+> ordinary lines — a healthy `/api/health`, the gh-extension and pytools blocks
+> if they are configured, and the relay if `DISCORD_WEBHOOK_URL` is set — since
+> what is unproven is not only the ownership but that nothing in the image
+> quietly needed to write the bundle. The uid comes from the container, never
+> from `-u 1000`, for the reason `docs/install.md`'s *Sign in once* gives.
 
 > **The `canvasView.ts` extraction was not looked at.** The world/screen
 > transform, hit testing, device-pixel sizing, the pan/zoom gestures, the
@@ -4558,6 +4657,39 @@ through before trusting this unattended:
   8. At 390px: the chips wrap rather than overflowing, the hairlines still
      separate the questions, and tapping the text field does not zoom the page
      in and leave it there.
+
+- **A process that does not own the data directory no longer closes out the
+  owner's runs on its way out.** `shutdownRuns` was registered as the
+  `SIGINT`/`SIGTERM` handler outside `instrumentation.ts`'s ownership branch and
+  carried no gate of its own, so the second process — the dev server an agent
+  starts against an inherited `DATA_DIR`, restarted by `next dev` on every file
+  change — ran the entire shutdown reconciliation against the owner's database
+  on each exit: a `shutdown` event and its outbound webhook for every `running`
+  row install-wide, `restart_closed = 1`, and `active_started_at` cleared on
+  cycles whose agents were still working and still billing. The last of those
+  fails **open**, which is why this was worth a fix rather than a note —
+  `installBudget` and a workflow instance's budget both bound
+  `telemetrySpendSince` below by that column, so a stray dev server widened two
+  ceilings at once with nothing on any page saying so. The gate is
+  `mayWriteDataDir()` at the top of `shutdownRuns`, read at the write like every
+  other writer in the app rather than captured at boot, returning
+  `{ signalled: 0, closed: 0, recovered: 0 }`; `killAllAgents` is still
+  unconditional, because those children are this process's whatever the lock
+  says.
+
+  **Not verified by hand:** no two-process reproduction was run and no container
+  was built — this checkout has no Docker, and the second server is only worth
+  watching against a real billed agent in the first. What was run, on this
+  branch: `NODE_ENV=development npm ci --include=dev` (exit 0),
+  `npm run typecheck` (exit 0) and `npm test` (**1,906 tests / 281 suites / 0
+  failures**), the last of which includes a new fourth case in
+  `shutdown.test.ts`. That case was run against the unfixed function first and
+  observed to fail on its first assertion, with `shutdownRuns` returning
+  `closed: 1, recovered: 1` and the seeded row's `restart_closed`,
+  `active_started_at` and `spent_usd_est` all rewritten by a process that had
+  been refused the directory. It makes itself a non-owner the way a real second
+  server becomes one — a lock file naming a live pid that is not ours, then
+  `claimDataDir()` — rather than by stubbing the gate.
 
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget

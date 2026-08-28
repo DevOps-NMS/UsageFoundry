@@ -90,6 +90,39 @@ function runnerStage(): string {
   return dockerfile.slice(start);
 }
 
+/** The runner stage's `WORKDIR` — where `COPY --from=builder` puts the server. */
+function appRoot(): string {
+  const match = /^WORKDIR\s+(\S+)\s*$/m.exec(runnerStage());
+  assert.ok(match, "the runner stage no longer sets a WORKDIR");
+  return match[1];
+}
+
+/**
+ * Every `chown [-R] <owner> <paths…>` in the runner stage, as (owner, path)
+ * pairs, with the comments dropped first — this file's own reasoning says the
+ * word "chown" repeatedly, and a sentence about one is not one.
+ *
+ * The owner is kept whole and its uid half read by the caller, because the uid
+ * is what decides who may write: `root:node` is still root's.
+ */
+function chownGrants(): { owner: string; target: string }[] {
+  const instructions = runnerStage()
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+
+  const grants: { owner: string; target: string }[] = [];
+  for (const match of instructions.matchAll(
+    /\bchown\s+((?:-\S+\s+)*)(\S+)\s+([^\n&|;]+)/g,
+  )) {
+    for (const target of match[3].trim().split(/\s+/)) {
+      if (target.startsWith("-") || target === "\\") continue;
+      grants.push({ owner: match[2], target });
+    }
+  }
+  return grants;
+}
+
 /**
  * The packages the runner stage's `apt-get install` names, as whole tokens.
  * Tokenised rather than matched as a substring, because `better-sqlite3` — the
@@ -259,6 +292,56 @@ describe("the image and compose agree on the data volume", () => {
       /^\s*USER\s+(?!root\b|0\b)/m,
       "the runner stage drops to a non-root USER, so the server cannot spawn " +
         "children as another uid.",
+    );
+  });
+
+  it("leaves the server's own bundle owned by root, not by the agents", () => {
+    // The other direction of the same split, and the one that cancels it. The
+    // recursive chown above used to end `… /home/node /app`, which handed the
+    // unprivileged half ownership of the code the privileged half executes:
+    // `server.js`, `.next/`, the standalone `node_modules/` and `scripts/`. Root
+    // re-runs two of those on a timer nobody has to trigger — the entrypoint
+    // restarts `scripts/discord-relay.mjs` every five seconds wherever
+    // DISCORD_WEBHOOK_URL is set, and `restart: unless-stopped` re-runs
+    // `server.js` after every mem_limit OOM kill — so one write from an agent is
+    // root inside the container within seconds. Nothing about that is visible:
+    // the image builds, the server boots, every page works, and the only
+    // evidence is one word on a line whose other six entries are correct.
+    //
+    // Asserted as an absence rather than as the shape of the line, because the
+    // line is not the invariant: any chown, in the image or in the entrypoint,
+    // that names the bundle for a uid other than root is the same defect.
+    const app = appRoot();
+    const inBundle = (target: string): boolean => {
+      const cleaned = target.replace(/^["']+|["']+$/g, "");
+      // `.` and `./…` are the WORKDIR, which is the bundle under another name.
+      if (cleaned === "." || cleaned.startsWith("./")) return true;
+      return cleaned === app || cleaned.startsWith(`${app}/`);
+    };
+
+    for (const { owner, target } of chownGrants()) {
+      if (!inBundle(target)) continue;
+      const uid = owner.split(":")[0];
+      assert.ok(
+        uid === "root" || uid === "0",
+        `Dockerfile chowns ${target} to ${owner}, so ${app} belongs to a uid ` +
+          `that is not the server's. The agents are dropped to UF_AGENT_UID — ` +
+          `${app}/scripts/discord-relay.mjs and ${app}/server.js are run as ` +
+          `root — and an agent that can write either has root in this container.`,
+      );
+    }
+
+    const entrypoint = fs
+      .readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8")
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    assert.doesNotMatch(
+      entrypoint,
+      new RegExp(`\\bchown\\b[^\\n]*\\s${app}(/|\\s|$)`, "m"),
+      `docker-entrypoint.sh chowns ${app} at boot, which reopens at runtime ` +
+        `exactly what the image no longer grants — and reaches every existing ` +
+        `install rather than only fresh ones.`,
     );
   });
 });
@@ -700,9 +783,13 @@ describe("gh extensions survive the rebuild that installs them by hand does not"
     // Root-owned executables in a volume the agents are meant to own leave them
     // unable to upgrade or remove what they run, and the privilege split this
     // image is built around says the children are not root.
+    // Anchored on the helper, the way the Python tools' assertion below is.
+    // Unanchored it asked only whether the *file* contains a `setpriv`, which
+    // three separate launches now do — so it would have gone on passing with
+    // this one's dropped.
     assert.match(
       entrypoint,
-      /setpriv --reuid="\$UF_AGENT_UID"/,
+      /gh_as_agent\(\)[\s\S]*?setpriv --reuid="\$UF_AGENT_UID"/,
       "docker-entrypoint.sh installs gh extensions without dropping to " +
         "UF_AGENT_UID, so the executables an agent runs belong to root",
     );
@@ -951,6 +1038,177 @@ describe("winnow is in the image, because nothing else bounds a cycle now", () =
       !/args\.push\("--autocompact"/.test(orchestrator),
       "buildArgs emits --autocompact again. contextPruning.ts owns the ceiling; " +
         "running both is worse than either.",
+    );
+  });
+});
+
+/**
+ * The intake filter's uid, and the environment it holds at that uid.
+ *
+ * The third of the entrypoint's long-lived children and the only one that runs
+ * code the *agents* wrote: `WINNOW_FILTER_PATH` defaults inside a workspace bind
+ * mount, and `uv run` executes the project it points at — the build backend on a
+ * sync, then winnow's own module. Started without `setpriv` that is one run
+ * putting its code on every other run's transcript as uid 0, with this script's
+ * whole environment and root's access to `/data`, and nothing about it is
+ * visible: the filter works, the ledger fills, the dashboard reads correctly.
+ *
+ * The environment half is not a second, separate concern — it is what the uid
+ * drop *creates*. A root process's `/proc/<pid>/environ` is unreadable by the
+ * agents; the same process at their own uid is not, so anything left in it is
+ * handed to them by the fix. Nothing here needs a credential either way: the
+ * proxy relays the caller's own `x-api-key` upstream and reads no key of its
+ * own.
+ *
+ * Beside `gh`'s assertion and `uv`'s, which pin the same `setpriv` on the two
+ * helpers this launch was written next to and did not copy.
+ */
+describe("the intake filter runs as the agent uid, holding no credential", () => {
+  const entrypoint = fs.readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8");
+
+  /**
+   * Everything the `WINNOW_FILTER` branch runs up to the launch, comments
+   * dropped.
+   *
+   * Read off the branch rather than off a helper's name, because the name is
+   * the part a rewrite is free to change: what has to hold is that nothing
+   * between the switch and the process reaches `uv` without dropping the uid
+   * first. Comment lines go the way the `UF_` forwarding assertion drops them —
+   * this is about what the shell runs, not the paragraph above it saying what
+   * it ought to.
+   */
+  function filterLaunch(): string {
+    const start = entrypoint.indexOf('if [ "${WINNOW_FILTER:-}" = "1" ]; then');
+    assert.notEqual(
+      start,
+      -1,
+      "docker-entrypoint.sh no longer gates the intake filter on WINNOW_FILTER",
+    );
+    const off = entrypoint.indexOf("--off-file", start);
+    assert.notEqual(off, -1, "the intake filter launch no longer passes --off-file");
+    return entrypoint
+      .slice(start, entrypoint.indexOf("\n", off))
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+  }
+
+  /**
+   * The directory the ledger and the off switch are written to, resolved
+   * through the entrypoint's own assignment the way `ghDataVolume` and
+   * `pyToolsVolume` are — the launch passes a variable, and the point of
+   * reading it back is that this file never states the path itself.
+   */
+  function filterStateVolume(): string {
+    const passed = /--ledger\s+"?(\S+?)\/filter\.jsonl/.exec(filterLaunch());
+    assert.ok(passed, "the intake filter launch no longer passes a --ledger path");
+    const raw = passed[1].replace(/^"/, "");
+    if (!raw.startsWith("$")) return raw;
+    const name = raw.replace(/^\$\{?/, "").replace(/\}$/, "");
+    const assigned = new RegExp(`^\\s*${name}=(\\S+)$`, "m").exec(entrypoint);
+    assert.ok(
+      assigned,
+      `docker-entrypoint.sh passes --ledger ${raw} and assigns ${name} nowhere, ` +
+        `so the filter writes its ledger to /filter.jsonl`,
+    );
+    return assigned[1];
+  }
+
+  it("wraps the launch in the setpriv its two neighbours use", () => {
+    // The defect this group was written for. `gh_as_agent` and `uv_as_agent`
+    // twenty lines above drop to UF_AGENT_UID; this one, which is the only one
+    // of the three that keeps running and the only one whose code an agent
+    // wrote, did not — so agent-authored Python executed as root, holding
+    // UF_AUTH_TOKEN, ANTHROPIC_ADMIN_KEY and UF_GITHUB_TOKEN, with root's read
+    // of `/data` and of `~/.claude/.credentials.json`.
+    assert.match(
+      filterLaunch(),
+      /setpriv --reuid="\$UF_AGENT_UID" --regid="\$\{UF_AGENT_GID:-\$UF_AGENT_UID\}"/,
+      "docker-entrypoint.sh starts the winnow intake filter without dropping " +
+        "to UF_AGENT_UID, so `uv run` executes a workspace checkout every " +
+        "agent can write as root, holding this script's whole environment",
+    );
+  });
+
+  it("gives it an allowlisted environment rather than the inherited one", () => {
+    // `env` without -i passes everything through, which at uid 0 was merely
+    // excessive and at the agent uid is a handout: the filter's own
+    // /proc/<pid>/environ becomes readable by the uid every agent runs at.
+    assert.match(
+      filterLaunch(),
+      /env -i/,
+      "docker-entrypoint.sh hands the intake filter the entrypoint's whole " +
+        "environment. Dropped to UF_AGENT_UID, that process's " +
+        "/proc/<pid>/environ is readable by every agent — so UF_AUTH_TOKEN, " +
+        "ANTHROPIC_ADMIN_KEY, UF_GITHUB_TOKEN and UF_WEBHOOK_SECRET are handed " +
+        "to them by the very change that took root away.",
+    );
+    for (const name of ["UF_AUTH_TOKEN", "ANTHROPIC_ADMIN_KEY", "UF_GITHUB_TOKEN"]) {
+      assert.ok(
+        !filterLaunch().includes(name),
+        `the intake filter launch names ${name}. The proxy relays the ` +
+          `caller's own credentials upstream and reads none of its own, so ` +
+          `nothing here needs it — and at the agent uid, holding it publishes it.`,
+      );
+    }
+  });
+
+  it("keeps the ledger and the switch out of /data, which that uid cannot reach", () => {
+    // The consequence of the drop, and the half that fails silently. `/data` is
+    // root-owned 0700 — deliberately, it is what keeps the agents out of the
+    // database — so a filter at UF_AGENT_UID cannot traverse into it. Left
+    // there, `_append_ledger` catches its own EACCES and prints one stderr
+    // line, the dashboard reports `ledger: "missing"` (which is a legitimate
+    // state, not an error), and `touch .../filter-off` stops turning the
+    // rewriting off at all.
+    const dir = filterStateVolume();
+    assert.ok(
+      dir !== "/data" && !dir.startsWith("/data/"),
+      `the intake filter writes its ledger under ${dir}. /data is root-owned ` +
+        `0700 — which is what keeps an agent out of the database and the ` +
+        `settings every guard reads — so UF_AGENT_UID cannot traverse into ` +
+        `it: the ledger stays empty and the off switch stops switching ` +
+        `anything off, with one stderr line between them.`,
+    );
+    assert.match(
+      filterLaunch(),
+      new RegExp(`--off-file\\s+"?\\$\\{?\\w+\\}?/filter-off|--off-file\\s+${dir}/filter-off`),
+      `the intake filter's off switch is not beside its ledger under ${dir}, ` +
+        `so one of the two is somewhere the uid it runs at cannot reach`,
+    );
+    // The same literal-copying rule intakeFilter.ts states about itself: the
+    // reader and the writer agree only by hand, and the last time they did not
+    // an install whose filter was rewriting every request read as `missing`.
+    const reader = fs.readFileSync(path.join(root, "src/lib/intakeFilter.ts"), "utf8");
+    for (const [constant, file] of [
+      ["LEDGER_PATH", "filter.jsonl"],
+      ["OFF_FILE", "filter-off"],
+    ]) {
+      assert.match(
+        reader,
+        new RegExp(`const ${constant} = "${dir}/${file}";`),
+        `docker-entrypoint.sh writes ${dir}/${file} and intakeFilter.ts's ` +
+          `${constant} names somewhere else. A path that is not there is a ` +
+          `legitimate reading rather than an error, so the card reports the ` +
+          `filter as absent while it rewrites every request.`,
+      );
+    }
+  });
+
+  it("puts that directory on a named volume, which a rebuild does not discard", () => {
+    // Measured, not predicted: the ledger lived in the writable layer once and
+    // a restart took 52 lines with it, leaving the sessions they described
+    // permanently unattributable. It is the record of which bytes the
+    // transcript still holds and the API never received — losing it is not
+    // losing a log, it is losing the correction.
+    const dir = filterStateVolume();
+    const mounts = [...compose.matchAll(/^\s*-\s*[A-Za-z0-9][\w.-]*:(\/\S+?)(?::\w+)?\s*$/gm)]
+      .map((m) => m[1]);
+    assert.ok(
+      mounts.includes(dir),
+      `${dir} is not a named volume in docker-compose.yml. Without one it is ` +
+        `the image's writable layer, which \`docker compose up --build\` ` +
+        `discards along with every correction the ledger recorded.`,
     );
   });
 });
