@@ -115,12 +115,26 @@ And `proposals/ContextControl/` measured what injected text costs against a
 cached prefix — the marginal tokens here are small but they are not zero, and
 they land in the prefix that gets re-read 520 times.
 
-**Estimated cost.** ~120 tokens of prompt, in the cached prefix. Run A read its
-prefix 53.2M times over; 120 tokens of it at cache-read rates is under a cent.
-The declarations themselves: ~15 decisions × ~60 output tokens = ~900 output
-tokens = **$0.023 on Opus 5**. Call it **under $0.05 per run**, the cheapest of
-the annotating options by an order of magnitude — because the run is already
-paying for the context, and generating 900 tokens is nothing against 356,961.
+## Cost per run
+
+The cheapest of the annotating options by an order of magnitude, because the run
+is already paying for the context it writes into.
+
+| | tokens | at Opus 5 rates |
+|---|---:|---:|
+| appended prompt, in the cached prefix | ~120, read 520× | ~$0.0004 |
+| the declarations themselves | ~15 × 60 = ~900 output | **$0.023** |
+| re-injection after each compaction (§ seam) | ~900 × 4 = 3,600 cached-prefix tokens | ~$0.002 |
+| **total** | | **< $0.05** |
+
+Against run A's measured $43.51 that is **0.06%**, and against the 356,961 output
+tokens the run already generated, 900 more is noise. The prompt tokens ride the
+cached prefix at 0.1× input rates — `proposals/ContextControl/` measured what
+injected text costs there, and 120 tokens is at the bottom of that scale.
+
+**The real cost is not the money.** It is the context the declarations occupy and
+the possibility that asking for them changes what the run decides — neither of
+which appears in this table, and the second of which nothing here measures.
 
 ## Sub-agents, forks, resumes
 
