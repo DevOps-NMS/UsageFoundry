@@ -281,6 +281,30 @@ const MAX_NODE_NAME = 60;
 /* Validation — pure                                                   */
 /* ------------------------------------------------------------------ */
 
+
+/**
+ * Whether a block's guards give it a checkout of its own — so whether there is
+ * ever a branch to hand over, carry on, or land.
+ *
+ * Read off the guards rather than off the node, because that is where the
+ * answer lives: a node names a template or names none and takes
+ * `chatDefaultGuards`. It holds for an orchestrator block too — the runs it
+ * emits take that same guard set, which is the whole of `guardsFor`'s point.
+ *
+ * Asked from four places — a loop block, whose passes hand a branch along;
+ * either end of a hand-over edge; and a merge block's predecessors — so it is
+ * resolved once, including while a node is still being normalised and has only
+ * a template id.
+ */
+function isolatedTemplate(
+  templateId: string | null,
+  known: WorkflowKnowledge,
+): boolean {
+  return templateId === null
+    ? known.defaultIsolate
+    : (known.templates.get(templateId)?.isolate ?? false);
+}
+
 /**
  * Read a workflow off the wire, refusing anything that could not be run.
  *
@@ -331,21 +355,165 @@ export function normalizeWorkflowInput(
   const nodes: WorkflowNode[] = [];
   const byId = new Map<string, WorkflowNode>();
 
-  /**
-   * Whether a block's guards give it a checkout of its own.
-   *
-   * Read twice — once for a loop block, whose passes hand a branch along, and
-   * once for either end of a hand-over edge — so it is resolved in one place.
-   */
-  const isolatedTemplate = (templateId: string | null) =>
-    templateId === null
-      ? known.defaultIsolate
-      : (known.templates.get(templateId)?.isolate ?? false);
-
   for (const [index, entry] of rawNodes.entries()) {
-    const n = (entry ?? {}) as Record<string, unknown>;
-    const position = `Block ${index + 1}`;
+    const node = normalizeNode(entry, index, known, byId);
+    if (!node.ok) return node;
+    nodes.push(node.value);
+    byId.set(node.value.id, node.value);
+  }
 
+  const edges: WorkflowEdge[] = [];
+  const seenPairs = new Set<string>();
+  /** The one dependency each node takes its branch from, by node id. */
+  const branchFrom = new Map<string, string>();
+
+  for (const [index, entry] of rawEdges.entries()) {
+    const e = (entry ?? {}) as Record<string, unknown>;
+    const from = String(e.from ?? "");
+    const to = String(e.to ?? "");
+    const where = `Link ${index + 1}`;
+
+    const source = byId.get(from);
+    const target = byId.get(to);
+    if (!source || !target) {
+      return {
+        ok: false,
+        error: `${where} joins a block that is not in this workflow.`,
+      };
+    }
+    if (from === to) {
+      return {
+        ok: false,
+        error: `“${source.name}” is set to start after itself.`,
+      };
+    }
+    const pair = `${from} ${to}`;
+    if (seenPairs.has(pair)) {
+      return {
+        ok: false,
+        error:
+          `“${target.name}” is set to start after “${source.name}” twice, so ` +
+          "it is unclear which condition applies.",
+      };
+    }
+    seenPairs.add(pair);
+
+    // Required rather than defaulted, the same treatment `POST /api/runs` gives
+    // it: `on-success` terminates a chain the operator meant to run regardless,
+    // `on-finish` starts a run on top of a dependency that crashed, and a silent
+    // default is wrong half the time in both directions.
+    const edge = String(e.edge ?? "");
+    if (!(DEPENDENCY_EDGES as readonly string[]).includes(edge)) {
+      return {
+        ok: false,
+        error:
+          `“${target.name}” needs a condition for starting after “${source.name}”: ` +
+          `${DEPENDENCY_EDGES.join(" or ")}.`,
+      };
+    }
+
+    // `=== true` for the reason `POST /api/runs` reads it that way: it decides
+    // which branch a billed agent commits to, so a string off the wire fails
+    // safe.
+    const continueBranch = e.continueBranch === true;
+    if (continueBranch) {
+      // A run block has a checkout of its own, and so does a loop — its passes
+      // are runs on one shared ref, which is the whole of why a non-isolated
+      // loop is refused above. An orchestrator block decides and spends nothing
+      // on disk; a merge block writes into somebody else's checkout and cuts no
+      // branch. Those two are refused by name at either end rather than left to
+      // the isolation test below, which would say "its guards work directly in
+      // the folder" — true of neither and misleading about what would have to
+      // change.
+      for (const node of [source, target]) {
+        if (node.kind === "run" || node.kind === "loop") continue;
+        return {
+          ok: false,
+          error:
+            node.kind === "orchestrator"
+              ? `“${node.name}” decides what to run rather than working in a ` +
+                "checkout, so it has no branch to hand over or carry on."
+              : `“${node.name}” lands other blocks' branches rather than ` +
+                "working in a checkout of its own, so it has no branch to hand " +
+                "over or carry on.",
+        };
+      }
+
+      const rival = branchFrom.get(to);
+      if (rival) {
+        return {
+          ok: false,
+          error:
+            `“${target.name}” is set to carry on two branches — ` +
+            `“${byId.get(rival)!.name}”'s and “${source.name}”'s. It can only continue one.`,
+        };
+      }
+      branchFrom.set(to, from);
+
+      // Both ends need a checkout of their own: the predecessor has to have a
+      // branch to hand over and the successor has to be able to hold one.
+      // Refused here rather than left to `admitDependencies`, which would throw
+      // half way through creating the graph.
+      if (!isolatedTemplate(source.templateId, known)) {
+        return {
+          ok: false,
+          error:
+            `“${source.name}” has no branch to hand to “${target.name}” — its ` +
+            "guards work directly in the folder rather than in a checkout of " +
+            "their own.",
+        };
+      }
+      if (!isolatedTemplate(target.templateId, known)) {
+        return {
+          ok: false,
+          error:
+            `“${target.name}” cannot carry on “${source.name}”'s branch: its ` +
+            "guards work directly in the folder rather than in a checkout of " +
+            "their own.",
+        };
+      }
+    }
+
+    edges.push({ from, to, edge: edge as DependencyEdge, continueBranch });
+  }
+
+  const refusal = graphRefusal(nodes, edges, byId, known);
+  if (refusal) return { ok: false, error: refusal };
+
+  // Total, never a refusal: `null`/`""`/`0` all mean off, and a fraction guard
+  // with no ceiling behind it is refused at *Run* rather than at Save. That is
+  // the one place this file's "refuse at save what instantiation refuses" rule
+  // does not apply, and deliberately: a ceiling is a Settings value that can be
+  // typed at any time, so a graph saved without one is not unstartable — it is
+  // unstartable *today*. The editor says so beside the field.
+  const instanceBudget = normalizeInstanceBudget(o.instanceBudget);
+
+  return { ok: true, value: { name, graph: { nodes, edges }, instanceBudget } };
+}
+
+type NodeNormalization =
+  | { ok: true; value: WorkflowNode }
+  | { ok: false; error: string };
+
+/**
+ * Read one block off the wire, refusing anything that could not be run.
+ *
+ * Every refusal names the block — by its own name once it has one, and by its
+ * position until then — because a graph is read as a list of steps and "block
+ * 3" is a thing only the editor can see.
+ *
+ * `taken` is the ids already accepted from this same graph, and it is the one
+ * thing here that is not about a single block: two blocks sharing an id makes
+ * every edge naming it name both, and that can only be seen from outside.
+ */
+function normalizeNode(
+  entry: unknown,
+  index: number,
+  known: WorkflowKnowledge,
+  taken: ReadonlyMap<string, WorkflowNode>,
+): NodeNormalization {
+  const n = (entry ?? {}) as Record<string, unknown>;
+  const position = `Block ${index + 1}`;
     const id = String(n.id ?? "");
     if (!NODE_ID.test(id)) {
       return {
@@ -353,7 +521,7 @@ export function normalizeWorkflowInput(
         error: `${position} has no usable id. An id is 1–64 letters, digits, hyphens or underscores.`,
       };
     }
-    if (byId.has(id)) {
+    if (taken.has(id)) {
       return {
         ok: false,
         error: `Two blocks share the id “${id}”, so an edge naming it names both.`,
@@ -525,7 +693,7 @@ export function normalizeWorkflowInput(
     // would be a run repeated on top of itself with no record of what each pass
     // added. Refused here rather than at the first pass, where it would surface
     // as a throw in the middle of an instance that had already started.
-    if (kind === "loop" && !isolatedTemplate(templateId)) {
+    if (kind === "loop" && !isolatedTemplate(templateId, known)) {
       return {
         ok: false,
         error:
@@ -593,178 +761,66 @@ export function normalizeWorkflowInput(
       if (refusal) return { ok: false, error: `“${nodeName}”: ${refusal}` };
     }
 
-    nodes.push({
-      id,
-      name: nodeName,
-      kind,
-      templateId,
-      agentId,
-      mountId,
-      // The empty string is the mount root — the one selection that blocks
-      // every other run in the tree — so it is kept rather than collapsed into
-      // "no folder", exactly as a template's is.
-      folder: kind === "merge" ? "" : String(n.folder ?? ""),
-      task,
-      promptOverride: promptOverride || null,
-      fanOut,
-      mergeStrategy,
-      mergeAutoResolve,
-      maxPasses,
-      maxLoopCostUSD,
-    });
-    byId.set(id, nodes[nodes.length - 1]);
-  }
+  return {
+    ok: true,
+    value: {
+          id,
+          name: nodeName,
+          kind,
+          templateId,
+          agentId,
+          mountId,
+          // The empty string is the mount root — the one selection that blocks
+          // every other run in the tree — so it is kept rather than collapsed into
+          // "no folder", exactly as a template's is.
+          folder: kind === "merge" ? "" : String(n.folder ?? ""),
+          task,
+          promptOverride: promptOverride || null,
+          fanOut,
+          mergeStrategy,
+          mergeAutoResolve,
+          maxPasses,
+          maxLoopCostUSD,
+    },
+  };
+}
 
-  const edges: WorkflowEdge[] = [];
-  const seenPairs = new Set<string>();
-  /** The one dependency each node takes its branch from, by node id. */
-  const branchFrom = new Map<string, string>();
-
-  /**
-   * Whether this node's runs get a checkout of their own — so whether there is
-   * ever a branch to hand over, carry on, or land.
-   *
-   * Read off the guards rather than off the node, because that is where the
-   * answer lives: a node names a template or names none and takes
-   * `chatDefaultGuards`. It holds for an orchestrator block too — the runs it
-   * emits take that same guard set, which is the whole of `guardsFor`'s point.
-   *
-   * The node-shaped reader and `isolatedTemplate` are one answer with two call
-   * shapes rather than two answers: the loop check above runs while a node is
-   * still being normalised and has only a template id, where the edge checks
-   * below run over nodes that exist.
-   */
-  const isolated = (node: WorkflowNode) => isolatedTemplate(node.templateId);
-
-  for (const [index, entry] of rawEdges.entries()) {
-    const e = (entry ?? {}) as Record<string, unknown>;
-    const from = String(e.from ?? "");
-    const to = String(e.to ?? "");
-    const where = `Link ${index + 1}`;
-
-    const source = byId.get(from);
-    const target = byId.get(to);
-    if (!source || !target) {
-      return {
-        ok: false,
-        error: `${where} joins a block that is not in this workflow.`,
-      };
-    }
-    if (from === to) {
-      return {
-        ok: false,
-        error: `“${source.name}” is set to start after itself.`,
-      };
-    }
-    const pair = `${from} ${to}`;
-    if (seenPairs.has(pair)) {
-      return {
-        ok: false,
-        error:
-          `“${target.name}” is set to start after “${source.name}” twice, so ` +
-          "it is unclear which condition applies.",
-      };
-    }
-    seenPairs.add(pair);
-
-    // Required rather than defaulted, the same treatment `POST /api/runs` gives
-    // it: `on-success` terminates a chain the operator meant to run regardless,
-    // `on-finish` starts a run on top of a dependency that crashed, and a silent
-    // default is wrong half the time in both directions.
-    const edge = String(e.edge ?? "");
-    if (!(DEPENDENCY_EDGES as readonly string[]).includes(edge)) {
-      return {
-        ok: false,
-        error:
-          `“${target.name}” needs a condition for starting after “${source.name}”: ` +
-          `${DEPENDENCY_EDGES.join(" or ")}.`,
-      };
-    }
-
-    // `=== true` for the reason `POST /api/runs` reads it that way: it decides
-    // which branch a billed agent commits to, so a string off the wire fails
-    // safe.
-    const continueBranch = e.continueBranch === true;
-    if (continueBranch) {
-      // A run block has a checkout of its own, and so does a loop — its passes
-      // are runs on one shared ref, which is the whole of why a non-isolated
-      // loop is refused above. An orchestrator block decides and spends nothing
-      // on disk; a merge block writes into somebody else's checkout and cuts no
-      // branch. Those two are refused by name at either end rather than left to
-      // the isolation test below, which would say "its guards work directly in
-      // the folder" — true of neither and misleading about what would have to
-      // change.
-      for (const node of [source, target]) {
-        if (node.kind === "run" || node.kind === "loop") continue;
-        return {
-          ok: false,
-          error:
-            node.kind === "orchestrator"
-              ? `“${node.name}” decides what to run rather than working in a ` +
-                "checkout, so it has no branch to hand over or carry on."
-              : `“${node.name}” lands other blocks' branches rather than ` +
-                "working in a checkout of its own, so it has no branch to hand " +
-                "over or carry on.",
-        };
-      }
-
-      const rival = branchFrom.get(to);
-      if (rival) {
-        return {
-          ok: false,
-          error:
-            `“${target.name}” is set to carry on two branches — ` +
-            `“${byId.get(rival)!.name}”'s and “${source.name}”'s. It can only continue one.`,
-        };
-      }
-      branchFrom.set(to, from);
-
-      // Both ends need a checkout of their own: the predecessor has to have a
-      // branch to hand over and the successor has to be able to hold one.
-      // Refused here rather than left to `admitDependencies`, which would throw
-      // half way through creating the graph.
-      if (!isolated(source)) {
-        return {
-          ok: false,
-          error:
-            `“${source.name}” has no branch to hand to “${target.name}” — its ` +
-            "guards work directly in the folder rather than in a checkout of " +
-            "their own.",
-        };
-      }
-      if (!isolatedTemplate(target.templateId)) {
-        return {
-          ok: false,
-          error:
-            `“${target.name}” cannot carry on “${source.name}”'s branch: its ` +
-            "guards work directly in the folder rather than in a checkout of " +
-            "their own.",
-        };
-      }
-    }
-
-    edges.push({ from, to, edge: edge as DependencyEdge, continueBranch });
-  }
-
+/**
+ * Why a graph as a whole could never run, or null when nothing is wrong with it.
+ *
+ * The checks a single block or a single link cannot see: two links carrying on
+ * one branch, a merge block with nothing in front of it to land, and the two
+ * orderings. Separated from `normalizeWorkflowInput` because it is the phase
+ * that reads the finished graph rather than the wire, and it is the one that
+ * grows as the kinds of block do.
+ *
+ * Shaped like `folderRefusal` — a sentence or null — for the same reason: a
+ * refusal here is something the operator can change.
+ */
+function graphRefusal(
+  nodes: readonly WorkflowNode[],
+  edges: readonly WorkflowEdge[],
+  byId: ReadonlyMap<string, WorkflowNode>,
+  known: WorkflowKnowledge,
+): string | null {
   // Two runs on one ref is a branch git will not check out twice, and it leaves
   // the landing rules with no last link to name. `admitDependencies` refuses it
   // between live runs; this is the same rule inside one graph, where both would
   // be created in the same pass.
   const continued = new Set<string>();
-  for (const from of branchFrom.values()) {
-    if (continued.has(from)) {
-      const source = byId.get(from)!;
+  for (const e of edges) {
+    if (!e.continueBranch) continue;
+    if (continued.has(e.from)) {
+      const source = byId.get(e.from)!;
       const takers = edges
-        .filter((e) => e.continueBranch && e.from === from)
-        .map((e) => `“${byId.get(e.to)!.name}”`);
-      return {
-        ok: false,
-        error:
-          `${takers.join(" and ")} are both set to carry on “${source.name}”'s ` +
-          "branch. Two runs cannot extend one branch.",
-      };
+        .filter((other) => other.continueBranch && other.from === e.from)
+        .map((other) => `“${byId.get(other.to)!.name}”`);
+      return (
+        `${takers.join(" and ")} are both set to carry on “${source.name}”'s ` +
+        "branch. Two runs cannot extend one branch."
+      );
     }
-    continued.add(from);
+    continued.add(e.from);
   }
 
   // A merge block lands what is in front of it, so what is in front of it has to
@@ -787,23 +843,19 @@ export function normalizeWorkflowInput(
       .map((e) => byId.get(e.from)!);
     const producers = sources.filter((s) => s.kind !== "merge");
     if (producers.length === 0) {
-      return {
-        ok: false,
-        error:
-          `“${node.name}” has no block in front of it whose work it could ` +
-          "land. A merge block lands the branches its predecessors left, so it " +
-          "needs at least one predecessor that runs something.",
-      };
+      return (
+        `“${node.name}” has no block in front of it whose work it could ` +
+        "land. A merge block lands the branches its predecessors left, so it " +
+        "needs at least one predecessor that runs something."
+      );
     }
-    const bare = producers.find((s) => !isolated(s));
+    const bare = producers.find((s) => !isolatedTemplate(s.templateId, known));
     if (bare) {
-      return {
-        ok: false,
-        error:
-          `“${bare.name}” leaves no branch for “${node.name}” to land — its ` +
-          "guards work directly in the folder rather than in a checkout of " +
-          "their own.",
-      };
+      return (
+        `“${bare.name}” leaves no branch for “${node.name}” to land — its ` +
+        "guards work directly in the folder rather than in a checkout of " +
+        "their own."
+      );
     }
   }
 
@@ -816,12 +868,10 @@ export function normalizeWorkflowInput(
   }));
   const loop = dependencyCycle(links);
   if (loop) {
-    return {
-      ok: false,
-      error:
-        "These blocks wait for each other in a loop, so none of them could " +
-        `ever start: ${loop.map((id) => byId.get(id)?.name ?? id).join(" → ")}.`,
-    };
+    return (
+      "These blocks wait for each other in a loop, so none of them could " +
+      `ever start: ${loop.map((id) => byId.get(id)?.name ?? id).join(" → ")}.`
+    );
   }
 
   // Belt and braces: the order the instantiation uses has to be total, and the
@@ -830,24 +880,15 @@ export function normalizeWorkflowInput(
   // sit `waiting` for ever.
   const { unplaced } = topologicalOrder({ nodes, edges });
   if (unplaced.length > 0) {
-    return {
-      ok: false,
-      error:
-        "These blocks could never start, because what they wait for can never " +
-        `settle: ${unplaced.map((id) => byId.get(id)!.name).join(", ")}.`,
-    };
+    return (
+      "These blocks could never start, because what they wait for can never " +
+      `settle: ${unplaced.map((id) => byId.get(id)!.name).join(", ")}.`
+    );
   }
 
-  // Total, never a refusal: `null`/`""`/`0` all mean off, and a fraction guard
-  // with no ceiling behind it is refused at *Run* rather than at Save. That is
-  // the one place this file's "refuse at save what instantiation refuses" rule
-  // does not apply, and deliberately: a ceiling is a Settings value that can be
-  // typed at any time, so a graph saved without one is not unstartable — it is
-  // unstartable *today*. The editor says so beside the field.
-  const instanceBudget = normalizeInstanceBudget(o.instanceBudget);
-
-  return { ok: true, value: { name, graph: { nodes, edges }, instanceBudget } };
+  return null;
 }
+
 
 /**
  * What a graph is validated against right now.
