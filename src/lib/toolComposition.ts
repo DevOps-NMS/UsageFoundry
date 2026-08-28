@@ -123,7 +123,17 @@ function resultChars(content: unknown): number {
  */
 export function parseToolRecord(line: string): ToolRecord | null {
   if (!line.startsWith("{")) return null;
-  if (!line.includes('"tool_use"') && !line.includes('"tool_result"')) return null;
+  // One pass for both block types rather than two for neither. A line carrying
+  // no tool block used to be scanned end to end twice — once failing to find
+  // `"tool_use"` and again failing to find `"tool_result"` — and on this store
+  // that is 42% of lines averaging 3.3 KB each. `"tool_` is a prefix of both
+  // literals, so every line the pair admitted this admits: strictly more
+  // permissive, and therefore incapable of changing what the parse below
+  // returns. What it lets through extra is a line holding some other `tool_`
+  // key, which costs one wasted parse and a null — measured at 9 lines in
+  // 20,798, and the direction this test is documented as preferring to be
+  // wrong in.
+  if (!line.includes('"tool_')) return null;
 
   let rec: Record<string, unknown>;
   try {
