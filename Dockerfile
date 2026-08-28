@@ -541,9 +541,18 @@ COPY scripts/backup-db.mjs scripts/restore-db.mjs scripts/discord-relay.mjs ./sc
 # a missing one itself and would make it as whoever the install ran as — which
 # on an install that never set UF_AGENT_UID is root, leaving the agents unable
 # to upgrade or remove what they run.
+#
+# `/var/lib/winnow` is the fifth, and the only one that is neither /data's
+# arrangement nor the children's: the intake filter runs as UF_AGENT_UID and
+# appends its ledger there, so the directory is root's while one file inside it
+# is handed to that uid by name. It is created here, outside every path the
+# `chown -R` below covers, so a fresh volume takes root's 0755 rather than the
+# agents' ownership — `docker-entrypoint.sh` re-asserts both, because a volume
+# an older release created keeps what it was made with.
 RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.claude \
       /home/node/go/build-cache /home/node/.local/share/gh/extensions \
       /home/node/pytools/tools /home/node/pytools/bin /home/node/pytools/python \
+      /var/lib/winnow \
  && chown -R node:node /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
  && chown root:root /data \
  && chmod 0700 /data
