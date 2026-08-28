@@ -1121,8 +1121,11 @@ interface ResolveCheckout {
  * nothing to create, nothing to delete. Otherwise a dedicated one, because a
  * slot is reused by later runs and taking one that another run is about to
  * adopt is the collision the whole worktree scheme exists to avoid.
+ *
+ * Exported for the test that two runs resolving at once are handed two
+ * directories. Nothing else calls it.
  */
-async function resolveCheckout(
+export async function resolveCheckout(
   repoRoot: string,
   run: RunRow,
   branch: string,
@@ -1136,11 +1139,18 @@ async function resolveCheckout(
     }
   }
 
+  // Named for the run, not for the repository. The store is shared by every run
+  // in it and a resolution holds its checkout for as long as its agent runs, so
+  // one `<slug>-resolve` for the whole repository meant the removal below
+  // deleting a live resolution's working tree out from under a billed child —
+  // and that resolution's `after` handler then aborting the merge it found in
+  // its place, which belonged to the run that had taken the directory over.
   // Throws unless the store is a real directory inside the mount.
-  const slot = auxWorktreePath(repoRoot, "resolve");
+  const slot = auxWorktreePath(repoRoot, `resolve-${short(run.id)}`);
   if (fs.existsSync(slot)) {
     // Left behind by an earlier attempt that could not clean up. Removing it is
-    // safe only because this path is ours alone and nothing else ever adopts it.
+    // safe because the path is this run's alone and `resolveConflicts` admits
+    // one resolution per run, so nothing live can be standing in it.
     await git(repoRoot, ["worktree", "remove", "--force", slot], NO_CLOCK);
     fs.rmSync(slot, { recursive: true, force: true });
   }
@@ -1164,6 +1174,20 @@ async function discardCheckout(
 }
 
 /**
+ * Runs whose resolution is being set up.
+ *
+ * `assistRunning` is the durable guard and stays the one that answers for a
+ * resolution already under way, but it reads a row `startAssist` has not
+ * inserted yet: two callers for one run — the merge queue draining it while the
+ * operator presses the button — both pass it, and the second's checkout setup
+ * then deletes the first's. Held only as far as the row, never for the life of
+ * the child, so a spawn that fails cannot lock a run out of resolving. On
+ * `globalThis` for the reason `landing` above is.
+ */
+const resolving = ((globalThis as unknown as { __ufResolving?: Set<string> })
+  .__ufResolving ??= new Set<string>());
+
+/**
  * Merge the target *into* the run's branch, and have Claude resolve what git
  * could not.
  *
@@ -1180,6 +1204,21 @@ async function discardCheckout(
  * having left `<<<<<<<` in a file is the exact failure this ordering prevents.
  */
 export async function resolveConflicts(runId: string): Promise<LandOutcome> {
+  // Checked and taken in one turn — `createRun`'s folder-claim property — so
+  // two callers arriving together cannot both get past it.
+  if (resolving.has(runId)) {
+    return { ok: false, reason: "A resolution for this run is already being started." };
+  }
+  resolving.add(runId);
+  try {
+    return await startResolution(runId);
+  } finally {
+    resolving.delete(runId);
+  }
+}
+
+/** The body of `resolveConflicts`, bracketed by its claim. */
+async function startResolution(runId: string): Promise<LandOutcome> {
   const run = getRun(runId);
   if (!run) return { ok: false, reason: "No such run." };
   if (assistRunning(runId, "resolve")) {
