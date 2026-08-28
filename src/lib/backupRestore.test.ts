@@ -26,9 +26,9 @@ import Database from "better-sqlite3";
  * transaction open, restored into a directory standing in for a fresh volume,
  * and compared table by table against the source once it is quiesced. The four
  * refusals beside it are the ones that turn a restore into a second incident —
- * restoring under a live server (which corrupts rather than replaces), losing
- * the database that was there, restoring some other SQLite file, and a prune
- * that deletes the wrong thing.
+ * restoring under a live server, whether or not its heartbeat is still moving
+ * (which corrupts rather than replaces), losing the database that was there,
+ * restoring some other SQLite file, and a prune that deletes the wrong thing.
  *
  * `DATA_DIR` is set before the first import for `chatTurn.test.ts`'s reason:
  * `config.ts` reads it at module load, and this file needs the real `migrate()`
@@ -49,6 +49,8 @@ let backupDir: string;
  */
 let fixtureBackup: string;
 let dbMod: typeof import("./db");
+/** For the one number `restore-db.mjs` has to keep a copy of. */
+let lockMod: typeof import("./serverLock");
 
 function repoRoot(): string {
   let dir = __dirname;
@@ -128,6 +130,44 @@ function insertRun(id: string): void {
     .run(id, path.join(root, "workspace"), `task for ${id}`, Date.now());
 }
 
+/**
+ * A database standing in for the one a restore would replace, holding a row
+ * nothing else writes so that its survival is a fact rather than an inference.
+ */
+function seedLiveDatabase(target: string): void {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const live = new Database(target);
+  live.exec("CREATE TABLE runs (id TEXT PRIMARY KEY); CREATE TABLE settings (key TEXT PRIMARY KEY)");
+  live.prepare("INSERT INTO runs VALUES ('the-live-one')").run();
+  live.close();
+}
+
+/** Whether `target` is still the database `seedLiveDatabase` wrote. */
+function stillTheLiveDatabase(target: string): boolean {
+  const db = new Database(target, { readonly: true });
+  try {
+    const row = db
+      .prepare("SELECT count(*) AS n FROM runs WHERE id = 'the-live-one'")
+      .get() as { n: number };
+    return row.n === 1;
+  } finally {
+    db.close();
+  }
+}
+
+/** `server.lock` as `serverLock.ts` writes it, stamped once and left alone. */
+function writeLock(dir: string, heartbeatAt: number): void {
+  fs.writeFileSync(
+    path.join(dir, "server.lock"),
+    JSON.stringify({
+      pid: process.pid,
+      ownerId: "test-owner",
+      startedAt: heartbeatAt - 60_000,
+      heartbeatAt,
+    }),
+  );
+}
+
 /** The newest file the backup script wrote into `dir`. */
 function newestBackup(dir: string): string {
   const names = fs
@@ -157,6 +197,7 @@ before(async () => {
   );
 
   dbMod = await import("./db");
+  lockMod = await import("./serverLock");
 
   // Enough rows that a snapshot missing the tail of them is unmistakable.
   for (let i = 0; i < 40; i += 1) insertRun(`run-${String(i).padStart(3, "0")}`);
@@ -274,6 +315,69 @@ describe("restoring", () => {
     } finally {
       clearInterval(beat);
     }
+  });
+
+  it("refuses while the owner's event loop is blocked and the beat has stopped", async () => {
+    const dir = path.join(root, "blocked");
+    const target = path.join(dir, "usagefoundry.db");
+    seedLiveDatabase(target);
+
+    // The case above with its one moving part taken away. A server inside
+    // `gitSync` — a `spawnSync` bounded by git's own 20s ceiling, several of
+    // them back to back on the admission path — cannot fire the `setInterval`
+    // that beats this lock, so the file stops moving while the process is
+    // perfectly healthy, holds the database open and goes on writing its WAL.
+    // Watching for a beat read that as a corpse: the live database was renamed
+    // aside, the backup put in its place, and everything the server committed
+    // from that moment went into an inode nothing would ever open again — with
+    // a success message and an exit status of 0.
+    writeLock(dir, Date.now());
+
+    const restore = await runScript("restore-db.mjs", [fixtureBackup, "--db", target]);
+    assert.equal(restore.code, 1);
+    assert.match(restore.stderr, /a server is running/);
+    // The pid is the only thing in that sentence naming *which* process, and it
+    // is what an operator checks before concluding the refusal is wrong.
+    assert.match(restore.stderr, new RegExp(`pid ${process.pid}\\b`));
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((name) => name.includes(".superseded-")),
+      [],
+      "the live database was moved aside",
+    );
+    assert.ok(stillTheLiveDatabase(target), "the live database was replaced");
+  });
+
+  it("proceeds against a lock nothing has beaten for longer than STALE_MS", async () => {
+    const dir = path.join(root, "abandoned");
+    const target = path.join(dir, "usagefoundry.db");
+    seedLiveDatabase(target);
+
+    // The control, and half of the case above: a refusal keyed on a lock being
+    // *present* rather than on its age passes every assertion up there and
+    // refuses every restore after a killed container, which is the state an
+    // operator reaches for this script in. The app itself stops honouring this
+    // lock at the same boundary — `lockVerdict` answers `claim` past it.
+    writeLock(dir, Date.now() - lockMod.STALE_MS - 60_000);
+
+    const restore = await runScript("restore-db.mjs", [fixtureBackup, "--db", target]);
+    assert.equal(restore.code, 0, restore.stderr);
+    assert.equal(stillTheLiveDatabase(target), false, "it refused the restore");
+  });
+
+  it("holds its copy of STALE_MS to the number serverLock.ts derives", () => {
+    // The script cannot import it — the runtime image ships `scripts/` without
+    // `src/` — so the number is a copy, and a copy drifts silently in both
+    // directions: a restore refused against a directory nothing holds, or one
+    // that replaces a database under a server this app still calls its owner.
+    // `deployment.test.ts`'s grounds, one pair of files over.
+    const source = fs.readFileSync(path.join(repoRoot(), "scripts", "restore-db.mjs"), "utf8");
+    const declared = /^const STALE_MS = ([\d_]+) \* (\d+);$/m.exec(source);
+    assert.ok(declared, "restore-db.mjs no longer declares STALE_MS where this test can read it");
+    assert.equal(
+      Number(declared[1].replace(/_/g, "")) * Number(declared[2]),
+      lockMod.STALE_MS,
+      "the restore script and serverLock.ts disagree about when a lock is stale",
+    );
   });
 
   it("keeps the database it replaces, and its sidecar files with it", async () => {

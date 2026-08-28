@@ -8,8 +8,8 @@
 //      its own WAL; replacing the file underneath it leaves that process
 //      writing into a stale write-ahead log, which is the one way to corrupt
 //      this database rather than merely lose it. Liveness is decided the way
-//      `src/lib/serverLock.ts` decides it — by watching `server.lock` for a
-//      beat — because a restore runs in a *different container* from the
+//      `src/lib/serverLock.ts` decides it — on the *age* of `server.lock`'s
+//      heartbeat — because a restore runs in a *different container* from the
 //      server, where a pid means nothing.
 //   2. It moves the existing database aside instead of deleting it, along with
 //      its `-wal` and `-shm`. The sidecars are not tidiness: a leftover `-wal`
@@ -32,15 +32,27 @@ import Database from "better-sqlite3";
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), ".data");
 
 /**
- * How long to watch `server.lock` for a heartbeat.
+ * How recent `server.lock`'s heartbeat has to be for its owner to count as
+ * live: `STALE_MS` in src/lib/serverLock.ts, which derives it as
+ * `GIT_SYNC_TIMEOUT_MS * 6`. Copied rather than imported because the runtime
+ * image ships these scripts without `src/`, and held to the original by
+ * `backupRestore.test.ts` so the copy cannot drift.
  *
- * Comfortably more than `HEARTBEAT_MS` in src/lib/serverLock.ts, and framed as
- * an observation rather than as a copy of that module's `STALE_MS` so the two
- * cannot drift into disagreeing about a number. A lock that beats at all is a
- * live owner; one that does not is the corpse of a container that was killed,
- * which is the ordinary state of things at the moment somebody needs a restore.
+ * This was a 2.5s observation — read the lock, sleep, read it again, and call
+ * the owner dead unless the heartbeat had moved — and that premise is the
+ * inverse of what a beat proves. A beat that *moves* proves life; one that does
+ * not proves nothing, because the beat is a `setInterval` on the server's own
+ * event loop and that loop is held for longer than any observation worth
+ * waiting through: one `gitSync` is a `spawnSync` bounded by git's 20s ceiling,
+ * an admission makes several back to back, and `Dockerfile`'s healthcheck is
+ * timed under that same window for the same reason. So a live server inside one
+ * was read as a corpse and its database renamed out from under its open
+ * descriptors, after which it went on committing into an inode nothing would
+ * open again — and this script printed success and exited 0. Age is the
+ * question `lockVerdict` actually asks, and it is the one a blocked loop cannot
+ * answer wrongly.
  */
-const OBSERVE_MS = 2_500;
+const STALE_MS = 20_000 * 6;
 
 /**
  * Tables every version of this schema has had. A file with neither is not this
@@ -105,18 +117,22 @@ function readLock(file) {
   }
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** `stillBeating` from src/lib/serverLock.ts, read from outside the process. */
-async function serverIsLive(dataDir) {
-  const file = path.join(dataDir, "server.lock");
-  const before = readLock(file);
-  if (!before) return null;
-  await sleep(OBSERVE_MS);
-  const after = readLock(file);
-  if (!after) return null;
-  const beating = after.ownerId !== before.ownerId || after.heartbeatAt > before.heartbeatAt;
-  return beating ? before : null;
+/**
+ * The live owner of `dataDir`, or `null` if nothing holds it.
+ *
+ * `lockVerdict` from src/lib/serverLock.ts, less the two questions a different
+ * container cannot ask. Pids are unique within one namespace and meaningless
+ * across them, so neither "is this lock our own pid" nor "is the owner's pid
+ * alive" can be asked from here — which leaves the age, and collapses the two
+ * verdicts those questions would have separated. Both refuse: `held` is an
+ * owner known to be alive, and `observe` is *undecided*, which is not a licence
+ * to replace a database. An absent or unreadable lock is nobody holding it,
+ * which is `parseLock`'s reading of the same file.
+ */
+function lockOwner(dataDir, now) {
+  const lock = readLock(path.join(dataDir, "server.lock"));
+  if (!lock) return null;
+  return now - lock.heartbeatAt > STALE_MS ? null : lock;
 }
 
 /** Throws unless the file is a readable SQLite database holding this schema. */
@@ -169,13 +185,22 @@ async function main() {
     fail(`${source} cannot be restored: ${err.message}`);
   }
 
-  const owner = await serverIsLive(dataDir);
+  const now = Date.now();
+  const owner = lockOwner(dataDir, now);
   if (owner) {
+    // A live server's beat stops for the length of a `gitSync` without the
+    // server stopping, so the wait is named rather than left as a mystery: an
+    // operator whose container is genuinely gone would otherwise read this as a
+    // permanent refusal and reach for the `rm` that makes it one.
+    const beat = Math.max(0, Math.round((now - owner.heartbeatAt) / 1000));
+    const abandonedIn = Math.ceil((owner.heartbeatAt + STALE_MS - now) / 1000);
     fail(
       `a server is running against ${dataDir} (pid ${owner.pid} in its own ` +
-        `container). Stop it first — \`docker compose stop\` — and run this ` +
-        `again. Restoring under a live server corrupts the database rather ` +
-        `than replacing it.`,
+        `container, last beat ${beat}s ago). Stop it first — \`docker compose ` +
+        `stop\`, which releases the lock — and run this again. Restoring under ` +
+        `a live server corrupts the database rather than replacing it. If that ` +
+        `container is already gone, its lock counts as abandoned ` +
+        `${abandonedIn}s from now.`,
     );
   }
 
