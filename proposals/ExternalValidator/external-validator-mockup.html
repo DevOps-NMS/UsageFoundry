@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en" data-verdict="none">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>External validator — visual model</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:            light-dark(#f0f0f3, #1e1e20);
+    --bg-raised:     light-dark(#ffffff, #2a2a2d);
+    --bg-inset:      light-dark(#f5f5f7, #161618);
+    --bg-grouped:    light-dark(#f7f7f9, #323235);
+    --border:        light-dark(#e3e3e6, #3a3a3d);
+    --border-strong: light-dark(#c7c7cc, #4d4d52);
+    --fg:            light-dark(#1d1d1f, #f5f5f7);
+    --fg-muted:      light-dark(#68686d, #a1a1a6);
+    --fg-faint:      light-dark(#86868b, #8a8a8f);
+    --accent:        light-dark(#0069d9, #4a9bff);
+    --accent-dim:    light-dark(#d6e4fa, #1f3a5f);
+    --ok:            light-dark(#177d33, #30d158);
+    --warn:          light-dark(#8c5e00, #ff9f0a);
+    --danger:        light-dark(#d70015, #ff6961);
+    --tint:          light-dark(#0069d9, #0a6cd8);
+    --tint-fg:       #ffffff;
+    --bezel:         light-dark(#ffffff, #48484c);
+    --bezel-hover:   light-dark(#f2f2f4, #545458);
+    --shadow-e1: 0 1px 2px light-dark(rgba(0,0,0,.06), rgba(0,0,0,.4)), 0 0 0 .5px light-dark(rgba(0,0,0,.04), rgba(255,255,255,.04));
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1180px;margin:0 auto;padding:0 24px 96px}
+  h1{font-size:24px;letter-spacing:-.02em;margin:0 0 6px}
+  h2{font-size:17px;letter-spacing:-.01em;margin:0 0 4px}
+  h3{font-size:13px;font-weight:600;margin:0 0 8px;color:var(--fg-muted);text-transform:uppercase;letter-spacing:.05em}
+  p{margin:0 0 12px;color:var(--fg-muted);max-width:70ch}
+  code,.mono{font-family:var(--mono);font-size:.9em}
+  a{color:var(--accent)}
+
+  /* ---------- page chrome ---------- */
+  header.top{
+    position:sticky;top:0;z-index:20;background:color-mix(in oklab, var(--bg) 88%, transparent);
+    backdrop-filter:saturate(180%) blur(20px);border-bottom:.5px solid var(--border);
+  }
+  header.top .inner{max-width:1180px;margin:0 auto;padding:14px 24px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .warnbar{
+    background:color-mix(in oklab, var(--warn) 12%, var(--bg-raised));
+    border:.5px solid color-mix(in oklab, var(--warn) 40%, var(--border));
+    border-radius:8px;padding:10px 14px;margin:20px 0 28px;font-size:13px;color:var(--fg);
+  }
+  .warnbar b{color:var(--warn)}
+
+  section{margin:56px 0 0}
+  .sechead{display:flex;align-items:baseline;gap:12px;margin-bottom:16px;padding-bottom:10px;border-bottom:.5px solid var(--border)}
+  .sechead .num{font:600 11px/1 var(--mono);color:var(--fg-faint);border:.5px solid var(--border-strong);border-radius:5px;padding:5px 7px}
+
+  .card{background:var(--bg-raised);border:.5px solid var(--border);border-radius:12px;box-shadow:var(--shadow-e1)}
+  .card .hd{padding:12px 16px;border-bottom:.5px solid var(--border);display:flex;align-items:center;gap:10px;justify-content:space-between}
+  .card .bd{padding:16px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:900px){.grid2,.grid3{grid-template-columns:1fr}}
+
+  /* ---------- controls ---------- */
+  .seg{display:inline-flex;background:var(--bg-inset);border:.5px solid var(--border);border-radius:8px;padding:2px;gap:2px}
+  .seg button{
+    appearance:none;border:0;background:transparent;color:var(--fg-muted);font:inherit;font-size:12.5px;
+    padding:5px 11px;border-radius:6px;cursor:pointer;white-space:nowrap;
+  }
+  .seg button[aria-pressed="true"]{background:var(--bezel);color:var(--fg);box-shadow:var(--shadow-e1);font-weight:590}
+  .btn{
+    appearance:none;font:inherit;font-weight:590;font-size:13px;padding:7px 14px;border-radius:8px;cursor:pointer;
+    background:var(--tint);color:var(--tint-fg);border:0;box-shadow:var(--shadow-e1);
+  }
+  .btn.sec{background:var(--bezel);color:var(--fg);border:.5px solid var(--border)}
+  .btn:disabled{opacity:.45;cursor:default}
+
+  /* ---------- chips ---------- */
+  .chip{
+    display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:590;
+    padding:3px 8px;border-radius:999px;border:.5px solid var(--border);background:var(--bg-inset);color:var(--fg-muted);
+    white-space:nowrap;
+  }
+  .chip .dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
+  .chip.ok{color:var(--ok);background:color-mix(in oklab,var(--ok) 12%,var(--bg-raised));border-color:color-mix(in oklab,var(--ok) 30%,var(--border))}
+  .chip.warnc{color:var(--warn);background:color-mix(in oklab,var(--warn) 12%,var(--bg-raised));border-color:color-mix(in oklab,var(--warn) 30%,var(--border))}
+  .chip.acc{color:var(--accent);background:var(--accent-dim);border-color:color-mix(in oklab,var(--accent) 30%,var(--border))}
+  .chip.ghost{color:var(--fg-faint);background:transparent;border-style:dashed}
+
+  /* the verdict chip: third voice, always neutral — never ok, never danger */
+  .vchip{
+    display:inline-flex;align-items:center;gap:6px;font-size:11.5px;font-weight:590;
+    padding:3px 9px;border-radius:6px;border:.5px solid var(--border-strong);
+    background:var(--bg-grouped);color:var(--fg);white-space:nowrap;
+  }
+  .vchip .eye{font-size:10px;opacity:.65}
+  .vchip.none{color:var(--fg-faint);border-style:dashed;background:transparent;font-weight:500}
+
+  /* ---------- runs list ---------- */
+  table.runs{width:100%;border-collapse:collapse;font-size:13px}
+  table.runs th{
+    text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-faint);
+    font-weight:600;padding:8px 12px;border-bottom:.5px solid var(--border);
+  }
+  table.runs td{padding:9px 12px;border-bottom:.5px solid var(--border);vertical-align:middle}
+  table.runs tr:last-child td{border-bottom:0}
+  table.runs tr.sel{background:var(--accent-dim)}
+  table.runs tr[data-clickable]{cursor:pointer}
+  table.runs tr[data-clickable]:hover{background:var(--bg-grouped)}
+  .task{font-weight:500}
+  .folder{color:var(--fg-faint);font-family:var(--mono);font-size:11.5px}
+  .hidecol{display:none}
+  body[data-mode="today"] .validator-only{display:none}
+
+  /* ---------- run detail voices ---------- */
+  .voice{border-left:3px solid var(--border-strong);padding-left:14px;margin-bottom:18px}
+  .voice .who{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-faint);font-weight:600;margin-bottom:5px}
+  .voice.machine{border-left-color:var(--fg-faint)}
+  .voice.agent{border-left-color:var(--accent)}
+  .voice.reader{border-left-color:var(--warn)}
+  .voice .headline{font-weight:590;font-size:14px;margin-bottom:3px}
+  .voice .detail{color:var(--fg-muted);font-size:13px}
+
+  .evlist{margin:10px 0 0;padding-left:18px;color:var(--fg-muted);font-size:12.5px}
+  .evlist li{margin-bottom:3px}
+  .evlist code{background:var(--bg-inset);padding:1px 5px;border-radius:4px;border:.5px solid var(--border)}
+
+  .shas{display:flex;gap:16px;margin-top:12px;font-family:var(--mono);font-size:11px;color:var(--fg-faint);flex-wrap:wrap}
+
+  /* ---------- pipeline ---------- */
+  .pipe{display:flex;flex-direction:column;gap:0}
+  .step{
+    display:grid;grid-template-columns:26px 1fr;gap:12px;padding:9px 0;position:relative;opacity:.34;
+    transition:opacity .25s ease;
+  }
+  .step.on{opacity:1}
+  .step.done{opacity:.72}
+  .step .bullet{
+    width:20px;height:20px;border-radius:50%;border:1.5px solid var(--border-strong);
+    display:grid;place-items:center;font-size:10px;font-weight:700;color:var(--fg-faint);
+    background:var(--bg-raised);z-index:2;margin-top:1px;
+  }
+  .step.on .bullet{border-color:var(--accent);color:var(--accent);box-shadow:0 0 0 4px color-mix(in oklab,var(--accent) 22%,transparent)}
+  .step.done .bullet{border-color:var(--ok);color:var(--ok)}
+  .step:not(:last-child)::before{
+    content:"";position:absolute;left:9.5px;top:26px;bottom:-4px;width:1.5px;background:var(--border);z-index:1;
+  }
+  .step .t{font-weight:590;font-size:13px}
+  .step .s{color:var(--fg-muted);font-size:12.5px;margin-top:2px}
+  .step .s code{background:var(--bg-inset);padding:1px 5px;border-radius:4px;border:.5px solid var(--border);font-size:11.5px}
+  .step.hard .t::after{content:"  boundary";font:600 9.5px/1 var(--mono);color:var(--warn);letter-spacing:.06em;vertical-align:2px}
+  .divider{
+    display:flex;align-items:center;gap:10px;margin:6px 0 6px 38px;
+    font:600 10.5px/1 var(--mono);letter-spacing:.06em;color:var(--warn);text-transform:uppercase;
+  }
+  .divider::after{content:"";flex:1;height:1px;background:repeating-linear-gradient(90deg,var(--warn) 0 5px,transparent 5px 10px);opacity:.5}
+
+  /* ---------- prompt panel ---------- */
+  .prompt{background:var(--bg-inset);border:.5px solid var(--border);border-radius:10px;overflow:hidden;font-family:var(--mono);font-size:11.5px}
+  .prompt .blk{padding:10px 13px;border-bottom:.5px solid var(--border)}
+  .prompt .blk:last-child{border-bottom:0}
+  .prompt .lbl{color:var(--fg-faint);font-size:10px;letter-spacing:.06em;text-transform:uppercase;margin-bottom:5px;display:flex;justify-content:space-between;gap:8px}
+  .prompt .body{color:var(--fg-muted);white-space:pre-wrap;line-height:1.45}
+  .prompt .blk.muted{opacity:.5}
+  .prompt .blk.untrusted{background:color-mix(in oklab,var(--danger) 7%,var(--bg-inset))}
+
+  /* ---------- writes ---------- */
+  .writebox{border-radius:10px;border:.5px solid var(--border);overflow:hidden}
+  .writebox .h{padding:9px 13px;font:600 12px/1.3 var(--mono);border-bottom:.5px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .writebox .r{padding:7px 13px;font-family:var(--mono);font-size:11.5px;color:var(--fg-muted);border-bottom:.5px solid var(--border);display:flex;justify-content:space-between;gap:12px}
+  .writebox .r:last-child{border-bottom:0}
+  .writebox .r b{color:var(--fg);font-weight:590}
+  .writebox.yes .h{background:color-mix(in oklab,var(--ok) 12%,var(--bg-raised));color:var(--ok)}
+  .writebox.no{border-style:dashed}
+  .writebox.no .h{background:color-mix(in oklab,var(--danger) 9%,var(--bg-raised));color:var(--danger)}
+  .writebox.no .r{text-decoration:line-through;opacity:.6}
+
+  /* ---------- stats ---------- */
+  .stat{background:var(--bg-raised);border:.5px solid var(--border);border-radius:10px;padding:13px 15px;box-shadow:var(--shadow-e1)}
+  .stat .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--fg-faint);font-weight:600;margin-bottom:6px}
+  .stat .v{font-size:22px;font-weight:640;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .stat .n{font-size:11.5px;color:var(--fg-muted);margin-top:4px;line-height:1.4}
+  .stat .v small{font-size:13px;font-weight:500;color:var(--fg-muted)}
+
+  ul.plain{margin:0;padding-left:18px;color:var(--fg-muted);font-size:13px}
+  ul.plain li{margin-bottom:7px}
+  ul.plain b{color:var(--fg);font-weight:590}
+  .kbd{font-family:var(--mono);font-size:11.5px;background:var(--bg-inset);border:.5px solid var(--border);border-radius:4px;padding:1px 5px}
+  .muted{color:var(--fg-faint)}
+  .flexrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .spacer{flex:1}
+</style>
+</head>
+<body data-mode="validator">
+
+<header class="top">
+  <div class="inner">
+    <strong style="font-size:15px;letter-spacing:-.01em">External validator</strong>
+    <span class="chip ghost">visual model · nothing built</span>
+    <span class="spacer"></span>
+    <span class="muted" style="font-size:12px">Modelled from <span class="mono">proposals/ExternalValidator/</span> + <span class="mono">scripts/validator-spike/</span></span>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="warnbar">
+    <b>This is a mockup, not the product.</b> No run is validated today — <code>AssistKind</code> is still
+    <code>"review" | "resolve"</code> (<code>src/lib/review.ts:51</code>), there is no validator on the assist path,
+    and nothing in the pitch reached the code. Every screen below is drawn from the recommended shape in
+    <code>external-validator.md</code> §4–§6; every number is from <code>scripts/validator-spike/RESULT.md</code>
+    or <code>validator-baseline.md</code>.
+  </div>
+
+  <!-- ============================================================ 1 -->
+  <section>
+    <div class="sechead">
+      <span class="num">01</span>
+      <div>
+        <h2>The problem, on the screen it happens on</h2>
+        <p style="margin:2px 0 0">You run twenty-five agents overnight and the morning is a column of green chips.
+        One of them wrote nothing and stopped. The list cannot tell you which, and the filter cannot separate them.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="hd">
+        <div class="flexrow">
+          <strong style="font-size:14px">Runs</strong>
+          <span class="muted" style="font-size:12px">last 12 hours · 10 shown</span>
+        </div>
+        <div class="flexrow">
+          <span class="muted" style="font-size:12px">Show</span>
+          <div class="seg" role="group">
+            <button data-mode-btn="today" aria-pressed="false">Today</button>
+            <button data-mode-btn="validator" aria-pressed="true">With validator</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="bd" style="padding-bottom:6px">
+        <div class="flexrow" style="margin-bottom:12px">
+          <div class="seg" role="group" id="filters">
+            <button data-filter="all" aria-pressed="true">All</button>
+            <button data-filter="done" aria-pressed="false">Reported done</button>
+            <button data-filter="cap" aria-pressed="false">Used all cycles</button>
+            <button data-filter="needs" aria-pressed="false">Needs review</button>
+            <button data-filter="doubt" aria-pressed="false" class="validator-only">Doubted <span id="doubtcount" style="opacity:.7">1</span></button>
+          </div>
+          <span class="spacer"></span>
+          <span class="muted validator-only" style="font-size:12px">
+            <b style="color:var(--fg)">1</b> run a second reader doubts · <b style="color:var(--fg)">2</b> it could not judge
+          </span>
+        </div>
+      </div>
+
+      <table class="runs" id="runstable">
+        <thead>
+          <tr>
+            <th style="width:38%">Task</th>
+            <th>Folder</th>
+            <th>Ending</th>
+            <th class="validator-only">Second reading</th>
+            <th style="text-align:right">Spent</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="grid2" style="margin-top:18px">
+      <div class="card"><div class="bd">
+        <h3>What the split already knows</h3>
+        <p style="margin-bottom:0">Both endings are one green <b>Completed</b> chip on the list today —
+        <code>StatusMark</code> renders the raw status and <code>FILTERS</code> is keyed on status alone. The run
+        <i>detail</i> page has distinguished them all along: <i>“Used all N work cycles — it never reported the task
+        complete, so there is probably more to do.”</i> Carrying that onto the list is hours of work, has the
+        <i>Needs review</i> segment as an exact precedent, and targets the <b>29.6%</b> of runs that carry
+        <b>100%</b> of the measured defect. §1 says do it whether or not the validator is ever built.</p>
+      </div></div>
+      <div class="card"><div class="bd">
+        <h3>Which runs the validator even looks at</h3>
+        <p>Decision 3's recommended default: <b>only <code>completed</code> runs that ended without <code>DONE</code>,
+        and only isolated ones.</b> Everything else shows <span class="vchip none">— not validated</span> and costs nothing.</p>
+        <ul class="plain" style="margin-top:10px">
+          <li><b>Reported <code>DONE</code></b> → skipped. 31 of 31 judgeable ones did the work.</li>
+          <li><b>Not isolated</b> → skipped. No well-defined diff exists; all five worktree columns are null.</li>
+          <li><b>A continuation</b> → judged on the <i>chain's</i> task or not at all. <code>worktree_base</code> is the chain's by design.</li>
+        </ul>
+      </div></div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 2 -->
+  <section>
+    <div class="sechead">
+      <span class="num">02</span>
+      <div>
+        <h2>The run page: a third voice, and a fourth state</h2>
+        <p style="margin:2px 0 0">The verdict is a card, not a status. It sits below the state card in its own voice —
+        neutral tone, never <span style="color:var(--ok)">ok</span>, never <span style="color:var(--danger)">danger</span>,
+        because a red chip would read as a fault that did not happen.</p>
+      </div>
+    </div>
+
+    <div class="flexrow" style="margin-bottom:14px">
+      <span class="muted" style="font-size:12px">Force a verdict</span>
+      <div class="seg" role="group" id="verdictpicker">
+        <button data-v="did-the-work" aria-pressed="false">did-the-work</button>
+        <button data-v="did-not" aria-pressed="true">did-not</button>
+        <button data-v="cannot-tell" aria-pressed="false">cannot-tell</button>
+        <button data-v="none" aria-pressed="false">no verdict</button>
+      </div>
+      <span class="spacer"></span>
+      <button class="btn" id="runbtn">▶ Run the validator</button>
+      <button class="btn sec" id="resetbtn">Reset</button>
+    </div>
+
+    <div class="grid2" style="align-items:start">
+      <!-- left: what the operator sees -->
+      <div class="card">
+        <div class="hd">
+          <div>
+            <strong style="font-size:14px">Add jitter to the 429 retry ladder</strong>
+            <div class="folder" style="margin-top:2px">/workspace/UsageFoundry · uf/usagefoundry-…-4a8efa7e</div>
+          </div>
+          <span class="chip ok"><span class="dot"></span>Completed</span>
+        </div>
+        <div class="bd">
+
+          <div class="voice machine">
+            <div class="who">The machine · <span class="mono">stop_reason</span></div>
+            <div class="headline">Used all 1 work cycles</div>
+            <div class="detail">It never reported the task complete, so there is probably more to do.</div>
+          </div>
+
+          <div class="voice agent">
+            <div class="who">The agent · its own last turn</div>
+            <div class="headline">“Ladder implemented and verified.”</div>
+            <div class="detail">Testimony, not evidence. The measured value of handing this to the validator is
+              <b>zero verdict changes in eight</b> — see §3.</div>
+          </div>
+
+          <div class="voice reader" id="verdictcard">
+            <div class="who">A second reader · <span class="mono">run_reviews.verdict</span></div>
+            <div id="verdictbody"></div>
+            <div class="shas" id="verdictshas"></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- right: what it is as data -->
+      <div class="card">
+        <div class="hd"><strong style="font-size:14px">…and what that card actually is</strong>
+          <span class="chip acc" id="rowstate">1 row</span></div>
+        <div class="bd">
+          <div class="writebox yes" style="margin-bottom:16px">
+            <div class="h"><span>run_reviews</span><span style="font-weight:500">written</span></div>
+            <div class="r"><span>kind</span><b>'validate'</b></div>
+            <div class="r"><span>verdict</span><b id="w-verdict">'did-not'</b></div>
+            <div class="r"><span>text</span><b id="w-text">“empty diff; task required a commit”</b></div>
+            <div class="r"><span>cost_usd</span><b id="w-cost">0.11</b></div>
+            <div class="r"><span>base_sha / head_sha</span><b class="mono">7f21c04 / 7f21c04</b></div>
+            <div class="r"><span>run_id</span><b class="mono">4a8efa7e</b> </div>
+          </div>
+
+          <div class="writebox no">
+            <div class="h"><span>runs</span><span style="font-weight:500">not one column</span></div>
+            <div class="r"><span>status</span><b>needs-review</b></div>
+            <div class="r"><span>stop_reason</span><b>“a validator disagreed”</b></div>
+            <div class="r"><span>reported_done</span><b>0</b></div>
+            <div class="r"><span>needs_review_reason</span><b>…</b></div>
+          </div>
+
+          <p style="margin-top:14px;font-size:12.5px">
+            The sharpest prohibition in the document: <b>it must not write <code>needs-review</code></b>. That word means
+            <i>the agent judged it could not finish</i>. <code>TERMINAL_STATUSES</code> carries the value into five
+            subsystems at once — <code>planLoopPass</code> would stop a loop, <code>edgeSatisfied</code> would block every
+            <code>on-success</code> dependent, and retention would begin ageing the evidence, all on the strength of a
+            machine opinion.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 3 -->
+  <section>
+    <div class="sechead">
+      <span class="num">03</span>
+      <div>
+        <h2>What happens behind it</h2>
+        <p style="margin:2px 0 0">Attachment (a′): an assist fired from <code>startRun</code>'s <code>finally</code>
+        <b>below</b> <code>promoteQueued()</code> — one line lower than <code>emitHandoff</code>, and not awaited.
+        Press <b>Run the validator</b> above to walk it.</p>
+      </div>
+    </div>
+
+    <div class="grid2" style="align-items:start">
+      <div class="card">
+        <div class="hd"><strong style="font-size:14px">Run end, in order</strong>
+          <span class="muted mono" style="font-size:11px">orchestrator.ts · startRun finally</span></div>
+        <div class="bd">
+          <div class="pipe" id="pipe">
+            <div class="step" data-step="0">
+              <div class="bullet">1</div>
+              <div><div class="t">The last cycle returns</div>
+                <div class="s"><code>cycleEnding(res.finalText)</code> → status <code>completed</code>, <code>reported_done = 0</code></div></div>
+            </div>
+            <div class="step" data-step="1">
+              <div class="bullet">2</div>
+              <div><div class="t">emitHandoff</div>
+                <div class="s">fire-and-forget, the existing precedent for a child at run end</div></div>
+            </div>
+            <div class="step hard" data-step="2">
+              <div class="bullet">3</div>
+              <div><div class="t">releaseDependents()</div>
+                <div class="s">synchronous by requirement — the folder claim is only atomic inside one event-loop turn</div></div>
+            </div>
+            <div class="step hard" data-step="3">
+              <div class="bullet">4</div>
+              <div><div class="t">promoteQueued()</div>
+                <div class="s">the next run in the FIFO takes the folder and the slot</div></div>
+            </div>
+            <div class="divider">the validator goes below this line</div>
+            <div class="step" data-step="4">
+              <div class="bullet">5</div>
+              <div><div class="t">Gate</div>
+                <div class="s">setting on? · <code>completed</code>? · <code>!reported_done</code>? · <code>isolation === "worktree"</code>? ·
+                  <code>assistRunning</code> · <code>maxConcurrentAssists</code> (2) · <code>windowRefusal</code></div></div>
+            </div>
+            <div class="step" data-step="5">
+              <div class="bullet">6</div>
+              <div><div class="t">rangeDiff(base…branch)</div>
+                <div class="s">a ref operation against <code>repo_root</code> — <b>nobody holds a worktree</b>. Median 76.8 kB, max 274 kB.</div></div>
+            </div>
+            <div class="step" data-step="6">
+              <div class="bullet">7</div>
+              <div><div class="t">Compose the prompt</div>
+                <div class="s">task + evidence, patch budgeted to 60 kB (19 of 40 spike cases were shortened)</div></div>
+            </div>
+            <div class="step" data-step="7">
+              <div class="bullet">8</div>
+              <div><div class="t">spawnAssist</div>
+                <div class="s"><code>--permission-mode plan</code> <code>--allowedTools Grep Glob</code>
+                  <code>--max-budget-usd</code> · uid dropped · <code>UF_*</code>, <code>OTEL_*</code>,
+                  <code>ANTHROPIC_ADMIN_KEY</code>, <code>DATA_DIR</code> stripped</div></div>
+            </div>
+            <div class="step" data-step="8">
+              <div class="bullet">9</div>
+              <div><div class="t">Parse one fenced JSON block</div>
+                <div class="s">verdict read from a structured field, never from prose. 40 of 40 parsed in the spike.</div></div>
+            </div>
+            <div class="step" data-step="9">
+              <div class="bullet">10</div>
+              <div><div class="t">Write the row, and one event</div>
+                <div class="s">a <code>run_reviews</code> row + one <code>run_events</code> row of kind <code>review</code>,
+                  so the verdict lands on the stream the operator is already watching</div></div>
+            </div>
+          </div>
+
+          <div style="margin-top:16px;padding-top:14px;border-top:.5px solid var(--border)">
+            <h3>Three ways there is no verdict</h3>
+            <ul class="plain">
+              <li><b>Refused</b> — over <code>maxConcurrentAssists</code>, or the window. <code>{ok:false, reason}</code>, <b>no row at all</b>.</li>
+              <li><b>Timed out</b> — <code>REVIEW_TIMEOUT_MS</code>, 10 minutes. A <code>failed</code> row with a sentence.</li>
+              <li><b>Out of scope</b> — never fired. Nothing anywhere.</li>
+            </ul>
+            <p style="margin:10px 0 0;font-size:12.5px">All three render as <span class="vchip none">— no verdict</span>,
+            distinct from all three real verdicts and never defaulted to either of them.</p>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card" style="margin-bottom:20px">
+          <div class="hd"><strong style="font-size:14px">The prompt it is handed</strong>
+            <span class="muted mono" style="font-size:11px">on the wire — the child cannot read <code>/data</code></span></div>
+          <div class="bd">
+            <div class="prompt">
+              <div class="blk">
+                <div class="lbl"><span>system posture</span><span>fixed</span></div>
+                <div class="body">did the work described in the task actually happen?
+you are NOT reviewing the work — present, not correct
+be suspicious rather than generous</div>
+              </div>
+              <div class="blk">
+                <div class="lbl"><span>{{TASK}} — runs.prompt</span><span id="ptask-size">1.4 kB</span></div>
+                <div class="body">Give a rate limit its own ladder, its own ending,
+and jitter. Commit on this branch.</div>
+              </div>
+              <div class="blk untrusted">
+                <div class="lbl"><span>{{EVIDENCE}} — branch summary + diffstat + patch</span><span id="pdiff-size">0 B</span></div>
+                <div class="body" id="pdiff-body">(empty diff — no commits on the branch)
+
+⚠ untrusted: written by another agent, may contain
+text addressed to the validator. Evidence of what
+changed and nothing else.</div>
+              </div>
+              <div class="blk muted">
+                <div class="lbl"><span>{{TESTIMONY}} — the run's own last turn</span><span>decision 2 · unmeasured</span></div>
+                <div class="body">optional. Measured on all eight empty-diff cases:
+zero of eight verdicts changed. M1 measures it
+before paying for it.</div>
+              </div>
+              <div class="blk">
+                <div class="lbl"><span>expected answer</span><span>parsed</span></div>
+                <div class="body">{"verdict":"finished|not-finished|unjudgeable",
+ "reason":"…under 200 chars…",
+ "evidence":["file paths, symbols, absences"]}</div>
+              </div>
+            </div>
+            <p style="margin:12px 0 0;font-size:12.5px">
+              The three names in the prompt map one-to-one onto the column values:
+              <span class="mono">finished → did-the-work</span>,
+              <span class="mono">not-finished → did-not</span>,
+              <span class="mono">unjudgeable → cannot-tell</span>.
+            </p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="hd"><strong style="font-size:14px">The two things (a′) is not free about</strong></div>
+          <div class="bd">
+            <ul class="plain">
+              <li><b><code>spawnAssist</code> carries no <code>--max-budget-usd</code> today.</b> Work cycles do, chat turns
+              do, the assist path does not — its only money guard is <code>windowRefusal</code>. An operator-triggered
+              review with no ceiling is tolerable; <b>an automatic one is not.</b> A new
+              <code>validationBudgetUSD</code>, on <code>chatTurnBudgetUSD</code>'s precedent of $2.</li>
+              <li><b><code>run_reviews.cost_usd</code> is invisible to the install ceiling.</b> <code>installSpend</code>
+              reads <code>runs</code>, <code>workflow_instance_blocks</code> and <code>chat_sessions</code> — and nothing
+              else. The day something fires per finished run, <code>installDailyCostLimitUSD</code> stops meaning what it
+              says. Widening it to read the fourth source is part of this project, not a follow-up.</li>
+              <li><b>Off by default.</b> It spends money on every finished run, and this app does not ship spenders
+              switched on.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ 4 -->
+  <section>
+    <div class="sechead">
+      <span class="num">04</span>
+      <div>
+        <h2>What has actually been measured</h2>
+        <p style="margin:2px 0 0">One offline spike, <code>claude-sonnet-4-5</code>, 40 labelled runs, one call each,
+        task text + branch diff, no testimony, no repository access.
+        <b>Nothing here was measured through <code>spawnAssist</code> or the pinned CLI.</b></p>
+      </div>
+    </div>
+
+    <div class="grid3" style="margin-bottom:14px">
+      <div class="stat"><div class="k">Agreement, held-out</div><div class="v">34<small> / 37 · 91.9%</small></div>
+        <div class="n">A trivial validator that always answers <i>finished</i> scores 29/37 (78.4%) and detects nothing.</div></div>
+      <div class="stat"><div class="k">False-finished</div><div class="v">0<small> of 2</small></div>
+        <div class="n">The error the feature exists to prevent. Both <code>not-done</code> rows were called <code>not-finished</code>.</div></div>
+      <div class="stat"><div class="k">False-not-finished</div><div class="v">1<small> of 30 all-in</small></div>
+        <div class="n">Case 18 — a harness defect, not the validator: it was shown two thirds of the commits and said so.</div></div>
+      <div class="stat"><div class="k">Cost per verdict</div><div class="v">$0.125<small> median</small></div>
+        <div class="n">Upper bound — it prices the harness's own subagent transport. <b>≈$0.04 modelled</b> for the API path, which is arithmetic, not a measurement.</div></div>
+      <div class="stat"><div class="k">Wall clock</div><div class="v">49.5<small>s median</small></div>
+        <div class="n">11.9 s – 108.0 s. The 10-minute assist timeout is still the only <i>enforced</i> bound.</div></div>
+      <div class="stat"><div class="k">Testimony arm</div><div class="v">0<small> of 8 changed</small></div>
+        <div class="n">The one place the pitch claimed testimony mattered is the one place it was tried and bought nothing. The task text carries the discrimination.</div></div>
+    </div>
+
+    <div class="card"><div class="bd">
+      <h3>The number the whole thing still rests on</h3>
+      <p style="margin-bottom:0">The positive class in the labelled set is <b>two runs</b>, and one of them is held out —
+      so held-out detection is <b>n = 1</b>. Milestone 0 exists to fix exactly that: label ~40 of the 63 cycle-cap
+      endings, two days, and it is a <b>gate</b> rather than a task. <b>If the <code>not-done</code> rate there is at
+      or under 5%, the project stops</b> and the list-and-filter split from §1 is the whole answer.</p>
+    </div></div>
+  </section>
+
+  <!-- ============================================================ 5 -->
+  <section>
+    <div class="sechead">
+      <span class="num">05</span>
+      <div>
+        <h2>What it deliberately does not do</h2>
+        <p style="margin:2px 0 0">Every one of these is load-bearing, and each is a thing a reader who meets the
+        design will reach for.</p>
+      </div>
+    </div>
+    <div class="grid2">
+      <div class="card"><div class="bd">
+        <ul class="plain">
+          <li><b>Reopen the run.</b> One billed cycle per false negative, systematically, at fleet scale — and it puts an
+          agent that accepts edits back to work unattended on a machine opinion.</li>
+          <li><b>Move it to <code>needs-review</code>.</b> Overwrites the ladder's statement about <i>who decided</i>.</li>
+          <li><b>Block a dependent.</b> <code>edgeSatisfied</code> is deliberately not <code>completed && reported_done</code>:
+          if the agent's own claim to have finished is not strong enough to gate that edge, a machine's opinion about
+          that claim certainly is not. An <code>on-validated</code> edge is a different project.</li>
+          <li><b>Introduce a new run status.</b> <code>needs-review</code> cost a 200-line call-site inventory. Paying it
+          again for an opinion that is wrong in both directions is not a trade worth making.</li>
+        </ul>
+      </div></div>
+      <div class="card"><div class="bd">
+        <ul class="plain">
+          <li><b>Run the repository's tests.</b> This app has never executed a repository's own commands, and the reviewer
+          is deliberately granted none — <code>--permission-mode plan</code> is the whole posture and a command grant
+          would be the one hole in it. Fenced into M3.</li>
+          <li><b>Validate non-isolated runs.</b> There is no well-defined diff to read.</li>
+          <li><b>Validate a chain per-link.</b> Per-run commit boundaries do not exist. Judge the chain or skip it.</li>
+          <li><b>Validate history.</b> 39% of the sampled branches are already gone; checkouts age out at 7 days.</li>
+          <li><b>Say the work is <i>correct</i>.</b> Every <i>finished</i> verdict means the change asked for is
+          <b>present</b>, never that it works.</li>
+        </ul>
+      </div></div>
+    </div>
+
+    <div class="warnbar" style="margin-top:24px">
+      <b>The open exposure, stated rather than closed.</b> The diff is written by an agent and a file in it could contain
+      text addressed to the validator. The mitigations are <code>--permission-mode plan</code> and parsing the verdict
+      from a structured field — not a fix. It is the same exposure <code>review.ts</code> already carries, and the pitch
+      declines to claim otherwise.
+    </div>
+  </section>
+
+</div>
+
+<script>
+(() => {
+  const RUNS = [
+    {task:"Repair docs/verification.md", folder:"UsageFoundry", done:true,  iso:true,  spend:"$7.89", v:null},
+    {task:"Extract the path-map core",   folder:"UsageFoundry", done:true,  iso:true,  spend:"$9.28", v:null},
+    {task:"Fix the #188 overflow items", folder:"UsageFoundry", done:false, iso:true,  spend:"$4.72", v:"did-the-work"},
+    {task:"Label 40 runs for the baseline (do not commit)", folder:"UsageFoundry", done:false, iso:true, spend:"$4.52", v:"cannot-tell"},
+    {task:"Add jitter to the 429 retry ladder", folder:"UsageFoundry", done:false, iso:true, spend:"$3.82", v:"did-not", sel:true},
+    {task:"Audit the docs for drift",    folder:"InvestmentManager", done:true, iso:false, spend:"$5.17", v:null},
+    {task:"Build the merge-conflict map",folder:"UsageFoundry", done:true,  iso:true,  spend:"$23.83", v:null},
+    {task:"Implement WF2",               folder:"UsageFoundry", done:false, iso:true,  spend:"$10.79", v:"did-the-work"},
+    {task:"Rate-limit the OTLP exporter",folder:"orient",       done:false, iso:true,  spend:"$2.03", v:"cannot-tell"},
+    {task:"Split the run-detail state card", folder:"UsageFoundryWeb", done:true, iso:true, spend:"$2.69", v:null},
+  ];
+
+  const VERDICTS = {
+    "did-the-work": {
+      label:"did-the-work", eye:"👁",
+      headline:"A second reader thinks the work is there.",
+      detail:"Every deliverable the task names is present in the diff. Present, not correct — nothing was run.",
+      evidence:["<code>src/lib/orchestrator.ts</code> — <code>jitterMs</code> added and threaded through <code>TRANSIENT_BACKOFF_MS</code>",
+                "<code>src/lib/orchestrator.test.ts</code> — a case naming the ladder",
+                "3 commits on the branch, all three subjects matched"],
+      cost:"0.09", text:"“all three named deliverables present in the diff”", rows:"1 row"
+    },
+    "did-not": {
+      label:"did-not", eye:"👁",
+      headline:"A second reader doubts the work happened.",
+      detail:"The task named a deliverable the diff does not contain. Worth a look before you land this branch.",
+      evidence:["the branch diff is <b>empty</b> — no commits between <code>worktree_base</code> and <code>worktree_branch</code>",
+                "the task text says <i>“Commit on this branch”</i>",
+                "no <code>jitterMs</code> anywhere in the range"],
+      cost:"0.11", text:"“empty diff; task required a commit”", rows:"1 row"
+    },
+    "cannot-tell": {
+      label:"cannot-tell", eye:"👁",
+      headline:"A second reader could not settle it.",
+      detail:"The artefacts cannot decide this one. A real answer, not a hedge — ≥12.5% of tasks are undecidable from the diff alone.",
+      evidence:["the diff is empty, and the task <b>forbade committing</b>",
+                "an empty diff is consistent with both a completed analysis and a no-op run",
+                "the deliverable — labels in a file elsewhere — never enters the repository"],
+      cost:"0.08", text:"“deliverable never enters the repository”", rows:"1 row"
+    },
+    "none": {
+      label:"no verdict", eye:"",
+      headline:"No second reading.",
+      detail:"Refused over <code>maxConcurrentAssists</code>. No row was written and nothing about this run changed.",
+      evidence:[], cost:"—", text:"—", rows:"no row", none:true
+    }
+  };
+
+  const tbody = document.querySelector("#runstable tbody");
+  let filter = "all";
+
+  function vchip(v){
+    if(!v) return '<span class="vchip none">— not validated</span>';
+    const d = VERDICTS[v];
+    return `<span class="vchip"><span class="eye">${d.eye}</span>${d.label}</span>`;
+  }
+  function renderRuns(){
+    tbody.innerHTML = RUNS.filter(r => {
+      if(filter==="all") return true;
+      if(filter==="done") return r.done;
+      if(filter==="cap") return !r.done;
+      if(filter==="needs") return false;
+      if(filter==="doubt") return r.v === "did-not";
+      return true;
+    }).map(r => `
+      <tr ${r.sel?'class="sel"':''} data-clickable>
+        <td class="task">${r.task}</td>
+        <td class="folder">${r.folder}${r.iso?"":' <span class="chip ghost" style="margin-left:4px">not isolated</span>'}</td>
+        <td><span class="chip ok"><span class="dot"></span>Completed</span>
+            <span class="validator-only chip warnc" style="margin-left:4px;${r.done?'display:none':''}">used all cycles</span></td>
+        <td class="validator-only">${vchip(r.v)}</td>
+        <td style="text-align:right" class="folder">${r.spend}</td>
+      </tr>`).join("");
+  }
+  renderRuns();
+
+  document.querySelectorAll("[data-mode-btn]").forEach(b => b.onclick = () => {
+    document.querySelectorAll("[data-mode-btn]").forEach(x => x.setAttribute("aria-pressed", String(x===b)));
+    document.body.dataset.mode = b.dataset.modeBtn;
+  });
+  document.querySelectorAll("#filters button").forEach(b => b.onclick = () => {
+    document.querySelectorAll("#filters button").forEach(x => x.setAttribute("aria-pressed", String(x===b)));
+    filter = b.dataset.filter; renderRuns();
+  });
+
+  // ---- verdict card ----
+  const body = document.getElementById("verdictbody");
+  const shas = document.getElementById("verdictshas");
+  function paint(v){
+    const d = VERDICTS[v];
+    body.innerHTML =
+      `<div class="headline">${d.none ? "" : `<span class="vchip" style="margin-right:8px"><span class="eye">${d.eye}</span>${d.label}</span>`}${d.none ? `<span class="vchip none">— no verdict</span>` : ""}</div>
+       <div class="headline" style="margin-top:8px">${d.headline}</div>
+       <div class="detail">${d.detail}</div>
+       ${d.evidence.length ? `<ul class="evlist">${d.evidence.map(e=>`<li>${e}</li>`).join("")}</ul>` : ""}`;
+    shas.innerHTML = d.none ? "" :
+      `<span>judged base <b style="color:var(--fg-muted)">7f21c04</b></span>
+       <span>judged head <b style="color:var(--fg-muted)">7f21c04</b></span>
+       <span>cost $${d.cost}</span>
+       <span>49.5 s</span>`;
+    document.getElementById("w-verdict").textContent = d.none ? "—" : `'${d.label}'`;
+    document.getElementById("w-text").textContent = d.text;
+    document.getElementById("w-cost").textContent = d.cost;
+    document.getElementById("rowstate").textContent = d.rows;
+    document.querySelector(".writebox.yes").style.opacity = d.none ? ".4" : "1";
+    const row = RUNS.find(r=>r.sel); if(row){ row.v = d.none ? null : v; renderRuns(); }
+    document.getElementById("doubtcount").textContent = String(RUNS.filter(r=>r.v==="did-not").length);
+  }
+  document.querySelectorAll("#verdictpicker button").forEach(b => b.onclick = () => {
+    document.querySelectorAll("#verdictpicker button").forEach(x => x.setAttribute("aria-pressed", String(x===b)));
+    paint(b.dataset.v);
+  });
+  paint("did-not");
+
+  // ---- pipeline walk ----
+  const steps = [...document.querySelectorAll("#pipe .step")];
+  const runbtn = document.getElementById("runbtn");
+  let timer = null;
+  function clearPipe(){ steps.forEach(s => s.classList.remove("on","done")); }
+  runbtn.onclick = () => {
+    if(timer) clearInterval(timer);
+    clearPipe(); runbtn.disabled = true;
+    let i = 0;
+    timer = setInterval(() => {
+      if(i > 0) { steps[i-1].classList.remove("on"); steps[i-1].classList.add("done"); }
+      if(i >= steps.length){ clearInterval(timer); timer = null; runbtn.disabled = false;
+        document.getElementById("verdictcard").animate(
+          [{background:"var(--accent-dim)"},{background:"transparent"}], {duration:900, easing:"ease-out"});
+        return; }
+      steps[i].classList.add("on");
+      steps[i].scrollIntoView({block:"nearest", behavior:"smooth"});
+      i++;
+    }, 620);
+  };
+  document.getElementById("resetbtn").onclick = () => {
+    if(timer){ clearInterval(timer); timer = null; }
+    clearPipe(); runbtn.disabled = false;
+  };
+})();
+</script>
+</body>
+</html>
