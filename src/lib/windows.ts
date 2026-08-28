@@ -791,6 +791,107 @@ function planFractionCarriedForward(
   return planFraction * (windowCostGuardUSD / atFetch);
 }
 
+/**
+ * One meter, from this app's arithmetic and whatever the provider said about
+ * the same window.
+ *
+ * At module scope rather than inside `buildSnapshot` because it reads nothing
+ * from that function's state — every input is a parameter, which is what makes
+ * the precedence below the whole of the rule: which figure a meter reports and
+ * which one a guard acts on depend on this window's own three readings and on
+ * nothing else about the snapshot around it.
+ */
+function makeWindow(
+  label: string,
+  startsAt: number,
+  endsAt: number,
+  agg: Aggregate,
+  costLimit: number | null,
+  tokenLimit: number | null,
+  planWindow: PlanWindow | null,
+  /**
+   * Worst of every wall on this window, or null when the provider named
+   * none. Null rather than 0, because this figure has to be able to stand on
+   * its own below when there is no top-level reading beside it, and a 0
+   * there would report an unread window as an empty one.
+   */
+  planGuard: number | null = null,
+  /**
+   * What this window has spent since the provider's reading was taken — the
+   * only part of the derived figure that reading has not already counted.
+   */
+  sinceFetchCostGuardUSD = 0,
+): WindowState {
+  const derived = buildWindow(startsAt, endsAt, agg, costLimit, tokenLimit);
+  const planFraction = planWindow ? planWindow.utilization : null;
+
+  // The derived readings survive either way: `costFraction`/`tokenFraction`
+  // are what the "your configured ceiling says otherwise" footnote is drawn
+  // from, so the provider's figure displaces them at `fraction` without
+  // overwriting them.
+  if (planFraction === null) {
+    // A model-scoped wall stands on its own when the provider named no
+    // top-level figure for this window — `parsePlanUsage` accepts exactly
+    // that payload (`five_hour` and `limits[]`, no `seven_day`). Falling
+    // through to the derived reading here dropped an Opus week at 95% back
+    // to `no-ceiling`, so the weekly guard stopped existing on an account
+    // that has the wall the guard was written for.
+    //
+    // It is already a fraction of a provider allowance — `planUsage.ts`
+    // divides the body's percent — so it goes in as it is, and it is *not*
+    // carried forward: `planFractionCarriedForward` scales a reading by this
+    // window's own spend, and an Opus-only percentage against all-model
+    // spend is the mixed-denominator error one branch down. `planFraction`
+    // stays null, because the provider still named no figure for the window
+    // this meter is labelled with.
+    if (planGuard === null) return { label, ...derived, planFraction: null };
+
+    return {
+      label,
+      ...derived,
+      planFraction: null,
+      fraction: planGuard,
+      fractionMetric: "plan",
+      guardFraction: planGuard,
+      // Nothing to describe: the provider names a percentage, not a ceiling.
+      limit: null,
+      limitMetric: "plan",
+    };
+  }
+
+  return {
+    label,
+    ...derived,
+    planFraction,
+    fraction: planFraction,
+    fractionMetric: "plan",
+    // The worst of every wall on this window, in one set of units.
+    //
+    // The provider's own reading carried forward by the spend it has not yet
+    // seen (see `planFractionCarriedForward`, which is where the reason this
+    // is not `derived.guardFraction` is written down), against every
+    // model-scoped weekly wall — because being cut off by the Opus week is
+    // being cut off. Both are fractions of a provider allowance. The typed
+    // ceiling is deliberately absent: it is a guess at a denominator the
+    // provider has just supplied the numerator for, and mixing the two is
+    // what made this meter read double.
+    //
+    // `fraction` stays the provider's figure alone, so the carried-forward
+    // part shows up as `Meter`'s hatched band rather than moving the bar.
+    guardFraction: Math.max(
+      planFractionCarriedForward(
+        planFraction,
+        agg.costGuardUSD,
+        sinceFetchCostGuardUSD,
+      ),
+      planGuard ?? 0,
+    ),
+    // Nothing to describe: the provider names a percentage, not a ceiling.
+    limit: null,
+    limitMetric: "plan",
+  };
+}
+
 export function buildSnapshot(
   entries: UsageEntry[],
   limits: LimitConfig,
@@ -845,97 +946,6 @@ export function buildSnapshot(
   // but must never re-open a window that has already rolled over.
   const anchorIsCurrent =
     anchor !== null && anchor <= now && now < anchor + FIVE_HOURS_MS;
-
-  const makeWindow = (
-    label: string,
-    startsAt: number,
-    endsAt: number,
-    agg: Aggregate,
-    costLimit: number | null,
-    tokenLimit: number | null,
-    planWindow: PlanWindow | null,
-    /**
-     * Worst of every wall on this window, or null when the provider named
-     * none. Null rather than 0, because this figure has to be able to stand on
-     * its own below when there is no top-level reading beside it, and a 0
-     * there would report an unread window as an empty one.
-     */
-    planGuard: number | null = null,
-    /**
-     * What this window has spent since the provider's reading was taken — the
-     * only part of the derived figure that reading has not already counted.
-     */
-    sinceFetchCostGuardUSD = 0,
-  ): WindowState => {
-    const derived = buildWindow(startsAt, endsAt, agg, costLimit, tokenLimit);
-    const planFraction = planWindow ? planWindow.utilization : null;
-
-    // The derived readings survive either way: `costFraction`/`tokenFraction`
-    // are what the "your configured ceiling says otherwise" footnote is drawn
-    // from, so the provider's figure displaces them at `fraction` without
-    // overwriting them.
-    if (planFraction === null) {
-      // A model-scoped wall stands on its own when the provider named no
-      // top-level figure for this window — `parsePlanUsage` accepts exactly
-      // that payload (`five_hour` and `limits[]`, no `seven_day`). Falling
-      // through to the derived reading here dropped an Opus week at 95% back
-      // to `no-ceiling`, so the weekly guard stopped existing on an account
-      // that has the wall the guard was written for.
-      //
-      // It is already a fraction of a provider allowance — `planUsage.ts`
-      // divides the body's percent — so it goes in as it is, and it is *not*
-      // carried forward: `planFractionCarriedForward` scales a reading by this
-      // window's own spend, and an Opus-only percentage against all-model
-      // spend is the mixed-denominator error one branch down. `planFraction`
-      // stays null, because the provider still named no figure for the window
-      // this meter is labelled with.
-      if (planGuard === null) return { label, ...derived, planFraction: null };
-
-      return {
-        label,
-        ...derived,
-        planFraction: null,
-        fraction: planGuard,
-        fractionMetric: "plan",
-        guardFraction: planGuard,
-        // Nothing to describe: the provider names a percentage, not a ceiling.
-        limit: null,
-        limitMetric: "plan",
-      };
-    }
-
-    return {
-      label,
-      ...derived,
-      planFraction,
-      fraction: planFraction,
-      fractionMetric: "plan",
-      // The worst of every wall on this window, in one set of units.
-      //
-      // The provider's own reading carried forward by the spend it has not yet
-      // seen (see `planFractionCarriedForward`, which is where the reason this
-      // is not `derived.guardFraction` is written down), against every
-      // model-scoped weekly wall — because being cut off by the Opus week is
-      // being cut off. Both are fractions of a provider allowance. The typed
-      // ceiling is deliberately absent: it is a guess at a denominator the
-      // provider has just supplied the numerator for, and mixing the two is
-      // what made this meter read double.
-      //
-      // `fraction` stays the provider's figure alone, so the carried-forward
-      // part shows up as `Meter`'s hatched band rather than moving the bar.
-      guardFraction: Math.max(
-        planFractionCarriedForward(
-          planFraction,
-          agg.costGuardUSD,
-          sinceFetchCostGuardUSD,
-        ),
-        planGuard ?? 0,
-      ),
-      // Nothing to describe: the provider names a percentage, not a ceiling.
-      limit: null,
-      limitMetric: "plan",
-    };
-  };
 
   // With no block open and no live override, no window is running: what is
   // reported is the one the next turn would open, which starts when that turn
