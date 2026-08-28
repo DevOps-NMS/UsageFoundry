@@ -1082,12 +1082,6 @@ export function startRetentionSweeper(): void {
   void tick();
 }
 
-export function stopRetentionSweeper(): void {
-  if (!timer.handle) return;
-  clearInterval(timer.handle);
-  timer.handle = null;
-}
-
 async function tick(): Promise<void> {
   if (timer.running) return;
   timer.running = true;

@@ -1612,17 +1612,6 @@ function migrate(db: Database.Database) {
 }
 
 /**
- * Drop the NOT NULL from `chat_proposals.template_id`, preserving the rows.
- *
- * The alternative — dropping the table and letting it be recreated — would take
- * the decided proposals with it, which are the record of what the operator
- * approved and what came of it. A rebuild costs fifteen lines and keeps that.
- *
- * The index is recreated at the end rather than before: renaming a table brings
- * its indexes along under their own names, so `CREATE INDEX` would collide with
- * the copy still attached to the old table until that table is dropped.
- */
-/**
  * The columns a proposal had before any of this — the ones a table left behind
  * by an interrupted rebuild is guaranteed to hold, and therefore the only ones
  * either the rebuild or the recovery may name. Everything added since

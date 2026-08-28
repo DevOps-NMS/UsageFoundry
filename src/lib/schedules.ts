@@ -65,8 +65,6 @@ export type ScheduleSpec =
   | { kind: "daily"; minutes: number }
   | { kind: "weekly"; weekday: number; minutes: number };
 
-export type ScheduleKind = ScheduleSpec["kind"];
-
 /** A week. Longer than this is a date, not a recurrence. */
 const MAX_EVERY_HOURS = 168;
 
