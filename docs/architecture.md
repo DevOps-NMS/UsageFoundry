@@ -79,6 +79,8 @@ src/lib/
                    and the shared spawn a workflow's deciding block reuses
   workflows.ts     saved graphs of run blocks — form input, never a run; and
                    the blocks that decide what to run, which are not
+  workflowGraph.ts what a graph is on the wire, and every refusal decidable
+                   without the disk; re-exported by workflows.ts in full
   schedules.ts     when a saved workflow presses its own Run — the one place
                    an agent starts with nobody present
   workspace.ts     the folder walk, shared by the picker and the chat's tools
