@@ -2009,156 +2009,154 @@ export function runOrchestratorChild(o: OrchestratorChildOptions): void {
     throw err;
   }
 
-  {
-    const settings = getSettings();
-    const args = [
-      "-p",
-      o.prompt,
-      "--output-format",
-      "json",
-      // Every tool the CLI has, with the system prompt above as the boundary
-      // rather than a list of names.
-      //
-      // This used to be `manual` plus an allowlist — this app's tools,
-      // `Read`/`Glob`/`Grep`, read-only `gh` and three `git` subcommands — and
-      // that allowlist was the whole guarantee, because `plan` (what
-      // `review.ts` uses) refuses MCP tool calls outright ("Cannot call
-      // mcp__uf__list_templates while in plan mode") and would leave the chat
-      // able to see GitHub and not this app. Its cost was every question the
-      // list did not anticipate: a build log, a test run, `gh api`, `git -C
-      // <path> log`, anything compound. Each came back refused, and an
-      // orchestrator that cannot look proposes work badly — which is the one
-      // failure this feature has no other defence against, since a bad
-      // proposal is approved by a person who is trusting it to have looked.
-      //
-      // `bypassPermissions` rather than `acceptEdits`: that mode holds every
-      // mutating shell command for an approval a `-p` child has nobody to give
-      // — measured, in the isolated-run failure that `ISOLATED_GIT_TOOLS`
-      // exists to fix — so it would reproduce exactly the refusals this is
-      // removing, only less predictably.
-      //
-      // What bounds this child is therefore not the mode. Its tool surface is
-      // whatever `/api/mcp` publishes for its *subject* — a chat may propose,
-      // an orchestrator block may emit, and neither can start a run under
-      // guards it chose; `--strict-mcp-config` keeps the mounted `~/.claude`'s
-      // own MCP servers out; the capability token dies with the turn; and
-      // `chatTurnBudgetUSD` caps the spend. It can, however, write to the
-      // mounts and reach GitHub with the token in its environment, and the
-      // chat page says so.
-      "--permission-mode",
-      "bypassPermissions",
-      "--mcp-config",
-      configPath,
-      // Without this, an MCP server configured in the mounted ~/.claude joins
-      // this child — a tool surface the operator never granted this feature.
-      "--strict-mcp-config",
-      "--append-system-prompt",
-      o.appendSystemPrompt,
-    ];
+  const settings = getSettings();
+  const args = [
+    "-p",
+    o.prompt,
+    "--output-format",
+    "json",
+    // Every tool the CLI has, with the system prompt above as the boundary
+    // rather than a list of names.
+    //
+    // This used to be `manual` plus an allowlist — this app's tools,
+    // `Read`/`Glob`/`Grep`, read-only `gh` and three `git` subcommands — and
+    // that allowlist was the whole guarantee, because `plan` (what
+    // `review.ts` uses) refuses MCP tool calls outright ("Cannot call
+    // mcp__uf__list_templates while in plan mode") and would leave the chat
+    // able to see GitHub and not this app. Its cost was every question the
+    // list did not anticipate: a build log, a test run, `gh api`, `git -C
+    // <path> log`, anything compound. Each came back refused, and an
+    // orchestrator that cannot look proposes work badly — which is the one
+    // failure this feature has no other defence against, since a bad
+    // proposal is approved by a person who is trusting it to have looked.
+    //
+    // `bypassPermissions` rather than `acceptEdits`: that mode holds every
+    // mutating shell command for an approval a `-p` child has nobody to give
+    // — measured, in the isolated-run failure that `ISOLATED_GIT_TOOLS`
+    // exists to fix — so it would reproduce exactly the refusals this is
+    // removing, only less predictably.
+    //
+    // What bounds this child is therefore not the mode. Its tool surface is
+    // whatever `/api/mcp` publishes for its *subject* — a chat may propose,
+    // an orchestrator block may emit, and neither can start a run under
+    // guards it chose; `--strict-mcp-config` keeps the mounted `~/.claude`'s
+    // own MCP servers out; the capability token dies with the turn; and
+    // `chatTurnBudgetUSD` caps the spend. It can, however, write to the
+    // mounts and reach GitHub with the token in its environment, and the
+    // chat page says so.
+    "--permission-mode",
+    "bypassPermissions",
+    "--mcp-config",
+    configPath,
+    // Without this, an MCP server configured in the mounted ~/.claude joins
+    // this child — a tool surface the operator never granted this feature.
+    "--strict-mcp-config",
+    "--append-system-prompt",
+    o.appendSystemPrompt,
+  ];
 
-    // Access to the mounts, so "look at what this repo is like" works. Under
-    // `bypassPermissions` this is no longer read-only, which is the half of
-    // the trade above that costs something: a chat told to leave the work
-    // alone is now the only thing stopping it from editing a checkout.
-    const addDirs = WORKSPACE_MOUNTS.filter((m) => fs.existsSync(m.path)).map(
-      (m) => m.path,
-    );
-    for (const dir of addDirs) args.push("--add-dir", dir);
+  // Access to the mounts, so "look at what this repo is like" works. Under
+  // `bypassPermissions` this is no longer read-only, which is the half of
+  // the trade above that costs something: a chat told to leave the work
+  // alone is now the only thing stopping it from editing a checkout.
+  const addDirs = WORKSPACE_MOUNTS.filter((m) => fs.existsSync(m.path)).map(
+    (m) => m.path,
+  );
+  for (const dir of addDirs) args.push("--add-dir", dir);
 
-    // The one allowlist this child carries, and it grants nothing: naming
-    // `Grep` and `Glob` is what makes the pinned CLI offer them at all, and
-    // under `bypassPermissions` there is no prompt for them to skip. Without
-    // it an orchestrator asked to look at a repository has `Read` and no way
-    // to find out what to read — which is the failure the mode above was
-    // chosen to prevent, arriving through the tool list instead of the
-    // permission system.
-    args.push("--allowedTools", ...SEARCH_TOOLS);
+  // The one allowlist this child carries, and it grants nothing: naming
+  // `Grep` and `Glob` is what makes the pinned CLI offer them at all, and
+  // under `bypassPermissions` there is no prompt for them to skip. Without
+  // it an orchestrator asked to look at a repository has `Read` and no way
+  // to find out what to read — which is the failure the mode above was
+  // chosen to prevent, arriving through the tool list instead of the
+  // permission system.
+  args.push("--allowedTools", ...SEARCH_TOOLS);
 
-    // And the same list again as this child's write set, if anything confines
-    // it at all. The same encoder the work cycle and the reviewer use, and
-    // deliberately the widest of the three sets it produces: this child is
-    // `bypassPermissions` with every mount already on its argv above, so a
-    // narrower write set would be this app disagreeing with itself one line
-    // later — an orchestrator refused inside a tool call, on a directory it was
-    // handed on purpose. What bounds it is its MCP tool surface, a capability
-    // that dies with the turn and `chatTurnBudgetUSD`, not its filesystem.
-    args.push(...sandboxArgsFor({ kind: "chat", dirs: addDirs }));
+  // And the same list again as this child's write set, if anything confines
+  // it at all. The same encoder the work cycle and the reviewer use, and
+  // deliberately the widest of the three sets it produces: this child is
+  // `bypassPermissions` with every mount already on its argv above, so a
+  // narrower write set would be this app disagreeing with itself one line
+  // later — an orchestrator refused inside a tool call, on a directory it was
+  // handed on purpose. What bounds it is its MCP tool surface, a capability
+  // that dies with the turn and `chatTurnBudgetUSD`, not its filesystem.
+  args.push(...sandboxArgsFor({ kind: "chat", dirs: addDirs }));
 
-    // One encoder for every spawn site, so there is one place that knows the
-    // shape — silent when a member is only offered, a failed spawn when it is
-    // selected. The appended system prompt above still reaches a session started
-    // this way (measured on the pin), which is what keeps the boundary this
-    // child is bounded by in front of it.
-    args.push(...sessionAgentArgs(o.agent));
+  // One encoder for every spawn site, so there is one place that knows the
+  // shape — silent when a member is only offered, a failed spawn when it is
+  // selected. The appended system prompt above still reaches a session started
+  // this way (measured on the pin), which is what keeps the boundary this
+  // child is bounded by in front of it.
+  args.push(...sessionAgentArgs(o.agent));
 
-    if (o.resumeSessionId) args.push("--resume", o.resumeSessionId);
-    if (settings.defaultModel) args.push("--model", settings.defaultModel);
-    if (o.maxBudgetUSD !== null) {
-      // A hard stop inside the CLI. Everything else here bounds a *run*; this
-      // is the only thing bounding an orchestrator turn, which can otherwise
-      // read issues and repositories for as long as it likes.
-      args.push("--max-budget-usd", String(o.maxBudgetUSD));
-    }
-
-    // No shell, as everywhere else: the prompt is operator text and whatever a
-    // GitHub issue body happens to contain.
-    const child = spawn(CLAUDE_BIN, args, {
-      cwd: o.cwd && fs.existsSync(o.cwd) ? o.cwd : chatCwd(),
-      env: chatEnv(),
-      // Dropped like every other child, and this is the one that most needs it:
-      // it runs `bypassPermissions` with no allowlist, so the only thing between
-      // it and the server's own files is that it is not the server's uid.
-      //
-      // The agents' uid and *not* their gid: the group is what carries this
-      // turn's capability file, which every other child is kept out of.
-      ...chatChildCredentials(),
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: settings.killProcessGroup && process.platform !== "win32",
-    });
-
-    // Registered before anything can go wrong with it, so an operator pressing
-    // Stop reaches the child rather than orphaning it.
-    o.onSpawn?.(child);
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (c: string) => (stdout += c));
-    child.stderr.on("data", (c: string) => (stderr += c.slice(0, 4_096)));
-
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      signalTree(child, "SIGTERM");
-      setTimeout(() => signalTree(child, "SIGKILL"), 5_000).unref?.();
-    }, o.timeoutMs);
-    timer.unref?.();
-
-    let settled = false;
-    const land = (result: TurnResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      // Both of these are why the token is worth having: the credential dies
-      // with the turn, and the file that carried it does not outlive it either.
-      revokeCapability(token);
-      removeMcpConfig(configPath);
-      o.onSettle(result);
-    };
-
-    child.on("error", (err) => {
-      land({ status: "failed", error: `Could not launch ${CLAUDE_BIN}: ${err.message}` });
-    });
-
-    settleOnExit(child, (code) => {
-      if (timedOut) {
-        land({ status: "failed", error: o.timedOutMessage });
-        return;
-      }
-      land(parseTurnOutput(stdout, stderr, code));
-    });
+  if (o.resumeSessionId) args.push("--resume", o.resumeSessionId);
+  if (settings.defaultModel) args.push("--model", settings.defaultModel);
+  if (o.maxBudgetUSD !== null) {
+    // A hard stop inside the CLI. Everything else here bounds a *run*; this
+    // is the only thing bounding an orchestrator turn, which can otherwise
+    // read issues and repositories for as long as it likes.
+    args.push("--max-budget-usd", String(o.maxBudgetUSD));
   }
+
+  // No shell, as everywhere else: the prompt is operator text and whatever a
+  // GitHub issue body happens to contain.
+  const child = spawn(CLAUDE_BIN, args, {
+    cwd: o.cwd && fs.existsSync(o.cwd) ? o.cwd : chatCwd(),
+    env: chatEnv(),
+    // Dropped like every other child, and this is the one that most needs it:
+    // it runs `bypassPermissions` with no allowlist, so the only thing between
+    // it and the server's own files is that it is not the server's uid.
+    //
+    // The agents' uid and *not* their gid: the group is what carries this
+    // turn's capability file, which every other child is kept out of.
+    ...chatChildCredentials(),
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: settings.killProcessGroup && process.platform !== "win32",
+  });
+
+  // Registered before anything can go wrong with it, so an operator pressing
+  // Stop reaches the child rather than orphaning it.
+  o.onSpawn?.(child);
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (c: string) => (stdout += c));
+  child.stderr.on("data", (c: string) => (stderr += c.slice(0, 4_096)));
+
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    signalTree(child, "SIGTERM");
+    setTimeout(() => signalTree(child, "SIGKILL"), 5_000).unref?.();
+  }, o.timeoutMs);
+  timer.unref?.();
+
+  let settled = false;
+  const land = (result: TurnResult) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    // Both of these are why the token is worth having: the credential dies
+    // with the turn, and the file that carried it does not outlive it either.
+    revokeCapability(token);
+    removeMcpConfig(configPath);
+    o.onSettle(result);
+  };
+
+  child.on("error", (err) => {
+    land({ status: "failed", error: `Could not launch ${CLAUDE_BIN}: ${err.message}` });
+  });
+
+  settleOnExit(child, (code) => {
+    if (timedOut) {
+      land({ status: "failed", error: o.timedOutMessage });
+      return;
+    }
+    land(parseTurnOutput(stdout, stderr, code));
+  });
 }
 
 /**
