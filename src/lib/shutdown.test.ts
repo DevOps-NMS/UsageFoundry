@@ -60,8 +60,11 @@ const {
 } =
   require("./orchestrator") as typeof import("./orchestrator");
 const { db } = require("./db") as typeof import("./db");
+const { claimDataDir, releaseDataDir } =
+  require("./serverLock") as typeof import("./serverLock");
 
 const SESSION = "11111111-2222-3333-4444-555555555555";
+const lockFile = path.join(config.DATA_DIR, "server.lock");
 
 /**
  * The transcript the killed cycle leaves behind.
@@ -302,5 +305,109 @@ describe("shutting down with a work cycle in flight", () => {
     assert.equal(row.active_started_at, null);
     assert.equal(row.status, "failed");
     assert.equal(row.restart_closed, 1);
+  });
+});
+
+/**
+ * The same handler, in the process that does not own the data directory.
+ *
+ * `shutdownRuns` closes out every `running` row install-wide, which is the
+ * right reading for the owner and nobody else's business. The second process is
+ * ordinarily an agent's `npm run dev` against an inherited `DATA_DIR` — the
+ * workflow `serverLock.ts` exists for — and on its way out it was marking the
+ * *owner's* live runs `restart_closed`, logging a shutdown against them and
+ * clearing `active_started_at` on cycles whose agents were still working. That
+ * last column is why this is worth a case of its own rather than tidiness:
+ * `installBudget` and a workflow instance's budget both bound their spend below
+ * by it, so nulling it widens two ceilings at once, silently, in the direction
+ * a guard may never move by accident.
+ *
+ * Refused for real rather than through a stubbed `mayWriteDataDir`: a lock file
+ * naming a live pid that is not ours is what a second server actually finds,
+ * and it is the whole of the difference between `held` and the `unclaimed`
+ * every case above runs under — which is why those may write and this may not.
+ */
+describe("shutting down without owning the data directory", () => {
+  // Whatever is appended to this file next must not inherit a process that has
+  // been refused the directory. Deleting the lock and claiming it back is the
+  // module's own route from `held` to `unclaimed`; there is no setter.
+  after(async () => {
+    fs.rmSync(lockFile, { force: true });
+    await claimDataDir();
+    releaseDataDir();
+  });
+
+  it("leaves the owner's running row exactly as it found it", async () => {
+    const startedAt = Date.now();
+    db()
+      .prepare(
+        "INSERT INTO runs (id, folder, prompt, model, status, budget, max_iterations," +
+          " iterations, created_at, spent_usd, spent_tokens, session_id," +
+          " active_iteration, active_started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        "owners-live-run",
+        path.join(tmp, "workspace", "project"),
+        "task",
+        null,
+        "running",
+        "{}",
+        1,
+        0,
+        startedAt,
+        0,
+        0,
+        SESSION,
+        1,
+        startedAt,
+      );
+    // Written after the cycle's start instant, so it is spend
+    // `reconcileKilledCycle` would have found: without it "nothing was charged"
+    // would be true for the wrong reason.
+    appendTranscript("msg_nonowner", "req_nonowner");
+
+    const before = db()
+      .prepare("SELECT * FROM runs WHERE id = ?")
+      .get("owners-live-run");
+    const eventsBefore = runEvents("owners-live-run").events.length;
+
+    // `process.ppid` because it is alive and can never be our own pid — which
+    // `lockVerdict` reads as this server's predecessor across a restart and
+    // claims outright.
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.ppid,
+        ownerId: "the-process-that-owns-this-directory",
+        startedAt,
+        heartbeatAt: Date.now(),
+      }),
+    );
+    assert.equal(
+      await claimDataDir(),
+      false,
+      "the fixture must leave this process refused, or the case proves nothing",
+    );
+
+    const outcome = await shutdownRuns("SIGTERM");
+    assert.deepEqual(
+      outcome,
+      { signalled: 0, closed: 0, recovered: 0 },
+      "a process that may not write has closed nothing out and recovered nothing",
+    );
+
+    // The whole issue. Every column this compares was being written by a
+    // process that had already been told it does not own this database, on a
+    // row whose agent belongs to the server that does.
+    assert.deepEqual(
+      db().prepare("SELECT * FROM runs WHERE id = ?").get("owners-live-run"),
+      before,
+      "restart_closed, active_started_at and spent_usd_est are the owner's to write",
+    );
+    assert.equal(
+      runEvents("owners-live-run").events.length,
+      eventsBefore,
+      "no run_events row — and so no outbound webhook, which is fired from emit",
+    );
   });
 });
