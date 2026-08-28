@@ -35,3 +35,9 @@ backups/*
 !backups/.gitkeep
 
 .claude/
+
+# Database exports. Every row of the `runs` table carries the run's full prompt,
+# which for the private repos this app orchestrates is a complete product brief;
+# a secret scan comes back clean and the prose is the part that leaks. This
+# repository is public, so an export made for analysis stays out of it.
+*-dump.json
