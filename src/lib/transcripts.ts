@@ -827,58 +827,20 @@ async function mapWithLimit<T, R>(
   return out;
 }
 
-async function runScan(): Promise<ScanResult> {
-  const { files, failures: walkFailures } = await listTranscriptFiles(PROJECTS_DIR);
-
-  // A transcript that is no longer on disk will never be read again, so its
-  // records are retention with nothing behind them. Dropped here rather than in
-  // `evictToBound`, which is about the bound: this one is free whatever the
-  // cache is holding.
-  //
-  // Only when the walk itself was clean, though: a directory that could not be
-  // read is not an empty directory, and pruning against a partial listing would
-  // throw away the records of every file under it — costing a full re-read of
-  // the tree the moment the directory came back.
-  if (walkFailures.length === 0) {
-    const present = new Set(files);
-    for (const file of cache.keys()) if (!present.has(file)) cache.delete(file);
-  }
-
-  const readFailures: ScanReadFailure[] = [...walkFailures];
-  const results = await mapWithLimit(files, SCAN_CONCURRENCY, (f) =>
-    refreshFile(f).catch((err) => {
-      readFailures.push({ path: f, message: failureMessage(err) });
-      return null;
-    }),
-  );
-
-  // Nothing below this line reads the filesystem: the dedupe and the sort are
-  // pure functions of the `FileCacheEntry` objects `refreshFile` just returned,
-  // and an unchanged byte size means each of those is the same object holding
-  // the same records the last scan folded. See `__ufScanMemo` for why size is
-  // the right question and why this is no staler than the offset cache.
-  //
-  // Skipped whole when anything failed to read, in either scan: a short answer
-  // and a full one are different results, and the cheap comparison below cannot
-  // tell which failures produced the one being held.
-  const sizes = results.map((r) => (r ? r.size : -1));
-  const memo = globalScanMemo.__ufScanMemo;
-  if (
-    readFailures.length === 0 &&
-    memo &&
-    memo.files.length === files.length &&
-    memo.files.every((f, i) => f === files[i]) &&
-    memo.sizes.every((s, i) => s === sizes[i])
-  ) {
-    evictToBound();
-    scanHealth.readFailures = readFailures;
-    // A fresh instant on a shared body: the records are current as of now — that
-    // is what an unchanged tree proves — and the arrays are the ones every
-    // caller already only reads. `scannedAt` is the one field that would be a
-    // lie if it were shared.
-    return { ...memo.result, scannedAt: Date.now() };
-  }
-
+/**
+ * Fold every file's records into one deduplicated set.
+ *
+ * Its own function at the seam `runScan` already had: everything before this
+ * reads the filesystem and everything after it shapes a result, and the rules
+ * for which copy of a record written into two files wins are the part carrying
+ * the reasoning. `entryFile` and `toolCallFile` are scan-local bookkeeping that
+ * nothing outside the fold ever read, and now cannot.
+ */
+function dedupeAcrossFiles(results: readonly (FileCacheEntry | null)[]): {
+  entries: UsageEntry[];
+  toolCalls: ToolCall[];
+  unpriced: Set<string>;
+} {
   // Dedupe across files: a resumed session copies earlier turns into the new
   // transcript, so the same key legitimately appears in more than one file.
   //
@@ -997,6 +959,63 @@ async function runScan(): Promise<ScanResult> {
       toolCalls.push(c);
     }
   }
+
+  return { entries, toolCalls, unpriced };
+}
+
+async function runScan(): Promise<ScanResult> {
+  const { files, failures: walkFailures } = await listTranscriptFiles(PROJECTS_DIR);
+
+  // A transcript that is no longer on disk will never be read again, so its
+  // records are retention with nothing behind them. Dropped here rather than in
+  // `evictToBound`, which is about the bound: this one is free whatever the
+  // cache is holding.
+  //
+  // Only when the walk itself was clean, though: a directory that could not be
+  // read is not an empty directory, and pruning against a partial listing would
+  // throw away the records of every file under it — costing a full re-read of
+  // the tree the moment the directory came back.
+  if (walkFailures.length === 0) {
+    const present = new Set(files);
+    for (const file of cache.keys()) if (!present.has(file)) cache.delete(file);
+  }
+
+  const readFailures: ScanReadFailure[] = [...walkFailures];
+  const results = await mapWithLimit(files, SCAN_CONCURRENCY, (f) =>
+    refreshFile(f).catch((err) => {
+      readFailures.push({ path: f, message: failureMessage(err) });
+      return null;
+    }),
+  );
+
+  // Nothing below this line reads the filesystem: the dedupe and the sort are
+  // pure functions of the `FileCacheEntry` objects `refreshFile` just returned,
+  // and an unchanged byte size means each of those is the same object holding
+  // the same records the last scan folded. See `__ufScanMemo` for why size is
+  // the right question and why this is no staler than the offset cache.
+  //
+  // Skipped whole when anything failed to read, in either scan: a short answer
+  // and a full one are different results, and the cheap comparison below cannot
+  // tell which failures produced the one being held.
+  const sizes = results.map((r) => (r ? r.size : -1));
+  const memo = globalScanMemo.__ufScanMemo;
+  if (
+    readFailures.length === 0 &&
+    memo &&
+    memo.files.length === files.length &&
+    memo.files.every((f, i) => f === files[i]) &&
+    memo.sizes.every((s, i) => s === sizes[i])
+  ) {
+    evictToBound();
+    scanHealth.readFailures = readFailures;
+    // A fresh instant on a shared body: the records are current as of now — that
+    // is what an unchanged tree proves — and the arrays are the ones every
+    // caller already only reads. `scannedAt` is the one field that would be a
+    // lie if it were shared.
+    return { ...memo.result, scannedAt: Date.now() };
+  }
+
+  const { entries, toolCalls, unpriced } = dedupeAcrossFiles(results);
 
   entries.sort((a, b) => a.ts - b.ts);
 
