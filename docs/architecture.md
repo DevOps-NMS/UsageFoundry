@@ -67,6 +67,12 @@ src/lib/
                    the node set files and the layout the path hierarchy,
                    because tool → file is a star. Adds no field that could be
                    read as an outcome
+  conflictMap.ts   `pathMap.ts`'s second payload, for the picture at
+                   /runs/[id]/conflicts: a pending merge's conflicted files as
+                   a directory tree, sized by clash count and filled by git's
+                   conflict type. A file the preview never opened carries a
+                   *null* count and never a zero, because `land.ts` reads the
+                   merged content of only the first `MAX_CONTENT_FILES`
   review.ts        the on-demand reviewer (a third, deliberate child process)
   land.ts          merge preview, landing, branch deletion, branch inventory
   chat.ts          the orchestrator chat (a fourth, deliberate child process),

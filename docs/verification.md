@@ -1996,6 +1996,83 @@ through before trusting this unattended:
 > 12. **Narrow.** At 390px the split stacks, the canvas keeps its 24rem height, and
 >    dragging on the canvas pans rather than scrolling the page.
 
+> **The map at `/runs/[id]/conflicts` *has* been seen, against real
+> `merge-tree` output, and here is exactly how far that goes.** Docker is still
+> unavailable, so this was not a `docker compose up`: the app was booted with
+> `npx next dev` against a throwaway `WORKSPACE_ROOT` and `DATA_DIR` under
+> `$TMPDIR`, `WORKSPACE_ROOTS` unset so the mount degraded to that one directory,
+> and eight `runs` rows inserted straight into the migrated database with
+> `better-sqlite3` — every one of them pointing at a real git repository built for
+> the state it was meant to produce. Chromium was driven with Playwright at
+> 1280×1100. **Three environment facts are load-bearing and cost an hour between
+> them**: this container's ambient `NODE_ENV=production` makes `next dev` die in
+> edge instrumentation with `EvalError: Code generation from strings disallowed`,
+> its ambient `WORKSPACE_ROOTS` silently outranks any `WORKSPACE_ROOT` you set, and
+> a server started in one shell is unreachable from the next — the sandbox gives
+> each invocation its own network namespace, so boot, seed, drive and tear down
+> have to happen inside one command.
+>
+> What was **seen rendered**, each from its own repository:
+>
+> - **A conflict of 21 paths across five directories and the checkout root**, 12 of
+>   them past `MAX_CONTENT_FILES` and so never opened. The card reads "21 files
+>   conflict, with 6 clashes in the 9 this preview opened", the warn notice below
+>   it names the 12 and says the smallest size is not a count, and those twelve
+>   nodes draw hollow and dashed while the nine drawn solid are sized by their
+>   counts. This is the case the whole encoding exists for and it is the one that
+>   would have been invisible: a zero there draws exactly like a real zero.
+> - **Three of the four fills.** Amber content clashes, a red `modify/delete`
+>   (`src/lib/doomed.ts`), and blue `rename/rename` on all three of the paths git
+>   files under that one conflict — a `docs/guide.md` renamed differently on each
+>   side, which also renders as blue *and* dashed, since it is both another kind
+>   and unopened. The grey `untyped` fill was **not** seen and cannot easily be:
+>   it needs an informational section this git version does not produce, which is
+>   the case `parseMergeTree` parses defensively for. It is unit-tested and
+>   nothing else.
+> - **The inspector, on three kinds of node.** A file: "Kind: rename/rename —
+>   Another kind git named", "Clashes: Unknown — its merged content was not opened
+>   by this preview", and git's own sentence under "git says". A directory
+>   (`docs`): "Holds 7 conflicted files · Clashes 3 and more — see below · Not
+>   opened 1 of them, so the count above is a floor · Kinds contents,
+>   rename/rename". The checkout root, with all 21 and all 12.
+> - **Five of the ways of having nothing**, each with its own sentence and each
+>   from a repository built to produce it: `clean` ("Every file merges cleanly…"),
+>   `fast-forward`, `already-merged`, `unknown` on a `paused` run (the warn notice
+>   carrying git's "This run can still commit to it." and saying in as many words
+>   that it is not a clean merge), and a deleted branch, which renders the land
+>   card's own "Branch uf/deleted-demo no longer exists." rather than a second
+>   wording. A run with `isolation: "none"` renders the no-branch sentence.
+> - **n=1.** A single-file conflict draws one node and one root anchor and says "1
+>   file conflicts, with 1 clash in it". It is a thin picture and it is supposed
+>   to be: there is deliberately no guard that refuses to draw.
+> - **The one link in.** Driven from the run page: the Land tab's conflict section
+>   carries exactly one anchor to `/runs/conflict1/conflicts` (asserted as a count
+>   of one, not eyeballed), the 21-row list above it is unchanged, and following
+>   the link lands on the map.
+>
+> **What has still not been seen, and how to see it.** No `docker compose up`, so
+> nothing is confirmed against the shipped image. Only light theme at one
+> viewport: the theme re-probe on a `data-theme` flip and on an OS scheme change,
+> and the 390px stack, are `PathMapCanvas`'s behaviour and were inherited rather
+> than checked here. Nobody watched a CPU meter, so "the loop stops" rests on
+> `forceLayout`'s cooling and on the touch map's own headless measurement.
+> `prefers-reduced-motion` was not exercised. **Folding was not seen at all** —
+> the budget is 300 drawn files and 21 is nowhere near it, so a real check needs a
+> conflict of a few hundred paths or a temporarily lowered `MAX_DRAWN_FILES`, and
+> what to look for is the touched map's step 10 verbatim. Nor was the `none-named`
+> state, which needs stage records git will not produce on request. A human with
+> Docker should: make two branches conflict in several directories, open the run's
+> land card, follow the link, and walk steps 2–6 and 10–12 of the touched map's
+> list above with this map's own legend in hand.
+>
+> One thing the map is faithfully reporting and did not cause: a **binary**
+> conflict arrives typed `contents` rather than `binary`. `merge-tree` emits two
+> informational records for it and `parseMergeTree` takes the last, so
+> `docs/logo.bin` reads "Content — both sides changed the same lines / None — git
+> left no conflict markers in it". That is `land.ts`'s parse and is out of this
+> map's hands; it is recorded here so the next reader does not chase it into the
+> encoding.
+
 > **The four frontend reachability fixes — the paged runs list, quick open's
 > search, the run log's filter and the settings field search — were written on
 > branch `uf/usagefoundry-721638d11c0b-1-41e5e190` by two runs, and a third that
