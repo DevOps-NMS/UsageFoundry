@@ -1716,6 +1716,22 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **Two conflict resolutions in one repository have never been run at once.**
+> The aux resolve checkout is now named for the run — `<slug>-resolve-<id8>`
+> rather than one `<slug>-resolve` the whole repository shared — and
+> `resolveConflicts` holds a claim on the run from entry until `startAssist` has
+> written the row `assistRunning` reads. What that rests on is `npm run
+> typecheck` (exit 0), `npm test` (**1,906 tests / 281 suites / 0 failures**, of
+> which 1 is the new `resolveCheckout.test.ts`) and that test driving two real
+> `git worktree add`s through `resolveCheckout` in one store, which is the
+> collision itself with no `claude` child standing in either checkout. What has
+> **not** been exercised is the rest of it: two conflicting branches in one
+> repository, the merge queue auto-resolving one while the operator presses
+> Resolve on the other, both children running to completion, and the two
+> `run_reviews` rows then describing work that is actually theirs. That needs
+> Docker and two billed children. Nothing was read in the running app and no
+> `next build` was run, since nothing under `src/app/` changed.
+
 > **The `canvasView.ts` extraction was not looked at.** The world/screen
 > transform, hit testing, device-pixel sizing, the pan/zoom gestures, the
 > `ResizeObserver` and the colour probe were moved out of
