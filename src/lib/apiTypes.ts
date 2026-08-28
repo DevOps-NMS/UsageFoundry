@@ -1884,7 +1884,15 @@ export interface ConflictRegionDTO {
 
 export interface ConflictFileDTO {
   path: string;
-  /** git's own name for the conflict — `content`, `modify/delete`, … */
+  /**
+   * git's own name for the conflict, from `merge-tree -z`'s *type* field.
+   *
+   * Its spelling is not the one its message uses, and `conflictMap.ts` reads
+   * this: a content clash arrives as `contents` (plural) where the message says
+   * `CONFLICT (content)`, and an `add/add` arrives as `contents` too. The rest
+   * are as they read — `modify/delete`, `rename/rename`, `file/directory`,
+   * `binary`. Measured against git 2.39.5, which is what the container ships.
+   */
   type: string | null;
   message: string | null;
   regions: ConflictRegionDTO[];
