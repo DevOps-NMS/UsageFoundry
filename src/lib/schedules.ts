@@ -65,8 +65,6 @@ export type ScheduleSpec =
   | { kind: "daily"; minutes: number }
   | { kind: "weekly"; weekday: number; minutes: number };
 
-export type ScheduleKind = ScheduleSpec["kind"];
-
 /** A week. Longer than this is a date, not a recurrence. */
 const MAX_EVERY_HOURS = 168;
 
@@ -896,11 +894,11 @@ async function fireIfDue(schedule: WorkflowSchedule, now: number): Promise<void>
   }
 
   const action = decision.action;
-  if (action.kind !== "fire" && action.kind !== "skip") return;
   if (action.kind === "skip") {
     recordOutcome(schedule, action.code, action.reason, action.fireAt, null, now);
     return;
   }
+  if (action.kind !== "fire") return;
 
   // Re-checked at every fire rather than only at creation: clearing the
   // workflow's own limits is one edit away, and nothing about that edit knows a

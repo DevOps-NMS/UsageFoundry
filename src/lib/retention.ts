@@ -335,6 +335,62 @@ function repoPathFor(dir: string): string | null {
   }
 }
 
+/** The columns of a `runs` row that deciding about its checkout reads. */
+interface SlotRow {
+  id: string;
+  status: string;
+  finished_at: number | null;
+  worktree_path: string;
+  worktree_branch: string | null;
+  worktree_base: string | null;
+  worktree_base_branch: string | null;
+  repo_root: string;
+  landed_at: number | null;
+  landed_tip: string | null;
+}
+
+/**
+ * Every run that has not started yet and is set to carry another's branch on.
+ *
+ * One query rather than one per candidate: the answer is a small set and the
+ * question is asked of every slot.
+ */
+function chainedRunIds(): Set<string> {
+  const rows = db()
+    .prepare(
+      `SELECT DISTINCT continues_run AS id FROM runs
+        WHERE continues_run IS NOT NULL
+          AND status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(",")})`,
+    )
+    .all(...TERMINAL_STATUSES) as Array<{ id: string }>;
+  return new Set(rows.map((r) => r.id));
+}
+
+/**
+ * The newest run recorded in each isolated checkout, which is the one whose
+ * state describes that slot. Ordered newest-first, so the first row seen for a
+ * path is the one kept.
+ */
+function newestRunPerSlot(): Map<string, SlotRow> {
+  const rows = db()
+    .prepare(
+      `SELECT id, status, finished_at, worktree_path, worktree_branch,
+              worktree_base, worktree_base_branch, repo_root, landed_at, landed_tip
+         FROM runs
+        WHERE isolation = 'worktree' AND worktree_path IS NOT NULL
+          AND repo_root IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 500`,
+    )
+    .all() as SlotRow[];
+
+  const newest = new Map<string, SlotRow>();
+  for (const row of rows) {
+    if (!newest.has(row.worktree_path)) newest.set(row.worktree_path, row);
+  }
+  return newest;
+}
+
 /**
  * Reclaim the checkouts of settled runs whose branches have nowhere left to go.
  *
@@ -362,50 +418,8 @@ export async function sweepCheckouts(now = Date.now()): Promise<{
       .filter((p): p is string => !!p),
   );
 
-  // Every branch a run that has not started yet is set to carry on. One query
-  // rather than one per candidate: the answer is a small set and the question
-  // is asked of every slot.
-  const chained = new Set(
-    (
-      db()
-        .prepare(
-          `SELECT DISTINCT continues_run AS id FROM runs
-            WHERE continues_run IS NOT NULL
-              AND status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(",")})`,
-        )
-        .all(...TERMINAL_STATUSES) as Array<{ id: string }>
-    ).map((r) => r.id),
-  );
-
-  // The newest run per slot, which is the one whose state describes it. Ordered
-  // newest-first so the first row seen for a path is the one kept.
-  const rows = db()
-    .prepare(
-      `SELECT id, status, finished_at, worktree_path, worktree_branch,
-              worktree_base, worktree_base_branch, repo_root, landed_at, landed_tip
-         FROM runs
-        WHERE isolation = 'worktree' AND worktree_path IS NOT NULL
-          AND repo_root IS NOT NULL
-        ORDER BY created_at DESC
-        LIMIT 500`,
-    )
-    .all() as Array<{
-    id: string;
-    status: string;
-    finished_at: number | null;
-    worktree_path: string;
-    worktree_branch: string | null;
-    worktree_base: string | null;
-    worktree_base_branch: string | null;
-    repo_root: string;
-    landed_at: number | null;
-    landed_tip: string | null;
-  }>;
-
-  const newest = new Map<string, (typeof rows)[number]>();
-  for (const row of rows) {
-    if (!newest.has(row.worktree_path)) newest.set(row.worktree_path, row);
-  }
+  const chained = chainedRunIds();
+  const newest = newestRunPerSlot();
 
   let removed = 0;
   let probes = 0;
@@ -1080,12 +1094,6 @@ export function startRetentionSweeper(): void {
   timer.handle = setInterval(() => void tick(), SWEEP_MS);
   timer.handle.unref?.();
   void tick();
-}
-
-export function stopRetentionSweeper(): void {
-  if (!timer.handle) return;
-  clearInterval(timer.handle);
-  timer.handle = null;
 }
 
 async function tick(): Promise<void> {
