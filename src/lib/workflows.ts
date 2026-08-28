@@ -5886,21 +5886,11 @@ export function reconcileBlocksOnBoot(): void {
       "The server restarted while this block was deciding what to start.",
     ).changes;
 
-  // A loop is closed out for the queued-run reason rather than the `thinking`
-  // one: its passes were failed by the same boot, so another pass would be an
-  // unattended agent started hours after anyone asked for it — and `failed`
-  // rather than `blocked` because the passes it already took were billed.
-  const looping = db()
-    .prepare(
-      "UPDATE workflow_instance_blocks SET status='failed', finished_at=?," +
-        " error='The server restarted while this block was repeating its task, and the pass it was working on was closed out by the same restart.'" +
-        " WHERE status='looping'",
-    )
-    .run(now).changes;
-
   // Read after the sweep above, so a block that was deciding counts as the
-  // decision that will never arrive rather than as something still to come.
-  // One row per member; instances with no `waiting` block are not asked about.
+  // decision that will never arrive rather than as something still to come —
+  // and before the `looping` sweep below, which is the other thing it decides,
+  // so a loop is still `looping` here.
+  // One row per member; instances with neither status are not asked about.
   const rows = db()
     .prepare(
       `SELECT i.id AS id, i.status AS status, r.status AS memberStatus
@@ -5908,7 +5898,8 @@ export function reconcileBlocksOnBoot(): void {
          LEFT JOIN workflow_instance_runs w ON w.instance_id = i.id
          LEFT JOIN runs r ON r.id = w.run_id
         WHERE EXISTS (SELECT 1 FROM workflow_instance_blocks b
-                       WHERE b.instance_id = i.id AND b.status = 'waiting')`,
+                       WHERE b.instance_id = i.id
+                         AND b.status IN ('waiting', 'looping'))`,
     )
     .all() as Array<{
     id: string;
@@ -5930,6 +5921,30 @@ export function reconcileBlocksOnBoot(): void {
   const plan = bootBlockPlan(
     [...gathered].map(([id, entry]) => ({ id, ...entry })),
   );
+
+  // A loop is closed out for the queued-run reason rather than the `thinking`
+  // one: its passes were failed by the same boot, so another pass would be an
+  // unattended agent started hours after anyone asked for it — and `failed`
+  // rather than `blocked` because the passes it already took were billed.
+  //
+  // Both premises are the instance's rather than this row's, so a spared one is
+  // spared here for the reason its `waiting` blocks are below: the pass this
+  // loop is on is a run the same boot decided to keep, nothing was failed under
+  // it, and the pass the next advance would start is the one the operator is
+  // already paying for. Left `looping`, `advanceLoops` picks the row up again
+  // and `planLoopPass` decides it off that pass when it settles.
+  const sparedClause =
+    plan.spared.length === 0
+      ? ""
+      : ` AND instance_id NOT IN (${plan.spared.map(() => "?").join(",")})`;
+  const looping = db()
+    .prepare(
+      "UPDATE workflow_instance_blocks SET status='failed', finished_at=?," +
+        " error='The server restarted while this block was repeating its task, and the pass it was working on was closed out by the same restart.'" +
+        " WHERE status='looping'" +
+        sparedClause,
+    )
+    .run(now, ...plan.spared).changes;
 
   const closeOut = (ids: readonly string[], error: string): number => {
     if (ids.length === 0) return 0;
@@ -5956,16 +5971,19 @@ export function reconcileBlocksOnBoot(): void {
     );
   }
   if (plan.spared.length > 0) {
-    // Every `waiting` row left is one of theirs, both statements above having
-    // run — so this is counted rather than carried through the plan.
+    // Every `waiting` and `looping` row left is one of theirs, all three
+    // statements above having run — so this is counted rather than carried
+    // through the plan.
     const left = db()
       .prepare(
-        "SELECT COUNT(*) AS n FROM workflow_instance_blocks WHERE status='waiting'",
+        "SELECT COUNT(*) AS n FROM workflow_instance_blocks" +
+          " WHERE status IN ('waiting', 'looping')",
       )
       .get() as { n: number };
     console.warn(
-      `[usagefoundry] Left ${left.n} workflow block(s) waiting in ${plan.spared.length} ` +
-        "instance(s) with a run that survived the restart; they are decided when it settles.",
+      `[usagefoundry] Left ${left.n} workflow block(s) waiting or repeating in ` +
+        `${plan.spared.length} instance(s) with a run that survived the restart; ` +
+        "they are decided when it settles.",
     );
   }
 }
