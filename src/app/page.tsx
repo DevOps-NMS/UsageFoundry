@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import { LiveTelemetry } from "@/components/LiveTelemetry";
 import { Meter } from "@/components/Meter";
+import { RecentBlocksCard } from "@/components/RecentBlocksCard";
 import { RepoSpendCard } from "@/components/RepoSpendCard";
 import { PruneSavingsRows } from "@/components/PruneSavings";
 import {
@@ -147,7 +148,6 @@ const POLL_WORKING_MS = 60_000;
 
 /** Every table cuts its tail. What is cut is counted rather than dropped. */
 const MAX_BREAKDOWN_ROWS = 12;
-const MAX_BLOCK_ROWS = 15;
 const MAX_TOOL_ROWS = 12;
 
 /**
@@ -542,7 +542,6 @@ export default function Dashboard() {
   // The table's key is `claude-sonnet-5`; the column head has one line for it.
   const counterfactualLabel = (counterfactualModel ?? "").replace("claude-", "");
   const toolsOmitted = Math.max(0, s.byTool.rows.length - MAX_TOOL_ROWS);
-  const blocksOmitted = Math.max(0, s.blocks.length - MAX_BLOCK_ROWS);
   // `wkEnd` is `now` itself unless a weekly anchor is configured, so this is a
   // reading of the window rather than a guess about the setting behind it.
   const weeklyResets = s.weekly.endsAt > s.now;
@@ -1303,77 +1302,7 @@ export default function Dashboard() {
           )}
         </Card>
 
-        <Card emphasis="quiet" className="mb-4">
-          <CardTitle>Recent 5-hour blocks</CardTitle>
-          <ListView box="capped">
-            <Table stack>
-              <caption className="sr-only">
-                Each recorded 5-hour window, newest first
-              </caption>
-              <THead>
-                <tr>
-                  <Th className={STICKY_HEAD}>Started</Th>
-                  <Th num className={STICKY_HEAD}>
-                    Tokens
-                  </Th>
-                  <Th num className={STICKY_HEAD}>
-                    Cost
-                  </Th>
-                  <Th num className={STICKY_HEAD}>
-                    Turns
-                  </Th>
-                  <Th className={STICKY_HEAD}>Models</Th>
-                </tr>
-              </THead>
-              <TBody>
-                {s.blocks.slice(0, MAX_BLOCK_ROWS).map((b) => (
-                  <Tr key={b.startsAt}>
-                    {/* No label: when the window started is what identifies the
-                        block, and the "live" badge beside it is part of that. */}
-                    <Td className="whitespace-nowrap tabular-nums">
-                      <span title={new Date(b.startsAt).toLocaleString()}>
-                        {fmtDateTime(b.startsAt)}
-                      </span>
-                      {b.isActive && (
-                        <>
-                          {" "}
-                          <Badge tone="ok">live</Badge>
-                        </>
-                      )}
-                    </Td>
-                    <Td num label="Tokens">
-                      {fmtTokens(
-                        b.agg.tokens.input +
-                          b.agg.tokens.output +
-                          b.agg.tokens.cacheRead +
-                          b.agg.tokens.cacheWrite5m +
-                          b.agg.tokens.cacheWrite1h,
-                      )}
-                    </Td>
-                    <Td num label="Cost">
-                      {fmtUSD(b.agg.costUSD)}
-                    </Td>
-                    <Td num label="Turns">
-                      {b.agg.entryCount}
-                    </Td>
-                    {/* Above the value: a window with three model families in it
-                        is a longer string than anything else in the row. */}
-                    <Td label="Models" labelPlacement="above" className="mono">
-                      {b.models.map((m) => m.replace("claude-", "")).join(", ")}
-                    </Td>
-                  </Tr>
-                ))}
-              </TBody>
-            </Table>
-          </ListView>
-          {blocksOmitted > 0 && (
-            <div className="mt-2 text-xs tabular-nums text-ink-muted">
-              {blocksOmitted} older{" "}
-              {blocksOmitted === 1 ? "block is" : "blocks are"} recorded but not
-              listed.
-            </div>
-          )}
-        </Card>
+        <RecentBlocksCard blocks={s.blocks} />
       </SourceRegion>
 
       <SourceRegion
