@@ -1767,6 +1767,20 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **The cycle-prompt split has never spawned a real agent.** On 2026-08-28
+> `orchestrator.ts`'s "Claude Code invocation" section — the next prompt, its
+> notices, `cycleEnding` and `buildArgs`, 1,032 lines — moved unedited to
+> `cycleInvocation.ts`, with `orchestrator.ts` re-exporting every name so that
+> none of the thirteen modules importing `@/lib/orchestrator` changed. What that
+> rests on is `npm run typecheck` (exit 0), `npm test` (1,981 passing, 0
+> failures), a clean `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build`, and
+> a diff of the file's exported names before and after that is empty in both
+> directions. What has **not** happened is one spawned cycle: Docker was not
+> available in the container this was done in, so no argv `buildArgs` composes
+> has been handed to a real CLI since the move, and no prompt has been read by an
+> agent. The decisive test is the ordinary one — a single run of two cycles, which
+> exercises `nextPrompt`'s continuation arm and `cycleEnding` together.
+>
 > **The context-control readout has never been seen with a real boundary behind
 > it.** `prune_decisions`, `prunerState()` and `pruneStatement` were added on
 > 2026-08-28 so that the five ways a boundary can end stop sharing one blank —
