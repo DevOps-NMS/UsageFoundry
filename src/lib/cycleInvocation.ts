@@ -563,8 +563,12 @@ const SHARED_CHECKOUT_NOTICE =
  *
  * Prefix-matched, so `git commit -am …` is covered and `git -c user.name=…
  * commit` is not — the agent above tried that form too, once, before falling
- * back to the plain one. Not worth a second entry: `gitEnv` and the image's
- * system-wide identity are why it reached for `-c` at all.
+ * back to the plain one. Still not worth a second entry, but no longer because
+ * the `-c` form is harmless: an agent that reaches for it also chooses what to
+ * put in it, and one of them put the operator's own address there and published
+ * it. What answers that is `COMMIT_IDENTITY_NOTICE`, on the system prompt,
+ * because an entry here would be read only by the permission modes that consult
+ * an allowlist and the run that did it was on `bypassPermissions`.
  */
 const ISOLATED_GIT_TOOLS = ["Bash(git add:*)", "Bash(git commit:*)"];
 
@@ -830,6 +834,54 @@ const RENDERING_NOTICE =
   "browser is not writable by you, and that refusal says nothing about whether " +
   "you can render. Take a screenshot to find out.";
 
+/**
+ * Never sign a commit with the address you were given to recognise the operator
+ * by.
+ *
+ * The CLI puts the signed-in account's email in every agent's own system prompt,
+ * worded as "use it only to identify the user, such as for authorship,
+ * attribution" — and an agent this app has just told to commit reads that as
+ * permission. Two commits on this repository's `main` were authored
+ * `UsageFoundry Agent <the operator's address>` by an isolated run that reached
+ * for `git -c user.name=… -c user.email=… commit` on its own, having never been
+ * asked to. GitHub maps a commit to an account by author email, so both were
+ * attributed to the operator's other GitHub identity and it appeared in the
+ * repository's contributor list. Nothing failed: the image's system-wide
+ * identity was correct and still is, the commits landed, and the attribution
+ * was only found weeks later by someone reading the contributors panel.
+ *
+ * `ISOLATED_GIT_TOOLS` cannot hold this. Its entries are prefix-matched, so the
+ * `-c` form is outside them by construction, and the run that did this was on
+ * `bypassPermissions`, where an allowlist decides nothing at all. The system
+ * prompt is the only thing that reaches every run whatever its mode, which is
+ * why the rule is stated here rather than enforced on the argv.
+ *
+ * It says *why* rather than only "do not", for `SELF_HOSTING_NOTICE`'s reason:
+ * an agent told only that a flag is forbidden reaches for `git config` or
+ * `GIT_AUTHOR_EMAIL` instead, where one told what an author email *is* to a
+ * forge stops looking for a way to spell it. All four spellings are named
+ * because the agent tried the first two in one session.
+ *
+ * The literal rule this inherits is satisfied the way the price list satisfies
+ * it: the strings it puts on every sibling's argv are git configuration keys,
+ * the only verb near them is "commit", and nothing here selects a process or
+ * suggests finding one. It carries no digits at all.
+ *
+ * Adding it costs every run in flight one cold prefix on its next cycle, once,
+ * at the deploy. Do not reword it for style — every edit charges that again
+ * across the whole fleet.
+ */
+const COMMIT_IDENTITY_NOTICE =
+  "Commit with the git identity this container already configures. Never " +
+  "override it — not with `-c user.email` or `-c user.name`, not with `git " +
+  "config`, not with `GIT_AUTHOR_EMAIL` or `GIT_COMMITTER_EMAIL`. The " +
+  "operator's address is given to you so you can recognise their work, not so " +
+  "you can sign yours with it: a forge maps a commit to an account by author " +
+  "email, so a commit carrying it is published under their name, and that " +
+  "attribution outlives both the run and the branch. If git ever refuses to " +
+  "commit for want of an identity, report that and stop rather than inventing " +
+  "one.";
+
 export function buildArgs(opts: {
   prompt: string;
   model: string | null;
@@ -1009,6 +1061,7 @@ export function buildArgs(opts: {
       SELF_HOSTING_NOTICE,
       DELEGATION_NOTICE,
       RENDERING_NOTICE,
+      COMMIT_IDENTITY_NOTICE,
       opts.fileCostNotice?.trim(),
     ]
       .filter((notice): notice is string => Boolean(notice))

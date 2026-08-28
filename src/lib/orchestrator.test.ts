@@ -2265,13 +2265,23 @@ describe("buildArgs", () => {
     // never saw the process-safety half has not been told why `pkill` is
     // denied, one that never saw the delegation half simply costs more, and one
     // that never saw the rendering half goes looking for a browser that is
-    // already installed and reads the refusal as "there is none".
+    // already installed and reads the refusal as "there is none", and one that
+    // never saw the identity half signs its commits with the operator's own
+    // address, which no part of this app would notice and a forge publishes.
     const args = buildArgs({ ...base, isolated: false });
     assert.equal(args.filter((a) => a === "--append-system-prompt").length, 1);
     const notice = args[args.indexOf("--append-system-prompt") + 1];
     assert.ok(notice.includes("pgrep -af"), "the process-safety notice is missing");
     assert.ok(notice.includes("sub-agent"), "the delegation notice is missing");
     assert.ok(notice.includes("playwright screenshot"), "the rendering notice is missing");
+    assert.ok(notice.includes("GIT_AUTHOR_EMAIL"), "the commit-identity notice is missing");
+    // The notice rides every run, not only the isolated ones it was written
+    // for: a run in the operator's own checkout is the one whose commits land
+    // where nobody reviews a branch first.
+    const owned = buildArgs({ ...base, isolated: true });
+    assert.ok(
+      owned[owned.indexOf("--append-system-prompt") + 1].includes("GIT_AUTHOR_EMAIL"),
+    );
   });
 
   it("adds the file price list to that same flag rather than a second one", () => {
@@ -2290,6 +2300,7 @@ describe("buildArgs", () => {
     assert.ok(notice.includes("pgrep -af"), "the process-safety notice is missing");
     assert.ok(notice.includes("sub-agent"), "the delegation notice is missing");
     assert.ok(notice.includes("playwright screenshot"), "the rendering notice is missing");
+    assert.ok(notice.includes("GIT_AUTHOR_EMAIL"), "the commit-identity notice is missing");
     assert.ok(notice.includes("116k"), "the file price list is missing");
   });
 
