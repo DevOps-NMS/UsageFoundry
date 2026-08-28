@@ -53,9 +53,13 @@ becomes a second incident:
 
 - **A server is still running against that volume.** The app holds the database
   open with its own write-ahead log; replacing the file underneath it does not
-  replace the database, it corrupts it. The check is `server.lock` in the data
-  directory, watched for a heartbeat — which works across containers, where a
-  pid would not.
+  replace the database, it corrupts it. The check is the age of the heartbeat in
+  `server.lock` in the data directory — which works across containers, where a
+  pid would not. A lock stamped within the last two minutes counts as a live
+  owner, because a server's beat stops for the length of one `git` call without
+  the server stopping. `docker compose stop` releases the lock, so the ordinary
+  sequence needs no wait; a container that was *killed* leaves its lock behind,
+  and the refusal names the second at which it counts as abandoned.
 - **The file is not one of this app's databases.** Restores are done under
   pressure from a directory of similar-looking files.
 - **It is not a readable SQLite database at all**, or fails `integrity_check`.

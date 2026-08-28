@@ -9827,8 +9827,12 @@ async function liveGuardTick(): Promise<void> {
  * paying stops having its cycles ended, which is the correct direction: the
  * alternative is a dry run per tick, and winnow's dry run parses the same whole
  * file for a token figure that is measured here to be unusable.
+ *
+ * Exported for `contextCeilingRace.test.ts` and for nothing else. Its only
+ * caller is `liveGuardTick`, which is reachable only through a `setInterval` a
+ * spawn starts, so the alternative to the export is a billed cycle.
  */
-async function checkContextCeilings(): Promise<void> {
+export async function checkContextCeilings(): Promise<void> {
   if (contextWatches.size === 0) return;
 
   // `pruningEnabled()` used to stand in front of this whole function, and moving
@@ -9871,6 +9875,19 @@ async function checkContextCeilings(): Promise<void> {
       continue;
     }
 
+    // Re-read after the await above, for the reason the budget loop re-reads
+    // `interrupts` after its own scan: the cycle this just measured may have
+    // ended while the transcript was being resolved, and everything below acts
+    // on a cycle it believes is still running. Identity rather than `has`,
+    // because the entry is re-set per cycle — a run whose *next* cycle started
+    // inside this window is a different conversation than the one measured, and
+    // ending it would charge that conversation for this one's size.
+    //
+    // The sample above is deliberately left standing: it is a true reading of a
+    // transcript that existed, and the occupancy series is the half of this
+    // function that is not gated on the run still working.
+    if (contextWatches.get(id) !== watch || interrupts.has(id)) continue;
+
     if (!pruning) continue;
     if (tokens < CYCLE_CONTEXT_CEILING_TOKENS) continue;
 
@@ -9902,6 +9919,15 @@ async function checkContextCeilings(): Promise<void> {
     }
     ceilingMeasuredAt.set(id, tokens);
     const plan = await planCut(transcript);
+    // And again, because that one is a winnow subprocess bounded by
+    // `PRUNE_TIMEOUT_MS` — two minutes in which a cycle has every chance to
+    // finish. Nothing below this line awaits, so the test and the write are one
+    // step: an interrupt written past a cycle's end is either a completed cycle
+    // refunded and its `DONE` discarded, a healthy run filed `stopped` by
+    // `interruptOutcome`, or — past `startRun`'s outer `finally` — an entry no
+    // deleter ever reaches, which stops the run's next resume dead.
+    if (contextWatches.get(id) !== watch || interrupts.has(id)) continue;
+
     const predicted = ceilingPayback(tokens, plan);
     if (predicted === null || predicted > PAYBACK_HORIZON_TURNS) {
       // Null declines here, which is the opposite of what `predictedPayback`'s
@@ -11004,11 +11030,37 @@ export async function reconcileInterruptedCycles(): Promise<number> {
  * Deliberately does *not* touch `reconcileOnBoot`'s rule that a restart never
  * resumes anything. This is about accounting for the cycle and making the
  * recovery tractable; a run stopped here is picked up by a person, as before.
+ *
+ * And all of it is the *owner's* to do, which is asked here rather than by the
+ * signal handler for the reason every other writer asks it at the write.
  */
 export async function shutdownRuns(
   sig: NodeJS.Signals,
 ): Promise<{ signalled: number; closed: number; recovered: number }> {
   shutdown.active = true;
+
+  // Ownership, read at the write. The `SELECT` below is install-wide by
+  // design — see its own comment — so in a process that does not own this
+  // directory the whole of what follows lands on somebody else's live runs:
+  // a `shutdown` event and its outbound webhook, `restart_closed = 1`, and
+  // `active_started_at` cleared on cycles whose agents are still working and
+  // still billing. That last one is the serious half and it fails open —
+  // `installBudget` and a workflow instance's budget both bound their spend
+  // below by that column, so nulling it widens two ceilings at once, silently,
+  // in the direction a guard may never move by accident. The second process is
+  // not hypothetical: it is the dev server an agent starts against an inherited
+  // `DATA_DIR`, and it is this server itself from the beat at which `heartbeat`
+  // finds the lock in another name.
+  //
+  // Its own children are killed anyway — they are this process's whatever the
+  // lock says — and outright, because the caller exits the moment this returns,
+  // so there is no grace left in which a gentler signal could be noticed. The
+  // three counts are what the shutdown *accounted for*, and it accounted for
+  // nothing.
+  if (!mayWriteDataDir()) {
+    killAllAgents("SIGKILL");
+    return { signalled: 0, closed: 0, recovered: 0 };
+  }
 
   const live = [...procs.keys()];
   const pending = db()
