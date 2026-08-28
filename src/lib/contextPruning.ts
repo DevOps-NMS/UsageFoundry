@@ -23,6 +23,7 @@ import type {
   PruneActivityDTO,
   PruneTier,
 } from "./apiTypes";
+import { PRUNE_ENGINE_LABEL } from "./pruneStatement";
 import { getSettings, type Settings } from "./settings";
 
 /**
@@ -178,12 +179,13 @@ export type { PruneTier };
 export const CYCLE_CONTEXT_CEILING_TOKENS = 200_000;
 
 /**
- * How many further turns a manufactured boundary is allowed to need.
+ * How many further turns a cut is allowed to need, under `paybackTurns`.
  *
- * Only the early-end path consults this. A cycle that has just crossed the
- * ceiling is by definition a long one, but "long" is not "has 60 turns left" —
- * nothing here knows how many remain, and a cut that needs more turns than the
- * run has is a cost with no return at all.
+ * `boundaryAction` consults this and nothing else does. A run that has just
+ * reached a cycle boundary may have any number of cycles left, and "has more
+ * work to do" is not "has 60 turns left" — nothing here knows how many remain,
+ * and a cut that needs more turns than the run has is a cost with no return at
+ * all.
  *
  * 18 because it is the break-even for cutting **half** the suffix
  * (`19·2 − 20`), which is the case winnow's own SPEC calls out as clearly worth
@@ -191,34 +193,61 @@ export const CYCLE_CONTEXT_CEILING_TOKENS = 200_000;
  * that this app cannot price, and the safe direction is to leave the context
  * alone: an unpruned cycle costs cache reads at 0.1×, where a cut that never
  * pays back has already spent the invalidation at ~2×.
+ *
+ * The ceiling asks the same question through a different formula and so needs
+ * its own number: `CEILING_PAYBACK_HORIZON_TURNS`.
  */
 export const PAYBACK_HORIZON_TURNS = 18;
+
+/**
+ * The same judgement at the ceiling, restated in the arithmetic used there.
+ *
+ * These are one policy — *cutting half is clearly worth doing, and past that
+ * this app is betting on a run's remaining length it cannot price* — expressed
+ * twice, because the two call sites price different quantities. `paybackTurns`
+ * is `19·(S/D) − 20` over the **suffix**, and half of it costs 18 turns.
+ * `ceilingPayback` is `20·(C − D)/D` over the **whole conversation**, and half
+ * of *it* costs 20.
+ *
+ * Sharing the 18 across both therefore refused the very case it was chosen to
+ * admit: an exactly-half cut priced at 20 against a limit of 18, off by the
+ * difference between two formulas rather than by any decision anyone made.
+ *
+ * So neither constant may be used at the other's call site, and folding them
+ * back together would reintroduce that. What they must keep in common is the
+ * *case* — half — not the number it comes out as.
+ */
+export const CEILING_PAYBACK_HORIZON_TURNS = 20;
 
 /**
  * How much a conversation must grow before the ceiling re-measures it.
  *
  * `checkContextCeilings` runs on the live ticker — every
  * `liveGuardIntervalSeconds`, 60 by default — and the measurement it takes
- * spawns `winnow plan` over the whole transcript. Without a growth gate a run
- * parked above the ceiling would spawn one subprocess a minute against a
- * multi-megabyte file, for hours.
+ * spawns the configured engine over the whole transcript (`ceilingCut`, so
+ * `winnow plan` or a `treat` dry run). Without a growth gate a run parked above
+ * the ceiling would spawn one subprocess a minute against a multi-megabyte
+ * file, for hours.
  *
  * ## Why growth, and why this much of it
  *
  * A decline can only become an approval if `D` grows faster than the
- * conversation does, and the gap is wide. A run declining at `D/C = 9%` needs
- * `D/C ≈ 53%` to clear `PAYBACK_HORIZON_TURNS`; even if **every** new token were
- * strippable that takes about 187,000 tokens of growth. So the answer is close
- * to stable, and a threshold well under that is already generous.
+ * conversation does, and clearing `CEILING_PAYBACK_HORIZON_TURNS` needs
+ * `D/C ≥ 50%`. Under the fork engine the gap to that is wide: a run declining
+ * at `D/C = 9%` would need about 164,000 further tokens to reach it even if
+ * **every** one of them were strippable, so the answer is close to stable and a
+ * threshold well under that is already generous.
  *
- * Not a latch, though, for the reason `boundaryDeclines` gives about the same
- * arithmetic: `D` is whatever the newest work happened to produce, and one cycle
- * that greps a large tree or runs a long build can make it jump. A permanent
- * decline on one reading would miss exactly that case.
+ * Under the in-place pruner it is not wide at all — `treat -rx aggressive`
+ * measures at 49%–53% of the file on this install, which straddles the
+ * threshold — and that is the case a latch would get wrong. `boundaryDeclines`
+ * makes the same argument about the same arithmetic: `D` is whatever the newest
+ * work happened to produce, and one cycle that greps a large tree or runs a long
+ * build moves it. A permanent decline on one reading would miss exactly that.
  *
  * 25,000 tokens is roughly five to eight turns at the rate these runs
- * accumulate context — frequent against a threshold that needs 187,000 to
- * matter, and a sixtieth of the subprocesses.
+ * accumulate context — frequent enough to catch a run crossing a threshold it
+ * is sitting on, and a sixtieth of the subprocesses.
  *
  * It also paces the operator-facing line, which is deliberate:
  * `ceilingDeclineMessage` is emitted once per measurement, so the log follows
@@ -1141,7 +1170,17 @@ export function paybackTurns(suffixBeforeCut: number, removedTokens: number): nu
  * same cuts priced at 74–275 turns where 209–771 was billed, which is how a
  * gate meant to catch exactly this let all three through.
  *
- * ## Two knowingly-imprecise inputs, both erring the same way
+ * ## Where `D` comes from, and why not from here
+ *
+ * `removedTokens` is converted by the estimator that produced it — see
+ * `ceilingCut`, and `treatRemovedTokens` for the case where a byte figure may
+ * not be divided by `BYTES_PER_TOKEN` at all. This function used to take
+ * `netBytes` and do that division itself, which quietly made it the arbiter of
+ * a units question it has no way to answer: it cannot tell a count of prompt
+ * bytes from a count of transcript bytes, and the second one over-reads the
+ * first by about four times on this install.
+ *
+ * ## The imprecision that remains, and which way it leans
  *
  * `apiContextNow` is `sampleContext`'s API-visible figure and not
  * `contextTokens`, deliberately — the transcript runs ~37% high because the
@@ -1149,27 +1188,23 @@ export function paybackTurns(suffixBeforeCut: number, removedTokens: number): nu
  * disk (`apiContextTokens` documents 183,803 against a real 114,485). But it
  * also carries the ~21.9k static head — system prompt and tool definitions —
  * which a resume re-reads rather than rewrites, so `apiContextNow − D` sits
- * about 10% above what actually gets written.
+ * about 10% above what actually gets written. That pushes `T*` up and declines
+ * more cuts, which is the direction to be wrong in on a gate whose failure mode
+ * was being too permissive.
  *
- * And `D` is transcript-measured, so it counts anything the intake filter had
- * already taken off the wire — bounded by the overlap between the two
- * mechanisms, measured at 4.06% in `intakeFilter.ts`.
- *
- * Both push `T*` up, which declines more cuts. That is the direction to be
- * wrong in on a gate whose failure mode was being too permissive.
- *
- * Null when there is nothing to weigh: no plan, or a plan that removes nothing.
- * **Null must decline here**, which is the opposite of `predictedPayback`'s
- * null — that one means "this run has not cut yet" and resolves to prune on
- * `boundaryAction`'s aggregate argument. This one means "no measurement", and
- * spending $1.80 on an unmeasured cut is the mistake being corrected.
+ * Null when there is nothing to weigh: no measurement, or one that removes
+ * nothing. **Null must decline here**, which is the opposite of
+ * `predictedPayback`'s null — that one means "this run has not cut yet" and
+ * resolves to prune on `boundaryAction`'s aggregate argument. This one means
+ * "no measurement", and spending $1.80 on an unmeasured cut is the mistake
+ * being corrected.
  */
 export function ceilingPayback(
   apiContextNow: number,
-  plan: { netBytes: number } | null,
+  cut: { removedTokens: number } | null,
 ): number | null {
-  if (!plan) return null;
-  const removed = plan.netBytes / BYTES_PER_TOKEN;
+  if (!cut) return null;
+  const removed = cut.removedTokens;
   if (removed <= 0) return null;
   const conversationAfter = Math.max(0, apiContextNow - removed);
   return Math.max(0, Math.round((20 * conversationAfter) / removed));
@@ -1602,6 +1637,260 @@ export function parsePlan(body: string): PlannedCut | null {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* What the engine in use would take out — read-only, at the ceiling   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What the configured pruner says it would remove from this conversation.
+ *
+ * One shape for both engines so the ceiling gate cannot be handed the wrong
+ * one, and `removedTokens` rather than bytes so that each estimator converts
+ * in its own terms. That conversion is where the two genuinely differ and it
+ * has no single right answer, so it belongs beside the measurement whose
+ * reasoning justifies it rather than inside the arithmetic that consumes it —
+ * `ceilingPayback` cannot tell transcript bytes from prompt bytes and must not
+ * be the place that decides.
+ */
+export interface CeilingCut {
+  /** Which engine measured it: the one that would do the cutting. */
+  engine: Settings["contextPruningEngine"];
+  /** In the same currency as `apiContextNow`. See each estimator. */
+  removedTokens: number;
+}
+
+/**
+ * The two figures a `treat` dry run prints, in bytes.
+ *
+ * Separated from the conversion so the parse can be tested against winnow's
+ * real output without a transcript, which is the half that breaks when the
+ * tool's wording moves.
+ */
+export interface TreatEstimate {
+  /** The transcript as it stands, as winnow measured it in this same run. */
+  totalBytes: number;
+  /** What the prescription would take out of it. */
+  freedBytes: number;
+}
+
+/**
+ * Bytes out of one of winnow's `fmt_bytes` renderings, or null.
+ *
+ * `legacy/cli.py:100` prints `123B`, `12.3KB` or `1.23MB`, and the KB and MB
+ * are binary — matching them with 1000 would be wrong by 2.4% at MB, which is
+ * the size every figure this reads comes back at.
+ *
+ * `fmt_tokens` beside it renders `K` and `M` with no `B`, so a line carrying
+ * both a token count and a byte count has exactly one match for this and the
+ * three shapes of winnow's `Saved` line collapse to one rule.
+ */
+function winnowBytes(line: string): number | null {
+  const m = /(\d+(?:\.\d+)?)(MB|KB|B)(?![A-Za-z])/.exec(line);
+  if (!m) return null;
+  const scale = m[2] === "MB" ? 1024 * 1024 : m[2] === "KB" ? 1024 : 1;
+  const value = Number(m[1]) * scale;
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The size and the saving out of `treat`'s dry-run summary.
+ *
+ * A text parse, because the inherited CLI has no `--json` on this subcommand —
+ * `plan` and `fork` are the new tree's commands and carry one, `treat` is not.
+ * Both figures come from the **same** run so the share below is taken against
+ * the file winnow actually measured, rather than against a `stat` that a live
+ * cycle may have appended to in between.
+ *
+ * Null when either line is missing or unreadable, which the caller reports
+ * rather than swallows: this is the one failure mode that looks exactly like a
+ * conversation with nothing worth removing, and the whole reason this function
+ * exists is that a wrong number here reads as a working feature.
+ */
+export function parseTreatEstimate(body: string): TreatEstimate | null {
+  const before = /^\s*Before\b.*$/m.exec(body);
+  const saved = /^\s*Saved\b.*$/m.exec(body);
+  if (!before || !saved) return null;
+  const totalBytes = winnowBytes(before[0]);
+  const freedBytes = winnowBytes(saved[0]);
+  if (totalBytes === null || freedBytes === null) return null;
+  if (totalBytes <= 0 || freedBytes < 0) return null;
+  return { totalBytes, freedBytes };
+}
+
+/**
+ * What `treat` would remove, as a share of the conversation the API carries.
+ *
+ * **Not `freedBytes / BYTES_PER_TOKEN`, and that is the whole of this
+ * function.** That constant converts *text* to tokens; a transcript is not the
+ * prompt. Measured on this install, session `02584a86` stood at 3.83 MB on
+ * disk against an API context of 258.3k tokens — 14.8 bytes a token, four
+ * times the constant — because the file holds JSON envelopes, thinking blocks
+ * with signatures, and tool results the intake filter had already taken off
+ * the wire. Read at 3.6 the same dry run's 1.79 MB came to 521k tokens
+ * "removed" from a 258k-token conversation, so `apiContextNow − D` floored at
+ * zero and every cut priced at 0 turns. A gate cannot be built on a quantity
+ * that can exceed the thing it is subtracted from.
+ *
+ * A share can't. `treat` reports a change in the size of the file, so the
+ * honest reading of it is proportional: the cut takes out this fraction of the
+ * transcript, so assume it takes out that fraction of the prompt. The units
+ * cancel, and `D ≤ apiContextNow` holds by construction.
+ *
+ * ## Why `planCut`'s figure is *not* converted this way
+ *
+ * The two engines' bytes are not the same measurement despite both being a
+ * delta on the same file. `plan` at tier CB strips results its rules select —
+ * `keep_last: 6`, `min_bytes: 2048`, an intervening-read test — so its bytes
+ * are recent, large results still standing in the prompt, and the overlap with
+ * what the intake filter had already dropped is bounded and measured at 4.06%
+ * (`intakeFilter.ts`). `treat -rx aggressive` strips **every** tool result in
+ * the file, most of which are old, already filtered, or both. So the absolute
+ * reading is defensible for one and not the other, and this is where the two
+ * part company rather than an inconsistency to be tidied away.
+ *
+ * ## What is still wrong with it, and in which direction
+ *
+ * The share is taken against the whole prompt, and ~55k tokens of that is a
+ * system prompt, tool list and `CLAUDE.md` no prune can reach (`PruneOutcome`
+ * records the measurement). Applying a 49% share to all of it therefore claims
+ * about a quarter more than a prune could deliver, which lowers `T*` and makes
+ * this **permissive** — the direction that has already been wrong once here.
+ * Correcting it needs a per-run head size this app does not have; what would
+ * settle it is a resume measured against its predecessor, which is what
+ * `resumeControl` is built to collect. Until then this is on
+ * `docs/verification.md`'s not-verified list rather than presented as a
+ * measurement.
+ */
+export function treatRemovedTokens(
+  estimate: TreatEstimate,
+  apiContextNow: number,
+): number {
+  return Math.round(apiContextNow * (estimate.freedBytes / estimate.totalBytes));
+}
+
+/**
+ * `winnow treat -rx <tier>`, dry, for one transcript.
+ *
+ * The same argv `spawnPrune` uses **without `--execute`**, which is what makes
+ * it a measurement: the inherited CLI's default is a dry run and the flag is
+ * the opt-in. It must stay that way — this is the one place in the app that
+ * names `treat` and does not want it to write, and it runs against a session a
+ * Claude process is holding open. `orchestrator_safe.refusal_for` will not
+ * save us there: it refuses a mutating argv only when it can see a live Claude
+ * *above itself* in the process tree, and in this container the walk stops at
+ * `next-server`, so the agent this measures is invisible to it.
+ *
+ * Failure is null and is reported, on `parseTreatEstimate`'s reasoning.
+ */
+export function estimateTreatCut(
+  transcriptPath: string,
+  tier: PruneTier,
+): Promise<TreatEstimate | null> {
+  return new Promise((resolve) => {
+    if (!winnowAvailable()) {
+      resolve(null);
+      return;
+    }
+    let stdout = "";
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const finish = (result: TreatEstimate | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+
+    try {
+      const child = spawn(
+        WINNOW_PYTHON,
+        ["-m", "winnow", "safe", "run", "--", "treat", transcriptPath, "-rx", tier],
+        // `spawnPrune`'s credential argument, unchanged: the app's own
+        // maintenance on root-owned transcripts.
+        { env: pruneEnv(), stdio: ["ignore", "pipe", "ignore"] },
+      );
+
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        // A summary and a strategy table, so this is bounded far tighter than
+        // `planCut`'s four megabytes — that one carries a pointer per stripped
+        // result and this carries a line per strategy.
+        if (stdout.length < 200_000) stdout += chunk;
+      });
+
+      timer = setTimeout(() => child.kill("SIGKILL"), PRUNE_TIMEOUT_MS);
+      timer.unref?.();
+
+      child.on("error", () => finish(null));
+      child.on("close", (code) => {
+        if (code !== 0) {
+          finish(null);
+          return;
+        }
+        const parsed = parseTreatEstimate(stdout);
+        if (parsed === null) {
+          // Reported rather than returned quietly. A wording change in winnow
+          // would otherwise silence the ceiling on every install at once,
+          // while looking exactly like conversations with nothing in them.
+          noteBookkeepingFailure(
+            "parseTreatEstimate",
+            new Error("no readable Before/Saved figures in `treat`'s dry run"),
+          );
+        }
+        finish(parsed);
+      });
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+/**
+ * What a cut would take out, measured by the engine that would take it.
+ *
+ * The ceiling used to ask `planCut` whatever the setting said, and `plan` is
+ * the **new** rule engine: SPEC §4's six rules at tier CB, which is what
+ * `contextPruningEngine: "winnow"` runs and is not what `"legacy"` runs.
+ * Measured on the two transcripts this install declined on 2026-08-28, tier CB
+ * would have stripped 9 of 183 and 13 of 172 tool results — 2.2% and 7.1% of
+ * the file — where `treat -rx aggressive`, the pruner actually configured,
+ * strips every one of them and frees 49% and 53%. So the gate refused every
+ * crossing on a figure five to twenty times smaller than the cut it was
+ * refusing, and `prune_receipts` has stood empty since 2026-08-26 while the
+ * decline line repeated every few minutes.
+ *
+ * `planCut`'s own docblock names this failure — "gating one engine's action on
+ * the other's arithmetic would be a category error that produced plausible
+ * numbers, which is the worst kind" — about `break_even_turns`. Reading its
+ * `netBytes` instead was the same error wearing a different field name, so the
+ * pairing is made structural here: one function resolves the engine, and there
+ * is no way to reach a measurement without going through it.
+ *
+ * The tier each engine is asked at differs on purpose. `plan` is fixed at
+ * `PLAN_TIER` because `gentle`/`standard`/`aggressive` and `C`/`CB`/`CBA` name
+ * different things and there is no translation; `treat` is asked at
+ * `contextPruningStrictness`, because that is literally the argv the prune
+ * would run with.
+ */
+export async function ceilingCut(
+  transcriptPath: string,
+  apiContextNow: number,
+  s: Settings = getSettings(),
+): Promise<CeilingCut | null> {
+  if (s.contextPruningEngine === "winnow") {
+    const plan = await planCut(transcriptPath);
+    if (plan === null) return null;
+    return { engine: "winnow", removedTokens: plan.netBytes / BYTES_PER_TOKEN };
+  }
+  const estimate = await estimateTreatCut(transcriptPath, s.contextPruningStrictness);
+  if (estimate === null) return null;
+  return {
+    engine: "legacy",
+    removedTokens: treatRemovedTokens(estimate, apiContextNow),
+  };
+}
+
 /** How many distinct faults get a durable row before the rest are stdout only. */
 const MAX_REPORTED_FAULTS = 32;
 
@@ -1715,7 +2004,7 @@ export function recordPlanObservation(
  * to use it.
  *
  * The gate that does belong on the early-end path is the one already there, and
- * it is `PAYBACK_HORIZON_TURNS` deciding whether to interrupt at all
+ * it is `CEILING_PAYBACK_HORIZON_TURNS` deciding whether to interrupt at all
  * (`orchestrator.ts`, the ceiling watcher). That is the decision with a real
  * cost behind it.
  *
@@ -1967,18 +2256,37 @@ export function ceilingDeclineMessage(o: {
   removedTokens: number;
   /** `ceilingPayback`'s answer; null when there was no measurement to make. */
   turnsNeeded: number | null;
+  /** Which engine measured it, or null where nothing could be measured. */
+  engine: CeilingCut["engine"] | null;
   /** False for the first line of a run, true for every one after it. */
   repeat: boolean;
 }): string {
-  const unpriceable = o.turnsNeeded === null || o.removedTokens <= 0;
   const share =
     o.contextTokens > 0 ? (o.removedTokens / o.contextTokens) * 100 : 0;
-  const finding = unpriceable
-    ? `nothing here could be priced as worth removing`
-    : `a cut would remove ${fmtTokens(o.removedTokens)} tokens ` +
-      `(${share.toFixed(1)}% of it) and need ${o.turnsNeeded} further turns to ` +
-      `pay for the rewrite that ending this cycle would cause, against a limit ` +
-      `of ${PAYBACK_HORIZON_TURNS}`;
+  // Named, because the question this line failed to answer for a whole day was
+  // "which engine's figure is this". It was `plan`'s — the fork engine's rules
+  // — on an install running the in-place pruner, and nothing on screen said so.
+  // Through `PRUNE_ENGINE_LABEL` rather than a second vocabulary, so the engine
+  // reads the same here as on the settings page and the dashboard.
+  const engine = o.engine
+    ? `the pruner in use (${PRUNE_ENGINE_LABEL[o.engine].toLowerCase()})`
+    : null;
+
+  // Three findings, not two. "The pruner ran and found nothing" and "nothing
+  // measured it" are the same blank on screen and opposite facts underneath:
+  // the first is a clean conversation and the second is a winnow that would not
+  // run, a wording change in its output, or a transcript that could not be
+  // read. Collapsing them is the failure this whole area keeps having — an
+  // operator cannot tell a working feature from a broken one.
+  const finding =
+    engine === null
+      ? `nothing here could be measured, so no cut has been priced`
+      : o.turnsNeeded === null || o.removedTokens <= 0
+        ? `${engine} found nothing here worth removing`
+        : `${engine} would remove ${fmtTokens(o.removedTokens)} tokens ` +
+          `(${share.toFixed(1)}% of it) and need ${o.turnsNeeded} further turns ` +
+          `to pay for the rewrite that ending this cycle would cause, against a ` +
+          `limit of ${CEILING_PAYBACK_HORIZON_TURNS}`;
 
   if (o.repeat) {
     return (

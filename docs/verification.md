@@ -1720,6 +1720,46 @@ Built and exercised against real transcripts:
   two runs above are **not** retroactively corrected — `runs.spent_usd` is
   stored, not derived, so both rows keep their inflated figures.
 
+- **The context ceiling was pricing the wrong engine's cut, measured against
+  the running container on 2026-08-28.** The operator's report was that pruning
+  "would only cut 8k tokens and do basically nothing" on the legacy engine. It
+  was reading `winnow plan --tier CB` — the fork engine's classifier — on an
+  install running `treat -rx aggressive`. Both engines were run over the two
+  transcripts that produced the declines, inside the deployed container
+  (winnow 1.8.39, `WINNOW_ORCHESTRATOR=1`, `treat` dry-run, nothing written):
+
+  | session | `plan --tier CB` | `treat -rx aggressive` |
+  |---|---|---|
+  | `02584a86` (run `98ade0c1`) | 30,729 B = 8.5k tok, 2.2%, 9/183 results | 1.79 MB of 3.65 MB — **49%**, 183/183 results |
+  | `de288909` (run `547f56a1`) | 68,776 B = 19.1k tok, 7.1%, 13/172 results | 1.50 MB of 2.83 MB — **53%**, 172/172 results |
+
+  The plan column reproduces the `run_events` lines exactly ("8.0k tokens
+  (3.1%)", "19.1k tokens (7.5%)"). The gap is one strategy:
+  `tool-use-result-strip` takes every tool result where CB's B1/B2/C1/C2/C3
+  fired on 9 of 183. Four further transcripts of 3–13 MB gave the same shape —
+  plan 0%, 8.6%, 11.0%, 25.2% against treat 49.8%, 53.9%, 54.9%, 52.8%. The
+  record agrees: the last `prune_receipts` row is 2026-08-26 21:14 and the
+  decline line repeated every few minutes for two days after it.
+
+- **The corrected path was run end to end against that same output.** The real
+  captured stdout of both dry runs was fed through the compiled
+  `parseTreatEstimate` → `treatRemovedTokens` → `ceilingPayback`
+  → `ceilingDeclineMessage`, at the API-context figures the two runs actually
+  declined at: `02584a86` reads 49.0%, D = 126,673 of C = 258,300, T\* = 21 —
+  still declined, by one turn — and `de288909` reads 53.0%, D = 135,053 of
+  C = 254,800, T\* = 18 — pruned. That the two land either side of a horizon of
+  20 is the arithmetic being right rather than the gate being off: the in-place
+  pruner frees about half these transcripts, and half is exactly where
+  `20·(C − D)/D` crosses.
+
+- **The units bug that reading found, and why the share is not
+  `BYTES_PER_TOKEN`.** Session `02584a86` stood at 3,832,363 bytes on disk
+  against an API context of 258,300 tokens — 14.8 bytes a token, four times the
+  constant — so the dry run's 1.79 MB read at 3.6 comes to 521k tokens
+  "removed" from a 258k-token conversation. `ceilingPayback` floors the
+  remainder at zero and prices that at 0 turns, i.e. prune unconditionally. The
+  test asserts the overshoot before asserting the fix.
+
 ## Not yet verified by hand
 
 The live-enforcement and pause/resume paths typecheck, build (including the
@@ -1748,6 +1788,29 @@ through before trusting this unattended:
 > confirmation the branch was reached, and the run's `session_id` staying a v4
 > UUID with no new `fork_attempts` row is the legacy engine proven by execution
 > rather than by reading.
+>
+> **No early-end prune has run since the ceiling was repointed at the
+> configured engine.** The change landed 2026-08-28 with `npm run typecheck`
+> (exit 0), `npm test` (**1,980 tests / 1 failure, `backupRestore.test.ts`'s
+> truncated-copy case, which fails identically on the unmodified tree**), and
+> the end-to-end reading above against the deployed container. What has **not**
+> happened is a real crossing taking the prune branch: every reading available
+> to check it against was a decline, and the one transcript that now clears the
+> horizon was measured after its run had finished. So `prune_receipts` gaining a
+> row from a ceiling crossing, the cycle refund, and the decline line's new
+> engine clause in the operator's own pane are all still unexercised in the
+> running app.
+>
+> **The share `treatRemovedTokens` takes is knowingly biased, and by how much is
+> not measured.** It applies the cut's share of the *file* to the whole API
+> context, ~55k tokens of which is a system prompt, tool list and `CLAUDE.md`
+> that no prune reaches — so it over-claims `D` by roughly a quarter and makes
+> the gate **permissive**, which is the direction that has already been wrong
+> here once. Correcting it needs a per-run head size this app does not have.
+> What would settle it is the experiment `resumeControl` already collects for: a
+> resume measured against its predecessor, giving the real reduction in what the
+> next request carries. Until then the 21-and-18 above are estimates, and a cut
+> the gate now allows may still not repay.
 >
 > **The `unavailable` branch has never been rendered.** It needs an image built
 > with `WINNOW_REF=` empty, which has not been done — the running container

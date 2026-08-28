@@ -5,7 +5,7 @@ import path from "node:path";
 import { after, before, describe, it } from "node:test";
 // Type-only, so it is erased rather than hoisted above the environment set up
 // in `before` — the reason every other import in this file is dynamic.
-import type { PlannedCut } from "./contextPruning";
+import type { CeilingCut } from "./contextPruning";
 import type { Interrupt } from "./orchestrator";
 
 /**
@@ -13,7 +13,7 @@ import type { Interrupt } from "./orchestrator";
  * while it was deciding.
  *
  * `checkContextCeilings` reads `interrupts` at the top of its loop and then
- * awaits twice — a transcript resolution, and `planCut`, which is a winnow
+ * awaits twice — a transcript resolution, and `ceilingCut`, which is a winnow
  * subprocess bounded by `PRUNE_TIMEOUT_MS` at two minutes. Everything it does
  * after those awaits is about a cycle it believes is still running, and the
  * window is wide enough that a cycle ending inside it is ordinary rather than a
@@ -36,9 +36,9 @@ import type { Interrupt } from "./orchestrator";
  * It is its own file for `cycleDeadline.test.ts`'s reason — `DATA_DIR` and
  * `CLAUDE_HOME` are read into `config.ts` at load, and this needs a projects
  * tree of its own for `resolveSessionTranscript` to walk — and one of its own:
- * it replaces `planCut` on the module `orchestrator.ts` calls it through, which
- * is `shutdown.test.ts`'s device and not something to leave standing in a file
- * other cases share.
+ * it replaces `ceilingCut` on the module `orchestrator.ts` calls it through,
+ * which is `shutdown.test.ts`'s device and not something to leave standing in a
+ * file other cases share.
  */
 
 /** Over `CYCLE_CONTEXT_CEILING_TOKENS`, which is 200,000. */
@@ -49,25 +49,19 @@ const OVER_CEILING = 210_000;
  *
  * The gate under test is the interrupt map, not the payback arithmetic — that is
  * `contextPruning.test.ts`'s — so this is deliberately far past the horizon in
- * the *acting* direction. A plan that declined would leave the interrupt site
- * unreached and both cases below vacuously green.
+ * the *acting* direction. A measurement that declined would leave the interrupt
+ * site unreached and both cases below vacuously green.
  */
-const HUGE_CUT: PlannedCut = {
-  tier: "CB",
-  toolCalls: 40,
-  stripped: 40,
-  removedBytes: 1_000_000,
-  pointerOverhead: 0,
-  netBytes: 1_000_000,
-  suffixBytes: 10_000,
-  breakEvenTurns: 0,
+const HUGE_CUT: CeilingCut = {
+  engine: "legacy",
+  removedTokens: OVER_CEILING,
 };
 
 let root: string;
 let orchestrator: typeof import("./orchestrator");
 let pruningMod: typeof import("./contextPruning");
 let dbMod: typeof import("./db");
-let realPlanCut: typeof import("./contextPruning").planCut;
+let realCeilingCut: typeof import("./contextPruning").ceilingCut;
 let realPruningEnabled: typeof import("./contextPruning").pruningEnabled;
 let seq = 0;
 
@@ -163,7 +157,7 @@ before(async () => {
   pruningMod = await import("./contextPruning");
   orchestrator = await import("./orchestrator");
 
-  realPlanCut = pruningMod.planCut;
+  realCeilingCut = pruningMod.ceilingCut;
   realPruningEnabled = pruningMod.pruningEnabled;
   // The acting half is gated on the feature, and both cases are about acting.
   // Stubbed rather than switched on through `saveSettings`, because
@@ -174,7 +168,7 @@ before(async () => {
 });
 
 after(() => {
-  patch("planCut", realPlanCut);
+  patch("ceilingCut", realCeilingCut);
   patch("pruningEnabled", realPruningEnabled);
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -187,7 +181,7 @@ after(() => {
  * reaches these through its own import, and a seam it does not have would pin
  * the test's wiring instead of the tick's.
  */
-function patch<K extends "planCut" | "pruningEnabled">(
+function patch<K extends "ceilingCut" | "pruningEnabled">(
   name: K,
   fn: (typeof import("./contextPruning"))[K],
 ): void {
@@ -195,14 +189,14 @@ function patch<K extends "planCut" | "pruningEnabled">(
 }
 
 describe("the context ceiling against a cycle that ends while it is deciding", () => {
-  it("writes no interrupt for a run that left contextWatches during planCut", async () => {
+  it("writes no interrupt for a run that left contextWatches during the measurement", async () => {
     const id = liveCycle();
     let planned = false;
 
     // Exactly the ordering the two-minute window makes ordinary: the child
     // exits and `startRun`'s inner `finally` clears the watch while winnow is
     // still parsing the transcript this tick handed it.
-    patch("planCut", async () => {
+    patch("ceilingCut", async () => {
       planned = true;
       contextWatches().delete(id);
       return HUGE_CUT;
@@ -210,7 +204,7 @@ describe("the context ceiling against a cycle that ends while it is deciding", (
 
     await orchestrator.checkContextCeilings();
 
-    assert.ok(planned, "the tick never got as far as planning a cut, so this proves nothing");
+    assert.ok(planned, "the tick never got as far as measuring a cut, so this proves nothing");
     assert.equal(
       interrupts().get(id),
       undefined,
@@ -222,7 +216,7 @@ describe("the context ceiling against a cycle that ends while it is deciding", (
   it("still ends a cycle that is genuinely over the ceiling", async () => {
     const id = liveCycle();
 
-    patch("planCut", async () => HUGE_CUT);
+    patch("ceilingCut", async () => HUGE_CUT);
 
     await orchestrator.checkContextCeilings();
 

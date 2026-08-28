@@ -69,6 +69,7 @@ import {
   forgetContextCheck,
   freshestPayback,
   PAYBACK_HORIZON_TURNS,
+  CEILING_PAYBACK_HORIZON_TURNS,
   paybackTurns,
   type PaybackReading,
   boundaryAction,
@@ -79,6 +80,7 @@ import {
   pendingForkFor,
   PLAN_TIER,
   markForkResumed,
+  ceilingCut,
   planCut,
   pruneTranscript,
   pruningEnabled,
@@ -7054,9 +7056,10 @@ async function settleBoundary(
  * There is no payback gate here and that is deliberate. The ceiling watcher has
  * already made the only decision with a cost behind it — whether to spend a work
  * cycle manufacturing this boundary, which it takes against
- * `PAYBACK_HORIZON_TURNS`. That cycle is spent by the time this runs, cut or no
- * cut, so a second gate on the same arithmetic could only decline to use a
- * boundary already paid for. `BOUNDARY_BREAK_EVEN_BUDGET` carries the argument.
+ * `CEILING_PAYBACK_HORIZON_TURNS`. That cycle is spent by the time this runs,
+ * cut or no cut, so a second gate on the same arithmetic could only decline to
+ * use a boundary already paid for. `BOUNDARY_BREAK_EVEN_BUDGET` carries the
+ * argument.
  *
  * That is not in tension with passing `early-end` below, though it reads like
  * it. Two different questions:
@@ -9869,17 +9872,22 @@ async function liveGuardTick(): Promise<void> {
  * stopping at the first `usage` frame — a read and a split for a file of a few
  * megabytes, once a minute per live run.
  *
- * ## Why the payback test uses the last receipt
+ * ## Why the payback test measures this conversation
  *
  * Ending a cycle manufactures a boundary, so unlike the one at the end of a
  * cycle it pays the invalidation in full and only pays back over later turns.
- * The test for that is `paybackTurns`, which needs to know how much a prune will
- * remove — and the only honest way to know is to have pruned this run before.
- * So the first crossing on a run always acts, and every crossing after it is
- * predicted from what the last one actually took out. A run whose prunes are not
- * paying stops having its cycles ended, which is the correct direction: the
- * alternative is a dry run per tick, and winnow's dry run parses the same whole
- * file for a token figure that is measured here to be unusable.
+ * That is `ceilingPayback`, and it needs to know how much a prune would remove
+ * *here*. It used to be inferred instead from this run's last receipt, which
+ * meant the first crossing on every run acted unconditionally — a $1.80 cold
+ * rewrite decided by the absence of a reading rather than by one.
+ *
+ * So a dry run per measurement, which is affordable because
+ * `CEILING_REMEASURE_GROWTH_TOKENS` paces it by the conversation's growth
+ * rather than by the ticker. What it reads off that dry run is a **byte**
+ * figure: winnow's own token count is anchored on the `usage` frames and does
+ * not move when content is stripped, so it prints a 0% saving on a cut that
+ * halves the file, and `treatRemovedTokens` records what converting the bytes
+ * costs instead.
  *
  * Exported for `contextCeilingRace.test.ts` and for nothing else. Its only
  * caller is `liveGuardTick`, which is reachable only through a `setInterval` a
@@ -9899,7 +9907,8 @@ export async function checkContextCeilings(): Promise<void> {
   // acting-on-it belongs with the feature. It costs nothing extra where pruning
   // is on: one scan answers both, and the sample is taken before the ceiling
   // comparison rather than after, which would record only runs already over it.
-  const pruning = pruningEnabled();
+  const settings = getSettings();
+  const pruning = pruningEnabled(settings);
   // One walk of the projects tree for the whole tick rather than one per watched
   // run, which is the same hoist the `transcript` binding below performs within
   // a single run. Every run was walking the identical tree for its own basename:
@@ -9978,7 +9987,10 @@ export async function checkContextCeilings(): Promise<void> {
       continue;
     }
     ceilingMeasuredAt.set(id, tokens);
-    const plan = await planCut(transcript);
+    // Asked of the engine the operator chose, not of `plan` regardless. The two
+    // classify differently enough that reading one to decide the other's action
+    // refused every crossing this install saw for two days — see `ceilingCut`.
+    const cut = await ceilingCut(transcript, tokens, settings);
     // And again, because that one is a winnow subprocess bounded by
     // `PRUNE_TIMEOUT_MS` — two minutes in which a cycle has every chance to
     // finish. Nothing below this line awaits, so the test and the write are one
@@ -9988,8 +10000,8 @@ export async function checkContextCeilings(): Promise<void> {
     // deleter ever reaches, which stops the run's next resume dead.
     if (contextWatches.get(id) !== watch || interrupts.has(id)) continue;
 
-    const predicted = ceilingPayback(tokens, plan);
-    if (predicted === null || predicted > PAYBACK_HORIZON_TURNS) {
+    const predicted = ceilingPayback(tokens, cut);
+    if (predicted === null || predicted > CEILING_PAYBACK_HORIZON_TURNS) {
       // Null declines here, which is the opposite of what `predictedPayback`'s
       // null meant. That one was "no history", and `boundaryAction`'s aggregate
       // argument says an unknown of that kind should prune. This one is "no
@@ -10009,8 +10021,9 @@ export async function checkContextCeilings(): Promise<void> {
         id,
         ceilingDeclineMessage({
           contextTokens: tokens,
-          removedTokens: plan ? Math.round(plan.netBytes / BYTES_PER_TOKEN) : 0,
+          removedTokens: cut ? Math.round(cut.removedTokens) : 0,
           turnsNeeded: predicted,
+          engine: cut?.engine ?? null,
           repeat: explained,
         }),
       );

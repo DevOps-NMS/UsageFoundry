@@ -23,8 +23,11 @@ import {
   parseFork,
   parsePlan,
   paybackTurns,
+  parseTreatEstimate,
   PLAN_TIER,
+  treatRemovedTokens,
   PAYBACK_HORIZON_TURNS,
+  CEILING_PAYBACK_HORIZON_TURNS,
   PRUNE_TIERS,
   sumPruneSavings,
   type PruneReceiptRow,
@@ -152,28 +155,39 @@ describe("ceilingPayback — what a manufactured boundary would cost", () => {
       // The conversation as it stood before the cut, in the currency the
       // ceiling reads. `write` is what was left after it.
       const apiContextNow = m.write + removed;
-      const predicted = ceilingPayback(apiContextNow, { netBytes: m.netBytes })!;
+      // `removedTokens` spelled out at the call site rather than derived inside
+      // `ceilingPayback`, because the conversion is now the estimator's and
+      // differs per engine. These three are `fork_attempts` rows, so the
+      // conversion that applies is `ceilingCut`'s winnow branch — `netBytes`
+      // over `BYTES_PER_TOKEN` — and the figures below are unchanged by the
+      // move.
+      const predicted = ceilingPayback(apiContextNow, { removedTokens: removed })!;
       assert.ok(
         Math.abs(predicted - m.billed) <= 1,
         `predicted ${predicted} against a billed ${m.billed}`,
       );
       assert.ok(
-        predicted > PAYBACK_HORIZON_TURNS,
+        predicted > CEILING_PAYBACK_HORIZON_TURNS,
         "every one of these must now be refused — that is the whole point",
       );
     });
   }
 
-  it("clears the horizon only when the cut is worth about half the conversation", () => {
-    // T* = 20·(1−f)/f, so the horizon of 18 turns needs f ≈ 53%. This is the
-    // number that says pruning is the wrong tool for these conversations:
-    // winnow finds 2–10% in them, and no tier setting moves that.
+  it("clears the horizon at exactly half the conversation, which is what the constant means", () => {
+    // The derivation `CEILING_PAYBACK_HORIZON_TURNS` exists to hold. T* is
+    // 20·(1−f)/f, so an exactly-half cut costs 20 — and the horizon is 20 so
+    // that it is admitted. Shared with `PAYBACK_HORIZON_TURNS` it was 18, and
+    // half priced at 20 was refused by two turns that no decision put there.
     const conversation = 200_000;
-    const half = conversation * 0.53 * BYTES_PER_TOKEN;
-    assert.ok(ceilingPayback(conversation, { netBytes: half })! <= PAYBACK_HORIZON_TURNS);
+    assert.equal(ceilingPayback(conversation, { removedTokens: conversation / 2 }), 20);
+    assert.equal(CEILING_PAYBACK_HORIZON_TURNS, 20);
 
-    const tenth = conversation * 0.1 * BYTES_PER_TOKEN;
-    assert.equal(ceilingPayback(conversation, { netBytes: tenth }), 180);
+    // And the two constants must not be equal, or the divergence this pins is
+    // untestable and the next reader folds them back together.
+    assert.notEqual(CEILING_PAYBACK_HORIZON_TURNS, PAYBACK_HORIZON_TURNS);
+
+    const tenth = conversation * 0.1;
+    assert.equal(ceilingPayback(conversation, { removedTokens: tenth }), 180);
   });
 
   it("answers null when there is no measurement, which the caller declines on", () => {
@@ -182,16 +196,133 @@ describe("ceilingPayback — what a manufactured boundary would cost", () => {
     // caller must not spend a boundary on it. A number here — 0, or Infinity —
     // would make the gate decide on something nobody measured.
     assert.equal(ceilingPayback(200_000, null), null);
-    assert.equal(ceilingPayback(200_000, { netBytes: 0 }), null);
-    assert.equal(ceilingPayback(200_000, { netBytes: -5 }), null);
+    assert.equal(ceilingPayback(200_000, { removedTokens: 0 }), null);
+    assert.equal(ceilingPayback(200_000, { removedTokens: -5 }), null);
   });
 
   it("does not go negative when the cut is bigger than the conversation", () => {
-    // Reachable: `netBytes` is transcript-measured and `apiContextNow` is the
-    // API-visible figure, and the transcript runs high because the intake
-    // filter drops results on the wire that Claude Code still writes to disk.
-    // So a cut can be reported as larger than the conversation it is cut from.
-    assert.equal(ceilingPayback(1_000, { netBytes: 900_000 }), 0);
+    // Unreachable through `ceilingCut`'s legacy branch, which takes a share of
+    // `apiContextNow` and so cannot exceed it, and bounded but not impossible
+    // through the winnow branch: `netBytes` is transcript-measured where
+    // `apiContextNow` is API-visible, and the transcript runs high because the
+    // intake filter drops results on the wire that Claude Code still writes to
+    // disk. Held anyway — this is the floor that stops a units mistake becoming
+    // a negative cost.
+    assert.equal(ceilingPayback(1_000, { removedTokens: 900_000 }), 0);
+  });
+});
+
+describe("parseTreatEstimate — the in-place pruner's dry run", () => {
+  /**
+   * Real output, from `winnow safe run -- treat <session> -rx aggressive` at
+   * 1.8.39 in the deployed image, on session `02584a86` — the conversation the
+   * ceiling declined on 2026-08-28 while reading `plan`'s 8.0k tokens.
+   */
+  const REAL = [
+    "",
+    "  winnow — aggressive prescription",
+    "",
+    "  Before     311.7K tokens    3.65MB  791 messages",
+    "  After      311.7K tokens    1.87MB  791 messages",
+    "  Saved           0 tokens (0.0%)  1.79MB freed",
+    "  Context  [====----------------] 20% of 1.00M",
+    "",
+    "  What changed:",
+    "    tool-use-result-strip          1.35MB   183 msgs",
+    "    envelope-strip                 41.0KB   269 msgs",
+    "",
+    "  Dry run — pass --execute to apply.",
+  ].join("\n");
+
+  it("reads the size and the saving off the summary", () => {
+    // Not rounded: both figures exist only to be divided by each other, and a
+    // round trip through an integer would cost precision the share cannot spare
+    // — winnow prints two decimals at MB, so the share is already ±0.2pp.
+    const e = parseTreatEstimate(REAL)!;
+    assert.equal(e.totalBytes, 3.65 * 1024 * 1024);
+    assert.equal(e.freedBytes, 1.79 * 1024 * 1024);
+  });
+
+  it("takes the byte figure and never the token figure beside it", () => {
+    // The trap this parse exists to avoid. Under orchestrator-safe mode
+    // `metadata-strip` is excluded, so the `usage` frames survive and winnow's
+    // exact token count re-anchors on the same turn — it prints "0 tokens
+    // (0.0%)" for a cut that halves the file. A parser that took the first
+    // number on the line would price every legacy cut at nothing and decline
+    // for ever, which is the bug being fixed wearing a different hat.
+    const e = parseTreatEstimate(REAL)!;
+    assert.ok(e.freedBytes > 0, "the saving must come from the byte column");
+  });
+
+  it("reads binary KB and MB, which is what winnow prints", () => {
+    // `fmt_bytes` divides by 1024 and 1024², so decimal units would be 2.4%
+    // low at MB — small, in the direction of declining, and invisible.
+    const e = parseTreatEstimate(
+      "  Before      53.2KB  10 messages\n  Saved       22.0KB (41.4%)",
+    )!;
+    assert.equal(e.totalBytes, 53.2 * 1024);
+    assert.equal(e.freedBytes, 22.0 * 1024);
+  });
+
+  it("reads a prescription that found nothing rather than failing on it", () => {
+    // `-rx gentle` on a real transcript here prints exactly this. Zero is an
+    // answer — `ceilingPayback` declines on it — and null is a fault, so the
+    // two must not collapse.
+    const e = parseTreatEstimate(
+      "  Before     194.9K tokens    9.95MB  310 messages\n" +
+        "  Saved           0 tokens (0.0%)  0B freed",
+    )!;
+    assert.equal(e.freedBytes, 0);
+  });
+
+  it("is null when the wording moves, rather than reporting a saving of zero", () => {
+    // The failure mode worth separating: a winnow release that renames these
+    // lines must not read as "nothing worth removing" on every install at once.
+    // `estimateTreatCut` files an ops event on this branch.
+    assert.equal(parseTreatEstimate("Before 3.65MB\nnothing else"), null);
+    assert.equal(parseTreatEstimate("  Saved  1.79MB freed"), null);
+    assert.equal(parseTreatEstimate(""), null);
+  });
+});
+
+describe("treatRemovedTokens — a share, never a byte count", () => {
+  it("is bounded by the conversation it is subtracted from", () => {
+    // The whole reason this is not `freedBytes / BYTES_PER_TOKEN`. Session
+    // `02584a86` stood at 3.83 MB against an API context of 258.3k tokens —
+    // 14.8 bytes a token — so the 1.79 MB this dry run frees reads as 521k
+    // tokens at 3.6, from a 258k-token conversation. `ceilingPayback` would
+    // floor the remainder at zero and price the cut at 0 turns: prune always.
+    const estimate = { totalBytes: 3_832_363, freedBytes: 1_876_951 };
+    const apiContextNow = 258_300;
+
+    const viaBytes = estimate.freedBytes / BYTES_PER_TOKEN;
+    assert.ok(
+      viaBytes > apiContextNow,
+      "the reading this replaces must exceed the conversation, or this proves nothing",
+    );
+    assert.equal(ceilingPayback(apiContextNow, { removedTokens: viaBytes }), 0);
+
+    const removed = treatRemovedTokens(estimate, apiContextNow);
+    assert.ok(removed < apiContextNow);
+    assert.equal(removed, 126_506);
+  });
+
+  it("prices a real declined crossing at the boundary the physics puts it on", () => {
+    // Both measured on 2026-08-28 with the deployed image. The in-place pruner
+    // frees about half of these transcripts, so `T*` lands next to the horizon
+    // rather than three orders away from it — one side each, which is the
+    // answer being right rather than the gate being switched off.
+    const declined = treatRemovedTokens(
+      { totalBytes: 3_832_363, freedBytes: 1_876_951 },
+      258_300,
+    );
+    assert.equal(ceilingPayback(258_300, { removedTokens: declined }), 21);
+
+    const allowed = treatRemovedTokens(
+      { totalBytes: 2_963_312, freedBytes: 1_572_864 },
+      254_800,
+    );
+    assert.ok(ceilingPayback(254_800, { removedTokens: allowed })! <= CEILING_PAYBACK_HORIZON_TURNS);
   });
 });
 
@@ -938,6 +1069,7 @@ describe("ceilingDeclineMessage — a run left alone still says so", () => {
     contextTokens: 205_600,
     removedTokens: 17_594,
     turnsNeeded: 209,
+    engine: "winnow" as const,
   };
 
   it("explains itself the first time, numbers and cadence included", () => {
@@ -945,9 +1077,36 @@ describe("ceilingDeclineMessage — a run left alone still says so", () => {
     assert.match(m, /17\.6k tokens/, "what a cut would take");
     assert.match(m, /8\.6% of it/, "and what share of the conversation that is");
     assert.match(m, /209 further turns/, "and what it would cost in turns");
-    assert.match(m, new RegExp(`limit of ${PAYBACK_HORIZON_TURNS}`));
+    assert.match(m, new RegExp(`limit of ${CEILING_PAYBACK_HORIZON_TURNS}`));
     // The question an operator asks next, answered before they ask it.
     assert.match(m, /Checked again every 25\.0k tokens of growth/);
+  });
+
+  it("names the engine that measured, because that is what went wrong", () => {
+    // A day of "a cut would remove 8.0k tokens" on an install whose pruner
+    // would have removed half the conversation: the figure was `plan`'s, the
+    // engine was the in-place pruner, and no line anywhere said which. Both
+    // spellings are pinned so a rename on one screen cannot leave this one
+    // saying the other thing.
+    assert.match(
+      ceilingDeclineMessage({ ...AT_205K, engine: "legacy", repeat: false }),
+      /pruner in use \(edit in place\)/,
+    );
+    assert.match(
+      ceilingDeclineMessage({ ...AT_205K, engine: "winnow", repeat: true }),
+      /pruner in use \(fork\)/,
+    );
+  });
+
+  it("carries the ceiling's horizon and never the boundary's", () => {
+    // The two constants price different formulas, and this line reports the
+    // ceiling's decision. Printing 18 beside an answer computed against 20 is
+    // the kind of off-by-two nobody reads twice.
+    const m = ceilingDeclineMessage({ ...AT_205K, repeat: false });
+    assert.ok(
+      !new RegExp(`limit of ${PAYBACK_HORIZON_TURNS}\\b`).test(m),
+      "the boundary gate's number must not appear on the ceiling's line",
+    );
   });
 
   it("keeps saying it as the run climbs, which is the whole point", () => {
@@ -959,6 +1118,7 @@ describe("ceilingDeclineMessage — a run left alone still says so", () => {
       contextTokens: 255_400,
       removedTokens: 15_600,
       turnsNeeded: 307,
+      engine: "legacy" as const,
       repeat: true,
     });
     assert.match(later, /255\.4k tokens/);
@@ -970,15 +1130,41 @@ describe("ceilingDeclineMessage — a run left alone still says so", () => {
     );
   });
 
+  it("separates a pruner that found nothing from a measurement that never happened", () => {
+    // Two facts that shared one sentence, and they are opposites: a clean
+    // conversation on one side, and on the other a winnow that would not run, a
+    // wording change in its output, or a transcript that could not be read.
+    // Both render as "no cut" and only one of them is the feature working.
+    const nothingToCut = ceilingDeclineMessage({
+      contextTokens: 240_000,
+      removedTokens: 0,
+      turnsNeeded: null,
+      engine: "legacy",
+      repeat: false,
+    });
+    assert.match(nothingToCut, /pruner in use \(edit in place\) found nothing/);
+
+    const unmeasured = ceilingDeclineMessage({
+      contextTokens: 240_000,
+      removedTokens: 0,
+      turnsNeeded: null,
+      engine: null,
+      repeat: false,
+    });
+    assert.match(unmeasured, /nothing here could be measured/);
+    assert.notEqual(nothingToCut, unmeasured);
+  });
+
   it("says so plainly when nothing could be priced", () => {
     for (const repeat of [false, true]) {
       const m = ceilingDeclineMessage({
         contextTokens: 240_000,
         removedTokens: 0,
         turnsNeeded: null,
+        engine: null,
         repeat,
       });
-      assert.match(m, /nothing here could be priced as worth removing/);
+      assert.match(m, /nothing here could be measured/);
       // Never a percentage of nothing, and never a bare NaN where a figure goes.
       assert.doesNotMatch(m, /NaN|Infinity|0\.0% of it/);
     }

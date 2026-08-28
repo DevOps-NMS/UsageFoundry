@@ -295,12 +295,19 @@ const PRUNE_ENGINE_OPTIONS: readonly SegmentedOption<PruneEngine>[] = [
  * one does not, and that it does nothing at all until the setting below it is
  * lowered. The last is the one that would otherwise read as the feature being
  * broken.
+ *
+ * Both rows close on what the choice does to the *decision*, which is the half
+ * that was missing. This switch does not only pick who cuts: it picks whose
+ * measurement the context ceiling reads when it decides whether ending a cycle
+ * early is worth it, and the two engines answer that question very differently
+ * on the same conversation. An operator who read this row as "which cutter" had
+ * no way to connect it to a run being left alone.
  */
 const PRUNE_ENGINE_CONSEQUENCE: Record<PruneEngine, string> = {
   legacy:
-    "Rewrites the conversation where it stands, keeping the same session. This is what this app has always done, and it is the engine the savings card reports against by name when it has nothing else to say",
+    "Rewrites the conversation where it stands, keeping the same session. This is what this app has always done, and it is the engine the savings card reports against by name when it has nothing else to say. It typically finds about half of a long conversation, and a cut that size is worth ending a work cycle for",
   winnow:
-    "Writes a new conversation with the removed output replaced by recoverable pointers, and moves the run onto it. The original is never touched and stays the way back. Nothing has yet proved a forked conversation resumes, so if one does not, the run returns to the conversation it had and the failure is recorded — that check is also how the evidence gets collected. Does nothing until you lower the quiet period below",
+    "Writes a new conversation with the removed output replaced by recoverable pointers, and moves the run onto it. The original is never touched and stays the way back. Nothing has yet proved a forked conversation resumes, so if one does not, the run returns to the conversation it had and the failure is recorded — that check is also how the evidence gets collected. Does nothing until you lower the quiet period below. It is far more selective than the other engine — a few percent of a long conversation — so a run will rarely have a cycle ended early to make one",
 };
 
 const LAND_CONSEQUENCE: Record<LandStrategy, string> = {
