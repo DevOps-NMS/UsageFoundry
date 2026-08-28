@@ -439,6 +439,71 @@ function parseLine(
 }
 
 /**
+ * Fold every complete line of an appended chunk into the file's cache entry.
+ *
+ * Mutates `base` and `cwdRef` rather than answering with what it parsed, which
+ * is what `readAppended` did inline and is the point: the entry it is appending
+ * to is the one the cache already holds, and rebuilding it here would make two
+ * objects out of the one every offset in this module refers to.
+ */
+function consumeLines(
+  base: FileCacheEntry,
+  cwdRef: { value: string },
+  complete: string,
+): void {
+  for (const line of complete.split("\n")) {
+    if (!line) continue;
+
+    // Two readers over one line, asking it different questions — but off one
+    // parse, not two.
+    //
+    // They used to share nothing but the bytes, on the grounds that the tool
+    // reader's substring test "skips the parse entirely on the three quarters of
+    // lines that carry no tool block". That was the right trade when it was
+    // written and the arithmetic behind it has since inverted: measured on this
+    // store, 57.6% of lines now carry a tool block, so the gate skips 42% rather
+    // than 75% — and `parseLine` below has no such gate and parses **every**
+    // line regardless. The parse the gate was avoiding therefore already
+    // happened, one statement later, and the second one bought nothing.
+    //
+    // Parsed here so that neither reader pays for it twice. Both still parse for
+    // themselves when called with a line alone, which is how their unit tests
+    // call them.
+    let record: Record<string, unknown> | undefined;
+    if (line.startsWith("{")) {
+      try {
+        record = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        // Partially flushed or corrupt. Both readers answer null for such a line
+        // on their own, so skipping it here is the same outcome one statement
+        // sooner. A line that does *not* open with `{` is left to them instead:
+        // that is the test each makes first, and it is theirs to make.
+        continue;
+      }
+    }
+
+    const tools = parseToolRecord(line, record);
+    if (tools) {
+      for (const call of tools.calls) {
+        base.pendingToolCalls.set(call.id, base.toolCalls.length);
+        base.toolCalls.push(call);
+      }
+      for (const result of tools.results) {
+        const at = base.pendingToolCalls.get(result.toolUseId);
+        if (at === undefined) continue; // a result whose call is in another file
+        base.toolCalls[at].resultChars = result.chars;
+        base.pendingToolCalls.delete(result.toolUseId);
+      }
+    }
+
+    const entry = parseLine(line, cwdRef, record);
+    if (!entry) continue;
+    base.entries.push(entry);
+    if (entry.ts > base.lastTs) base.lastTs = entry.ts;
+  }
+}
+
+/**
  * Parse only the bytes appended since the last scan of this file.
  *
  * Never call this directly — go through `refreshFile`, which serialises
@@ -493,56 +558,7 @@ async function readAppended(file: string): Promise<FileCacheEntry> {
   const complete = chunk.subarray(0, lastNewline).toString("utf8");
   const cwdRef = { value: base.cwd };
 
-  for (const line of complete.split("\n")) {
-    if (!line) continue;
-
-    // Two readers over one line, asking it different questions — but off one
-    // parse, not two.
-    //
-    // They used to share nothing but the bytes, on the grounds that the tool
-    // reader's substring test "skips the parse entirely on the three quarters of
-    // lines that carry no tool block". That was the right trade when it was
-    // written and the arithmetic behind it has since inverted: measured on this
-    // store, 57.6% of lines now carry a tool block, so the gate skips 42% rather
-    // than 75% — and `parseLine` below has no such gate and parses **every**
-    // line regardless. The parse the gate was avoiding therefore already
-    // happened, one statement later, and the second one bought nothing.
-    //
-    // Parsed here so that neither reader pays for it twice. Both still parse for
-    // themselves when called with a line alone, which is how their unit tests
-    // call them.
-    let record: Record<string, unknown> | undefined;
-    if (line.startsWith("{")) {
-      try {
-        record = JSON.parse(line) as Record<string, unknown>;
-      } catch {
-        // Partially flushed or corrupt. Both readers answer null for such a line
-        // on their own, so skipping it here is the same outcome one statement
-        // sooner. A line that does *not* open with `{` is left to them instead:
-        // that is the test each makes first, and it is theirs to make.
-        continue;
-      }
-    }
-
-    const tools = parseToolRecord(line, record);
-    if (tools) {
-      for (const call of tools.calls) {
-        base.pendingToolCalls.set(call.id, base.toolCalls.length);
-        base.toolCalls.push(call);
-      }
-      for (const result of tools.results) {
-        const at = base.pendingToolCalls.get(result.toolUseId);
-        if (at === undefined) continue; // a result whose call is in another file
-        base.toolCalls[at].resultChars = result.chars;
-        base.pendingToolCalls.delete(result.toolUseId);
-      }
-    }
-
-    const entry = parseLine(line, cwdRef, record);
-    if (!entry) continue;
-    base.entries.push(entry);
-    if (entry.ts > base.lastTs) base.lastTs = entry.ts;
-  }
+  consumeLines(base, cwdRef, complete);
 
   // Backfill cwd onto entries parsed before the first record that carried it.
   if (cwdRef.value && !base.cwd) {
