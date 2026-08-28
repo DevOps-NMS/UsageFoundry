@@ -1541,6 +1541,31 @@ function migrate(db: Database.Database) {
   // one it left behind.
   reportOrphanTables(db);
 
+  // Give the planner something to plan with. Without `sqlite_stat1` SQLite
+  // guesses selectivity from the schema alone, and on the runs table it guesses
+  // wrong in a specific way: told to find `status = ?` ordered by `created_at
+  // DESC`, it believes the status is selective, seeks `idx_runs_status`, and
+  // then sorts every matching row into a temp B-tree — rather than walking
+  // `idx_runs_created`, which is already in the order asked for, and stopping at
+  // LIMIT+OFFSET. The indices to do it right are all present; only the estimate
+  // was missing.
+  //
+  // Measured through `listRunsPage` against 5,000 runs / 250,000 events:
+  //
+  //   status filter, first page      9.48 ms -> 0.44 ms
+  //   history page (settledBefore)  15.01 ms -> 4.19 ms
+  //
+  // and the unfiltered first page — the only one of these on the four-second
+  // poll — is unmoved at 0.41 ms, as is the `LIKE` search, which nothing can
+  // index. So this buys the filtered pages and risks nothing on the hot one.
+  //
+  // Unconditional rather than gated on the stats being absent: they are an
+  // estimate of a table that grows, and a boot is both the moment they are
+  // cheapest to take and the only recurring event this process is guaranteed.
+  // 27 ms on the fixture above, against a `migrate()` that has just executed
+  // every CREATE in this file.
+  db.exec("ANALYZE");
+
   // Stamped only once everything above has returned, which is what makes it
   // mean "a build of this version finished migrating this file" rather than
   // "one started".
