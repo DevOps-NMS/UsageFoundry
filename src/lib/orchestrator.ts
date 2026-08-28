@@ -45,6 +45,7 @@ import {
   readCompactions,
   resolveSessionTranscript,
   scanUsage,
+  sessionTranscriptResolver,
   type CompactionBoundary,
   type UsageEntry,
 } from "./transcripts";
@@ -9843,6 +9844,13 @@ async function checkContextCeilings(): Promise<void> {
   // is on: one scan answers both, and the sample is taken before the ceiling
   // comparison rather than after, which would record only runs already over it.
   const pruning = pruningEnabled();
+  // One walk of the projects tree for the whole tick rather than one per watched
+  // run, which is the same hoist the `transcript` binding below performs within
+  // a single run. Every run was walking the identical tree for its own basename:
+  // 288 ms a tick at four concurrent runs on this operator's store and 1.7 s at
+  // twenty-five, spent on the event loop these guards run on. Lazy, so a tick
+  // that resolves nothing still walks nothing.
+  const resolveSession = sessionTranscriptResolver();
 
   for (const [id, watch] of contextWatches) {
     if (interrupts.has(id)) continue;
@@ -9855,7 +9863,7 @@ async function checkContextCeilings(): Promise<void> {
     // directory walk for an answer already in hand.
     let transcript: string | null = null;
     try {
-      transcript = await resolveSessionTranscript(sessionId);
+      transcript = await resolveSession(sessionId);
       if (!transcript) continue;
       // Read off `usage` rather than estimated from bytes. The two diverge by
       // tens of thousands of tokens in both directions on this install — the

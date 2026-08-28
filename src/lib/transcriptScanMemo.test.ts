@@ -180,6 +180,33 @@ describe("the memoised scan answers what a rebuilt one would", () => {
     );
   });
 
+  it("resolves a session against the shared walk exactly as the per-run walk did", async () => {
+    // `checkContextCeilings` resolves every watched run against one walk now.
+    // The rule it must keep is the refusal: a session id matching two files is
+    // ambiguous and neither is safe to rewrite, so it answers null. Sharing the
+    // file list keeps that; caching a resolved path would not, which is why the
+    // resolver takes the walk rather than the answer.
+    writeSession("delta", [record("delta", 0, NOW)]);
+    const resolve = transcripts.sessionTranscriptResolver();
+
+    assert.equal(
+      await resolve("delta"),
+      await transcripts.resolveSessionTranscript("delta"),
+    );
+    assert.equal(await resolve("no-such-session"), null);
+
+    // The same basename under a second project: both must refuse.
+    const twin = path.join(projects, "delta-copy");
+    fs.mkdirSync(twin, { recursive: true });
+    fs.writeFileSync(path.join(twin, "delta.jsonl"), `${record("delta", 0, NOW)}\n`);
+
+    const fresh = transcripts.sessionTranscriptResolver();
+    assert.equal(await transcripts.resolveSessionTranscript("delta"), null);
+    assert.equal(await fresh("delta"), null);
+
+    fs.rmSync(twin, { recursive: true, force: true });
+  });
+
   it("rebuilds after the retention sweep has forgotten a file", async () => {
     const file = path.join(projects, "alpha", "alpha.jsonl");
     const before = await transcripts.scanUsage();

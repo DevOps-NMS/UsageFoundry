@@ -1144,9 +1144,51 @@ export async function resolveSessionTranscript(
   sessionId: string,
 ): Promise<string | null> {
   const { files } = await listTranscriptFiles(PROJECTS_DIR);
+  return resolveIn(files, sessionId);
+}
+
+/** The rule above, against a file list the caller already has. */
+function resolveIn(files: readonly string[], sessionId: string): string | null {
   const name = `${sessionId}.jsonl`;
   const mine = files.filter((f) => path.basename(f) === name);
   return mine.length === 1 ? mine[0] : null;
+}
+
+/**
+ * Resolve several sessions against **one** walk of the projects tree.
+ *
+ * `checkContextCeilings` asks this question once per watched run on every guard
+ * tick, and each ask was a full walk for a tree every one of them was reading
+ * identically — 288 ms a tick at the default four concurrent runs on this
+ * operator's store, 1.7 s at the twenty-five an operator can opt into, all of it
+ * on the same event loop that is supposed to be guarding those runs.
+ *
+ * This is the hoist the loop already performs within a single run — "resolving
+ * the session twice on the same tick would be a second directory walk for an
+ * answer already in hand" — carried across the runs of one tick, which is the
+ * same argument about the same tree.
+ *
+ * The **rule is unchanged**, which is the whole point of sharing a file list
+ * rather than caching a resolved path: a session still answers null unless
+ * exactly one basename matches, so two projects holding the same id are still
+ * refused rather than one of them being rewritten. A per-session path cache
+ * could not keep that promise — it would have to re-walk to notice the second
+ * file, which is the cost being removed.
+ *
+ * Lazy, so a tick whose every watch is interrupted or session-less still walks
+ * nothing, and single-flight, so the first two callers of a tick share one walk
+ * rather than racing two. Scoped to the tick the caller creates it for: a longer
+ * life would be a cache with a staleness nobody had chosen.
+ */
+export function sessionTranscriptResolver(): (
+  sessionId: string,
+) => Promise<string | null> {
+  let walk: Promise<{ files: string[] }> | null = null;
+  return async (sessionId: string) => {
+    walk ??= listTranscriptFiles(PROJECTS_DIR);
+    const { files } = await walk;
+    return resolveIn(files, sessionId);
+  };
 }
 
 /**
