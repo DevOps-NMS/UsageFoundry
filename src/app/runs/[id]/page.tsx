@@ -31,8 +31,7 @@ import {
 } from "@/lib/format";
 import { Badge } from "@/components/ui/Badge";
 import { Button, ButtonRow } from "@/components/ui/Button";
-import { Card, CardTitle, Empty, Stat } from "@/components/ui/Card";
-import { Disclosure } from "@/components/ui/Disclosure";
+import { Card, Empty, Stat } from "@/components/ui/Card";
 import { Field, Input, Select, Textarea } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
@@ -56,6 +55,7 @@ import {
 import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import { RunAgentCost } from "@/components/RunAgentCost";
 import { RunDiff } from "@/components/RunDiff";
+import { RunHandoff } from "@/components/RunHandoff";
 import { RunLand } from "@/components/RunLand";
 import { RunOutput } from "@/components/RunOutput";
 import { RunReview } from "@/components/RunReview";
@@ -1758,79 +1758,10 @@ export default function RunDetail({
               <RunLand run={run} />
 
               {/* The generation of this feature that `RunLand` above replaced,
-                  kept whole and moved one click away. Two things it says are
-                  not said anywhere else — the commit list as the agent wrote it,
-                  and the `git merge` line — so it is an escape hatch rather than
-                  a duplicate, and Tier 2 evidence is what a fold is for.
-
-                  What it withholds is unchanged and must stay withheld: the
-                  merge command is absent entirely while the operator's checkout
-                  is dirty, never shown with a warning, because a copyable
-                  command gets copied. */}
-              {handoff && (
-                <Disclosure
-                  className="mt-4"
-                  summary="Do it in your own terminal"
-                  summaryClassName="text-xs font-semibold text-ink-muted"
-                >
-                  <Card emphasis="quiet" className="mt-3">
-                    <CardTitle>In your own terminal</CardTitle>
-
-                    {Array.isArray(handoff.payload.commits) &&
-                    handoff.payload.commits.length > 0 ? (
-                      <div className="mono max-h-40 overflow-auto rounded-sm border border-line bg-inset p-2.5">
-                        {(handoff.payload.commits as string[]).map((c) => (
-                          <div key={c} className="whitespace-pre-wrap text-ink-muted">
-                            {c}
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <Empty>The agent made no commits on this branch.</Empty>
-                    )}
-
-                    {Array.isArray(handoff.payload.uncommitted) &&
-                      handoff.payload.uncommitted.length > 0 && (
-                        <Notice tone="warn" quiet className="mt-3">
-                          <strong>Uncommitted changes left in the checkout.</strong>{" "}
-                          They are not on the branch, so a merge will not bring
-                          them over.
-                        </Notice>
-                      )}
-
-                    <div className="mt-4 border-t border-line pt-3.5">
-                      <div className="mb-2 text-xs font-semibold text-ink">
-                        Review it
-                      </div>
-                      {(Array.isArray(handoff.payload.review)
-                        ? (handoff.payload.review as string[])
-                        : []
-                      ).map((c) => (
-                        <div key={c} className="mono break-all text-ink-muted">
-                          {c}
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="mt-4 border-t border-line pt-3.5">
-                      <div className="mb-2 text-xs font-semibold text-ink">
-                        Bring it in
-                      </div>
-                      {handoff.payload.merge ? (
-                        <div className="mono break-all text-ink-muted">
-                          {String(handoff.payload.merge)}
-                        </div>
-                      ) : (
-                        // Withheld rather than shown with a caveat: a copyable
-                        // command gets copied.
-                        <Hint tone="warn">
-                          {String(handoff.payload.mergeBlocked)}
-                        </Hint>
-                      )}
-                    </div>
-                  </Card>
-                </Disclosure>
-              )}
+                  kept whole and moved one click away. Why it is a fold rather
+                  than a duplicate, and what it withholds while the operator's
+                  checkout is dirty, are stated on the component. */}
+              <RunHandoff handoff={handoff} />
             </>
           )}
         </div>
