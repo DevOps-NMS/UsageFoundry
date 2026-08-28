@@ -121,25 +121,41 @@ function resultChars(content: unknown): number {
  * reading is scoped to a window, and a call at epoch 0 would sit outside every
  * window forever while still being counted in nothing.
  */
-export function parseToolRecord(line: string): ToolRecord | null {
-  if (!line.startsWith("{")) return null;
-  // One pass for both block types rather than two for neither. A line carrying
-  // no tool block used to be scanned end to end twice — once failing to find
-  // `"tool_use"` and again failing to find `"tool_result"` — and on this store
-  // that is 42% of lines averaging 3.3 KB each. `"tool_` is a prefix of both
-  // literals, so every line the pair admitted this admits: strictly more
-  // permissive, and therefore incapable of changing what the parse below
-  // returns. What it lets through extra is a line holding some other `tool_`
-  // key, which costs one wasted parse and a null — measured at 9 lines in
-  // 20,798, and the direction this test is documented as preferring to be
-  // wrong in.
-  if (!line.includes('"tool_')) return null;
-
+export function parseToolRecord(
+  line: string,
+  parsed?: Record<string, unknown>,
+): ToolRecord | null {
   let rec: Record<string, unknown>;
-  try {
-    rec = JSON.parse(line);
-  } catch {
-    return null; // partially flushed or corrupt — skip, do not abort the file
+  if (parsed) {
+    // The caller has already parsed this line for its own question and is
+    // handing the record over rather than paying for a second parse of the same
+    // bytes — see `readAppended`, which is the only caller that can.
+    //
+    // Both gates below are skipped with it, and neither was ever part of the
+    // answer: `startsWith` and the `"tool_` test exist solely to avoid the parse
+    // that has already happened. Skipping them admits records carrying no tool
+    // block at all, and those reach the `calls.length === 0 && results.length
+    // === 0` check at the end and return the same null the gate would have.
+    rec = parsed;
+  } else {
+    if (!line.startsWith("{")) return null;
+    // One pass for both block types rather than two for neither. A line carrying
+    // no tool block used to be scanned end to end twice — once failing to find
+    // `"tool_use"` and again failing to find `"tool_result"` — and on this store
+    // that is 42% of lines averaging 3.3 KB each. `"tool_` is a prefix of both
+    // literals, so every line the pair admitted this admits: strictly more
+    // permissive, and therefore incapable of changing what the parse below
+    // returns. What it lets through extra is a line holding some other `tool_`
+    // key, which costs one wasted parse and a null — measured at 9 lines in
+    // 20,798, and the direction this test is documented as preferring to be
+    // wrong in.
+    if (!line.includes('"tool_')) return null;
+
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      return null; // partially flushed or corrupt — skip, do not abort the file
+    }
   }
 
   const message = rec.message as Record<string, unknown> | undefined;

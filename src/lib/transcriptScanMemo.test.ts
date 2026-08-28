@@ -207,6 +207,62 @@ describe("the memoised scan answers what a rebuilt one would", () => {
     fs.rmSync(twin, { recursive: true, force: true });
   });
 
+  it("reads a turn and its tool blocks off one parse of the line", async () => {
+    // `readAppended` parses each line once and hands the record to both readers.
+    // A line that carries a turn *and* a tool block has to reach both off that
+    // one parse, and a line neither wants must still be skipped rather than
+    // aborting the file — the torn last line of a transcript being appended to
+    // is the ordinary case, not the exotic one.
+    const dir = path.join(projects, "epsilon");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "epsilon.jsonl");
+    fs.writeFileSync(
+      file,
+      [
+        record("epsilon", 0, NOW),
+        "not json at all", // does not open with `{`
+        '{"type":"assistant","uuid":"broken",', // opens with `{`, does not parse
+        // one line carrying both a billable turn and a tool_use block
+        JSON.stringify({
+          type: "assistant",
+          uuid: "u-both",
+          requestId: "req_both",
+          timestamp: new Date(NOW + 30_000).toISOString(),
+          sessionId: "epsilon",
+          cwd: "/workspace/epsilon",
+          message: {
+            id: "msg_both",
+            model: "claude-opus-4-5-20251101",
+            role: "assistant",
+            usage: {
+              input_tokens: 7,
+              output_tokens: 99,
+              cache_read_input_tokens: 12,
+              cache_creation_input_tokens: 0,
+            },
+            content: [
+              { type: "tool_use", id: "toolu_both", name: "Bash", input: {} },
+            ],
+          },
+        }),
+      ].join("\n") + "\n",
+    );
+
+    const scan = await transcripts.scanUsage();
+
+    const both = scan.entries.find((e) => e.key.includes("msg_both"));
+    assert.ok(both, "the turn on the shared line was read");
+    assert.equal(both.tokens.output, 99);
+    assert.equal(both.project, "/workspace/epsilon");
+    assert.ok(
+      scan.toolCalls.some((c) => c.id === "toolu_both"),
+      "the tool block on that same line was read too",
+    );
+    // The two unusable lines contributed nothing and stopped nothing: the turn
+    // written before them is still there.
+    assert.ok(scan.entries.some((e) => e.key.includes("msg_epsilon_0")));
+  });
+
   it("rebuilds after the retention sweep has forgotten a file", async () => {
     const file = path.join(projects, "alpha", "alpha.jsonl");
     const before = await transcripts.scanUsage();
