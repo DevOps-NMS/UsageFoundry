@@ -1716,6 +1716,21 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **No real restart was taken over a live loop block.** `reconcileBlocksOnBoot`
+> now spares a `looping` block whose instance kept a member across the boot,
+> which is the same `bootBlockPlan` question its `waiting` sweep already asked.
+> What is behind it is `npm run typecheck` (exit 0) and `npm test` (**1,909
+> tests / 0 failures**, of which 4 are the new `bootBlocks.test.ts` cases — the
+> two positive ones were seen to fail against the unfixed sweep, reporting
+> `failed` where the block must read `looping`). What no test here reaches is
+> the thing the fault was made of: a container restarted while a loop's pass is
+> genuinely parked. On the next rebuild, park a pass inside `resumeGraceHours`,
+> `docker compose restart`, and check that the loop block still reads as
+> repeating on the instance page, that the sweeper resumes the pass, and that a
+> further pass is created when it settles — and, for the other direction, that a
+> loop whose pass the same boot failed still reads `failed` with the restart
+> sentence on it.
+
 > **The `canvasView.ts` extraction was not looked at.** The world/screen
 > transform, hit testing, device-pixel sizing, the pan/zoom gestures, the
 > `ResizeObserver` and the colour probe were moved out of
