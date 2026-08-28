@@ -638,93 +638,10 @@ export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan
   const byId = new Map<string, RunSpec>();
 
   for (const [index, entry] of list.entries()) {
-    const e = (entry ?? {}) as Record<string, unknown>;
-    const where = `Run ${index + 1}`;
-
-    const id = String(e.id ?? "").trim();
-    if (!NODE_ID.test(id)) {
-      return {
-        ok: false,
-        reason: `${where} has no usable id. An id is 1–64 letters, digits, hyphens or underscores, and the dependsOn entries name it.`,
-      };
-    }
-    if (byId.has(id)) {
-      return {
-        ok: false,
-        reason: `Two runs share the id “${id}”, so a dependsOn naming it names both.`,
-      };
-    }
-
-    const title = String(e.title ?? "").trim();
-    if (!title) return { ok: false, reason: `${where} needs a title.` };
-
-    const task = String(e.task ?? "").trim();
-    if (!task) {
-      return {
-        ok: false,
-        reason: `“${title}” has no task. It is the whole brief the agent gets, and it cannot ask a follow-up question.`,
-      };
-    }
-
-    // `""` is the mount root and a real answer, exactly as it is on a node — so
-    // it is never collapsed into "no folder named".
-    const folder = String(e.folder ?? "");
-    const refusal = limits.folderRefusal(folder);
-    if (refusal) {
-      return {
-        ok: false,
-        reason:
-          `“${title}” names a folder that cannot be used: ${refusal} A run ` +
-          `this block starts has to be inside “${limits.blockName}”'s own ` +
-          "workspace; use a folder exactly as list_folders gives it.",
-      };
-    }
-
-    // The agent, checked here beside the cap and the folder because this is the
-    // last moment before these become processes. Refused by name rather than
-    // dropped, which is `agentRefusal`'s rule reached from the one door where
-    // nobody is looking: a run emitted "as the reviewer" and started as nobody
-    // is indistinguishable afterwards from a run that named none.
-    const namedAgent = String(e.agent ?? "").trim();
-    let agent: string | null = null;
-    if (namedAgent !== "") {
-      // Case-folded because `idx_agents_name` is, so the name the turn typed
-      // and the name the operator saved are one agent here too.
-      const match = limits.agents.find(
-        (a) => a.name.toLowerCase() === namedAgent.toLowerCase(),
-      );
-      if (!match) {
-        return {
-          ok: false,
-          reason:
-            `“${title}” asks for an agent this install does not have: ` +
-            `${namedAgent}. Name one of the agents listed in your instructions, ` +
-            "or leave it out — a run started as no agent is the ordinary run.",
-        };
-      }
-      if (!match.usable) {
-        return {
-          ok: false,
-          reason:
-            `“${title}” asks for the “${match.name}” agent, which is missing ` +
-            "its description or its prompt. Claude Code will not register such " +
-            "an agent, so the run would fail the moment it spawned. Name " +
-            "another, or leave it out.",
-        };
-      }
-      // The registry's spelling, not the turn's — see `RunSpec.agent`.
-      agent = match.name;
-    }
-
-    specs.push({
-      id,
-      title: title.slice(0, MAX_SPEC_TITLE),
-      task,
-      folder,
-      agent,
-      dependsOn: [],
-    });
-    byId.set(id, specs[specs.length - 1]);
+    const spec = normalizeSpec(entry, index, limits, byId);
+    if (!spec.ok) return spec;
+    specs.push(spec.value);
+    byId.set(spec.value.id, spec.value);
   }
 
   const seenPairs = new Set<string>();
@@ -803,6 +720,115 @@ export function planEmission(raw: unknown, limits: EmissionLimits): EmissionPlan
     edges: specs.flatMap((s) => s.dependsOn.map((d) => ({ from: d.id, to: s.id }))),
   });
   return { ok: true, specs: order.map((id) => byId.get(id)!) };
+}
+
+type SpecNormalization =
+  | { ok: true; value: RunSpec }
+  | { ok: false; reason: string };
+
+/**
+ * Read one emitted spec, refusing anything that could not be started.
+ *
+ * `normalizeNode`'s shape one layer over, and deliberately: the two doors admit
+ * the same kinds of thing and a refusal one of them makes and the other does not
+ * is the gap this file exists to close. `taken` is the ids already accepted from
+ * this same emission, for that function's reason — two specs sharing an id makes
+ * a dependsOn naming it name both, which is only visible from outside.
+ */
+function normalizeSpec(
+  entry: unknown,
+  index: number,
+  limits: EmissionLimits,
+  taken: ReadonlyMap<string, RunSpec>,
+): SpecNormalization {
+  const e = (entry ?? {}) as Record<string, unknown>;
+  const where = `Run ${index + 1}`;
+    const id = String(e.id ?? "").trim();
+    if (!NODE_ID.test(id)) {
+      return {
+        ok: false,
+        reason: `${where} has no usable id. An id is 1–64 letters, digits, hyphens or underscores, and the dependsOn entries name it.`,
+      };
+    }
+    if (taken.has(id)) {
+      return {
+        ok: false,
+        reason: `Two runs share the id “${id}”, so a dependsOn naming it names both.`,
+      };
+    }
+
+    const title = String(e.title ?? "").trim();
+    if (!title) return { ok: false, reason: `${where} needs a title.` };
+
+    const task = String(e.task ?? "").trim();
+    if (!task) {
+      return {
+        ok: false,
+        reason: `“${title}” has no task. It is the whole brief the agent gets, and it cannot ask a follow-up question.`,
+      };
+    }
+
+    // `""` is the mount root and a real answer, exactly as it is on a node — so
+    // it is never collapsed into "no folder named".
+    const folder = String(e.folder ?? "");
+    const refusal = limits.folderRefusal(folder);
+    if (refusal) {
+      return {
+        ok: false,
+        reason:
+          `“${title}” names a folder that cannot be used: ${refusal} A run ` +
+          `this block starts has to be inside “${limits.blockName}”'s own ` +
+          "workspace; use a folder exactly as list_folders gives it.",
+      };
+    }
+
+    // The agent, checked here beside the cap and the folder because this is the
+    // last moment before these become processes. Refused by name rather than
+    // dropped, which is `agentRefusal`'s rule reached from the one door where
+    // nobody is looking: a run emitted "as the reviewer" and started as nobody
+    // is indistinguishable afterwards from a run that named none.
+    const namedAgent = String(e.agent ?? "").trim();
+    let agent: string | null = null;
+    if (namedAgent !== "") {
+      // Case-folded because `idx_agents_name` is, so the name the turn typed
+      // and the name the operator saved are one agent here too.
+      const match = limits.agents.find(
+        (a) => a.name.toLowerCase() === namedAgent.toLowerCase(),
+      );
+      if (!match) {
+        return {
+          ok: false,
+          reason:
+            `“${title}” asks for an agent this install does not have: ` +
+            `${namedAgent}. Name one of the agents listed in your instructions, ` +
+            "or leave it out — a run started as no agent is the ordinary run.",
+        };
+      }
+      if (!match.usable) {
+        return {
+          ok: false,
+          reason:
+            `“${title}” asks for the “${match.name}” agent, which is missing ` +
+            "its description or its prompt. Claude Code will not register such " +
+            "an agent, so the run would fail the moment it spawned. Name " +
+            "another, or leave it out.",
+        };
+      }
+      // The registry's spelling, not the turn's — see `RunSpec.agent`.
+      agent = match.name;
+    }
+
+  return {
+    ok: true,
+    value: {
+          id,
+          title: title.slice(0, MAX_SPEC_TITLE),
+          task,
+          folder,
+          agent,
+          dependsOn: [],
+    },
+  };
 }
 
 /* ------------------------------------------------------------------ */
