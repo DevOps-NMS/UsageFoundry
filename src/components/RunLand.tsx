@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import type {
   ConflictFileDTO,
   LandStateDTO,
@@ -422,9 +423,20 @@ export function RunLand({ run }: { run: RunDTO }) {
 
           {state.preview.outcome === "conflict" && (
             <>
+              {/* The list below is the primary route and stays it: it is
+                  ordered and it shows the actual markers, which is what
+                  resolving a conflict needs. The map is the second route, for
+                  the one case this list reads worst — many files across many
+                  directories, where "which part of the tree is on fire" is a
+                  spatial question an ordered list of paths cannot answer. One
+                  link, here and nowhere else, for `RunTouches`' reason. */}
               <p className="mt-2 max-w-[70ch] text-xs leading-snug text-ink-muted">
                 Nothing was written to find that out — the merge was tried in
-                memory, and what is below is how it would land.
+                memory, and what is below is how it would land.{" "}
+                <Link href={`/runs/${run.id}/conflicts`}>
+                  Where they are in the tree
+                </Link>{" "}
+                lays the same files out by directory.
               </p>
               <div className="mt-2">
                 {state.preview.files.map((f) => (
