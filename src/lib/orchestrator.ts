@@ -1818,6 +1818,43 @@ export function refusalDisposition(o: {
 }
 
 /**
+ * What a run's row says when a refusal ended it for good.
+ *
+ * A `switch` rather than the conditional chain this was, because the four
+ * sentences are four different instructions to the operator and the chain's
+ * final arm was also its fallback: a fifth `RefusalCause` added upstream would
+ * have silently rendered as "refused the request", losing the one line telling
+ * a person what to do about it. The `never` arm makes that a build failure.
+ */
+export function refusalStopReason(cause: RefusalCause, refusal: string): string {
+  switch (cause) {
+    // Named as attempts rather than as the wall, because those are different
+    // facts and the operator's next move differs. The allowance may well have
+    // refilled by now; what has run out is how often one run may wait for it
+    // without anybody looking.
+    case "pauses-spent":
+      return `Claude refused the work cycle for want of allowance again, after this run had already waited out ${MAX_PAUSES_PER_RUN} windows. Out of waits rather than out of allowance: ${refusal}`;
+    // Reached only with the retries spent, so say that rather than reporting
+    // the last attempt as if it were the only one.
+    case "retries-spent":
+      return `Claude Code hit a transient API error on ${MAX_TRANSIENT_RETRIES + 1} attempts in a row: ${refusal}`;
+    // A different sentence from the one above, because the operator's response
+    // is the opposite. An upstream that is down clears on its own and waiting
+    // is right; a rate limit at this concurrency is the account describing how
+    // much of it this app is using, and waiting changes nothing that lowering
+    // the cap would not change faster.
+    case "rate-limited":
+      return `Claude Code was rate limited on ${MAX_RATE_LIMIT_RETRIES + 1} attempts in a row, over ${Math.round(
+        RATE_LIMIT_BACKOFF_MS.reduce((a, b) => a + b, 0) / 60_000,
+      )} minutes or more of backing off. This is the account refusing this app's own request rate rather than being unreachable, so lower the concurrent-run limit rather than waiting: ${refusal}`;
+    case "other":
+      return `Claude Code refused the request: ${refusal}`;
+  }
+  const unreachable: never = cause;
+  throw new Error(`Unhandled refusal cause: ${String(unreachable)}`);
+}
+
+/**
  * Sleep, unless the run is interrupted first.
  *
  * The loop's `cancelled` checkpoints only run between cycles, so sleeping
@@ -8155,32 +8192,7 @@ export async function startRun(id: string): Promise<void> {
           break;
         }
 
-        stopReason =
-          plan.cause === "pauses-spent"
-            ? // Named as attempts rather than as the wall, because those are
-              // different facts and the operator's next move differs. The
-              // allowance may well have refilled by now; what has run out is
-              // how often one run may wait for it without anybody looking.
-              `Claude refused the work cycle for want of allowance again, after this run had already waited out ${MAX_PAUSES_PER_RUN} windows. Out of waits rather than out of allowance: ${refusal}`
-            : plan.cause === "retries-spent"
-              ? // Reached only with the retries spent, so say that rather than
-                // reporting the last attempt as if it were the only one.
-                `Claude Code hit a transient API error on ${
-                  MAX_TRANSIENT_RETRIES + 1
-                } attempts in a row: ${refusal}`
-              : plan.cause === "rate-limited"
-                ? // A different sentence from the one above, because the
-                  // operator's response is the opposite. An upstream that is
-                  // down clears on its own and waiting is right; a rate limit
-                  // at this concurrency is the account describing how much of
-                  // it this app is using, and waiting changes nothing that
-                  // lowering the cap would not change faster.
-                  `Claude Code was rate limited on ${
-                    MAX_RATE_LIMIT_RETRIES + 1
-                  } attempts in a row, over ${Math.round(
-                    RATE_LIMIT_BACKOFF_MS.reduce((a, b) => a + b, 0) / 60_000,
-                  )} minutes or more of backing off. This is the account refusing this app's own request rate rather than being unreachable, so lower the concurrent-run limit rather than waiting: ${refusal}`
-                : `Claude Code refused the request: ${refusal}`;
+        stopReason = refusalStopReason(plan.cause, refusal);
         finalStatus = "failed";
         break;
       }

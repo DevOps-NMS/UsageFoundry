@@ -102,6 +102,7 @@ const {
   nextPrompt,
   permissionDenials,
   refusalDisposition,
+  refusalStopReason,
   refusalKind,
   refusalResumeAt,
   reopenPrompt,
@@ -1644,6 +1645,36 @@ describe("rate limits, apart from the rest", () => {
       }),
       { action: "fail", cause: "retries-spent" },
     );
+  });
+
+  it("gives each refusal cause its own instruction to the operator", () => {
+    // The test above pins the two *causes* apart; this pins the two sentences
+    // apart, which is the half an operator actually reads. `refusalStopReason`
+    // is the only place a cause becomes copy, and until it was a `switch` its
+    // last arm doubled as the fallback — so a cause added upstream would have
+    // rendered as the generic sentence with nothing failing to say so.
+    const sentences = (
+      ["pauses-spent", "retries-spent", "rate-limited", "other"] as const
+    ).map((cause) => refusalStopReason(cause, "API Error: overloaded_error"));
+
+    // Every one names the underlying refusal, and no two read alike.
+    for (const s of sentences) assert.match(s, /API Error: overloaded_error$/);
+    assert.equal(new Set(sentences).size, sentences.length);
+
+    const [pauses, retries, rateLimited, other] = sentences;
+    assert.match(pauses, new RegExp(`waited out ${MAX_PAUSES_PER_RUN} windows`));
+    assert.match(
+      retries,
+      new RegExp(`transient API error on ${MAX_TRANSIENT_RETRIES + 1} attempts`),
+    );
+    // The one sentence that asks for a different action rather than for
+    // patience: it must say to lower the cap, not to wait.
+    assert.match(
+      rateLimited,
+      new RegExp(`rate limited on ${MAX_RATE_LIMIT_RETRIES + 1} attempts`),
+    );
+    assert.match(rateLimited, /lower the concurrent-run limit rather than waiting/);
+    assert.doesNotMatch(other, /rate limited|transient|allowance/);
   });
 
   it("climbs its own ladder, not the other one", () => {
