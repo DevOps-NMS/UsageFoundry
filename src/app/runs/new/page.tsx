@@ -37,7 +37,8 @@ import {
   Switch,
   Textarea,
 } from "@/components/ui/Field";
-import { Hint } from "@/components/ui/Hint";
+import { Hint, type HintTone } from "@/components/ui/Hint";
+import { Toned } from "@/components/ui/Toned";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import {
@@ -281,26 +282,6 @@ const ENFORCEMENT_OPTIONS: readonly SegmentedOption<EnforcementModeDTO>[] = [
   { value: "live-resume", label: "Stop, then resume" },
 ];
 
-type NoteTone = "neutral" | "warn" | "danger";
-
-/** Complete class strings per tone, looked up rather than interpolated. */
-const NOTE_TONE: Record<NoteTone, string> = {
-  neutral: "",
-  warn: "text-warn",
-  danger: "text-danger",
-};
-
-/** A sentence inside a row's description that has to carry a tone of its own. */
-function Toned({
-  tone = "neutral",
-  children,
-}: {
-  tone?: NoteTone;
-  children: ReactNode;
-}) {
-  return <span className={NOTE_TONE[tone]}>{children}</span>;
-}
-
 /**
  * What the chosen permission mode lets an agent nobody is watching do.
  *
@@ -311,7 +292,7 @@ function Toned({
  */
 function permissionConsequence(mode: string): {
   text: ReactNode;
-  tone: NoteTone;
+  tone: HintTone;
 } {
   switch (mode) {
     case "plan":
