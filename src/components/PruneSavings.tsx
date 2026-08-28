@@ -1,8 +1,13 @@
 "use client";
 
-import type { PruneSavingsDTO } from "@/lib/apiTypes";
+import type {
+  ContextPrunerDTO,
+  PruneActivityDTO,
+  PruneSavingsDTO,
+} from "@/lib/apiTypes";
 import { fmtTokens, fmtUSD, signedUSD } from "@/lib/format";
 import { TBody, Table, Td, Tr } from "@/components/ui/Table";
+import { pruneStatement, prunerLine } from "@/lib/pruneStatement";
 
 /**
  * One span's pruning figures.
@@ -34,10 +39,21 @@ import { TBody, Table, Td, Tr } from "@/components/ui/Table";
 export function PruneSavingsRows({
   label,
   savings,
+  pruner,
+  activity,
 }: {
   label: string;
   savings: PruneSavingsDTO;
+  // Required rather than optional, and deliberately: an optional prop falling
+  // back to the old single sentence would leave a call site that forgot it
+  // rendering the exact ambiguity this pair exists to end, and typechecking.
+  pruner: ContextPrunerDTO;
+  activity: PruneActivityDTO;
 }) {
+  // The span's own outcomes. What is *configured* is named once at the top of
+  // the card these rows sit in, not three times down it — `filterShareUSD`'s
+  // rule for the mechanism beside this one.
+  const statement = pruneStatement(activity);
   const {
     prunes,
     pricedPrunes,
@@ -53,7 +69,18 @@ export function PruneSavingsRows({
     return (
       <div className="mb-3">
         <div className="text-ink-muted text-sm">{label}</div>
-        <div className="text-ink-muted text-sm">Nothing pruned in this window.</div>
+        {/* Five different claims shared this one sentence: pruning switched
+            off, winnow absent from the image, nothing worth removing, every
+            boundary declined by the payback gate, and a span no cycle has ended
+            in. `noFigureReason` refuses exactly that on the filter's half of
+            this same card, and the reasons are the same — they call for
+            different actions, or for none. */}
+        <div className="text-ink-muted text-sm">
+          {/* The breakdown where boundaries were reached and none of them cut,
+              and what is switched on where none were. Never the single string
+              both used to share. */}
+          {statement?.text ?? prunerLine(pruner)}
+        </div>
       </div>
     );
   }
@@ -130,6 +157,17 @@ export function PruneSavingsRows({
                 Money covers {pricedPrunes} of {prunes} prunes — the rest ran on a
                 model with no price here, so what they saved is unknown rather
                 than nothing.
+              </Td>
+            </Tr>
+          )}
+          {/* The denominator for the figures above it: money describes the
+              boundaries that cut, and this says how many there were. Without
+              it a span where four of twelve boundaries cut reads exactly like
+              one where four of four did. */}
+          {statement && (
+            <Tr>
+              <Td className="text-ink-muted" colSpan={2}>
+                {statement.text}
               </Td>
             </Tr>
           )}

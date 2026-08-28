@@ -85,7 +85,9 @@ import {
   recordForkAttempt,
   recordPrune,
   recordPlanObservation,
+  recordPruneDecision,
   recordResumeProbe,
+  WINNOW_MISSING_REASON,
   type PruneOutcome,
   type PruneTrigger,
 } from "./contextPruning";
@@ -6822,7 +6824,9 @@ async function prune(
 
   const transcript = await resolveSessionTranscript(sessionId);
   if (!transcript) {
+    const reason = "the run's transcript could not be found";
     log(id, `Could not find this run's transcript, so its context was not pruned.`);
+    recordPruneDecision(id, trigger, "legacy", "failed", reason);
     return null;
   }
 
@@ -6864,6 +6868,7 @@ async function prune(
           `taking the context from ${fmtTokens(apiTokensBefore)} to about ` +
           `${fmtTokens(apiTokensAfter)}.`,
       );
+      recordPruneDecision(id, trigger, "legacy", "cut");
       return result.outcome;
     }
     case "nothing":
@@ -6871,12 +6876,18 @@ async function prune(
       // cycle whose conversation held nothing worth removing has to be
       // distinguishable from one where the tool never ran.
       log(id, `Nothing worth removing from this run's conversation.`);
+      // Written beside the line rather than instead of it: the line is one
+      // cycle in a pane somebody may not be reading, and the row is what the
+      // span's own sentence is counted from a week later.
+      recordPruneDecision(id, trigger, "legacy", "nothing");
       break;
     case "unavailable":
       log(id, `Context pruning is switched on but ${result.reason}.`);
+      recordPruneDecision(id, trigger, "legacy", "unavailable", result.reason);
       break;
     case "failed":
       log(id, `This run's context could not be pruned: ${result.reason}.`);
+      recordPruneDecision(id, trigger, "legacy", "failed", result.reason);
       break;
   }
   return null;
@@ -6924,6 +6935,22 @@ async function pruneAtBoundary(
   contextTokensNow: number,
   adopt: (sid: string) => void,
 ): Promise<PruneOutcome | null> {
+  const settings = getSettings();
+  // Above the payback gate rather than below it, and that ordering is the whole
+  // point. Below, an install with pruning switched **off** still ran the gate,
+  // still incremented `boundaryDeclines`, and still wrote "the last prune here
+  // removed too little to pay for another one" into the pane every cycle — a
+  // considered decision the app had not made, about a feature nobody had asked
+  // for. `prune()` opens by checking this itself, so the legacy path was
+  // covered and the two newer ones were not: the fork engine spawned winnow and
+  // rewrote a conversation, and the plan observation spawned winnow every
+  // cycle. An operator who turned it off is entitled to a tool that does
+  // nothing and says nothing.
+  if (!settings.contextPruning) {
+    await settleBoundary(id, sessionId, false, contextTokensNow);
+    return null;
+  }
+
   const predicted = predictedPayback(id);
   const declinesSoFar = boundaryDeclines.get(id) ?? 0;
   const action = boundaryAction(predicted, declinesSoFar);
@@ -6947,6 +6974,18 @@ async function pruneAtBoundary(
         `${predicted} more turns to break even, and the limit is ` +
         `${PAYBACK_HORIZON_TURNS}).`,
     );
+    // The one outcome that left no durable trace of any kind: `boundaryDeclines`
+    // is a `globalThis` map cleared when the run ends, so "declined at every
+    // boundary for forty cycles" and "pruning was never on" were the same empty
+    // section a day later.
+    recordPruneDecision(
+      id,
+      "boundary",
+      settings.contextPruningEngine,
+      "declined",
+      null,
+      predicted,
+    );
     await settleBoundary(id, sessionId, false, contextTokensNow);
     return null;
   }
@@ -6958,17 +6997,6 @@ async function pruneAtBoundary(
     );
   }
 
-  const settings = getSettings();
-  // `prune()` opens by checking this itself, so the legacy path was covered and
-  // the two new ones were not: the fork engine spawned winnow and rewrote a
-  // conversation, and the plan observation spawned winnow every cycle, on an
-  // install that had context pruning switched off. The switch's own docstring
-  // calls it "the only thing bounding a cycle's context", and an operator who
-  // turned it off is entitled to a tool that does nothing.
-  if (!settings.contextPruning) {
-    await settleBoundary(id, sessionId, false, contextTokensNow);
-    return null;
-  }
   const outcome =
     settings.contextPruningEngine === "winnow"
       ? await forkAndAdopt(
@@ -7115,12 +7143,14 @@ async function forkAndAdopt(
   const transcript = await resolveSessionTranscript(sessionId);
   if (!transcript) {
     log(id, `Could not find this run's transcript, so its context was not forked.`);
+    recordPruneDecision(id, trigger, "winnow", "failed", "the run's transcript could not be found");
     return null;
   }
 
   const result = await forkTranscript(transcript, minColdAge, maxBreakEven);
   if (!result) {
     log(id, `Context pruning is switched on but winnow is not installed.`);
+    recordPruneDecision(id, trigger, "winnow", "unavailable", WINNOW_MISSING_REASON);
     return null;
   }
 
@@ -7167,6 +7197,20 @@ async function forkAndAdopt(
     } else {
       log(id, `Nothing worth removing from this run's conversation.`);
     }
+    // One row after the branches rather than one per branch: `fork_attempts`
+    // already carries this refusal in full, and what this table is for is the
+    // count an operator reads on a card -- three outcomes, not five wordings.
+    // A guard that stood is `refused`; winnow breaking is `failed`; neither is
+    // `nothing`, which is the tool working and finding no rule hit.
+    recordPruneDecision(
+      id,
+      trigger,
+      "winnow",
+      result.refusedBy ? "refused" : result.reason ? "failed" : "nothing",
+      result.refusedBy
+        ? `${result.refusedBy} — ${result.reason ?? "no reason given"}`
+        : result.reason,
+    );
     return null;
   }
 
@@ -7189,6 +7233,7 @@ async function forkAndAdopt(
   // `--resume` and the live context watch both read. Passed in rather than
   // reached for, because a module-level function could not touch it.
   adopt(result.newSessionId);
+  recordPruneDecision(id, trigger, "winnow", "cut");
 
   // Report what came out, so `contextAfterPrune` can correct the loop's running
   // figure. Returning null here — which this did — left `lastContextTokens`
@@ -7236,6 +7281,13 @@ async function observePlan(
   sessionId: string | null,
   pruned: boolean,
 ): Promise<void> {
+  // Gated here as well as at `pruneAtBoundary`'s head, because this is reached
+  // through `settleBoundary` on the off branch too — and an observation is
+  // still a subprocess spawned against the operator's transcript. Read-only is
+  // not the same as free, and it is emphatically not the same as permitted:
+  // the one thing an operator who turned the feature off has asked for is that
+  // winnow is not run on their conversation.
+  if (!getSettings().contextPruning) return;
   try {
     const transcript = sessionId ? await resolveSessionTranscript(sessionId) : null;
     if (!transcript) return;

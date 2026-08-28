@@ -17,6 +17,7 @@ import { Hint } from "@/components/ui/Hint";
 import { ListGroup, ListRow } from "@/components/ui/List";
 import { ListView, STICKY_HEAD } from "@/components/ui/ListView";
 import { Notice } from "@/components/ui/Notice";
+import { prunerLine } from "@/lib/pruneStatement";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
 import { PERIOD_OPTIONS, UsagePeriods } from "@/components/UsagePeriods";
@@ -504,7 +505,17 @@ export default function Dashboard() {
   // The filter's is `running` rather than a figure: an operator who has it
   // switched on is owed the reason it has no number yet.
   const hasContextControl =
-    pruning.total.prunes > 0 || intakeFilter.running ||
+    pruning.total.prunes > 0 ||
+    // The pruner's own liveness, and the asymmetry it fixes: the filter's
+    // disjunct above was already a *state* and the pruner's was an *outcome*.
+    // An install with pruning switched on and nothing cut yet — or one built
+    // with `WINNOW_REF=` empty, where nothing ever will be — rendered no
+    // context-control surface at all, which reads as the feature not existing.
+    pruning.pruner.state !== "off" ||
+    // A window whose pruning has since been switched off still has boundaries
+    // in it worth reading.
+    pruning.activity.total.boundaries > 0 ||
+    intakeFilter.running ||
     intakeFilter.ledger === "read";
   // Read off the windows rather than off the setting: the setting says we
   // asked, this says we were answered.
@@ -845,6 +856,8 @@ export default function Dashboard() {
             pruningFrom={pruning.totalFrom}
             session={pruning.session}
             weekly={pruning.weekly}
+            pruner={pruning.pruner}
+            weeklyActivity={pruning.activity.weekly}
           />
         )}
       </div>
@@ -1478,6 +1491,24 @@ export default function Dashboard() {
 
           <Card className="mb-4">
             <CardTitle>Context pruning</CardTitle>
+            {/* Full strength rather than `quiet`, because this is not a
+                standing banner: it appears only while pruning is switched on
+                with nothing behind it, which an operator either fixes with a
+                rebuild or turns off deliberately. Every figure under it is
+                then a history, not a reading of now. */}
+            {pruning.pruner.state === "unavailable" ? (
+              <Notice tone="warn">
+                <strong>Context pruning cannot run here.</strong>{" "}
+                {pruning.pruner.detail} Nothing below was removed by it.
+              </Notice>
+            ) : (
+              /* Once, at the top, rather than on each of the three spans under
+                 it: what is configured is one fact about now, and repeating it
+                 per span would read as three readings of it. */
+              <p className="mb-3 text-sm text-ink-muted">
+                {prunerLine(pruning.pruner)}
+              </p>
+            )}
             {/* The total first, because it is what the tile leads with and this
                 band is that figure's derivation. The two windows under it are
                 the same arithmetic over shorter spans. */}
@@ -1488,16 +1519,32 @@ export default function Dashboard() {
                   : `Since ${fmtDate(pruning.totalFrom)}`
               }
               savings={pruning.total}
+              pruner={pruning.pruner}
+              activity={pruning.activity.total}
             />
-            <PruneSavingsRows label="This 5-hour window" savings={pruning.session} />
-            <PruneSavingsRows label="This week" savings={pruning.weekly} />
+            <PruneSavingsRows
+              label="This 5-hour window"
+              savings={pruning.session}
+              pruner={pruning.pruner}
+              activity={pruning.activity.session}
+            />
+            <PruneSavingsRows
+              label="This week"
+              savings={pruning.weekly}
+              pruner={pruning.pruner}
+              activity={pruning.activity.weekly}
+            />
             <Hint>
               Removing conversation does not simply make a run cheaper: an edit
               invalidates the cached prefix, so the saving is what later turns did
               not have to re-read, less what the edit itself cost. A prune between
-              two work cycles pays nothing, because the next cycle was going to
-              rewrite that conversation anyway. One that ended a cycle early pays
-              for the restart it caused. Both are counted here.
+              two work cycles was believed to pay nothing, because the next cycle
+              was going to rewrite that conversation anyway — that is the most
+              likely reading and it has not been measured, so a total still
+              carrying unsettled prunes is printed as a ceiling. One that ended a
+              cycle early pays for the restart it caused. Both are counted here.
+              A cut is left alone when the last one on that run would need more
+              than 18 further turns to pay for itself.
               {/* Why the first block stops where it does. It belongs here rather
                   than on the tile: it is the one line that explains a span, and
                   a reader who wants to know why the total starts on a date has

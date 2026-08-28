@@ -22,6 +22,7 @@ import type {
   SettingsDTO,
   StorageReportDTO,
 } from "@/lib/apiTypes";
+import { PRUNE_ENGINE_LABEL } from "@/lib/pruneStatement";
 import { actionFailureMessage, jsonRequest } from "@/lib/jsonRequest";
 import {
   describeAmbientAgents,
@@ -276,9 +277,13 @@ const PRUNE_TIER_CONSEQUENCE: Record<PruneTier, string> = {
 
 type PruneEngine = "legacy" | "winnow";
 
+// Labels from `pruneStatement.ts` rather than repeated here: the engine is now
+// named on the dashboard tile and the run page as well as on this control, and
+// three copies of a two-entry map is three places for the names to drift apart
+// while every one of them still typechecks.
 const PRUNE_ENGINE_OPTIONS: readonly SegmentedOption<PruneEngine>[] = [
-  { value: "legacy", label: "Edit in place" },
-  { value: "winnow", label: "Fork" },
+  { value: "legacy", label: PRUNE_ENGINE_LABEL.legacy },
+  { value: "winnow", label: PRUNE_ENGINE_LABEL.winnow },
 ];
 
 /**
@@ -293,7 +298,7 @@ const PRUNE_ENGINE_OPTIONS: readonly SegmentedOption<PruneEngine>[] = [
  */
 const PRUNE_ENGINE_CONSEQUENCE: Record<PruneEngine, string> = {
   legacy:
-    "Rewrites the conversation where it stands, keeping the same session. This is what this app has always done and what every figure on the savings card was measured against",
+    "Rewrites the conversation where it stands, keeping the same session. This is what this app has always done, and it is the engine the savings card reports against by name when it has nothing else to say",
   winnow:
     "Writes a new conversation with the removed output replaced by recoverable pointers, and moves the run onto it. The original is never touched and stays the way back. Nothing has yet proved a forked conversation resumes, so if one does not, the run returns to the conversation it had and the failure is recorded — that check is also how the evidence gets collected. Does nothing until you lower the quiet period below",
 };
@@ -924,6 +929,11 @@ function StorageFigures({
               {/* Conditional rather than defaulted to 0: a sweep recorded
                   before this store was swept knew nothing about it, which is
                   not the same claim as having found none. */}
+              {lastSweep.decisions !== undefined && (
+                <>
+                  {lastSweep.decisions.toLocaleString()} boundary decisions,{" "}
+                </>
+              )}
               {lastSweep.samples !== undefined && (
                 <>{lastSweep.samples.toLocaleString()} context samples, </>
               )}

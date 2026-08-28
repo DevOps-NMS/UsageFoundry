@@ -84,6 +84,15 @@ export interface RetentionSweep {
    * them, and `metering.md`'s rule is that the two must not read the same.
    */
   samples?: number;
+  /**
+   * Rows removed from `prune_decisions`.
+   *
+   * Absent on a sweep recorded before this table was swept at all, on
+   * `samples`' reasoning — the reader renders it conditionally rather than as
+   * a `0`, because a sweep that predates the column did not remove none of
+   * these, it did not know about them.
+   */
+  decisions?: number;
   /** Isolated checkouts removed from the mounts' stores. */
   checkouts: number;
   /** Session transcripts removed from `~/.claude/projects`. */
@@ -137,9 +146,10 @@ export function sweepRunEvents(now = Date.now()): {
   events: number;
   telemetry: number;
   samples: number;
+  decisions: number;
 } {
   const cutoff = retentionCutoff(getSettings().eventRetentionDays, now);
-  if (cutoff === null) return { events: 0, telemetry: 0, samples: 0 };
+  if (cutoff === null) return { events: 0, telemetry: 0, samples: 0, decisions: 0 };
 
   const settled = TERMINAL_STATUSES.map(() => "?").join(",");
   const events = db()
@@ -175,7 +185,20 @@ export function sweepRunEvents(now = Date.now()): {
     )
     .run(cutoff, ...TERMINAL_STATUSES).changes;
 
-  return { events, telemetry, samples };
+  // Boundary decisions go on exactly the samples clause, and for exactly its
+  // reason: this is evidence for a sentence on the run's own page, beside the
+  // log it explains, and it must not outlive that log. Deliberately not
+  // `prune_receipts`' treatment — a receipt answers a weekly KPI and has to
+  // outlive its run; a decision is read only while somebody is reading the run.
+  const decisions = db()
+    .prepare(
+      `DELETE FROM prune_decisions
+        WHERE ts < ?
+          AND run_id IN (SELECT id FROM runs WHERE status IN (${settled}))`,
+    )
+    .run(cutoff, ...TERMINAL_STATUSES).changes;
+
+  return { events, telemetry, samples, decisions };
 }
 
 /* ------------------------------------------------------------------ */

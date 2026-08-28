@@ -1,10 +1,13 @@
 "use client";
 
 import type {
+  ContextPrunerDTO,
   FilterSavingsDTO,
   FilterWindowDTO,
+  PruneActivityDTO,
   PruneSavingsDTO,
 } from "@/lib/apiTypes";
+import { pruneStatement, prunerLine } from "@/lib/pruneStatement";
 import { fmtDate, fmtTokens, fmtUSD, signedUSD } from "@/lib/format";
 import { Card, CardTitle, Stat, StatSub } from "@/components/ui/Card";
 import { TBody, Table, Td, Tr } from "@/components/ui/Table";
@@ -163,14 +166,24 @@ export function ContextControlAside({
   pruningFrom,
   session,
   weekly,
+  pruner,
+  weeklyActivity,
 }: {
   filter: FilterSavingsDTO;
   pruning: PruneSavingsDTO;
   pruningFrom: number | null;
   session: PruneSavingsDTO;
   weekly: PruneSavingsDTO;
+  pruner: ContextPrunerDTO;
+  weeklyActivity: PruneActivityDTO;
 }) {
   const reason = noFigureReason(filter);
+  // Keyed to the week, because the week is what the headline above reads. The
+  // pruner half of this card had no equivalent of the filter's `running`, so an
+  // install with winnow missing from the image drew an identical tile while
+  // every prune no-opped — the two mechanisms sit side by side here and only
+  // one of them could say what it was doing.
+  const prunerNote = pruneStatement(weeklyActivity);
   const weeklyShare = filterShareUSD(filter, filter.weekly);
   const sessionShare = filterShareUSD(filter, filter.session);
   const weeklyNet = combinedUSD(weekly, weeklyShare);
@@ -220,6 +233,15 @@ export function ContextControlAside({
           taken off the wire, and both count it.
         </div>
         <div>Not spend, and added to nothing beside it.</div>
+        {/* The pruner's sentence sits before the filter's, in the order the
+            headline sums them. One line and not a badge on the title: this card
+            is titled for neither mechanism, so a mark up there could not say
+            which half it meant. */}
+        {/* Always, and that is the point: no figure on this card carries which
+            engine made it or whether the tool is still installed, so an absent
+            line here was the ambiguity rather than the quiet default. */}
+        <div>{prunerLine(pruner)}</div>
+        {prunerNote && <div>{prunerNote.text}</div>}
         {/* Only when the adjacency would otherwise mislead. A history read off a
             ledger nothing is appending to is still worth reading, but it is not
             a reading of now. */}

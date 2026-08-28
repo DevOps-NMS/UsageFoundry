@@ -18,7 +18,9 @@ import { scanUsage, type UsageEntry } from "./transcripts";
 import type {
   ContextCheckDTO,
   ContextOccupancyDTO,
+  ContextPrunerDTO,
   ContextSampleBasisDTO,
+  PruneActivityDTO,
   PruneTier,
 } from "./apiTypes";
 import { getSettings, type Settings } from "./settings";
@@ -287,18 +289,61 @@ export type PruneResult =
   | { kind: "failed"; reason: string };
 
 /**
+ * Why a switched-on pruner cannot act, in the one wording both surfaces use.
+ *
+ * A module constant rather than a literal at the `pruneTranscript` branch that
+ * used to hold it, because it is now read twice: once into the run log and once
+ * onto `ContextPrunerDTO.detail`, which two screens render. A hedge worded
+ * twice is a hedge that drifts, and the drift is invisible — the two copies
+ * would still both typecheck and still both read as sentences.
+ */
+export const WINNOW_MISSING_REASON = `winnow is not installed at ${WINNOW_ROOT} — this image was built with WINNOW_REF empty`;
+
+/**
+ * How long a `winnowAvailable()` answer is reused.
+ *
+ * The probe used to run only on the run loop's path, a handful of times per
+ * work cycle. It is now also on the dashboard's heartbeat and the run page's
+ * three-second poll, so an uncached `statSync` would sit on a request path that
+ * repeats for as long as a tab is open. The answer can only change by a rebuild
+ * or an edit to a bind-mounted checkout, so a minute bounds even the second.
+ */
+const WINNOW_PROBE_TTL_MS = 60_000;
+
+/**
+ * A new key rather than a reuse, on `orchestrator.ts:373`'s trap: `??=` only
+ * initialises when absent, so a value of a different shape left at an old key
+ * by a pre-upgrade dev process survives the hot reload and every call on it
+ * throws.
+ */
+const winnowProbe = ((globalThis as unknown as {
+  __ufWinnowProbeV1?: { at: number; ok: boolean };
+}).__ufWinnowProbeV1 ??= { at: 0, ok: false });
+
+/**
  * Is the bundled tool actually here?
  *
  * Probed rather than assumed because the Dockerfile's `WINNOW_REF` may be empty
  * — an install that deliberately built without it — and because this runs on the
  * run loop's path, where an exception would end a cycle that was doing fine.
+ *
+ * Cached in place rather than behind a second, read-only twin: the guard that
+ * decides whether to spawn and the readout that tells an operator whether it
+ * can must never be able to disagree, and two functions over one fact is
+ * exactly how they come to.
  */
 export function winnowAvailable(): boolean {
+  const now = Date.now();
+  if (now - winnowProbe.at < WINNOW_PROBE_TTL_MS) return winnowProbe.ok;
+  let ok: boolean;
   try {
-    return fs.statSync(WINNOW_PYTHON).isFile();
+    ok = fs.statSync(WINNOW_PYTHON).isFile();
   } catch {
-    return false;
+    ok = false;
   }
+  winnowProbe.at = now;
+  winnowProbe.ok = ok;
+  return ok;
 }
 
 /**
@@ -1179,9 +1224,43 @@ export function freshestPayback(
   return latest ? paybackTurns(latest.s, latest.d) : null;
 }
 
-/** Is the feature on, and is the tool here to do it? */
+/**
+ * What is configured, and whether the tool behind it is actually here.
+ *
+ * `FilterSavingsDTO`'s `running`/`ledger` split, one mechanism over and for the
+ * same reason. The pruner half of the context-control card shipped arithmetic
+ * and no state, so an image built with `WINNOW_REF=` empty rendered a
+ * byte-identical dashboard while every prune no-opped — the failure was
+ * reported once per cycle into a per-run log nothing aggregates, and nowhere
+ * else at all.
+ *
+ * Three readings and not a boolean, because the third is how an install lies
+ * about itself: `unavailable` is pruning switched **on** with nothing behind
+ * it, and it is the only one of the three drawn as a fault. Off is not a fault
+ * — it is an operator's decision, and a warning standing permanently over one
+ * trains the eye to skip warnings that matter.
+ */
+export function prunerState(s: Settings = getSettings()): ContextPrunerDTO {
+  const available = winnowAvailable();
+  return {
+    state: !s.contextPruning ? "off" : available ? "ready" : "unavailable",
+    engine: s.contextPruningEngine,
+    detail: !s.contextPruning || available ? null : WINNOW_MISSING_REASON,
+    minColdAgeSeconds:
+      s.contextPruningEngine === "winnow" ? s.contextPruningForkMinColdAge : null,
+  };
+}
+
+/**
+ * Is the feature on, and is the tool here to do it?
+ *
+ * Defined over `prunerState` rather than beside it so the guard that decides
+ * whether to spawn and the sentence that tells an operator what happened cannot
+ * come apart — the readout would otherwise be a second derivation of the same
+ * two facts, and a second derivation is a place for them to disagree.
+ */
 export function pruningEnabled(s: Settings = getSettings()): boolean {
-  return s.contextPruning && winnowAvailable();
+  return prunerState(s).state === "ready";
 }
 
 /**
@@ -1226,10 +1305,7 @@ export async function pruneTranscript(
   tier: PruneTier,
 ): Promise<PruneResult> {
   if (!winnowAvailable()) {
-    return {
-      kind: "unavailable",
-      reason: `winnow is not installed at ${WINNOW_ROOT} — this image was built with WINNOW_REF empty`,
-    };
+    return { kind: "unavailable", reason: WINNOW_MISSING_REASON };
   }
 
   // Created here rather than at boot: this is the only thing that writes it, and
@@ -2146,6 +2222,164 @@ export function recordPrune(
     // A receipt is evidence, not the thing itself — so this does not throw.
     noteBookkeepingFailure("recordPrune", err);
   }
+}
+
+/**
+ * How a cycle boundary ended.
+ *
+ * Six and not two, because the difference between them is the whole reason the
+ * table exists: an operator reading "nothing pruned" cannot act on it, and each
+ * of these calls for a different action — none, a rebuild, a wait, or nothing
+ * at all because the arithmetic said so.
+ */
+export type PruneDecisionOutcome =
+  | "cut"
+  | "nothing"
+  | "declined"
+  | "refused"
+  | "unavailable"
+  | "failed";
+
+export interface PruneDecisionRow {
+  ts: number;
+  runId: string;
+  trigger: PruneTrigger;
+  engine: "legacy" | "winnow";
+  outcome: PruneDecisionOutcome;
+  detail: string | null;
+  predictedTurns: number | null;
+}
+
+const PRUNE_DECISION_OUTCOMES = new Set<string>([
+  "cut",
+  "nothing",
+  "declined",
+  "refused",
+  "unavailable",
+  "failed",
+]);
+
+/**
+ * Write down how a boundary ended, beside the log line that says the same thing.
+ *
+ * Best-effort on `recordPrune`'s reasoning, and the stakes here are lower still
+ * — the decision has already been taken and acted on, and what is lost is a
+ * clause in a sentence.
+ *
+ * Called at each terminus rather than once at the end, so the row and the line
+ * in the operator's pane are written from the same branch and cannot come to
+ * disagree about what happened.
+ */
+export function recordPruneDecision(
+  runId: string,
+  trigger: PruneTrigger,
+  engine: "legacy" | "winnow",
+  outcome: PruneDecisionOutcome,
+  detail: string | null = null,
+  predictedTurns: number | null = null,
+): void {
+  try {
+    db()
+      .prepare(
+        `INSERT INTO prune_decisions
+           (ts, run_id, trigger, engine, outcome, detail, predicted_turns)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(Date.now(), runId, trigger, engine, outcome, detail, predictedTurns);
+  } catch (err) {
+    noteBookkeepingFailure("recordPruneDecision", err);
+  }
+}
+
+/** Raw decision rows, span- or run-bounded. */
+export function readPruneDecisions(
+  filter: { from: number; to: number } | { runId: string },
+): PruneDecisionRow[] {
+  const where = "runId" in filter ? "run_id = ?" : "ts >= ? AND ts <= ?";
+  const args: (string | number)[] =
+    "runId" in filter ? [filter.runId] : [filter.from, filter.to];
+  try {
+    const rows = db()
+      .prepare(
+        `SELECT ts, run_id, trigger, engine, outcome, detail, predicted_turns
+           FROM prune_decisions WHERE ${where} ORDER BY ts`,
+      )
+      .all(...args) as {
+      ts: number;
+      run_id: string;
+      trigger: string;
+      engine: string;
+      outcome: string;
+      detail: string | null;
+      predicted_turns: number | null;
+    }[];
+    return rows.flatMap((r) =>
+      // Dropped rather than coerced, unlike `readReceipts`' tier. A tier that
+      // cannot be read still describes a cut that happened, so a default is
+      // honest there; an outcome that cannot be read is the entire content of
+      // this row, and defaulting it would invent a boundary decision.
+      PRUNE_DECISION_OUTCOMES.has(r.outcome)
+        ? [
+            {
+              ts: r.ts,
+              runId: r.run_id,
+              trigger: r.trigger === "early-end" ? "early-end" : "boundary",
+              engine: r.engine === "winnow" ? "winnow" : "legacy",
+              outcome: r.outcome as PruneDecisionOutcome,
+              detail: r.detail,
+              predictedTurns: r.predicted_turns,
+            } satisfies PruneDecisionRow,
+          ]
+        : [],
+    );
+  } catch (err) {
+    noteBookkeepingFailure("readPruneDecisions", err);
+    return [];
+  }
+}
+
+/**
+ * Count the outcomes.
+ *
+ * Pure and separate from the read on `sumPruneSavings`' grounds: the counting is
+ * what has to be testable without a database behind it, because a breakdown that
+ * does not sum to `boundaries` is a sentence quietly dropping a clause — and a
+ * shorter sentence still reads as a complete one.
+ */
+export function sumPruneActivity(
+  rows: readonly PruneDecisionRow[],
+): PruneActivityDTO {
+  const out: PruneActivityDTO = {
+    boundaries: rows.length,
+    cut: 0,
+    nothing: 0,
+    declined: 0,
+    refused: 0,
+    unavailable: 0,
+    failed: 0,
+    lastDetail: null,
+  };
+  for (const r of rows) {
+    out[r.outcome] += 1;
+    // Newest wins, and rows arrive in `ts` order. A cut carries no detail worth
+    // repeating — the money beside it already says what happened.
+    if (r.outcome !== "cut" && r.detail) out.lastDetail = r.detail;
+  }
+  return out;
+}
+
+/**
+ * One span or one run's boundary outcomes, or undefined when it reached none.
+ *
+ * Undefined rather than a zeroed record, on `contextOccupancy`'s convention: the
+ * page drops the section rather than printing a row of zeroes, and with every
+ * boundary now writing a row, absent genuinely means nothing happened.
+ */
+export function pruneActivity(
+  filter: { from: number; to: number } | { runId: string },
+): PruneActivityDTO | undefined {
+  const rows = readPruneDecisions(filter);
+  return rows.length === 0 ? undefined : sumPruneActivity(rows);
 }
 
 /* ------------------------------------------------------------------ */

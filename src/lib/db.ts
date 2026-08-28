@@ -1522,6 +1522,45 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_fork_attempts_run ON fork_attempts(run_id, ts);
   `);
 
+  // Every cycle boundary's outcome, including the ones that removed nothing.
+  //
+  // **A count of events and never a cost source.** Nothing in the netting reads
+  // this table, and an `outcome = 'cut'` row is not a receipt -- the receipt is
+  // in prune_receipts or fork_attempts and is the only thing money is derived
+  // from. The two must not be joined to make a figure.
+  //
+  // A table of its own rather than a column on prune_receipts, which is read by
+  // pricedCuts, contextOccupancy and countFor: a non-cut row landing in there
+  // would corrupt all three, and it would do it silently -- every one of them
+  // would still return a number.
+  //
+  // It exists because five outcomes at a boundary -- a cut, a payback decline,
+  // nothing worth removing, a fork refusal, a missing tool -- were one absent
+  // section on two screens, and an absent section reads as "the feature never
+  // ran". Four of the five left no durable trace anywhere at all.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS prune_decisions (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts              INTEGER NOT NULL,
+      run_id          TEXT NOT NULL,
+      -- 'boundary' or 'early-end', the same pair prune_receipts carries.
+      trigger         TEXT NOT NULL,
+      -- Which engine was configured when this boundary was decided. Stored per
+      -- row rather than read back off settings later, on min_cold_age's
+      -- grounds: it is the fact that explains the outcome, and settings move.
+      engine          TEXT NOT NULL,
+      -- 'cut', 'nothing', 'declined', 'refused', 'unavailable' or 'failed'.
+      outcome         TEXT NOT NULL,
+      -- The server's own reason, so the page and the run log cannot word the
+      -- same failure two different ways.
+      detail          TEXT,
+      -- What the payback gate read, for 'declined'. Null on every other row.
+      predicted_turns REAL
+    );
+    CREATE INDEX IF NOT EXISTS idx_prune_decisions_ts ON prune_decisions(ts);
+    CREATE INDEX IF NOT EXISTS idx_prune_decisions_run ON prune_decisions(run_id, ts);
+  `);
+
   // `suffix_bytes` arrived one commit after the table did, and it arrived inside
   // the CREATE above — which is a no-op against an install that already has the
   // table, so the column never appeared on any database created in between.

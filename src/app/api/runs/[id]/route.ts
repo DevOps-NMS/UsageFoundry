@@ -9,7 +9,12 @@ import {
   stopRun,
 } from "@/lib/orchestrator";
 import { telemetryForRun } from "@/lib/otlp";
-import { contextOccupancy, pruneSavings } from "@/lib/contextPruning";
+import {
+  contextOccupancy,
+  pruneActivity,
+  pruneSavings,
+  prunerState,
+} from "@/lib/contextPruning";
 import { runAgentDTO } from "@/lib/agents";
 import { normalizePolicy } from "@/lib/budget";
 import { auditMutation } from "../../../../lib/requestLog";
@@ -91,6 +96,15 @@ export async function GET(req: Request, ctx: Ctx) {
     // the section rather than render a row of zeroes — which would read as
     // "pruning saved nothing here" when it means "pruning did not run".
     pruning: pruned.prunes > 0 ? pruned : undefined,
+    // What is configured now and whether the tool behind it is here — the pair
+    // that turns the absence above from one blank into a sentence. Sent on
+    // every poll, and cheap: one settings read and one memoised stat.
+    pruner: prunerState(),
+    // How this run's cycle boundaries actually ended. Undefined when it reached
+    // none, on `pruning`'s rule — and with every boundary now writing a row,
+    // undefined here genuinely means nothing happened rather than standing in
+    // for four different things that did.
+    pruneActivity: pruneActivity({ runId: id }),
     // How full this run's context has been, on the poll the page already runs
     // rather than an endpoint of its own — this is the row's own state and it
     // arrives with the rest of it. Two indexed reads bounded by

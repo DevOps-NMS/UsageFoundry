@@ -307,6 +307,68 @@ export interface PruneSavingsDTO {
 }
 
 /**
+ * Which engine is configured, and whether the tool behind it is here.
+ *
+ * `FilterSavingsDTO`'s `running`/`ledger` split, one mechanism over. The pruner
+ * half of the context-control card carried arithmetic and no state, so an image
+ * built with `WINNOW_REF=` empty rendered a byte-identical dashboard while every
+ * prune no-opped.
+ *
+ * Three readings and not a boolean, because one of them is the way an install
+ * lies about itself: `unavailable` is pruning switched **on** with no tool
+ * behind it, and it is the only one of the three drawn as a fault.
+ *
+ * `engine` is what is configured **now**, and it may never be printed as a
+ * label on money. `pricedCuts` unions both engines' tables deliberately, so
+ * every figure on these screens is a blend — naming one for the current setting
+ * would attribute one engine's earnings to the other the moment the switch
+ * moved.
+ */
+export type PrunerStateDTO = "off" | "unavailable" | "ready";
+
+export interface ContextPrunerDTO {
+  state: PrunerStateDTO;
+  engine: "legacy" | "winnow";
+  /**
+   * The server's own sentence for `unavailable`, null otherwise.
+   *
+   * The server's and not the page's: it is the same string the run log carries,
+   * from the same constant, and a second copy authored in a component is a
+   * second thing to keep true.
+   */
+  detail: string | null;
+  /** Seconds of quiet the fork engine needs. Null under the edit-in-place engine. */
+  minColdAgeSeconds: number | null;
+}
+
+/**
+ * What the pruner did at the cycle boundaries inside one span.
+ *
+ * **Event counts, never money, and never summed with anything on
+ * `PruneSavingsDTO`.** They exist because five different outcomes at a boundary
+ * — a cut, a payback decline, nothing worth removing, a fork refusal, a missing
+ * tool — all rendered as the same absent section, which reads as "pruning never
+ * ran" for a run winnow was spawned at every cycle of.
+ *
+ * The six outcome counts sum to `boundaries` exactly, and that is what makes the
+ * sentence built from them checkable: a breakdown that did not add up would be a
+ * filter dropping rows with nothing saying what it left out.
+ *
+ * An early end counts as a boundary, because it manufactures one.
+ */
+export interface PruneActivityDTO {
+  boundaries: number;
+  cut: number;
+  nothing: number;
+  declined: number;
+  refused: number;
+  unavailable: number;
+  failed: number;
+  /** Newest non-cut `detail`, server-written; null when every boundary cut. */
+  lastDetail: string | null;
+}
+
+/**
  * Which measure a context sample was taken in.
  *
  * `api` is `apiContextTokens` — the whole prompt as the API was billed for it,
@@ -543,6 +605,24 @@ export interface UsageResponse {
     weekly: PruneSavingsDTO;
     total: PruneSavingsDTO;
     totalFrom: number | null;
+    /**
+     * Not a span reading: what is configured now, and whether it can act.
+     *
+     * Shipped unconditionally, never behind a `pruningEnabled()` on the route —
+     * or the readout would go missing on exactly the installs whose operators
+     * need it, which is the failure it was added to end.
+     */
+    pruner: ContextPrunerDTO;
+    /**
+     * The same three spans as the savings above, from one read, so a span with
+     * no money can still say what happened in it — and so a card can never
+     * print a boundary count over one window beside a figure over another.
+     */
+    activity: {
+      session: PruneActivityDTO;
+      weekly: PruneActivityDTO;
+      total: PruneActivityDTO;
+    };
   };
   /**
    * Spend cut into calendar buckets, all three granularities at once so the
@@ -2408,6 +2488,8 @@ export interface StorageReportDTO {
     telemetry: number;
     /** Absent on a sweep recorded before `context_samples` was swept at all. */
     samples?: number;
+    /** Absent on a sweep recorded before `prune_decisions` was swept at all. */
+    decisions?: number;
     checkouts: number;
     transcripts: number;
     transcriptBytes: number;

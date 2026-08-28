@@ -1727,6 +1727,35 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **The context-control readout has never been seen with a real boundary behind
+> it.** `prune_decisions`, `prunerState()` and `pruneStatement` were added on
+> 2026-08-28 so that the five ways a boundary can end stop sharing one blank —
+> the operator's own report was that a switched-back engine looked unchanged,
+> and the reason was that nothing on either screen had ever named the engine or
+> said whether the tool was present. What that rests on is `npm run typecheck`
+> (exit 0), `npm test` (**1,969 tests / 1 failure, `backupRestore.test.ts`'s
+> truncated-copy case, which fails identically on the unmodified tree**), a
+> clean `env -u __NEXT_PRIVATE_STANDALONE_CONFIG npm run build`, and 11 new unit
+> cases over the pure resolver and the counter. What has **not** happened is a
+> single row in `prune_decisions`: the install has been on `legacy` with
+> `maxIterations: 2` and `continueAfterDone: false`, every run has reported DONE
+> inside cycle 1, and the ceiling watcher declined every early-end measurement,
+> so `pruneAtBoundary`'s engine branch has not been reached since the switch. So
+> every sentence this change can render has been produced from a fixture and
+> **none of them from a real boundary**. The decisive test is one run with
+> `maxIterations >= 2` and a prompt that will not finish in cycle 1: the
+> boundary then writes a `resume_probes` row unconditionally, which is positive
+> confirmation the branch was reached, and the run's `session_id` staying a v4
+> UUID with no new `fork_attempts` row is the legacy engine proven by execution
+> rather than by reading.
+>
+> **The `unavailable` branch has never been rendered.** It needs an image built
+> with `WINNOW_REF=` empty, which has not been done — the running container
+> carries winnow 1.8.39 at `/opt/winnow` and `winnowAvailable()` is true. Both
+> the dashboard `Notice` and the run page's quiet one are therefore unexercised
+> against a real install, and the sentence they carry is the server's own
+> constant rather than a second copy, which is the part the unit test pins.
+
 > **Two conflict resolutions in one repository have never been run at once.**
 > The aux resolve checkout is now named for the run — `<slug>-resolve-<id8>`
 > rather than one `<slug>-resolve` the whole repository shared — and

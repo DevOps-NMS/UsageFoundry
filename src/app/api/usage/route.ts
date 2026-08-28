@@ -16,6 +16,9 @@ import { retentionCutoff } from "@/lib/retention";
 import { installSpendReport } from "@/lib/installBudget";
 import {
   pricedCuts,
+  prunerState,
+  readPruneDecisions,
+  sumPruneActivity,
   sumPruneSavings,
 } from "../../../lib/contextPruning";
 import { readFilterSavings } from "@/lib/intakeFilter";
@@ -146,6 +149,13 @@ export async function GET(req: Request) {
         pricedReceipts.filter((p) => p.row.ts >= from && p.row.ts <= to),
       );
 
+    // Read once over the widest span and sliced, exactly as the receipts above
+    // are, so a card can never print a boundary count over one window beside a
+    // figure over another. Bounded at the same `pruneFrom` for the same reason.
+    const decisions = readPruneDecisions({ from: pruneFrom, to: now });
+    const activityWithin = (from: number, to: number) =>
+      sumPruneActivity(decisions.filter((d) => d.ts >= from && d.ts <= to));
+
     // Bounded at the same horizon the prune total is, and for the same reason:
     // a filtered request whose transcript has been swept can be neither dated
     // nor priced. The same two window starts the meters and the prune figures
@@ -208,6 +218,27 @@ export async function GET(req: Request) {
         // transcript retention off keeps every receipt priceable. The client
         // must not print a date it invented for that case.
         totalFrom: pruneFrom > 0 ? pruneFrom : null,
+        // The pruner's own `running`, and its absence is why an image built
+        // with `WINNOW_REF=` empty rendered an identical dashboard while every
+        // prune no-opped: nothing on this route had ever said the tool was not
+        // there. Sent unconditionally and never behind `pruningEnabled()` — a
+        // readout that disappears on the installs it describes is the failure,
+        // not the fix.
+        pruner: prunerState(settings),
+        // Event counts, never money: they answer "what happened at the
+        // boundaries in this span", which is the question a $0.00 could not be
+        // an answer to. Never summed with anything above them.
+        activity: {
+          session: activityWithin(
+            snapshot.session.startsAt,
+            snapshot.session.endsAt,
+          ),
+          weekly: activityWithin(
+            snapshot.weekly.startsAt,
+            snapshot.weekly.endsAt,
+          ),
+          total: sumPruneActivity(decisions),
+        },
       },
       meta: {
         transcriptDir: PROJECTS_DIR,

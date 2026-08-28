@@ -5,12 +5,15 @@ import type { ReactNode } from "react";
 import Link from "next/link";
 import type {
   ContextOccupancyDTO,
+  ContextPrunerDTO,
   EnforcementModeDTO,
+  PruneActivityDTO,
   RunDTO,
   RunEventDTO,
   PruneSavingsDTO,
   RunTelemetryDTO,
 } from "@/lib/apiTypes";
+import { pruneStatement, prunerLine } from "@/lib/pruneStatement";
 import {
   STATUS_TONE,
   fmtClock,
@@ -450,6 +453,11 @@ export default function RunDetail({
   const [run, setRun] = useState<RunDTO | null>(null);
   const [telemetry, setTelemetry] = useState<RunTelemetryDTO | null>(null);
   const [pruning, setPruning] = useState<PruneSavingsDTO | null>(null);
+  // The pair that turns an absent pruning section from a blank into a sentence.
+  // `pruner` is what is configured now; `pruneActivity` is what this run's own
+  // boundaries did, which is the half the money could never carry.
+  const [pruner, setPruner] = useState<ContextPrunerDTO | null>(null);
+  const [pruneActivity, setPruneActivity] = useState<PruneActivityDTO | null>(null);
   // Rides the run poll below rather than a route of its own: this is the row's
   // own state and arrives with the rest of it, so a second timer would only add
   // a way for the indicator and the run header to disagree about the same run.
@@ -537,6 +545,8 @@ export default function RunDetail({
           run?: RunDTO;
           telemetry?: RunTelemetryDTO | null;
           pruning?: PruneSavingsDTO | null;
+          pruner?: ContextPrunerDTO | null;
+          pruneActivity?: PruneActivityDTO | null;
           context?: ContextOccupancyDTO | null;
           error?: string;
         };
@@ -552,6 +562,8 @@ export default function RunDetail({
         setRun(json.run);
         setTelemetry(json.telemetry ?? null);
         setPruning(json.pruning ?? null);
+        setPruner(json.pruner ?? null);
+        setPruneActivity(json.pruneActivity ?? null);
         setContext(json.context ?? null);
         setPollError(null);
       } catch (err) {
@@ -647,6 +659,11 @@ export default function RunDetail({
   // Computed here rather than inside `RunOutput` because the tab bar has to
   // know whether there is a report before it offers a tab for one.
   const cycles = useMemo(() => cycleOutputs(events), [events]);
+  // Null only until the first poll answers. `pruner` is what the server says is
+  // configured now; the activity is this run's own boundaries, and the resolver
+  // prefers the second — a finished run describes what happened to it rather
+  // than announcing a setting that has moved since.
+  const runStatement = pruneStatement(pruneActivity);
 
   // Follow the tail, but stop fighting the user if they scroll up to read.
   // Keyed on the tab as well: the pane is unmounted while another tab is up, so
@@ -1451,22 +1468,59 @@ export default function RunDetail({
                 conversation was pruned between cycles. Never added to the three
                 above — the copy says so, on the same grounds the telemetry line
                 does. */}
-            {pruning && (
+            {/* Rendered when the run has either cuts or boundary decisions.
+                Absent now genuinely means nothing happened: every boundary an
+                install with pruning on reaches writes a decision row, so the
+                five states that used to share this one blank — pruning off,
+                winnow absent, every boundary declined, nothing worth removing,
+                and a run that never reached a boundary — each have a sentence
+                of their own below. */}
+            {(pruning || pruneActivity || pruner) && (
               <Section title="Context pruning">
-                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                  <Stat>
-                    {pruning.netUSD >= 0 ? "+" : "−"}
-                    {fmtUSD(Math.abs(pruning.netUSD))}
-                  </Stat>
-                  <div className="text-xs tabular-nums text-ink-muted">
-                    {fmtTokens(pruning.tokensRemoved)} tokens removed over{" "}
-                    {pruning.prunes} {pruning.prunes === 1 ? "prune" : "prunes"}
-                  </div>
-                </div>
-                <p className="mt-2 text-xs leading-snug text-ink-muted">
-                  What later turns did not have to re-read, less what the edits
-                  cost. Not spend, and never added to the figures above.
-                </p>
+                {pruning && (
+                  <>
+                    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <Stat>
+                        {pruning.netUSD >= 0 ? "+" : "−"}
+                        {fmtUSD(Math.abs(pruning.netUSD))}
+                      </Stat>
+                      <div className="text-xs tabular-nums text-ink-muted">
+                        {fmtTokens(pruning.tokensRemoved)} tokens removed over{" "}
+                        {pruning.prunes}{" "}
+                        {pruning.prunes === 1 ? "prune" : "prunes"}
+                      </div>
+                    </div>
+                    <p className="mt-2 text-xs leading-snug text-ink-muted">
+                      What later turns did not have to re-read, less what the
+                      edits cost. Not spend, and never added to the figures
+                      above.
+                    </p>
+                  </>
+                )}
+                {/* `quiet` here against full strength on the dashboard: by the
+                    time a finished run is being read this is history, and the
+                    place a rebuild is prompted is the install-wide card. */}
+                {/* What this run's own boundaries did, where they did
+                    anything but cut. */}
+                {runStatement?.severity === "warn" ? (
+                  <Notice tone="warn" quiet className="mt-2">
+                    {runStatement.text}
+                  </Notice>
+                ) : (
+                  runStatement && (
+                    <p className="mt-2 text-xs leading-snug text-ink-muted">
+                      {runStatement.text}
+                    </p>
+                  )
+                )}
+                {/* And what is switched on, always — the figures above name
+                    neither the engine nor whether the tool is still there, so
+                    a run page without this line left both unanswerable. */}
+                {pruner && (
+                  <p className="mt-2 text-xs leading-snug text-ink-muted">
+                    {prunerLine(pruner)}
+                  </p>
+                )}
               </Section>
             )}
           </Region>
