@@ -345,25 +345,40 @@ export function winnowAvailable(): boolean {
  * loop's path and none of them should end a cycle over a stat.
  */
 export function contextTokens(transcriptPath: string): number {
-  let bytes = 0;
+  let text: string;
   try {
-    const text = fs.readFileSync(transcriptPath, "utf8");
-    for (const line of text.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let record: unknown;
-      try {
-        record = JSON.parse(trimmed);
-      } catch {
-        // A torn trailing line is normal on a transcript being appended to.
-        continue;
-      }
-      const message = (record as { message?: unknown } | null)?.message;
-      if (message === undefined || message === null) continue;
-      bytes += JSON.stringify(message).length;
-    }
+    text = fs.readFileSync(transcriptPath, "utf8");
   } catch {
     return 0;
+  }
+  return contextTokensOf(text);
+}
+
+/**
+ * The measurement above, over text the caller has already read.
+ *
+ * `readContext` reaches its fallbacks holding the whole file in a string, and
+ * calling `contextTokens` from there read those same bytes off disk a second
+ * time within the one call — 7.6 ms of the 31.9 ms that call costs on the
+ * largest transcript this store holds. Measuring the string in hand also makes
+ * the two halves of the answer describe one snapshot rather than two reads taken
+ * milliseconds apart on a file being appended to.
+ */
+function contextTokensOf(text: string): number {
+  let bytes = 0;
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(trimmed);
+    } catch {
+      // A torn trailing line is normal on a transcript being appended to.
+      continue;
+    }
+    const message = (record as { message?: unknown } | null)?.message;
+    if (message === undefined || message === null) continue;
+    bytes += JSON.stringify(message).length;
   }
   return Math.round(bytes / BYTES_PER_TOKEN);
 }
@@ -471,8 +486,21 @@ function readContext(
   sinceFrameId: string | null,
   countTurns: boolean,
 ): ContextReading {
-  const miss = (basis: ContextBasis, wholeFile: boolean): ContextReading => ({
-    tokens: basis === "unreadable" ? 0 : contextTokens(transcriptPath),
+  // `text` is the whole file where the caller already holds it, which every
+  // path that reaches a `transcript` basis does — the fallback below has just
+  // read it, and a tail that came back `whole` *is* it. Re-reading those bytes
+  // was a second multi-megabyte read inside the one call.
+  const miss = (
+    basis: ContextBasis,
+    wholeFile: boolean,
+    text?: string,
+  ): ContextReading => ({
+    tokens:
+      basis === "unreadable"
+        ? 0
+        : text !== undefined
+          ? contextTokensOf(text)
+          : contextTokens(transcriptPath),
     basis,
     frameId: null,
     turnsAdvanced: 0,
@@ -493,15 +521,21 @@ function readContext(
     // theoretical: the largest transcript on this install is 9.1 MB over 789
     // lines, so one tool result can be bigger than the window. Pay for the whole
     // file rather than report a conversation as empty.
+    let whole: string;
     try {
-      const fromWhole = scanTail(fs.readFileSync(transcriptPath, "utf8"), sinceFrameId, countTurns);
+      whole = fs.readFileSync(transcriptPath, "utf8");
+      const fromWhole = scanTail(whole, sinceFrameId, countTurns);
       if (fromWhole) return { ...fromWhole, basis: "api", wholeFile: true };
     } catch {
+      // The read *or* the scan: both were inside this catch before the text was
+      // hoisted out of it, and a scan that threw answered `unreadable`.
       return miss("unreadable", false);
     }
-    return miss("transcript", true);
+    return miss("transcript", true, whole);
   }
-  return miss("transcript", tail.whole);
+  // `tail.whole` is true here, so `readTail` returned the file entire and it is
+  // exactly what `contextTokens` would have gone back to disk for.
+  return miss("transcript", tail.whole, tail.text);
 }
 
 /** What one backwards pass over a transcript's tail found. */
