@@ -1763,6 +1763,32 @@ through before trusting this unattended:
 >    find its lines carried over — the entrypoint copies them once, and only
 >    when the new ledger is still empty.
 
+> **`/app`'s ownership has never been read off a built image.** The Dockerfile
+> stopped chowning `/app` to `node` (#200): it was handing the agent uid
+> ownership of `server.js`, `.next/`, the standalone `node_modules/` and
+> `scripts/discord-relay.mjs` — the last of which the entrypoint re-runs *as
+> root* every five seconds — while the server itself runs as root. The change is
+> the removal of one path from one `chown`, and `deployment.test.ts` pins the
+> absence, but Docker was unavailable to the run that made it, so nothing has
+> confirmed that the bundle actually lands root-owned or that the boot still
+> works without the grant. Three commands settle it:
+>
+> ```bash
+> docker compose up --build -d
+> docker compose exec usagefoundry \
+>   stat -c '%U %n' /app /app/server.js /app/scripts/discord-relay.mjs
+> uid=$(docker compose exec -T usagefoundry printenv UF_AGENT_UID)
+> docker compose exec -u "$uid" usagefoundry sh -c 'touch /app/probe 2>&1; echo exit=$?'
+> ```
+>
+> The `stat` must say `root` three times and the `touch` must fail with
+> `Permission denied` and a non-zero exit. Then read the boot log for the
+> ordinary lines — a healthy `/api/health`, the gh-extension and pytools blocks
+> if they are configured, and the relay if `DISCORD_WEBHOOK_URL` is set — since
+> what is unproven is not only the ownership but that nothing in the image
+> quietly needed to write the bundle. The uid comes from the container, never
+> from `-u 1000`, for the reason `docs/install.md`'s *Sign in once* gives.
+
 > **The `canvasView.ts` extraction was not looked at.** The world/screen
 > transform, hit testing, device-pixel sizing, the pan/zoom gestures, the
 > `ResizeObserver` and the colour probe were moved out of

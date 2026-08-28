@@ -90,6 +90,39 @@ function runnerStage(): string {
   return dockerfile.slice(start);
 }
 
+/** The runner stage's `WORKDIR` — where `COPY --from=builder` puts the server. */
+function appRoot(): string {
+  const match = /^WORKDIR\s+(\S+)\s*$/m.exec(runnerStage());
+  assert.ok(match, "the runner stage no longer sets a WORKDIR");
+  return match[1];
+}
+
+/**
+ * Every `chown [-R] <owner> <paths…>` in the runner stage, as (owner, path)
+ * pairs, with the comments dropped first — this file's own reasoning says the
+ * word "chown" repeatedly, and a sentence about one is not one.
+ *
+ * The owner is kept whole and its uid half read by the caller, because the uid
+ * is what decides who may write: `root:node` is still root's.
+ */
+function chownGrants(): { owner: string; target: string }[] {
+  const instructions = runnerStage()
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+
+  const grants: { owner: string; target: string }[] = [];
+  for (const match of instructions.matchAll(
+    /\bchown\s+((?:-\S+\s+)*)(\S+)\s+([^\n&|;]+)/g,
+  )) {
+    for (const target of match[3].trim().split(/\s+/)) {
+      if (target.startsWith("-") || target === "\\") continue;
+      grants.push({ owner: match[2], target });
+    }
+  }
+  return grants;
+}
+
 /**
  * The packages the runner stage's `apt-get install` names, as whole tokens.
  * Tokenised rather than matched as a substring, because `better-sqlite3` — the
@@ -259,6 +292,56 @@ describe("the image and compose agree on the data volume", () => {
       /^\s*USER\s+(?!root\b|0\b)/m,
       "the runner stage drops to a non-root USER, so the server cannot spawn " +
         "children as another uid.",
+    );
+  });
+
+  it("leaves the server's own bundle owned by root, not by the agents", () => {
+    // The other direction of the same split, and the one that cancels it. The
+    // recursive chown above used to end `… /home/node /app`, which handed the
+    // unprivileged half ownership of the code the privileged half executes:
+    // `server.js`, `.next/`, the standalone `node_modules/` and `scripts/`. Root
+    // re-runs two of those on a timer nobody has to trigger — the entrypoint
+    // restarts `scripts/discord-relay.mjs` every five seconds wherever
+    // DISCORD_WEBHOOK_URL is set, and `restart: unless-stopped` re-runs
+    // `server.js` after every mem_limit OOM kill — so one write from an agent is
+    // root inside the container within seconds. Nothing about that is visible:
+    // the image builds, the server boots, every page works, and the only
+    // evidence is one word on a line whose other six entries are correct.
+    //
+    // Asserted as an absence rather than as the shape of the line, because the
+    // line is not the invariant: any chown, in the image or in the entrypoint,
+    // that names the bundle for a uid other than root is the same defect.
+    const app = appRoot();
+    const inBundle = (target: string): boolean => {
+      const cleaned = target.replace(/^["']+|["']+$/g, "");
+      // `.` and `./…` are the WORKDIR, which is the bundle under another name.
+      if (cleaned === "." || cleaned.startsWith("./")) return true;
+      return cleaned === app || cleaned.startsWith(`${app}/`);
+    };
+
+    for (const { owner, target } of chownGrants()) {
+      if (!inBundle(target)) continue;
+      const uid = owner.split(":")[0];
+      assert.ok(
+        uid === "root" || uid === "0",
+        `Dockerfile chowns ${target} to ${owner}, so ${app} belongs to a uid ` +
+          `that is not the server's. The agents are dropped to UF_AGENT_UID — ` +
+          `${app}/scripts/discord-relay.mjs and ${app}/server.js are run as ` +
+          `root — and an agent that can write either has root in this container.`,
+      );
+    }
+
+    const entrypoint = fs
+      .readFileSync(path.join(root, "docker-entrypoint.sh"), "utf8")
+      .split("\n")
+      .filter((line) => !/^\s*#/.test(line))
+      .join("\n");
+    assert.doesNotMatch(
+      entrypoint,
+      new RegExp(`\\bchown\\b[^\\n]*\\s${app}(/|\\s|$)`, "m"),
+      `docker-entrypoint.sh chowns ${app} at boot, which reopens at runtime ` +
+        `exactly what the image no longer grants — and reaches every existing ` +
+        `install rather than only fresh ones.`,
     );
   });
 });

@@ -368,6 +368,86 @@ describe("provider-reported utilisation", () => {
   });
 
   /**
+   * The same carried-forward reading, on a block that straddles the weekly
+   * rollover — which is where the two windows stop being drawn from the same
+   * entries.
+   *
+   * Each window's residue has to be summed over the entries its own total was:
+   * the week's from the week slice, the session's from the block
+   * `buildSessionBlocks` found over all of them. Nothing orders `fetchedAt`
+   * against `wkStart`, so a session block open across a rollover holds turns
+   * that are newer than the fetch and older than the week — and summing the
+   * session's residue over the week slice drops exactly those, leaving
+   * `atFetch` larger than what the window had actually spent when the provider
+   * looked.
+   *
+   * Both directions are silent, and both act: the guard reads a percentage of
+   * an allowance, and the meter beside it never moves.
+   */
+  it("sums the session's post-fetch spend over the session, not the week", () => {
+    // The rollover five minutes ago, the reading ten, and a block opened two
+    // hours before either. $10 of the block's $20 was already counted by the
+    // reading; the $10 since is split down the middle by the rollover.
+    const wkStart = now - 5 * 60_000;
+    const snap = buildSnapshot(
+      [
+        entry(now - 2 * HOUR, 10), // before the fetch
+        entry(now - 8 * 60_000, 5), // after the fetch, before the rollover
+        entry(now - 2 * 60_000, 5), // after both
+      ],
+      CEILINGS,
+      now,
+      null,
+      plan(
+        { utilization: 0.5, resetsAt: null },
+        { utilization: 0.2, resetsAt: wkStart + WEEK_MS },
+        [],
+        now - 10 * 60_000,
+      ),
+    );
+
+    // The reading described a window holding $10, so 0.5 of the allowance is
+    // $10 and the $20 in it now is all of it. Week-scoped the residue is $5,
+    // which reads 0.667 — and a `maxSessionFraction: 0.8` guard then passes on
+    // a window that is full.
+    assert.equal(snap.session.guardFraction, 1);
+    // The week's own term is week-scoped on both sides and is not touched by
+    // any of it: $5 in the window, all of it since the fetch, so there is no
+    // baseline to scale from and the provider's figure stands.
+    assert.equal(snap.weekly.guardFraction, 0.2);
+    // And the meter is unmoved either way, which is the display-versus-guard
+    // split the carried-forward figure lives on the other side of.
+    assert.equal(snap.session.fraction, 0.5);
+  });
+
+  it("does not scale the session against a baseline the rollover invented", () => {
+    // A block opened ten minutes before the rollover on a reading older than
+    // the block itself: every turn in the window is newer than the fetch, so
+    // there is no baseline to scale from and the reading carries unchanged.
+    const wkStart = now - 30 * 60_000;
+    const snap = buildSnapshot(
+      [entry(wkStart - 10 * 60_000, 0.5), entry(wkStart + 10 * 60_000, 19.5)],
+      CEILINGS,
+      now,
+      null,
+      plan(
+        { utilization: 0.5, resetsAt: null },
+        { utilization: 0.2, resetsAt: wkStart + WEEK_MS },
+        [],
+        now - HOUR,
+      ),
+    );
+
+    // Week-scoped, the $0.50 before the rollover reads as spend the provider
+    // had already counted — a $0.50 baseline under a $20 window, which scales
+    // 0.5 to 20. Past 1 the guard stops every fraction-guarded run and
+    // `windowRefusal` refuses every review, resolution and chat turn, while
+    // the meter beside it still reads 50%.
+    assert.equal(snap.session.guardFraction, 0.5);
+    assert.equal(snap.weekly.guardFraction, 0.2);
+  });
+
+  /**
    * The reported bug, with the numbers it was measured on.
    *
    * A live Max account mid-window: $2,388 of derived weekly spend that the
