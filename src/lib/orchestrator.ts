@@ -11004,11 +11004,37 @@ export async function reconcileInterruptedCycles(): Promise<number> {
  * Deliberately does *not* touch `reconcileOnBoot`'s rule that a restart never
  * resumes anything. This is about accounting for the cycle and making the
  * recovery tractable; a run stopped here is picked up by a person, as before.
+ *
+ * And all of it is the *owner's* to do, which is asked here rather than by the
+ * signal handler for the reason every other writer asks it at the write.
  */
 export async function shutdownRuns(
   sig: NodeJS.Signals,
 ): Promise<{ signalled: number; closed: number; recovered: number }> {
   shutdown.active = true;
+
+  // Ownership, read at the write. The `SELECT` below is install-wide by
+  // design — see its own comment — so in a process that does not own this
+  // directory the whole of what follows lands on somebody else's live runs:
+  // a `shutdown` event and its outbound webhook, `restart_closed = 1`, and
+  // `active_started_at` cleared on cycles whose agents are still working and
+  // still billing. That last one is the serious half and it fails open —
+  // `installBudget` and a workflow instance's budget both bound their spend
+  // below by that column, so nulling it widens two ceilings at once, silently,
+  // in the direction a guard may never move by accident. The second process is
+  // not hypothetical: it is the dev server an agent starts against an inherited
+  // `DATA_DIR`, and it is this server itself from the beat at which `heartbeat`
+  // finds the lock in another name.
+  //
+  // Its own children are killed anyway — they are this process's whatever the
+  // lock says — and outright, because the caller exits the moment this returns,
+  // so there is no grace left in which a gentler signal could be noticed. The
+  // three counts are what the shutdown *accounted for*, and it accounted for
+  // nothing.
+  if (!mayWriteDataDir()) {
+    killAllAgents("SIGKILL");
+    return { signalled: 0, closed: 0, recovered: 0 };
+  }
 
   const live = [...procs.keys()];
   const pending = db()

@@ -4616,6 +4616,39 @@ through before trusting this unattended:
      separate the questions, and tapping the text field does not zoom the page
      in and leave it there.
 
+- **A process that does not own the data directory no longer closes out the
+  owner's runs on its way out.** `shutdownRuns` was registered as the
+  `SIGINT`/`SIGTERM` handler outside `instrumentation.ts`'s ownership branch and
+  carried no gate of its own, so the second process — the dev server an agent
+  starts against an inherited `DATA_DIR`, restarted by `next dev` on every file
+  change — ran the entire shutdown reconciliation against the owner's database
+  on each exit: a `shutdown` event and its outbound webhook for every `running`
+  row install-wide, `restart_closed = 1`, and `active_started_at` cleared on
+  cycles whose agents were still working and still billing. The last of those
+  fails **open**, which is why this was worth a fix rather than a note —
+  `installBudget` and a workflow instance's budget both bound
+  `telemetrySpendSince` below by that column, so a stray dev server widened two
+  ceilings at once with nothing on any page saying so. The gate is
+  `mayWriteDataDir()` at the top of `shutdownRuns`, read at the write like every
+  other writer in the app rather than captured at boot, returning
+  `{ signalled: 0, closed: 0, recovered: 0 }`; `killAllAgents` is still
+  unconditional, because those children are this process's whatever the lock
+  says.
+
+  **Not verified by hand:** no two-process reproduction was run and no container
+  was built — this checkout has no Docker, and the second server is only worth
+  watching against a real billed agent in the first. What was run, on this
+  branch: `NODE_ENV=development npm ci --include=dev` (exit 0),
+  `npm run typecheck` (exit 0) and `npm test` (**1,906 tests / 281 suites / 0
+  failures**), the last of which includes a new fourth case in
+  `shutdown.test.ts`. That case was run against the unfixed function first and
+  observed to fail on its first assertion, with `shutdownRuns` returning
+  `closed: 1, recovered: 1` and the seeded row's `restart_closed`,
+  `active_started_at` and `spent_usd_est` all rewritten by a process that had
+  been refused the directory. It makes itself a non-owner the way a real second
+  server becomes one — a lock file naming a live pid that is not ours, then
+  `claimDataDir()` — rather than by stubbing the gate.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a
