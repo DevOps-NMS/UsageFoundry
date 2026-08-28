@@ -28,6 +28,11 @@ src/lib/
                    `compactionNotice` say what a compaction took — read off the
                    cycle's own argv, quoting the vendor's table, acting on
                    nothing
+  cycleInvocation.ts  what one work cycle *says* and how it is invoked — the
+                   next prompt and every notice appended to it, `cycleEnding`'s
+                   two contracts, and `buildArgs`. Lifted out of the file above,
+                   which re-exports each name it used to own, so nothing that
+                   imports `@/lib/orchestrator` moved
   runTasks.ts      the background tasks a run started, reduced from the
                    `system:task_*` events the loop above already stores — the
                    log feed drops every `system:` line on purpose, so this is

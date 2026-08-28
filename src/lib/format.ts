@@ -302,6 +302,11 @@ export function fmtPeriodLabel(
   }).formatRange(start, last);
 }
 
+/** Ids are UUIDs; the whole app names a run by its first eight characters. */
+export function shortId(id: string): string {
+  return id.slice(0, 8);
+}
+
 /** Shorten an absolute path for display, keeping the tail meaningful. */
 export function shortPath(p: string, keep = 3): string {
   if (!p) return "—";
