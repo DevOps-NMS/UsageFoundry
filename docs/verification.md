@@ -1938,7 +1938,7 @@ through before trusting this unattended:
 > 3. **The arrangement.** Files should sit in clusters around a small ringed
 >    directory node carrying the directory's name, and the clusters should be
 >    separated rather than one mass. This is the whole deliverable and the thing
->    least likely to be right first time: `FORCES` in `RunTouchedMap.tsx` is the
+>    least likely to be right first time: `FORCES` in `PathMapCanvas.tsx` is the
 >    graph panel's defaults with `linkDistance` dropped from 90 to 70, chosen by
 >    reasoning about a rosette rather than by looking at one. If files crowd
 >    their directory or clusters overlap, that constant is the dial.
