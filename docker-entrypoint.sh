@@ -878,25 +878,39 @@ fi
 # agent request failing with a connection refused, inside a tool call, on an
 # unattended run.
 #
-# ## Why the ledger and the switch live under /data
+# ## Why the ledger and the switch live on a named volume of their own
 #
-# `/home/node/.winnow` is the container's writable layer, so a restart discards
-# it — measured, not predicted: a restart on 2026-08-25 took 52 ledger lines with
-# it and left the sessions they described permanently unattributable. The ledger
-# is what tells `winnow inspect` and `winnow fork` which bytes the transcript
-# still holds but the API never received, so losing it is not losing a log, it is
-# losing the correction. `/data` is a named volume and survives.
+# Not in the writable layer, which is not durable enough. `/home/node/.winnow`
+# is where the ledger started and a restart discarded it — measured, not
+# predicted: a restart on 2026-08-25 took 52 ledger lines with it and left the
+# sessions they described permanently unattributable. The ledger is what tells
+# `winnow inspect` and `winnow fork` which bytes the transcript still holds but
+# the API never received, so losing it is not losing a log, it is losing the
+# correction.
 #
-# It is also root-owned 0700, which is the right place for it on a second count:
-# the ledger names the commands whose output was dropped, and the agents have no
-# business reading it. The proxy runs as root here, so it can write there.
+# And not under /data, which is where it went next and stayed until this process
+# stopped running as root. /data is root-owned 0700, and that mode is the whole
+# of what keeps an agent out of the database, the settings every guard reads and
+# the lock `serverLock.ts` keeps beside them — so nothing at UF_AGENT_UID can
+# traverse into it, and opening it by one bit to let the filter back in would
+# trade this file's privilege defect for a far worse one.
+#
+# What the directory mode used to do is done per file instead, and both of the
+# things it did still hold. The directory is root's 0755: the filter may
+# traverse and read it and may not add to or remove from it, which is what keeps
+# `filter-off` an operator's switch rather than something a run can throw to
+# stop paying for its own transcript. The ledger is root's too, group
+# UF_AGENT_GID and 0620 — appendable by the filter, readable by root alone, and
+# neither chmod-able nor removable by the uid that appends to it. The ledger
+# names the commands whose output was dropped, the agents have no business
+# reading it, and they still cannot.
 #
 # ## Turning it off
 #
 # Two ways, and they are not equivalent. `WINNOW_FILTER=` blank plus a restart
 # is the full off: no proxy, no ANTHROPIC_BASE_URL, boot identical to before
 # this block existed. Without a restart, what can be turned off is the
-# *rewriting* and not the proxy — `touch /data/winnow/filter-off` and the
+# *rewriting* and not the proxy — `touch /var/lib/winnow/filter-off` and the
 # next request is relayed untouched.
 #
 # Only the second one is safe to do to a running install, and the asymmetry is
@@ -916,12 +930,100 @@ fi
 if [ "${WINNOW_FILTER:-}" = "1" ]; then
   WINNOW_PATH="${WINNOW_FILTER_PATH:-/workspace/winnow}"
   WINNOW_PORT="${WINNOW_FILTER_PORT:-8789}"
+  WINNOW_STATE_VOLUME=/var/lib/winnow
 
   if [ ! -f "$WINNOW_PATH/pyproject.toml" ]; then
     echo "[usagefoundry] WINNOW_FILTER=1 but no checkout at $WINNOW_PATH —" \
          "agents will talk to the API directly. Clone winnow under the" \
          "workspace this container mounts, or set WINNOW_FILTER_PATH." >&2
   else
+    # The volume root, reclaimed on the terms /data's is at the top of this
+    # file: Docker copies the image directory's ownership and mode onto a fresh
+    # volume once and never revisits it, so an install that created this one
+    # before these modes existed keeps whatever it was made with. Inside the
+    # branch rather than beside the other three, because a volume nothing writes
+    # needs no modes — this runs on the boot that switches the filter on.
+    if ! mkdir -p "$WINNOW_STATE_VOLUME" 2>/dev/null ||
+       ! chown 0:0 "$WINNOW_STATE_VOLUME" 2>/dev/null ||
+       ! chmod 0755 "$WINNOW_STATE_VOLUME" 2>/dev/null; then
+      echo "[usagefoundry] cannot reclaim $WINNOW_STATE_VOLUME — the filter's" \
+           "off switch is writable by the agents, so a run can stop the filter" \
+           "rewriting its own transcript." >&2
+    fi
+
+    # The ledger is handed over by name rather than by opening the directory,
+    # and it has to be created here: a 0755 root directory is exactly what stops
+    # the filter making it, and `_append_ledger` is best-effort — a ledger it
+    # cannot write costs one line on stderr and is silent everywhere else,
+    # including on the card that reads it.
+    touch "$WINNOW_STATE_VOLUME/filter.jsonl" 2>/dev/null || true
+    if [ -n "${UF_AGENT_UID:-}" ] &&
+       ! { chown "0:${UF_AGENT_GID:-$UF_AGENT_UID}" "$WINNOW_STATE_VOLUME/filter.jsonl" 2>/dev/null &&
+           chmod 0620 "$WINNOW_STATE_VOLUME/filter.jsonl" 2>/dev/null; }; then
+      echo "[usagefoundry] cannot give $WINNOW_STATE_VOLUME/filter.jsonl to the" \
+           "agent uid — the filter will rewrite every request and record none" \
+           "of it, and the correction will read as zero." >&2
+    fi
+
+    # Carried over once from where the ledger used to live, so an install
+    # upgrading into the uid drop keeps its record rather than starting an empty
+    # one beside a file only root can still reach.
+    if [ -s /data/winnow/filter.jsonl ] &&
+       [ ! -s "$WINNOW_STATE_VOLUME/filter.jsonl" ]; then
+      cat /data/winnow/filter.jsonl >>"$WINNOW_STATE_VOLUME/filter.jsonl" 2>/dev/null || true
+    fi
+
+    # The virtualenv belonged to root on every boot before this, and `uv run` at
+    # the agent uid cannot write one it does not own. Handed over rather than
+    # left to be rebuilt: the rebuild is the ninety seconds below, and on a
+    # `restart` — which keeps the writable layer — it would be spent again on
+    # every boot and then fail anyway.
+    if [ -n "${UF_AGENT_UID:-}" ] && [ -d /home/node/.winnow-venv ]; then
+      winnow_want="$UF_AGENT_UID:${UF_AGENT_GID:-$UF_AGENT_UID}"
+      winnow_have="$(stat -c '%u:%g' /home/node/.winnow-venv 2>/dev/null || echo '')"
+      if [ "$winnow_have" != "$winnow_want" ] &&
+         ! chown -R "$winnow_want" /home/node/.winnow-venv 2>/dev/null; then
+        echo "[usagefoundry] cannot give /home/node/.winnow-venv to" \
+             "$winnow_want — the filter cannot build the virtualenv it runs in" \
+             "and will not start. Remove that directory and restart." >&2
+      fi
+    fi
+
+    # Everything below runs at UF_AGENT_UID, and both halves of that matter.
+    #
+    # `$WINNOW_PATH` is a checkout inside a workspace bind mount, which every
+    # agent can write, and `uv run` executes what is there — the project's build
+    # backend when it syncs, then winnow's own module. As root that is one run
+    # putting its own code on every other run's transcript at uid 0, holding
+    # this script's whole environment and root's reach into /data and
+    # ~/.claude/.credentials.json. It is the argument `gh_as_agent` and
+    # `uv_as_agent` are wrapped for, one step further along: those two exit,
+    # this one keeps running for the life of the container.
+    #
+    # The environment is an allowlist rather than the inherited one because the
+    # drop is what makes that matter. A root process's `/proc/<pid>/environ` is
+    # out of the agents' reach; the same process at their own uid is not, so
+    # UF_AUTH_TOKEN, ANTHROPIC_ADMIN_KEY, UF_GITHUB_TOKEN and UF_WEBHOOK_SECRET
+    # left in it would be handed over by the very change that took root away —
+    # the reason the Discord relay is started before its variable is unset, one
+    # uid down. Nothing here needs a credential: the proxy relays the caller's
+    # own headers upstream and reads no key of its own. A WINNOW_* knob added to
+    # compose has to be added to this list as well or it arrives nowhere.
+    #
+    # UV_PYTHON_* are forwarded rather than dropped with the rest: without the
+    # preference `uv` fetches a ~30 MB interpreter instead of using the one this
+    # image already has, and without the directory it fetches it into the
+    # writable layer, once per rebuild.
+    winnow_filter_as_agent() {
+      if [ -n "${UF_AGENT_UID:-}" ]; then
+        setpriv --reuid="$UF_AGENT_UID" --regid="${UF_AGENT_GID:-$UF_AGENT_UID}" \
+                --clear-groups \
+          env -i "$@"
+      else
+        env -i "$@"
+      fi
+    }
+
     # UV_PROJECT_ENVIRONMENT is load-bearing, not tidiness. The checkout is a
     # bind mount shared with the operator's own machine, and `uv run` in a
     # project whose .venv was built by a different OS *deletes and rebuilds it*
@@ -929,14 +1031,18 @@ if [ "${WINNOW_FILTER:-}" = "1" ]; then
     # operator works in, on every boot.
     (
       while :; do
-        env HOME=/home/node \
+        winnow_filter_as_agent \
+            PATH="$PATH" \
+            HOME=/home/node \
             UV_PROJECT_ENVIRONMENT=/home/node/.winnow-venv \
+            UV_PYTHON_INSTALL_DIR="$UV_PYTHON_INSTALL_DIR" \
+            UV_PYTHON_PREFERENCE="$UV_PYTHON_PREFERENCE" \
             WINNOW_FILTER=1 \
           uv run --frozen --project "$WINNOW_PATH" \
             python -m winnow filter \
               --port "$WINNOW_PORT" \
-              --ledger /data/winnow/filter.jsonl \
-              --off-file /data/winnow/filter-off || true
+              --ledger "$WINNOW_STATE_VOLUME/filter.jsonl" \
+              --off-file "$WINNOW_STATE_VOLUME/filter-off" || true
         echo "[usagefoundry] winnow filter exited; restarting in 5s" >&2
         sleep 5
       done
@@ -979,7 +1085,7 @@ if [ "${WINNOW_FILTER:-}" = "1" ]; then
       export ENABLE_TOOL_SEARCH=1
       echo "[usagefoundry] winnow intake filter on 127.0.0.1:$WINNOW_PORT;" \
            "agents routed through it. To stop it rewriting without a restart:" \
-           "docker compose exec usagefoundry touch /data/winnow/filter-off" >&2
+           "docker compose exec usagefoundry touch $WINNOW_STATE_VOLUME/filter-off" >&2
     else
       echo "[usagefoundry] winnow filter did not open 127.0.0.1:$WINNOW_PORT" \
            "within 90s — agents will talk to the API directly. The supervisor" \

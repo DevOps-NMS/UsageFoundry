@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Put a backup taken by scripts/backup-db.mjs back in place.
 //
-// Three things this does that a `cp` back over the file does not, each of them
+// Four things this does that a `cp` back over the file does not, each of them
 // the difference between a restore and a second incident:
 //
 //   1. It refuses while a server is live. The app holds the database open with
@@ -18,6 +18,10 @@
 //   3. It checks the file is this app's database before anything is moved. A
 //      restore is run under pressure, from a directory of similar-looking
 //      files, and finding out afterwards is the expensive order to find out in.
+//   4. It copies under a temporary name and renames into place, so a restore
+//      that dies part-way leaves the database that was there rather than no
+//      database at all. An empty data directory is not an outage: the next boot
+//      creates a database, migrates it, and the app comes up green and empty.
 //
 // Usage:
 //   node scripts/restore-db.mjs <backup file> [--db <path>]
@@ -135,6 +139,22 @@ function lockOwner(dataDir, now) {
   return now - lock.heartbeatAt > STALE_MS ? null : lock;
 }
 
+/**
+ * Remove a half-written copy, along with any sidecar inspecting it created.
+ *
+ * Best effort on purpose: the operator is already being told the restore
+ * failed, and what matters is that none of this is at the path the app opens.
+ */
+function discardPartial(partial) {
+  for (const ext of ["", "-wal", "-shm"]) {
+    try {
+      fs.rmSync(`${partial}${ext}`, { force: true });
+    } catch {
+      // Nothing to do about it that the message this precedes does not say.
+    }
+  }
+}
+
 /** Throws unless the file is a readable SQLite database holding this schema. */
 function inspect(file) {
   const db = new Database(file, { readonly: true });
@@ -206,6 +226,31 @@ async function main() {
 
   fs.mkdirSync(dataDir, { recursive: true });
 
+  // Copied under a temporary name and renamed into place, `backup-db.mjs`'s
+  // discipline in the other direction: the database that is there is not moved
+  // until there is a whole, inspected copy to put in its place. A copy that
+  // dies part-way — `ENOSPC` on the volume, or the container killed mid-restore
+  // — then leaves the operator's database exactly where the app opens it,
+  // rather than a data directory with no database in it at all, which the next
+  // boot fills with a fresh empty one and comes up green.
+  const partial = `${target}.partial`;
+  try {
+    fs.copyFileSync(source, partial);
+  } catch (err) {
+    discardPartial(partial);
+    fail(`could not copy ${source} to ${partial}: ${err.message}. ${target} is untouched.`);
+  }
+
+  // Read it back through a fresh handle rather than trusting the copy, and
+  // before anything is moved, so a copy that arrives unreadable costs nothing.
+  let restored;
+  try {
+    restored = inspect(partial);
+  } catch (err) {
+    discardPartial(partial);
+    fail(`the copy at ${partial} is not usable: ${err.message}. ${target} is untouched.`);
+  }
+
   // The sidecars go with it. A `-wal` left behind belongs to the database being
   // superseded, and SQLite would replay it into the restored file.
   const moved = [];
@@ -216,21 +261,43 @@ async function main() {
       if (!fs.existsSync(from)) continue;
       const to = `${target}${ext}.${suffix}`;
       fs.renameSync(from, to);
-      moved.push(to);
+      moved.push({ from, to });
     }
   }
 
-  fs.copyFileSync(source, target);
+  try {
+    fs.renameSync(partial, target);
+  } catch (err) {
+    discardPartial(partial);
+    const stranded = [];
+    for (const { from, to } of moved) {
+      try {
+        fs.renameSync(to, from);
+      } catch {
+        stranded.push(to);
+      }
+    }
+    if (stranded.length) {
+      // Said here because this is the only disclosure of those names there is,
+      // and the success path below is no longer going to be reached.
+      console.error(`restore: the database that was there could not be put back. It is here:`);
+      for (const file of stranded) console.error(`  ${file}`);
+    }
+    fail(`could not move ${partial} into place: ${err.message}`);
+  }
 
-  // Read it back through a fresh handle rather than trusting the copy.
-  const restored = inspect(target);
+  // A backup that is itself in WAL mode leaves the inspection's `-shm` and
+  // `-wal` behind under the temporary name. They hold nothing committed — the
+  // source's own WAL was never copied — and the restored file makes its own on
+  // the next open, so they are debris rather than sidecars.
+  discardPartial(partial);
 
   console.log(`restored ${source}`);
   console.log(`      to ${target}`);
   console.log(`         ${restored.tables} tables · ${restored.parts.join(" · ")}`);
   if (moved.length) {
     console.log(`\nThe database that was there is kept, not deleted:`);
-    for (const file of moved) console.log(`  ${file}`);
+    for (const { to } of moved) console.log(`  ${to}`);
     console.log("Delete those once you are satisfied with the restore.");
   }
   console.log("\nStart the app:\n  docker compose up -d");

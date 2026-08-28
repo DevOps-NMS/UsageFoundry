@@ -408,6 +408,21 @@ services:
       # exits 0 having done nothing, on every session start.
       - usagefoundry-pytools:/home/node/pytools
 
+      # winnow's intake filter ledger and its off switch, when WINNOW_FILTER is
+      # on. A named volume for the reason the three above are — the default
+      # location is the writable layer — but with a loss that is not a cache's:
+      # the ledger is the record of which bytes a transcript still holds and the
+      # API never received, so a discarded one is not a slower next boot, it is
+      # a correction that can never be made again. That is measured: a restart
+      # while it lived in the writable layer took 52 lines with it.
+      #
+      # Not inside /data, where it was until the filter stopped running as root.
+      # /data is root-owned 0700 to keep the agents out of the database and the
+      # guards' settings, and the filter now runs at UF_AGENT_UID — so it is a
+      # volume of its own, root-owned 0755, with `docker-entrypoint.sh` handing
+      # the one file the filter writes to that uid by name.
+      - usagefoundry-winnow:/var/lib/winnow
+
       # Where `scripts/backup-db.mjs` writes, and the one thing here that is
       # deliberately *not* the named volume above: a snapshot kept inside the
       # volume dies with `docker compose down -v`, which is the command this
@@ -574,3 +589,4 @@ volumes:
   usagefoundry-gocache:
   usagefoundry-gh:
   usagefoundry-pytools:
+  usagefoundry-winnow:

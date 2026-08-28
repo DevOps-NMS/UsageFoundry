@@ -977,18 +977,47 @@ export function buildSnapshot(
   const weekEntries = entries.filter((e) => e.ts >= wkStart);
   const weeklyAgg = aggregate(weekEntries);
 
-  // What each window has spent since the provider's reading was taken, in one
-  // pass over the entries already filtered for the week. `fetchedAt` is at or
-  // before `now` and `wkStart` is too, so a turn newer than the fetch is
-  // always inside `weekEntries` — the session slice cannot be missing turns
-  // that fall outside it.
+  // What each window has spent since the provider's reading was taken. Each
+  // sum has to run over the same entries as the total that
+  // `planFractionCarriedForward` subtracts it from, and the two windows are not
+  // drawn from the same set: `weeklyAgg` is the week slice, `sessionAgg` is the
+  // block `buildSessionBlocks` found over *all* entries.
+  //
+  // Summing both from `weekEntries` used to be defended on `fetchedAt` and
+  // `wkStart` both being at or before `now`, which does not order them against
+  // each other. A reading taken before a weekly rollover is the ordinary case
+  // for the minutes after one — and for up to an hour while the provider is
+  // refusing requests and the last good reading is re-served — and `wkStart` is
+  // not aligned to a 5-hour block, so the open block routinely straddles it.
+  // Every turn in `[fetchedAt, wkStart)` was then counted in the session's
+  // total and not in its residue, leaving `atFetch` too large by whatever fell
+  // in that gap: measured on the reported reproduction, a session window at its
+  // ceiling read 0.667 and passed a guard set at 0.8, and one at half read 20
+  // and refused every review, resolution and chat turn while the meter beside
+  // it still said 50%.
   let weeklySinceFetch = 0;
   let sessionSinceFetch = 0;
   if (plan) {
     for (const e of weekEntries) {
       if (e.ts < plan.fetchedAt) continue;
       weeklySinceFetch += e.costGuardUSD;
-      if (e.ts >= sessionStart) sessionSinceFetch += e.costGuardUSD;
+    }
+    // The block's own bounds rather than the meter's five hours, so this is a
+    // sum over exactly the entries `sessionAgg` was built from — a block the
+    // provider's reset cut short ends where it was cut. With no block open that
+    // aggregate is zero and there is no total for a residue to be taken from.
+    //
+    // A block that opened inside the week is entirely within the slice already
+    // filtered above, so the walk that matters on the pre-cycle guard path is
+    // the same length it has always been; only a block straddling a rollover
+    // pays for a pass over the whole history, and only while it is open.
+    if (activeBlock) {
+      const scope = activeBlock.startsAt >= wkStart ? weekEntries : entries;
+      for (const e of scope) {
+        if (e.ts < plan.fetchedAt) continue;
+        if (e.ts < activeBlock.startsAt || e.ts >= activeBlock.endsAt) continue;
+        sessionSinceFetch += e.costGuardUSD;
+      }
     }
   }
 

@@ -106,7 +106,7 @@ toolComposition.ts
                 is an object of rows so nothing written for the five compiles
                 against it
 intakeFilter.ts what winnow's intake filter kept off the wire, read from its own
-                ledger at /data/winnow/filter.jsonl — the one file here
+                ledger at /var/lib/winnow/filter.jsonl — the one file here
                 that no part of this app writes. A counterfactual, never a
                 fourth cost source: the meters are priced from usage frames and
                 a usage frame reports the request the filter had already
