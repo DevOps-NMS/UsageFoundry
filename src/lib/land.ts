@@ -1054,10 +1054,32 @@ export async function landRun(
   }
 }
 
-/** Paths git left conflicted, read before the merge is unwound. */
-async function conflictedFiles(folder: string): Promise<string[]> {
-  const res = await git(folder, ["diff", "--name-only", "--diff-filter=U"], NO_CLOCK);
-  return res.ok && res.stdout ? res.stdout.split("\n") : [];
+/**
+ * Paths git left conflicted, read before the merge is unwound.
+ *
+ * `-z` for `parseNumstat`'s reason, and it matters more here than it does
+ * there: the default format C-quotes any path holding a non-ASCII byte, and
+ * every consumer of this list uses what it returns as a real path — the
+ * resolution prompt names it, `run_reviews.resolved_paths` keeps it for
+ * `resolutionChange`'s pathspec, the `after` handler joins it onto the checkout
+ * and reads it, and `git add` stages it. So `café.txt` arriving as
+ * `"caf\303\251.txt"` did not mangle a name in a report, it made the branch
+ * unresolvable: the read failed, an unreadable file counts as unresolved, and
+ * the whole merge was rolled back after the resolution had been paid for.
+ *
+ * `trim: false` for `parseStatusZ`'s reason — a leading space is part of a
+ * filename — so the empty record after the final NUL is dropped here instead.
+ * It has to be: `:(top,literal)` with an empty path matches the entire tree.
+ *
+ * Exported for `conflictedPaths.test.ts` and for nothing else, `logLifecycle`'s
+ * precedent: what has to be pinned is the argv as much as the parse.
+ */
+export async function conflictedFiles(folder: string): Promise<string[]> {
+  const res = await git(folder, ["diff", "--name-only", "--diff-filter=U", "-z"], {
+    ...NO_CLOCK,
+    trim: false,
+  });
+  return res.ok ? res.stdout.split("\0").filter((p) => p !== "") : [];
 }
 
 /**
