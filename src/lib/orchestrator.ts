@@ -9827,8 +9827,12 @@ async function liveGuardTick(): Promise<void> {
  * paying stops having its cycles ended, which is the correct direction: the
  * alternative is a dry run per tick, and winnow's dry run parses the same whole
  * file for a token figure that is measured here to be unusable.
+ *
+ * Exported for `contextCeilingRace.test.ts` and for nothing else. Its only
+ * caller is `liveGuardTick`, which is reachable only through a `setInterval` a
+ * spawn starts, so the alternative to the export is a billed cycle.
  */
-async function checkContextCeilings(): Promise<void> {
+export async function checkContextCeilings(): Promise<void> {
   if (contextWatches.size === 0) return;
 
   // `pruningEnabled()` used to stand in front of this whole function, and moving
@@ -9871,6 +9875,19 @@ async function checkContextCeilings(): Promise<void> {
       continue;
     }
 
+    // Re-read after the await above, for the reason the budget loop re-reads
+    // `interrupts` after its own scan: the cycle this just measured may have
+    // ended while the transcript was being resolved, and everything below acts
+    // on a cycle it believes is still running. Identity rather than `has`,
+    // because the entry is re-set per cycle — a run whose *next* cycle started
+    // inside this window is a different conversation than the one measured, and
+    // ending it would charge that conversation for this one's size.
+    //
+    // The sample above is deliberately left standing: it is a true reading of a
+    // transcript that existed, and the occupancy series is the half of this
+    // function that is not gated on the run still working.
+    if (contextWatches.get(id) !== watch || interrupts.has(id)) continue;
+
     if (!pruning) continue;
     if (tokens < CYCLE_CONTEXT_CEILING_TOKENS) continue;
 
@@ -9902,6 +9919,15 @@ async function checkContextCeilings(): Promise<void> {
     }
     ceilingMeasuredAt.set(id, tokens);
     const plan = await planCut(transcript);
+    // And again, because that one is a winnow subprocess bounded by
+    // `PRUNE_TIMEOUT_MS` — two minutes in which a cycle has every chance to
+    // finish. Nothing below this line awaits, so the test and the write are one
+    // step: an interrupt written past a cycle's end is either a completed cycle
+    // refunded and its `DONE` discarded, a healthy run filed `stopped` by
+    // `interruptOutcome`, or — past `startRun`'s outer `finally` — an entry no
+    // deleter ever reaches, which stops the run's next resume dead.
+    if (contextWatches.get(id) !== watch || interrupts.has(id)) continue;
+
     const predicted = ceilingPayback(tokens, plan);
     if (predicted === null || predicted > PAYBACK_HORIZON_TURNS) {
       // Null declines here, which is the opposite of what `predictedPayback`'s
