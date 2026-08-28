@@ -2407,11 +2407,17 @@ export function resumeControl(
   probes: readonly CleanProbe[],
   mainThread: readonly UsageEntry[],
 ): ResumeControl {
+  // Grouped once, then one probe reads one session's turns. `firstBilledTurn`
+  // skips every entry whose session is not the one asked about, so this is the
+  // same loop over the only entries that could ever have answered it — and the
+  // one below was O(probes x every turn on the machine): 4,835 probes against
+  // 82,913 turns is 400M comparisons for a single run's page row.
+  const bySession = indexBySession(mainThread);
   let observed = 0;
   let warm = 0;
   for (const probe of probes) {
     if (!probe.sessionId) continue;
-    const firstBilled = firstBilledTurn(mainThread, probe.sessionId, probe.ts);
+    const firstBilled = firstBilledTurn(bySession, probe.sessionId, probe.ts);
     if (!firstBilled) continue;
     observed += 1;
     if (classifyResume(firstBilled) === "warm") warm += 1;
@@ -2420,6 +2426,26 @@ export function resumeControl(
     cleanResumes: observed,
     warmShare: observed === 0 ? 0 : warm / observed,
   };
+}
+
+/**
+ * Main-thread turns grouped by the session that produced them, in array order.
+ *
+ * Every reader below asks the same question — this session's turns, after this
+ * instant — and each was answering it by walking the whole corpus. Sessions
+ * partition the turns, so a group holds every candidate and nothing else, and
+ * relative order inside a group is the order the array had.
+ */
+function indexBySession(
+  mainThread: readonly UsageEntry[],
+): Map<string, UsageEntry[]> {
+  const bySession = new Map<string, UsageEntry[]>();
+  for (const e of mainThread) {
+    const bucket = bySession.get(e.sessionId);
+    if (bucket) bucket.push(e);
+    else bySession.set(e.sessionId, [e]);
+  }
+  return bySession;
 }
 
 /** One boundary at which no prune ran. */
@@ -2441,13 +2467,13 @@ export interface CleanProbe {
  * the zero-usage skip is the part that would drift.
  */
 function firstBilledTurn(
-  mainThread: readonly UsageEntry[],
+  bySession: ReadonlyMap<string, UsageEntry[]>,
   sessionId: string,
   after: number,
 ): ResumeWrite | null {
   let best: UsageEntry | null = null;
-  for (const e of mainThread) {
-    if (e.sessionId !== sessionId || e.ts <= after) continue;
+  for (const e of bySession.get(sessionId) ?? []) {
+    if (e.ts <= after) continue;
     const billed =
       e.tokens.cacheRead + e.tokens.cacheWrite5m + e.tokens.cacheWrite1h;
     if (billed <= 0) continue;
@@ -2851,12 +2877,15 @@ export async function priceReceipts(
     readCleanProbes({ from, to: Date.now() }),
     mainThread,
   );
+  // Per receipt, and it was walking every turn on the machine each time. The
+  // sort below is unchanged and still what fixes the order this relies on.
+  const bySession = indexBySession(mainThread);
 
   return receipts.map((row) => {
     const sessionId = sessions.get(row.runId) ?? null;
     const following = sessionId
-      ? mainThread
-          .filter((e) => e.sessionId === sessionId && e.ts > row.ts)
+      ? (bySession.get(sessionId) ?? [])
+          .filter((e) => e.ts > row.ts)
           .sort((a, b) => a.ts - b.ts)
       : [];
 
@@ -3079,13 +3108,18 @@ async function priceForks(
     readCleanProbes({ from, to: Date.now() }),
     mainThread,
   );
+  // Both reads below are per fork and both were walking every turn on the
+  // machine to find one session's. Same grouping `resumeControl` makes, for the
+  // same reason; only `following.length` is read, so nothing here depends on an
+  // order the grouping preserves anyway.
+  const bySession = indexBySession(mainThread);
 
   return forks.map(({ cut, sessionId }) => {
     const following = sessionId
-      ? mainThread.filter((e) => e.sessionId === sessionId && e.ts > cut.ts)
+      ? (bySession.get(sessionId) ?? []).filter((e) => e.ts > cut.ts)
       : [];
     const resumeWrite = sessionId
-      ? firstBilledTurn(mainThread, sessionId, cut.ts)
+      ? firstBilledTurn(bySession, sessionId, cut.ts)
       : null;
     return { row: cut, net: netReceipt(cut, following.length, resumeWrite, control) };
   });
