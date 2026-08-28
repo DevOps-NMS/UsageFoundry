@@ -1,16 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import {
-  baseName,
-  buildTouchTree,
-  dirName,
-  dirOf,
-  nodeId,
-  parentOf,
-  planTouchedMap,
-  touchedMapView,
-} from "./touchedMap";
+import { buildTouchTree, planTouchedMap, touchedMapView } from "./touchedMap";
+import { baseName, dirName, dirOf, nodeId, parentOf } from "./pathMap";
 import { reconcileTouches } from "./runTouches";
 import type { RunDiffDTO, RunTouchDTO, RunTouchedDTO } from "./apiTypes";
 

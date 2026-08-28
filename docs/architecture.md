@@ -55,12 +55,18 @@ src/lib/
                    against the diff's file list, into four groups. Reaches
                    nothing, because `RunTouches.tsx` imports it — the split is
                    what keeps `node:fs` out of the browser bundle
-  touchedMap.ts    those four groups as a directory tree, for the picture at
-                   /runs/[id]/touched: the node set is files and the layout is
-                   the path hierarchy, because tool → file is a star. Folds at
-                   a depth when over budget and never drops a file; adds no
-                   field that could be read as an outcome. Reaches nothing,
-                   for `runTouches.ts`'s own reason
+  pathMap.ts       a path hierarchy as a drawable tree over any per-file
+                   payload, and the fold plan under it: a depth cutoff when
+                   over budget, never a top-N and never `capGraph`'s
+                   degree-first prune, so no file is ever dropped. Holds no
+                   map's vocabulary — the payload and its directory rollup are
+                   the caller's — and reaches nothing, for `runTouches.ts`'s
+                   own reason
+  touchedMap.ts    `pathMap.ts`'s payload for the picture at
+                   /runs/[id]/touched: those four groups as a directory tree,
+                   the node set files and the layout the path hierarchy,
+                   because tool → file is a star. Adds no field that could be
+                   read as an outcome
   review.ts        the on-demand reviewer (a third, deliberate child process)
   land.ts          merge preview, landing, branch deletion, branch inventory
   chat.ts          the orchestrator chat (a fourth, deliberate child process),

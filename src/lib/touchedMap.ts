@@ -1,8 +1,23 @@
 import type { RunDiffDTO, RunTouchedDTO } from "./apiTypes";
+import {
+  buildPathTree,
+  planPathMap,
+  type PathDir,
+  type PathEntry,
+  type PathFile,
+  type PathPlan,
+  type PathPlanNode,
+  type PathTree,
+  type PlanOptions,
+} from "./pathMap";
 import { reconcileTouches, type TouchReport, type TouchedFile } from "./runTouches";
 
 /**
  * What a run touched, arranged by where in the repository it sits.
+ *
+ * The arrangement itself is `pathMap.ts` and knows nothing about touches; what
+ * is here is the payload — what a call log can say about one file, and what a
+ * directory says about the files under it.
  *
  * **The node set is files, and the arrangement is the path hierarchy.** The
  * obvious graph over this data is tool → file, and it is the wrong one at every
@@ -20,11 +35,9 @@ import { reconcileTouches, type TouchReport, type TouchedFile } from "./runTouch
  *   this file and its rows are attempts; this module adds no field that could be
  *   read as an outcome. `state` distinguishes read from written from both, which
  *   is what the call *asked for*, not what it got.
- * - **A file is never dropped.** When the drawn count is over budget the tree is
- *   folded at a *depth*, and every folded directory keeps the count of what is
- *   behind it so the surface can say the number out loud. `capGraph`'s
- *   degree-first pruning is deliberately not reused: largest-degree-first over
- *   this graph discards files and keeps directories, which is backwards.
+ * - **A file is never dropped.** That is `pathMap.ts`'s rule and the reason the
+ *   fold there is a depth cutoff rather than `capGraph`'s degree-first prune,
+ *   but it is this map's promise: the surface prints the folded count out loud.
  *
  * **This module reaches nothing** — the same rule `runTouches.ts` states, and
  * for the same reason: the page that draws the map is a `"use client"` file and
@@ -46,14 +59,8 @@ import { reconcileTouches, type TouchReport, type TouchedFile } from "./runTouch
  */
 export type TouchState = "read" | "written" | "both" | "unnamed";
 
-/** One file, positioned by its path rather than by what reached it. */
-export interface MapFile {
-  /** Relative to the checkout, or absolute when `outside`. */
-  path: string;
-  /** The last segment — what a label shows. */
-  name: string;
-  /** The directory holding it, as `dirOf` writes one. */
-  dir: string;
+/** What this map knows about one file, on top of where the file sits. */
+export interface TouchFacts {
   reads: number;
   writes: number;
   /** `reads + writes`. Zero for `unnamed`, which is why it is not a size alone. */
@@ -67,28 +74,8 @@ export interface MapFile {
   by: string[];
 }
 
-/**
- * One directory, with what is under it already summed.
- *
- * The subtree figures are what a folded node draws, so they are computed once
- * here rather than by a walk at draw time: a frame that recurses a directory
- * tree is a frame that gets slower as the run gets bigger, and the figures
- * cannot change between frames.
- */
-export interface MapDir {
-  /** `""` is the checkout root and `"/"` the filesystem root. */
-  path: string;
-  /** `"."` for the checkout root, `"/"` for the filesystem root. */
-  name: string;
-  parent: string | null;
-  /** Hops to a root. Both roots are 0. */
-  depth: number;
-  /** Files directly in it, busiest first then by name. */
-  files: MapFile[];
-  /** Directories directly under it, sorted. */
-  children: string[];
-  /** Files at or under it. Never zero: a directory exists only to hold one. */
-  subtreeFiles: number;
+/** What this map says about a directory, summed over the files under it. */
+export interface TouchRollup {
   subtreeCalls: number;
   /** Files under it with at least one write. */
   subtreeWritten: number;
@@ -100,52 +87,18 @@ export interface MapDir {
   outside: boolean;
 }
 
-export interface TouchedTree {
-  dirs: ReadonlyMap<string, MapDir>;
-  files: readonly MapFile[];
-  /** `""` then `"/"`, for whichever of the two has anything under it. */
-  roots: readonly string[];
-  /** The deepest directory holding a file, which bounds the fold search. */
-  maxDepth: number;
-}
+/** One file, positioned by its path rather than by what reached it. */
+export type MapFile = PathFile<TouchFacts>;
 
-/* ------------------------------ path arithmetic ----------------------------- */
+/** One directory, with what is under it already summed. */
+export type MapDir = PathDir<TouchFacts, TouchRollup>;
 
-/**
- * The directory holding `path`.
- *
- * Two roots rather than one, because a run's touches are not all relative:
- * `outside` paths arrive absolute and their chain has to end somewhere that is
- * visibly not the checkout. `"README.md"` sits in `""`; `"/tmp/x.txt"` sits in
- * `"/"`. Collapsing the two would file a path in `/etc` under the repository
- * root, which is a claim about the run that is not true.
- */
-export function dirOf(path: string): string {
-  const cut = path.lastIndexOf("/");
-  if (cut < 0) return "";
-  if (cut === 0) return "/";
-  return path.slice(0, cut);
-}
+export type TouchedTree = PathTree<TouchFacts, TouchRollup>;
 
-/** The directory above this one, or null at either root. */
-export function parentOf(dir: string): string | null {
-  if (dir === "" || dir === "/") return null;
-  return dirOf(dir);
-}
+/** One thing the canvas draws — a file, a directory anchor, or a fold. */
+export type PlanNode = PathPlanNode<TouchFacts, TouchRollup>;
 
-/** What a directory is called on screen. Both roots get a name a path could hold. */
-export function dirName(dir: string): string {
-  if (dir === "") return ".";
-  if (dir === "/") return "/";
-  const cut = dir.lastIndexOf("/");
-  return cut < 0 ? dir : dir.slice(cut + 1);
-}
-
-/** The last segment of a path. */
-export function baseName(path: string): string {
-  const cut = path.lastIndexOf("/");
-  return cut < 0 ? path : path.slice(cut + 1);
-}
+export type MapPlan = PathPlan<TouchFacts, TouchRollup>;
 
 /* -------------------------------- the tree --------------------------------- */
 
@@ -154,6 +107,41 @@ function stateOf(file: TouchedFile): TouchState {
   if (file.writes > 0) return "written";
   if (file.reads > 0) return "read";
   return "unnamed";
+}
+
+/** Busiest first, then by name — the table's tiebreak, for the same reason. */
+function byCallsThenName(a: MapFile, b: MapFile): number {
+  return b.calls - a.calls || a.name.localeCompare(b.name);
+}
+
+/**
+ * What a folded directory stands for.
+ *
+ * Two of these five are not sums, which is why the shared core hands the whole
+ * subtree over at once rather than folding an ancestor at a time: `tools` is a
+ * union, and `outside` is an *all* — a directory is outside the checkout only
+ * when every file under it is.
+ */
+function summariseTouches(files: readonly TouchFacts[]): TouchRollup {
+  const tools = new Set<string>();
+  let subtreeCalls = 0;
+  let subtreeWritten = 0;
+  let subtreeInDiff = 0;
+  let outside = true;
+  for (const file of files) {
+    subtreeCalls += file.calls;
+    if (file.writes > 0) subtreeWritten++;
+    if (file.inDiff) subtreeInDiff++;
+    if (!file.outside) outside = false;
+    for (const tool of file.tools) tools.add(tool);
+  }
+  return {
+    subtreeCalls,
+    subtreeWritten,
+    subtreeInDiff,
+    tools: [...tools].sort(),
+    outside,
+  };
 }
 
 /**
@@ -169,7 +157,7 @@ function stateOf(file: TouchedFile): TouchState {
  * "no event named this", not "nothing happened".
  */
 export function buildTouchTree(report: TouchReport): TouchedTree {
-  const files: MapFile[] = [];
+  const entries: PathEntry<TouchFacts>[] = [];
   for (const group of [
     report.changedNotTouched,
     report.touchedAndChanged,
@@ -177,283 +165,36 @@ export function buildTouchTree(report: TouchReport): TouchedTree {
     report.outsideCheckout,
   ]) {
     for (const file of group) {
-      files.push({
+      entries.push({
         path: file.path,
-        name: baseName(file.path),
-        dir: dirOf(file.path),
-        reads: file.reads,
-        writes: file.writes,
-        calls: file.reads + file.writes,
-        state: stateOf(file),
-        inDiff: file.inDiff,
-        outside: file.outside,
-        tools: file.tools,
-        by: file.by,
+        payload: {
+          reads: file.reads,
+          writes: file.writes,
+          calls: file.reads + file.writes,
+          state: stateOf(file),
+          inDiff: file.inDiff,
+          outside: file.outside,
+          tools: file.tools,
+          by: file.by,
+        },
       });
     }
   }
 
-  const dirs = new Map<string, MapDir>();
-  const toolsOf = new Map<string, Set<string>>();
-
-  const ensure = (path: string): MapDir => {
-    const found = dirs.get(path);
-    if (found) return found;
-    const parent = parentOf(path);
-    const made: MapDir = {
-      path,
-      name: dirName(path),
-      parent,
-      // Filled after the parent chain exists, so a deep first file cannot leave
-      // an ancestor holding a depth measured from the wrong end.
-      depth: 0,
-      files: [],
-      children: [],
-      subtreeFiles: 0,
-      subtreeCalls: 0,
-      subtreeWritten: 0,
-      subtreeInDiff: 0,
-      tools: [],
-      outside: true,
-      };
-    dirs.set(path, made);
-    toolsOf.set(path, new Set<string>());
-    if (parent !== null) ensure(parent).children.push(path);
-    return made;
-  };
-
-  for (const file of files) {
-    ensure(file.dir).files.push(file);
-    // Every ancestor, not just the parent: a folded `src/` has to know about a
-    // file in `src/lib/db.ts` or its count understates what it is standing for,
-    // which is the one number a fold exists to say.
-    for (let at: string | null = file.dir; at !== null; at = parentOf(at)) {
-      const dir = dirs.get(at);
-      if (!dir) continue;
-      dir.subtreeFiles++;
-      dir.subtreeCalls += file.calls;
-      if (file.writes > 0) dir.subtreeWritten++;
-      if (file.inDiff) dir.subtreeInDiff++;
-      if (!file.outside) dir.outside = false;
-      const tools = toolsOf.get(at);
-      if (tools) for (const tool of file.tools) tools.add(tool);
-    }
-  }
-
-  let maxDepth = 0;
-  for (const dir of dirs.values()) {
-    let depth = 0;
-    for (let at = dir.parent; at !== null; at = parentOf(at)) depth++;
-    dir.depth = depth;
-    dir.children.sort();
-    dir.files.sort(byCallsThenName);
-    dir.tools = [...(toolsOf.get(dir.path) ?? [])].sort();
-    if (dir.files.length > 0 && depth > maxDepth) maxDepth = depth;
-  }
-
-  const roots = ["", "/"].filter((root) => dirs.has(root));
-  return { dirs, files, roots, maxDepth };
-}
-
-/** Busiest first, then by name — the table's tiebreak, for the same reason. */
-function byCallsThenName(a: MapFile, b: MapFile): number {
-  return b.calls - a.calls || a.name.localeCompare(b.name);
+  return buildPathTree(entries, { summarise: summariseTouches, compare: byCallsThenName });
 }
 
 /* -------------------------------- the plan --------------------------------- */
 
 /**
- * One thing the canvas draws.
+ * `planPathMap` with this map's payload bound, and nothing else.
  *
- * A `dir` is an anchor and a label: it is where its files hang, and it is not a
- * hub standing in for a tool. A `folded` is a whole directory drawn as one node
- * because the tree was over budget, and it carries `files` so the surface can
- * say how many are behind it. Nothing is ever dropped, so `folded` is the only
- * way a file goes undrawn and it is always announced.
+ * A binding rather than a re-export, because the name is what the page and its
+ * test reach for and the fold is not this module's decision to restate — every
+ * rule the plan obeys (the depth cutoff, a root never folding, an expansion
+ * carrying its ancestors) is written once, over there.
  */
-export interface PlanNode {
-  /** Prefixed by kind: a directory and a file can share a path string. */
-  id: string;
-  kind: "dir" | "file" | "folded";
-  path: string;
-  label: string;
-  /** 1 for a file, the subtree count for a fold, 0 for a directory anchor. */
-  files: number;
-  file: MapFile | null;
-  dir: MapDir | null;
-}
-
-/**
- * A drawn node's id, built in one place.
- *
- * A directory has two of them — `dir:p` open and `folded:p` closed — and the
- * transition between them happens on the click that opens it. Anything holding
- * an id across that click has to know which one it is about to become, and a
- * consumer spelling `` `dir:${path}` `` itself is how the surface ends up
- * clearing its own inspector on the one click that was supposed to explain
- * something. `planTouchedMap` builds every id through here and so does the
- * canvas.
- */
-export function nodeId(kind: PlanNode["kind"], path: string): string {
-  return `${kind}:${path}`;
-}
-
-export interface MapPlan {
-  nodes: PlanNode[];
-  /** Containment, as indices into `nodes` — never a tool, never causation. */
-  edges: { source: number; target: number }[];
-  /** Directories at this depth or shallower are drawn open. */
-  cutoff: number;
-  /** Directory paths drawn as one node each, deepest-visible first. */
-  folded: string[];
-  /** Files standing behind a fold, and therefore drawn nowhere else. */
-  foldedFiles: number;
-  drawnFiles: number;
-}
-
-export interface PlanOptions {
-  /** Drawn file nodes the surface will accept before it starts folding. */
-  budget: number;
-  /** Directories the operator opened by hand, which no budget closes again. */
-  expanded?: ReadonlySet<string>;
-}
-
-/**
- * Fold the tree to a depth that fits, and lay out what is left.
- *
- * **The rule is a depth cutoff, not a top-N.** A cutoff keeps the shape of the
- * repository — the top level stays whole and detail rolls up from the leaves —
- * where dropping the smallest directories would leave an arbitrary sample of it,
- * and dropping the *largest* (which is what reusing `capGraph` would do, since
- * it prunes by degree largest-first) would delete exactly the directory the run
- * worked in.
- *
- * `drawnFilesAt` is monotone in the cutoff — raising it only ever unfolds — so
- * the largest cutoff that fits is found by walking down from `maxDepth`. Zero is
- * the floor: a run whose files all sit at the checkout root has nothing left to
- * fold, and drawing them all is the only honest option left. The surface says
- * the number either way.
- */
-export function planTouchedMap(tree: TouchedTree, options: PlanOptions): MapPlan {
-  const expanded = withAncestors(options.expanded);
-  const budget = Math.max(1, options.budget);
-
-  let cutoff = 0;
-  for (let candidate = tree.maxDepth; candidate >= 0; candidate--) {
-    if (drawnFilesAt(tree, candidate, expanded) <= budget) {
-      cutoff = candidate;
-      break;
-    }
-  }
-
-  const nodes: PlanNode[] = [];
-  const edges: { source: number; target: number }[] = [];
-  const folded: string[] = [];
-  let foldedFiles = 0;
-  let drawnFiles = 0;
-
-  const walk = (path: string, parentIndex: number | null): void => {
-    const dir = tree.dirs.get(path);
-    if (!dir) return;
-
-    if (isFolded(dir, cutoff, expanded)) {
-      const index = nodes.length;
-      nodes.push({
-        id: nodeId("folded", path),
-        kind: "folded",
-        path,
-        label: dir.name,
-        files: dir.subtreeFiles,
-        file: null,
-        dir,
-      });
-      if (parentIndex !== null) edges.push({ source: index, target: parentIndex });
-      folded.push(path);
-      foldedFiles += dir.subtreeFiles;
-      return;
-    }
-
-    const index = nodes.length;
-    nodes.push({
-      id: nodeId("dir", path),
-      kind: "dir",
-      path,
-      label: dir.name,
-      files: 0,
-      file: null,
-      dir,
-    });
-    if (parentIndex !== null) edges.push({ source: index, target: parentIndex });
-
-    for (const file of dir.files) {
-      const at = nodes.length;
-      nodes.push({
-        id: nodeId("file", file.path),
-        kind: "file",
-        path: file.path,
-        label: file.name,
-        files: 1,
-        file,
-        dir,
-      });
-      edges.push({ source: at, target: index });
-      drawnFiles++;
-    }
-
-    for (const child of dir.children) walk(child, index);
-  };
-
-  for (const root of tree.roots) walk(root, null);
-
-  return { nodes, edges, cutoff, folded, foldedFiles, drawnFiles };
-}
-
-/**
- * Opening a directory opens every directory above it.
- *
- * A fold hides its whole subtree, so an operator can only ever have clicked a
- * directory whose ancestors were already open — and without this the next plan
- * closes one of them under them, because the ancestor is over the cutoff and
- * nothing said otherwise. The symptom is a click that appears to do nothing: the
- * expansion is recorded, the subtree stays hidden behind the parent's fold, and
- * no state is wrong enough to notice.
- */
-function withAncestors(paths: ReadonlySet<string> | undefined): ReadonlySet<string> {
-  if (!paths || paths.size === 0) return new Set<string>();
-  const out = new Set<string>();
-  for (const path of paths) {
-    for (let at: string | null = path; at !== null; at = parentOf(at)) out.add(at);
-  }
-  return out;
-}
-
-/**
- * A directory is folded when it is deeper than the cutoff and nobody opened it.
- *
- * A root is never folded: folding it would leave the map with one node standing
- * for everything, which is a picture of nothing.
- */
-function isFolded(dir: MapDir, cutoff: number, expanded: ReadonlySet<string>): boolean {
-  if (dir.parent === null) return false;
-  return dir.depth > cutoff && !expanded.has(dir.path);
-}
-
-/** Files that would be drawn at this cutoff. Counted, never laid out. */
-function drawnFilesAt(
-  tree: TouchedTree,
-  cutoff: number,
-  expanded: ReadonlySet<string>,
-): number {
-  let total = 0;
-  const walk = (path: string): void => {
-    const dir = tree.dirs.get(path);
-    if (!dir || isFolded(dir, cutoff, expanded)) return;
-    total += dir.files.length;
-    for (const child of dir.children) walk(child);
-  };
-  for (const root of tree.roots) walk(root);
-  return total;
-}
+export const planTouchedMap: (tree: TouchedTree, options: PlanOptions) => MapPlan = planPathMap;
 
 /* ------------------------------- the nothings ------------------------------- */
 

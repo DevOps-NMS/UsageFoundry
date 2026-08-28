@@ -36,7 +36,8 @@ import {
   type SimNode,
   type SimState,
 } from "@/lib/forceLayout";
-import { nodeId, type MapPlan, type PlanNode } from "@/lib/touchedMap";
+import { nodeId } from "@/lib/pathMap";
+import type { MapPlan, PlanNode } from "@/lib/touchedMap";
 
 /**
  * A run's touches, drawn where they sit in the repository.
