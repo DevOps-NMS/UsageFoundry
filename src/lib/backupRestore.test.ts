@@ -71,14 +71,30 @@ interface ScriptRun {
  * `spawnSync`: these ship as executables an operator runs, and the live-server
  * case below needs the event loop free to keep a heartbeat going while the
  * child watches for one.
+ *
+ * `fileLimitBlocks` is how the interrupted-restore case makes a copy fail part
+ * of the way through. Node exposes no `setrlimit`, so the limit is set by a
+ * shell between the fork and the exec; the script and its arguments are passed
+ * as positional parameters rather than interpolated into the command, since
+ * they are `mkdtemp` paths. `ulimit -f` raises `EFBIG` where a full volume
+ * raises `ENOSPC`, which is the same unhandled throw out of the same call.
  */
-function runScript(script: string, args: string[]): Promise<ScriptRun> {
+function runScript(
+  script: string,
+  args: string[],
+  opts: { fileLimitBlocks?: number } = {},
+): Promise<ScriptRun> {
+  let file = process.execPath;
+  let argv = [path.join(repoRoot(), "scripts", script), ...args];
+  if (opts.fileLimitBlocks !== undefined) {
+    argv = ["-c", 'ulimit -f "$1"; shift; exec "$@"', "sh", String(opts.fileLimitBlocks), file, ...argv];
+    file = "/bin/sh";
+  }
   return new Promise((resolve) => {
-    const child = spawn(
-      process.execPath,
-      [path.join(repoRoot(), "scripts", script), ...args],
-      { env: { ...process.env, DATA_DIR: dataDir }, stdio: ["ignore", "pipe", "pipe"] },
-    );
+    const child = spawn(file, argv, {
+      env: { ...process.env, DATA_DIR: dataDir },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -308,6 +324,53 @@ describe("restoring", () => {
     } finally {
       restored.close();
     }
+  });
+
+  it("leaves the database that was there when the copy dies part-way", async () => {
+    const dir = path.join(root, "interrupted");
+    const target = path.join(dir, "usagefoundry.db");
+    fs.mkdirSync(dir, { recursive: true });
+    const live = new Database(target);
+    live.exec("CREATE TABLE runs (id TEXT PRIMARY KEY); CREATE TABLE settings (key TEXT PRIMARY KEY)");
+    live.prepare("INSERT INTO runs VALUES ('the-operators-data')").run();
+    live.close();
+
+    // Half the backup's own size, so the copy is certain to meet the limit part
+    // of the way through rather than before it starts or after it finishes.
+    const size = fs.statSync(fixtureBackup).size;
+    const blocks = Math.floor(size / 2 / 512);
+    assert.ok(blocks > 0, `the fixture backup is too small to truncate: ${size} bytes`);
+
+    const restore = await runScript("restore-db.mjs", [fixtureBackup, "--db", target], {
+      fileLimitBlocks: blocks,
+    });
+
+    assert.equal(restore.code, 1);
+    // The one that fails against an unguarded copy: with the database moved
+    // aside first, this directory held nothing but a `.superseded-` file whose
+    // name was never printed, and the next boot created a fresh empty database
+    // here and came up green.
+    assert.ok(fs.existsSync(target), `the database is gone: ${restore.stderr}`);
+    const kept = new Database(target, { readonly: true });
+    try {
+      assert.equal(
+        (kept.prepare("SELECT count(*) AS n FROM runs WHERE id = 'the-operators-data'").get() as {
+          n: number;
+        }).n,
+        1,
+        "the database is at its own path but the rows that were in it are not",
+      );
+    } finally {
+      kept.close();
+    }
+    // Says the failure was reported as one rather than thrown, and that what it
+    // told the operator about their data is true.
+    assert.match(restore.stderr, /untouched/);
+    assert.deepEqual(
+      fs.readdirSync(dir).filter((name) => name.includes(".partial") || name.includes(".superseded-")),
+      [],
+      "a half-written copy or a moved-aside database was left behind",
+    );
   });
 
   it("refuses a file that is not this app's database", async () => {

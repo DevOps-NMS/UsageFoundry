@@ -420,10 +420,21 @@ Built and exercised against real transcripts:
   deleting either, a SQLite file with no `runs` table was refused by name, a
   file that is not a database at all was refused as one, `--keep 2` deleted only
   files matching this script's own name pattern, and a second backup to an
-  existing path was refused rather than overwriting it. Six of those are the
+  existing path was refused rather than overwriting it. Seven of those are the
   unit tests in `backupRestore.test.ts`; replacing `VACUUM INTO` with
   `fs.copyFileSync` in the script fails them, which is what says they are
   measuring the mechanism rather than the file's existence.
+  The seventh was added last and was **seen to fail first**: a restore whose
+  copy dies part-way, induced with `ulimit -f 200` against a 512KB backup —
+  `EFBIG` where a full volume gives `ENOSPC`, the same unhandled throw out of
+  the same `copyFileSync`. Against the unguarded copy the scratch data directory
+  afterwards held only `usagefoundry.db.superseded-<stamp>`, a name nothing had
+  printed, and no `usagefoundry.db` at all; with the copy staged under
+  `usagefoundry.db.partial` it exits 1 saying the database *is untouched*, and
+  the file is still at its own path with all 2,000 of its rows. What was **not**
+  executed is the other half of the incident — that the next boot creates a
+  database at the empty path and comes up green — which follows from
+  `src/lib/db.ts`'s unconditional `new Database(DB_PATH)` and wants a container.
 - **The two agent flags, probed by hand against the pin
   (`@anthropic-ai/claude-code@2.1.226`).** Seven probes, each deciding a design
   question rather than confirming one. Four of them refuse before any API call,
