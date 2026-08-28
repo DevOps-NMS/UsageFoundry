@@ -541,10 +541,32 @@ COPY scripts/backup-db.mjs scripts/restore-db.mjs scripts/discord-relay.mjs ./sc
 # a missing one itself and would make it as whoever the install ran as — which
 # on an install that never set UF_AGENT_UID is root, leaving the agents unable
 # to upgrade or remove what they run.
+#
+# **`/app` is not on that list and must never be put back on it.** It is this
+# server's own bundle — `server.js`, `.next/`, the standalone `node_modules/`
+# and `scripts/` — and root is what executes it, so `node:node` there made the
+# unprivileged half the *owner* of the code the privileged half runs. That is
+# not a smaller version of the grants above; it is the one that cancels them.
+# The line reached `/app` from the days the whole container ran as `${UF_UID}`
+# and the bundle merely had to be readable, and the root/agent split landed
+# without revisiting it. Two paths make that root *execution* rather than a
+# theoretical grant: `docker-entrypoint.sh` re-runs
+# `/app/scripts/discord-relay.mjs` as root every five seconds on any install
+# with `DISCORD_WEBHOOK_URL` set — so an agent that rewrites that file and lets
+# the relay exit is root within seconds, holding the very credential that
+# entrypoint's own `unset` keeps out of every child — and `restart:
+# unless-stopped` re-runs `/app/server.js` as root after every `mem_limit` OOM
+# kill, which is routine here rather than exceptional.
+# Nothing wants the grant back: the `COPY` lines above carry no `--chown`, so
+# the bundle arrives root-owned and world-*readable*, no child is spawned with a
+# cwd under `/app` (`chatCwd()` is a mount or `os.tmpdir()`), and everything
+# written at runtime is a volume, a bind mount or `/data`. `deployment.test.ts`
+# asserts the absence, because re-adding the word is a one-token edit that
+# changes nothing else anyone would notice.
 RUN mkdir -p /data /workspace /workspace2 /workspace3 /workspace4 /home/node/.claude \
       /home/node/go/build-cache /home/node/.local/share/gh/extensions \
       /home/node/pytools/tools /home/node/pytools/bin /home/node/pytools/python \
- && chown -R node:node /workspace /workspace2 /workspace3 /workspace4 /home/node /app \
+ && chown -R node:node /workspace /workspace2 /workspace3 /workspace4 /home/node \
  && chown root:root /data \
  && chmod 0700 /data
 
