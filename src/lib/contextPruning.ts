@@ -366,19 +366,27 @@ export function contextTokens(transcriptPath: string): number {
  */
 function contextTokensOf(text: string): number {
   let bytes = 0;
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let record: unknown;
-    try {
-      record = JSON.parse(trimmed);
-    } catch {
-      // A torn trailing line is normal on a transcript being appended to.
-      continue;
+  // The whole walk stays inside a catch, not just the per-line parse: the
+  // measurement above promises never to throw, its callers are all on the run
+  // loop, and splitting the read out of that promise must not quietly narrow
+  // it. `miss` reaches this directly, so the guarantee has to live here.
+  try {
+    for (const line of text.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(trimmed);
+      } catch {
+        // A torn trailing line is normal on a transcript being appended to.
+        continue;
+      }
+      const message = (record as { message?: unknown } | null)?.message;
+      if (message === undefined || message === null) continue;
+      bytes += JSON.stringify(message).length;
     }
-    const message = (record as { message?: unknown } | null)?.message;
-    if (message === undefined || message === null) continue;
-    bytes += JSON.stringify(message).length;
+  } catch {
+    return 0;
   }
   return Math.round(bytes / BYTES_PER_TOKEN);
 }
