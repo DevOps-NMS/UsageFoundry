@@ -133,6 +133,19 @@ async function postHandler(req: Request, ctx: Ctx) {
   // folder and takes no slot, so nothing it does can change what a run
   // proposal is admitted into.
   const batch = approveRunBatch(id, targets);
+
+  // The click refused whole, before anything was decided, by a condition that
+  // will have cleared by the time the operator looks again — the install
+  // ceiling's rolling window, or another process holding the data directory.
+  // The same 400 an empty batch gets above and for a stronger version of its
+  // reason: nothing here is a verdict on a proposal, so every one of them is
+  // still pending and the page must not clear the selection. Answered before
+  // the workflow half rather than after it, so "nothing was decided" is true of
+  // the click and not merely of its run proposals.
+  if (batch.refused) {
+    return NextResponse.json({ error: batch.refused }, { status: 400 });
+  }
+
   const failed: DecisionTally["failed"] = [...batch.failed];
   const saved: Array<{ workflowId: string; name: string }> = [];
 

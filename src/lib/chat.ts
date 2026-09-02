@@ -1223,6 +1223,30 @@ export type ApprovalOutcome =
   | { ok: false; reason: string };
 
 /**
+ * The two things `createRun` refuses for that will not still be true tomorrow.
+ *
+ * Asked *before* the call rather than told apart inside the catch below, and
+ * they are both already sentences from named functions so nothing here matches
+ * on a string. `dataDirRefusal` is a fact about which process holds the lock
+ * right now, and `installBudgetRefusal`'s window is rolling — it clears with no
+ * operator action at all — so neither is a verdict on a proposal. Marking one
+ * `failed` for either destroys it: that status is terminal, `planProposal`
+ * refuses anything not `pending` and the route only ever offers what is
+ * pending, so a proposal refused for a condition that has since passed can
+ * never be approved again, and getting the work back means a billed turn.
+ *
+ * Everything else `createRun` refuses for is a property of the proposal — a
+ * folder outside every mount, a folder that does not exist, a template or agent
+ * that has been deleted, a rival already continuing the branch — and stays
+ * terminal, which is what the catch below is for.
+ */
+function transientRefusal(): string | null {
+  // `createRun`'s own order, so the sentence read here is the one the throw
+  // would have carried.
+  return dataDirRefusal() ?? installBudgetRefusal();
+}
+
+/**
  * Start the run a proposal asks for.
  *
  * Synchronous from the plan to the INSERT, which is not an accident: it calls
@@ -1262,6 +1286,14 @@ export function approveProposal(
     return { ok: false, reason: plan.reason };
   }
 
+  // Before `createRun` rather than in the catch, because the catch is terminal
+  // and neither of these is about this proposal. `approveRunBatch` asks the
+  // same question once for a whole click, so no batch ever arrives here with
+  // one of them live; what this covers is the direct caller, which must not
+  // burn a proposal on a condition nobody could have acted on either.
+  const transient = transientRefusal();
+  if (transient) return { ok: false, reason: transient };
+
   try {
     const run = createRun({
       ...plan.input,
@@ -1276,6 +1308,8 @@ export function approveProposal(
     markProposal(id, "approved", { runId: run.id });
     return { ok: true, runId: run.id };
   } catch (err) {
+    // Everything left is a property of the proposal rather than of the moment
+    // it was clicked in — the two that clear on their own were asked above.
     // `createRun` refuses a folder outside every mount and a folder that does
     // not exist; a folder merely *busy* queues instead, which is why this is a
     // failure rather than a retry.
@@ -1289,6 +1323,14 @@ export function approveProposal(
 export interface BatchOutcome {
   started: string[];
   failed: Array<{ title: string; reason: string }>;
+  /**
+   * Set when the whole click was refused before anything was decided, and the
+   * sentence saying why. Deliberately not a `failed` entry per proposal: those
+   * are verdicts, recorded on the row and terminal, and this is the absence of
+   * one — every proposal is still pending and the caller answers 400, which is
+   * what the route already does with a batch holding nothing to act on.
+   */
+  refused?: string;
 }
 
 /**
@@ -1307,6 +1349,12 @@ export interface BatchOutcome {
  * that never resolved, arriving from the other direction: there it is a
  * dependency that was never going to exist, here it is one that was going to
  * and did not.
+ *
+ * The two refusals that clear on their own refuse the **click** instead, once
+ * and before any of it — `refused` rather than a `failed` per member. That is
+ * not a fourth validation pass over what a proposal may be: it is the one
+ * question on this path whose answer is about the moment rather than the work,
+ * and `admitDependencies` is left the sole owner of everything else.
  */
 export function approveRunBatch(
   chatId: string,
@@ -1316,6 +1364,27 @@ export function approveRunBatch(
   const proposals = listProposals(chatId).filter(
     (p) => wanted.has(p.id) && p.kind === "run",
   );
+
+  // One question for the whole click, before anything is decided, because a
+  // condition that will have cleared by the time the operator looks again is
+  // not a verdict on any of these proposals. Asked here rather than per member
+  // for the reason the loop below has no early exit: one tripped ceiling used
+  // to fail every proposal in the batch in turn, each one terminally, so a
+  // single click destroyed twenty. Only when there is a run to start — a click
+  // of workflow proposals alone claims no folder and spends nothing, and
+  // neither condition bears on saving a graph.
+  if (proposals.length > 0) {
+    const transient = transientRefusal();
+    if (transient) {
+      return {
+        started: [],
+        failed: [],
+        refused:
+          `${transient} Nothing was decided — every proposal in this click ` +
+          "is still waiting.",
+      };
+    }
+  }
 
   // Every labelled proposal of this chat that is *not* in the batch, so a
   // dependency on one approved in an earlier click resolves to its run.
