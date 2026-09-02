@@ -10,7 +10,7 @@ good, and what makes it bad?**
 
 The behaviour is produced by exactly two things, and both are text:
 
-1. **`systemPrompt()`** — `src/lib/chat.ts:2495-2595`, 99 lines of instruction —
+1. **`systemPrompt()`** — `src/lib/chat.ts:2495-2595`, whose body is 98 lines —
    and what `chatPrompt()` (`src/lib/chat.ts:968`) composes around it per turn.
 2. **The thirteen MCP tool declarations** in `src/app/api/mcp/route.ts:149-603`.
    Eight shared (`SHARED_TOOLS`, `:149`), five chat-only (`CHAT_TOOLS`, `:254`).

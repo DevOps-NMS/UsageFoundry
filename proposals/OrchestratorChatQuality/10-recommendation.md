@@ -208,7 +208,7 @@ carry both `mountId` and `folder`, the other 4 omit both, which
 own folder"*), and **no proposal in the corpus was refused for an unknown mount
 or folder**.
 
-That rules out the obvious global repair — *"the prompt is 99 lines, shorten it"*
+That rules out the obvious global repair — *"the prompt is 98 lines, shorten it"*
 — because the length is where the compliance comes from. Every recommendation
 above is additive or a same-length rewrite for exactly this reason.
 

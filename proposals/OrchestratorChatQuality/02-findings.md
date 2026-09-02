@@ -109,11 +109,15 @@ on asking — `src/lib/chat.ts:2543-2554`:
 
 Two things about it, and the second is the finding.
 
-**It never names the tool.** `ask_operator` is one of **two** tools the system
-prompt does not name anywhere in its 99 lines. The prompt names `list_folders`
-(`:2530`), `list_proposals` (`:2536`), `list_agents` (`:2539`, `:2565`),
-`propose_run` and `propose_workflow` (`:2502`), `save_template` (`:2567`),
-`promptOverride` (`:2561`) and `dependsOn` (`:2575`).
+**It never names the tool.** The prompt names 6 of the 13 by name —
+`propose_run` and `propose_workflow` (`:2502`), `list_folders` (`:2530`),
+`list_proposals` (`:2536`), `list_agents` (`:2539`, `:2565`), `save_template`
+(`:2567`) — plus two argument names, `promptOverride` (`:2561`) and `dependsOn`
+(`:2575`). `ask_operator` is one of the **seven** it does not name, checked
+against the source by `scripts/asking.mjs` rather than from memory.
+
+Being unnamed is therefore **not sufficient** to explain the rate, and the next
+paragraph is that counter-evidence rather than a hedge around it.
 
 **Every sentence in it is restrictive.** Three bullets: *ask only for*, *prefer
 proposing*, *four are a form*. There is no sentence that says asking is
@@ -121,20 +125,32 @@ something to do, and none that implies a *tool* rather than a turn of phrase. A
 model reading this paragraph learns when not to ask and is never told what to
 call.
 
-**The honest counter-evidence**, because it is real: `get_usage` is also unnamed
-and is fetched 82/160 and called 140 times. So an unnamed tool is not
-automatically an unreachable one. The difference is that the prompt describes
-`get_usage`'s *action* imperatively at `src/lib/chat.ts:2534-2535` —
+**The honest counter-evidence**, because it is decisive against the simple
+version of this finding: the seven unnamed tools include `list_templates` (147
+calls, fetched 86/160) and `get_usage` (140 calls, fetched 82/160) — the second-
+and fourth-most-used tools in the corpus. An unnamed tool is plainly not an
+unreachable one.
+
+What separates them is that the prompt describes those tools' *actions*
+imperatively, so the model knows there is something to go and do and can guess
+the name. For `get_usage` that is `src/lib/chat.ts:2534-2535` —
 
 > ```
 > "- If a 5-hour or weekly window is nearly spent, say so — approving ten runs",
 > "  into a full window means ten runs that stop on their first guard check.",
 > ```
 
-— which is a thing to go and do, and "usage" is the obvious name for the tool
-that does it. The asking paragraph has no equivalent sentence. `ask_operator` is
-the only tool in the surface whose *use is a judgement the prompt spends a
-paragraph on* while the paragraph never connects to the tool.
+— a thing to go and do, with "usage" the obvious name for the tool that does it.
+For `list_templates` it is `src/lib/chat.ts:2559-2560` (*"Say whether you named
+one or left the run on the default guard set"*), which cannot be answered without
+calling it.
+
+**The asking paragraph has no equivalent sentence, and it is the only paragraph
+in the prompt that does not.** So the finding is not "unnamed tools go
+uncalled" — it is narrower and it holds: `ask_operator` is the one tool whose
+*use is a judgement the prompt spends a whole paragraph on*, where every sentence
+of that paragraph is a reason not to, and nothing in it is an action to take or a
+name to fetch.
 
 ### On `MAX_OPEN_QUESTIONS`
 
