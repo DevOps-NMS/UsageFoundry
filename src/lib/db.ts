@@ -945,6 +945,27 @@ function migrate(db: Database.Database) {
   // the untemplated guard set in settings.
   addColumn(db, "chat_proposals", "agent_id", "TEXT");
 
+  // The untemplated guard set as it stood when the proposal was written, as
+  // JSON, and null on a templated one — whose guards are a *handle* the
+  // operator can go and read, so that one is read live at the click and stays
+  // that way. An untemplated card spells the values out instead, and a card
+  // that spells values out is a promise: the set is frozen here so that editing
+  // `chatDefaultGuards` between the render and the click cannot start a run
+  // under rules no card ever stated.
+  //
+  // It carries nothing a model wrote. `createProposal` fills it from
+  // `chatGuards()` server-side; there is no field on `propose_run` and no
+  // argument anywhere that can reach it, which is `prompt_override`'s rule above
+  // — prompt text is the half of a run a model may write, and this is exactly
+  // what guards are not.
+  //
+  // Deliberately not in PROPOSAL_BASE_COLUMNS, and it must not be added there:
+  // `relaxProposalTemplate` runs before every `addColumn` on this table, so a
+  // file still carrying the NOT NULL that rebuild exists to drop has never had
+  // this column at all, and naming a column the old table does not have would
+  // fail the copy for every install that has one to make.
+  addColumn(db, "chat_proposals", "guards_json", "TEXT");
+
   // The order a chat's messages were written in, because `ts` does not decide
   // it: `finishTurn` appends the reply, an error and a denial note inside one
   // synchronous block, so they routinely share a millisecond, and the primary

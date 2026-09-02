@@ -56,6 +56,7 @@ let chat: typeof import("./chat");
 let settings: typeof import("./settings");
 let dbMod: typeof import("./db");
 let installBudget: typeof import("./installBudget");
+let dto: typeof import("../app/api/chat/dto");
 let root: string;
 let mountId: string;
 let tmpdirBefore: string | undefined;
@@ -88,6 +89,9 @@ before(async () => {
   settings = await import("./settings");
   dbMod = await import("./db");
   installBudget = await import("./installBudget");
+  // The route's own projection, so the card a case reads is the card the page
+  // is served rather than a second rendering of the same row.
+  dto = await import("../app/api/chat/dto");
 
   // The snapshot a creation path reads asks the provider for its own
   // utilisation, and there is no network here — see the same line in
@@ -199,6 +203,160 @@ describe("approving something that can never start", () => {
     assert.equal(outcome.failed.length, 1);
     assert.equal(chat.getProposal(proposal.id)?.status, "failed");
     assert.deepEqual(chat.pendingProposals(thread.id), []);
+  });
+});
+
+/**
+ * The card is a promise, and this is the whole of what makes it one.
+ *
+ * An untemplated card spells its guards out — `plan · your folder · 3 cycles ·
+ * $5.00` — because there is no template name for the operator to go and read.
+ * Both halves of that used to be re-derived from `chatGuards()`: the label on
+ * every poll, and the run again at the click. So an edit to `chatDefaultGuards`
+ * landing in between started the run under a set no card had ever shown, and
+ * nothing recorded that the two disagreed — not the thread, not the run row,
+ * not the proposal. The window is at least one poll interval and is longer
+ * whenever a poll failed or the tab was in the background, which is the
+ * likeliest way to have been in Settings at all.
+ *
+ * Driven end to end rather than through `planProposal`, which is where the
+ * resolution branches are unit-tested: what this pins is that the *stored*
+ * snapshot reaches both readers, and that is three modules and a column rather
+ * than a function.
+ *
+ * The run's `isolation` column is deliberately not one of the assertions. This
+ * fixture's folder is not a git repository, so isolation degrades to `none`
+ * whichever way the flag was set, and a column that reads the same under both
+ * answers cannot tell them apart. The card carries that choice in words, and
+ * the card is asserted.
+ */
+describe("approving a card whose defaults moved under it", () => {
+  const budget = {
+    maxRunTokens: null,
+    maxWeeklyFraction: null,
+    maxSessionFraction: null,
+    enforcement: "between-cycles" as const,
+    continueAfterDone: false,
+  };
+  /** What Settings said when the chat wrote the proposal. */
+  const asProposed = {
+    permissionMode: "plan" as const,
+    isolate: false,
+    budget: {
+      ...budget,
+      maxIterations: 3,
+      maxDurationMinutes: null,
+      maxRunCostUSD: 5,
+    },
+  };
+  /** What it says by the time the operator clicks: wider in every field. */
+  const asClicked = {
+    permissionMode: "bypassPermissions" as const,
+    isolate: true,
+    budget: {
+      ...budget,
+      maxIterations: null,
+      maxDurationMinutes: 600,
+      maxRunCostUSD: null,
+    },
+  };
+
+  // Install-wide state in a database the rest of the file shares — put back
+  // for the reason the ceiling above is.
+  after(() =>
+    settings.saveSettings({ chatDefaultGuards: settings.DEFAULT_CHAT_GUARDS }),
+  );
+
+  it("starts the run under the guards the card stated, not the ones since saved", () => {
+    settings.saveSettings({ chatDefaultGuards: asProposed });
+
+    const thread = chat.createChat();
+    const proposal = chat.createProposal(thread.id, {
+      templateId: null,
+      title: "Fix the flaky test",
+      task: "Find out why the suite is flaky and fix it.",
+      promptOverride: null,
+      mountId,
+      folder: "project",
+    });
+
+    const card = () =>
+      dto
+        .chatDTO(chat.getChat(thread.id)!)
+        .proposals.find((p) => p.id === proposal.id)!;
+    assert.equal(card().guardsSource, "defaults");
+    const asRendered = card().guardsLabel;
+    assert.equal(asRendered, "plan · your folder · 3 cycles · $5.00");
+
+    // The operator opens Settings, in this tab or another, and changes the
+    // untemplated guard set.
+    settings.saveSettings({ chatDefaultGuards: asClicked });
+
+    // The card in front of them is what the last poll returned, and the next
+    // poll must return the same thing: a card that changes under a reader is
+    // the drift arriving one render earlier rather than a warning about it.
+    assert.equal(
+      card().guardsLabel,
+      asRendered,
+      "the card must not be re-derived from a setting edited after it was written",
+    );
+
+    const outcome = chat.approveRunBatch(thread.id, [proposal.id]);
+    assert.deepEqual(outcome.failed, []);
+    assert.equal(outcome.started.length, 1);
+
+    const run = dbMod
+      .db()
+      .prepare("SELECT budget FROM runs WHERE id=?")
+      .get(outcome.started[0]) as { budget: string };
+    const started = JSON.parse(run.budget) as {
+      permissionMode: string;
+      maxIterations: number | null;
+      maxDurationMinutes: number | null;
+      maxRunCostUSD: number | null;
+    };
+
+    assert.equal(started.permissionMode, "plan");
+    assert.equal(started.maxIterations, 3);
+    assert.equal(started.maxRunCostUSD, 5);
+    // The one that would be widest of all if the live set had been read: the
+    // card named no wall clock at all, and `asClicked` names ten hours.
+    assert.equal(started.maxDurationMinutes, null);
+  });
+
+  it("falls back to the live set for a proposal that froze none", () => {
+    // Every proposal already pending when the column arrived. Refusing them
+    // would be worse than the drift: the work is gone and getting it back is a
+    // billed turn.
+    settings.saveSettings({ chatDefaultGuards: asProposed });
+
+    const thread = chat.createChat();
+    const proposal = chat.createProposal(thread.id, {
+      templateId: null,
+      title: "Fix the other flaky test",
+      task: "Find out why the other suite is flaky and fix it.",
+      promptOverride: null,
+      mountId,
+      folder: "project",
+    });
+    dbMod
+      .db()
+      .prepare("UPDATE chat_proposals SET guards_json = NULL WHERE id = ?")
+      .run(proposal.id);
+
+    const outcome = chat.approveRunBatch(thread.id, [proposal.id]);
+    assert.deepEqual(outcome.failed, []);
+    assert.equal(outcome.started.length, 1);
+
+    const run = dbMod
+      .db()
+      .prepare("SELECT budget FROM runs WHERE id=?")
+      .get(outcome.started[0]) as { budget: string };
+    assert.equal(
+      (JSON.parse(run.budget) as { maxIterations: number | null }).maxIterations,
+      3,
+      "a row with no snapshot must take today's defaults, as it always did",
+    );
   });
 });
 

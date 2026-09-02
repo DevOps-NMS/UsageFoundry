@@ -9,6 +9,7 @@ import {
   pendingProposals,
   pendingQuestions,
   proposalDeps,
+  proposalGuards,
   questionChoices,
   type ChatQuestionRow,
   type ChatRow,
@@ -21,7 +22,7 @@ import {
 } from "../../../lib/workflows";
 import { getTemplate } from "../../../lib/templates";
 import { getAgent } from "../../../lib/agents";
-import { chatGuards } from "../../../lib/settings";
+import { chatGuards, type RunGuards } from "../../../lib/settings";
 import { mountById } from "../../../lib/config";
 import { fmtUSD } from "../../../lib/format";
 import type {
@@ -88,11 +89,21 @@ function questionDTO(q: ChatQuestionRow): ChatQuestionDTO {
 /**
  * Every proposal of one thread, with what they all share read once.
  *
- * The untemplated guard set and the template/mount knowledge are both database
- * reads, and the chat page polls this route every few seconds — so they are
- * taken per request rather than per proposal. `currentKnowledge()` is only read
- * when a workflow proposal is actually there, which on nearly every thread is
- * never.
+ * The template/mount knowledge is a database read and the chat page polls this
+ * route every few seconds, so it is taken per request rather than per proposal.
+ * `currentKnowledge()` is only read when a workflow proposal is actually there,
+ * which on nearly every thread is never.
+ *
+ * The untemplated guard set is here for a *second* reason now, and the two
+ * point opposite ways. Taking it per request used to be the whole answer, and
+ * it made the label live: the card was re-derived from `chatGuards()` on every
+ * poll, so it changed under the operator between renders and the run took a
+ * third reading at the click. An untemplated proposal now freezes its own set
+ * when it is written, so the card is drawn from the row and cannot go stale —
+ * see `proposalGuards`. What is read here is only what a row *without* one
+ * falls back to: a proposal from before the column, or a blob nothing can read.
+ * A value already on the row is cheaper than this read rather than dearer, so
+ * nothing about the polling cost argues the other way.
  */
 function proposalDTOs(
   rows: ReturnType<typeof listProposals>,
@@ -139,6 +150,11 @@ function proposalDTO(
   // An agent the CLI would not register counts as missing: `planProposal` refuses it,
   // so a card calling it fine would be a card the click contradicts.
   const agent = p.agent_id ? getAgent(p.agent_id) : null;
+  // The set this proposal froze, or null for a row that froze none — which is
+  // every templated and every workflow proposal, and every run proposal made
+  // before the column existed. Those fall back to `untemplated`, the live set,
+  // which is what this card showed however the guards were resolved.
+  const frozen = proposalGuards(p);
   return {
     id: p.id,
     createdAt: p.created_at,
@@ -151,7 +167,9 @@ function proposalDTO(
       ? template.name
       : p.template_id
         ? "template deleted"
-        : untemplated,
+        : frozen
+          ? guardsLabel(frozen)
+          : untemplated,
     promptRewritten: p.prompt_override !== null,
     agentName: agent?.name ?? null,
     // Truthy rather than `!== null`, `planProposal`'s rule: a row written before
@@ -209,9 +227,27 @@ function proposedBlocks(
  * place the answer exists is a settings page two clicks away, and an approval
  * gate that does not show what is being approved is a gate that gets clicked
  * through.
+ *
+ * Which is exactly why an untemplated proposal now freezes this set onto its
+ * own row: values on a card are a promise, and a promise re-derived on every
+ * poll is one the operator can be shown and never given. This stays as the
+ * fallback for a row carrying none, and as what a *workflow* proposal's blocks
+ * are summarised against — approving one of those saves a graph rather than
+ * starting anything, so the guards it names are read when somebody presses Run.
  */
 function defaultGuardsLabel(): string {
-  const guards = chatGuards();
+  return guardsLabel(chatGuards());
+}
+
+/**
+ * One guard set, in the words a card says it in.
+ *
+ * Shared by the two sets a card can be drawn from — the live one above, and the
+ * one an untemplated proposal froze when it was written — because a card
+ * rendered from the frozen set and a card rendered from the live one differing
+ * in *wording* would read as the guards having changed when they had not.
+ */
+function guardsLabel(guards: RunGuards): string {
   const { maxIterations, maxDurationMinutes, maxRunCostUSD } = guards.budget;
 
   return [

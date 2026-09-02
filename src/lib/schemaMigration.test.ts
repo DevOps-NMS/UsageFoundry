@@ -200,6 +200,12 @@ describe("an interrupted chat_proposals rebuild", () => {
     assert.equal(rows(db, "chat_proposals"), 5);
     assert.equal(exists(db, "chat_proposals_old"), false);
     assert.equal(templateIdIsNotNull(db), false);
+    // The rebuild recreates the table from the base columns alone, so every
+    // column added since has to arrive from the `addColumn` calls that run
+    // after it in the same `migrate`. `guards_json` is the one `createProposal`
+    // names in its INSERT, so a boot that rebuilt and did not re-add it is an
+    // install where the chat cannot record a proposal at all.
+    assert.equal(hasColumn(db, "chat_proposals", "guards_json"), true);
     // The rename took the index with it and the DROP took it away again, so a
     // recovery that does not put it back leaves the thread query unindexed
     // until some later boot happens to rebuild something.

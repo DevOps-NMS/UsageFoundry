@@ -146,6 +146,7 @@ const {
   listQuestions,
   normalizeChoices,
   proposalDeps,
+  proposalGuards,
   parseTurnOutput,
   planApprovalBatch,
   planProposal,
@@ -250,6 +251,7 @@ const proposal = (over: Partial<ChatProposalRow> = {}) =>
     folder: null,
     status: "pending",
     title: "Fix #412",
+    guards_json: null,
     ...over,
   }) as Pick<
     ChatProposalRow,
@@ -261,6 +263,7 @@ const proposal = (over: Partial<ChatProposalRow> = {}) =>
     | "template_id"
     | "agent_id"
     | "prompt_override"
+    | "guards_json"
   >;
 
 /**
@@ -520,6 +523,123 @@ describe("planProposal", () => {
     assert.equal(plan.ok, true);
     if (!plan.ok) return;
     assert.equal(plan.input.agent ?? null, null);
+  });
+
+  /**
+   * What an untemplated proposal freezes, and what the click does with it.
+   *
+   * `proposalGuards(row) ?? chatGuards()` is the expression `approveProposal`
+   * and the card are both built on, so the composition is what these drive
+   * rather than the helper alone. The failure it exists to catch is the one
+   * nothing reports: the card spells out `plan · own checkout · 3 cycles ·
+   * $5.00`, the operator edits Settings in the other tab, and the run that
+   * starts is `bypassPermissions` in their own folder with no cap on money —
+   * every write successful, nothing in the thread, nothing on the run.
+   */
+  describe("the guard set an untemplated proposal froze", () => {
+    /** Deliberately unlike `defaults` in every field, for `defaults`' reason. */
+    const frozen: RunGuards = {
+      permissionMode: "acceptEdits",
+      isolate: true,
+      budget: {
+        maxIterations: 3,
+        maxDurationMinutes: null,
+        maxRunCostUSD: 5,
+        maxRunTokens: null,
+        maxWeeklyFraction: null,
+        maxSessionFraction: null,
+        enforcement: "between-cycles",
+        continueAfterDone: false,
+      },
+    };
+    const snapshot = (guards: unknown = frozen) =>
+      untemplated({ guards_json: JSON.stringify(guards) });
+
+    it("is what the run starts under, whatever Settings says by the click", () => {
+      const row = snapshot();
+      const plan = planProposal(
+        row,
+        null,
+        proposalGuards(row) ?? defaults,
+        null,
+      );
+      assert.equal(plan.ok, true);
+      if (!plan.ok) return;
+
+      assert.equal(plan.input.permissionMode, "acceptEdits");
+      assert.equal(plan.input.isolate, true);
+      assert.deepEqual(plan.input.budget, frozen.budget);
+      // The control: `defaults` is what the live set would have supplied, and
+      // reading it would have produced a different run in all four fields.
+      assert.notEqual(plan.input.permissionMode, defaults.permissionMode);
+    });
+
+    it("falls back to today's defaults when the row froze none", () => {
+      // Every proposal already pending when the column arrived, and every
+      // workflow one. Refusing them, or running them under an empty guard set,
+      // are the two ways this could have been worse than the drift it fixes.
+      const row = untemplated();
+      assert.equal(proposalGuards(row), null);
+
+      const plan = planProposal(row, null, proposalGuards(row) ?? defaults, null);
+      assert.equal(plan.ok, true);
+      if (!plan.ok) return;
+      assert.equal(plan.input.permissionMode, "plan");
+      assert.deepEqual(plan.input.budget, defaults.budget);
+    });
+
+    it("falls back rather than half-applying a blob it cannot read", () => {
+      for (const raw of ["{not json", '"acceptEdits"', "null", "[]"]) {
+        const row = untemplated({ guards_json: raw });
+        assert.equal(proposalGuards(row), null, raw);
+      }
+    });
+
+    it("narrows a partial snapshot rather than widening to what it omits", () => {
+      // The other half of the line above, and the direction that matters: a
+      // blob written by an older build, or edited by hand, must resolve to less
+      // than it names and never to more. `{}` is the extreme of it.
+      const bare = proposalGuards(snapshot({}));
+      assert.equal(bare?.permissionMode, "plan");
+      assert.equal(bare?.isolate, true);
+      assert.equal(bare?.budget.maxIterations, 1);
+
+      // An unrecognised mode is `plan` too — the one of the four that cannot
+      // write — rather than whatever the string says.
+      assert.equal(
+        proposalGuards(snapshot({ ...frozen, permissionMode: "wide-open" }))
+          ?.permissionMode,
+        "plan",
+      );
+      // And a policy with neither terminus is one work cycle rather than an
+      // uncapped loop, `chatGuards`' rule reached through the same narrowing.
+      assert.equal(
+        proposalGuards(
+          snapshot({
+            ...frozen,
+            budget: { maxIterations: null, maxDurationMinutes: null },
+          }),
+        )?.budget.maxIterations,
+        1,
+      );
+    });
+
+    it("does not reach a templated proposal, which still resolves live", () => {
+      // A template is a handle the operator can go and read, so its guards are
+      // read at the click on purpose. A row that carries a snapshot anyway —
+      // written before it named a template, or by hand — must not be able to
+      // move that.
+      const plan = planProposal(
+        proposal({ guards_json: JSON.stringify(frozen) }),
+        template,
+        defaults,
+        null,
+      );
+      assert.equal(plan.ok, true);
+      if (!plan.ok) return;
+      assert.equal(plan.input.permissionMode, template.permissionMode);
+      assert.deepEqual(plan.input.budget, template.budget);
+    });
   });
 });
 

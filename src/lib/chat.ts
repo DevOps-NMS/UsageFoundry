@@ -15,7 +15,12 @@ import {
   WORKSPACE_ROOT,
 } from "./config";
 import { db } from "./db";
-import { chatGuards, getSettings, type RunGuards } from "./settings";
+import {
+  chatGuards,
+  getSettings,
+  narrowGuards,
+  type RunGuards,
+} from "./settings";
 import { assistRefusal } from "./review";
 import { dataDirRefusal } from "./serverLock";
 import { installBudgetRefusal } from "./installBudget";
@@ -220,6 +225,15 @@ export interface ChatProposalRow {
    * read off the other's column.
    */
   graph: string | null;
+  /**
+   * The untemplated guard set frozen at proposal time, as JSON, or null.
+   *
+   * Null on a templated proposal, on a workflow one, and on every row written
+   * before the column existed — read through `proposalGuards`, which falls back
+   * to the live set rather than trusting any of those three to mean the same
+   * thing as an empty guard set.
+   */
+  guards_json: string | null;
   status: ProposalStatus;
   run_id: string | null;
   /** What a workflow proposal became. Never a run; approving one starts nothing. */
@@ -749,18 +763,20 @@ export function createProposal(
 ): ChatProposalRow {
   const id = randomUUID();
   const deps = input.dependsOn ?? [];
+  const kind = input.kind ?? "run";
   db()
     .prepare(
       `INSERT INTO chat_proposals
          (id, chat_id, created_at, kind, template_id, agent_id, title, task,
-          prompt_override, mount_id, folder, spec_id, depends_on, graph, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+          prompt_override, mount_id, folder, spec_id, depends_on, graph,
+          guards_json, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
     )
     .run(
       id,
       chatId,
       Date.now(),
-      input.kind ?? "run",
+      kind,
       input.templateId,
       input.agentId ?? null,
       input.title,
@@ -771,6 +787,21 @@ export function createProposal(
       input.specId ?? null,
       deps.length > 0 ? JSON.stringify(deps) : null,
       input.graph ?? null,
+      // Read here rather than at the click, and read from *settings* rather
+      // than from anything on `input`: the card an untemplated proposal draws
+      // spells its guards out, so the values it shows and the values the run
+      // starts under have to be one value taken once. `ProposalInput` has no
+      // field that could carry them and must not grow one — a guard a model
+      // could name is the one thing this whole path exists to make unreachable.
+      //
+      // Only a run proposal, and only an untemplated one. A template is a
+      // handle the operator can go and read, so it is resolved live at the
+      // click; and approving a *workflow* proposal saves a graph rather than
+      // starting anything, so the guards that matter there are the ones its
+      // blocks name when somebody later presses Run.
+      kind === "run" && input.templateId === null
+        ? JSON.stringify(chatGuards())
+        : null,
     );
   return getProposal(id)!;
 }
@@ -782,6 +813,47 @@ export function createProposal(
 export type ProposalPlan =
   | { ok: true; input: Omit<CreateRunInput, "origin"> }
   | { ok: false; reason: string };
+
+/**
+ * The guard set an untemplated proposal froze when it was written, or null.
+ *
+ * Both readers of it — the card and the click — take it through here and fall
+ * back to the live `chatGuards()` on null, which is what the two of them did
+ * before any set was frozen. That fallback is the *only* thing null means, and
+ * it means it for three separate rows: a templated proposal, whose guards are a
+ * handle read live on purpose; a workflow one, which starts nothing; and every
+ * proposal already pending across the upgrade that added the column, which must
+ * still approve rather than refuse.
+ *
+ * A blob that will not parse is null too, and that is not the same act as
+ * accepting half of one. What comes back from `JSON.parse` is narrowed by
+ * `narrowGuards` exactly as the settings blob is, so a snapshot missing fields
+ * — an older build's shape, a hand-edited row — resolves to `plan`, a checkout
+ * of its own and one work cycle. Every direction this can be wrong in is
+ * therefore narrower than what was asked for, which is the one property that
+ * matters: a guard set arriving from storage may never widen what a run may do.
+ *
+ * Pure, for `planProposal`'s reason and with its failure mode: what it decides
+ * is what an agent is allowed to do to a directory, and a wrong answer here is
+ * a run under rules nobody agreed to, which nothing throws over and no page
+ * shows.
+ */
+export function proposalGuards(
+  proposal: Pick<ChatProposalRow, "guards_json">,
+): RunGuards | null {
+  if (!proposal.guards_json) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(proposal.guards_json);
+  } catch {
+    return null;
+  }
+  // An array is as much "not a guard set" as a bare string is: it would narrow
+  // to `plan`, isolated, one cycle — a perfectly safe set that nobody wrote —
+  // where falling back gives the operator the set their Settings page shows.
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  return narrowGuards(raw as Partial<RunGuards>);
+}
 
 /**
  * Turn an approved proposal into the run it asks for, or say why not.
@@ -1280,7 +1352,15 @@ export function approveProposal(
   const plan = planProposal(
     proposal,
     proposal.template_id ? getTemplate(proposal.template_id) : null,
-    chatGuards(),
+    // Read at the *proposal* rather than at the click, which is the one of the
+    // three that goes the other way and is the whole of why: the card spells
+    // these values out, so re-deriving them here starts the run under whatever
+    // Settings says now and the card in front of the operator says something
+    // else — silently, for at least one poll interval. The template above is
+    // read live because a name is a handle they can go and read; a set of
+    // values is a promise. Null is a row that froze none, and that falls back
+    // to the live set exactly as this line used to.
+    proposalGuards(proposal) ?? chatGuards(),
     // Read at the click rather than at the proposal, which is what an id on the
     // row buys: an agent the operator has since fixed is used as it stands now,
     // and one they have since deleted is refused by name a line above.

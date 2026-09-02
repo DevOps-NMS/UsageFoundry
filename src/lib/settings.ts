@@ -1055,19 +1055,42 @@ export function setNewWorkPaused(paused: boolean): void {
  * already a hand-edited row.
  */
 export function chatGuards(s: Settings = getSettings()): RunGuards {
-  const raw = s.chatDefaultGuards ?? DEFAULT_CHAT_GUARDS;
+  return narrowGuards(s.chatDefaultGuards);
+}
+
+/**
+ * The same narrowing, for a guard blob that came from somewhere else.
+ *
+ * Separate from `chatGuards` because a *proposal* freezes this set onto its own
+ * row when it is written, so the card's values and the run's are one value —
+ * and that row is JSON in SQLite exactly as the settings blob is JSON in a
+ * settings row, with the same two ways of arriving unusable. Narrowing it here
+ * rather than at the reader is what keeps the three rules above the only rules
+ * there are; a second reader that trusted the shape would be a second answer to
+ * "what may this run do", and the wrong one would be the permissive one.
+ *
+ * Every partial reading is narrower than what it is missing: an absent mode is
+ * `plan`, an absent `isolate` is a checkout of its own, an absent terminus is
+ * one work cycle. A snapshot this cannot read at all is not this function's
+ * business — the caller falls back to the live set, which is the behaviour
+ * that existed before any of them were frozen.
+ */
+export function narrowGuards(
+  raw: Partial<RunGuards> | null | undefined,
+): RunGuards {
+  const g = raw ?? DEFAULT_CHAT_GUARDS;
   const permissionMode = (PERMISSION_MODES as readonly string[]).includes(
-    String(raw.permissionMode),
+    String(g.permissionMode),
   )
-    ? (raw.permissionMode as PermissionMode)
+    ? (g.permissionMode as PermissionMode)
     : "plan";
 
-  const budget = normalizePolicy(raw.budget ?? {});
+  const budget = normalizePolicy(g.budget ?? {});
   if (budget.maxIterations === null && budget.maxDurationMinutes === null) {
     budget.maxIterations = 1;
   }
 
-  return { permissionMode, isolate: raw.isolate !== false, budget };
+  return { permissionMode, isolate: g.isolate !== false, budget };
 }
 
 export function limitConfig(s: Settings = getSettings()): LimitConfig {
