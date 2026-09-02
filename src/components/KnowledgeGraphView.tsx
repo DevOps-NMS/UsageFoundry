@@ -49,12 +49,16 @@ import { SegmentedControl, type SegmentedOption } from "@/components/ui/Segmente
  * trip over a vault walk — and the whole panel is built to be *swept* through,
  * because what it is for is finding the setting that makes a shape appear.
  *
- * **The panel's search is not the page's.** The list above this has its own
- * folder / tag / type / text filters, and the graph deliberately does not read
- * them: the graph's query is the one Obsidian's graph view has, over the whole
- * vault, and a graph silently showing the twenty notes the list happened to be
- * filtered to would be a second view of the vault that disagrees with the first
- * about what is in it. They narrow the same vault from two places on purpose.
+ * **The panel's search is not the page's.** The Notes list has its own folder /
+ * tag / type / text filters, and the graph deliberately does not read them: the
+ * graph's query is the one Obsidian's graph view has, over the whole vault, and
+ * a graph silently showing the twenty notes the list happened to be filtered to
+ * would be a second view of the vault that disagrees with the first about what
+ * is in it. They narrow the same vault from two places on purpose. That list is
+ * now directly *below* this region rather than three screens above it, which
+ * makes the independence easier to notice and also easier to mistake for a bug
+ * — so the `Filters` footnote says it in a clause rather than leaving a reader
+ * to type in one box and wonder why the other did not move.
  *
  * **Settings live in the browser, not in `Settings`.** This is presentation
  * state for one operator at one screen size — the same class of thing as the
@@ -405,7 +409,8 @@ function GraphPanel({
             The search takes <code>-term</code>, <code>&quot;a phrase&quot;</code>,{" "}
             <code>path:</code>, <code>file:</code>, <code>tag:</code> and <code>OR</code>. It
             matches a note&apos;s title, path, tags and aliases — not its body, which is not
-            part of the graph.
+            part of the graph. The Notes list below has its own filters and this search does
+            not read them.
           </>
         }
       >

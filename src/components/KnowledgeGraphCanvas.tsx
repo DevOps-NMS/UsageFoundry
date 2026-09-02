@@ -69,10 +69,13 @@ import {
  *
  * **The pointer is the only input here that has no keyboard route, and that is
  * deliberate.** Panning and zooming a force layout is a way of *looking*; every
- * note this can open is also a row in the list above it, which is reachable,
- * ordered and searchable. A graph is the second route to that content, not the
- * only one, so it stays a pointer surface rather than growing a spatial
- * keyboard model nobody would find.
+ * note this can open is also a row in the Notes list on this page, which is
+ * reachable, ordered and searchable. A graph is the second route to that
+ * content, not the only one, so it stays a pointer surface rather than growing
+ * a spatial keyboard model nobody would find. What that claim rests on is the
+ * list being reachable rather than the list being *above* — which it no longer
+ * is, since the graph was moved ahead of it — so the `aria-label` names it by
+ * name rather than by direction.
  */
 
 /** Zoom range over which a label ramps from invisible to solid. */

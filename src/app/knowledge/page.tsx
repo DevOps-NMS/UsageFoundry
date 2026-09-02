@@ -56,8 +56,8 @@ import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
  *
  * ## Why the note leads the page
  *
- * The open note is the first block, above the list it was picked from. The list
- * is a height-capped box, so with the note under it a click could scroll
+ * The open note is the first block, ahead of the list it was picked from. The
+ * list is a height-capped box, so with the note under it a click could scroll
  * nothing, move no focus and change only a panel below the fold: the reader's
  * own click was the only evidence anything had happened. Opening a note now
  * also brings that block to them and puts focus on it, which is the half a
@@ -66,6 +66,16 @@ import { TBody, THead, Table, Td, Th, Tr } from "@/components/ui/Table";
  * Nothing is keyed or reordered to do it. The note sits in its own JSX slot
  * ahead of the list's, so React *inserts* a node rather than moving the list's,
  * and the capped list keeps the scroll position the reader left it at.
+ *
+ * ## The order of the other three
+ *
+ * Note, **graph**, Notes, Health. The graph used to be third and is now second,
+ * which is the reorder move this route had never had run on it: the table below
+ * it is uncapped under `md`, so a phone reader used to scroll fifty rows at
+ * full height to reach the picture they came for. Health stays last because it
+ * is the block read least often. The reasoning for the move sits at the graph's
+ * own JSX slot, and the graph's position is *not* what makes a click on a node
+ * work — that is `openNote`, which every note link on this page already uses.
  */
 
 const NOTE_HREF = "/knowledge?note=";
@@ -507,6 +517,33 @@ export default function KnowledgePage() {
         </div>
       )}
 
+      {/* ---------------------------- the graph ---------------------------- */}
+      {/*
+        Above the Notes table rather than below it, which is where it sat until
+        the density audit's move order was run on this route for the first time:
+        delete, group, reorder, hide, and reorder is the one nobody had spent
+        here. The table is capped at `max-h-80` above `md` and deliberately
+        uncapped below it, so on a phone the graph used to sit under fifty rows
+        at full height — the reader who came for the picture scrolled past every
+        note in the vault to reach it. The note still leads the page, because
+        that is a different decision and C6 above is why.
+
+        `openNote` is the same door the list, the backlinks and every wikilink
+        already go through, so a click on a node lands in the reader above with
+        Back still working.
+
+        The graph deliberately does *not* read this page's four browse filters,
+        which an earlier note here expected it to. Its own search and toggles
+        are the ones Obsidian's graph view has, over the whole vault; a graph
+        silently showing only the twenty notes the list happened to be filtered
+        to would be a second view that disagrees with the first about what is in
+        the vault. Now that the two sit next to each other that independence is
+        easier to *see* and easier to *ask about*, which is why the panel's
+        `Filters` footnote says it in a clause. See the note at the top of
+        `KnowledgeGraphView`.
+      */}
+      <KnowledgeGraphView notePath={selected} onOpenNote={openNote} />
+
       {/* --------------------------- browse --------------------------- */}
       <div className="mb-8">
         <CardTitle>
@@ -692,21 +729,6 @@ export default function KnowledgePage() {
           )}
         </Card>
       </div>
-
-      {/* ---------------------------- the graph ---------------------------- */}
-      {/*
-        `openNote` is the same door the list, the backlinks and every wikilink
-        already go through, so a click on a node lands in the reader above with
-        Back still working.
-
-        The graph deliberately does *not* read this page's four browse filters,
-        which an earlier note here expected it to. Its own search and toggles
-        are the ones Obsidian's graph view has, over the whole vault; a graph
-        silently showing only the twenty notes the list happened to be filtered
-        to would be a second view that disagrees with the first about what is in
-        the vault. See the note at the top of `KnowledgeGraphView`.
-      */}
-      <KnowledgeGraphView notePath={selected} onOpenNote={openNote} />
 
       {/* ---------------------------- the health --------------------------- */}
       <div className="mb-8">
