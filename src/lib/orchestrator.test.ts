@@ -71,6 +71,7 @@ const {
   contextShapingEnv,
   cycleEnding,
   cycleSilenceMs,
+  declaresSubmodule,
   dependencyCycle,
   isRunStatus,
   normalizeRunListQuery,
@@ -748,6 +749,40 @@ describe("isolation for the three modes", () => {
         }),
       /workspace mount that would hold one is no longer configured/,
     );
+  });
+});
+
+/**
+ * Covers what makes a repository a superproject, and only that.
+ *
+ * The gate itself is right and stays: git warns against a second checkout of a
+ * superproject, so a repository with submodules works in the folder. What this
+ * pins is the *reading*, because getting it wrong is silent in both directions
+ * and the greedy direction already happened — an unattended run's `git add -A`
+ * committed an empty `.gitmodules`, an existence check read it as a
+ * superproject, and every run on this repository for the next five days edited
+ * the operator's own checkout on whatever branch it stood on. A folder run is a
+ * legitimate degrade, so nothing threw and nothing looked wrong.
+ */
+describe("what counts as a repository with submodules", () => {
+  it("reads an entry, not a file", () => {
+    // The file that caused it, and the two shapes git itself writes.
+    assert.equal(declaresSubmodule(""), false);
+    assert.equal(declaresSubmodule("\n# left behind by a tidy-up\n\n"), false);
+    assert.equal(
+      declaresSubmodule('[submodule "vendor/lib"]\n\tpath = vendor/lib\n\turl = ../lib.git\n'),
+      true,
+    );
+    // Section names are case-insensitive in git's config format, a header may
+    // be indented, and a submodule section is rarely the first one.
+    assert.equal(declaresSubmodule('[core]\n\tx = 1\n  [SUBMODULE "v"]\n\tpath = v\n'), true);
+  });
+
+  it("does not take the word from a value or a comment", () => {
+    // A path or a comment mentioning submodules is not a declaration of one,
+    // and treating it as one costs the repository its isolation permanently.
+    assert.equal(declaresSubmodule("# no [submodule] sections here yet\n"), false);
+    assert.equal(declaresSubmodule('[core]\n\tpath = vendor/submodule\n'), false);
   });
 });
 

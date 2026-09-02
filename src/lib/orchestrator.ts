@@ -2155,6 +2155,41 @@ export function repoSlug(repoRoot: string): string {
 }
 
 /**
+ * A `[submodule "…"]` section in git's config format.
+ *
+ * Its own function, pure and tested, because both ways of being wrong are
+ * silent: too lax and a superproject gets the second checkout git says it must
+ * not have; too greedy and a repository loses isolation for good, which is what
+ * an existence check did here for five days — an unattended run's `git add -A`
+ * committed an empty `.gitmodules` along with ten other stray dotfiles, and
+ * every run on this repository afterwards worked in the operator's own checkout
+ * on whatever branch it was standing on. Nothing threw: a folder run is a
+ * legitimate degrade, so the only symptom was a scheduling note.
+ *
+ * Section names are case-insensitive in that format, and a header may be
+ * indented. Read rather than asked of `git config -f`, which would put a fifth
+ * subprocess inside `createRun`'s no-`await` window — see `slotProbes.test.ts`.
+ */
+export function declaresSubmodule(gitmodules: string): boolean {
+  return /^[ \t]*\[[ \t]*submodule\b/im.test(gitmodules);
+}
+
+/**
+ * Whether `repoRoot` is a superproject, by what its `.gitmodules` declares.
+ *
+ * A file that exists and cannot be read counts as one: that is the case git's
+ * multiple-checkout warning is actually about, and refusing isolation is the
+ * half of the answer that is only ever slower.
+ */
+function usesSubmodules(repoRoot: string): boolean {
+  try {
+    return declaresSubmodule(fs.readFileSync(path.join(repoRoot, ".gitmodules"), "utf8"));
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+/**
  * Decide whether a run can be given its own checkout.
  *
  * Every gate here exists because failing it would put a checkout somewhere it
@@ -2204,7 +2239,7 @@ export function probeIsolation(folder: string): IsolationPlan {
   }
 
   // git's own documentation warns against multiple checkouts of a superproject.
-  if (fs.existsSync(path.join(repoRoot, ".gitmodules"))) {
+  if (usesSubmodules(repoRoot)) {
     return { mode: "none", reason: "Repository uses submodules." };
   }
 
