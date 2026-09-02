@@ -22,7 +22,7 @@ import {
 } from "../../../lib/workflows";
 import { getTemplate } from "../../../lib/templates";
 import { getAgent } from "../../../lib/agents";
-import { chatGuards } from "../../../lib/settings";
+import { chatGuards, type RunGuards } from "../../../lib/settings";
 import { mountById } from "../../../lib/config";
 import { fmtUSD } from "../../../lib/format";
 import type {
@@ -100,7 +100,7 @@ function questionDTO(q: ChatQuestionRow): ChatQuestionDTO {
 function proposalDTOs(
   rows: ReturnType<typeof listProposals>,
 ): ChatProposalDTO[] {
-  const untemplated = defaultGuardsLabel();
+  const untemplated = spellGuards(chatGuards());
   const known = rows.some((p) => p.kind === "workflow")
     ? currentKnowledge()
     : null;
@@ -155,7 +155,12 @@ function proposalDTO(
       : p.template_id
         ? "template deleted"
         : untemplated,
-    promptRewritten: p.prompt_override !== null,
+    // The figures behind the name, and only where a name is all the card shows.
+    // An untemplated proposal already spells them out one field up, and a
+    // deleted template has nothing left to read them off — which is the fact
+    // `guardsSource: "missing"` carries and approval refuses on.
+    guardsDetail: template ? spellGuards(template) : null,
+    promptOverride: p.prompt_override,
     agentName: agent?.name ?? null,
     // Truthy rather than `!== null`, `planProposal`'s rule: a row written before
     // the column existed reads as no agent rather than as a missing one.
@@ -163,6 +168,7 @@ function proposalDTO(
     title: p.title,
     task: p.task,
     folderLabel: folderLabel(p.mount_id, p.folder),
+    specId: p.spec_id,
     dependsOn: proposalDeps(p).map((d) => ({
       label: d.specId,
       edge: d.edge,
@@ -204,17 +210,25 @@ function proposedBlocks(
 }
 
 /**
- * What an untemplated proposal would be allowed to do, spelled out.
+ * A guard set spelled out, whoever it belongs to.
  *
- * A templated proposal says the template's name instead, because that is a
- * thing the operator wrote and can go and read. An untemplated one has no such
- * handle, so the card has to carry the guards themselves — otherwise the only
- * place the answer exists is a settings page two clicks away, and an approval
- * gate that does not show what is being approved is a gate that gets clicked
- * through.
+ * Two callers and one string on purpose. The card says a *template's* name
+ * rather than its figures, because that is a thing the operator wrote and can
+ * go and read, and an untemplated proposal has no such handle — so the card has
+ * to carry those guards itself, otherwise the only place the answer exists is a
+ * settings page two clicks away, and an approval gate that does not show what is
+ * being approved is a gate that gets clicked through. That argument stopped one
+ * step short: `Bug fix` names the rules without stating them, so the same
+ * sentence applies to the template's own numbers, which is what `guardsDetail`
+ * carries behind the card's fold. Written by *this* function rather than by a
+ * second one beside it, since two spellings of one guard set are two things to
+ * keep in step and the day they diverge the card asserts a ceiling the run does
+ * not have.
+ *
+ * `RunGuards` rather than three arguments because that is already the name of
+ * this triple, and a `RunTemplate` satisfies it as it stands.
  */
-function defaultGuardsLabel(): string {
-  const guards = chatGuards();
+export function spellGuards(guards: RunGuards): string {
   const { maxIterations, maxDurationMinutes, maxRunCostUSD } = guards.budget;
 
   return [

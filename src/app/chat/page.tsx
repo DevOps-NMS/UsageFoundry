@@ -1794,6 +1794,17 @@ function Proposal({
   const workflow = proposal.kind === "workflow";
   const missing = proposal.guardsSource === "missing";
   const folder = proposal.folderLabel ?? "folder from the template";
+  // Named from what is actually behind it rather than from a fixed phrase: a
+  // summary promising a prompt on a card that has none is a fold nobody opens
+  // twice, and `Disclosure`'s own note says a fold that does not say what is
+  // inside is one nobody opens at all.
+  const folded = [
+    "Full task",
+    proposal.guardsDetail ? "guards" : null,
+    proposal.promptOverride !== null ? "prompt" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   return (
     <label
@@ -1817,6 +1828,19 @@ function Proposal({
           <div className="min-w-0 flex-1 text-sm leading-snug font-semibold text-ink">
             {proposal.title}
           </div>
+          {/* The chat's own label for this proposal, which is the name the
+              dependency line at the foot of a *sibling* card prints. Without it
+              on a card, "Starts after `auth-fix`" names something that appears
+              nowhere on the page and the instruction beside it — tick both — has
+              no second thing to tick. Mono and lower case because that line
+              prints it that way and a `Badge` would upper-case it: a label that
+              reads differently in the two places it appears is not one a reader
+              can match. */}
+          {proposal.specId && (
+            <span className="mono shrink-0 rounded-sm bg-inset px-1 py-0.5 text-2xs text-ink-muted">
+              {proposal.specId}
+            </span>
+          )}
           {workflow && <Badge tone="neutral">workflow</Badge>}
         </div>
         <p className="mt-1 line-clamp-3 text-xs leading-normal text-ink-muted">
@@ -1878,7 +1902,7 @@ function Proposal({
                 is a closed union with no warning or edit mark in it, and the
                 shield is ruled out for the reason the agent phrase above is
                 kept outside it. The text is unchanged and stays in this row. */}
-            {proposal.promptRewritten && (
+            {proposal.promptOverride !== null && (
               <span className="font-medium text-warn">prompt rewritten</span>
             )}
           </div>
@@ -1923,6 +1947,56 @@ function Proposal({
               : "The agent this names has been deleted, so approving it will be refused."}
           </p>
         )}
+
+        {/* What is being approved is the task, and it is the one field on this
+            card that is clipped — 162px of text in a 54px box, with no way to
+            read the rest without leaving the page. This is that way, and it is
+            a fold rather than a `title` for the reason the guard mark above
+            states for itself: a hover title is not a way of reading anything on
+            touch.
+
+            Closed, and the geometry is the argument rather than a preference.
+            The seeded batch measured 178.5px a card and 1.8 cards of 26 visible
+            at 1440×900, where un-clipping the task inline takes a card to ~290px
+            and the list to under one — so un-hiding it here would make a long
+            batch worse rather than better. What this changes is that the answer
+            exists somewhere the operator can reach without leaving the page; a
+            reader who does not open it approves on exactly what they had before,
+            which is the honest limit of it.
+
+            Inside the `<label>` and safe there: `details` is interactive
+            content, so a label's activation behaviour skips a press on the
+            summary and anything under it. Measured in Chromium against this
+            nesting — the fold opens and the checkbox does not move. */}
+        <Disclosure className="mt-2 text-2xs text-ink-muted" summary={folded}>
+          <div className="mt-1.5 flex flex-col gap-2 border-l border-line pl-2.5">
+            <p className="leading-normal whitespace-pre-wrap">{proposal.task}</p>
+
+            {/* The figures the name stands for. The name stays the card's
+                answer and is the link here, which is the other half of "a
+                template is a thing the operator wrote and can go and read": the
+                run form is the only page that writes, applies or deletes one,
+                the workflow editor's picker being a read of the list. */}
+            {proposal.guardsDetail && (
+              <p className="leading-normal">
+                <Link href="/runs/new">{proposal.templateName}</Link> —{" "}
+                {proposal.guardsDetail}
+              </p>
+            )}
+
+            {/* The mark above says a prompt was rewritten and this is the only
+                place that says what it now reads — the one half of a run a
+                model may write, and until now marked and unreadable. */}
+            {proposal.promptOverride !== null && (
+              <div>
+                <p className="font-medium text-warn">The prompt the chat wrote</p>
+                <p className="mt-1 leading-normal whitespace-pre-wrap">
+                  {proposal.promptOverride}
+                </p>
+              </div>
+            )}
+          </div>
+        </Disclosure>
       </div>
     </label>
   );
