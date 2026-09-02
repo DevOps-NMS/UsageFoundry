@@ -1904,6 +1904,41 @@ export interface RunTouchDTO {
 }
 
 /**
+ * One file-naming tool call, in the order the run made it.
+ *
+ * The uncollapsed form of `RunTouchDTO` and deliberately not a superset of it:
+ * there is no `calls`, because a step *is* one call, and a file read forty times
+ * is forty of these. That is the unit the replay steps through, and it is not
+ * the unit the table draws.
+ *
+ * **Position is the array index and is not a field.** The wire order is the
+ * sequence, so a number beside it would be a second thing that can disagree
+ * with the first — and the one the surface would read is the one that got it
+ * wrong.
+ *
+ * A step is an *attempt*, on `RunTouchDTO`'s own grounds: a result is stored
+ * only when the tool failed and carries no id joining it back. Nothing here may
+ * grow a field that could be read as an outcome.
+ */
+export interface RunTouchStepDTO {
+  /** Relative to the checkout, or absolute when `outside` — `RunTouchDTO`'s rule. */
+  path: string;
+  /** Matched neither `runs.work_dir` nor `runs.folder`. */
+  outside: boolean;
+  /**
+   * When the call was recorded. Ordering is the array's, never this: several
+   * calls routinely share a millisecond.
+   */
+  at: number;
+  /** The tool's own name, as the CLI reported it. */
+  tool: string;
+  /** The sub-agent's own name, when the `Task` call that opened it was seen. */
+  subagent: string | null;
+  /** Set on any delegated call, named or not. */
+  parentToolUseId: string | null;
+}
+
+/**
  * What a run's tool events say it touched.
  *
  * Four answers rather than one plus an empty list, because "swept", "made no
