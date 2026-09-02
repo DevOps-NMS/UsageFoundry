@@ -147,6 +147,30 @@ const GUARD_TONE: Record<"missing" | "set", string> = {
 };
 
 /**
+ * The refusals the card already states, so `Select all` can agree to what will
+ * happen rather than to what is on screen.
+ *
+ * These are exactly the three facts `Proposal` draws in `text-danger` with the
+ * words "will be refused" — a deleted template, an agent that is gone or has
+ * decayed, and a graph that could not be read — and each is the client-visible
+ * half of a refusal the approve route already makes: `planProposal` refuses the
+ * first two by name and `planWorkflowProposal` the third, which is what leaves
+ * `blocks` empty in the first place. A card saying approval will be refused and
+ * a selection that includes it is the page contradicting itself, and the count
+ * the operator agrees to is the one that goes wrong.
+ *
+ * Deliberately **not** the whole refusal set. The rest of it is a folder on
+ * disk, an install-wide ceiling and the live dependency graph, none of which
+ * this page can see; guessing at those would skip a proposal that would have
+ * started. Under-selecting costs one tick, over-selecting is the defect.
+ */
+function approvalRefused(proposal: ChatProposalDTO): boolean {
+  return proposal.kind === "workflow"
+    ? proposal.blocks.length === 0
+    : proposal.guardsSource === "missing" || proposal.agentMissing;
+}
+
+/**
  * The leading edge of a question card, per state. Complete class strings, the
  * kit's rule — an interpolated one emits nothing at all and does it silently.
  *
@@ -692,7 +716,17 @@ export default function ChatPage() {
   const proposals = chat?.proposals ?? [];
   const pending = proposals.filter((p) => p.status === "pending");
   const decided = proposals.filter((p) => p.status !== "pending");
-  const allSelected = pending.length > 0 && selected.size === pending.length;
+  // What `Select all` may tick, and what it left behind. Every id it does not
+  // tick is one the route drops anyway, so this only aligns the number agreed
+  // to with the number that happens — seeded at 26 pending, the button read
+  // `Approve 26` above a sentence about 26 unattended runs when two of them
+  // could never start. `every` rather than a size comparison because the two
+  // sets are no longer the same size: with a refused proposal ticked by hand,
+  // the button still has to offer Select none.
+  const approvable = pending.filter((p) => !approvalRefused(p));
+  const refusedCount = pending.length - approvable.length;
+  const allSelected =
+    approvable.length > 0 && approvable.every((p) => selected.has(p.id));
   const showJump = !atBottom && messageCount > 0;
 
   // Proposals is always offered, empty or not: it is what the panel is for, and
@@ -819,6 +853,31 @@ export default function ChatPage() {
       <div className="flex flex-col lg:absolute lg:inset-0">
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">Orchestrator</h1>
+          {/* Beside the heading rather than under it, and not because it
+              matters less. This row's height is already the New chat button's,
+              so up to two lines of it are free; the same two lines below the
+              heading came straight off the row underneath, which is the one
+              holding the list of things to approve — 1.8 of 26 cards at
+              1440x900. Same size and colour it had inside the quiet notice,
+              one position higher, and the `<strong>` carries the weight the
+              notice used to lend it.
+
+              Every width states its own layout and neither overrides the
+              other's, so nothing here depends on which order Tailwind emits
+              two utilities that set one property in. From `lg`, where the
+              split starts and the pane is what runs out, it takes the room
+              between the heading and the actions and wraps *inside* the row.
+              Below it there is no pane to run out of, so it takes a line of
+              its own — last, so that New chat stays where it has always been
+              rather than being pushed under a paragraph. Source order is the
+              reading order at both. */}
+          <p className="text-xs leading-normal text-ink-muted max-lg:order-last max-lg:basis-full lg:min-w-0 lg:flex-1">
+            <strong className="font-semibold text-ink">
+              Nothing here starts a run.
+            </strong>{" "}
+            Each proposal waits for you, and then runs under the guards of the
+            template it names — never under anything the chat chose.
+          </p>
           <div className="ml-auto flex items-center gap-3">
             {/* What the figure counts is said, because what it leaves out is
                 the turn the operator is most likely watching: `--output-format
@@ -840,22 +899,15 @@ export default function ChatPage() {
         {/* Two paragraphs of standing context stood between the heading and a box
             that fills what is left of the pane, and everything they cost came off
             the box — which is how the composer at the foot of it ended up under
-            the fold on a short window. What stays visible is the sentence that
-            has to be read before anything on this page is pressed: hiding *that*
-            would be trading a safety claim for a few lines of room, and the rule
-            is that a disclosure holds what some readers need rather than what all
-            of them do. The rest is read once, and is a press away with its
-            subject named on the summary. */}
+            the fold on a short window. What is left here is the half that is read
+            once, a press away with its subject named on the summary; the sentence
+            that has to be read before anything on this page is pressed did not go
+            behind the fold, it went up beside the `<h1>`, where the row it joined
+            was already that tall. A fact a decision is approved against is never
+            folded however rare it is — what changed is only that keeping it
+            visible now costs the box below nothing. */}
         <Notice tone="info" quiet>
-          <p>
-            <strong>Nothing here starts a run.</strong> Each proposal waits for
-            you, and then runs under the guards of the template it names — never
-            under anything the chat chose.
-          </p>
-          <Disclosure
-            className="mt-1.5"
-            summary="What the chat itself may do, and what its turns cost"
-          >
+          <Disclosure summary="What the chat itself may do, and what its turns cost">
             <p className="mt-2">
               A proposal that names no template runs under the default guard set
               in <Link href="/settings">Settings</Link>.
@@ -1334,11 +1386,33 @@ export default function ChatPage() {
                     disabled={busy}
                     onClick={() =>
                       setSelected(
-                        allSelected ? new Set() : new Set(pending.map((p) => p.id)),
+                        allSelected
+                          ? new Set()
+                          : new Set(approvable.map((p) => p.id)),
                       )
                     }
                   >
-                    {allSelected ? "Select none" : "Select all"}
+                    {/* Said on the control rather than left to the cards,
+                        because a selection that quietly came up short is
+                        indistinguishable from a list that was always that
+                        long. The label grows at the *left* end of the row, so
+                        a poll that adds a refused proposal moves nothing:
+                        Reject and Approve are held at the right by `ml-auto`.
+
+                        The count and not the reason, which is the one thing
+                        this parenthesis is not room for. Measured in Chromium
+                        against this column: the row fits a ghost of about
+                        150px beside Reject and Approve and wraps to two lines
+                        past it, and the wrap costs the list under it 44px —
+                        more than moving the standing notice's sentence up
+                        beside the `<h1>` just gave it back. "2 cannot be
+                        approved" is 218px and buys a sentence the two cards
+                        it is about already carry in red. */}
+                    {allSelected
+                      ? "Select none"
+                      : refusedCount > 0
+                        ? `Select all (skips ${refusedCount})`
+                        : "Select all"}
                   </Button>
                   <Button
                     variant="secondary"
