@@ -368,6 +368,107 @@ describe("a stopped turn's child exiting into the turn that replaced it", () => 
   });
 });
 
+describe("a turn a restart left mid-flight", () => {
+  const realSpawn = childProcess.spawn;
+  const open: FakeChild[] = [];
+
+  // The retry has to still be `thinking` when the assertion after it reads the
+  // row: a real `spawn` of the `claude` that deliberately is not there emits
+  // `error` on a `process.nextTick`, which is drained ahead of the promise
+  // microtask resuming the `await` — so the row would already carry a launch
+  // failure and the case would pass or fail on scheduling rather than on what
+  // the claim wrote.
+  before(() => {
+    childProcess.spawn = () => {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        exitCode: null as number | null,
+        signalCode: null as NodeJS.Signals | null,
+        kill: () => true,
+      }) as FakeChild;
+      open.push(child);
+      return child;
+    };
+  });
+
+  after(() => {
+    childProcess.spawn = realSpawn;
+    // A turn left open holds a capability and an MCP config file that only a
+    // settle removes.
+    for (const child of open) {
+      child.exitCode = 0;
+      child.emit("close", 0);
+    }
+  });
+
+  it("says so in the thread, where the next message cannot erase it", async () => {
+    const row = chat.createChat();
+    chat.appendMessage(row.id, "user", "find me something worth doing");
+    // The state a killed process leaves behind: `thinking`, with the child that
+    // was answering gone with the process that spawned it.
+    dbMod
+      .db()
+      .prepare(
+        "UPDATE chat_sessions SET status='thinking', turn_started_at=? WHERE id=?",
+      )
+      .run(Date.now(), row.id);
+
+    // A thread nothing was running on, to pin what the boot may not touch.
+    const untouched = chat.createChat();
+    chat.appendMessage(untouched.id, "user", "something asked and answered");
+
+    chat.reconcileChatsOnBoot();
+
+    const booted = chat.getChat(row.id);
+    assert.equal(booted?.status, "failed");
+    assert.equal(booted?.turn_started_at, null);
+    assert.match(booted?.error ?? "", /server restarted/);
+
+    const said = chat.listMessages(row.id);
+    assert.equal(said.length, 2, "the boot wrote nothing to the conversation");
+    assert.equal(said[1].role, "system");
+    assert.match(
+      said[1].text,
+      /server restarted/,
+      "the thread must say what happened to the turn",
+    );
+    assert.equal(
+      said[1].text,
+      booted?.error,
+      "the row and the thread must give the same account of the same ending",
+    );
+
+    assert.equal(
+      chat.listMessages(untouched.id).length,
+      1,
+      "a thread with no turn in flight was written into by the boot",
+    );
+
+    // The operator retries, which is what `failed` invites. `claimTurn` writes
+    // `error=NULL` in the same statement that takes the turn, so the row's copy
+    // of the record is gone the moment the next message goes out — and this is
+    // the right place for it to be gone from, because the row describes the
+    // turn it is on.
+    const sent = await chat.sendChatMessage(row.id, "try again");
+    if (!sent.ok) assert.fail(`the retry did not start: ${sent.reason}`);
+
+    const retried = chat.getChat(row.id);
+    assert.equal(retried?.status, "thinking");
+    assert.equal(retried?.error, null);
+
+    // The thread is what survives it, and without this the conversation reads
+    // as one question followed by another with no reply and no note between
+    // them — an answer that never came rather than a turn a restart killed.
+    assert.ok(
+      chat
+        .listMessages(row.id)
+        .some((m) => m.role === "system" && /server restarted/.test(m.text)),
+      "the only record that the turn died was erased by the next message",
+    );
+  });
+});
+
 describe("sendChatMessage when the turn cannot be started", () => {
   it("leaves the row failed, not thinking, and says why", async () => {
     const row = chat.createChat();

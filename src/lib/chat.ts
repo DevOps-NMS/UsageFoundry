@@ -1723,11 +1723,18 @@ const sweeper = ((globalThis as unknown as {
   __ufChatSweep?: { timer: NodeJS.Timeout | null };
 }).__ufChatSweep ??= { timer: null });
 
-/** What the row says afterwards. The two causes must not read alike. */
+/**
+ * What the row and the thread say afterwards. The three causes must not read
+ * alike — each is a different thing for the operator to do next — and each is
+ * one constant because the row's copy and the conversation's copy of the same
+ * ending drifting apart is a thread that contradicts itself.
+ */
 const CANCELLED_REASON =
   "You stopped this message while it was being answered.";
 const TIMED_OUT_REASON =
   `The chat did not answer within ${CHAT_TIMEOUT_MS / 60_000} minutes and was stopped.`;
+const RESTARTED_REASON =
+  "The server restarted while this message was being answered.";
 
 /**
  * Whether a turn has outlived the bound on one, given the row and the clock.
@@ -2548,15 +2555,27 @@ function finishTurn(chatId: string, turnSeq: number, r: TurnResult): void {
  * `cancelChatTurn` clears one on request and the sweeper clears one that has
  * run past its deadline, so recovering a thread no longer means restarting the
  * server for everything else running in it.
+ *
+ * The ids are read before the write because the write is what makes them
+ * unfindable: `status='thinking'` is the only mark a stranded turn carries.
  */
 export function reconcileChatsOnBoot(): void {
+  const stranded = db()
+    .prepare("SELECT id FROM chat_sessions WHERE status='thinking'")
+    .all() as { id: string }[];
   db()
     .prepare(
       "UPDATE chat_sessions SET status='failed', turn_started_at=NULL," +
-        " error='The server restarted while this message was being answered.'" +
-        " WHERE status='thinking'",
+        " error=? WHERE status='thinking'",
     )
-    .run();
+    .run(RESTARTED_REASON);
+  // In the thread as well as on the row, for `endTurn`'s reason and one this
+  // path has of its own: `claimTurn` writes `error=NULL` in the same statement
+  // that takes the next turn, so the row's copy is gone the moment the operator
+  // retries, and without this the conversation reads as their question followed
+  // by their next one with nothing in between — an answer that never came
+  // rather than a turn the restart killed.
+  for (const { id } of stranded) appendMessage(id, "system", RESTARTED_REASON);
 }
 
 /* ------------------------------------------------------------------ */
