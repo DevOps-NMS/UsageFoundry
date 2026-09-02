@@ -970,6 +970,31 @@ function migrate(db: Database.Database) {
   // run. Null whenever no turn is in flight.
   addColumn(db, "chat_sessions", "turn_started_at", "INTEGER");
 
+  // Which turn the row is in, so a settle can say which turn it belongs to.
+  //
+  // `finishTurn` latched on `status='thinking'` alone, and that is not an
+  // identity: `endTurn` settles the row to `failed` and returns without waiting
+  // for the child it signalled, `claimTurn` admits any status that is not
+  // `thinking`, so a message sent inside the eight seconds of the signal ladder
+  // puts the row back to `thinking` — and the *previous* turn's child then walks
+  // through the latch and settles the new turn's row with its text, its cost and
+  // its session id. The live turn is then unwatched (the sweeper reads
+  // `thinking` rows), its own answer is discarded against an `idle` row, and the
+  // one-billed-child guard is open because that guard reads the row.
+  //
+  // A counter rather than `turn_started_at`, which is otherwise written and
+  // cleared in exactly the right places: it is `Date.now()`, and two turns
+  // claimed inside one millisecond would share it. That is not hypothetical
+  // here — a Stop and a re-send are both synchronous once `assistRefusal()`
+  // has answered — and the failure it would reintroduce is the silent one this
+  // column exists to close. Monotone per chat, so no value is ever reused.
+  //
+  // `NOT NULL DEFAULT 0` so every existing row already has a turn number, and
+  // the rows that were `thinking` when it was added are failed out by
+  // `reconcileChatsOnBoot` on the same boot: their children died with the
+  // process that spawned them and no settle is coming for them.
+  addColumn(db, "chat_sessions", "turn_seq", "INTEGER NOT NULL DEFAULT 0");
+
   // That this instance was halted, by what, and when.
   //
   // `stopped_at` is the moment the door was closed rather than the moment the

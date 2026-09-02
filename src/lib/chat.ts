@@ -156,6 +156,11 @@ export interface ChatRow {
    * however long the turn had already been running.
    */
   turn_started_at: number | null;
+  /**
+   * Which turn this row is in. Bumped by the claim, never reset, and what a
+   * settle has to match to be allowed to change anything — see `finishTurn`.
+   */
+  turn_seq: number;
 }
 
 export interface ChatMessageRow {
@@ -1675,16 +1680,22 @@ const ALREADY_THINKING: ChatOutcome = {
  * `staleTurn` reads, and a turn that became unstoppable between two writes is
  * exactly the turn that has to have a deadline on it.
  *
+ * `turn_seq` likewise, and for the stronger version of the same reason: it is
+ * the turn's identity, so a turn that existed before it had one is a turn whose
+ * child could settle somebody else's row.
+ *
  * Returns the row as it stood at the claim, because a read taken before that
  * await is stale by definition — `session_id` above all, which decides whether
- * the turn resumes the conversation or pays to replay the thread.
+ * the turn resumes the conversation or pays to replay the thread, and
+ * `turn_seq`, which is what the child spawned below settles under.
  */
 function claimTurn(chatId: string): ChatRow | null {
   const now = Date.now();
   const claim = db()
     .prepare(
       `UPDATE chat_sessions
-          SET status='thinking', error=NULL, updated_at=?, turn_started_at=?
+          SET status='thinking', error=NULL, updated_at=?, turn_started_at=?,
+              turn_seq = turn_seq + 1
         WHERE id=? AND status<>'thinking'`,
     )
     .run(now, now, chatId);
@@ -1746,8 +1757,10 @@ export function staleTurn(
  *
  * The row is settled *here* rather than when the child closes, which is the
  * whole point: the turns that need ending are the ones whose `close` is not
- * coming. `finishTurn` latches on `status='thinking'`, so a `close` that does
- * arrive afterwards cannot move the row back or overwrite what this said.
+ * coming. `finishTurn` latches on this turn's own `turn_seq` as well as on
+ * `status='thinking'`, so a `close` that does arrive afterwards cannot move the
+ * row back, overwrite what this said, or — because the operator is invited to
+ * retry the instant this returns — settle the turn that replaced it.
  *
  * The signal ladder is `interruptRun`'s, and SIGINT leads for the same reason:
  * it is the signal a CLI is most likely to handle deliberately, and a chat turn
@@ -1941,7 +1954,7 @@ export async function sendChatMessage(
     const reason = `Could not start the turn: ${
       err instanceof Error ? err.message : String(err)
     }`;
-    finishTurn(chatId, { status: "failed", error: reason });
+    finishTurn(chatId, claimed.turn_seq, { status: "failed", error: reason });
     return { ok: false, reason };
   }
 
@@ -2285,11 +2298,14 @@ function runTurn(chat: ChatRow, prompt: string): void {
       turns.set(chat.id, child);
     },
     onSettle: (result) => {
-      // Only this child's own entry: a turn cancelled and re-sent while the old
-      // child was still dying would otherwise have its live handle deleted by
-      // the corpse of the previous one.
+      // Only this child's own entry, and only this child's own turn: a turn
+      // cancelled and re-sent while the old child was still dying would
+      // otherwise have its live handle deleted — and its row settled — by the
+      // corpse of the previous one. `chat` is the row as it stood at the claim,
+      // so `turn_seq` here is the turn this child was spawned under and not
+      // whatever the row has since become.
       if (spawned && turns.get(chat.id) === spawned) turns.delete(chat.id);
-      finishTurn(chat.id, result);
+      finishTurn(chat.id, chat.turn_seq, result);
     },
   });
 }
@@ -2395,17 +2411,37 @@ export function parseTurnOutput(
   return { status: "idle", text, costUSD, tokens, sessionId, denials };
 }
 
-function finishTurn(chatId: string, r: TurnResult): void {
+/**
+ * Settle the turn this result belongs to, and nothing else.
+ *
+ * `turnSeq` is the identity, and it is what makes the latch a latch. Status
+ * alone is what `cancelChatTurn` and the sweeper need to end a turn without
+ * waiting for a `close` that may never come — a late settle lands here and
+ * changes nothing, rather than reviving the thread or replacing "you stopped
+ * this" with whatever the killed child left on stderr. But `failed` is exactly
+ * what invites the operator to retry, and `endTurn` returns while the child it
+ * signalled is still working through an eight-second ladder, so the row is
+ * routinely `thinking` again — under a *different* turn — by the time the old
+ * child exits. Status alone let that child settle the new turn's row: its text
+ * appended as the answer to a question it never read, its cost and session id
+ * adopted, the live child left unwatched by a sweeper that reads only
+ * `thinking` rows, its own answer later discarded against an `idle` row, and a
+ * third message admitted by a guard that reads the row rather than the process.
+ *
+ * `runTurn`'s `onSettle` already applies this test to the process map, for this
+ * scenario, one line above the call to this function.
+ *
+ * What a refused settle costs is a superseded child's own figures, and that is
+ * the right trade rather than a free one: the CLI reports cost and session id
+ * only in the final JSON object, which a child that was signalled is not
+ * expected to print — but if one does, this drops it. Recording it would mean
+ * adding another turn's spend to a row the operator is watching a live turn on,
+ * which is the mis-attribution this exists to stop.
+ */
+function finishTurn(chatId: string, turnSeq: number, r: TurnResult): void {
   const now = Date.now();
   const prior = getChat(chatId)?.session_id ?? null;
 
-  // `WHERE status='thinking'` makes the row itself the settle-once latch, which
-  // is what lets `cancelChatTurn` and the sweeper end a turn without waiting
-  // for a `close` that may never come: a late one lands here and changes
-  // nothing, rather than reviving the thread or replacing "you stopped this"
-  // with whatever the killed child left on stderr. Nothing is lost by that —
-  // the CLI reports cost and session id only in the final JSON object, which a
-  // child that was signalled never prints.
   const changed =
     db()
       .prepare(
@@ -2413,7 +2449,7 @@ function finishTurn(chatId: string, r: TurnResult): void {
             SET status=?, error=?, updated_at=?, turn_started_at=NULL,
                 cost_usd = cost_usd + ?, tokens = tokens + ?,
                 session_id = COALESCE(?, session_id)
-          WHERE id=? AND status='thinking'`,
+          WHERE id=? AND status='thinking' AND turn_seq=?`,
       )
       .run(
         r.status,
@@ -2423,6 +2459,7 @@ function finishTurn(chatId: string, r: TurnResult): void {
         r.tokens ?? 0,
         r.sessionId,
         chatId,
+        turnSeq,
       ).changes > 0;
   if (!changed) return;
 

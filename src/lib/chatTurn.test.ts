@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 import { after, before, describe, it } from "node:test";
 
 /**
- * Two things a chat does that fail expensively and say nothing: what happens to
- * the row when starting a turn throws, and what happens to a proposal when the
+ * Three things a chat does that fail expensively and say nothing: what happens
+ * to the row when starting a turn throws, what happens to a proposal when the
  * approval it is clicked into is refused by something that will have cleared by
- * the time anyone looks again.
+ * the time anyone looks again, and which turn a child's answer is allowed to
+ * settle.
  *
  * The first earns a place in this suite on the same grounds as the rest of it —
  * a silent, expensive failure with no other way out. `runTurn` mints the
@@ -28,6 +31,18 @@ import { after, before, describe, it } from "node:test";
  * propose it again. Nothing throws, the operator is told the ceiling stopped
  * their run, and every word of that sentence is true except what it implies
  * about the proposal.
+ *
+ * The third is the same shape as the first — a state transition rather than a
+ * return value — and it is the one nothing in the process can notice. `endTurn`
+ * settles the row to `failed` and returns while the child it signalled is still
+ * working through an eight-second ladder, and `failed` is what invites the
+ * operator to retry; so the stopped turn's child can exit into a row a *later*
+ * turn has claimed. Latched on status alone, it settled that row: the answer to
+ * a question nobody asked, its cost and session id adopted, the live child left
+ * unwatched by a sweeper that reads only `thinking` rows, that child's own
+ * answer discarded in silence against an `idle` row, and a third billed message
+ * admitted by a guard that reads the row rather than the process. Every step is
+ * a successful write; nothing throws and the page looks right.
  *
  * Both live in their own file rather than in `chat.test.ts` because they touch
  * SQLite: `DATA_DIR` and `CLAUDE_HOME` are read into `config.ts` at module
@@ -184,6 +199,172 @@ describe("approving something that can never start", () => {
     assert.equal(outcome.failed.length, 1);
     assert.equal(chat.getProposal(proposal.id)?.status, "failed");
     assert.deepEqual(chat.pendingProposals(thread.id), []);
+  });
+});
+
+/**
+ * `chat.ts` calls `spawn` through the module object under the test build's
+ * CommonJS emit, so replacing it here is what the turns below get — the same
+ * device `chat.test.ts` uses to count children, with the closing left to the
+ * case: which child exits, and *when* relative to the other one, is the whole
+ * fault.
+ *
+ * Kept out of `before` and restored in `after` so it stands for one `describe`
+ * rather than for the file: the approval above starts a real run, and a fake
+ * `claude` standing in for the one that is supposed to be missing would make
+ * that case pass for a reason it is not testing.
+ */
+const childProcess = require("node:child_process") as Record<string, unknown>;
+
+interface FakeChild extends EventEmitter {
+  stdout: PassThrough;
+  stderr: PassThrough;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+  kill: (sig: NodeJS.Signals) => boolean;
+}
+
+describe("a stopped turn's child exiting into the turn that replaced it", () => {
+  const realSpawn = childProcess.spawn;
+  const started: FakeChild[] = [];
+
+  before(() => {
+    childProcess.spawn = () => {
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        // What `endTurn`'s ladder re-checks between its signals. A fake dies
+        // when this case says so and not when it is asked to.
+        exitCode: null as number | null,
+        signalCode: null as NodeJS.Signals | null,
+        // `signalTree` falls through to this because there is no `pid`, and a
+        // throw from here would be swallowed rather than reported.
+        kill: () => true,
+      }) as FakeChild;
+      started.push(child);
+      return child;
+    };
+  });
+
+  after(() => {
+    childProcess.spawn = realSpawn;
+    // Anything still open would hold a capability and an MCP config file that
+    // only a settle removes.
+    for (const child of started) {
+      if (child.exitCode === null) {
+        child.exitCode = 0;
+        child.emit("close", 0);
+      }
+    }
+  });
+
+  /** Let a landed turn finish writing before the next assertion reads the row. */
+  const drain = async () => {
+    for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
+  };
+
+  /** The CLI's final JSON object, which is the only thing `land` reads. */
+  const finalJson = (reply: string, session: string) =>
+    JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: reply,
+      session_id: session,
+      total_cost_usd: 0.25,
+    });
+
+  /**
+   * The child answers and goes. The tick between the two is load-bearing: a
+   * `PassThrough` delivers `data` on the next turn of the loop, so a `close`
+   * emitted in the same one would land an empty answer and test nothing.
+   */
+  async function answer(child: FakeChild, stdout: string): Promise<void> {
+    child.stdout.write(stdout);
+    await new Promise((r) => setImmediate(r));
+    child.exitCode = 0;
+    child.emit("close", 0);
+    await drain();
+  }
+
+  it("changes nothing, and leaves the live turn settleable", async () => {
+    const row = chat.createChat();
+    const turns = (globalThis as unknown as {
+      __ufChatTurns?: Map<string, FakeChild>;
+    }).__ufChatTurns;
+
+    const first = await chat.sendChatMessage(row.id, "message one");
+    if (!first.ok) assert.fail(`turn one did not start: ${first.reason}`);
+    assert.equal(chat.getChat(row.id)?.status, "thinking");
+    const childOne = turns?.get(row.id);
+    assert.ok(childOne, "turn one registered no child to stop");
+
+    // Stop. The row is usable immediately and on purpose — `endTurn` does not
+    // wait for the child, because the turns that need ending are the ones whose
+    // `close` is not coming.
+    const stop = chat.cancelChatTurn(row.id);
+    assert.equal(stop.ok, true);
+    assert.equal(chat.getChat(row.id)?.status, "failed");
+
+    // Which is what invites the retry, inside the eight seconds child one has
+    // left to live.
+    const second = await chat.sendChatMessage(row.id, "message two");
+    if (!second.ok) assert.fail(`turn two did not start: ${second.reason}`);
+    assert.equal(chat.getChat(row.id)?.status, "thinking");
+    const childTwo = turns?.get(row.id);
+    assert.ok(childTwo && childTwo !== childOne, "turn two started no child of its own");
+
+    // Child one answers now, into a row turn two owns.
+    await answer(childOne, finalJson("reply-from-the-stopped-turn", "session-one"));
+
+    const mid = chat.getChat(row.id);
+    assert.equal(mid?.status, "thinking", "the stopped turn's child settled the live turn");
+    assert.equal(mid?.session_id, null, "the stopped turn's session id was adopted");
+    assert.equal(mid?.cost_usd, 0, "the stopped turn's cost was charged to the live turn");
+    assert.notEqual(
+      mid?.turn_started_at,
+      null,
+      "the live turn lost the deadline the sweeper reads, so nothing is watching it",
+    );
+    assert.ok(
+      !chat.listMessages(row.id).some((m) => m.text.includes("reply-from-the-stopped-turn")),
+      "the stopped turn's answer was appended to the conversation that replaced it",
+    );
+
+    // The guard that keeps one billed child per conversation reads the row, so
+    // a row settled early opens it while child two is still running.
+    const third = await chat.sendChatMessage(row.id, "message three");
+    assert.equal(third.ok, false, "a third billed child was admitted beside the live one");
+    assert.equal(
+      turns?.get(row.id),
+      childTwo,
+      "the refused message started a child anyway",
+    );
+
+    // And the live turn still settles, which is the direction the repair breaks
+    // in: a latch that matched nothing would strand every turn at `thinking`.
+    await answer(childTwo, finalJson("reply-from-the-live-turn", "session-two"));
+
+    const settled = chat.getChat(row.id);
+    assert.equal(settled?.status, "idle");
+    assert.equal(settled?.session_id, "session-two");
+    assert.equal(settled?.cost_usd, 0.25);
+    assert.equal(settled?.turn_started_at, null);
+    assert.ok(
+      chat.listMessages(row.id).some((m) => m.text === "reply-from-the-live-turn"),
+      "the live turn's answer never reached the conversation",
+    );
+
+    // The install-wide ceiling reads the dated rows rather than the running
+    // total, so a settle refused above must have left none behind here either.
+    const spend = dbMod
+      .db()
+      .prepare("SELECT cost_usd FROM chat_turn_spend WHERE chat_id=?")
+      .all(row.id) as { cost_usd: number }[];
+    assert.deepEqual(
+      spend.map((s) => s.cost_usd),
+      [0.25],
+      "the stopped turn's spend was dated into the live turn's window",
+    );
   });
 });
 
