@@ -527,6 +527,26 @@ export interface KnowledgeGraphSettings {
  * for *this* app: the page's own health card counts orphans and broken links as
  * things to go and fix, and a graph that hid both by default would be a second
  * view of the vault that disagrees with the first about what is in it.
+ *
+ * **`textFade` is 0.1 because 1.1 meant a graph nobody ever saw a label on.**
+ * It is a threshold on the *zoom*, and the zoom a graph opens at is whatever
+ * `fitView` produces, which nobody had read. Measured against the mounted vault
+ * — 1,258 nodes and 28,551 edges at these defaults, settling to a 4,900-square
+ * world extent — a canvas 880–1,040 CSS px wide frames it at `k` between 0.12
+ * and 0.14, and the biggest hub's `This note` graph at depth 1 frames at 0.68.
+ * At 1.1 every one of those is below the threshold, so the first paint of both
+ * views was unlabelled and stayed unlabelled until a reader zoomed to about a
+ * hundredth of the graph's area. At 0.1 the framed global view sits just onto
+ * the `LABEL_RAMP`, labels reach full strength around `k` 0.45 — roughly a
+ * sixth of the extent on screen, which is a neighbourhood rather than a wall —
+ * and a local graph is labelled outright. The ramp is what keeps a threshold
+ * this low safe: under `textFade + LABEL_RAMP` a label is drawn at part
+ * opacity, so the zoomed-out picture gains a texture rather than 1,258 titles.
+ *
+ * **This reaches nobody who has already been here.** The panel writes every
+ * change to `localStorage`, so an operator with a stored entry keeps 1.1 until
+ * they press `Reset to defaults` or move the `Label fade` slider themselves.
+ * A default is what the *next* first look gets.
  */
 export const GRAPH_DEFAULTS: KnowledgeGraphSettings = {
   view: "global",
@@ -539,7 +559,7 @@ export const GRAPH_DEFAULTS: KnowledgeGraphSettings = {
     showOrphans: true,
   },
   groups: [],
-  display: { arrows: false, textFade: 1.1, nodeSize: 1, linkThickness: 1, animate: true },
+  display: { arrows: false, textFade: 0.1, nodeSize: 1, linkThickness: 1, animate: true },
   forces: { center: 0.4, repel: 10, link: 0.6, linkDistance: 90 },
 };
 

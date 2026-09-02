@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KnowledgeGraphDTO } from "@/lib/apiTypes";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { KnowledgeGraphDTO, KnowledgeNodeDTO } from "@/lib/apiTypes";
 import { pollFailureMessage } from "@/lib/format";
 import { jsonRequest } from "@/lib/jsonRequest";
 import {
@@ -16,6 +16,7 @@ import {
   expandGraph,
   filterGraph,
   graphTags,
+  groupIndexFor,
   localGraph,
   noteNodeId,
   parseGraphQuery,
@@ -65,6 +66,20 @@ import { SegmentedControl, type SegmentedOption } from "@/components/ui/Segmente
  * sidebar's docked width, the theme and the workflow editor's saved layout,
  * all three of which are already `localStorage`. Putting it on the server would
  * make one person's force sliders everybody's.
+ *
+ * **The panel leads with what the canvas is saying, not with what changes it.**
+ * A legend, a readout of the node under the pointer, and `Fit` sit above the
+ * view scope. None of the three narrows anything; all three are about the
+ * picture, and the top of this column is the part of it nearest the picture at
+ * both widths — beside the canvas above `lg`, directly under it below. Two of
+ * them exist because the canvas could not be *read*: nothing said what a colour
+ * or a size meant, and the only way to ask what a node was, was to click it,
+ * which navigates. Neither is folded, deliberately: hiding an explanation is
+ * the move the folds further down are paid for, not a move to make twice.
+ *
+ * **`fitNonce` and `pointed` are events, not settings**, so neither is in
+ * `KnowledgeGraphSettings` and neither reaches `localStorage` — a stored fit
+ * would reframe the graph on a later visit for a press made last week.
  */
 
 const STORAGE_KEY = "uf.knowledge-graph";
@@ -87,6 +102,20 @@ const EMPTY_GRAPH: KnowledgeGraph = {
 /** Two decimals for the sliders that move in hundredths, none for the rest. */
 const decimals = (value: number) => (Number.isInteger(value) ? String(value) : value.toFixed(2));
 
+/**
+ * A node the pointer was over, with the one figure the wire does not carry.
+ *
+ * `degree` is the node's degree in the **drawn** slice, which is what decides
+ * its radius, and it is deliberately kept beside the DTO's own `inDegree` and
+ * `outDegree` rather than replacing them: the two disagree whenever a filter or
+ * the drawing cap is on, and the readout showing both is where a reader finds
+ * that out instead of guessing that a node shrank because the vault changed.
+ */
+interface PointedNode {
+  node: KnowledgeNodeDTO;
+  degree: number;
+}
+
 export function KnowledgeGraphView({
   /** The note open in the reader, as a vault-relative path. */
   notePath,
@@ -98,6 +127,23 @@ export function KnowledgeGraphView({
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState<KnowledgeGraphSettings>(defaultGraphSettings);
+  /**
+   * The operator asking for the graph to be framed, counted rather than flagged.
+   *
+   * Not in `settings` and never in `localStorage`: it is an event, and a stored
+   * one would refit the graph on the next visit for a press somebody made last
+   * week. `fitView` already exists in the canvas and ran exactly once per mount,
+   * which left a reload as the only way back to a framed view after one drag.
+   */
+  const [fitNonce, setFitNonce] = useState(0);
+  /**
+   * The last node the pointer was over, and its degree in the drawn slice.
+   *
+   * It outlives the pointer leaving the canvas on purpose — that is what makes
+   * the readout a place to read rather than a hover-reveal, which this app's
+   * grouping vocabulary refuses for anything a reader needs.
+   */
+  const [pointed, setPointed] = useState<PointedNode | null>(null);
   /** Nothing is written back until the stored value has been read in. */
   const hydrated = useRef(false);
   /**
@@ -211,6 +257,18 @@ export function KnowledgeGraphView({
 
   const localUnavailable = settings.view === "local" && focusId === null;
 
+  const onHover = useCallback((node: KnowledgeNodeDTO, degree: number) => {
+    setPointed({ node, degree });
+  }, []);
+
+  /* Both figures the caption already prints, said once more for a listener: a
+     `<canvas>` announces nothing at all, and the second sentence is where the
+     route this surface deliberately does not offer is named instead. */
+  const ariaLabel =
+    `The vault's link graph, ${shown.nodes.length.toLocaleString()} of ` +
+    `${(graph?.nodes.length ?? 0).toLocaleString()} nodes drawn. The same notes are listed, ` +
+    `ordered and searchable, in the Notes list on this page.`;
+
   return (
     <div className="mb-8">
       <CardTitle>Graph</CardTitle>
@@ -276,7 +334,10 @@ export function KnowledgeGraphView({
               groups={settings.groups}
               display={settings.display}
               forces={settings.forces}
+              fitNonce={fitNonce}
+              ariaLabel={ariaLabel}
               onOpenNote={onOpenNote}
+              onHover={onHover}
               // No background of its own: the canvas is transparent over the
               // card, which is `--bg-raised` — the colour the phantom ring is
               // drawn in so that a hollow node reads as a hole.
@@ -288,7 +349,9 @@ export function KnowledgeGraphView({
         <GraphPanel
           settings={settings}
           tags={tags}
+          pointed={pointed}
           onChange={update}
+          onFit={() => setFitNonce((n) => n + 1)}
           onReset={() => setSettings(defaultGraphSettings())}
           hasNote={focusId !== null}
         />
@@ -324,14 +387,18 @@ export function KnowledgeGraphView({
 function GraphPanel({
   settings,
   tags,
+  pointed,
   onChange,
+  onFit,
   onReset,
   hasNote,
 }: {
   settings: KnowledgeGraphSettings;
   /** The vault's tags, most-used first, for the colour groups to be built from. */
   tags: GraphTag[];
+  pointed: PointedNode | null;
   onChange: (patch: (previous: KnowledgeGraphSettings) => KnowledgeGraphSettings) => void;
+  onFit: () => void;
   onReset: () => void;
   hasNote: boolean;
 }) {
@@ -349,6 +416,26 @@ function GraphPanel({
 
   return (
     <Card emphasis="default" className="flex flex-col gap-4">
+      {/* The three canvas-facing things lead the panel, above the controls that
+          narrow what it draws. They are about the *picture* rather than about
+          the panel, and both places a reader looks up from the picture are here:
+          below `lg` the panel sits directly under the canvas, so this is the row
+          of pixels nearest it, and above `lg` it is the top of the column beside
+          it. The explanation is deliberately not folded — a legend behind a
+          triangle is consulted about half as often as one on the page, which is
+          the finding the folds below are built against. */}
+      <Legend groups={groups} filters={filters} hasNote={hasNote} />
+      <Readout pointed={pointed} groups={groups} />
+      {/* Not beside `Reset to defaults`, which is the panel's other action at
+          the level of the whole: a reset sits at the level of what it resets,
+          and these two reset different objects. `Fit` frames the *view*; the
+          other restores the *settings*. */}
+      <ButtonRow>
+        <Button variant="secondary" size="compact" onClick={onFit}>
+          Fit
+        </Button>
+      </ButtonRow>
+
       <SegmentedControl
         options={VIEW_OPTIONS}
         value={settings.view}
@@ -573,6 +660,203 @@ function GraphPanel({
         </Button>
       </ButtonRow>
     </Card>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* What the canvas is saying                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Every mark the canvas can make, in words, permanently.
+ *
+ * The rows are conditional on the filters that decide whether the mark can be
+ * on screen at all, because a legend row for something nothing is drawing is a
+ * row that lies — and one false row costs more than the nine true ones earn.
+ * The colour-group rows are the same values, in the same order, with the same
+ * numbers as the editor below: the order *is* the behaviour, since the first
+ * matching group wins, and the list is the only thing on screen that says so.
+ *
+ * A local copy of the swatch row rather than an import: `runs/[id]/touched` has
+ * the same construct as a private function on the page, and the two legends
+ * describe different vocabularies — a shared component would be a promise that
+ * they stay the same shape, which nobody wants to keep.
+ */
+function Legend({
+  groups,
+  filters,
+  hasNote,
+}: {
+  groups: GraphGroup[];
+  filters: KnowledgeGraphSettings["filters"];
+  hasNote: boolean;
+}) {
+  return (
+    <div>
+      <GroupLabel>What the marks mean</GroupLabel>
+      <ul className="space-y-1.5 text-xs text-ink-muted">
+        {groups.map((group, index) => (
+          <LegendRow
+            key={group.id}
+            swatch={
+              <span
+                className="block size-3 rounded-full"
+                // The one colour here that cannot come from a token: it is the
+                // operator's own hex, out of the colour input below.
+                style={{ backgroundColor: group.color }}
+              />
+            }
+          >
+            <span className="tabular-nums">{index + 1}</span> ·{" "}
+            {group.query.trim() === "" ? "No search yet" : <code>{group.query}</code>}
+          </LegendRow>
+        ))}
+        <LegendRow swatch={<span className="block size-3 rounded-full bg-ink-muted" />}>
+          {/* "No group claims it" names a distinction that does not exist until
+              there is a group to be claimed by. */}
+          {groups.length === 0 ? "A note" : "A note no group claims"}
+        </LegendRow>
+        {filters.showTags && (
+          <LegendRow swatch={<span className="block size-3 rounded-full bg-accent" />}>
+            A tag
+          </LegendRow>
+        )}
+        {!filters.existingOnly && (
+          <LegendRow
+            swatch={
+              <span className="flex size-3 items-center justify-center rounded-full bg-ink-faint">
+                <span className="block size-1.5 rounded-full bg-surface" />
+              </span>
+            }
+          >
+            A link nobody has written the note for yet
+          </LegendRow>
+        )}
+        {filters.showAttachments && (
+          <LegendRow
+            swatch={
+              <span className="block size-3 rounded-full border border-ink bg-ink-muted" />
+            }
+          >
+            An attachment
+          </LegendRow>
+        )}
+        {hasNote && (
+          <LegendRow
+            swatch={
+              <span className="block size-3 rounded-full border-2 border-ink bg-transparent" />
+            }
+          >
+            The note open above
+          </LegendRow>
+        )}
+        <LegendRow swatch={<span className="block size-3 rounded-full bg-accent" />}>
+          The node under the pointer. Its links and neighbours stay lit; everything else dims
+        </LegendRow>
+      </ul>
+      <p className="mt-2 text-xs leading-snug text-ink-muted">
+        A node&apos;s size is how many of its links are <strong>drawn</strong>. Turning a filter
+        on makes a node smaller without the vault having changed.
+      </p>
+      {groups.length > 1 && (
+        <p className="mt-2 text-xs leading-snug text-ink-muted">
+          Colour groups are tried in order and the first match wins, so a note two groups match
+          takes the higher one&apos;s colour.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function LegendRow({ swatch, children }: { swatch: ReactNode; children: ReactNode }) {
+  return (
+    <li className="flex items-start gap-2">
+      <span className="mt-0.5 shrink-0">{swatch}</span>
+      <span>{children}</span>
+    </li>
+  );
+}
+
+/**
+ * The node under the pointer, in words, and it stays there after the pointer
+ * leaves.
+ *
+ * That persistence is the whole point: a hover-only readout is a tooltip in
+ * different clothes, and this app's grouping vocabulary refuses one for
+ * anything a reader needs. The canvas answers a click by *navigating*, so
+ * without this there was no way to ask what a node is and stay where you are.
+ *
+ * **`Links` against `Drawn` is what the box is for.** The wire's degrees are
+ * the whole vault's; the drawn degree is over the filtered, capped slice, and
+ * it is the one that decides the radius. They disagree constantly and nothing
+ * else on the page shows them side by side.
+ */
+function Readout({ pointed, groups }: { pointed: PointedNode | null; groups: GraphGroup[] }) {
+  if (pointed === null) {
+    return (
+      <div>
+        <GroupLabel>Under the pointer</GroupLabel>
+        <Empty>Point at a node to read it.</Empty>
+      </div>
+    );
+  }
+
+  const { node, degree } = pointed;
+  const claim = groupIndexFor(
+    node,
+    groups.map((group) => parseGraphQuery(group.query)),
+  );
+  const vaultDegrees = node.kind === "note" || node.kind === "attachment";
+
+  return (
+    <div>
+      <GroupLabel>Under the pointer</GroupLabel>
+      <div className="rounded-sm border border-line bg-inset p-2.5">
+        <div className="mono mb-2 break-all text-xs text-ink">{node.title}</div>
+        <dl className="space-y-1 text-xs">
+          <Fact label="Path">
+            {node.kind === "phantom"
+              ? "No file — a link nobody has written yet"
+              : node.kind === "tag"
+                ? "A tag"
+                : node.path}
+          </Fact>
+          {vaultDegrees && (
+            <Fact label="Links">
+              {node.inDegree.toLocaleString()} in, {node.outDegree.toLocaleString()} out — in the
+              whole vault
+            </Fact>
+          )}
+          <Fact label="Drawn">
+            {vaultDegrees
+              ? `${degree.toLocaleString()} of those are on screen`
+              : `${degree.toLocaleString()} on screen`}
+          </Fact>
+          <Fact label="Colour">
+            {claim >= 0 ? `Group ${claim + 1} — ${groups[claim].query}` : "Its kind"}
+          </Fact>
+          {node.tags.length > 0 && <Fact label="Tags">{node.tags.join(", ")}</Fact>}
+        </dl>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One labelled line about a node, with the label column fixed so two of them
+ * stacked line their values up.
+ *
+ * A local copy of the run inspector's row for the reason its own comment gives
+ * about the two call sites it serves: this one is about a vault and that one is
+ * about a tool call, and `src/components/ui/` is where a shape shared across
+ * subjects would go — which is a wider change than this readout is worth.
+ */
+function Fact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex gap-2">
+      <dt className="w-14 shrink-0 text-ink-faint">{label}</dt>
+      <dd className="min-w-0 flex-1 break-words text-ink-muted">{children}</dd>
+    </div>
   );
 }
 

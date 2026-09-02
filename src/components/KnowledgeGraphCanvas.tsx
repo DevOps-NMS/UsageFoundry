@@ -58,10 +58,21 @@ import {
  *
  * What stays is everything that knows this is a graph of notes:
  *
- * **What a node looks like and what that means.** Its radius is its degree,
- * damped; its colour is the first group whose query claims it, or its kind; a
- * phantom is drawn hollow because it is a link nobody has written the note for
- * yet. `canvasView` is handed a `reachOf` and a margin and is told none of this.
+ * **What a node looks like and what that means.** Its radius is its degree in
+ * the *drawn* slice, damped; its colour is the first group whose query claims
+ * it, or its kind; a phantom is drawn hollow because it is a link nobody has
+ * written the note for yet, and an attachment is outlined because it is a file
+ * that is not a note. `canvasView` is handed a `reachOf` and a margin and is
+ * told none of this.
+ *
+ * **Every mark here has to be distinct from every other, because the panel now
+ * states them all in a legend.** Two of them were not. An attachment and an
+ * unclaimed note were both a plain `--fg-muted` disc, so the `attachment`
+ * branch in `colourFor` returned the same value as the fallback it sat above;
+ * and the open note's ring was `--tint`, which is the same hex as `--accent` in
+ * light mode and `--accent` is the fill under the pointer. Both are repaired in
+ * shape and in an already-probed token rather than by adding an eighth colour
+ * to `globals.css` for one node kind on one surface.
  *
  * **The simulation must stop.** A settled graph that kept asking for frames is a
  * warm laptop on a page that looks finished, so the loop ends when `step`
@@ -109,7 +120,6 @@ const TOKENS = [
   "--fg-faint",
   "--border",
   "--accent",
-  "--tint",
   "--bg-raised",
 ] as const;
 
@@ -138,7 +148,10 @@ export function KnowledgeGraphCanvas({
   groups,
   display,
   forces,
+  fitNonce,
+  ariaLabel,
   onOpenNote,
+  onHover,
   className = "",
 }: {
   /** Already filtered and capped: this draws what it is given, whole. */
@@ -148,7 +161,25 @@ export function KnowledgeGraphCanvas({
   groups: readonly GraphGroup[];
   display: GraphDisplay;
   forces: SimForces;
+  /**
+   * Bumped when the operator asks for the graph to be framed. An event carried
+   * as a changing number rather than an imperative handle: `useImperativeHandle`
+   * and `forwardRef` have no other call site in this app, and this is not the
+   * place to introduce the first. Zero means nobody has asked yet.
+   */
+  fitNonce: number;
+  /** What a listener is told this picture is, since a `<canvas>` says nothing. */
+  ariaLabel: string;
   onOpenNote: (path: string) => void;
+  /**
+   * The node under the pointer, when it *changes* — not on every move.
+   *
+   * Never called with `null`, which is the whole difference between the panel's
+   * readout and a hover-reveal: a box that emptied when the pointer left the
+   * canvas would be one, and a reader who wants to look away from the graph and
+   * read what they found has nowhere else to read it from.
+   */
+  onHover: (node: KnowledgeNodeDTO, degree: number) => void;
   className?: string;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -182,12 +213,14 @@ export function KnowledgeGraphCanvas({
   const displayRef = useRef(display);
   const focusRef = useRef(focusId);
   const openRef = useRef(onOpenNote);
+  const hoverOutRef = useRef(onHover);
   const groupsRef = useRef(groups);
 
   forcesRef.current = forces;
   displayRef.current = display;
   focusRef.current = focusId;
   openRef.current = onOpenNote;
+  hoverOutRef.current = onHover;
   groupsRef.current = groups;
 
   /* ------------------------------ drawing ------------------------------ */
@@ -303,10 +336,27 @@ export function KnowledgeGraphCanvas({
         ctx.strokeStyle = palette["--bg-raised"];
         ctx.stroke();
       }
+      // An attachment is a file that is not a note, so it takes an outline
+      // rather than a hole. Without one it is `--fg-muted`, which is also what
+      // an unclaimed note is — two kinds drawn identically, which is a legend
+      // that cannot be written. Shape rather than an eighth colour: the probed
+      // palette's four colours are all spoken for, and `--border` against
+      // `--bg-raised` is very nearly invisible, which is what a border colour
+      // is for.
+      if (meta[i].kind === "attachment") {
+        ctx.lineWidth = 1.2 / view.k;
+        ctx.strokeStyle = palette["--fg"];
+        ctx.stroke();
+      }
       if (meta[i].id === focusRef.current) {
         ctx.globalAlpha = 1;
         ctx.lineWidth = 2 / view.k;
-        ctx.strokeStyle = palette["--tint"];
+        // `--fg` rather than `--tint`: `--tint` and `--accent` are the same hex
+        // in light mode and `--accent` is the fill under the pointer, so the
+        // open note and the hovered node were one colour on one theme. That is
+        // the reasoning `GROUP_PALETTE`'s own docblock already applies to the
+        // seven group colours; this was the call site it had not reached.
+        ctx.strokeStyle = palette["--fg"];
         ctx.beginPath();
         ctx.arc(node.x, node.y, radiusOf(node, nodeSize) + 3 / view.k, 0, Math.PI * 2);
         ctx.stroke();
@@ -488,6 +538,18 @@ export function KnowledgeGraphCanvas({
     schedule();
   }, [display, focusId, schedule]);
 
+  /* The operator asking to be framed, which is a different event from the one
+     automatic fit in `tick`. That one is suppressed for good once the view has
+     been touched, and this one deliberately does not clear `touchedRef`: doing
+     so would let the automatic fit fire again later and move a graph somebody
+     had panned on purpose. One frame and no reheat — framing a settled layout
+     must not disturb it. */
+  useEffect(() => {
+    if (fitNonce === 0) return;
+    fitView();
+    schedule();
+  }, [fitNonce, fitView, schedule]);
+
   useEffect(
     () => () => {
       if (frameRef.current) cancelAnimationFrame(frameRef.current);
@@ -549,6 +611,11 @@ export function KnowledgeGraphCanvas({
         // The cursor is the only thing that says a node is a link, since the
         // canvas has no <a> for the browser to report in the status bar.
         event.currentTarget.style.cursor = over === null ? "grab" : "pointer";
+        // Inside the changed-index guard, and that placement is the whole cost
+        // control: hover already redraws per `pointermove`, and telling React
+        // on each of those would re-render the panel beside a thousand-node
+        // graph several times a frame. A node is not a coordinate.
+        if (over !== null && sim) hoverOutRef.current(metaRef.current[over], sim.nodes[over].degree);
         schedule();
       }
       return;
@@ -647,6 +714,12 @@ export function KnowledgeGraphCanvas({
     <div ref={hostRef} className={`relative overflow-hidden ${className}`}>
       <canvas
         ref={canvasRef}
+        // A picture, named — the shape `PathMapCanvas` already uses. Deliberately
+        // not `role="application"` and deliberately not focusable: either would
+        // advertise a keyboard model this surface has decided not to grow, and
+        // the label's own second sentence is where the reachable route is named.
+        role="img"
+        aria-label={ariaLabel}
         // `touch-none` or the browser takes the drag for a scroll and the
         // canvas never sees a pointermove — the same reason WorkflowCanvas
         // carries it on everything draggable.
@@ -669,7 +742,14 @@ export function KnowledgeGraphCanvas({
   );
 }
 
-/** The kind a node is, as a colour, for everything no group has claimed. */
+/**
+ * The kind a node is, as a colour, for everything no group has claimed.
+ *
+ * An attachment and a note share `--fg-muted` on purpose and the branch is kept
+ * rather than folded into the fallback: what tells them apart is the outline
+ * `draw` strokes on an attachment, not the fill, and a reader who found one
+ * branch here would otherwise conclude the two kinds are meant to be identical.
+ */
 function colourFor(node: KnowledgeNodeDTO, palette: Palette): string {
   if (node.kind === "tag") return palette["--accent"];
   if (node.kind === "phantom") return palette["--fg-faint"];
