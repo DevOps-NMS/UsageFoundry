@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+
 import { Notice } from "@/components/ui/Notice";
 
 /**
@@ -18,6 +20,12 @@ import { Notice } from "@/components/ui/Notice";
  * The three ways of having nothing are here for the same reason: swept, named-no
  * file and no-such-run all render as an empty list on one surface and as an
  * empty canvas on the other, and both read as a run that touched nothing.
+ *
+ * `Fact` is here on the same argument one step down: the map's inspector and the
+ * replay's readout name the same four things about the same call — the path, the
+ * tool, and `touchActor`'s `main`/`delegated`/sub-agent answer under the label
+ * **By** — and two label rows written out separately are two vocabularies that
+ * drift into disagreeing about one row.
  */
 
 /** Where the run's changes are, relative to the surface saying this. */
@@ -47,23 +55,65 @@ export const TOUCH_IDLE_SENTENCE = "No tool call in this run's log named a file.
  * The hedge belongs on the header and not on the rows: no row can honestly say
  * whether its own call worked, and a column that is wrong inside a retry loop is
  * worse than one that is absent.
+ *
+ * `touches` is the third figure and it is optional because only one surface has
+ * it: the table under the diff reads the collapsed scan and has no call count to
+ * print, and the map fetches the ordered sequence and does. Where it is given it
+ * goes in **this** sentence rather than beside the scrubber it measures, because
+ * a run that read 39 files in 412 calls has two numbers that are both about the
+ * same rows and read as a contradiction any further apart than one clause.
  */
 export function TouchHeadline({
   distinctTouched,
+  touches = null,
   cycles,
 }: {
   distinctTouched: number;
+  /** File-naming tool calls — a file read forty times is forty of them. */
+  touches?: number | null;
   cycles: number;
 }) {
+  const files = (
+    <>
+      <strong className="font-semibold tabular-nums text-ink">{distinctTouched}</strong>{" "}
+      distinct file{distinctTouched === 1 ? "" : "s"}
+    </>
+  );
+  const across = (
+    <>
+      across <strong className="font-semibold tabular-nums text-ink">{cycles}</strong> work
+      cycle{cycles === 1 ? "" : "s"}
+    </>
+  );
   return (
     <p className="mb-3 text-sm text-ink-muted">
-      <strong className="font-semibold tabular-nums text-ink">{distinctTouched}</strong>{" "}
-      distinct file{distinctTouched === 1 ? "" : "s"} named across{" "}
-      <strong className="font-semibold tabular-nums text-ink">{cycles}</strong> work
-      cycle{cycles === 1 ? "" : "s"}. A call being recorded means it was{" "}
-      <em>attempted</em>: this app stores a tool result only when the tool failed, so
-      nothing here says a read or a write succeeded.
+      {touches === null ? (
+        <>{files} named {across}.</>
+      ) : (
+        <>
+          {files} named by{" "}
+          <strong className="font-semibold tabular-nums text-ink">{touches}</strong> tool
+          call{touches === 1 ? "" : "s"}, {across}.
+        </>
+      )}{" "}
+      A call being recorded means it was <em>attempted</em>: this app stores a tool result
+      only when the tool failed, so nothing here says a read or a write succeeded.
     </p>
+  );
+}
+
+/**
+ * One labelled line about a call — the four the inspector and the readout share.
+ *
+ * The label column is fixed so two of these stacked line their values up, which
+ * is what makes a path and a tool name readable as a record rather than as prose.
+ */
+export function Fact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex gap-2">
+      <dt className="w-20 shrink-0 text-ink-faint">{label}</dt>
+      <dd className="min-w-0 flex-1 text-ink-muted">{children}</dd>
+    </div>
   );
 }
 

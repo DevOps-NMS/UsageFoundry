@@ -72,6 +72,8 @@ export function RunTouchedMap({
   plan,
   changedKnown,
   selectedId,
+  dimmedIds = null,
+  markedId = null,
   onSelect,
   onExpand,
   className = "",
@@ -80,6 +82,18 @@ export function RunTouchedMap({
   /** False with no diff: no node may draw the changed ring. */
   changedKnown: boolean;
   selectedId: string | null;
+  /**
+   * Nodes the replay has not reached yet, and the one it is on. Null when the
+   * scrubber is at rest, which is what keeps this map identical to the one it
+   * was before the replay existed.
+   *
+   * Neither is a fact about a *file* and so neither goes through `paintFile`:
+   * they are facts about where the operator is in the sequence, and a fold —
+   * which `paintFile` never sees — carries both on behalf of the files behind
+   * it.
+   */
+  dimmedIds?: ReadonlySet<string> | null;
+  markedId?: string | null;
   /** The id to select, never the node — see `nodeId`: a fold changes id as it opens. */
   onSelect: (id: string | null) => void;
   onExpand: (dirPath: string) => void;
@@ -141,6 +155,8 @@ export function RunTouchedMap({
       paintFile={paintFile}
       ariaLabel="The files this run touched, positioned by directory. The same files are listed, ordered and searchable, in the table on the run's Files tab."
       selectedId={selectedId}
+      dimmedIds={dimmedIds}
+      markedId={markedId}
       onSelect={onSelect}
       onExpand={onExpand}
       className={className}

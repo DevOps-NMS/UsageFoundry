@@ -3,7 +3,7 @@
 import { use, useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
-import type { RunDiffDTO, RunTouchedDTO } from "@/lib/apiTypes";
+import type { RunDiffDTO, RunTouchStepDTO, RunTouchedDTO } from "@/lib/apiTypes";
 import {
   buildTouchTree,
   planTouchedMap,
@@ -12,16 +12,19 @@ import {
   type MapFile,
   type PlanNode,
 } from "@/lib/touchedMap";
+import { placeTouches, replayFrame } from "@/lib/touchReplay";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
 import { GroupLabel } from "@/components/ui/List";
 import { Notice } from "@/components/ui/Notice";
 import {
+  Fact,
   TOUCH_IDLE_SENTENCE,
   TouchHeadline,
   TouchNoDiffNotice,
   TouchSweptNotice,
 } from "@/components/RunTouchNotes";
 import { RunTouchedMap } from "@/components/RunTouchedMap";
+import { RunTouchReplay } from "@/components/RunTouchReplay";
 
 /**
  * Where a run's touches are, laid out by directory.
@@ -62,22 +65,27 @@ export default function RunTouchedPage({ params }: Ctx) {
 
   const [touched, setTouched] = useState<RunTouchedDTO | null>(null);
   const [diff, setDiff] = useState<RunDiffDTO | null>(null);
+  const [sequence, setSequence] = useState<readonly RunTouchStepDTO[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set<string>());
+  /** 1-based over the touches; 0 is rest, which is the map as it is without this. */
+  const [position, setPosition] = useState(0);
 
   useEffect(() => {
     let live = true;
     void (async () => {
       try {
-        // Together rather than in sequence: neither answer is derived from the
-        // other, and the diff is the slower of the two by several git processes.
-        const [touchRes, diffRes] = await Promise.all([
+        // Together rather than in sequence: no answer is derived from another,
+        // and the diff is the slowest of the three by several git processes.
+        const [touchRes, diffRes, seqRes] = await Promise.all([
           fetch(`/api/runs/${id}/touched`, { cache: "no-store" }),
           fetch(`/api/runs/${id}/diff`, { cache: "no-store" }),
+          fetch(`/api/runs/${id}/touched/sequence`, { cache: "no-store" }),
         ]);
         const touchJson = (await touchRes.json()) as { touched?: RunTouchedDTO };
         const diffJson = (await diffRes.json()) as { diff?: RunDiffDTO };
+        const seqJson = (await seqRes.json()) as { sequence?: RunTouchStepDTO[] };
         if (!live) return;
         if (!touchRes.ok || !touchJson.touched) {
           setError("Could not read what this run touched.");
@@ -88,6 +96,12 @@ export default function RunTouchedPage({ params }: Ctx) {
         // unknown rather than empty, which the map already has a state for, and
         // the touch half is the half this page exists to draw.
         setDiff(diffJson.diff ?? null);
+        // Nor is a sequence that failed: the map is the page and the replay is a
+        // mode over it. `null` is kept apart from an empty array on purpose —
+        // one is "nobody could read the order" and the other is "there was
+        // none", and a missing scrubber standing for both would be the fourth
+        // way of having nothing that nothing on this page says out loud.
+        setSequence(seqRes.ok && seqJson.sequence ? seqJson.sequence : null);
       } catch {
         if (live) setError("Could not read what this run touched.");
       }
@@ -118,6 +132,23 @@ export default function RunTouchedPage({ params }: Ctx) {
   const selected = useMemo(
     () => plan?.nodes.find((node) => node.id === selectedId) ?? null,
     [plan, selectedId],
+  );
+
+  // Re-placed against every plan, which is what moves the playhead from a fold
+  // onto the file behind it the moment the operator opens that fold. `position`
+  // deliberately survives it: it is an index into the sequence, which no fold
+  // changes.
+  const placed = useMemo(
+    () => (plan && sequence ? placeTouches(sequence, plan.nodes) : null),
+    [plan, sequence],
+  );
+
+  const frame = useMemo(
+    () =>
+      plan && sequence && placed
+        ? replayFrame(sequence, placed, plan.nodes, position)
+        : null,
+    [plan, sequence, placed, position],
   );
 
   const onSelect = useCallback((id: string | null) => setSelectedId(id), []);
@@ -176,6 +207,7 @@ export default function RunTouchedPage({ params }: Ctx) {
 
           <TouchHeadline
             distinctTouched={view.report.distinctTouched}
+            touches={sequence?.length ?? null}
             cycles={view.cycles}
           />
 
@@ -222,17 +254,43 @@ export default function RunTouchedPage({ params }: Ctx) {
             </Notice>
           )}
 
+          {sequence === null && (
+            <Notice tone="warn" quiet>
+              The order this run named files in could not be read, so there is no replay
+              below — the map still shows every file it named.
+            </Notice>
+          )}
+
           <div className="mt-3 grid gap-4 lg:grid-cols-[minmax(0,1fr)_21rem]">
-            <RunTouchedMap
-              plan={plan}
-              changedKnown={view.changedKnown}
-              selectedId={selectedId}
-              onSelect={onSelect}
-              onExpand={onExpand}
-              className="h-[24rem] rounded-md border border-line bg-inset md:h-[30rem] lg:h-[36rem]"
-            />
             <div>
-              <Legend changedKnown={view.changedKnown} />
+              <RunTouchedMap
+                plan={plan}
+                changedKnown={view.changedKnown}
+                selectedId={selectedId}
+                dimmedIds={frame?.dimmed ?? null}
+                markedId={frame?.currentId ?? null}
+                onSelect={onSelect}
+                onExpand={onExpand}
+                className="h-[24rem] rounded-md border border-line bg-inset md:h-[30rem] lg:h-[36rem]"
+              />
+              {/* Never with nothing to scrub. A run whose events aged out has no
+                  sequence at all and already has its own notice above; a
+                  zero-step track under it would be a control saying the run did
+                  nothing, which is the reading those notices exist to prevent. */}
+              {frame && sequence && sequence.length > 0 && (
+                <RunTouchReplay
+                  steps={sequence}
+                  frame={frame}
+                  onPosition={setPosition}
+                  className="mt-3"
+                />
+              )}
+            </div>
+            <div>
+              <Legend
+                changedKnown={view.changedKnown}
+                replaying={frame !== null && frame.step !== null}
+              />
               <Inspector node={selected} changedKnown={view.changedKnown} />
             </div>
           </div>
@@ -241,7 +299,9 @@ export default function RunTouchedPage({ params }: Ctx) {
             A line means <em>is in</em> — the path hierarchy, not a tool call. Which tools
             named a file is on the file, because tool&nbsp;→&nbsp;file is a star: a dozen
             hubs with nearly everything hanging off <span className="mono">Read</span>,
-            drawing one fact the count above already states.
+            drawing one fact the count above already states. The replay steps the same
+            nodes in the order the calls were made; a call on a file behind a folded
+            directory lands on the fold, and opening it moves the playhead onto the file.
           </p>
         </Card>
       )}
@@ -255,8 +315,22 @@ export default function RunTouchedPage({ params }: Ctx) {
  * Four encodings on one node is three more than a reader can hold, and a
  * tooltip has no touch equivalent — which is why this app's closed vocabulary
  * refuses to put anything a reader needs inside one.
+ *
+ * The replay's two marks are drawn **only while it is running**, and that is the
+ * same decision as `changedKnown` withholding the changed ring rather than a
+ * tidiness one: eight rows is already at the edge of what a column this narrow
+ * can be read as a list, and two of them standing permanently for marks nothing
+ * on the canvas is currently making is a legend describing a picture that is not
+ * there. They appear exactly when a node starts wearing one.
  */
-function Legend({ changedKnown }: { changedKnown: boolean }) {
+function Legend({
+  changedKnown,
+  replaying,
+}: {
+  changedKnown: boolean;
+  /** The scrubber is off rest, so some node is marked and others are washed. */
+  replaying: boolean;
+}) {
   return (
     <>
       <GroupLabel>What a node says</GroupLabel>
@@ -307,6 +381,25 @@ function Legend({ changedKnown }: { changedKnown: boolean }) {
         <LegendRow swatch={<span className="block size-3 rounded-full border border-ink-faint bg-surface" />}>
           A directory, holding the files under it
         </LegendRow>
+        {replaying && (
+          <>
+            <LegendRow
+              swatch={
+                <span className="flex size-3.5 items-center justify-center rounded-full bg-tint/35">
+                  <span className="block size-2 rounded-full bg-ink-muted" />
+                </span>
+              }
+            >
+              Haloed: the tool call at the playhead
+            </LegendRow>
+            <LegendRow
+              swatch={<span className="block size-3 rounded-full bg-ink-muted opacity-20" />}
+            >
+              Faded: the replay has not reached it. A file the diff lists and no call
+              named is never reached, which is what its hollow already says.
+            </LegendRow>
+          </>
+        )}
       </ul>
       <p className="mb-4 max-w-[42ch] text-xs leading-snug text-ink-muted">
         A file&apos;s size is how many calls named it. Drag to pan, scroll to zoom, drag a
@@ -416,14 +509,5 @@ function DirFacts({ dir, changedKnown }: { dir: MapDir; changedKnown: boolean })
       )}
       {dir.tools.length > 0 && <Fact label="Tools">{dir.tools.join(", ")}</Fact>}
     </dl>
-  );
-}
-
-function Fact({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="flex gap-2">
-      <dt className="w-20 shrink-0 text-ink-faint">{label}</dt>
-      <dd className="min-w-0 flex-1 text-ink-muted">{children}</dd>
-    </div>
   );
 }

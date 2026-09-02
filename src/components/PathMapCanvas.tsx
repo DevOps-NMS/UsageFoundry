@@ -102,6 +102,16 @@ const FILE_LABEL_FROM = 0.75;
 const FILE_LABEL_RAMP = 0.4;
 
 /**
+ * How much of itself a dimmed node keeps.
+ *
+ * Low enough that the undimmed nodes are what an eye lands on, and never zero:
+ * a node drawn at no opacity is a node dropped, which is the one thing this
+ * arrangement promises never to do. It stays on screen, in place, saying "not
+ * this one" rather than "not here".
+ */
+const DIM_ALPHA = 0.18;
+
+/**
  * The tokens the arrangement itself draws with: links, anchors, folds, labels
  * and the halo. A map's own encoding names whatever else it needs in `tokens`,
  * because the colours a fill picks are the one part of a node that is entirely
@@ -171,6 +181,8 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
   paintFile,
   ariaLabel,
   selectedId,
+  dimmedIds = null,
+  markedId = null,
   onSelect,
   onExpand,
   className = "",
@@ -184,6 +196,26 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
   /** What a screen reader is told the picture is, and where the same rows are listed. */
   ariaLabel: string;
   selectedId: string | null;
+  /**
+   * Nodes drawn washed out because the surface is currently looking at a subset
+   * of the map. A drawing state over the arrangement, like `selectedId` and
+   * unlike `paintFile` — this file does not know *why* a node is out of scope
+   * and the caller's own legend is what says so.
+   *
+   * **Null and an empty set are different.** Null is "nothing is narrowed", and
+   * the map is then pixel-identical to one that never had the prop; an empty set
+   * is "narrowed to nothing", which dims none of them for a reason.
+   */
+  dimmedIds?: ReadonlySet<string> | null;
+  /**
+   * A second focus mark, drawn as a filled halo *behind* the node.
+   *
+   * Deliberately not a third ring: `selectedId` already strokes at
+   * `radius + 6`, and a mark that a reader has to measure against it is a mark
+   * that reads as the same thing. A fill and a hairline are told apart without
+   * being learnt, so a node that is both shows a wash with a ring on it.
+   */
+  markedId?: string | null;
   /** The id to select, never the node — see `nodeId`: a fold changes id as it opens. */
   onSelect: (id: string | null) => void;
   onExpand: (dirPath: string) => void;
@@ -219,6 +251,8 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
   const paintRef = useRef(paintFile);
   const tokensRef = useRef(tokens);
   const selectedRef = useRef(selectedId);
+  const dimmedRef = useRef(dimmedIds);
+  const markedRef = useRef(markedId);
   const selectRef = useRef(onSelect);
   const expandRef = useRef(onExpand);
 
@@ -226,6 +260,8 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
   paintRef.current = paintFile;
   tokensRef.current = tokens;
   selectedRef.current = selectedId;
+  dimmedRef.current = dimmedIds;
+  markedRef.current = markedId;
   selectRef.current = onSelect;
   expandRef.current = onExpand;
 
@@ -246,6 +282,8 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
     const meta = metaRef.current;
     const hover = hoverRef.current;
     const selected = selectedRef.current;
+    const dimmed = dimmedRef.current;
+    const marked = markedRef.current;
     const radiusFor = radiusRef.current;
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -283,6 +321,27 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
       const item = meta[i];
       const radius = radiusFor(item);
 
+      // The wash is composed onto whatever each branch below sets rather than
+      // applied by them, so a branch that reaches for its own alpha — the fold's
+      // 0.2 fill does — multiplies into it instead of resetting it. The injected
+      // `paintFile` sets no alpha at all and so inherits this one, which is the
+      // whole reason a caller does not have to know the prop exists.
+      const base = dimmed !== null && dimmed.has(item.id) ? DIM_ALPHA : 1;
+      ctx.globalAlpha = base;
+
+      // Behind the node, so a fill the map's own encoding draws sits on top of
+      // it rather than under it. Full opacity whatever the wash says: the mark
+      // exists to be found, and a marked node is by construction one the
+      // surface has reached.
+      if (item.id === marked) {
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = palette["--tint"];
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, radius + 7 / view.k, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = base;
+      }
+
       if (item.kind === "dir") {
         // An anchor and a label, drawn as a small hollow ring so it reads as a
         // place rather than as a file. It is not a hub: nothing about a count,
@@ -297,10 +356,10 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
       } else if (item.kind === "folded") {
         ctx.beginPath();
         ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
-        ctx.globalAlpha = 0.2;
+        ctx.globalAlpha = base * 0.2;
         ctx.fillStyle = palette["--fg-muted"];
         ctx.fill();
-        ctx.globalAlpha = 1;
+        ctx.globalAlpha = base;
         ctx.lineWidth = 1.6 / view.k;
         ctx.strokeStyle = palette["--fg-muted"];
         ctx.stroke();
@@ -310,6 +369,7 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
         // context as it found it — the halo below sets everything it uses.
         paintRef.current(ctx, item, { x: node.x, y: node.y, radius, k: view.k }, palette);
       }
+      ctx.globalAlpha = 1;
 
       // Selection and hover share a halo well clear of every mark above, so
       // neither can be read as part of what the node says about its file. Not
@@ -343,12 +403,19 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
       const node = nodes[i];
       if (!visible(node.x, node.y)) continue;
       const item = meta[i];
-      const forced = i === hover || item.id === selected;
+      // The marked node forces its own name on for the reason hover and
+      // selection do: a mark an operator has to zoom in to read is a mark they
+      // have to hunt for, which is the thing it exists to save them.
+      const forced = i === hover || item.id === selected || item.id === marked;
       const alpha = item.kind === "file" ? (forced ? 1 : fade) : 1;
       if (alpha <= 0) continue;
 
       const radius = radiusFor(item);
-      ctx.globalAlpha = alpha;
+      // Composed rather than replaced, so a dimmed node's name dims with it —
+      // a full-strength label over a washed node would read as the label of
+      // whatever is behind it.
+      ctx.globalAlpha =
+        alpha * (dimmed !== null && dimmed.has(item.id) && !forced ? DIM_ALPHA : 1);
       ctx.fillStyle = item.kind === "file" ? palette["--fg"] : palette["--fg-muted"];
       ctx.font = `${(item.kind === "file" ? 11 : 12) / view.k}px ${palette.font}`;
       ctx.fillText(item.label, node.x, node.y + radius + 3 / view.k);
@@ -528,10 +595,12 @@ export function PathMapCanvas<P extends object, R extends object, T extends stri
   /* None of these moves a node, so none of them reheats. `paintFile` is in the
      list because it is where a prop like the touched map's `changedKnown` ends
      up: a fill that answers to it changes identity, and nothing else would ask
-     for the frame that draws the new answer. */
+     for the frame that draws the new answer. `dimmedIds` and `markedId` are the
+     same case at a much higher rate — a playhead advancing is a new set and a
+     new id every step, and this effect is the only thing that draws them. */
   useEffect(() => {
     schedule();
-  }, [selectedId, radiusOf, paintFile, schedule]);
+  }, [selectedId, dimmedIds, markedId, radiusOf, paintFile, schedule]);
 
   useEffect(
     () => () => {
