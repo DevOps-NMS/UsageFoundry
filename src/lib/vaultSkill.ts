@@ -229,12 +229,31 @@ export function renderVaultSkill(v: VaultSkillContext): string {
 
   return `---
 name: ${SKILL_NAME}
-description: Search the knowledge vault at ${v.vaultLabel} — the operator's own graded notes — instead of answering from general knowledge. Use when asked what is known, settled or already researched about something, or when a claim needs the evidence behind it rather than a confident summary. Also use before asserting anything the vault is likely to have an opinion on.
+description: Search the knowledge vault at ${v.vaultLabel} — the operator's own graded notes — instead of answering from general knowledge. Use when asked what is known, settled or already researched about something, or when a claim needs the evidence behind it rather than a confident summary. **Also use before investigating a failure, a flaky command, or anything about how this machine behaves: what has already been measured here is in the vault, and searching beats rediscovering.** Also use before asserting anything the vault is likely to have an opinion on.
 ---
 
 Answer from the vault, not from memory. If the vault does not cover the
 question, say so: an absence is a correct answer, and general knowledge relayed
 as a finding is the one failure this skill exists to prevent.
+
+## Check before you investigate
+
+**Searching costs less than rediscovering.** Measured on this install, two runs
+asked the same question about a recurring sandbox failure, differing only in
+whether they were told to search the vault first:
+
+| | Investigated from scratch | Searched the vault first |
+|---|---|---|
+| Cost | \$1.63 | **\$0.75** |
+| Wall time | 369s | **83s** |
+| Tool calls | 52, of which 24 errored | **15, of which 2 errored** |
+
+The unsteered run also reached a confident conclusion from 19 observations that
+contradicted a 9,269-observation measurement already recorded in the vault. So
+this is not only about answering questions put to you: **before you start
+digging into a failure, a flaky command or anything about how this machine
+behaves, search first.** If the vault has it, you are done in a minute. If it
+does not, you have lost one search and you now know the ground is fresh.
 
 ## The vault
 
@@ -289,11 +308,16 @@ author's inference, \`> [!warning]\` is uncertainty. Do not flatten them into
 
 ## Never write to the vault
 
-Nothing in this app writes into the vault and neither do you. Do not create,
-edit, move or delete anything under the vault path — not a note, not an inbox
-entry, not a typo you noticed on the way past. If the work turns up something
-the vault should record, say so in your answer and leave the writing to a
-person.
+**Do not create, edit, move or delete anything under the vault path** — not a
+note, not an inbox entry, not a typo you noticed on the way past. This skill is
+a reader. If the work turns up something the vault should record, say so in your
+answer and leave the writing to somebody whose job it is.
+
+There is exactly one job in this app that writes here, and it is not this one:
+a nightly pass whose *task* is to record failures that have recurred, which is
+told so in its own prompt and is pointed at the vault as its working directory.
+If that is not what you were asked to do, you are the reader. And if you were —
+your task text governs, not this section.
 `;
 }
 

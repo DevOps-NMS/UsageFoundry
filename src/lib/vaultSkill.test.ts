@@ -77,6 +77,30 @@ test("forbids writing into the vault", () => {
   assert.match(renderVaultSkill(ctx), /Never write to the vault/);
 });
 
+test("names the one job that does write, rather than claiming nothing does", () => {
+  // It used to say "Nothing in this app writes into the vault and neither do
+  // you", and Dreaming made the first half false. Every run gets this skill,
+  // including the nightly writer whose whole task is to write here — so the
+  // flat claim left that run holding two instructions that contradict each
+  // other, and it obeyed the right one by luck rather than by design. A skill
+  // is persuasion; a sentence in it that the reader can see is untrue is worth
+  // less than one that is narrower and true.
+  const text = renderVaultSkill(ctx);
+  assert.doesNotMatch(text, /Nothing in this app writes into the vault/);
+  assert.match(text, /your task text governs/i);
+});
+
+test("tells a run to search before investigating, not only when asked", () => {
+  // The trigger, and the reason the description is worth its place in every
+  // cycle's context. Measured: a run told to search first answered the same
+  // question at $0.75 in 83s against $1.63 in 369s, and the unsteered one
+  // never searched at all despite having the skill available.
+  const text = renderVaultSkill(ctx);
+  const fm = frontmatter(text) ?? "";
+  assert.match(fm, /before investigating/i, "the description carries the trigger");
+  assert.match(text, /Check before you investigate/);
+});
+
 test("uses the vault's ranked search when it has one", () => {
   const text = renderVaultSkill({
     ...ctx,
