@@ -1767,6 +1767,27 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **The knowledge graph's orientation layer was driven in a browser; the
+> ten-step canvas click-list below still has not been run.** On 2026-09-02 the
+> `/knowledge` rework — the graph moved above the Notes table, a legend, a
+> readout, `Fit`, `role="img"` with an `aria-label`, three folds, a three-tag
+> seed and a measured `textFade` — was exercised against `next dev` on the
+> mounted vault (1,227 notes, 1,375 graph nodes, 1,258 drawn) at 1440px and
+> 390px. What **was** checked by hand: the graph is the first block under the
+> heading at both widths; the three folds render closed with the summaries
+> `Edit colour groups (3)`, `Display` and `Forces`; the legend shows the three
+> seeded groups; `Fit` reframes a panned graph; the readout fills on hover and
+> **survives the pointer leaving the canvas**; the canvas carries the role and
+> the label. And `textFade` was chosen by *looking*: `fitView` frames this vault
+> at `k` 0.12–0.14, the recommendation's own suggestion of a threshold just
+> under that was rendered and is wrong — `draw` labels every visible node, so it
+> puts 1,258 titles into 820px — and 0.35 was the value that leaves the fitted
+> view clean and labels a local graph. What was **not**: the dark theme, a real
+> touch device, any screen reader, `docker compose`, and the click-list below.
+> The middleware was moved aside for each of these runs because the edge bundle
+> will not load under this container's sandbox; nothing on the page depends on
+> it, but that means no run here passed through auth.
+
 > **Dreaming's readout, ledger and refusals were driven against a running
 > server; the agent's write into a vault was not.** On 2026-09-02 the feature
 > was exercised end to end against a built app (`npm start`, a throwaway
