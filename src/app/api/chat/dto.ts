@@ -2,6 +2,7 @@
 // rewrites the path alias at runtime, so a module a test loads has to import
 // the way src/lib and Meter.tsx already do.
 import {
+  CHAT_TIMEOUT_MS,
   listChats,
   listMessages,
   listProposals,
@@ -51,6 +52,8 @@ export function chatDTO(chat: ChatRow): ChatDTO {
     costUSD: chat.cost_usd,
     tokens: chat.tokens,
     error: chat.error,
+    turnStartedAt: chat.turn_started_at,
+    turnTimeoutMs: CHAT_TIMEOUT_MS,
     messages: listMessages(chat.id).map((m) => ({
       id: m.id,
       ts: m.ts,

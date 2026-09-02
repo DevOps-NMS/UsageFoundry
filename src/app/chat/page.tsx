@@ -13,7 +13,7 @@ import type {
   ProposedBlockDTO,
 } from "@/lib/apiTypes";
 import { chatRequest } from "@/lib/chatRequest";
-import { threadItems } from "@/lib/chatThread";
+import { threadItems, turnStartInstant } from "@/lib/chatThread";
 import {
   describeAmbientAgents,
   fmtDateTime,
@@ -702,8 +702,16 @@ export default function ChatPage() {
     chat?.status === "failed" && chat.error && chat.error !== lastMessage?.text
       ? chat.error
       : null;
-  // The turn started when the message it is answering was written.
-  const waitingSince = lastMessage?.ts ?? chat?.updatedAt ?? Date.now();
+  // The turn started when the server claimed it, not when the thread last
+  // moved — see `turnStartInstant`. `Date.now()` is the last resort for a
+  // render with no chat at all, which is a render with nothing to draw a clock
+  // beside; it reads as "just now" rather than as 1970.
+  const waitingSince =
+    turnStartInstant(chat?.turnStartedAt, lastMessage?.ts ?? chat?.updatedAt) ??
+    Date.now();
+  // `thinking` implies a chat, but nothing here narrows the optional, and a
+  // ceiling nobody sent is one the page must not state.
+  const turnLimitMs = chat?.turnTimeoutMs ?? null;
 
   // What the click does, counted, above the button that does it. "Approve"
   // alone is a word; this is the sentence a person needs before pressing it.
@@ -775,9 +783,15 @@ export default function ChatPage() {
         <div className="mb-3 flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">Orchestrator</h1>
           <div className="ml-auto flex items-center gap-3">
+            {/* What the figure counts is said, because what it leaves out is
+                the turn the operator is most likely watching: `--output-format
+                json` puts no cost on the wire until the child exits, so a turn
+                in flight has spent money this number cannot yet see. Unsaid, a
+                total that does not move for ten minutes reads as a turn that is
+                not costing anything. */}
             {chat && chat.costUSD > 0 && (
               <span className="text-xs tabular-nums text-ink-muted">
-                {fmtUSD(chat.costUSD)} this chat
+                {fmtUSD(chat.costUSD)} this chat, settled turns only
               </span>
             )}
             <Button variant="secondary" onClick={() => void newChat()}>
@@ -915,7 +929,13 @@ export default function ChatPage() {
                     })
                   )}
 
-                  {thinking && <Waiting since={waitingSince} stale={pollError !== null} />}
+                  {thinking && (
+                    <Waiting
+                      since={waitingSince}
+                      limitMs={turnLimitMs}
+                      stale={pollError !== null}
+                    />
+                  )}
 
                   {turnFailure && (
                     <div className="mt-5 max-w-[70ch] rounded-sm border-l-2 border-l-danger bg-inset px-3 py-2 text-xs leading-normal text-danger">
@@ -1375,10 +1395,29 @@ function Speaker({ name, ts }: { name: string; ts: number }) {
  * turn is, because nothing does; the elapsed time is the only real progress
  * there is, and a bar would be an invention.
  *
+ * **The ceiling is not that bar by another name.** A bar invents a completion
+ * fraction; this reports a constant the server enforces — the turn will not run
+ * past it, which is a fact about the deadline and says nothing about how near
+ * the answer is. It is stated from the first second rather than past a
+ * threshold, because it is the operator's whole basis for deciding whether to
+ * wait and it is worth least at the moment they have already waited. Past it
+ * the clause stops being a ceiling and becomes what is being done about the
+ * turn: the sweeper runs every 30s against a 60s margin, so an overrun is a
+ * state this page reaches rather than a limit case.
+ *
  * `role="status"` holds the word alone — the clock beside it is hidden from
- * assistive tech, or the turn would be announced once a second.
+ * assistive tech, or the turn would be announced once a second. The ceiling is
+ * not hidden: it changes once in ten minutes.
  */
-function Waiting({ since, stale }: { since: number; stale: boolean }) {
+function Waiting({
+  since,
+  limitMs,
+  stale,
+}: {
+  since: number;
+  limitMs: number | null;
+  stale: boolean;
+}) {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -1396,15 +1435,25 @@ function Waiting({ since, stale }: { since: number; stale: boolean }) {
     );
   }
 
+  const elapsed = Math.max(0, now - since);
+  const limitMin = limitMs === null ? null : Math.round(limitMs / 60_000);
+
   return (
-    <div className="mt-5 flex items-center gap-2">
+    <div className="mt-5 flex flex-wrap items-center gap-2">
       <Spinner />
       <span role="status" className="text-xs font-medium text-ink-muted">
         Thinking…
       </span>
       <span aria-hidden="true" className="text-2xs tabular-nums text-ink-faint">
-        {fmtDuration(Math.max(0, now - since))}
+        {fmtDuration(elapsed)}
       </span>
+      {limitMs !== null && (
+        <span className="text-2xs text-ink-faint">
+          {elapsed < limitMs
+            ? `of up to ${limitMin} min`
+            : `past the ${limitMin}-minute limit; being stopped`}
+        </span>
+      )}
     </div>
   );
 }

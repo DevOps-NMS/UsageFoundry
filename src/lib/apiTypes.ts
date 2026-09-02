@@ -2702,6 +2702,27 @@ export interface ChatDTO {
   costUSD: number;
   tokens: number;
   error: string | null;
+  /**
+   * When the turn in flight was claimed, null when there is none.
+   *
+   * The clock the page draws beside "Thinking…" is measured from this and not
+   * from the last message in the thread. A turn writes into the thread itself —
+   * `save_template` appends a note mid-turn — and reading the thread restarted
+   * the elapsed time at zero on the one surface whose job is to say how long
+   * this has been going. It is the same instant `staleTurn` measures the
+   * deadline against, which is what lets the page state that deadline.
+   */
+  turnStartedAt: number | null;
+  /**
+   * `CHAT_TIMEOUT_MS`, carried rather than imported.
+   *
+   * The page says the ceiling in words, so the number has to be the one the
+   * server enforces rather than a copy that can drift from it — and the
+   * constant lives in `chat.ts`, which reaches SQLite and
+   * `node:child_process`, so a `"use client"` file may not import it even for
+   * a plain number.
+   */
+  turnTimeoutMs: number;
   messages: ChatMessageDTO[];
   proposals: ChatProposalDTO[];
   /**
