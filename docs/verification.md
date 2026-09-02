@@ -2043,15 +2043,25 @@ through before trusting this unattended:
 > handling is the one branch no other engine takes, and its own docblock says
 > the 16px line height is an estimate nobody has held against a real mouse.
 
-> **The map at `/runs/[id]/touched` has never been seen.** It was built and
-> shipped without a browser: Docker is unavailable in the environment it was
-> written in and no browser could be driven there, so every statement about it
-> below is a statement about the code. It typechecks, `next build` registers the
-> route, its reduction, its fold rule and its three empty states are unit-tested
-> in `touchedMap.test.ts`, and every Tailwind class it uses was grepped out of
-> the emitted stylesheet rather than assumed — which catches a spelling Tailwind
-> would drop silently and catches nothing at all about whether the picture is
-> legible. Nobody has looked at it.
+> **The map at `/runs/[id]/touched` had never been seen when it shipped, and has
+> since been seen on synthetic data only.** It was built without a browser:
+> Docker was unavailable in the environment it was written in and no browser
+> could be driven there, so every statement about it below is a statement about
+> the code. It typechecks, `next build` registers the route, its reduction, its
+> fold rule and its three empty states are unit-tested in `touchedMap.test.ts`,
+> and every Tailwind class it uses was grepped out of the emitted stylesheet
+> rather than assumed — which catches a spelling Tailwind would drop silently and
+> catches nothing at all about whether the picture is legible.
+>
+> On 2026-09-02 it was rendered for the first time, driving a built app
+> (`npm start`, a throwaway `DATA_DIR`) with Playwright against a **seeded** run:
+> 399 tool events over 48 distinct files in three directories, none of it real.
+> What that settles is that the page renders, the canvas settles and stops, the
+> nodes cluster by directory legibly at 1440×1000, and the same picture holds in
+> the dark theme — the tokens are re-read rather than frozen. What it does not
+> settle is anything about a **real** run: no shape here is one this app produced,
+> the fold has still never fired on data anybody generated, and the whole of the
+> list below still stands. Nobody has looked at it on a run that happened.
 >
 > What *is* measured: the layout was run headlessly against the compiled
 > modules — no DOM, no canvas, just `buildTouchTree` → `planTouchedMap` →
@@ -2157,6 +2167,41 @@ through before trusting this unattended:
 >    React render.
 > 12. **Narrow.** At 390px the split stacks, the canvas keeps its 24rem height, and
 >    dragging on the canvas pans rather than scrolling the page.
+
+> **The replay scrubber under that map was driven, on the same synthetic run and
+> never on a real one.** Added 2026-09-02. `scanTouchSequence` and
+> `/api/runs/[id]/touched/sequence` were exercised against a seeded database
+> through the built app: **399 touches over 48 distinct files**, a 50 KB response
+> against the collapsed scan's 47 KB beside it — which is the number that decided
+> the payload rides on its own route and that a slider with one step per call is
+> the right unit rather than a thousand-to-one compromise. `touchReplay.ts`'s
+> derivation is unit-tested in `touchReplay.test.ts`, including the two cases the
+> synthetic run could not reach: a touch behind a fold landing on the fold, and
+> that fold opening to move the playhead onto the file itself.
+>
+> Driven with Playwright at 1440×1000: the track's max is the touch count; the
+> readout at 120 read `Touch 120 of 399 / src/components/ui/C3.tsx / Read /
+> explorer`; right-arrow from there stepped to 121; space played it from 121 to
+> 170 in 2.5 s, which is the `TARGET_SECONDS` rate to within a step; space again
+> paused it and it was still on the same number 1.5 s later; the last touch is the
+> one outside the checkout and it kept its position and said so; Reset returned to
+> 0, took the two replay rows back out of the legend and left the map with nothing
+> dimmed and nothing haloed. At touch 8 of 399 the wash reads clearly — a handful
+> of solid nodes in one cluster against a pale rest — in both themes, with the
+> directory anchors at full strength.
+>
+> **What no automated pass can settle, and is the reason to open this by hand:**
+> whether *scrubbing* it tells you anything. A playhead that is legible frame by
+> frame in a screenshot can still be unreadable in motion, and the rate is a
+> guess: `TARGET_SECONDS = 20` was chosen by reasoning about how long a person
+> will watch, not by watching. Open `/runs/<id>/touched` on a **real** run, play
+> it end to end, and answer three things — is the halo findable without hunting
+> while it is moving; does the wash lifting file by file read as the run
+> progressing or as noise; and at that run's own length is 20 seconds too long to
+> sit through or too fast to follow. If the answer to the last one is either, the
+> constant is the dial. The keyboard needs a real pass too: space is claimed only
+> from the range input, so check that pressing it on Play does not toggle twice
+> and that pressing it on the track does not scroll the page.
 
 > **The map at `/runs/[id]/conflicts` *has* been seen, against real
 > `merge-tree` output, and here is exactly how far that goes.** Docker is still
