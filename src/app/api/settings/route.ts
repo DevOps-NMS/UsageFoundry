@@ -272,6 +272,76 @@ async function putHandler(req: Request) {
     patch.knowledgeBaseSubpath = subpath;
   }
 
+  if ("dreamingEnabled" in body) {
+    patch.dreamingEnabled = Boolean(body.dreamingEnabled);
+  }
+
+  if ("dreamingMinutes" in body) {
+    const v = Number(body.dreamingMinutes);
+    // A time of day, so the range is the day. Refused rather than clamped:
+    // `1440` is somebody meaning midnight and getting the wrong end of it, and
+    // silently storing `0` would fire a day earlier than they asked for.
+    if (!Number.isInteger(v) || v < 0 || v > 1439) {
+      return NextResponse.json(
+        { error: "The Dreaming time must be a whole number of minutes from 0 to 1439." },
+        { status: 400 },
+      );
+    }
+    patch.dreamingMinutes = v;
+  }
+
+  if ("dreamingTimeZone" in body) {
+    const zone = String(body.dreamingTimeZone ?? "").trim();
+    // Asked of the platform rather than matched against a list this app would
+    // have to keep: `defaultAgentId`'s rule, refuse where the person is. A zone
+    // stored now and found unknown later silently moves every day boundary the
+    // feature is denominated in to UTC, which is a readout about the wrong day.
+    try {
+      new Intl.DateTimeFormat("en-CA", { timeZone: zone });
+    } catch {
+      return NextResponse.json(
+        { error: `"${zone}" is not a time zone this system knows.` },
+        { status: 400 },
+      );
+    }
+    patch.dreamingTimeZone = zone;
+  }
+
+  if ("dreamingMinDays" in body) {
+    const v = Number(body.dreamingMinDays);
+    if (!Number.isInteger(v) || v < 1 || v > 30) {
+      return NextResponse.json(
+        { error: "A failure must span between 1 and 30 days before it is written." },
+        { status: 400 },
+      );
+    }
+    patch.dreamingMinDays = v;
+  }
+
+  if ("dreamingMaxCostUSD" in body) {
+    const v = Number(body.dreamingMaxCostUSD);
+    // No way to express "no ceiling", on `scheduleRefusal`'s reasoning: a clock
+    // removes the person who would have seen what the last run cost.
+    if (!Number.isFinite(v) || v <= 0) {
+      return NextResponse.json(
+        { error: "Dreaming needs a cost ceiling above zero; it runs with nobody present." },
+        { status: 400 },
+      );
+    }
+    patch.dreamingMaxCostUSD = v;
+  }
+
+  if ("dreamingMaxPerNight" in body) {
+    const v = Number(body.dreamingMaxPerNight);
+    if (!Number.isInteger(v) || v < 1 || v > 50) {
+      return NextResponse.json(
+        { error: "A night may write between 1 and 50 notes." },
+        { status: 400 },
+      );
+    }
+    patch.dreamingMaxPerNight = v;
+  }
+
   if ("continuationPrompt" in body) {
     const v = String(body.continuationPrompt ?? "").trim();
     if (v) patch.continuationPrompt = v;

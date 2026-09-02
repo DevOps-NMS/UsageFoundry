@@ -14,6 +14,7 @@ import {
   worktreeStores,
 } from "./orchestrator";
 import { getSettings } from "./settings";
+import { forgetDreamingFiles } from "./dreaming";
 import { forgetTranscriptFiles } from "./transcripts";
 
 /**
@@ -763,6 +764,11 @@ export async function sweepTranscripts(now = Date.now()): Promise<{
   for (const sessionId of sessions) clear.run(sessionId, ...TERMINAL_STATUSES);
 
   forgetTranscriptFiles(gone);
+  // The same call for the second cache over the same corpus. Dreaming keeps its
+  // own per-file memo rather than riding the usage scan's, so a sweep that
+  // forgot only that one would leave this one holding the parse of every
+  // transcript ever deleted, for the life of the process.
+  forgetDreamingFiles(gone);
   return { removed: gone.length, bytes };
 }
 

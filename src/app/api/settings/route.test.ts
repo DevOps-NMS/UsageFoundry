@@ -116,6 +116,12 @@ const PROBES: Record<keyof Settings, Probe> = {
   // Sent in the form a person types and stored normalized, so the round trip
   // proves the two ends agree on the spelling rather than only on the value.
   knowledgeBaseSubpath: { send: "/Vault/Notes/", stored: "Vault/Notes" },
+  dreamingEnabled: { send: true },
+  dreamingMinutes: { send: 4 * 60 + 30 },
+  dreamingTimeZone: { send: "Europe/Berlin" },
+  dreamingMinDays: { send: 3 },
+  dreamingMaxCostUSD: { send: 5 },
+  dreamingMaxPerNight: { send: 8 },
   chatDefaultGuards: {
     send: {
       permissionMode: "plan",

@@ -27,6 +27,7 @@ export type IconName =
   | "knowledge"
   | "account"
   | "settings"
+  | "dreaming"
   // The shell's own two controls: collapse the source list, and quick open.
   | "sidebar"
   | "search"
@@ -108,6 +109,15 @@ const GLYPH: Record<IconName, ReactElement> = {
     <>
       <circle cx="8" cy="6" r="2.5" />
       <path d="M3.4 13.1a4.75 4.75 0 0 1 9.2 0" />
+    </>
+  ),
+  // A crescent with two marks beside it. Deliberately not a lightbulb or a
+  // brain: this pane shows what *recurred*, counted, and a glyph promising
+  // insight would be the diagnosis half the feature refuses to ship.
+  dreaming: (
+    <>
+      <path d="M12.6 9.6A5 5 0 0 1 6.4 3.4a5.2 5.2 0 1 0 6.2 6.2Z" />
+      <path d="M11.2 2.6v1.9M10.25 3.55h1.9" />
     </>
   ),
   settings: (

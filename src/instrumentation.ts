@@ -155,6 +155,16 @@ export async function register() {
       const { reconcileSchedulesOnBoot } = await import("./lib/schedules");
       reconcileSchedulesOnBoot();
 
+      // The same rule for the other clock in this app. Dreaming's cursor is a
+      // night rather than an instant, and a boot moves it to the current night
+      // whatever it finds — so a server coming back at noon writes nothing
+      // about a 03:04 that passed while it was down. Its timer is started here
+      // for the schedules' reason: two processes deciding one night would point
+      // two agents at one vault, and the vault has no version control behind it.
+      const { reconcileDreamingOnBoot, startDreaming } = await import("./lib/dreamingRun");
+      reconcileDreamingOnBoot();
+      startDreaming();
+
       // And the one sweep that deletes rather than reconciles. Gated on the
       // same claim as everything above, for a reason of its own: it decides
       // what is safe to discard from the *live* state — which runs have

@@ -2403,6 +2403,22 @@ export interface SettingsDTO {
   knowledgeBaseMountId: string | null;
   /** A directory inside that mount. `""` is the mount root. */
   knowledgeBaseSubpath: string;
+  /**
+   * Let a nightly run write recurring failures into that vault.
+   *
+   * The only field on this payload that authorises an unattended write into a
+   * store this app does not own. The readout on `/dreaming` needs none of it.
+   */
+  dreamingEnabled: boolean;
+  /** Minutes past local midnight, in `dreamingTimeZone`. */
+  dreamingMinutes: number;
+  /** Read twice: when the pass fires, and where a day begins. */
+  dreamingTimeZone: string;
+  /** Separate days a failure must span before it is written down. */
+  dreamingMinDays: number;
+  /** Never null — a clock removes the person who would have seen the cost. */
+  dreamingMaxCostUSD: number;
+  dreamingMaxPerNight: number;
 }
 
 /**
@@ -2938,4 +2954,102 @@ export interface KnowledgeHealthDTO {
   listLimit: number;
   truncated: boolean;
   scannedAt: number;
+}
+
+/* ------------------------------------------------------------------ */
+/*                             Dreaming                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * One normalised failure signature, everywhere it has appeared.
+ *
+ * **`signature` is a string, not a cause**, and every surface that renders one
+ * has to say so somewhere the reader will see it. Normalisation collapses
+ * numbers, hex runs and path interiors, so one cause routinely appears as
+ * several rows — the four `bwrap` denials at four different files are one
+ * denial — and one row routinely carries many causes, of which `Exit code N` is
+ * the worst in this corpus. A count here is a count of strings that recurred.
+ */
+export interface DreamingSignatureDTO {
+  signature: string;
+  /** The machine's own words, clipped. Never a description of them. */
+  sample: string;
+  /** Distinct days it appeared on, ascending. */
+  days: string[];
+  instances: number;
+  /** Sessions it was seen in, cut to a link list rather than an audit. */
+  sessions: string[];
+  /** Whether this app has already written a note for it. */
+  written: boolean;
+}
+
+/** A note this app wrote, and whether the file is still there. */
+export interface DreamingNoteDTO {
+  signature: string;
+  sample: string;
+  writtenAt: number;
+  night: string;
+  runId: string | null;
+  /** Vault-relative. Null when the run wrote nothing for this signature. */
+  notePath: string | null;
+  daysSeen: number;
+  instances: number;
+  /**
+   * `true` when the file is on disk, `false` when it is gone, `null` when there
+   * is no path to check or the vault is unreachable.
+   *
+   * Three values rather than two because the vault has no version control: a
+   * note deleted in Obsidian leaves no trace except its absence, and "we cannot
+   * tell" must not render as "it is gone".
+   */
+  present: boolean | null;
+}
+
+export type DreamingNightOutcomeDTO = "selected" | "quiet" | "refused" | "failed";
+
+export interface DreamingNightDTO {
+  night: string;
+  startedAt: number;
+  outcome: DreamingNightOutcomeDTO;
+  reason: string | null;
+  runId: string | null;
+  selected: number;
+}
+
+/**
+ * What `/dreaming` reads.
+ *
+ * `writerConfigured` and `refusal` are separate from `enabled` on purpose: the
+ * readout half needs no configuration at all and is always available, so a page
+ * that conflated them would tell an operator with no vault that there is
+ * nothing to see.
+ */
+export interface DreamingDTO {
+  /** Signatures spanning two or more days, by days spanned then instances. */
+  recurring: DreamingSignatureDTO[];
+  totalSignatures: number;
+  totalInstances: number;
+  recurringInstances: number;
+  /** Days in the scanned window that carried at least one error. */
+  days: string[];
+  filesWalked: number;
+  filesRead: number;
+  scannedInMs: number;
+  scannedAt: number;
+
+  /** The write half. */
+  enabled: boolean;
+  /** Why a night would refuse right now, or null if it would run. */
+  refusal: string | null;
+  /** Local time of day the nightly pass fires, and the zone it is read in. */
+  fireAtMinutes: number;
+  timeZone: string;
+  minDays: number;
+  maxPerNight: number;
+  maxCostUSD: number;
+  /** The vault it would write into, as a label rather than a container path. */
+  vaultLabel: string | null;
+
+  notes: DreamingNoteDTO[];
+  nights: DreamingNightDTO[];
 }

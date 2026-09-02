@@ -1575,6 +1575,78 @@ function migrate(db: Database.Database) {
   addColumn(db, "fork_attempts", "trigger", "TEXT");
   addColumn(db, "fork_attempts", "context_tokens_after", "INTEGER");
 
+  // What Dreaming has written into the operator's vault, and when.
+  //
+  // **This table is the retraction mechanism, and it is why the feature can
+  // ship at all.** The vault is not a git repository: no history, no author
+  // field, no diff of what last night added, and nothing in a note marks it as
+  // machine-written. So "which files did this app write" is not a question the
+  // destination can answer, and without a row here the only retraction is a
+  // person noticing a wrong note months later. It is not version control. It is
+  // the list a person deletes *from*.
+  //
+  // `signature` is the primary key rather than an id, and that is the
+  // deduplication mechanism rather than a normalisation choice: the write
+  // policy is "has this app already written this signature", which is a lookup
+  // on this column. An id with a unique index beside it would be the same
+  // statement with a second way to get it wrong.
+  //
+  // `days_seen` and `instances` are the readings *at the moment of writing*,
+  // frozen deliberately — `run_templates`' rule. The note in the vault says
+  // "seen on 3 days"; re-deriving that later would leave the row disagreeing
+  // with the file it points at.
+  //
+  // `note_path` is vault-relative and nullable: a night can select a signature,
+  // spawn a run, and have the run write nothing. A row with a null path and a
+  // non-null `written_at` is exactly that, and is the difference between "this
+  // was never attempted" and "this was attempted and produced no file" — which
+  // the pane must not conflate.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dreaming_notes (
+      signature   TEXT PRIMARY KEY,
+      -- The machine's own words, clipped. Shown beside the note so an operator
+      -- can see what it was about without opening the vault.
+      sample      TEXT NOT NULL,
+      written_at  INTEGER NOT NULL,
+      -- The night that wrote it, as YYYY-MM-DD in the operator's zone.
+      night       TEXT NOT NULL,
+      -- The run that did the writing, so the pane can link to its log. A plain
+      -- column on webhook_deliveries.run_id's reasoning: nothing deletes a runs
+      -- row, so a cascade would describe a deletion that never happens.
+      run_id      TEXT,
+      -- Vault-relative. Null when the run wrote nothing for this signature.
+      note_path   TEXT,
+      days_seen   INTEGER NOT NULL,
+      instances   INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_dreaming_notes_night ON dreaming_notes(night);
+  `);
+
+  // One row per night Dreaming decided anything, whether or not it wrote.
+  //
+  // A night that selected nothing is the *success* case for a write-on-
+  // recurrence policy — six of the 23 measured days had no signature reach a
+  // second day — and it must not render as a failure or as an empty page. That
+  // is the whole reason this table exists separately from the one above: the
+  // notes table cannot record a night that produced no notes, and "ran and
+  // wrote nothing" and "never ran" are two of the three kinds of nothing the
+  // pane is required to keep apart.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dreaming_nights (
+      night       TEXT PRIMARY KEY,
+      started_at  INTEGER NOT NULL,
+      -- 'selected' when signatures qualified and a run was created, 'quiet'
+      -- when none did, 'refused' when something declined to start it, 'failed'
+      -- when the run itself did not finish. Never a success mark on a row: the
+      -- run's own status is the authority, exactly as it is for a review.
+      outcome     TEXT NOT NULL,
+      -- Why, for 'refused' and 'failed'. A full sentence, never a code.
+      reason      TEXT,
+      run_id      TEXT,
+      selected    INTEGER NOT NULL
+    );
+  `);
+
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as
   // one it left behind.

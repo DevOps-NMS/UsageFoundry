@@ -205,7 +205,10 @@ export function QuickOpen({
       key: `pane:${pane.href}`,
       group: "Panes",
       label: pane.label,
-      detail: `⌘${pane.shortcut}`,
+      // `QuickItem.detail` is optional and its render site is already
+      // conditional, so a row past the ninth simply draws no chip. Unguarded,
+      // this printed the string "⌘undefined" beside it.
+      detail: pane.shortcut ? `⌘${pane.shortcut}` : undefined,
       href: pane.href,
       haystack: pane.label.toLowerCase(),
     }));

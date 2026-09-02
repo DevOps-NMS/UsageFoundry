@@ -110,6 +110,7 @@ const SECTIONS = [
   { id: "tokens", label: "Token use" },
   { id: "plugins", label: "Plugins" },
   { id: "knowledge", label: "Knowledge base" },
+  { id: "dreaming", label: "Dreaming" },
   { id: "storage", label: "Storage" },
   { id: "prompts", label: "Prompts" },
 ];
@@ -372,6 +373,12 @@ const EDITABLE_PATHS = [
   "freshStartContextTokens",
   "knowledgeBaseMountId",
   "knowledgeBaseSubpath",
+  "dreamingEnabled",
+  "dreamingMinutes",
+  "dreamingTimeZone",
+  "dreamingMinDays",
+  "dreamingMaxCostUSD",
+  "dreamingMaxPerNight",
   "eventRetentionDays",
   "checkoutRetentionDays",
   "transcriptRetentionDays",
@@ -3524,7 +3531,7 @@ export default function SettingsPage() {
       <Section
         id="knowledge"
         title="Knowledge base"
-        lede="A folder of markdown notes, read as a graph of the links between them. It is one of the folders already mounted below — naming it here lets this app read it, and nothing here writes to it."
+        lede="A folder of markdown notes, read as a graph of the links between them. It is one of the folders already mounted below — naming it here lets this app read it. Nothing on this page writes to it; the one thing in this app that can is Dreaming, below, and it is off until you turn it on."
       >
         <KnowledgeFigures report={knowledge} error={knowledgeError} />
 
@@ -3624,6 +3631,141 @@ export default function SettingsPage() {
               disabled={skillBusy || knowledge === null || !knowledge.configured}
               onChange={(v) => void toggleSkill(v)}
             />
+          </SettingRow>
+        </ListGroup>
+      </Section>
+
+      <Section
+        id="dreaming"
+        title="Dreaming"
+        lede="Once a night, write down the failures that have happened on more than one day. This is the only thing in this app that writes into the vault above, and it is off until you turn it on."
+      >
+        <Notice tone="warn" quiet>
+          The vault is not a git repository — no history, no author field, and nothing in a
+          note that marks it as machine-written. What makes a wrong note retractable is the
+          list this app keeps of what it wrote, on{" "}
+          <a href="/dreaming">Dreaming</a>. Read that page before turning this on.
+        </Notice>
+
+        <ListGroup
+          className="mt-4"
+          label="The nightly pass"
+          footnote="The readout on the Dreaming page needs none of this — it reads the same failures, writes nothing, and is always available"
+        >
+          <SettingRow
+            htmlFor="dreamon"
+            edited={isEdited("dreamingEnabled")}
+            label="Write notes into the vault"
+            description="Starts one run a night, in the vault folder, told to read that vault's own conventions before writing anything"
+          >
+            <Switch
+              id="dreamon"
+              checked={effective.dreamingEnabled}
+              // Refused at the door too: a switch reading as on with no vault
+              // behind it would fire nightly and refuse every time, silently.
+              disabled={!knowledge?.configured}
+              onChange={(v) => patch({ dreamingEnabled: v })}
+            />
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="dreamtime"
+            edited={isEdited("dreamingMinutes")}
+            label="Run at"
+            description="Minutes past local midnight, in the zone below. A boot never catches up on a time that passed while the server was down"
+          >
+            <div className="w-32">
+              <Input
+                id="dreamtime"
+                type="number"
+                min={0}
+                max={1439}
+                className="tabular-nums"
+                unit="min"
+                value={String(effective.dreamingMinutes)}
+                onChange={(e) => patch({ dreamingMinutes: Number(e.target.value) })}
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="dreamtz"
+            edited={isEdited("dreamingTimeZone")}
+            label="Time zone"
+            description="Read twice: it sets when the pass fires and where a day begins. A failure seen either side of this boundary is a failure on two days"
+          >
+            <div className="w-64">
+              <Input
+                id="dreamtz"
+                value={effective.dreamingTimeZone}
+                onChange={(e) => patch({ dreamingTimeZone: e.target.value })}
+              />
+            </div>
+          </SettingRow>
+        </ListGroup>
+
+        <ListGroup
+          className="mt-4"
+          label="What it may write"
+          footnote="Measured on this install's own corpus: writing every failure the first time it is seen makes 93.5% of the notes about something that never happened again"
+        >
+          <SettingRow
+            htmlFor="dreamdays"
+            edited={isEdited("dreamingMinDays")}
+            label="Write a failure after"
+            description="Separate days it must have occurred on. At 2 it waits a median of three days, and writes only what is a standing property rather than an incident"
+          >
+            <div className="w-32">
+              <Input
+                id="dreamdays"
+                type="number"
+                min={1}
+                max={30}
+                className="tabular-nums"
+                unit="days"
+                value={String(effective.dreamingMinDays)}
+                onChange={(e) => patch({ dreamingMinDays: Number(e.target.value) })}
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="dreammax"
+            edited={isEdited("dreamingMaxPerNight")}
+            label="Notes per night"
+            description="Each one is a note plus an edit to whatever links to it, so a night that wrote dozens would be a long run inside a store you have open"
+          >
+            <div className="w-32">
+              <Input
+                id="dreammax"
+                type="number"
+                min={1}
+                max={50}
+                className="tabular-nums"
+                value={String(effective.dreamingMaxPerNight)}
+                onChange={(e) => patch({ dreamingMaxPerNight: Number(e.target.value) })}
+              />
+            </div>
+          </SettingRow>
+
+          <SettingRow
+            htmlFor="dreamcost"
+            edited={isEdited("dreamingMaxCostUSD")}
+            label="Cost ceiling"
+            description="There is no way to express no ceiling. This runs with nobody present, and every other press of Run has a person behind it who sees what the last one cost"
+          >
+            <div className="w-32">
+              <Input
+                id="dreamcost"
+                type="number"
+                min={0.01}
+                step={0.5}
+                className="tabular-nums"
+                unit="USD"
+                value={String(effective.dreamingMaxCostUSD)}
+                onChange={(e) => patch({ dreamingMaxCostUSD: Number(e.target.value) })}
+              />
+            </div>
           </SettingRow>
         </ListGroup>
       </Section>

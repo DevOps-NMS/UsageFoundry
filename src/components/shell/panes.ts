@@ -11,16 +11,29 @@ import type { IconName } from "@/components/ui/Icon";
  *
  * The digit follows the row's position rather than the pane's age: a shortcut
  * that names the fifth row and lands on the sixth is worse than one somebody
- * has to relearn, so inserting a pane renumbers the ones under it. Nine is the
- * ceiling and Knowledge is the ninth — a tenth destination has no digit, and a
- * row without one is a row two of the four readers cannot describe.
+ * has to relearn, so inserting a pane renumbers the ones under it. **Nine is
+ * the ceiling** — ⌘1…⌘9 is nine digits and Settings is the ninth row — so a
+ * tenth destination has no digit at all.
+ *
+ * That used to be a warning rather than a mechanism, and it named the wrong row
+ * (Knowledge, which has been the seventh since it moved above the two
+ * configuration panes). It is now a type: `shortcut` is optional, and the two
+ * readers that put the digit into a string guard it. Both were unguarded, and
+ * both failed silently rather than loudly — a screen reader announcing
+ * `Meta+undefined` and a palette printing `⌘undefined`, neither a type error
+ * and neither a throw.
  */
 export interface Pane {
   href: string;
   label: string;
   icon: IconName;
-  /** The digit after ⌘. Announced with `aria-keyshortcuts` on the row. */
-  shortcut: string;
+  /**
+   * The digit after ⌘, or absent past the ninth row.
+   *
+   * Announced with `aria-keyshortcuts` on the row and shown in quick open, and
+   * **every reader of it must handle its absence** — see the note above.
+   */
+  shortcut?: string;
 }
 
 export const PANES: readonly Pane[] = [
@@ -36,6 +49,13 @@ export const PANES: readonly Pane[] = [
   { href: "/knowledge", label: "Knowledge", icon: "knowledge", shortcut: "7" },
   { href: "/account", label: "API account", icon: "account", shortcut: "8" },
   { href: "/settings", label: "Settings", icon: "settings", shortcut: "9" },
+  // The tenth, and the first row in this app with no shortcut. It sits below
+  // the configuration pair rather than beside Knowledge, which is the pane it
+  // is nearest in kind: this one is a readout of what the install did to
+  // itself, and the two config panes keep the bottom they were given. Taking
+  // ⌘9 from Settings to give a digit to a readout would be the wrong trade —
+  // Settings is where somebody goes when something is wrong.
+  { href: "/dreaming", label: "Dreaming", icon: "dreaming" },
 ];
 
 /**

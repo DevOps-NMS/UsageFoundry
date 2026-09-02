@@ -657,6 +657,71 @@ export interface Settings {
    * not evidence about the filesystem it is read back into.
    */
   knowledgeBaseSubpath: string;
+  /**
+   * Let a nightly run write recurring failures into the configured vault.
+   *
+   * **Off by default, and this is the one setting in this file that authorises
+   * an unattended write into a store this app does not own.** Everything else
+   * here bounds what an agent does inside a checkout; this points one at the
+   * operator's document store. The readout on `/dreaming` needs none of it —
+   * that reads the same corpus, writes nothing, and is always available.
+   *
+   * The write is licensed rather than assumed: the vault's own `AGENTS.md`
+   * forbids a session that has not read its `CLAUDE.md` from writing notes, and
+   * the run this creates is pointed at the vault as its folder precisely so
+   * that it is a session that can read it. Nothing enforces that it does —
+   * a `PreToolUse` deny-on-`Write` hook is the only mechanism that would, and
+   * this app does not have one, which is why the default is off.
+   */
+  dreamingEnabled: boolean;
+  /**
+   * Minutes past local midnight to run, in `dreamingTimeZone`.
+   *
+   * Deliberately not a cron string, matching `ScheduleSpec`: three shapes with
+   * a zone on the row is what an operator can reason about, and the one this
+   * feature needs is the daily one.
+   */
+  dreamingMinutes: number;
+  /**
+   * The zone the day boundary and the fire time are both read in.
+   *
+   * One setting for both on purpose. A feature whose unit is "a day" and whose
+   * clock is a different day is one where the night of the 3rd writes about the
+   * 2nd and nobody can tell which.
+   */
+  dreamingTimeZone: string;
+  /**
+   * How many separate days a failure must span before it is written down.
+   *
+   * 2 by default, which is a measurement rather than a taste: writing every
+   * signature on first sight produces 1,177 notes over 23 days of this corpus,
+   * of which 1,100 (93.5%) are about something that never recurred. Waiting for
+   * a second day produces 77, all about something that happened twice.
+   * Raising it trades latency for certainty; 1 turns the policy off and is
+   * allowed because refusing to express a setting is worse than letting
+   * somebody choose badly on purpose.
+   */
+  dreamingMinDays: number;
+  /**
+   * Ceiling in USD on the run one night may create. Never null.
+   *
+   * `schedules.ts:529` refuses to schedule a workflow whose instance budget
+   * sets nothing, with a reason that applies here word for word: "every other
+   * press of Run is bounded by a person being there to see what it cost and
+   * decide whether to press it again; a schedule removes the person and keeps
+   * the press." This is that bound, and there is no way to express its absence.
+   */
+  dreamingMaxCostUSD: number;
+  /**
+   * Signatures one night may hand to a run.
+   *
+   * A cap on the *prompt*, not on the corpus: the policy above produces a
+   * median of 3.3 a night, but a first run against an unscanned corpus of 23
+   * days selects 77 at once, and the vault's own conventions make each one two
+   * file writes plus an index regeneration. A first night that tried all 77
+   * would be a long, expensive run against somebody's live document store.
+   */
+  dreamingMaxPerNight: number;
 }
 
 /**
@@ -823,6 +888,14 @@ export const DEFAULTS: Settings = {
   chatDefaultGuards: DEFAULT_CHAT_GUARDS,
   knowledgeBaseMountId: null,
   knowledgeBaseSubpath: "",
+  dreamingEnabled: false,
+  // 03:04 rather than 03:00: every other unattended thing on a host fires on
+  // the hour, and this one reads a corpus a retention sweep also walks.
+  dreamingMinutes: 3 * 60 + 4,
+  dreamingTimeZone: "UTC",
+  dreamingMinDays: 2,
+  dreamingMaxCostUSD: 2,
+  dreamingMaxPerNight: 5,
 };
 
 /**

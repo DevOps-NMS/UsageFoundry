@@ -93,6 +93,16 @@ src/lib/
                    graph — parse, resolve, cache; read-only, and no write path
   vaultSkill.ts    the vault-lookup skill a run is handed: generated per spawn
                    as a plugin directory, never installed into ~/.claude
+  dreaming.ts      failures that recurred, counted from the transcripts'
+                   is_error results — its own incremental cache, never the
+                   usage scan's; writes nothing
+  dreamingLedger.ts  what a night wrote into the vault and what each night
+                   decided — the deduplication key and the retraction list,
+                   since the vault has no history of its own
+  dreamingRun.ts   the half that spends: selects what has recurred and is
+                   unwritten, starts one run in the vault, and the nightly
+                   clock over it — the second clock in this app after
+                   schedules.ts, and it never catches up after a boot
   knowledgeGraph.ts  what the graph view shows before anything draws it —
                    the search query, the colour groups, the filters, the
                    local-graph walk, and the settings the browser stores

@@ -1767,6 +1767,39 @@ standalone bundle), and are covered by the unit tests above, but the following
 have **not** been exercised against a real CLI. They are the list to work
 through before trusting this unattended:
 
+> **Dreaming's readout, ledger and refusals were driven against a running
+> server; the agent's write into a vault was not.** On 2026-09-02 the feature
+> was exercised end to end against a built app (`npm start`, a throwaway
+> `DATA_DIR`, a scratch mount holding one `CLAUDE.md`) and the real
+> `~/.claude/projects` corpus. What **was** checked by hand: the readout
+> reproduces `proposals/Dreaming`'s figures exactly — 77 recurring signatures
+> carrying 1,260 of 2,553 instances over 23 days, against the 77 / 1,260 / 2,549
+> the scripts measured, the drift being that day's own sessions; the incremental
+> cache works, cold 3,483 ms over 1,954 files against warm **21 ms with 0 files
+> re-read**; all five settings-door refusals answer 400 with the sentence the
+> form shows; `refusal` reads "No knowledge base is configured." with the flag on
+> and no vault, and clears when one is named; a press creates a real run with
+> `origin_ref = dreaming:<night>` and claims its signatures; a second press
+> selects three **different** signatures, so deduplication suppresses; a quiet
+> night records `quiet`, creates no run and spends nothing; `forgetNote` answers
+> 200 then 404 and removes only the row. Both bugs in the ledger paragraph of
+> `docs/agent/testing.md` were found this way, after the code typechecked and
+> passed the suite.
+>
+> What has **not** happened is one agent writing one note. The two runs the
+> smoke test created were cancelled within seconds — a real billed agent against
+> the operator's own subscription, started to prove the spawn rather than the
+> write — so `reconcileDreamingNotes` was proved against a final report
+> **inserted into `run_events` by hand** rather than one an agent produced, and
+> no file has ever been written into a vault by this feature. Three things are
+> therefore untested against reality: whether an agent handed
+> `buildDreamingPrompt`'s text actually reads `CLAUDE.md` before writing (nothing
+> enforces it — see `docs/agent/dreaming.md`), whether it emits the `NOTE n path`
+> lines in the shape asked for, and whether what it writes passes `_Meta/qc.py`,
+> whose `LINK/orphan` rule at ERROR means a compliant write is two files rather
+> than one. The decisive test is one night against a **copy** of the vault with
+> `dreamingMaxPerNight: 1`, then `python3 "_Meta/qc.py"` over the result.
+
 > **The cycle-prompt split has never spawned a real agent.** On 2026-08-28
 > `orchestrator.ts`'s "Claude Code invocation" section — the next prompt, its
 > notices, `cycleEnding` and `buildArgs`, 1,032 lines — moved unedited to

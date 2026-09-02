@@ -173,7 +173,10 @@ export function Sidebar({
                   // The same computation that picks the fill, said so a screen
                   // reader gets it too.
                   aria-current={current ? "page" : undefined}
-                  aria-keyshortcuts={`Meta+${pane.shortcut}`}
+                  // Absent past the ninth row: `panes.ts` has nine digits and
+                  // a tenth destination. Unguarded, this announced a shortcut
+                  // that does not exist — `Meta+undefined` — to a screen reader.
+                  aria-keyshortcuts={pane.shortcut ? `Meta+${pane.shortcut}` : undefined}
                   onClick={onNavigate}
                   className={
                     `${COLLAPSE_ROW[variant]} ui-transition flex min-h-[var(--control-h)] ` +
