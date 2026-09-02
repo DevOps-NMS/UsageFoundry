@@ -162,6 +162,28 @@ const QUESTION_EDGE: Record<"open" | "settled", string> = {
 };
 
 /**
+ * A `system` turn's edge and text, per kind. Complete class strings, as above.
+ *
+ * `Message`'s docblock argues that what the app did must not be drawn as though
+ * the model said it; the same argument separates what the app *did* from what
+ * went *wrong*. "The chat saved a new template" and "the chat did not answer
+ * within 10 minutes and was stopped" are the same grey today, and only one of
+ * them is something to act on.
+ *
+ * **The page infers which is which, because the row does not say.**
+ * `chat_messages` carries no kind, so a failure is "the last message of a
+ * `failed` chat, saying what the row's `error` says" — right about the ending
+ * being looked at now, and wrong about the ones behind it: `claimTurn` clears
+ * both on the next message, so an older failure in a thread that was re-sent
+ * reverts to grey. The durable answer is a column on the table, which is a
+ * migration for a tone.
+ */
+const SYSTEM_EDGE: Record<"note" | "failure", string> = {
+  note: "border-l-line-strong text-ink-muted",
+  failure: "border-l-danger text-ink",
+};
+
+/**
  * A choice button, per state.
  *
  * Only reachable while more than one question is open — with one, a choice
@@ -702,6 +724,21 @@ export default function ChatPage() {
     chat?.status === "failed" && chat.error && chat.error !== lastMessage?.text
       ? chat.error
       : null;
+  // Which message in the thread is the failure note — see `SYSTEM_EDGE` for
+  // what this inference is right and wrong about. Paired with `turnFailure`
+  // above on the same comparison, so exactly one of the two draws the ending:
+  // the note when the thread carries it, the belt when only the row does.
+  const failureMessageId =
+    chat?.status === "failed" &&
+    lastMessage?.role === "system" &&
+    lastMessage.text === chat.error
+      ? lastMessage.id
+      : null;
+  // The words the failed turn was answering, offered back to the composer. They
+  // are still in the thread; what is gone is the turn. `at(-1)` over a filter
+  // rather than `findLast`, which is ES2023 and this target is ES2022.
+  const lastUserMessage =
+    chat?.messages.filter((m) => m.role === "user").at(-1) ?? null;
   // The turn started when the server claimed it, not when the thread last
   // moved — see `turnStartInstant`. `Date.now()` is the last resort for a
   // render with no chat at all, which is a render with nothing to draw a clock
@@ -906,6 +943,7 @@ export default function ChatPage() {
                             questions={item.questions}
                             busy={busy}
                             thinking={thinking}
+                            turnFailed={chat.status === "failed"}
                             error={answerError}
                             onAnswer={(answers) => void answer(answers)}
                           />
@@ -924,6 +962,11 @@ export default function ChatPage() {
                             prev?.kind === "message" &&
                             prev.message.role === item.message.role
                           }
+                          systemKind={
+                            item.message.id === failureMessageId
+                              ? "failure"
+                              : "note"
+                          }
                         />
                       );
                     })
@@ -940,6 +983,28 @@ export default function ChatPage() {
                   {turnFailure && (
                     <div className="mt-5 max-w-[70ch] rounded-sm border-l-2 border-l-danger bg-inset px-3 py-2 text-xs leading-normal text-danger">
                       {turnFailure}
+                    </div>
+                  )}
+
+                  {/* What survives an ending, under it. The button fills the
+                      composer and focuses it; it does not post, and that is
+                      the whole reason it is allowed — nothing may start a turn
+                      but the operator pressing Send, and nothing stranded may
+                      be re-asked unattended. `caretTo` is the same mechanism
+                      the mention list inserts with. */}
+                  {chat?.status === "failed" && lastUserMessage && (
+                    <div className="mt-2 flex max-w-[70ch] flex-wrap items-center gap-2 text-xs leading-normal text-ink-muted">
+                      Your message is still in the thread.
+                      <Button
+                        size="compact"
+                        variant="secondary"
+                        onClick={() => {
+                          setDraft(lastUserMessage.text);
+                          setCaretTo(lastUserMessage.text.length);
+                        }}
+                      >
+                        Send it again
+                      </Button>
                     </div>
                   )}
                 </div>
@@ -1321,18 +1386,30 @@ export default function ChatPage() {
  * one speaker are one utterance interrupted by a newline, and repeating the
  * label says nothing.
  */
-function Message({ message, grouped }: { message: ChatMessageDTO; grouped: boolean }) {
+function Message({
+  message,
+  grouped,
+  systemKind,
+}: {
+  message: ChatMessageDTO;
+  grouped: boolean;
+  /** Which kind of `system` turn this is. Nothing else reads it. */
+  systemKind: "note" | "failure";
+}) {
   const { role, text, ts } = message;
 
   if (role === "system") {
     return (
       // The kit's quiet notice, in the thread's own rhythm: a hairline box with
-      // a neutral leading edge. Not a `Notice`, only because that component
-      // carries a margin of its own that would fight the run spacing here.
+      // a leading edge that says which kind it is. Not a `Notice`, only because
+      // that component carries a margin of its own that would fight the run
+      // spacing here.
       <div
         className={`${
           grouped ? "mt-1.5" : "mt-5"
-        } max-w-[70ch] rounded-sm border border-line border-l-[3px] border-l-line-strong bg-inset px-3 py-2 text-xs leading-normal text-ink-muted first:mt-0`}
+        } max-w-[70ch] rounded-sm border border-line border-l-[3px] bg-inset px-3 py-2 text-xs leading-normal first:mt-0 ${
+          SYSTEM_EDGE[systemKind]
+        }`}
       >
         {text}
       </div>
@@ -1492,12 +1569,15 @@ function AskedQuestions({
   questions,
   busy,
   thinking,
+  turnFailed,
   error,
   onAnswer,
 }: {
   questions: ChatQuestionDTO[];
   busy: boolean;
   thinking: boolean;
+  /** The chat's last turn ended badly. A question outlives that; say so. */
+  turnFailed: boolean;
   error: string | null;
   onAnswer: (answers: Array<{ id: string; answer: string }>) => void;
 }) {
@@ -1669,6 +1749,16 @@ function AskedQuestions({
           {thinking && (
             <p className="mt-2 text-2xs leading-normal text-ink-faint">
               This turn is still working — you can answer once it finishes.
+            </p>
+          )}
+          {/* The counterpart, and the fact that decides whether the operator
+              answers or starts over: a question is a row and survives every way
+              a turn can die, so the card is still live — but the child that
+              asked is gone, and answering spawns a new one through
+              `sendChatMessage` like any other message. */}
+          {turnFailed && (
+            <p className="mt-2 text-2xs leading-normal text-ink-faint">
+              The turn that asked this was stopped. Answering starts a new one.
             </p>
           )}
           {/* Inside the open branch, because the page holds one answer error
