@@ -190,3 +190,28 @@ throw. The optional field makes that a compile-time obligation rather than a
 warning in a docblock, and the docblock in `panes.ts` that stated the ceiling was
 itself wrong about which row sat on it (it said Knowledge, which has been seventh
 since it moved above the two configuration panes).
+
+**The scan deduplicates on the record, never on the signature, and the
+distinction is load-bearing.** A resumed session copies its earlier records into
+the new transcript, so the same failure is written twice in two different files
+and a per-file pass cannot see it — `transcripts.ts` already dedupes across
+files for exactly this reason. Measured: 2,567 error blocks carrying 2,435
+distinct `tool_use_id`s, **132 surplus, 5.1%**. It moves the counts and not the
+policy: no copied-forward record was ever found on a different day from its
+original, so the same 78 signatures span two days either way. A future change
+that deduplicated on the *signature* instead would silently collapse a genuine
+recurrence into one sighting and stop writing notes at all, which is why
+`dreamingScan.test.ts` asserts the day span as well as the instance count. This
+was found by the first note the feature ever wrote — the agent re-derived the
+counts from the corpus rather than trusting the ones it was handed.
+
+**Steering an agent to consult the vault is cheaper than letting it
+investigate.** Measured on 2026-09-02 with two runs differing only in one
+paragraph of prompt, asked the same question about the `bwrap` and `git add`
+failures the first night had written up: unsteered **$1.63 / 861k tokens / 369s
+/ 52 tool calls of which 24 errored**; steered to search the vault first
+**$0.75 / 334k / 83s / 15 calls, 2 errors**. The vault skill was enabled for
+both and the unsteered run never searched it — availability is not what makes an
+agent check, the instruction is. The unsteered run also reached a confident
+conclusion from n=19 that contradicts the vault's n=9,269 measurement, which is
+the failure the store exists to prevent.

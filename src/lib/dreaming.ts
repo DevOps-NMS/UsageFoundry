@@ -68,6 +68,24 @@ export interface ErrorObservation {
   /** `YYYY-MM-DD` in the configured zone. See `dayKey`. */
   day: string;
   sessionId: string;
+  /**
+   * What makes two records the same observation: the `tool_use_id` the result
+   * answers, falling back to the record's own uuid where there is none.
+   *
+   * A resumed session copies earlier records forward, so the same failure is
+   * written again in the new transcript and a naive count reports it twice.
+   * `transcripts.ts` already dedupes its own scan across files for this reason;
+   * this is the same discipline for this module's corpus. Measured on the real
+   * corpus: 2,567 error blocks carrying 2,435 distinct ids — **132 surplus,
+   * 5.1%** — and the first note Dreaming ever wrote caught it by re-deriving
+   * the counts rather than trusting them.
+   *
+   * It moves the counts and **not** the policy: no copied-forward record was
+   * found on a different day from its original, so the same 78 signatures span
+   * two or more days either way. The figure this corrects is the one an
+   * operator reads, not the one that decides whether a note is written.
+   */
+  key: string;
 }
 
 /** A signature, everywhere it appeared. */
@@ -94,6 +112,14 @@ export interface DreamingReadout {
   /** Files walked, and how many had to be read rather than reused. */
   filesWalked: number;
   filesRead: number;
+  /**
+   * Records dropped as copies of one already counted.
+   *
+   * Reported rather than silently absorbed: it is the difference between this
+   * readout and a naive count of the same corpus, and a reader comparing the
+   * two deserves the reason instead of an unexplained gap.
+   */
+  duplicates: number;
   scannedInMs: number;
 }
 
@@ -265,7 +291,7 @@ async function mapWithLimit<T, R>(
  * and for its reason — the newest file in the corpus is usually one an agent is
  * still writing to.
  */
-function parseFile(raw: string, timeZone: string): ErrorObservation[] {
+function parseFile(raw: string, timeZone: string, file: string): ErrorObservation[] {
   const out: ErrorObservation[] = [];
   for (const line of raw.split("\n")) {
     if (!line.startsWith("{")) continue;
@@ -282,17 +308,24 @@ function parseFile(raw: string, timeZone: string): ErrorObservation[] {
     if (!Array.isArray(content)) continue;
 
     const sessionId = typeof rec.sessionId === "string" ? rec.sessionId : "";
+    const uuid = typeof rec.uuid === "string" ? rec.uuid : "";
     for (const block of content as Record<string, unknown>[]) {
       if (block?.type !== "tool_result" || !block.is_error) continue;
       const body =
         typeof block.content === "string" ? block.content : JSON.stringify(block.content ?? "");
       const signature = signatureOf(body);
       if (!signature) continue;
+      const toolUseId = typeof block.tool_use_id === "string" ? block.tool_use_id : "";
       out.push({
         signature,
         sample: body.slice(0, SAMPLE_BYTES),
         day: dayKey(ts, timeZone),
         sessionId,
+        // Without either identifier there is nothing to prove this is not a
+        // duplicate, so fall back to a key that can only ever match itself —
+        // `parseLine`'s rule in transcripts.ts, and the direction that
+        // over-counts rather than dropping a real failure.
+        key: toolUseId || uuid || `${file}:${out.length}`,
       });
     }
   }
@@ -323,7 +356,7 @@ async function readOne(
   } catch {
     return { observations: [], read: false };
   }
-  const observations = parseFile(raw, timeZone);
+  const observations = parseFile(raw, timeZone, file);
   memo.set(file, { stamp, observations });
   return { observations, read: true };
 }
@@ -352,12 +385,22 @@ export async function scanDreaming(opts: {
       ? dayKey(now - opts.sinceDays * 86_400_000, opts.timeZone)
       : null;
 
+  // Deduplicated across files, not within one: a resumed session writes the
+  // earlier records into a *new* transcript, so the copies are in a different
+  // file from the original and a per-file pass cannot see them.
   const observations: ErrorObservation[] = [];
+  const seen = new Set<string>();
   let filesRead = 0;
+  let duplicates = 0;
   for (const r of results) {
     if (r.read) filesRead++;
     for (const ob of r.observations) {
       if (horizon && ob.day < horizon) continue;
+      if (seen.has(ob.key)) {
+        duplicates++;
+        continue;
+      }
+      seen.add(ob.key);
       observations.push(ob);
     }
   }
@@ -374,6 +417,7 @@ export async function scanDreaming(opts: {
     days,
     filesWalked: files.length,
     filesRead,
+    duplicates,
     scannedInMs: Date.now() - startedAt,
   };
 }

@@ -77,11 +77,15 @@ describe("dayKey", () => {
   });
 });
 
+let nextKey = 0;
 const ob = (signature: string, day: string, sessionId = "s1"): ErrorObservation => ({
   signature,
   sample: signature,
   day,
   sessionId,
+  // Unique per observation: `rollUp` counts what it is given, and the scan is
+  // what drops copies before they reach it.
+  key: `k${nextKey++}`,
 });
 
 describe("rollUp", () => {
@@ -197,6 +201,15 @@ describe("buildDreamingPrompt", () => {
 
   it("asks for the paths back, which is what makes a note retractable", () => {
     assert.match(prompt, /NOTE <item number>/);
+  });
+
+  it("names the two conventions the first real run got wrong", () => {
+    // Its notes passed the vault's ERROR gate and tripped two warnings, both
+    // one line each: a `sources:` block with no `## Sources` section, and a
+    // seed with no `seeded_by:`. Following the conventions was not enough, so
+    // these are said outright.
+    assert.match(prompt, /## Sources/);
+    assert.match(prompt, /seeded_by/);
   });
 });
 

@@ -136,6 +136,16 @@ export function buildDreamingPrompt(rollups: readonly SignatureRollup[], night: 
     `an existing one is the failure mode the conventions exist to prevent; growing`,
     `the existing note in place is what to do instead.`,
     ``,
+    // Both learned from the first night this ever ran: its notes passed the
+    // vault's ERROR gate but tripped two warnings, and both are one line each.
+    // Named explicitly rather than left to "follow the conventions", because
+    // the conventions were followed and these still came out wrong.
+    `Two the first run of this job got wrong, so they are spelled out: a note with`,
+    `a \`sources:\` block in its frontmatter also needs a \`## Sources\` section in`,
+    `the body, and any note you leave at \`status: seed\` needs a \`seeded_by:\``,
+    `field naming the note it came from. Run the vault's own quality check before`,
+    `you finish if it has one, and fix what it reports about the files you wrote.`,
+    ``,
     `## What you may and may not claim`,
     ``,
     `- The error text is **transcription**: the machine said it, and it is`,
