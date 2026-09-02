@@ -15,8 +15,9 @@ changed.**
 **Ship the cheap tier — B, D, E and two pieces of G — as four commits**,
 [11-recommendation.md](11-recommendation.md). About 100 lines across four files.
 No migration, no new table, no new route, nothing on the approval or spawn path.
-It closes 14 of the 20 findings, five of them cases where the panel currently
-asserts something the code contradicts.
+It closes twelve of the twenty findings in full and three more in part —
+including four of the six places where the panel asserts something the code
+contradicts.
 
 **If only one change is made:** carry `turn_started_at` on the DTO and name the
 ten-minute deadline in `Waiting` — about fifteen lines. It is the only cheap

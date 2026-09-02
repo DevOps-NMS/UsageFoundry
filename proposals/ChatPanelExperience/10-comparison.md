@@ -36,9 +36,10 @@ for a combination.
 
 **1. The cheap tier is four options wide and covers three of the four passes.**
 B, D, E and G together are roughly 100 lines across four files, no migration,
-nothing on the approval or spawn path, and they close 14 of the 20 findings.
-Their combined score (57, taking the best per criterion rather than summing) is
-above the best single option (55).
+nothing on the approval or spawn path, and counting off the matrix above they
+close **twelve of the twenty in full and three more in part**. Their combined
+score (57, taking the best per criterion rather than summing) is above the best
+single option (55).
 
 **2. C is not substitutable and not cheap.** It is the only option that scores 3
 on the ten-minute wait, and the only one that needs a table, a migration and a

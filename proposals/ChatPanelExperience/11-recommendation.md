@@ -6,9 +6,10 @@ somebody else's survey.**
 
 Roughly 100 lines across `src/lib/chat.ts`, `src/lib/apiTypes.ts`,
 `src/app/api/chat/dto.ts` and `src/app/chat/page.tsx`. No migration, no new
-table, no new route, nothing on the approval or spawn path. It closes 14 of the
-20 findings, including five of the six where the panel currently asserts
-something the code contradicts.
+table, no new route, nothing on the approval or spawn path. Counted off the
+matrix in [10-comparison.md](10-comparison.md): **twelve of the twenty findings
+in full and three more in part** — and four of the six places where the panel
+asserts something the code contradicts, with part of the other two.
 
 ---
 
