@@ -5,6 +5,7 @@ import type { KnowledgeGraphDTO, KnowledgeNodeDTO } from "@/lib/apiTypes";
 import { pollFailureMessage } from "@/lib/format";
 import { jsonRequest } from "@/lib/jsonRequest";
 import {
+  GRAPH_DEFAULTS,
   GRAPH_RANGES,
   GROUP_PALETTE,
   MAX_DRAWN_NODES,
@@ -32,6 +33,7 @@ import {
 import { KnowledgeGraphCanvas } from "@/components/KnowledgeGraphCanvas";
 import { Button, ButtonRow } from "@/components/ui/Button";
 import { Card, CardTitle, Empty } from "@/components/ui/Card";
+import { Disclosure } from "@/components/ui/Disclosure";
 import { ColorSwatch, Input, Slider, Switch } from "@/components/ui/Field";
 import { Hint } from "@/components/ui/Hint";
 import { GroupLabel, ListGroup, ListRow } from "@/components/ui/List";
@@ -80,6 +82,15 @@ import { SegmentedControl, type SegmentedOption } from "@/components/ui/Segmente
  * **`fitNonce` and `pointed` are events, not settings**, so neither is in
  * `KnowledgeGraphSettings` and neither reaches `localStorage` — a stored fit
  * would reframe the graph on a later visit for a press made last week.
+ *
+ * **Three groups fold and the rest never do.** `Display` and `Forces` are tuned
+ * once and left, and the colour-group *editor* is 48 of the panel's controls at
+ * a first visit — which is most of what "overwhelming" was about. What does not
+ * fold is what a sweep touches or a reader needs: the view scope, the four
+ * `Around this note` controls, all five filters, the legend, the readout, `Fit`,
+ * and `Reset to defaults`, which sits at the level of everything above it and
+ * so may not be demoted below any of it. The three are independent siblings and
+ * nothing is nested, which is the sanctioned shape rather than an accordion.
  */
 
 const STORAGE_KEY = "uf.knowledge-graph";
@@ -116,6 +127,28 @@ interface PointedNode {
   degree: number;
 }
 
+/** How many settings in the two folded groups are not what they ship as. */
+interface ChangedCounts {
+  display: number;
+  forces: number;
+}
+
+const NOTHING_CHANGED: ChangedCounts = { display: 0, forces: 0 };
+
+/**
+ * How many of an object's values differ from the defaults it was built from.
+ *
+ * Keyed off the *defaults* rather than off the live object so a key that has
+ * gone missing through `localStorage` counts as changed rather than as absent —
+ * `coerceGraphSettings` fills it back in, so in practice the two agree, and a
+ * count that quietly shrank when they did not would be the wrong way to be
+ * wrong. Both objects it is used on are flat and hold only numbers and booleans.
+ */
+function countChanged<T extends object>(current: T, defaults: T): number {
+  return (Object.keys(defaults) as (keyof T)[]).filter((key) => current[key] !== defaults[key])
+    .length;
+}
+
 export function KnowledgeGraphView({
   /** The note open in the reader, as a vault-relative path. */
   notePath,
@@ -144,6 +177,18 @@ export function KnowledgeGraphView({
    * grouping vocabulary refuses for anything a reader needs.
    */
   const [pointed, setPointed] = useState<PointedNode | null>(null);
+  /**
+   * How many display and force settings differed from their defaults **when the
+   * stored entry was read**, which is the only moment the two folds below may
+   * decide whether they open.
+   *
+   * Read once rather than live, and that is the whole point: `Disclosure` is
+   * uncontrolled, so React rewrites `open` whenever the prop changes — a live
+   * count would slam the fold shut under an operator the moment they dragged a
+   * slider back to its default, mid-sweep, inside the fold they had opened. The
+   * *badge* follows the live count; the fold follows this one.
+   */
+  const [changedAtLoad, setChangedAtLoad] = useState<ChangedCounts>(NOTHING_CHANGED);
   /** Nothing is written back until the stored value has been read in. */
   const hydrated = useRef(false);
   /**
@@ -163,7 +208,12 @@ export function KnowledgeGraphView({
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
       try {
-        setSettings(coerceGraphSettings(JSON.parse(stored)));
+        const restored = coerceGraphSettings(JSON.parse(stored));
+        setSettings(restored);
+        setChangedAtLoad({
+          display: countChanged(restored.display, GRAPH_DEFAULTS.display),
+          forces: countChanged(restored.forces, GRAPH_DEFAULTS.forces),
+        });
       } catch {
         // A corrupt entry is not worth telling anybody about — it is one
         // operator's slider positions, and the defaults are already on screen.
@@ -350,6 +400,7 @@ export function KnowledgeGraphView({
           settings={settings}
           tags={tags}
           pointed={pointed}
+          changedAtLoad={changedAtLoad}
           onChange={update}
           onFit={() => setFitNonce((n) => n + 1)}
           onReset={() => setSettings(defaultGraphSettings())}
@@ -384,10 +435,44 @@ export function KnowledgeGraphView({
 /* The panel                                                           */
 /* ------------------------------------------------------------------ */
 
+/**
+ * A group of the panel behind a fold, at the rank a `ListGroup` label sits at.
+ *
+ * The summary carries the label, so the `ListGroup` inside deliberately has
+ * none: two would be the same word twice, and a `ListGroup` without a label is
+ * a box, which is exactly what is wanted here. Copied from `/settings`' own
+ * fold rhythm rather than stated as a component — the two pages disagree about
+ * their vertical rhythm, which is what `Disclosure` leaves to its callers.
+ */
+function Fold({
+  summary,
+  count,
+  defaultOpen,
+  children,
+}: {
+  summary: string;
+  /** How many settings inside are off their default. Hidden at zero. */
+  count: number;
+  defaultOpen: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <Disclosure
+      summary={summary}
+      count={count > 0 ? count : undefined}
+      defaultOpen={defaultOpen}
+      summaryClassName="text-xs font-medium text-ink-muted px-1"
+    >
+      <ListGroup className="mt-1.5">{children}</ListGroup>
+    </Disclosure>
+  );
+}
+
 function GraphPanel({
   settings,
   tags,
   pointed,
+  changedAtLoad,
   onChange,
   onFit,
   onReset,
@@ -397,6 +482,8 @@ function GraphPanel({
   /** The vault's tags, most-used first, for the colour groups to be built from. */
   tags: GraphTag[];
   pointed: PointedNode | null;
+  /** What was off its default when the stored settings arrived — see the state. */
+  changedAtLoad: ChangedCounts;
   onChange: (patch: (previous: KnowledgeGraphSettings) => KnowledgeGraphSettings) => void;
   onFit: () => void;
   onReset: () => void;
@@ -413,6 +500,9 @@ function GraphPanel({
   const setForces = (patch: Partial<typeof forces>) =>
     onChange((s) => ({ ...s, forces: { ...s.forces, ...patch } }));
   const setGroups = (next: GraphGroup[]) => onChange((s) => ({ ...s, groups: next }));
+
+  const changedDisplay = countChanged(display, GRAPH_DEFAULTS.display);
+  const changedForces = countChanged(forces, GRAPH_DEFAULTS.forces);
 
   return (
     <Card emphasis="default" className="flex flex-col gap-4">
@@ -555,7 +645,13 @@ function GraphPanel({
 
       <GroupList groups={groups} tags={tags} onChange={setGroups} />
 
-      <ListGroup label="Display">
+      {/* Folded, and the two are independent siblings rather than an accordion:
+          neither closes the other and neither is nested in anything. What is
+          behind them is the part of the panel an operator tunes once and leaves,
+          and the explanation the audit warns about hiding is the legend at the
+          top, which is not folded and did not exist before. The badge says how
+          many are off their default, so a fold never hides a value silently. */}
+      <Fold summary="Display" count={changedDisplay} defaultOpen={changedAtLoad.display > 0}>
         <ListRow label="Arrows" htmlFor="graph-arrows">
           <Switch
             id="graph-arrows"
@@ -608,9 +704,9 @@ function GraphPanel({
             onChange={(animate) => setDisplay({ animate })}
           />
         </ListRow>
-      </ListGroup>
+      </Fold>
 
-      <ListGroup label="Forces">
+      <Fold summary="Forces" count={changedForces} defaultOpen={changedAtLoad.forces > 0}>
         <ListRow label="Center force" htmlFor="graph-center">
           <Slider
             id="graph-center"
@@ -650,7 +746,7 @@ function GraphPanel({
             className="w-40"
           />
         </ListRow>
-      </ListGroup>
+      </Fold>
 
       {/* At the level of what it resets — the whole panel — rather than inside
           one of the groups, where it would read as resetting that group. */}
@@ -870,6 +966,20 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
  * cannot be moved is a rule that cannot be given precedence. The position is
  * drawn as a number for the same reason — with two identical-looking swatches,
  * nothing else on screen says which one wins.
+ *
+ * **Folded, and closed by default, which is a departure from the rule that a
+ * fold holding a non-default value opens.** Read literally that rule opens this
+ * one for everybody forever, because `GRAPH_DEFAULTS.groups` is `[]` and the
+ * seed writes three — today's state with a triangle added, which buys nothing.
+ * The rule exists so a reader is never surprised by a value they cannot see,
+ * and what serves that here is the legend at the top of the panel: the same
+ * rows, the same order, the same numbers, unfolded, permanently. This is 48 of
+ * the panel's controls at one visit and the single largest thing behind the
+ * word "overwhelming".
+ *
+ * The read-only half of this list is **not duplicated** into the fold. It is
+ * the legend's group rows, and two lists of the same values is two things to
+ * keep in step.
  */
 function GroupList({
   groups,
@@ -938,8 +1048,12 @@ function GroupList({
   }
 
   return (
-    <div>
-      <ListGroup label="Colour groups">
+    <Disclosure
+      summary="Edit colour groups"
+      count={groups.length > 0 ? groups.length : undefined}
+      summaryClassName="text-xs font-medium text-ink-muted px-1"
+    >
+      <ListGroup className="mt-1.5">
         {groups.length === 0 ? (
           <p className="px-3 py-2 text-xs text-ink-muted">
             A group paints every node its search matches. The first match wins.
@@ -1056,6 +1170,6 @@ function GroupList({
         </Button>
         {full && <span className="text-xs text-ink-faint">{MAX_GROUPS} is the most</span>}
       </ButtonRow>
-    </div>
+    </Disclosure>
   );
 }

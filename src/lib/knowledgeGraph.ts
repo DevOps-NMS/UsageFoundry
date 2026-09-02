@@ -275,12 +275,17 @@ export function tagGroupId(tag: string): string {
  * Colour groups for the vault's most-used tags, in palette order.
  *
  * What the panel opens on when nobody has set a colour group up yet — see the
- * seed in `KnowledgeGraphView`. Capped at `MAX_GROUPS` because that is what the
- * palette is: a vault with four hundred tags gets its top seven, and the rest
- * are a chip away.
+ * seed in `KnowledgeGraphView`. `limit` defaults to `SEED_GROUPS` rather than to
+ * `MAX_GROUPS`, which is the one place the two numbers have to be told apart:
+ * the ceiling is what an operator may build up to, and this is what they are
+ * handed unasked. It stays a parameter so a caller that means the ceiling can
+ * say so, and so the difference is testable.
  */
-export function tagGroups(tags: readonly GraphTag[]): GraphGroup[] {
-  return tags.slice(0, MAX_GROUPS).map((tag, i) => ({
+export function tagGroups(
+  tags: readonly GraphTag[],
+  limit: number = SEED_GROUPS,
+): GraphGroup[] {
+  return tags.slice(0, limit).map((tag, i) => ({
     id: tagGroupId(tag.name),
     query: tagGroupQuery(tag.name),
     color: GROUP_PALETTE[i % GROUP_PALETTE.length],
@@ -528,25 +533,36 @@ export interface KnowledgeGraphSettings {
  * things to go and fix, and a graph that hid both by default would be a second
  * view of the vault that disagrees with the first about what is in it.
  *
- * **`textFade` is 0.1 because 1.1 meant a graph nobody ever saw a label on.**
- * It is a threshold on the *zoom*, and the zoom a graph opens at is whatever
- * `fitView` produces, which nobody had read. Measured against the mounted vault
- * — 1,258 nodes and 28,551 edges at these defaults, settling to a 4,900-square
- * world extent — a canvas 880–1,040 CSS px wide frames it at `k` between 0.12
- * and 0.14, and the biggest hub's `This note` graph at depth 1 frames at 0.68.
- * At 1.1 every one of those is below the threshold, so the first paint of both
- * views was unlabelled and stayed unlabelled until a reader zoomed to about a
- * hundredth of the graph's area. At 0.1 the framed global view sits just onto
- * the `LABEL_RAMP`, labels reach full strength around `k` 0.45 — roughly a
- * sixth of the extent on screen, which is a neighbourhood rather than a wall —
- * and a local graph is labelled outright. The ramp is what keeps a threshold
- * this low safe: under `textFade + LABEL_RAMP` a label is drawn at part
- * opacity, so the zoomed-out picture gains a texture rather than 1,258 titles.
+ * **`textFade` is 0.35, and the number was read off the screen rather than
+ * reasoned to.** It is a threshold on the *zoom*, so what it means depends
+ * entirely on the zoom a graph opens at, which is whatever `fitView` produces
+ * and which nobody had measured. Against the mounted vault — 1,258 nodes and
+ * 28,551 edges at these defaults, settling to a 4,900-square world extent — a
+ * canvas 880–1,040 CSS px wide frames the whole vault at `k` 0.12 to 0.14, the
+ * biggest hub's `This note` graph at depth 1 frames at 0.68, and a median
+ * note's at 2.96.
  *
- * **This reaches nobody who has already been here.** The panel writes every
- * change to `localStorage`, so an operator with a stored entry keeps 1.1 until
- * they press `Reset to defaults` or move the `Label fade` slider themselves.
- * A default is what the *next* first look gets.
+ * At the old 1.1, *every* one of those is under the threshold: the first paint
+ * of the whole-vault view and of a large local graph were both unlabelled, and
+ * stayed unlabelled until a reader zoomed to about a hundredth of the extent.
+ *
+ * The obvious repair — put the threshold just under the fitted `k` — was tried
+ * at 0.1 and is **wrong**, which is the thing here that had to be seen rather
+ * than calculated. `draw` labels every visible node once the fade is above
+ * zero, with no per-node filter, so at the fitted zoom that is 1,258 titles at
+ * a constant screen size inside 820px: a grey smear over the graph, which is
+ * the complaint it was meant to answer made worse.
+ *
+ * 0.35 is what both ends want. The whole-vault view opens clean and stays clean
+ * until a reader has zoomed about 2.5× in — deliberately going somewhere, at
+ * which point a neighbourhood is legible — and a local graph is labelled at
+ * first paint at either end of its size range. `LABEL_RAMP` fades the last
+ * stretch in rather than switching it on.
+ *
+ * **None of this reaches anybody who has already been here.** The panel writes
+ * every change to `localStorage`, so an operator with a stored entry keeps 1.1
+ * until they press `Reset to defaults` or move `Label fade` themselves. A
+ * default is what the *next* first look gets.
  */
 export const GRAPH_DEFAULTS: KnowledgeGraphSettings = {
   view: "global",
@@ -559,7 +575,7 @@ export const GRAPH_DEFAULTS: KnowledgeGraphSettings = {
     showOrphans: true,
   },
   groups: [],
-  display: { arrows: false, textFade: 0.1, nodeSize: 1, linkThickness: 1, animate: true },
+  display: { arrows: false, textFade: 0.35, nodeSize: 1, linkThickness: 1, animate: true },
   forces: { center: 0.4, repel: 10, link: 0.6, linkDistance: 90 },
 };
 
@@ -700,6 +716,17 @@ export const GROUP_PALETTE = [
 /** More than this is a legend nobody reads, and seven distinct colours is
  * already past what most people can tell apart on a dim node. */
 export const MAX_GROUPS = 7;
+
+/**
+ * Colour groups a first visit is given.
+ *
+ * Below `MAX_GROUPS` deliberately, and the gap between the two numbers is the
+ * point: that one is a ceiling on how many an operator may *have*, argued from
+ * legibility, and seeding straight to a ceiling argued from legibility is the
+ * thing the argument is against. Three names the vault's three biggest tags,
+ * which is where the signal is, and a fourth is one chip away.
+ */
+export const SEED_GROUPS = 3;
 
 /**
  * The most tag chips the panel offers.

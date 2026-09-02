@@ -17,6 +17,7 @@ import {
   matchesGraphQuery,
   noteNodeId,
   parseGraphQuery,
+  SEED_GROUPS,
   tagGroupQuery,
   tagGroups,
   type GraphFilters,
@@ -512,18 +513,30 @@ test("a tag's query finds the notes carrying it, whitespace and all", () => {
   );
 });
 
-test("the seed stops at MAX_GROUPS, with distinct ids and palette colours", () => {
+test("the seed stops at SEED_GROUPS, and the ceiling is still MAX_GROUPS", () => {
   const tags = Array.from({ length: MAX_GROUPS + 5 }, (_, i) => ({
     name: `t${i}`,
     count: 100 - i,
   }));
   const seeded = tagGroups(tags);
 
-  assert.equal(seeded.length, MAX_GROUPS);
-  assert.equal(new Set(seeded.map((g) => g.id)).size, MAX_GROUPS);
-  assert.deepEqual(seeded.map((g) => g.color), [...GROUP_PALETTE]);
-  assert.deepEqual(seeded.map((g) => g.query), ["tag:t0", "tag:t1", "tag:t2", "tag:t3", "tag:t4", "tag:t5", "tag:t6"]);
+  // Two different numbers, and the whole reason `limit` is a parameter: an
+  // unasked-for seed of seven is the crowding the panel was folded to fix,
+  // while seven is still what an operator may build up to by hand.
+  assert.equal(seeded.length, SEED_GROUPS);
+  assert.equal(new Set(seeded.map((g) => g.id)).size, SEED_GROUPS);
+  assert.deepEqual(seeded.map((g) => g.color), GROUP_PALETTE.slice(0, SEED_GROUPS));
+  assert.deepEqual(seeded.map((g) => g.query), ["tag:t0", "tag:t1", "tag:t2"]);
+
+  const full = tagGroups(tags, MAX_GROUPS);
+  assert.equal(full.length, MAX_GROUPS);
+  assert.equal(new Set(full.map((g) => g.id)).size, MAX_GROUPS);
+  assert.deepEqual(full.map((g) => g.color), [...GROUP_PALETTE]);
+  assert.deepEqual(full.map((g) => g.query), ["tag:t0", "tag:t1", "tag:t2", "tag:t3", "tag:t4", "tag:t5", "tag:t6"]);
+
   assert.deepEqual(tagGroups([]), []);
+  // Fewer tags than the seed is the small vault, not an error.
+  assert.equal(tagGroups(tags.slice(0, 2)).length, 2);
 });
 
 test("a seeded group survives a round trip through storage", () => {
