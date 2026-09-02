@@ -13,12 +13,15 @@ grant. 1,953 `.jsonl` files, 1,370,318,045 bytes by `find -printf '%s'`, 994
 distinct `sessionId` values, 24 days carrying records
 (2026-08-10 … 2026-09-02).
 
-Three scripts produced every number, all in `proposals/Dreaming/scripts/`:
+Five scripts produced every number, all in `proposals/Dreaming/scripts/`. The
+last two were added with the revision and are covered by §10:
 
 ```bash
-node proposals/Dreaming/scripts/day-corpus.mjs ~/.claude/projects --split
-node proposals/Dreaming/scripts/slices.mjs     ~/.claude/projects
-node proposals/Dreaming/scripts/recurrence.mjs ~/.claude/projects
+node proposals/Dreaming/scripts/day-corpus.mjs  ~/.claude/projects --split
+node proposals/Dreaming/scripts/slices.mjs      ~/.claude/projects
+node proposals/Dreaming/scripts/recurrence.mjs  ~/.claude/projects
+node proposals/Dreaming/scripts/ledger.mjs      ~/.claude/projects
+node proposals/Dreaming/scripts/tool-corpus.mjs ~/.claude/projects
 node proposals/Dreaming/scripts/score.mjs
 ```
 
@@ -205,6 +208,57 @@ In order:
    table rather than demonstrated (§5).
 4. **Any token figure**, which passes through a single 3.6 bytes-per-token
    constant.
-5. **Nothing about whether the feature would work**, because that is unmeasured
+5. **The ledger's 77**, which counts recurring *signatures* and is called a count
+   of learnings nowhere in §10 but reads like one everywhere else.
+6. **Nothing about whether the feature would work**, because that is unmeasured
    everywhere — including in the operator's own vault, where the question sits
    open at `confidence: low` with UsageFoundry named as what prompted it.
+
+
+## 10. The revision's own figures, and what to distrust in them
+
+Added with `16-option-h`, `17-option-i` and `18-the-dreaming-pane`. Re-run on the
+host on 2026-09-02; files 00–15 were measured in a container on 2026-08-28.
+
+**Reproduced.** `recurrence.mjs` returns 1,177 distinct signatures against the
+original 1,175 and 2,549 instances against 2,547, with every percentage unchanged
+to one decimal. The drift is 2026-09-02's own sessions accumulating while the
+scripts ran, which is §8's effect appearing again.
+
+**Measured, and trustworthy to the extent the signature is.** `ledger.mjs`'s
+1,361 / 1,177 / 77 and `tool-corpus.mjs`'s 5,521k tokens, 91% overflow and 0.2%
+keyed share are arithmetic over the corpus, re-runnable in under 10 seconds each.
+
+**What is a proxy here, and it is the same proxy as §4's.** *A signature is a
+lesson* is assumed by every figure in the ledger table. It is false in both
+directions — four `bwrap` signatures are one cause, `Exit code N` is one
+signature over many causes — so **77 is not a count of lessons**, it is a count of
+strings that recurred. The direction of the error is not known: collapsing causes
+pushes it down, splitting them pushes it up.
+
+**What is assumed and not measured.**
+
+- **That a run whose cwd is the vault actually reads `CLAUDE.md`.** The licence
+  argument in `16-option-h` §1 turns on this and nothing enforces it. It is a
+  claim about how somebody composes a run, not about the code.
+- **That an errors-only note is checkable.** "A person can verify `pdftoppm is
+  not installed` by running one command" is stated, not demonstrated, and it is
+  the load-bearing difference between Option I's corpus score of 4 and Option
+  A's of 1.
+- **That a 1,000k window is the right fit test.** `tool-corpus.mjs` compares
+  against the largest context this install has. A reader that summarises as it
+  goes has a different bound, and that bound is not measured here.
+
+**One figure that reads like evidence and is not.** "34 of 77 notes (44%)
+describe something that occurred again after the note existed" is a property of a
+23-day window, not a benefit. Nothing in this corpus knows whether a note was
+read, and the 43 that did not recur are equally consistent with "the problem was
+fixed" and "the problem stopped by itself".
+
+**Verified rather than asserted, in `18-the-dreaming-pane`.** The tenth-pane
+claims were each checked against the tree: `QuickItem.detail` is optional at
+`QuickOpen.tsx:47` and guarded at `:373`; `Sidebar.tsx:176` and
+`QuickOpen.tsx:208` both interpolate `pane.shortcut` unguarded; `PANES` has nine
+entries with Settings at `shortcut: "9"`; and the docblock's "Knowledge is the
+ninth" contradicts the array, where Knowledge is seventh. That last one is a
+defect in the codebase found by this survey, not a claim about it.

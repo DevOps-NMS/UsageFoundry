@@ -1,38 +1,69 @@
 # Recommendation
 
-**Do not build Dreaming.** Build the half of it that is arithmetic, keep the
-half that is a sentence behind a person's press and inside the licence the vault
-itself issued, and settle the question the whole feature rests on with a
-fortnight of an experiment that needs no code.
+> **Revised.** The operator corrected the brief after §1–§13 were written: the
+> writer is an **external run whose cwd is the vault**, which reads `CLAUDE.md`
+> and therefore holds the writing conventions. That dissolves the two refusals
+> this recommendation leaned on hardest and adds
+> `16-option-h-the-licensed-external-run.md` and
+> `17-option-i-errors-only-licensed.md` to the table. The build order below is
+> the revised one; §"Why the recommendation is against the feature" is kept as
+> written, with each limb marked for whether it survived.
+>
+> The operator has also **required a left-navigation pane** showing what
+> Dreaming produced, of whichever option ships.
+> `18-the-dreaming-pane.md` is that requirement, not an option in this survey.
+
+**Build the arithmetic first, then the narrow writer.** The feature as literally
+posed — read everything, work out what was learned, write it down — still should
+not be built, and the reason is now scope rather than permission. The version
+that should be built is the one scoped to the slice of the day that carries a
+machine-established fact and a deduplication key.
 
 In order:
 
-1. **Ship the recurrence readout** (Option G). No model, no write, no clock. It
-   is refused by nothing in this repository or in the operator's vault, it costs
-   nothing to run, and it is the only artefact here whose failure mode is a bug
-   rather than a false claim in somebody's document store.
+1. **Ship the recurrence readout** (Option G) **behind the required pane.** No
+   model, no write, no clock. It is refused by nothing, it costs nothing to run,
+   its failure mode is a bug rather than a false claim in somebody's document
+   store, and it is the one thing that can fill the operator's pane on day one
+   with no prerequisite. `18-the-dreaming-pane.md` §5.
 2. **Run the fortnight** (Option F, as an experiment and not as a feature). A
    one-node workflow on a `{kind:"daily"}` schedule, budget-capped by
-   `scheduleRefusal`, watched on `/runs`, deleted afterwards. It can read the
-   day's sessions — the correction in `08-option-f-workflow-block.md` — so it
-   composes the literal brief for the price of a fortnight and no code, and it
-   is the only way to find out whether the written half is worth anything.
-3. **If the fortnight says yes, build the press, not the clock** (Option D,
-   pressed): a control that captures **one question** into
-   `3 Resources/Questions/Inbox/` using that folder's `_TEMPLATE.md`, with the
-   provenance fields the template already carries. That is the one write the
-   destination licenses, and it is the shape the corpus supports.
+   `scheduleRefusal`, watched on `/runs`, deleted afterwards. Point it at the
+   vault so it reads `CLAUDE.md` — that is Option H composed, and it costs a
+   fortnight and no code to find out whether the written half is worth anything.
+3. **Then build Option I**: the licensed external run, scoped to `is_error`
+   results, writing on a signature's **second** sighting, against a ledger this
+   app keeps. 77 notes in 23 days instead of 1,361, $0.42 a week, and the ledger
+   is what the pane renders and what makes retraction a list rather than an
+   accident.
 
-**Do not build Options A, B, C or the standing form of F.** Each is refused, by
-name, in §3.
+**Do not build Option H as posed, or A, B, C, or the standing form of F.** H is
+refused on scope in `16-option-h` §7 — 91% of days overflow a 1M context and
+99.8% of its corpus has no dedup key. The rest are refused, by name, in §3.
+
+**Option D is no longer the runner-up.** It scored 145 against Option I's 140 on
+this survey's weights and loses to it under every reweighting in
+`13-comparison.md` §4. It remains the right shape for a *press*, and its
+quarantine is still the only sink with a review queue in front of it.
 
 ---
 
 ## Why the recommendation is against the feature
 
-Three findings, in the order they matter.
+Three findings, in the order they mattered when they were written. **Limb 1 did
+not survive the operator's correction; limbs 2 and 3 did, in part.** They are
+kept rather than rewritten so the change is visible.
 
-**1. The destination has already answered.**
+**1. The destination has already answered. — DOES NOT SURVIVE.** The rule is
+conditional and the corrected shape fails its antecedent: the writer reads
+`CLAUDE.md`, so it is not "a session from another project [that has] not read
+`CLAUDE.md`". `16-option-h` §1 argues it in full. What survives is smaller and
+still real: **nothing enforces the licence.** No mechanism checks that the run
+read anything, the managed sandbox policy has no path-based write restriction
+(`docker-entrypoint.sh:431`–`:433`), and a skill is persuasion. The licence is
+now a property of how the run is composed rather than of anything in `src/`.
+
+The original text:
 `/workspace2/AGENTS.md:115`: "If you are a session from another project and have
 not read `CLAUDE.md`, you do not have the writing conventions and should not
 write notes here. The one exception is a single question capture into
@@ -48,8 +79,16 @@ vault is open in Obsidian while this runs, and "a background index that can
 write into it is one that can lose somebody's paragraph while they are typing
 it."
 
-**2. The corpus supports transcription and not diagnosis, and the operator's own
-vault has the numbers.** 48,978 `thinking` blocks in the readable corpus,
+**2. The corpus supports transcription and not diagnosis. — SURVIVES, NARROWED.**
+The 14.2% figure is about a model locating the step where **its own reasoning**
+went wrong, and a model restating `pdftoppm is not installed` is not doing that.
+So this limb no longer refuses the whole output; it refuses a nameable part of
+it — any sentence about *why* an approach was chosen, over a corpus with 48,978
+empty `thinking` blocks. A note that writes the signature verbatim and marks the
+cause as a hypothesis complies with the vault's own stated position. Nothing
+enforces which kind of note gets written. As originally stated:
+
+48,978 `thinking` blocks in the readable corpus,
 thirteen non-empty, none from the model this install runs; and
 `src/lib/orchestrator.ts:6675`–`:6704` drops every block that is not `text` or
 `tool_use` by name. So "what was learned" is inference over an action log — and
@@ -60,7 +99,17 @@ position: "admit transcription, mark diagnosis as a hypothesis, and never let an
 unverified stated cause enter a store as a fact." Option G ships the
 transcription and refuses the diagnosis. Options A, B and C ship the diagnosis.
 
-**3. There is no way to take it back.** `/workspace2` has no `.git`. No history,
+**3. There is no way to take it back. — SURVIVES, AND IS NOW THE MAIN
+OBJECTION.** Nothing about the corrected shape touches it. What Option I adds is
+a partial answer nobody had before: **a ledger this app keeps of what it wrote,
+which is a retraction list even though it is not version control**
+(`17-option-i` §3). It does not make the vault reversible; it makes this app able
+to say which 77 files are its own. That is the difference between "a person
+deletes a file if they notice" and "a person deletes a file from a list", and it
+is why Option I scores 3 on retirement where A, B, C and F score 1. The original
+statement, unchanged:
+
+`/workspace2` has no `.git`. No history,
 no author field, no list of what last night added. And the reason that matters
 more than a rate does: "**retrieval selects, it does not average**" — a sub-0.1%
 poison rate producing over 80% attack success at under 1% degradation on benign
@@ -173,15 +222,26 @@ the one place in `src/` where the gradient could be restored.
 
 ## The fact that would overturn this
 
-**One.** If the operator says the point of the feature is precisely that a
-person who has spent eleven hours on something will not sit down afterwards and
-ask what they learned — that the *automaticity is the feature* and a button is a
-feature that will never be pressed — then criterion 1 in `13-comparison.md` is
-not weight 4, and at weight 30 Option F takes the table. That is a claim about
-the operator, not about the corpus, and it is not this survey's to settle. The
-recommendation stands on the assumption that a card the operator reads is worth
-more than a note nobody asked for, and that assumption is the operator's to
-overturn in one sentence.
+**One, and the threshold has halved.** If the operator says the point of the
+feature is precisely that a person who has spent eleven hours on something will
+not sit down afterwards and ask what they learned — that the *automaticity is
+the feature* and a button is a feature that will never be pressed — then
+criterion 1 in `13-comparison.md` is not weight 4.
+
+Before the operator's correction that argument needed **weight 30** to overturn
+the table, and at 30 the winner was Option F: a weighting in which the brief's
+wording outweighed every other criterion combined by nearly a factor of two, and
+which was easy to set aside. **It now needs weight 15, and the winner is Option
+I** — 184 to G's 183 (`13-comparison.md` §4). Fifteen is "doing what was asked is
+worth about three times a safety column", which is an ordinary position, and it
+is the operator's default position since they are the one who asked.
+
+So the honest statement of where this recommendation stands: **G first is a
+claim about sequencing, not about I being wrong.** The readout has no
+prerequisite, fills the required pane on day one, and is the cheapest possible
+test of whether the operator acts on this material at all. If they read it for a
+fortnight and act on rows, Option I is not overturning the recommendation — it is
+the next step in it.
 
 Two more, both cheap:
 
@@ -195,3 +255,21 @@ Two more, both cheap:
   the same literature bounds it at "10 to 15 points and probably zero"
   (`Does a Standing Instruction File…:27`), and the question sits at
   `confidence: low` in a quarantine folder, prompted by this app.
+- **If a `PreToolUse` deny-on-`Write` hook is built**, the licence stops being a
+  property of how somebody composed the run and becomes a mechanism. That moves
+  H and I from 4 to 5 on criterion 2 and is the only thing that would make an
+  *unattended* vault write defensible. `10-the-write-path.md` §3 identifies it
+  and §6 sizes it as the one large row in the table.
+
+## The measurement that would settle Option I on its own
+
+`17-option-i` §4 reports it against itself: **of the 77 notes the
+write-on-recurrence policy produces, 34 (44%) describe something that occurred
+again after the note existed.** The other 43 document a recurrence that had
+already stopped. Re-run `scripts/ledger.mjs` over a 90-day window rather than 23
+and that ratio is the closest thing available to an answer about whether this
+feature writes about live problems or dead ones — and it costs one command
+against a corpus that already exists.
+
+It is not a measurement of whether writing helped. Nothing here knows whether
+anybody read a note.

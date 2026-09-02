@@ -112,6 +112,33 @@ const OPTIONS = [
     name: "the recurrence readout — no model, no write",
     scores: { asked: 1, licensed: 5, authorised: 5, retirement: 5, dedup: 5, corpus: 5, visible: 5, cost: 5, build: 4, blast: 5 },
   },
+  // H and I were added after the operator corrected the brief: the writer is an
+  // *external* run whose cwd is the vault and which reads CLAUDE.md, so
+  // AGENTS.md:115's antecedent is false and knowledge.ts:39 is a different
+  // module. Both score 4 rather than 5 on `licensed` because the licence is
+  // real and unenforced — nothing verifies the run read the conventions, and
+  // the only mechanism that could is a PreToolUse deny-on-Write hook that does
+  // not exist (10-the-write-path.md §3).
+  {
+    id: "H",
+    name: "licensed external run over tools+outputs",
+    // dedup 1: a ledger keys on 0.2% of the corpus and the other 99.8% falls
+    // back to nightly model judgement over 1,224 notes.
+    // corpus 2: input is machine-established, but 91% of days overflow a 1M
+    // window, so the cross-session synthesis it claims is chunked away.
+    scores: { asked: 5, licensed: 4, authorised: 3, retirement: 2, dedup: 1, corpus: 2, visible: 5, cost: 2, build: 3, blast: 1 },
+  },
+  {
+    id: "I",
+    name: "licensed external run, errors only, write-on-recurrence",
+    // dedup 5: the write-on-second-sighting ledger is an exact set membership
+    // test — 1,361 notes become 77, measured by scripts/ledger.mjs.
+    // retirement 3: the ledger is a retraction *list*, which is more than any
+    // other writing option has and less than version control.
+    // corpus 4 rather than 5: the input is transcription, the output is still
+    // an unverified cause.
+    scores: { asked: 4, licensed: 4, authorised: 3, retirement: 3, dedup: 5, corpus: 4, visible: 5, cost: 5, build: 3, blast: 2 },
+  },
 ];
 
 const dropped = new Set(
