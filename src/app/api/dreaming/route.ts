@@ -3,7 +3,15 @@ import { NextResponse } from "next/server";
 // rewrites the path alias at runtime.
 import type { DreamingDTO } from "../../../lib/apiTypes";
 import { scanDreaming } from "../../../lib/dreaming";
-import { listNights, listNotes, noteStillPresent, writtenSignatures } from "../../../lib/dreamingLedger";
+import {
+  NIGHT_LIMIT,
+  NOTE_LIMIT,
+  ledgerCounts,
+  listNights,
+  listNotes,
+  noteStillPresent,
+  writtenSignatures,
+} from "../../../lib/dreamingLedger";
 import { dreamingRefusal, reconcileDreamingNotes } from "../../../lib/dreamingRun";
 import { resolveKnowledgeRoot } from "../../../lib/knowledge";
 import { getSettings } from "../../../lib/settings";
@@ -38,6 +46,7 @@ export async function GET() {
     sinceDays: settings.transcriptRetentionDays,
   });
   const written = writtenSignatures();
+  const counts = ledgerCounts();
 
   const body: DreamingDTO = {
     recurring: readout.recurring.map((r) => ({
@@ -54,6 +63,7 @@ export async function GET() {
     days: readout.days,
     filesWalked: readout.filesWalked,
     filesRead: readout.filesRead,
+    duplicates: readout.duplicates,
     scannedInMs: readout.scannedInMs,
     scannedAt: Date.now(),
 
@@ -73,6 +83,10 @@ export async function GET() {
       present: root.ok ? noteStillPresent(root.root, n.notePath) : null,
     })),
     nights: listNights(),
+    noteLimit: NOTE_LIMIT,
+    notesTruncated: counts.notes > NOTE_LIMIT,
+    nightLimit: NIGHT_LIMIT,
+    nightsTruncated: counts.nights > NIGHT_LIMIT,
   };
   return NextResponse.json(body);
 }

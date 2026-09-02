@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 // Relative, not "@/…": tsconfig.test.json emits plain CommonJS and nothing
 // rewrites the path alias at runtime, so a module a test loads has to import
 // the way src/lib and the chat route already do.
+import { armDreaming, disarmDreaming } from "../../../lib/dreamingRun";
 import {
   DEFAULTS,
   getSettings,
@@ -658,6 +659,16 @@ async function putHandler(req: Request) {
   }
 
   const settings = saveSettings(patch);
+
+  // After the save, because both read the stored value. `startDreaming` used to
+  // run at boot alone, so switching Dreaming on here produced a switch that
+  // read as on and a timer that did not exist until the next restart —
+  // invisible on every surface, and the pane would simply have shown no nights
+  // for ever. `armDreaming` sets the cursor only when there is none, so this
+  // runs harmlessly on every save of a page that re-sends all its fields.
+  if (settings.dreamingEnabled) armDreaming();
+  else disarmDreaming();
+
   // Answered on the PUT as well as the GET: the page sets its state from this
   // response, so without it every fold's count would be stale from the moment
   // the operator pressed Save.

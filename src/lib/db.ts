@@ -1647,6 +1647,13 @@ function migrate(db: Database.Database) {
     );
   `);
 
+  // Dreaming's cursor was a `YYYY-MM-DD` day key and is now an instant under a
+  // different key, because a day key closed the whole day a boot landed in and
+  // so stopped the nightly pass firing at all on any day the server restarted.
+  // Nothing reads the old key; it is deleted rather than left behind so the
+  // next reader greping for it finds the live one and not a fossil.
+  db.prepare("DELETE FROM settings WHERE key = 'dreaming.cursor'").run();
+
   // Anything still wearing the rebuild suffix after the one rebuild above has
   // run. Last, so a leftover this boot has just completed is not reported as
   // one it left behind.

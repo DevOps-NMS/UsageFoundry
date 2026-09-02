@@ -50,8 +50,36 @@ const TICK_MS = 60_000;
 /** Work cycles one night may take. A terminus, not a target. */
 const MAX_CYCLES = 6;
 
-/** The kv key holding the last night this process decided. */
-const CURSOR_KEY = "dreaming.cursor";
+/**
+ * Wall clock one night may take.
+ *
+ * `budget.ts` is satisfied by `maxIterations` alone, so this is not there to
+ * make the policy legal — it is there because six cycles has no upper bound in
+ * time and the thing being bounded is how long an agent may hold the operator's
+ * document store open. The first real night wrote twelve notes in eighteen
+ * minutes; ninety leaves room for a slow one and still ends the same day.
+ */
+const MAX_MINUTES = 90;
+
+/**
+ * The kv key holding the last fire time already acted on, as epoch ms.
+ *
+ * **An instant, not a night, and that distinction is the whole of it.** It was
+ * a `YYYY-MM-DD` day key, which is coarser than the thing it guards: the boot
+ * reconciler set it to today so a restart could not replay a missed 03:04, and
+ * that closed the *rest of the calendar day* along with it. On a machine
+ * rebuilt most days — this one — the nightly pass would have fired
+ * approximately never, with an empty Nights tab and nothing anywhere reporting
+ * a fault. `schedules.ts` keys its cursor on an instant for exactly this
+ * reason, and this now does the same.
+ *
+ * The key is a new one rather than the old name reused, because the *shape* of
+ * the stored value changed: an install carrying the old day string would read
+ * back as a `NaN` cursor and every comparison against it would be false, which
+ * is the trap `orchestrator.ts:373` records for `globalThis` and holds just as
+ * well for a settings row.
+ */
+const CURSOR_KEY = "dreaming.firedAt";
 
 const timer = globalThis as unknown as {
   __ufDreamingTimer?: ReturnType<typeof setInterval> | null;
@@ -66,12 +94,18 @@ export interface NightResult {
   selected: SignatureRollup[];
 }
 
-function cursor(): string | null {
-  return getJSON<string | null>(CURSOR_KEY, null);
+function cursor(): number | null {
+  const raw = getJSON<unknown>(CURSOR_KEY, null);
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
 }
 
-function setCursor(night: string): void {
-  setJSON(CURSOR_KEY, night);
+function setCursor(at: number): void {
+  setJSON(CURSOR_KEY, at);
+}
+
+/** Exported for the clock's test and for nothing else. */
+export function clearDreamingCursor(): void {
+  setJSON(CURSOR_KEY, null);
 }
 
 /**
@@ -215,6 +249,32 @@ export function dreamingRefusal(s: Settings): string | null {
 }
 
 /**
+ * A Dreaming run that has not settled, if there is one.
+ *
+ * Exported for its test, on `tickSchedules`' precedent: the check is one SQL
+ * predicate and every way of getting it wrong is silent — a status list that
+ * drifts from `TERMINAL_STATUSES` would let two agents into the vault, and a
+ * prefix that stopped matching would refuse every night for ever.
+ *
+ * Asks the `runs` table rather than the ledger, because the ledger records what
+ * a night *decided* and this needs to know what is still happening. The
+ * `origin_ref` prefix is the only thing that marks a run as this feature's —
+ * `origin` is `schedule` or `form`, both of which every other run uses too.
+ */
+export function liveDreamingRun(): { runId: string; night: string } | null {
+  const row = db()
+    .prepare(
+      `SELECT id, origin_ref AS ref FROM runs
+        WHERE origin_ref LIKE 'dreaming:%'
+          AND status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(",")})
+        ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(...TERMINAL_STATUSES) as { id: string; ref: string } | undefined;
+  if (!row) return null;
+  return { runId: row.id, night: row.ref.slice("dreaming:".length) };
+}
+
+/**
  * Decide one night and, if anything qualifies, start the run that writes it.
  *
  * Exported for the manual press as well as the timer — the two differ only in
@@ -250,6 +310,27 @@ export async function runDreamingNight(opts: {
       outcome: "refused",
       reason: root.reason,
       runId: null,
+      selected: [],
+    };
+    recordNight({ ...result, startedAt: now, selected: 0 });
+    return result;
+  }
+
+  // Nothing else stops two nights overlapping, and what they would overlap in
+  // is the operator's live document store. `knowledge.ts:39`-`:44` refuses a
+  // background writer for exactly this reason — "a background index that can
+  // write into it is one that can lose somebody's paragraph while they are
+  // typing it" — and two of our own agents editing one vault is that hazard
+  // with the app on both ends of it. A long night is the ordinary way in: six
+  // cycles against a vault has no wall-clock bound of its own until the cap
+  // above, and the next night's timer does not ask what the last one is doing.
+  const live = liveDreamingRun();
+  if (live) {
+    const result: NightResult = {
+      night,
+      outcome: "refused",
+      reason: `The night of ${live.night} is still running. A second pass would put two agents in the vault at once.`,
+      runId: live.runId,
       selected: [],
     };
     recordNight({ ...result, startedAt: now, selected: 0 });
@@ -302,7 +383,7 @@ export async function runDreamingNight(opts: {
         maxWeeklyFraction: null,
         maxSessionFraction: null,
         maxRunTokens: null,
-        maxDurationMinutes: null,
+        maxDurationMinutes: MAX_MINUTES,
         enforcement: "between-cycles",
         continueAfterDone: false,
       },
@@ -357,9 +438,66 @@ export function nextDreamingFire(s: Settings, after: number): number {
  * so the grace below can only ever cover a late tick and never a restart.
  */
 export function reconcileDreamingOnBoot(now = Date.now()): void {
+  // The boot instant, so every window that closed while this process was down
+  // is behind the cursor and a window still ahead of it today is not. Set
+  // unconditionally: a cursor left over from a previous boot is exactly the
+  // stale value this is here to move past.
+  setCursor(now);
+}
+
+/**
+ * Whether tonight's window is open, and which one it is.
+ *
+ * Split out from the tick so the clock can be tested without a timer, a
+ * database of runs, or a vault — every fault this function has ever had was
+ * invisible to a press and would have taken a night to observe in production.
+ *
+ * A cursor that has never been set does **not** fire. A fresh install, or one
+ * restored from a backup taken before this key existed, would otherwise start
+ * an unattended agent because of a window it has no record of deciding. The
+ * reading arms it instead, so the next window is honoured.
+ */
+export function dreamingDue(now = Date.now()): { due: boolean; dueAt: number } {
   const s = getSettings();
-  const today = dayKey(now, s.dreamingTimeZone);
-  if (cursor() !== today) setCursor(today);
+  // The most recent occurrence at or before `now`: `nextOccurrence` is strictly
+  // forward, so today's is found by asking from a day earlier.
+  const dueAt = nextDreamingFire(s, now - 24 * 3_600_000);
+  const last = cursor();
+  if (last === null) {
+    setCursor(now);
+    return { due: false, dueAt };
+  }
+  return { due: dueAt > last && now >= dueAt, dueAt };
+}
+
+/** Record a window as acted on, so it is not decided twice. */
+export function markDreamingFired(dueAt: number): void {
+  setCursor(dueAt);
+}
+
+/**
+ * Start the clock, without letting the act of starting it spend anything.
+ *
+ * Called when the setting is saved as well as at boot, because `startDreaming`
+ * used to run at boot alone: an operator who switched Dreaming on in Settings
+ * got a switch that read as on and a timer that did not exist until the next
+ * restart.
+ *
+ * Arming sets the cursor only when there is none. Turning the setting on is not
+ * a press of Run — `review.ts:34`'s rule — so it must not fire a window that has
+ * already passed today; and the settings page re-sends every field on every
+ * save, so re-arming unconditionally would push the cursor past a window that
+ * was about to fire, giving a nightly job that silently skips any day the
+ * operator opened Settings.
+ */
+export function armDreaming(now = Date.now()): void {
+  if (cursor() === null) setCursor(now);
+  startDreaming();
+}
+
+/** Stop it, for the settings door to call when the switch goes off. */
+export function disarmDreaming(): void {
+  stopDreaming();
 }
 
 export function startDreaming(): void {
@@ -398,28 +536,25 @@ export async function tickDreaming(): Promise<void> {
   if (timer.__ufDreamingRunning) return;
 
   const now = Date.now();
-  const today = dayKey(now, settings.dreamingTimeZone);
-  if (cursor() === today) return;
-
-  // The fire time for *today*, which is the previous occurrence rather than the
-  // next one — `nextOccurrence` is strictly forward, so today's is found by
-  // asking from just before local midnight.
-  const dueAt = nextDreamingFire(settings, now - 24 * 3_600_000);
-  if (now < dueAt) return;
+  const { due, dueAt } = dreamingDue(now);
+  if (!due) return;
 
   timer.__ufDreamingRunning = true;
   try {
     // Moved before the work, not after: a night that throws must not be retried
     // every minute until midnight. The row `runDreamingNight` writes is what
     // says what happened.
-    setCursor(today);
+    markDreamingFired(dueAt);
     await runDreamingNight({ now, origin: "schedule" });
   } catch (err) {
     // Loud rather than swallowed. This is the only surface an operator has, and
     // a night that has quietly stopped deciding looks exactly like a quiet one.
     console.error("[usagefoundry] dreaming night failed", err);
     recordNight({
-      night: today,
+      // The night the window belonged to, in the operator's zone — the same key
+      // `runDreamingNight` would have written, so a failure lands on the row a
+      // success would have.
+      night: dayKey(now, settings.dreamingTimeZone),
       startedAt: now,
       outcome: "failed",
       reason: err instanceof Error ? err.message : String(err),

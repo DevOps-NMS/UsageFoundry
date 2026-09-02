@@ -175,3 +175,57 @@ describe("noteStillPresent", () => {
     assert.equal(ledger.noteStillPresent(path.join(DATA_DIR, "no-such-mount"), "x.md"), null);
   });
 });
+
+describe("liveDreamingRun", () => {
+  let runs: typeof import("./dreamingRun");
+
+  before(async () => {
+    runs = await import("./dreamingRun");
+  });
+
+  const insertRun = (id: string, status: string, ref: string | null) =>
+    dbMod
+      .db()
+      .prepare(
+        `INSERT INTO runs (id, folder, prompt, status, budget, created_at, origin, origin_ref)
+         VALUES (?, '/w', 'p', ?, '{}', ?, 'schedule', ?)`,
+      )
+      .run(id, status, Date.now(), ref);
+
+  beforeEach(() => {
+    dbMod.db().exec("DELETE FROM runs");
+  });
+
+  it("finds a night still in flight, so a second one cannot start", () => {
+    // Two agents editing one vault is the hazard `knowledge.ts:39` refuses a
+    // background writer over, arrived at from inside the app instead of outside
+    // it. Nothing else in this feature would stop it.
+    insertRun("r-live", "running", "dreaming:2026-09-02");
+    const live = runs.liveDreamingRun();
+    assert.equal(live?.runId, "r-live");
+    assert.equal(live?.night, "2026-09-02");
+  });
+
+  it("ignores a night that has settled", () => {
+    insertRun("r-done", "completed", "dreaming:2026-09-01");
+    assert.equal(runs.liveDreamingRun(), null);
+  });
+
+  it("ignores a live run that is not Dreaming's", () => {
+    // The origin column cannot carry this: `schedule` and `form` are used by
+    // every other run in the app, so the ref prefix is the only marker.
+    insertRun("r-other", "running", null);
+    insertRun("r-wf", "running", "instance-123");
+    assert.equal(runs.liveDreamingRun(), null);
+  });
+
+  it("treats every non-terminal status as in flight, queued and paused included", () => {
+    // A queued night holds no agent yet but will, and a paused one is coming
+    // back to the same vault. Both are reasons not to start a second.
+    for (const status of ["queued", "paused", "waiting"]) {
+      dbMod.db().exec("DELETE FROM runs");
+      insertRun(`r-${status}`, status, "dreaming:2026-09-02");
+      assert.ok(runs.liveDreamingRun(), `${status} must count as in flight`);
+    }
+  });
+});

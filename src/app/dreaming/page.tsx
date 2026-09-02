@@ -240,8 +240,10 @@ function Summary({
 
         <Hint>
           Scanned {data.filesWalked.toLocaleString()} transcript files in {data.scannedInMs}
-          ms, {data.filesRead.toLocaleString()} of them re-read. This scan keeps its own
-          cache and never rides the dashboard&apos;s.
+          ms, {data.filesRead.toLocaleString()} of them re-read
+          {data.duplicates > 0 &&
+            `, ${data.duplicates.toLocaleString()} records skipped as copies a resumed session rewrote`}
+          . This scan keeps its own cache and never rides the dashboard&apos;s.
         </Hint>
 
         {data.refusal ? (
@@ -340,6 +342,12 @@ function Written({
 
   return (
     <TableWrap>
+      {data.notesTruncated && (
+        <Notice tone="warn" quiet className="mb-3">
+          Showing the newest {data.noteLimit} notes. This list is the record of what this app
+          has written into the vault, so a cut one is saying less than it knows.
+        </Notice>
+      )}
       <Table stack>
         <THead>
           <Tr>
@@ -428,6 +436,11 @@ function Nights({ data }: { data: DreamingDTO }) {
 
   return (
     <TableWrap>
+      {data.nightsTruncated && (
+        <Notice tone="neutral" quiet className="mb-3">
+          Showing the last {data.nightLimit} nights.
+        </Notice>
+      )}
       <Table stack>
         <THead>
           <Tr>

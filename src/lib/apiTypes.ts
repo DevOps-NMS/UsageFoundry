@@ -3034,6 +3034,15 @@ export interface DreamingDTO {
   days: string[];
   filesWalked: number;
   filesRead: number;
+  /**
+   * Records dropped as copies of one already counted.
+   *
+   * A resumed session rewrites its earlier records into the new transcript.
+   * Reported rather than absorbed, because it is the difference between this
+   * readout and a naive count of the same corpus, and the first note this
+   * feature ever wrote flagged that gap by re-deriving the numbers.
+   */
+  duplicates: number;
   scannedInMs: number;
   scannedAt: number;
 
@@ -3052,4 +3061,16 @@ export interface DreamingDTO {
 
   notes: DreamingNoteDTO[];
   nights: DreamingNightDTO[];
+  /**
+   * Whether either list above was cut, and to what.
+   *
+   * `git-and-review.md`'s rule: a shortened list must say it is shortened. A
+   * ledger that silently stopped at 500 would read as the complete record of
+   * what this app has written into somebody's vault, which is the one thing it
+   * must never be wrong about.
+   */
+  noteLimit: number;
+  notesTruncated: boolean;
+  nightLimit: number;
+  nightsTruncated: boolean;
 }

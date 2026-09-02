@@ -39,6 +39,19 @@ export interface DreamingNight {
   selected: number;
 }
 
+/** How many notes and nights the two lists below return before cutting. */
+export const NOTE_LIMIT = 500;
+export const NIGHT_LIMIT = 60;
+
+/** Totals, so a cut list can say it was cut rather than reading as the whole. */
+export function ledgerCounts(): { notes: number; nights: number } {
+  const one = (sql: string) => (db().prepare(sql).get() as { n: number }).n;
+  return {
+    notes: one("SELECT COUNT(*) AS n FROM dreaming_notes"),
+    nights: one("SELECT COUNT(*) AS n FROM dreaming_nights"),
+  };
+}
+
 /** Every signature this app has already written a note for. */
 export function writtenSignatures(): Set<string> {
   const rows = db().prepare("SELECT signature FROM dreaming_notes").all() as {
@@ -47,7 +60,7 @@ export function writtenSignatures(): Set<string> {
   return new Set(rows.map((r) => r.signature));
 }
 
-export function listNotes(limit = 500): DreamingNote[] {
+export function listNotes(limit = NOTE_LIMIT): DreamingNote[] {
   const rows = db()
     .prepare(
       `SELECT signature, sample, written_at, night, run_id, note_path, days_seen, instances
@@ -183,7 +196,7 @@ export function recordNight(night: DreamingNight): void {
     .run(night);
 }
 
-export function listNights(limit = 60): DreamingNight[] {
+export function listNights(limit = NIGHT_LIMIT): DreamingNight[] {
   const rows = db()
     .prepare(
       `SELECT night, started_at, outcome, reason, run_id, selected
@@ -198,10 +211,6 @@ export function listNights(limit = 60): DreamingNight[] {
     runId: (r.run_id as string | null) ?? null,
     selected: Number(r.selected),
   }));
-}
-
-export function lastNight(): DreamingNight | null {
-  return listNights(1)[0] ?? null;
 }
 
 /**

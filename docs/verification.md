@@ -1786,6 +1786,29 @@ through before trusting this unattended:
 > `docs/agent/testing.md` were found this way, after the code typechecked and
 > passed the suite.
 >
+> **Update, same day.** One agent has now written notes: the operator ran a
+> night that selected twelve signatures, cost $9.40 over eighteen minutes and
+> completed. Nine got note paths, and the three that did not are exactly the
+> rows the design predicted a run should decline — a person rejecting a tool
+> call, a permission prompt and a split-command prompt. Four `bwrap` signatures
+> mapped to one note, which is the collapse the string cannot express. The files
+> pass `_Meta/qc.py`'s ERROR gate; all fifteen errors in that vault are
+> pre-existing and none names a Dreaming note. It produced four warnings across
+> two notes — a `sources:` block with no `## Sources` section, and a seed with
+> no `seeded_by:` — both now named in the prompt. **And the note corrected this
+> app**: it re-derived the counts instead of trusting them and found the 5.1%
+> of records that a resumed session rewrites, which the scan was counting twice.
+>
+> Still unverified after all that: **the nightly timer has never fired.** Every
+> night so far was a press. `tickDreaming`, `reconcileDreamingOnBoot` and
+> `armDreaming` are unit-tested and have never run unattended in production, and
+> the two faults that a press cannot expose — a day-keyed cursor that closed the
+> whole day a boot landed in, and a switch that started no timer — were found by
+> reading the code rather than by watching it, on 2026-09-02, after the feature
+> had already shipped. The decisive test is one 03:04 that nobody is present for.
+>
+> The original entry, unchanged:
+>
 > What has **not** happened is one agent writing one note. The two runs the
 > smoke test created were cancelled within seconds — a real billed agent against
 > the operator's own subscription, started to prove the spawn rather than the

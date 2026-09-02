@@ -434,9 +434,15 @@ export function forgetDreamingFiles(files: readonly string[]): void {
   for (const f of files) memo.delete(f);
 }
 
-/** What the memo is holding, for the storage card. */
-export function dreamingCacheStats(): { files: number; observations: number } {
-  let observations = 0;
-  for (const entry of memo.values()) observations += entry.observations.length;
-  return { files: memo.size, observations };
-}
+/*
+ * There is deliberately no `dreamingCacheStats` and no eviction bound, which is
+ * the one place this module does *not* follow `transcripts.ts`.
+ *
+ * That cache holds parsed turns and needs `TRANSCRIPT_CACHE_MAX_ENTRIES` to
+ * stop one process holding the whole corpus. This one holds a size/mtime stamp
+ * per file plus the error results, and the whole error corpus is 0.90 MiB
+ * across 23 days — 2,435 observations against 1,954 files. It is bounded by the
+ * retention horizon, which `forgetDreamingFiles` above enforces from the sweep,
+ * and a reading nobody displays would be the dead code this file would rather
+ * not carry. If this ever holds successful results it needs both.
+ */

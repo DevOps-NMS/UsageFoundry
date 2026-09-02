@@ -237,3 +237,49 @@ vault-reading run did not merely relay: it found that the note's own advice
 refusal and ten more character devices sit behind it. A reader that verifies is
 worth more than one that quotes, and the skill's grading table is what keeps the
 difference legible.
+
+**The cursor is an instant and never a day, and this is the fault that would
+have stopped the feature dead.** `reconcileDreamingOnBoot` exists to stop a
+restart replaying a window it missed — `reconcileSchedulesOnBoot`'s rule. It set
+a `YYYY-MM-DD` day key, and the tick returned whenever `cursor === today`, so a
+boot closed **the rest of that calendar day** along with the window it meant to
+close. This server restarts on every `docker compose up --build` and on every
+host reboot, so on a machine rebuilt most days the nightly pass would have fired
+approximately never, with an empty Nights tab and no error anywhere.
+`schedules.ts` keys on an instant for precisely this reason. `dreamingDue` is
+split out from the tick so the clock can be tested without a timer, and a cursor
+that has never been set does **not** fire — it arms instead, so a fresh install
+or a restored backup cannot start an agent because of a window it has no record
+of deciding.
+
+**Enabling the setting arms the clock, because `startDreaming` at boot alone was
+a switch with no timer behind it.** `armDreaming` sets the cursor only when
+there is none: the settings page re-sends every field on every save, so
+re-arming unconditionally would push the cursor past a window about to fire and
+give a nightly job that silently skips any day the operator opened Settings. And
+turning the switch on never fires a window that has already passed — that is a
+press of Save, not a press of Run, and the pane carries an explicit button for
+the case where the operator does want it now.
+
+**A night refuses while the previous one is still running.** Nothing else
+stopped two nights overlapping, and what they would overlap in is the operator's
+live document store — `knowledge.ts:39`–`:44` refuses a background writer over
+exactly that hazard, and two of our own agents editing one vault is the same
+hazard with this app on both ends of it. `liveDreamingRun` keys on the
+`dreaming:` prefix in `origin_ref`, because `origin` is `schedule` or `form` and
+every other run in the app uses both. Every non-terminal status counts as in
+flight, `queued` and `paused` included. The run also carries a wall-clock cap:
+six cycles has no bound in time, and the thing being bounded is how long an
+agent holds somebody's vault open.
+
+**There is no eviction bound on the scan memo and that is deliberate**, which is
+the one place this feature does not follow `transcripts.ts`. That cache holds
+parsed turns and needs `TRANSCRIPT_CACHE_MAX_ENTRIES`; this one holds a
+size/mtime stamp per file plus the error results, and the whole error corpus is
+0.90 MiB across 23 days. It is bounded by the retention horizon through
+`forgetDreamingFiles`. If it ever holds successful results it needs both.
+
+**Both lists on the pane say when they are cut.** `git-and-review.md`'s rule,
+and it matters most here: the notes table is the record of what this app has
+written into a store with no version control, so a list that silently stopped at
+500 would read as complete when it is not.
