@@ -934,6 +934,11 @@ function StorageFigures({
               {lastSweep.samples !== undefined && (
                 <>{lastSweep.samples.toLocaleString()} context samples, </>
               )}
+              {lastSweep.compositions !== undefined && (
+                <>
+                  {lastSweep.compositions.toLocaleString()} composition rows,{" "}
+                </>
+              )}
               {lastSweep.checkouts} checkout
               {lastSweep.checkouts === 1 ? "" : "s"} and{" "}
               {lastSweep.transcripts.toLocaleString()} transcript

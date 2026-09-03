@@ -182,7 +182,13 @@ describe("run_events retention", () => {
     // case: a store added to this sweep later must be named here or it is one
     // this blank horizon does not cover, which is a silent deletion on an
     // install that asked to keep everything.
-    assert.deepEqual(swept, { events: 0, telemetry: 0, samples: 0, decisions: 0 });
+    assert.deepEqual(swept, {
+      events: 0,
+      telemetry: 0,
+      samples: 0,
+      decisions: 0,
+      compositions: 0,
+    });
     assert.equal(eventCount("no-horizon"), 4);
   });
 

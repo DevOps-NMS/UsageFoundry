@@ -1420,6 +1420,58 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_context_samples_ts ON context_samples(ts);
   `);
 
+  // What the window was made of when a reading was taken — `winnow context`,
+  // at depth 1, one row per provenance per reading.
+  //
+  // A **second measure of the same window**, and the two anchor differently:
+  // `context_samples.tokens` is read off the last main-thread `usage` frame
+  // with sidechains excluded, where winnow anchors on the last priced request
+  // in the file whatever wrote it. A sub-agent's own frames live in that same
+  // file, so the two figures come apart for exactly as long as a sub-agent
+  // runs — which on this install has been measured at 22 minutes. `window`
+  // therefore stores winnow's own total rather than the sample's, so a
+  // composition can be drawn against the total it actually apportions and a
+  // divergence is visible instead of being averaged away. Nothing subtracts
+  // one from the other.
+  //
+  // `label` and `kind` are winnow's own strings, stored rather than mapped to
+  // an enum here: the tool owns that vocabulary, and a label this app did not
+  // anticipate must render as itself rather than be binned as 'other' — the
+  // same rule `PRUNE_TRIGGER` follows on the component side. `kind` is one of
+  // exact / derived / estimated / residual and says how the figure was
+  // reached, which is the one thing a stacked band cannot show.
+  //
+  // Bounded exactly as `context_samples` is: `CONTEXT_COMPOSITIONS_PER_RUN`
+  // caps a run oldest-first, and the same `sweepRunEvents` horizon drops a
+  // settled run's rows. The cap counts *readings* rather than rows, since one
+  // reading writes a row per provenance and a cap on rows would truncate a
+  // reading down the middle — a stacked area whose bands stop at different
+  // moments is a picture of a conversation that never happened.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS context_compositions (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts       INTEGER NOT NULL,
+      -- Plain, on context_samples' reasoning: nothing deletes a runs row.
+      run_id   TEXT NOT NULL,
+      -- Which reading this row belongs to. One winnow context call writes
+      -- several rows sharing this, and it is what lets the cap and every read
+      -- treat a reading as the unit rather than the row.
+      reading  INTEGER NOT NULL,
+      -- The work cycle in flight, on context_samples.iteration's reasoning.
+      iteration INTEGER NOT NULL,
+      -- Winnow's own exact window on the request it anchored to. Not the
+      -- sample's figure; see above.
+      window   INTEGER NOT NULL,
+      label    TEXT NOT NULL,
+      tokens   INTEGER NOT NULL,
+      kind     TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_context_compositions_run
+      ON context_compositions(run_id, reading);
+    CREATE INDEX IF NOT EXISTS idx_context_compositions_ts
+      ON context_compositions(ts);
+  `);
+
   // Every cycle boundary, pruned or not — and the `not` is the point.
   //
   // A prune receipt records what was cut. It cannot record what a resume would

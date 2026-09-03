@@ -4996,6 +4996,72 @@ through before trusting this unattended:
   server becomes one — a lock file naming a live pid that is not ours, then
   `claimDataDir()` — rather than by stubbing the gate.
 
+- **The context composition series, and the winnow pin it needed (2026-09-04).**
+  `winnow context` does not exist at the old pin `0384486` and fails there as an
+  unknown command, so the pin moved to `0421da5` — forty-three commits — and all
+  four subcommands this app spawns were re-read at the new one against a real
+  8.7 MB transcript on the `safe run --` path, not just the new one. `treat -rx
+  aggressive`'s dry run still prints `Before 434.2K tokens 8.73MB` and `Saved 0
+  tokens (0.0%) 4.30MB freed`, which is the shape `parseTreatEstimate` matches
+  and the zero token column its second case exists for; `plan --tier CB --json`
+  still carries all eight fields `parsePlan` reads (`selection.tier` CB,
+  `results.tool_calls` 185, `results.stripped` 3, `bytes.removed` 104,863,
+  `bytes.pointer_overhead` 517, `bytes.net` 104,346, `arithmetic.suffix_bytes`
+  4,078,388, `arithmetic.break_even_turns` 722.6); `fork --tier CB --json` still
+  carries `written`, `new_session_id`, `out`, `cold_age`, `refusals` and `plan`.
+
+  **`docker compose build` completed at the new pin**, and the image was then
+  driven directly: `winnow context --help` resolves inside it, and the app's own
+  argv — `safe run -- context <path> --depth 1 --json` under `WINNOW_ORCHESTRATOR=1`
+  and the app's `WINNOW_DATA_DIR` — returned a body on stdout with **stderr
+  empty**, which the compiled `parseComposition` then read: window 433,331
+  exact, and six bands summing to exactly that — tool traffic 185,525
+  (estimated), prefix 146,870 (derived), retained reasoning 72,903 (derived),
+  standing configuration 15,718 (estimated), conversation 2,068 (estimated),
+  unattributed 10,247 (residual). The sum holding is the property worth
+  recording: the residual is one of the bands, so a parse that dropped a node
+  would still draw a plausible stack that quietly stops short of its own total.
+  Timed at ~0.12 s on that transcript, which is what makes it affordable on the
+  guard tick at all.
+
+  A note on the direct invocation, because it looks alarming and is not: `python
+  -m winnow context --help` run **outside** `safe run` printed *"protecting every
+  Claude Code session globally (7 new hook(s) wired into ~/.claude/settings.json)"*.
+  `safe run` sets `WINNOW_NO_GLOBAL_INIT=1` itself, with that exact bind mount
+  named in its own reason, and every spawn in `contextPruning.ts` goes through
+  it. Nothing in this app can reach the ungated path.
+
+  The palette is the other computed half. The six band tokens were **validated
+  by script rather than judged by eye**, in both modes and against the surface
+  they are drawn on (`--bg-raised`, `#ffffff` and `#2a2a2d`): every adjacent
+  pair clears the CVD floor at 14.8 ΔE deutan in light and 12.6 protan in dark,
+  every step sits inside its mode's lightness band, and each clears 3:1. The
+  order the bands stack in was chosen by searching the orderings for the best
+  worst-adjacent separation, not picked.
+
+  The component was **rendered in a browser** in both themes and in all three of
+  its states — a fourteen-reading series with a prune in it, a lone reading, and
+  pruning switched off — and two defects came out of looking at it that no
+  assertion had: the legend truncated four of six band names at 21rem in two
+  columns ("retained reaso…", "standing confi…"), and the 1.5-unit separator
+  stroke was most of the `conversation` band, which runs about 1% of the window.
+  A third came out of writing the tests: a `<title>` whose children are an array
+  renders **empty** in React, warning on the console and nothing else, so every
+  band's tooltip was blank behind well-formed markup.
+
+  **Not yet verified by hand:** the loop has not been watched taking one. Nothing
+  here drove `checkContextCeilings` against a live run, so no row has been
+  written to `context_compositions` by the tick that is supposed to write it, and
+  the pacing — `COMPOSITION_REMEASURE_GROWTH_TOKENS`, and the absolute distance
+  that is meant to catch the drop after a prune — has been reasoned about and
+  unit-tested and not observed. The stack was drawn from **synthetic** readings,
+  never from stored ones, so the path from the table through `compositionSeries`
+  to the page is proven only by its types. And the anchor divergence this feature
+  documents — winnow taking the last priced request where the sample takes the
+  last main-thread one — has been read out of both implementations rather than
+  measured: no reading has been taken while a sub-agent was running, which is the
+  one condition under which the two figures are supposed to disagree.
+
 There is no linter run in this repo, and `npm test` covers a deliberately short
 list: the folder-collision predicate, which queued runs may start, the budget
 policy, how a provider refusal is classified and backed off from, which prompt a

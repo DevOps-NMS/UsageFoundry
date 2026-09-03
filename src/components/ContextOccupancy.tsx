@@ -4,7 +4,12 @@
 // rewrites the path alias at runtime, so a tested component has to import the
 // way src/lib, Meter.tsx and LiveTelemetry.tsx already do.
 import { Fragment, type ReactNode } from "react";
-import type { ContextOccupancyDTO, ContextSampleDTO } from "../lib/apiTypes";
+import type {
+  ContextCompositionDTO,
+  ContextCompositionSliceDTO,
+  ContextOccupancyDTO,
+  ContextSampleDTO,
+} from "../lib/apiTypes";
 import { fmtClock, fmtDuration, fmtRelative, fmtTokens } from "../lib/format";
 import { Meter } from "./Meter";
 import { Stat } from "./ui/Card";
@@ -174,6 +179,12 @@ export function ContextOccupancy({
             samples={samples}
             prunes={prunes}
             ceilingTokens={ceilingTokens}
+          />
+
+          <CompositionStack
+            readings={context.composition}
+            readingCount={context.compositionCount}
+            absence={context.compositionAbsence}
           />
 
           <Caption
@@ -514,6 +525,353 @@ function describeSeries(
     (marks.length === 0
       ? "No prune falls inside this span, so every fall in the line is the conversation's own."
       : `${marks.length} ${marks.length === 1 ? "prune is" : "prunes are"} marked inside it; the line falls at each.`)
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* What the window is made of                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The stack's own box, taller than the sparkline's rather than shorter.
+ *
+ * The line above is one series and reads at any height; this is six bands, two
+ * of which are a few percent of the window, and at the sparkline's 56 the
+ * thinnest of them were under a pixel of a 336px-wide card — present in the
+ * markup, absent from the picture, and the legend beside them saying they had a
+ * figure. 84 gives the smallest band about three pixels at its own scale.
+ */
+const STACK_H = 84;
+const STACK_PLOT_H = STACK_H - PAD_TOP - 2;
+/** Width of the single column drawn for a lone reading; see `CompositionStack`. */
+const LONE_COLUMN_W = 44;
+
+/**
+ * The six fills, in the fixed order a band is assigned one.
+ *
+ * **Assigned to an entity and never cycled**, which is why this is an ordered
+ * list read by a stable index rather than a modulo over however many bands
+ * came back: a conversation that stops carrying attachments loses a band, and a
+ * palette indexed by rank would repaint every band above it at that moment. The
+ * order the index comes from is `bandOrder`.
+ *
+ * Deliberately none of the status tones. `stroke-danger` is already the ceiling
+ * rule on the chart above this one, and a band wearing it would read as "this
+ * part of your context is the problem" — which a composition must not assert,
+ * least of all about `prefix`, the one part of it nothing here can cut.
+ */
+const BAND_FILL = [
+  "fill-band-1",
+  "fill-band-2",
+  "fill-band-3",
+  "fill-band-4",
+  "fill-band-5",
+  "fill-band-6",
+] as const;
+
+/**
+ * What the window is made of, over the same span as the series above it.
+ *
+ * ## The one thing this must not be read as
+ *
+ * It is drawn against **winnow's** window, not the sample series'. Both are the
+ * same measure — `input + cache_creation + cache_read` on a priced request —
+ * and they are anchored differently: `apiContextTokens` takes the last
+ * *main-thread* frame, sidechains excluded, because a sub-agent's turns are not
+ * this conversation's context; winnow takes the last priced request in the
+ * transcript whatever wrote it, and a sub-agent's frames are in that same file.
+ * So the two agree on an idle conversation and come apart for exactly as long
+ * as a sub-agent runs — 22 minutes at a stretch on this install. Scaling these
+ * bands onto the sample's figure would hide that; the caption names it instead,
+ * and nothing subtracts one from the other.
+ *
+ * ## Why the cycle ceiling is not on this chart
+ *
+ * It is on the one above, where the figure it bounds is drawn. Repeating it
+ * here would put this app's own policy line across a picture measured from a
+ * different anchor, and the first thing anyone would do with the two is read
+ * the gap between them.
+ *
+ * ## Why the bands are ordered by total and not by size at each reading
+ *
+ * Winnow returns its nodes largest-first *per reading*, so two readings can
+ * disagree about the order — and bands that swap places mid-chart cross each
+ * other, which reads as one provenance turning into another. The order is
+ * settled once, over the whole series, and every reading is stacked in it.
+ */
+function CompositionStack({
+  readings,
+  readingCount,
+  absence,
+}: {
+  readings: ContextCompositionDTO[];
+  readingCount: number;
+  absence: ContextOccupancyDTO["compositionAbsence"];
+}) {
+  if (readings.length === 0) {
+    return (
+      <p className="mt-2 max-w-[68ch] text-xs leading-snug text-ink-muted">
+        {absence === "off" ? (
+          <>
+            What the window is made of is not read: it costs a winnow
+            subprocess, and context pruning is switched off, so nothing here
+            runs winnow against this conversation.
+          </>
+        ) : (
+          <>
+            What the window is made of is taken on the guard tick, paced by
+            how far the conversation has grown rather than by the clock — so a
+            run that has not moved much yet has nothing to show.
+          </>
+        )}
+      </p>
+    );
+  }
+
+  const order = bandOrder(readings);
+  const yMax = Math.max(...readings.map((r) => r.window), 1);
+  const t0 = readings[0].ts;
+  const span = readings[readings.length - 1].ts - t0;
+  const lone = readings.length === 1;
+  // A column, never an area, whenever the readings share one instant. For a
+  // lone reading that is the point: one point stretched across the box asserts
+  // this composition held for the whole span, which is the one claim a single
+  // measurement cannot make. For several at the same `ts` — which the pacing
+  // makes vanishingly unlikely and does not forbid — it is what stops the area
+  // path collapsing to a zero-width sliver that renders as nothing at all.
+  const column = lone || span <= 0;
+
+  const x = (ts: number) =>
+    column
+      ? PAD_X + PLOT_W / 2
+      : round(PAD_X + ((ts - t0) / span) * PLOT_W);
+  const y = (tokens: number) =>
+    round(PAD_TOP + (1 - Math.min(Math.max(tokens, 0), yMax) / yMax) * STACK_PLOT_H);
+
+  // Cumulative tops, band by band, so each band's own area is the strip between
+  // its top and the one below it.
+  const stacked = readings.map((reading) => {
+    const byLabel = new Map(reading.slices.map((s) => [s.label, s.tokens]));
+    let running = 0;
+    return order.map((label) => {
+      running += byLabel.get(label) ?? 0;
+      return { cx: x(reading.ts), top: y(running) };
+    });
+  });
+
+  const baseline = PAD_TOP + STACK_PLOT_H;
+  const latest = readings[readings.length - 1];
+  const latestByLabel = new Map(latest.slices.map((s) => [s.label, s]));
+
+  return (
+    <>
+      <svg
+        // `h-auto` with a viewBox and the default `preserveAspectRatio`, for the
+        // sparkline's reasons — see its own note.
+        className="mt-3 block h-auto w-full"
+        viewBox={`0 0 ${VIEW_W} ${STACK_H}`}
+        role="img"
+        aria-label={describeComposition(latest, order, readings.length)}
+      >
+        {order.map((label, band) => {
+          const upper = stacked.map((cols) => cols[band]);
+          const lower =
+            band === 0 ? null : stacked.map((cols) => cols[band - 1]);
+
+          const d = column
+            ? // The column: a rectangle from this band's top down to the one
+              // below it, or to the baseline for the first.
+              `M${round(upper[0].cx - LONE_COLUMN_W / 2)} ${upper[0].top}` +
+              `H${round(upper[0].cx + LONE_COLUMN_W / 2)}` +
+              `V${lower ? lower[0].top : baseline}` +
+              `H${round(upper[0].cx - LONE_COLUMN_W / 2)}Z`
+            : upper.map((p, i) => `${i === 0 ? "M" : "L"}${p.cx} ${p.top}`).join(" ") +
+              (lower
+                ? // Back along the band below, right to left, which is what
+                  // closes this band against it rather than against the floor.
+                  lower
+                    .map((p) => `L${p.cx} ${p.top}`)
+                    .reverse()
+                    .join(" ")
+                : ` L${upper[upper.length - 1].cx} ${baseline} L${upper[0].cx} ${baseline}`) +
+              "Z";
+
+          return (
+            <path
+              key={label}
+              d={d}
+              className={`${BAND_FILL[band]} stroke-surface`}
+              // The gap between stacked segments, drawn as a surface-coloured
+              // edge rather than as a real gap: a gap would let the chart's ground
+              // through and make each band look like it had its own baseline.
+              //
+              // 0.75 rather than the 2 a full-size chart takes, because this
+              // viewBox is about 1:1 with device pixels and the stroke is
+              // centred on the boundary — so it costs each band half its width
+              // top and bottom. `conversation` is around 1% of the window here,
+              // four units tall, and at 1.5 the separator was most of the band.
+              strokeWidth="0.75"
+              strokeLinejoin="round"
+            >
+              {/* The native tooltip, which is the whole of this chart's hover
+                  layer. A crosshair would need client state on a component that
+                  has none and is re-rendered on a three-second poll; the band's
+                  own identity is what a pointer is actually asking for.
+
+                  One interpolated string and never `{label} — {value}`. React
+                  renders a `<title>` whose children are an *array* as empty,
+                  with a console warning and no other symptom: the element is
+                  there, the markup is well-formed, and every band's tooltip is
+                  blank. */}
+              <title>{`${label} — ${fmtTokens(
+                latestByLabel.get(label)?.tokens ?? 0,
+              )} at the last reading`}</title>
+            </path>
+          );
+        })}
+      </svg>
+
+      {/* The legend, and it is not optional: six bands cannot be told apart by
+          position, and `kind` — whether a figure was read, subtracted or
+          estimated — is the one thing about a band that no fill can carry.
+
+          One column and not two. These labels are winnow's and cannot be
+          shortened here, and at 21rem a two-column grid truncated four of the
+          six — "retained reaso…", "standing confi…" — which is the legend
+          failing at the one job it has. Six rows is the cost. */}
+      <ul className="mt-1.5 space-y-0.5 text-xs text-ink-muted">
+        {order.map((label, band) => {
+          const slice = latestByLabel.get(label);
+          return (
+            <li key={label} className="flex items-baseline gap-1.5">
+              <svg
+                viewBox="0 0 8 8"
+                className="h-2 w-2 shrink-0 translate-y-px"
+                aria-hidden="true"
+              >
+                <rect x="0" y="0" width="8" height="8" className={BAND_FILL[band]} />
+              </svg>
+              <span className="min-w-0 flex-1">{label}</span>
+              <span className="tabular-nums">{fmtTokens(slice?.tokens ?? 0)}</span>
+            </li>
+          );
+        })}
+      </ul>
+
+      {/* Discrete, so it is a table — the same split the sparkline makes. The
+          `kind` column is here rather than in the legend because it is a word
+          per row and the legend is two columns of a 21rem pane. */}
+      <div className="sr-only">
+        <Table>
+          <caption>
+            What the window held at the last reading, and how each figure was
+            reached.
+          </caption>
+          <THead>
+            <tr>
+              <Th>Provenance</Th>
+              <Th num>Tokens</Th>
+              <Th>How it was reached</Th>
+            </tr>
+          </THead>
+          <TBody>
+            {order.map((label) => {
+              const slice = latestByLabel.get(label);
+              return (
+                <Tr key={label}>
+                  <Td>{label}</Td>
+                  <Td num>{fmtTokens(slice?.tokens ?? 0)}</Td>
+                  <Td>{slice?.kind || "not stated"}</Td>
+                </Tr>
+              );
+            })}
+          </TBody>
+        </Table>
+      </div>
+
+      <p className="mt-1.5 max-w-[68ch] text-xs leading-snug text-ink-muted">
+        {/* The load-bearing sentence of this half of the panel. The two windows
+            are the same measure from different anchors, and the whole reason
+            this is said here rather than in a note somewhere on the page is
+            `LiveTelemetry`'s: a separation stated once, away from the figure,
+            is a separation nobody reads at the moment they need it. */}
+        Winnow&rsquo;s reading of the same window, apportioned. It anchors on the
+        last priced request in the transcript where the figure above anchors on
+        the last <em>main-thread</em> one, so the two totals part company for as
+        long as a sub-agent runs. Take each against its own chart and subtract
+        neither from the other.
+        {lone && <> One reading so far; the area appears from the second.</>}
+        {readingCount > readings.length && (
+          <>
+            {" "}
+            The newest {readings.length} of {readingCount} readings.
+          </>
+        )}
+      </p>
+    </>
+  );
+}
+
+/**
+ * The order bands are stacked in, settled once over the whole series.
+ *
+ * Largest total at the bottom, and anything winnow called a **residual** on top
+ * whatever its size. The residual is what nothing accounted for, so it is the
+ * one band whose height is a statement about the measurement rather than about
+ * the conversation; buried between two real provenances it reads as one of
+ * them, and at the top it reads as the gap it is.
+ *
+ * Ties break on the label so the order is total rather than merely stable —
+ * two provenances at exactly zero must not swap between two polls.
+ */
+function bandOrder(readings: ContextCompositionDTO[]): string[] {
+  const totals = new Map<string, number>();
+  const residual = new Set<string>();
+  for (const reading of readings) {
+    for (const slice of reading.slices) {
+      totals.set(slice.label, (totals.get(slice.label) ?? 0) + slice.tokens);
+      if (slice.kind === "residual") residual.add(slice.label);
+    }
+  }
+  return [...totals.keys()]
+    .sort((a, b) => {
+      const ra = residual.has(a) ? 1 : 0;
+      const rb = residual.has(b) ? 1 : 0;
+      if (ra !== rb) return ra - rb;
+      const d = (totals.get(b) ?? 0) - (totals.get(a) ?? 0);
+      return d !== 0 ? d : a.localeCompare(b);
+    })
+    // A seventh provenance would be a band with no fill assigned to it. Dropped
+    // rather than given a generated hue, and the bands then fail to sum to the
+    // window, which is visible — where a repeated colour is not.
+    .slice(0, BAND_FILL.length);
+}
+
+/**
+ * The composition in words, for the reader who gets no picture.
+ *
+ * The *latest* reading rather than the series' shape, which is the opposite of
+ * what `describeSeries` does and is right for the opposite reason: a stacked
+ * area's subject is the proportions at a moment, and six bands' worth of
+ * trajectory is a paragraph nobody can hold. The table under it carries the
+ * figures.
+ */
+function describeComposition(
+  latest: ContextCompositionDTO,
+  order: string[],
+  readings: number,
+): string {
+  const parts = order.map((label) => {
+    const slice = latest.slices.find((s) => s.label === label);
+    const tokens = slice?.tokens ?? 0;
+    const pct =
+      latest.window > 0 ? Math.round((tokens / latest.window) * 100) : 0;
+    return `${label} ${fmtTokens(tokens)} (${pct}%)`;
+  });
+  return (
+    `What the context is made of, over ${readings} ` +
+    `${readings === 1 ? "reading" : "readings"}. At the last one the window was ` +
+    `${fmtTokens(latest.window)} tokens: ${parts.join(", ")}.`
   );
 }
 

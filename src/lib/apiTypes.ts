@@ -437,6 +437,44 @@ export interface ContextCheckDTO {
   basis: ContextSampleBasisDTO | "unreadable";
 }
 
+/**
+ * One provenance's share of one reading of the window — `winnow context`, depth 1.
+ *
+ * `kind` is winnow's own word for how the figure was reached and is carried
+ * rather than dropped, because a stacked band cannot show it: `prefix` is a
+ * subtraction of two exact readings, `tool traffic` is characters over a
+ * constant, and `unattributed` is what nothing accounted for. A picture that
+ * drew all three the same way would claim a precision only one of them has.
+ */
+export interface ContextCompositionSliceDTO {
+  /** Winnow's own label, passed through — never mapped to a closed set here. */
+  label: string;
+  tokens: number;
+  /** `exact` | `derived` | `estimated` | `residual`, as winnow reported it. */
+  kind: string;
+}
+
+/**
+ * What one run's context was made of at one moment.
+ *
+ * **A second measure of the same window, and it may not be subtracted from the
+ * samples.** `window` is winnow's own total, anchored on the last priced
+ * request in the transcript whatever wrote it; `ContextSampleDTO.tokens` is
+ * anchored on the last *main-thread* frame, sidechains excluded. The two agree
+ * on an idle conversation and come apart for as long as a sub-agent runs — 22
+ * minutes, measured on this install — so the slices are drawn against `window`
+ * and against nothing else.
+ *
+ * `slices` sum to `window` by construction: the residual is one of them.
+ */
+export interface ContextCompositionDTO {
+  ts: number;
+  /** The work cycle in flight when it was taken, 1-based. */
+  iteration: number;
+  window: number;
+  slices: ContextCompositionSliceDTO[];
+}
+
 /** A cut, on the same axis as the samples, so a fall in context has a cause. */
 export interface ContextPruneMarkDTO {
   ts: number;
@@ -484,6 +522,31 @@ export interface ContextOccupancyDTO {
    * long tool call reads as a poll that has died.
    */
   lastCheck: ContextCheckDTO | null;
+  /**
+   * What the window was made of, over the same span — oldest first, empty when
+   * nothing has read it.
+   *
+   * Its cadence is **not** the samples': a reading costs a winnow subprocess,
+   * so it is paced by the conversation's growth rather than by the tick, and it
+   * is taken only where context pruning is switched on — read-only is not the
+   * same as permitted, which is the rule `observePlan` already follows. So a
+   * dense sample series beside a sparse composition is the ordinary case, and
+   * an empty one is an operator who turned the feature off rather than a fault.
+   */
+  composition: ContextCompositionDTO[];
+  /**
+   * Stored readings, where `composition.length` is what was returned. Greater
+   * than it means the array is the newest tail — a tail rather than a thinning,
+   * on `sampleCount`'s rule.
+   */
+  compositionCount: number;
+  /**
+   * Why there is no composition, or null when there is one — `off` when context
+   * pruning is switched off and winnow is deliberately not spawned, `pending`
+   * when it is on and nothing has been read yet. Two blanks that look identical
+   * on the page and have opposite fixes.
+   */
+  compositionAbsence: "off" | "pending" | null;
 }
 
 /**
@@ -2541,6 +2604,8 @@ export interface StorageReportDTO {
     samples?: number;
     /** Absent on a sweep recorded before `prune_decisions` was swept at all. */
     decisions?: number;
+    /** Absent on a sweep recorded before `context_compositions` was swept at all. */
+    compositions?: number;
     checkouts: number;
     transcripts: number;
     transcriptBytes: number;

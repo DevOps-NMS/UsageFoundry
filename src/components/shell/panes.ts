@@ -12,23 +12,26 @@ import type { IconName } from "@/components/ui/Icon";
  * The digit follows the row's position rather than the pane's age: a shortcut
  * that names the fifth row and lands on the sixth is worse than one somebody
  * has to relearn, so inserting a pane renumbers the ones under it. **Nine is
- * the ceiling** — ⌘1…⌘9 is nine digits and Settings is the ninth row — so a
- * tenth destination has no digit at all.
+ * the ceiling** — ⌘1…⌘9 is nine digits and the list is ten rows — so the tenth
+ * row has no digit at all, and *which* row that is falls out of the order
+ * rather than being chosen: today it is Settings, because Dreaming moved up to
+ * eighth and pushed the two configuration panes down one each.
  *
  * That used to be a warning rather than a mechanism, and it named the wrong row
  * (Knowledge, which has been the seventh since it moved above the two
- * configuration panes). It is now a type: `shortcut` is optional, and the two
- * readers that put the digit into a string guard it. Both were unguarded, and
- * both failed silently rather than loudly — a screen reader announcing
- * `Meta+undefined` and a palette printing `⌘undefined`, neither a type error
- * and neither a throw.
+ * configuration panes, and is still seventh with Dreaming under it). It is now
+ * a type: `shortcut` is optional, and the two readers that put the digit into a
+ * string guard it. Both were unguarded, and both failed silently rather than
+ * loudly — a screen reader announcing `Meta+undefined` and a palette printing
+ * `⌘undefined`, neither a type error and neither a throw.
  */
 export interface Pane {
   href: string;
   label: string;
   icon: IconName;
   /**
-   * The digit after ⌘, or absent past the ninth row.
+   * The digit after ⌘, or absent past the ninth row — Settings, as the list
+   * below stands.
    *
    * Announced with `aria-keyshortcuts` on the row and shown in quick open, and
    * **every reader of it must handle its absence** — see the note above.
@@ -43,19 +46,28 @@ export const PANES: readonly Pane[] = [
   { href: "/workflows", label: "Workflows", icon: "workflows", shortcut: "4" },
   { href: "/agents", label: "Agents", icon: "agents", shortcut: "5" },
   { href: "/branches", label: "Branches", icon: "branches", shortcut: "6" },
-  // Above the last two rather than after them: those two are the install's own
-  // configuration and stay at the bottom, where Knowledge is a place the
-  // operator reads. The renumbering below it is what the rule above asks for.
+  // Above the two configuration panes rather than after them: those two are the
+  // install's own settings and keep the bottom, where Knowledge is a place the
+  // operator reads — and so is the row now directly under it. The renumbering
+  // below both is what the rule above asks for.
   { href: "/knowledge", label: "Knowledge", icon: "knowledge", shortcut: "7" },
-  { href: "/account", label: "API account", icon: "account", shortcut: "8" },
-  { href: "/settings", label: "Settings", icon: "settings", shortcut: "9" },
-  // The tenth, and the first row in this app with no shortcut. It sits below
-  // the configuration pair rather than beside Knowledge, which is the pane it
-  // is nearest in kind: this one is a readout of what the install did to
-  // itself, and the two config panes keep the bottom they were given. Taking
-  // ⌘9 from Settings to give a digit to a readout would be the wrong trade —
-  // Settings is where somebody goes when something is wrong.
-  { href: "/dreaming", label: "Dreaming", icon: "dreaming" },
+  // Directly under Knowledge, which is the pane it is nearest in kind — both
+  // are places the operator reads, and this one is a readout of what the
+  // install did to itself. It sat below the configuration pair until the
+  // operator asked for this order, and the digits are what that cost: the rule
+  // above renumbers everything under an inserted row, so the two config panes
+  // each drop one and the list runs out of digits one row early.
+  { href: "/dreaming", label: "Dreaming", icon: "dreaming", shortcut: "8" },
+  { href: "/account", label: "API account", icon: "account", shortcut: "9" },
+  // The tenth row, and the first row in this app with no shortcut. Losing ⌘9
+  // is the price of the order above, and the loss falls on the pane somebody
+  // opens when something is wrong — which is the argument the old arrangement
+  // made for keeping the digit here, and which was overruled, not forgotten.
+  // Settings stays one press away in quick open. What may never be done is the
+  // compromise: leaving the digits alone while Dreaming sits eighth would give
+  // ⌘8 a name in the list and a landing one row down, which is the failure the
+  // position rule at the top of this file exists to prevent.
+  { href: "/settings", label: "Settings", icon: "settings" },
 ];
 
 /**

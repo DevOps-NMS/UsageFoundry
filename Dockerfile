@@ -342,8 +342,25 @@ ENV PATH="/home/node/pytools/bin:${PATH}" \
 # changed base do so only when `--filter-ledger` is passed, which this app does
 # not pass. Checked against a real transcript on both the direct and the
 # `safe run --` path before this pin moved.
+#
+# Moved 2026-09-04 from 0384486, for `winnow context` — the readout the run
+# page's composition stack is drawn from, which does not exist at the old pin
+# and fails there as an unknown command. That failure is `contextComposition`'s
+# null, so an image built on the old ref draws no stack and says nothing, which
+# is why the pin is part of the feature rather than a follow-up to it.
+#
+# Forty-three commits, so all four subcommands this app spawns were re-checked
+# against a real 8.7 MB transcript on the `safe run --` path rather than only
+# the new one: `treat -rx aggressive`'s dry run still prints the `Before` and
+# `Saved` lines `parseTreatEstimate` matches, in binary units and with the token
+# column still pinned at zero; `plan --tier CB --json` still carries all eight
+# fields `parsePlan` reads; `fork --tier CB --json` still carries `written`,
+# `new_session_id`, `out`, `cold_age`, `refusals` and `plan`. `context` is
+# beside `inspect` in that tree — no write path at all — so orchestrator-safe
+# mode allows it while a session is live, which is the whole reason it can be
+# asked on the guard tick.
 ARG WINNOW_REPO=https://github.com/Xapicc/winnow.git
-ARG WINNOW_REF=0384486669224b5053a32abefc4023b673cfbb3e
+ARG WINNOW_REF=0421da53d5087c1746c3101d0c97d0682d3094ac
 RUN set -eux; \
     if [ -z "${WINNOW_REF}" ]; then \
       echo "WINNOW_REF empty — building without winnow; context pruning will report unavailable"; \

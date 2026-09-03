@@ -179,17 +179,29 @@ the explicit press**, on quick open's rule: a keystroke away from spending money
 is what every approval gate in this app exists to prevent, and a readout is
 exactly where a Run Now button looks convenient.
 
-**The tenth pane has no keyboard shortcut, and `Pane.shortcut` is optional
-because of it.** ⌘1…⌘9 is nine digits and Settings is the ninth; taking ⌘9 from
-Settings to give a digit to a readout is the wrong trade, since Settings is where
-somebody goes when something is wrong. Both readers that put the digit into a
-string — `Sidebar.tsx`'s `aria-keyshortcuts` and `QuickOpen.tsx`'s `detail` —
-were unguarded and failed *silently*: a screen reader announcing
-`Meta+undefined`, a palette printing `⌘undefined`, neither a type error nor a
-throw. The optional field makes that a compile-time obligation rather than a
-warning in a docblock, and the docblock in `panes.ts` that stated the ceiling was
-itself wrong about which row sat on it (it said Knowledge, which has been seventh
-since it moved above the two configuration panes).
+**The pane is the eighth row, directly under Knowledge, and `Pane.shortcut` is
+optional because of where that leaves the digits.** It reads as a readout of what
+the install did to itself, which is nearer in kind to the vault than to the two
+configuration panes it used to sit below, and the operator asked for that order
+knowing what it costs. The digit follows the row's position, so Dreaming is ⌘8,
+API account is ⌘9, and **Settings, now the tenth row, carries no shortcut at
+all** — ⌘1…⌘9 is nine digits against ten rows. The earlier arrangement put
+Dreaming last and kept ⌘9 on Settings, on the ground that Settings is where
+somebody goes when something is wrong; that trade was overruled, not forgotten,
+and Settings stays one press away in quick open. The one thing that may never be
+done is the compromise between the two — a digit that names the eighth row and
+lands on the ninth is exactly the failure `panes.ts`'s position rule exists to
+prevent, so moving a pane and leaving the digits alone is not an option.
+
+Both readers that put the digit into a string — `Sidebar.tsx`'s
+`aria-keyshortcuts` and `QuickOpen.tsx`'s `detail` — were unguarded and failed
+*silently*: a screen reader announcing `Meta+undefined`, a palette printing
+`⌘undefined`, neither a type error nor a throw. The optional field makes that a
+compile-time obligation rather than a warning in a docblock, and it is why this
+reordering needed no change in either reader. The docblock in `panes.ts` that
+stated the ceiling was itself once wrong about which row sat on it (it said
+Knowledge, which has been seventh since it moved above the two configuration
+panes and is seventh still, with Dreaming under it).
 
 **The scan deduplicates on the record, never on the signature, and the
 distinction is load-bearing.** A resumed session copies its earlier records into
