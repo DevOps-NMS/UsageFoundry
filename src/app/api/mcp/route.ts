@@ -53,6 +53,7 @@ import {
   type DependencyEdge,
 } from "@/lib/orchestrator";
 import { diffAsText, runDiff } from "@/lib/diff";
+import { rivalContinuation } from "@/lib/proposalContinuation";
 import { chatGuards } from "@/lib/settings";
 import { githubRemotes, scanWorkspace } from "@/lib/workspace";
 import { mountById } from "@/lib/config";
@@ -1763,10 +1764,9 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
   // function is: a chain that cannot be wired is otherwise discovered by a
   // person clicking Approve on a list of twenty, and what they are shown then
   // is one proposal failing over a label they never saw.
+  const proposals = listProposals(chatId);
   const labels = new Map(
-    listProposals(chatId)
-      .filter((p) => p.spec_id)
-      .map((p) => [p.spec_id!, p]),
+    proposals.filter((p) => p.spec_id).map((p) => [p.spec_id!, p]),
   );
 
   const specId = String(args.id ?? "").trim() || null;
@@ -1866,6 +1866,33 @@ function proposeRun(args: Record<string, unknown>, chatId: string) {
           "of its own, so there is no branch to carry on. Both runs need guards " +
           "that isolate — a template that does, or ask the operator to change " +
           "the default guard set.",
+        true,
+      );
+    }
+    // The third condition `admitDependencies` refuses, and the one it is worst
+    // at refusing: a rival is another *proposal*, so what the operator is shown
+    // at the click is two run ids for two cards, and — since a proposal that
+    // fails to start is terminal — one of the cards is gone. Asked here after
+    // the guard check above, because with no branch at either end there is
+    // nothing for a rival to be claiming.
+    const rival = rivalContinuation(
+      continuing[0].specId,
+      proposals.map((p) => ({
+        specId: p.spec_id,
+        title: p.title,
+        status: p.status,
+        dependsOn: proposalDeps(p),
+      })),
+    );
+    if (rival) {
+      const named = rival.specId ? `"${rival.specId}"` : `“${rival.title}”`;
+      const instead = rival.specId
+        ? `Start this one after "${rival.specId}" instead, or drop `
+        : "That one carries no id, so nothing can be chained behind it: drop ";
+      return text(
+        `${named} is already waiting to carry on "${continuing[0].specId}"'s ` +
+          `branch, and two runs cannot extend the same one. ${instead}` +
+          "continueBranch so this one cuts a branch of its own.",
         true,
       );
     }
