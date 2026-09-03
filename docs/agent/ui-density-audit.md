@@ -112,7 +112,7 @@ Seven, and no eighth without a change to this document.
 
 | # | Affordance | Correct when | Cap |
 |---|---|---|---|
-| 1 | **Pane** (a row in `panes.ts`) | The reader arrives here *from the sidebar* to do a distinct job with its own primary action. | **Eight. The list is closed** — see §1.2. |
+| 1 | **Pane** (a row in `panes.ts`) | The reader arrives here *from the sidebar* to do a distinct job with its own primary action. | **Ten, and only nine of them carry a digit. The list is closed** — see §1.2. |
 | 2 | **Sub-route** (a page below a pane) | A group is both *large* (a screen's worth) and *rare* (used once a week or less), and has its own primary action. | — |
 | 3 | **Card** (`Card`, `emphasis`) | The contents are read together and answer **one** question a reader could ask out loud. | ≤ 7 cards **as peers at one level**; ≤ 9 controls in one card without an inner `ListGroup`; **at most one `primary` per page** — a page may legitimately have none. |
 | 4 | **Group** (`ListGroup` with `label`) | Rows inside a card share a subject that the card's own title does not name. | 3–9 rows, more than 9 is two. Fewer than 3 only where the **label** states something neither row does. |
@@ -156,18 +156,28 @@ Notes that are part of the rule, not commentary:
 
 Each of these is a thing a build run would plausibly reach for. None is allowed.
 
-1. **A tenth pane.** `panes.ts` is nine rows bound to ⌘1–⌘9 and four readers
-   (`panes.ts:3-16`). A tenth destination has no digit. New destinations are
-   sub-routes under an existing pane.
+1. **An eleventh pane.** `panes.ts` is ten rows against ⌘1–⌘9, read by four
+   things (`panes.ts:3-18`). The digits are spent: the tenth row already has
+   none, and an eleventh would be the second row you cannot reach from the
+   keyboard. New destinations are sub-routes under an existing pane.
 
-   *This read "a ninth pane" until `/knowledge` was built.* The ban's whole
-   ground was the digit — "a ninth destination has no digit" — and nine rows
-   still have one, so the ninth was allowed and the sentence moved up by one
-   rather than being waived. Ten is where it stops, and there it stops for the
-   reason it always gave. `/knowledge` earned a row rather than a sub-route
-   because it is not *about* any existing pane: a vault is neither a run, a
-   workflow nor a setting, and filing it under Settings would have made a
-   destination out of a configuration page.
+   *This read "a ninth pane" until `/knowledge` was built, and "a tenth" until
+   `/dreaming` was.* The ban's whole ground was the digit — "a ninth
+   destination has no digit" — and nine rows still had one, so the ninth was
+   allowed and the sentence moved up by one rather than being waived. The tenth
+   was the row that spent the last digit, and it is where the ground the ban
+   always gave finally runs out, so the sentence does not move again.
+   `/knowledge` earned a row rather than a sub-route because it is not *about*
+   any existing pane: a vault is neither a run, a workflow nor a setting, and
+   filing it under Settings would have made a destination out of a
+   configuration page.
+
+   **Which row loses the digit is the order's business, not the new pane's.**
+   The digit follows position, so `/dreaming` moving up to eighth — beside
+   `/knowledge`, the pane it is nearest in kind — pushed API account to ⌘9 and
+   left Settings, the tenth row, with no shortcut at all. See
+   `docs/agent/dreaming.md` for that trade and for why the compromise (moving
+   the row, keeping the digits) is the one arrangement that is forbidden.
 2. **An accordion** — a *coordinated* set where opening one panel closes
 another. It is cards with extra clicks and a lost scroll position, and the
 coordination is a second state machine nothing else here has. **Independent
