@@ -383,8 +383,12 @@ const CHAT_TOOLS = [
         promptOverride: {
           type: "string",
           description:
-            "Replaces the template's own prompt for this run only. Use when " +
-            "the template nearly fits; the task is still appended below it.",
+            "Standing instructions replacing the template's own prompt, for " +
+            "this run only. Use when the template nearly fits. It does not " +
+            "replace the task, which is still required and is still appended " +
+            "below it — and because it is standing text rather than this " +
+            "run's brief, a batch of related proposals normally carries the " +
+            "same override word for word.",
         },
         agentId: {
           type: "string",
