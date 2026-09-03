@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ContextOccupancy } from "./ContextOccupancy";
 import type {
   ContextCheckDTO,
+  ContextCompositionDTO,
   ContextOccupancyDTO,
   ContextPruneMarkDTO,
   ContextSampleDTO,
@@ -69,6 +70,34 @@ function series(over: Partial<ContextOccupancyDTO> = {}): ContextOccupancyDTO {
     // Read on the same tick that wrote the newest point, which is the ordinary
     // steady state: the cases below are the ones where it is not.
     lastCheck: { ts: NOW, basis: "api" },
+    // The default is a run whose composition has not been read yet, so every
+    // case above stays a case about the series alone. The composition's own are
+    // the ones that pass it.
+    composition: [],
+    compositionCount: 0,
+    compositionAbsence: "pending",
+    ...over,
+  };
+}
+
+/**
+ * One composition reading. `window` deliberately differs from the sample at the
+ * same instant — that is the divergence the panel exists to keep apart, not a
+ * mistake in the fixture.
+ */
+function reading(over: Partial<ContextCompositionDTO> = {}): ContextCompositionDTO {
+  return {
+    ts: NOW,
+    iteration: 2,
+    window: 100_000,
+    slices: [
+      { label: "tool traffic", tokens: 50_000, kind: "estimated" },
+      { label: "prefix", tokens: 30_000, kind: "derived" },
+      { label: "retained reasoning", tokens: 12_000, kind: "derived" },
+      { label: "standing configuration", tokens: 5_000, kind: "estimated" },
+      { label: "conversation", tokens: 2_000, kind: "estimated" },
+      { label: "unattributed", tokens: 1_000, kind: "residual" },
+    ],
     ...over,
   };
 }
@@ -267,12 +296,12 @@ test("the caption keeps the two token currencies apart", () => {
   // `contextTokens` and this series in `apiContextTokens`, and the difference
   // runs in both directions.
   assert.match(html, /The pruning figures on this page are in the transcript/);
-  assert.match(html, /own turns instead/);
+  assert.match(html, /own turns, tens of thousands of tokens/);
   assert.match(html, /either side of this in both/);
   assert.match(html, /must not be subtracted from anything here/);
   // And the two facts a reader needs to place the number at all.
   assert.match(html, /the whole prompt as the API was billed/i);
-  assert.match(html, /lags one turn by construction/);
+  assert.match(html, /one turn behind by construction/);
 });
 
 test("the sr-only prune table repeats the currency warning at its own figures", () => {
@@ -380,4 +409,137 @@ test("a ceiling of zero is refused rather than divided by", () => {
   assert.doesNotMatch(html, /aria-valuenow/);
   // The reading itself is still real and still shown.
   assert.match(html, /60\.0k/);
+});
+
+/* ------------------------------------------------------------------ */
+/* The composition stack                                               */
+/* ------------------------------------------------------------------ */
+
+test("the bands are ordered once over the series, not per reading", () => {
+  // Winnow sorts its nodes largest-first *per reading*, so a provenance that
+  // overtakes another mid-run arrives in a different position in the array.
+  // Stacked in arrival order the two bands swap places and cross, which reads
+  // as one provenance turning into another — a picture of a thing that did not
+  // happen, drawn from correct data.
+  const early = reading({
+    ts: NOW - 1_000,
+    window: 100_000,
+    slices: [
+      { label: "prefix", tokens: 60_000, kind: "derived" },
+      { label: "tool traffic", tokens: 40_000, kind: "estimated" },
+    ],
+  });
+  const late = reading({
+    window: 200_000,
+    slices: [
+      { label: "tool traffic", tokens: 140_000, kind: "estimated" },
+      { label: "prefix", tokens: 60_000, kind: "derived" },
+    ],
+  });
+  const html = render(
+    series({ composition: [early, late], compositionCount: 2, compositionAbsence: null }),
+  );
+
+  // `tool traffic` totals 180,000 against `prefix`'s 120,000, so it is band 1
+  // at both readings however the arrays arrived.
+  const bands = [...html.matchAll(/class="fill-band-(\d)[^"]*"[^>]*>\s*<title>([^<]+?) —/g)];
+  assert.deepEqual(
+    bands.map((m) => [m[1], m[2]]),
+    [
+      ["1", "tool traffic"],
+      ["2", "prefix"],
+    ],
+  );
+});
+
+test("the residual is the top band whatever its size", () => {
+  // It is the one band whose height is a statement about the measurement rather
+  // than about the conversation. Sorted by size alone it lands in the middle of
+  // two real provenances and reads as a third one.
+  const html = render(
+    series({
+      composition: [
+        reading({
+          window: 100_000,
+          slices: [
+            { label: "tool traffic", tokens: 50_000, kind: "estimated" },
+            { label: "unattributed", tokens: 40_000, kind: "residual" },
+            { label: "conversation", tokens: 10_000, kind: "estimated" },
+          ],
+        }),
+      ],
+      compositionCount: 1,
+      compositionAbsence: null,
+    }),
+  );
+  const bands = [...html.matchAll(/<title>([^<]+?) —/g)].map((m) => m[1]);
+  assert.deepEqual(bands, ["tool traffic", "conversation", "unattributed"]);
+});
+
+test("a lone reading is a column and says the area starts at the second", () => {
+  // One point stretched across the box asserts this composition held for the
+  // whole span, which is the one claim a single measurement cannot make — and
+  // it is indistinguishable from a flat run.
+  const html = render(
+    series({
+      composition: [reading()],
+      compositionCount: 1,
+      compositionAbsence: null,
+    }),
+  );
+  // The column is 44 wide about the midpoint of a 320 box: 138 to 182.
+  assert.match(html, /M138 /, "the column is drawn at its own width");
+  assert.match(html, /H182/);
+  assert.match(html, /One reading so far; the area appears from the second/);
+});
+
+test("the two windows are never presented as one figure", () => {
+  // The load-bearing sentence of this half of the panel. Both charts are in
+  // tokens, both are the same measure, and they are anchored differently — the
+  // sample excludes sidechains and winnow does not — so they part company for
+  // as long as a sub-agent runs and the arithmetic across them typechecks.
+  const html = render(
+    series({
+      composition: [reading()],
+      compositionCount: 1,
+      compositionAbsence: null,
+    }),
+  );
+  assert.match(html, /last priced request in the transcript/);
+  assert.match(html, /the last <em>main-thread<\/em> one/);
+  assert.match(html, /subtract\s+neither from the other/);
+  // And the stack is drawn against its own window: 50,000 of winnow's 100,000
+  // is half the box, where against the sample's 60,000 it would be five sixths.
+  assert.match(html, /the window was 100\.0k tokens/);
+});
+
+test("pruning switched off is not a run that has nothing to show yet", () => {
+  // Two blanks that look identical on the page and have opposite fixes: one is
+  // waiting for growth, the other is winnow deliberately never being spawned
+  // against this conversation.
+  const off = render(series({ compositionAbsence: "off" }));
+  assert.match(off, /context pruning is switched off/);
+  assert.doesNotMatch(off, /paced by/);
+
+  const pending = render(series({ compositionAbsence: "pending" }));
+  assert.match(pending, /paced by\s+how far the conversation has grown/);
+  assert.doesNotMatch(pending, /switched off/);
+});
+
+test("the stack is not sighted-only", () => {
+  const html = render(
+    series({
+      composition: [reading()],
+      compositionCount: 1,
+      compositionAbsence: null,
+    }),
+  );
+  // The shape in words, and the figures as rows — the split the sparkline
+  // already makes, because six trajectories is not a sentence anyone can hold.
+  assert.match(html, /aria-label="What the context is made of, over 1 reading/);
+  assert.match(html, /tool traffic 50\.0k \(50%\)/);
+  assert.match(html, /How it was reached/);
+  // `kind` reaches a reader here and nowhere else: no fill can carry whether a
+  // figure was read, subtracted or estimated.
+  assert.match(html, /residual/);
 });

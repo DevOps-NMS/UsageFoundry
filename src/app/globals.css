@@ -124,6 +124,33 @@
      annotating. Mixed against --border rather than against transparent so the
      result stays visible on --bg-raised and --bg-inset alike; the tone stays
      the text colour, where the 4.5:1 contrast is already met. */
+  /* Six categorical fills, for a chart whose bands are *identities* rather than
+     states. The status colours above are deliberately not reused: --danger is
+     already the ceiling rule on the occupancy chart these sit under, and a band
+     wearing it would say "this part of the context is the problem", which is
+     exactly what a composition must not assert. Nor is --accent, which is that
+     chart's own series line.
+
+     Fixed order, assigned to an entity and never cycled: a band keeps its hue
+     when a neighbouring one goes to zero, or the picture repaints itself every
+     time a conversation stops carrying attachments. Six is the ceiling as well
+     as the count — a seventh provenance folds into the last band rather than
+     getting a generated hue.
+
+     Both modes are *selected* rather than flipped, and both were validated
+     rather than judged: every pair clears the adjacent-pair CVD floor (worst
+     14.8 deutan in light, 12.6 protan in dark), every step sits inside its
+     mode's lightness band, and each clears 3:1 against its own surface —
+     #ffffff for light and #2a2a2d for dark, which are --bg-raised, the card
+     these are drawn on. Re-run the check before moving any of them; a hue
+     nudged by eye is how a palette stops being colourblind-safe silently. */
+  --band-1: light-dark(#3277c8, #3a8ded);
+  --band-2: light-dark(#1d8a5c, #21a56e);
+  --band-3: light-dark(#8a5cd6, #9b6ee9);
+  --band-4: light-dark(#a8467a, #d25c9a);
+  --band-5: light-dark(#b06a00, #c87600);
+  --band-6: light-dark(#0e8f9e, #009fb1);
+
   --ok-line:       color-mix(in oklab, var(--ok) 40%, var(--border));
   --warn-line:     color-mix(in oklab, var(--warn) 40%, var(--border));
   --danger-line:   color-mix(in oklab, var(--danger) 40%, var(--border));
@@ -350,6 +377,12 @@
   --color-warn-line:   var(--warn-line);
   --color-danger-line: var(--danger-line);
   --color-accent-line: var(--accent-line);
+  --color-band-1:      var(--band-1);
+  --color-band-2:      var(--band-2);
+  --color-band-3:      var(--band-3);
+  --color-band-4:      var(--band-4);
+  --color-band-5:      var(--band-5);
+  --color-band-6:      var(--band-6);
 
   /* -apple-system first, so macOS resolves SF rather than whatever `system-ui`
      maps to under a remapped default. ui-sans-serif stays behind it as the

@@ -76,6 +76,9 @@ import {
   ceilingDeclineMessage,
   ceilingPayback,
   CEILING_REMEASURE_GROWTH_TOKENS,
+  COMPOSITION_REMEASURE_GROWTH_TOKENS,
+  contextComposition,
+  recordComposition,
   forkTranscript,
   pendingForkFor,
   PLAN_TIER,
@@ -8421,6 +8424,7 @@ export async function startRun(id: string): Promise<void> {
     forgetContextCheck(id);
     earlyEndDeclined.delete(id);
     ceilingMeasuredAt.delete(id);
+    compositionMeasuredAt.delete(id);
     boundaryDeclines.delete(id);
     pendingFork.delete(id);
     // The exporter's credential dies with the run's loop, the way the chat's
@@ -8973,6 +8977,45 @@ export async function checkContextCeilings(): Promise<void> {
     if (contextWatches.get(id) !== watch || interrupts.has(id)) continue;
 
     if (!pruning) continue;
+
+    // What that window is *made of*, on the same tick and behind the same gate.
+    //
+    // Above the ceiling comparison rather than below it, and that placement is
+    // the point: the composition answers "what is this run's context growing
+    // on", which is a question worth an answer at 60,000 tokens and not only at
+    // the 200,000 where the app starts acting. Read below the `continue` it
+    // would exist only for conversations already over the line, which is the
+    // half of the climb an operator can no longer do anything cheap about.
+    //
+    // Behind `pruning`, though — `observePlan`'s rule, and not by analogy: this
+    // spawns winnow against the operator's own conversation, and switching the
+    // feature off is the request that it does not. The free reading above stays
+    // ungated because it spawns nothing.
+    //
+    // Awaited rather than left floating. A rejected floating promise takes the
+    // process down under Node's default handler, and the two guards below are
+    // already written for a tick that can lose its cycle mid-await.
+    const compositionAt = compositionMeasuredAt.get(id);
+    if (
+      compositionAt === undefined ||
+      Math.abs(tokens - compositionAt) >= COMPOSITION_REMEASURE_GROWTH_TOKENS
+    ) {
+      // Marked before the await, not after. `contextComposition` is bounded at
+      // `PRUNE_TIMEOUT_MS`, which is two minutes of ticks that would each see an
+      // unmarked run and spawn their own winnow against the same transcript.
+      compositionMeasuredAt.set(id, tokens);
+      const composition = await contextComposition(transcript);
+      // Re-checked after the await for the reason every await on this path is:
+      // the cycle may have ended, and a reading filed against a run whose next
+      // cycle has started would draw this conversation's shape on that one. The
+      // reading is dropped rather than kept — unlike the sample above, which is
+      // true of a transcript that existed whatever became of the run, a
+      // composition is only meaningful beside the iteration it is stamped with.
+      if (composition && contextWatches.get(id) === watch && !interrupts.has(id)) {
+        recordComposition(id, watch.iteration(), composition);
+      }
+    }
+
     if (tokens < CYCLE_CONTEXT_CEILING_TOKENS) continue;
 
     // Asked about **this** conversation, now, rather than inferred from the last
@@ -9184,6 +9227,35 @@ const earlyEndDeclined = ((globalThis as unknown as {
 const ceilingMeasuredAt = ((globalThis as unknown as {
   __ufCeilingMeasuredAt?: Map<string, number>;
 }).__ufCeilingMeasuredAt ??= new Map<string, number>());
+
+/**
+ * The context a run's composition was last read at, on `ceilingMeasuredAt`'s
+ * pattern and with its own threshold.
+ *
+ * A separate map rather than a second use of that one, because the two pace
+ * different work at different prices: the ceiling re-measures to decide whether
+ * to end a cycle, this re-measures to draw a band on a graph, and sharing a
+ * mark would tie a picture's cadence to a policy constant that moves for
+ * reasons of its own. See `COMPOSITION_REMEASURE_GROWTH_TOKENS`.
+ *
+ * A **new** key rather than a widened `__ufCeilingMeasuredAt`, on the rule a
+ * dev hot reload enforces: `??=` only initialises when the key is absent, so a
+ * pre-upgrade value at a key whose shape changed survives the reload and every
+ * call on it throws.
+ *
+ * Compared in **both** directions, which is the one place this departs from
+ * `ceilingMeasuredAt`'s arithmetic. That mark is one-sided because the ceiling
+ * only cares about growth toward it; a prune that drops a conversation by 80k
+ * leaves `tokens - measuredAt` negative for as long as it takes to grow back,
+ * and read one-sided here that is the whole post-cut shape missed — the one
+ * moment the composition is worth having. So the distance is absolute, and a
+ * cut large enough to matter takes its own reading on the next tick.
+ *
+ * Keyed by run, cleared when the run's loop ends.
+ */
+const compositionMeasuredAt = ((globalThis as unknown as {
+  __ufCompositionMeasuredAt?: Map<string, number>;
+}).__ufCompositionMeasuredAt ??= new Map<string, number>());
 
 /**
  * Consecutive boundaries this run's payback test has declined.

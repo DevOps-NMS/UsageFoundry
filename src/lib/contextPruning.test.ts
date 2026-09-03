@@ -23,6 +23,7 @@ import {
   parseFork,
   parsePlan,
   paybackTurns,
+  parseComposition,
   parseTreatEstimate,
   PLAN_TIER,
   treatRemovedTokens,
@@ -282,6 +283,209 @@ describe("parseTreatEstimate — the in-place pruner's dry run", () => {
     assert.equal(parseTreatEstimate("Before 3.65MB\nnothing else"), null);
     assert.equal(parseTreatEstimate("  Saved  1.79MB freed"), null);
     assert.equal(parseTreatEstimate(""), null);
+  });
+});
+
+describe("parseComposition — what the window is made of", () => {
+  /**
+   * Real output, verbatim from `winnow safe run -- context <session> --depth 1
+   * --json` at the pinned ref, with only the session id and its path replaced.
+   *
+   * Kept whole rather than reduced to the two fields the parse reads, on
+   * `parseTreatEstimate`'s grounds: this is another program's output, nothing
+   * here can ask it for a schema, and a fixture trimmed to what today's parser
+   * happens to look at cannot fail when the shape around it moves.
+   */
+  const REAL = `{
+  "session": "02584a86-0000-0000-0000-000000000000",
+  "path": "/root/.claude/projects/-workspace-repo/02584a86-0000-0000-0000-000000000000.jsonl",
+  "records": 788,
+  "requests": 186,
+  "requests_in_window": 186,
+  "model": "claude-opus-5",
+  "chars_per_token": 2.6,
+  "depth": 1,
+  "by_path": false,
+  "pooled_by_path": {
+    "tools": [
+      "Edit",
+      "NotebookEdit",
+      "Read",
+      "Write"
+    ],
+    "paths": 15,
+    "repeated_paths": 9,
+    "tokens": {
+      "tokens": 11138,
+      "kind": "estimated"
+    },
+    "repeated": {
+      "tokens": 10725,
+      "percent": 96.288,
+      "kind": "estimated"
+    }
+  },
+  "window": {
+    "tokens": 433331,
+    "kind": "exact"
+  },
+  "fullness": null,
+  "compaction": {
+    "boundaries": 0,
+    "dropped": {
+      "tokens": 0,
+      "kind": "exact"
+    },
+    "last_boundary": null
+  },
+  "shedding": {
+    "events": [],
+    "shed": {
+      "tokens": 0,
+      "kind": "exact"
+    }
+  },
+  "nodes": [
+    {
+      "label": "tool traffic",
+      "tokens": 185525,
+      "kind": "estimated",
+      "share": 0.428137,
+      "note": "",
+      "children": []
+    },
+    {
+      "label": "prefix",
+      "tokens": 146870,
+      "kind": "derived",
+      "share": 0.338933,
+      "note": "152,217 exact at the first request in this window, less 5,347 estimated visible before it \\u2014 the system prompt and tool definitions, which no transcript records (--explain prefix)",
+      "children": []
+    },
+    {
+      "label": "retained reasoning",
+      "tokens": 72903,
+      "kind": "derived",
+      "share": 0.168239,
+      "note": "100 thinking blocks over 100 responses, median 483 tokens per block in this session; the control is 85 responses with no thinking block, median 73 left over",
+      "children": []
+    },
+    {
+      "label": "standing configuration",
+      "tokens": 15718,
+      "kind": "estimated",
+      "share": 0.036273,
+      "note": "",
+      "children": []
+    },
+    {
+      "label": "conversation",
+      "tokens": 2068,
+      "kind": "estimated",
+      "share": 0.004772,
+      "note": "",
+      "children": []
+    },
+    {
+      "label": "unattributed",
+      "tokens": 10247,
+      "kind": "residual",
+      "share": 0.023647,
+      "note": "",
+      "children": []
+    }
+  ],
+  "notes": [
+    "a \`user\` text block carrying Skill's return outside a tool_result envelope is counted as tool traffic, paired by sourceToolUseID"
+  ],
+  "derivations": {
+    "exact": "read from usage.{input,cache_creation,cache_read}_tokens on the anchoring request",
+    "derived": "an exact number minus an estimate",
+    "estimated": "payload characters / 2.6 (01- \\u00a72.3; the band is 2.4-3.0)",
+    "residual": "the window less everything above it; what no kind accounts for"
+  }
+}`;
+
+  it("reads the exact window and every top-level node", () => {
+    const c = parseComposition(REAL)!;
+    assert.equal(c.window, 433_331);
+    assert.deepEqual(
+      c.slices.map((s) => s.label),
+      [
+        "tool traffic",
+        "prefix",
+        "retained reasoning",
+        "standing configuration",
+        "conversation",
+        "unattributed",
+      ],
+    );
+    // The bands sum to the window by construction — the residual is one of
+    // them. A parse that dropped a node would still draw a plausible stack,
+    // just one that quietly stops short of its own total.
+    assert.equal(
+      c.slices.reduce((n, s) => n + s.tokens, 0),
+      c.window,
+    );
+  });
+
+  it("carries the kind, which is the one thing a band cannot show", () => {
+    const c = parseComposition(REAL)!;
+    const kinds = new Map(c.slices.map((s) => [s.label, s.kind]));
+    // `prefix` is two exact readings subtracted, `tool traffic` is characters
+    // over a constant, `unattributed` is what nothing accounted for. Drawn
+    // identically, and three different claims about how far to trust a figure.
+    assert.equal(kinds.get("prefix"), "derived");
+    assert.equal(kinds.get("tool traffic"), "estimated");
+    assert.equal(kinds.get("unattributed"), "residual");
+  });
+
+  it("passes a label through rather than binning it", () => {
+    // Winnow owns this vocabulary and has already changed it once. A label this
+    // app has not seen must render as itself: folded into an "other" bin it
+    // would be indistinguishable from the residual, which is the one node whose
+    // whole job is to say what nothing accounted for.
+    const c = parseComposition(
+      JSON.stringify({
+        window: { tokens: 1_000, kind: "exact" },
+        nodes: [{ label: "a provenance from a later winnow", tokens: 1_000, kind: "estimated" }],
+      }),
+    )!;
+    assert.equal(c.slices[0].label, "a provenance from a later winnow");
+  });
+
+  it("is null with no anchoring request, and zero is not that", () => {
+    // Winnow reports a null window when no request in the file was priced —
+    // there is nothing exact to apportion, so every figure under it would be an
+    // estimate of an estimate. A *measured* zero band is an answer and survives.
+    assert.equal(
+      parseComposition(JSON.stringify({ window: null, nodes: [] })),
+      null,
+    );
+    const c = parseComposition(
+      JSON.stringify({
+        window: { tokens: 1_000, kind: "exact" },
+        nodes: [
+          { label: "tool traffic", tokens: 1_000, kind: "estimated" },
+          { label: "conversation", tokens: 0, kind: "estimated" },
+        ],
+      }),
+    )!;
+    assert.equal(c.slices.length, 2, "a band measured at zero is a measurement");
+  });
+
+  it("is null when the body is not a reading, rather than an empty stack", () => {
+    // The `parseTreatEstimate` failure mode in this command's clothes: a winnow
+    // release that moves this shape must not read as "this conversation is made
+    // of nothing" on every install at once. `contextComposition` writes no row
+    // on null, so the graph keeps its last honest reading.
+    assert.equal(parseComposition(""), null);
+    assert.equal(parseComposition("not json at all"), null);
+    assert.equal(parseComposition(JSON.stringify({ window: { tokens: 500 } })), null);
+    assert.equal(
+      parseComposition(JSON.stringify({ window: { tokens: 500 }, nodes: [] })),
+      null,
+    );
   });
 });
 
